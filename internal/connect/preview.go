@@ -121,9 +121,11 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		Bridge:               client.Bridge,
 		AccessState:          accessState,
 		ExistingEntrySummary: existingSummary,
-		// The token binds THIS preview to the state it just described, over the
-		// unmasked pending entry the write would produce (Spec 091 FR-005).
-		PreconditionToken: s.preconditionToken(cfgPath, fileExists, existing,
+		// The token binds THIS preview to the operation it described — this
+		// client, this file, this requested entry name — and to the state it
+		// just observed, over the unmasked pending entry the write would
+		// produce (Spec 091 FR-005).
+		PreconditionToken: s.preconditionToken(clientID, cfgPath, serverName, fileExists, existing,
 			buildServerEntry(clientID, s.entryParams(false))),
 		// Run the write's own refusal guards so the form learns "not
 		// connectable" from the preview, never from a failed click (FR-003).

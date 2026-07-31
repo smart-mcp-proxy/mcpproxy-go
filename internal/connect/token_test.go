@@ -30,8 +30,12 @@ func TestDerivePreconditionToken_DeterministicPerKey(t *testing.T) {
 	raw := json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)
 	pending := json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)
 
-	first := DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy", raw, pending)
-	second := DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy", raw, pending)
+	first := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "mcpproxy", RawResolvedEntry: raw, PendingEntry: pending})
+	second := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "mcpproxy", RawResolvedEntry: raw, PendingEntry: pending})
 	if first != second {
 		t.Fatalf("token not deterministic: %q vs %q", first, second)
 	}
@@ -51,8 +55,12 @@ func TestDerivePreconditionToken_DifferentKeyDifferentToken(t *testing.T) {
 	raw := json.RawMessage(`{"url":"http://127.0.0.1:8080/mcp"}`)
 	pending := json.RawMessage(`{"url":"http://127.0.0.1:8080/mcp"}`)
 
-	a := DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy", raw, pending)
-	b := DerivePreconditionToken(tokenKeyB, "/cfg.json", true, "mcpproxy", raw, pending)
+	a := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "mcpproxy", RawResolvedEntry: raw, PendingEntry: pending})
+	b := DerivePreconditionToken(tokenKeyB, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "mcpproxy", RawResolvedEntry: raw, PendingEntry: pending})
 	if a == b {
 		t.Fatal("tokens must differ under different keys (the key is what makes the token non-forgeable)")
 	}
@@ -60,9 +68,9 @@ func TestDerivePreconditionToken_DifferentKeyDifferentToken(t *testing.T) {
 
 func TestDerivePreconditionToken_DistinctPerDriftClass(t *testing.T) {
 	base := func() string {
-		return DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy",
-			json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`),
-			json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`))
+		return DerivePreconditionToken(tokenKeyA, PreconditionState{
+			ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+			ResolvedEntryName: "mcpproxy", RawResolvedEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`), PendingEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)})
 	}
 
 	cases := []struct {
@@ -71,39 +79,39 @@ func TestDerivePreconditionToken_DistinctPerDriftClass(t *testing.T) {
 	}{
 		{
 			name: "file existence flipped",
-			got: DerivePreconditionToken(tokenKeyA, "/cfg.json", false, "mcpproxy",
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`),
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)),
+			got: DerivePreconditionToken(tokenKeyA, PreconditionState{
+				ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: false,
+				ResolvedEntryName: "mcpproxy", RawResolvedEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`), PendingEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)}),
 		},
 		{
 			name: "resolved entry absent",
-			got: DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "",
-				nil,
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)),
+			got: DerivePreconditionToken(tokenKeyA, PreconditionState{
+				ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+				ResolvedEntryName: "", RawResolvedEntry: nil, PendingEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)}),
 		},
 		{
 			name: "resolved entry lives under an adopted key",
-			got: DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "proxy-alt",
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`),
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)),
+			got: DerivePreconditionToken(tokenKeyA, PreconditionState{
+				ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+				ResolvedEntryName: "proxy-alt", RawResolvedEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`), PendingEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)}),
 		},
 		{
 			name: "masked credential value of the existing entry changed",
-			got: DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy",
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"rotated"}}`),
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)),
+			got: DerivePreconditionToken(tokenKeyA, PreconditionState{
+				ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+				ResolvedEntryName: "mcpproxy", RawResolvedEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"rotated"}}`), PendingEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)}),
 		},
 		{
 			name: "pending entry changed (proxy-side drift)",
-			got: DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy",
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`),
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:9090/mcp"}`)),
+			got: DerivePreconditionToken(tokenKeyA, PreconditionState{
+				ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+				ResolvedEntryName: "mcpproxy", RawResolvedEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`), PendingEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:9090/mcp"}`)}),
 		},
 		{
 			name: "config path changed",
-			got: DerivePreconditionToken(tokenKeyA, "/other.json", true, "mcpproxy",
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`),
-				json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)),
+			got: DerivePreconditionToken(tokenKeyA, PreconditionState{
+				ConfigPath: "/other.json", Requested: "mcpproxy", FileExists: true,
+				ResolvedEntryName: "mcpproxy", RawResolvedEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"old"}}`), PendingEntry: json.RawMessage(`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`)}),
 		},
 	}
 	for _, tc := range cases {
@@ -121,14 +129,22 @@ func TestDerivePreconditionToken_DistinctPerDriftClass(t *testing.T) {
 // that impossible.
 func TestDerivePreconditionToken_LengthPrefixedEncoding(t *testing.T) {
 	pending := json.RawMessage(`{}`)
-	a := DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "ab", json.RawMessage(`"c"`), pending)
-	b := DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "a", json.RawMessage(`b"c"`), pending)
+	a := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "ab", RawResolvedEntry: json.RawMessage(`"c"`), PendingEntry: pending})
+	b := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "a", RawResolvedEntry: json.RawMessage(`b"c"`), PendingEntry: pending})
 	if a == b {
 		t.Fatal("field boundaries are ambiguous: encoding is not length-prefixed")
 	}
 
-	c := DerivePreconditionToken(tokenKeyA, "/cfg", true, ".jsonmcpproxy", nil, pending)
-	d := DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy", nil, pending)
+	c := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: ".jsonmcpproxy", RawResolvedEntry: nil, PendingEntry: pending})
+	d := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "mcpproxy", RawResolvedEntry: nil, PendingEntry: pending})
 	if c == d {
 		t.Fatal("path/name boundary is ambiguous: encoding is not length-prefixed")
 	}
@@ -139,9 +155,11 @@ func TestDerivePreconditionToken_LengthPrefixedEncoding(t *testing.T) {
 // credential — can survive into it.
 func TestDerivePreconditionToken_CarriesNoSecretSubstring(t *testing.T) {
 	const secret = "SUPER-SECRET-CREDENTIAL"
-	token := DerivePreconditionToken(tokenKeyA, "/cfg.json", true, "mcpproxy",
-		json.RawMessage(`{"headers":{"X-API-Key":"`+secret+`"}}`),
-		json.RawMessage(`{"headers":{"X-API-Key":"`+secret+`"}}`))
+	token := DerivePreconditionToken(tokenKeyA, PreconditionState{
+		ConfigPath: "/cfg.json", Requested: "mcpproxy", FileExists: true,
+		ResolvedEntryName: "mcpproxy",
+		RawResolvedEntry:  json.RawMessage(`{"headers":{"X-API-Key":"` + secret + `"}}`),
+		PendingEntry:      json.RawMessage(`{"headers":{"X-API-Key":"` + secret + `"}}`)})
 	if strings.Contains(token, secret) {
 		t.Fatalf("token leaked the secret: %s", token)
 	}
@@ -378,6 +396,128 @@ func TestConnectWithPrecondition_NonObjectEntryDriftRefuses(t *testing.T) {
 		}
 		if !res.Success {
 			t.Fatalf("an unchanged config must still write, got %+v", res)
+		}
+	})
+}
+
+// The token binds a preview to the entry the write would produce, so the
+// REQUESTED name is part of that binding. It used to be absent from the
+// preimage: only the RESOLVED name was hashed, and that is the empty string
+// whenever the target entry does not exist yet. Two previews for two different
+// names over the same config therefore produced the same token, and one could
+// be replayed to create a key the user never previewed.
+func TestPreconditionToken_BoundToTheRequestedEntryName(t *testing.T) {
+	t.Run("two absent targets do not share a token", func(t *testing.T) {
+		svc, home := serviceWithKey(t, "")
+		writeFileT(t, ConfigPath("claude-code", home), `{"mcpServers":{}}`)
+
+		alpha, err := svc.Preview("claude-code", "alpha")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		beta, err := svc.Preview("claude-code", "beta")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if alpha.PreconditionToken == beta.PreconditionToken {
+			t.Fatal("previews for different entry names must not share a token")
+		}
+	})
+
+	t.Run("two requested names adopting the same entry do not share a token", func(t *testing.T) {
+		svc, home := serviceWithKey(t, "")
+		writeFileT(t, ConfigPath("opencode", home),
+			`{"mcp":{"legacy":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`)
+
+		alpha, err := svc.Preview("opencode", "alpha")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		beta, err := svc.Preview("opencode", "beta")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if alpha.ExistingEntrySummary == nil || alpha.ExistingEntrySummary.EntryName != "legacy" {
+			t.Fatalf("precondition: both previews must adopt the same entry, got %+v", alpha.ExistingEntrySummary)
+		}
+		if alpha.PreconditionToken == beta.PreconditionToken {
+			t.Fatal("previews that would write DIFFERENT keys must not share a token")
+		}
+	})
+
+	t.Run("the client is part of the binding", func(t *testing.T) {
+		state := PreconditionState{
+			ConfigPath:   "/cfg.json",
+			Requested:    "mcpproxy",
+			FileExists:   true,
+			PendingEntry: json.RawMessage(`{"type":"http"}`),
+		}
+		other := state
+		other.ClientID = "cursor"
+		if DerivePreconditionToken(tokenKeyA, state) == DerivePreconditionToken(tokenKeyA, other) {
+			t.Fatal("a token minted for one client must not validate for another")
+		}
+	})
+}
+
+// The end of the same story: a token minted for one entry name must not
+// authorize a write under another. Nothing is written, and the refusal is the
+// ordinary discriminated conflict.
+func TestConnectWithPrecondition_TokenIsNotTransferableToAnotherName(t *testing.T) {
+	t.Run("absent target", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		const original = `{"mcpServers":{}}`
+		writeFileT(t, cfgPath, original)
+
+		alpha, err := svc.Preview("claude-code", "alpha")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "beta", false, alpha.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, original)
+		if strings.Contains(readConfigT(t, cfgPath), "beta") {
+			t.Fatal("a replayed token must not create an entry the user never previewed")
+		}
+	})
+
+	t.Run("adopted target", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("opencode", home)
+		const original = `{"mcp":{"legacy":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`
+		writeFileT(t, cfgPath, original)
+
+		alpha, err := svc.Preview("opencode", "alpha")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		// force rides with the token, and must not rescue a name substitution.
+		res, err := svc.ConnectWithPrecondition("opencode", "beta", true, alpha.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, original)
+	})
+
+	t.Run("the previewed name still writes", func(t *testing.T) {
+		svc, home := testService(t)
+		writeFileT(t, ConfigPath("claude-code", home), `{"mcpServers":{}}`)
+
+		alpha, err := svc.Preview("claude-code", "alpha")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("claude-code", "alpha", false, alpha.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("the previewed name must still write, got %+v", res)
 		}
 	})
 }

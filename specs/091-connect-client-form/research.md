@@ -7,11 +7,16 @@ Gemini tier sunset); its P1/P2 findings reshaped D1/D2/D6/D8 and added D9/D10.
 
 - **Decision**: `internal/connect/token.go` computes HMAC-SHA256 with a
   per-core-instance random in-memory key over a canonical, **length-prefixed**
-  encoding of `(configPath, fileExists, resolvedEntryName, rawResolvedEntry,
-  pendingEntrySerialized)`. "Resolved" means: the same equivalent-entry
-  adoption lookup the write performs (`findEquivalentJSONServerName` for
-  OpenCode-style adoption) picks the entry the write would actually replace —
-  under whatever key it lives. The pending entry (unmasked, as it would be
+  encoding of `(clientID, configPath, requestedServerName, fileExists,
+  resolvedEntryName, rawResolvedEntry, pendingEntrySerialized)`. "Resolved"
+  means: the same equivalent-entry adoption lookup the write performs
+  (`findEquivalentJSONServerName` for OpenCode-style adoption) picks the entry
+  the write would actually replace — under whatever key it lives; that lookup
+  is deterministic (exact name first, then sorted order) and resolved ONCE per
+  operation, so the token and the write cover the same entry. The requested
+  name and client are bound too: `resolvedEntryName` is empty for every absent
+  target, so without them a token minted for one entry name validated a write
+  under any other, creating a key the user never previewed. The pending entry (unmasked, as it would be
   written) is included so proxy-side drift (API-key rotation,
   `require_mcp_auth` toggle, listen-address change) also invalidates the token.
   Validation recomputes at write time; mismatch → discriminated 409, no write.

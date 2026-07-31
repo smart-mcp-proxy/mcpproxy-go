@@ -19,12 +19,43 @@ const tokenDomain = "mcpproxy/connect/precondition/v1"
 // the HMAC-SHA256 block security level).
 const preconditionKeyLen = 32
 
+// PreconditionState is everything a precondition token binds a rendered preview
+// to: the operation it described AND the pre-write state it observed. Two
+// operations that would touch the config differently must differ in at least
+// one field here, or a token minted for one authorizes the other.
+type PreconditionState struct {
+	// ClientID scopes the token to one client's connect flow.
+	ClientID string
+	// ConfigPath is which file is being written.
+	ConfigPath string
+	// Requested is the entry name the caller asked for — the key the write
+	// creates when nothing is adopted. It is NOT implied by ResolvedEntryName:
+	// that one is empty for every absent target, so without this a preview for
+	// one name validated a write under any other.
+	Requested string
+	// FileExists distinguishes create from update (a file appearing or
+	// vanishing between preview and write).
+	FileExists bool
+	// ResolvedEntryName is the key the write would replace, AFTER the same
+	// equivalent-entry adoption the write performs. Empty when none resolved.
+	ResolvedEntryName string
+	// RawResolvedEntry is that entry's value; nil when there is none. It
+	// includes values the sanitized summary deliberately hides, so a credential
+	// rotation inside the existing entry drifts.
+	RawResolvedEntry json.RawMessage
+	// PendingEntry is the entry the proxy would write right now, so proxy-side
+	// drift (API-key rotation, require_mcp_auth toggle, listen-address change)
+	// invalidates the preview too — otherwise a credential could be embedded
+	// without the FR-004 notice ever having been shown.
+	PendingEntry json.RawMessage
+}
+
 // DerivePreconditionToken computes the opaque precondition token that binds a
-// rendered connect preview to the exact pre-write state it described (Spec 091
-// FR-005).
+// rendered connect preview to the exact operation and pre-write state it
+// described (Spec 091 FR-005).
 //
 // It is an HMAC-SHA256, hex-encoded, over a canonical LENGTH-PREFIXED encoding
-// of every input, so:
+// of every field, so:
 //
 //   - no two distinct states share a preimage — a byte moved from one field into
 //     the next changes the encoding, which a delimiter- or concatenation-based
@@ -33,34 +64,21 @@ const preconditionKeyLen = 32
 //     not an offline confirmation oracle: an attacker who knows everything about
 //     the state except a masked or weak credential still cannot test guesses.
 //
-// The hashed state is exactly what the write must find unchanged:
-//
-//	configPath          — which file is being written
-//	fileExists          — create vs. update (a file appearing or vanishing)
-//	resolvedEntryName   — the key the write would replace, AFTER the same
-//	                      equivalent-entry adoption the write performs
-//	rawResolvedEntry    — that entry's value; nil when there is none. Includes
-//	                      values the sanitized summary deliberately hides, so a
-//	                      credential rotation inside the existing entry drifts.
-//	pendingEntry        — the entry the proxy would write right now, so
-//	                      proxy-side drift (API-key rotation, require_mcp_auth
-//	                      toggle, listen-address change) invalidates the preview
-//	                      too — otherwise a credential could be embedded without
-//	                      the FR-004 notice ever having been shown.
-//
 // The token is never persisted and never leaves this process except as an opaque
 // string in the preview response.
-func DerivePreconditionToken(key []byte, configPath string, fileExists bool, resolvedEntryName string, rawResolvedEntry, pendingEntry json.RawMessage) string {
+func DerivePreconditionToken(key []byte, state PreconditionState) string {
 	mac := hmac.New(sha256.New, key)
 	writeTokenField(mac, []byte(tokenDomain))
-	writeTokenField(mac, []byte(configPath))
-	writeTokenField(mac, []byte{boolByte(fileExists)})
+	writeTokenField(mac, []byte(state.ClientID))
+	writeTokenField(mac, []byte(state.ConfigPath))
+	writeTokenField(mac, []byte(state.Requested))
+	writeTokenField(mac, []byte{boolByte(state.FileExists)})
 	// Presence is its own field so "entry absent" and "entry present but empty"
 	// can never encode identically.
-	writeTokenField(mac, []byte{boolByte(rawResolvedEntry != nil)})
-	writeTokenField(mac, []byte(resolvedEntryName))
-	writeTokenField(mac, rawResolvedEntry)
-	writeTokenField(mac, pendingEntry)
+	writeTokenField(mac, []byte{boolByte(state.RawResolvedEntry != nil)})
+	writeTokenField(mac, []byte(state.ResolvedEntryName))
+	writeTokenField(mac, state.RawResolvedEntry)
+	writeTokenField(mac, state.PendingEntry)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -104,7 +122,7 @@ func (s *Service) preconditionKey() []byte {
 // The raw entry is re-marshaled canonically (encoding/json sorts object keys)
 // rather than hashed as source bytes, so reformatting the config alone does not
 // invalidate a preview while any semantic change to the entry does.
-func (s *Service) preconditionToken(cfgPath string, fileExists bool, existing *existingEntry, pendingEntry map[string]interface{}) string {
+func (s *Service) preconditionToken(clientID, cfgPath, requestedName string, fileExists bool, existing *existingEntry, pendingEntry map[string]interface{}) string {
 	var resolvedName string
 	var rawResolved json.RawMessage
 	if existing != nil {
@@ -114,7 +132,15 @@ func (s *Service) preconditionToken(cfgPath string, fileExists bool, existing *e
 		// "null" digest, hiding drift between two of them.
 		rawResolved = canonicalJSON(existing.value)
 	}
-	return DerivePreconditionToken(s.preconditionKey(), cfgPath, fileExists, resolvedName, rawResolved, canonicalJSON(pendingEntry))
+	return DerivePreconditionToken(s.preconditionKey(), PreconditionState{
+		ClientID:          clientID,
+		ConfigPath:        cfgPath,
+		Requested:         requestedName,
+		FileExists:        fileExists,
+		ResolvedEntryName: resolvedName,
+		RawResolvedEntry:  rawResolved,
+		PendingEntry:      canonicalJSON(pendingEntry),
+	})
 }
 
 // actionPreconditionFailed is the machine-readable discriminator for a write
@@ -133,7 +159,10 @@ const actionPreconditionFailed = "precondition_failed"
 // resolution, so checking a second, independently-resolved one would compare a
 // state neither the preview nor the write ever used (Spec 091 FR-005).
 func (s *Service) checkPrecondition(client *ClientDef, cfgPath, serverName, token string, fileExists bool, existing *existingEntry) *ConnectResult {
-	current := s.preconditionToken(cfgPath, fileExists, existing,
+	// serverName rides INTO the MAC, not just into the message below: it is the
+	// key this write would create, and a token that ignored it could be
+	// replayed under a different name the user never previewed.
+	current := s.preconditionToken(client.ID, cfgPath, serverName, fileExists, existing,
 		buildServerEntry(client.ID, s.entryParams(false)))
 	// Constant-time: the token is a MAC, and a byte-at-a-time comparison would
 	// leak enough to forge one.
