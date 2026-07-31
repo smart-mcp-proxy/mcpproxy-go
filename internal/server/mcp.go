@@ -657,6 +657,30 @@ func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessio
 // two separate attempts as one.
 var activityRequestIDSeq atomic.Uint64
 
+// mintCorrelationIDAt builds "<nanos>-<part>-…-<seq>": the shape every call
+// path already emitted, with the counter appended. It is the ONLY place in the
+// package that turns the clock into an identifier — see
+// TestActivityIDsAreNeverMintedInline, which enforces that.
+//
+// The instant is a parameter because some records are keyed by when the work
+// started, not by when the id was needed.
+func mintCorrelationIDAt(at time.Time, parts ...string) string {
+	var b strings.Builder
+	b.WriteString(strconv.FormatInt(at.UnixNano(), 10))
+	for _, part := range parts {
+		b.WriteByte('-')
+		b.WriteString(part)
+	}
+	b.WriteByte('-')
+	b.WriteString(strconv.FormatUint(activityRequestIDSeq.Add(1), 10))
+	return b.String()
+}
+
+// mintCorrelationID is mintCorrelationIDAt for work starting now.
+func mintCorrelationID(parts ...string) string {
+	return mintCorrelationIDAt(time.Now(), parts...)
+}
+
 // mintActivityRequestID produces the correlation id shared by every activity
 // event of one dispatch. The nanosecond stamp and target keep the shape the
 // call paths already generated (and logs are grepped by); the counter suffix is
@@ -666,8 +690,7 @@ var activityRequestIDSeq atomic.Uint64
 // the value: minting per emit site would make two gates in one dispatch look
 // like two unrelated requests.
 func mintActivityRequestID(serverName, toolName string) string {
-	return fmt.Sprintf("%d-%s-%s-%d", time.Now().UnixNano(), serverName, toolName,
-		activityRequestIDSeq.Add(1))
+	return mintCorrelationID(serverName, toolName)
 }
 
 // emitActivityInternalToolCall safely emits an internal tool call completion event (Spec 024)
@@ -1149,7 +1172,7 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-search_servers", time.Now().UnixNano())
+	requestID := mintCorrelationID("search_servers")
 
 	registry, err := request.RequireString("registry")
 	if err != nil {
@@ -1248,7 +1271,7 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-list_registries", time.Now().UnixNano())
+	requestID := mintCorrelationID("list_registries")
 
 	registriesList := []map[string]interface{}{}
 	allRegistries := registries.ListRegistries()
@@ -1325,7 +1348,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-retrieve_tools", time.Now().UnixNano())
+	requestID := mintCorrelationID("retrieve_tools")
 
 	query, err := request.RequireString("query")
 	if err != nil {
@@ -2127,7 +2150,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ID:               mintCorrelationID(actualToolName),
 		ServerID:         serverID,
 		ServerName:       serverName,
 		ToolName:         actualToolName,
@@ -2428,7 +2451,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	}
 
 	// Generate requestID for activity tracking
-	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+	requestID := mintActivityRequestID(serverName, actualToolName)
 
 	// Spec 028: Inject auth identity into activity metadata (separate copy for logging only)
 	activityArgs := injectAuthMetadata(ctx, args)
@@ -2537,7 +2560,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ID:               mintCorrelationID(actualToolName),
 		ServerID:         serverID,
 		ServerName:       serverName,
 		ToolName:         actualToolName,
@@ -2835,7 +2858,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-upstream_servers", time.Now().UnixNano())
+	requestID := mintCorrelationID("upstream_servers")
 
 	operation, err := request.RequireString("operation")
 	if err != nil {
@@ -2959,7 +2982,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-quarantine_security", time.Now().UnixNano())
+	requestID := mintCorrelationID("quarantine_security")
 
 	operation, err := request.RequireString("operation")
 	if err != nil {
@@ -4840,7 +4863,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-read_cache", time.Now().UnixNano())
+	requestID := mintCorrelationID("read_cache")
 
 	key, err := request.RequireString("key")
 	if err != nil {
