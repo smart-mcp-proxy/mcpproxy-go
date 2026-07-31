@@ -22,8 +22,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
     /// The Connect Client form. Presented as a sheet on the main window when one
-    /// is up, and as its own window otherwise.
-    private var connectClientWindow: NSWindow?
+    /// is up, and as its own window otherwise. The lifecycle owns the window and
+    /// its model together so BOTH exits — the form's Close button and the
+    /// titlebar's red button — tear the form down (see the type's header).
+    @MainActor private let connectClientForm = ConnectFormWindowLifecycle()
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
 
@@ -395,8 +397,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// race dressed as a workflow (research D5). Here the window is built and
     /// shown in this call.
     @MainActor @objc func presentConnectClientForm() {
-        if let existing = connectClientWindow, existing.isVisible {
-            existing.makeKeyAndOrderFront(nil)
+        if connectClientForm.makeKeyIfPresenting() {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -423,18 +424,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.dismissConnectClientForm()
             })
         )
-        connectClientWindow = window
+        connectClientForm.adopt(window, model: model)
 
         // A sheet on the main window when there is one — the form belongs to the
         // app the user is already looking at; a standalone window otherwise,
         // because a menu-bar app often has no window at all.
         if let host = mainWindow, host.isVisible {
-            host.beginSheet(window) { [weak self] _ in self?.connectClientWindow = nil }
+            host.beginSheet(window) { [weak self] _ in
+                self?.connectClientForm.windowWillClose(window)
+            }
             return
         }
 
         NSApp.setActivationPolicy(.regular)
         window.center()
+        // Owning the delegate is what makes the red button reach the teardown.
         window.delegate = self
         setupMainMenu()
         window.makeKeyAndOrderFront(nil)
@@ -443,13 +447,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Dismiss the form from its own Close button, whichever way it was shown.
     @MainActor private func dismissConnectClientForm() {
-        guard let window = connectClientWindow else { return }
-        if let host = window.sheetParent {
-            host.endSheet(window)
-        } else {
-            window.close()
-        }
-        connectClientWindow = nil
+        connectClientForm.dismiss()
     }
 
     @objc private func showAddServer() {
@@ -476,6 +474,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // NSWindowDelegate — hide from Dock when the last managed window closes.
     func windowWillClose(_ notification: Notification) {
+        // The titlebar's red button lands here and nowhere else: without this,
+        // closing the Connect form that way left its model and its 2 s
+        // reachability poll alive inside a retained, invisible window.
+        MainActor.assumeIsolated {
+            connectClientForm.windowWillClose(notification.object as? NSWindow)
+        }
         // Defer so the closing window has already left the visible set.
         DispatchQueue.main.async { [weak self] in self?.restoreAccessoryIfNoVisibleWindows() }
     }
