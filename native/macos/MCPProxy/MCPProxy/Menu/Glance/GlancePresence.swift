@@ -164,14 +164,18 @@ enum GlancePresence {
     /// session's start time. A session with neither usable is excluded — there
     /// is no honest age to show for it, and guessing one would put an invented
     /// row in a section whose whole purpose is to be trusted.
-    private static func lastActivity(of session: APIClient.MCPSession) -> Date? {
+    ///
+    /// Internal rather than private because the dashboard's Recent Sessions
+    /// table answers the same question and must answer it the same way; see
+    /// `DashboardSessions`.
+    static func lastActivity(of session: APIClient.MCPSession) -> Date? {
         if let date = usableTimestamp(session.lastActivity) { return date }
         return usableTimestamp(session.startTime)
     }
 
     /// A timestamp that parses *and* refers to a real moment — see
     /// `timestampFloor` for why parsing alone is not enough.
-    private static func usableTimestamp(_ stamp: String?) -> Date? {
+    static func usableTimestamp(_ stamp: String?) -> Date? {
         guard let stamp, let date = GlanceFormatting.parseTimestamp(stamp),
               date > timestampFloor else { return nil }
         return date
