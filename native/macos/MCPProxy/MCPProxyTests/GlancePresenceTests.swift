@@ -54,6 +54,21 @@ final class GlancePresenceTests: XCTestCase {
         XCTAssertEqual(rows.first?.age, 20 * 60)
     }
 
+    /// The Go API serialises an absent legacy `LastActivity` as the zero
+    /// `time.Time` — "0001-01-01T00:00:00Z" — which parses perfectly well and
+    /// would otherwise land two millennia outside the lookback, silently
+    /// dropping the client instead of falling back to its start time.
+    func testAZeroValueLastActivityIsTreatedAsMissing() {
+        let rows = GlancePresence.clients(
+            from: [Self.session(id: "s1", name: "Claude Code",
+                                start: "2027-01-15T07:40:00Z",
+                                lastActivity: "0001-01-01T00:00:00Z")],
+            now: Self.now)
+
+        XCTAssertEqual(rows.map(\.state), [.idle], "must classify from start_time, not the zero stamp")
+        XCTAssertEqual(rows.first?.age, 20 * 60)
+    }
+
     func testASessionWithNoParseableTimestampIsExcluded() {
         let rows = GlancePresence.clients(
             from: [

@@ -85,6 +85,16 @@ enum GlancePresence {
     /// Stand-in for a client that never sent a name in its initialize request.
     static let unknownClientName = "Unknown client"
 
+    /// Timestamps at or before this instant are not real observations.
+    ///
+    /// The core serialises an absent `time.Time` as its zero value,
+    /// "0001-01-01T00:00:00Z", which parses fine and would be treated as an age
+    /// of two thousand years — outside the lookback, so the session would be
+    /// dropped instead of falling back to its start time. Year 2000 is the
+    /// floor rather than the exact zero value because any epoch-ish sentinel
+    /// (0001, 1601, 1970) means the same thing: nothing was recorded.
+    static let timestampFloor = Date(timeIntervalSince1970: 946_684_800)  // 2000-01-01T00:00:00Z
+
     /// Classify an age, or nil when it falls outside the lookback.
     ///
     /// Boundaries are inclusive-idle (5:00 and 30:00 are both idle) so the two
@@ -151,17 +161,20 @@ enum GlancePresence {
     }
 
     /// When the client was last heard from: `last_activity`, falling back to the
-    /// session's start time. A session with neither parseable is excluded —
-    /// there is no honest age to show for it, and guessing one would put an
-    /// invented row in a section whose whole purpose is to be trusted.
+    /// session's start time. A session with neither usable is excluded — there
+    /// is no honest age to show for it, and guessing one would put an invented
+    /// row in a section whose whole purpose is to be trusted.
     private static func lastActivity(of session: APIClient.MCPSession) -> Date? {
-        if let stamp = session.lastActivity, let date = GlanceFormatting.parseTimestamp(stamp) {
-            return date
-        }
-        if let start = session.startTime, let date = GlanceFormatting.parseTimestamp(start) {
-            return date
-        }
-        return nil
+        if let date = usableTimestamp(session.lastActivity) { return date }
+        return usableTimestamp(session.startTime)
+    }
+
+    /// A timestamp that parses *and* refers to a real moment — see
+    /// `timestampFloor` for why parsing alone is not enough.
+    private static func usableTimestamp(_ stamp: String?) -> Date? {
+        guard let stamp, let date = GlanceFormatting.parseTimestamp(stamp),
+              date > timestampFloor else { return nil }
+        return date
     }
 
     // MARK: - Summary
