@@ -71,6 +71,9 @@ final class APIClientGlanceTests: XCTestCase {
     /// interpolated: `AppState.glanceActivityPageSize` is only meaningful
     /// because the server clamps `limit` to 100, and a test that reads the
     /// constant back would follow it silently wherever it went.
+    /// `policy_decision` is in the filter because a block is the proxy doing its
+    /// job and today the glance cannot see one at all (FR-014): the type filter
+    /// excluded them, so 52 blocks in a 6-week export produced zero rows.
     func testGlanceActivityRequestsToolCallTypesAtTheServersMaximumPage() async throws {
         GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
         {"activities":[],"total":0,"limit":100,"offset":0}
@@ -81,7 +84,7 @@ final class APIClientGlanceTests: XCTestCase {
 
         XCTAssertEqual(
             GlanceStubURLProtocol.requestedURLs,
-            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call"
+            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call,policy_decision"
              + "&limit=100&exclude_payloads=true"]
         )
     }

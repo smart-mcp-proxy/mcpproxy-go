@@ -421,9 +421,16 @@ actor APIClient {
     /// ~30KB projected — a 28x saving on a request the tray repeats every 30
     /// seconds. `recentActivity(limit:)` deliberately does NOT set it: the
     /// Dashboard renders exactly those fields.
+    ///
+    /// `policy_decision` is in the type filter because a blocked call is the
+    /// proxy doing its job, and it is the one outcome with no other trace in the
+    /// menu: a block never dispatches, so there is no `tool_call` record to
+    /// stand in for it (spec 090 FR-014). Warnings and redactions ride the same
+    /// record type and are rejected later, by `GlanceSelection.qualifies`.
     func glanceActivity(limit: Int = AppState.glanceActivityPageSize) async throws -> [ActivityEntry] {
         let response: ActivityListResponse = try await fetchWrapped(
-            path: "/api/v1/activity?type=tool_call,internal_tool_call&limit=\(limit)&exclude_payloads=true"
+            path: "/api/v1/activity?type=tool_call,internal_tool_call,policy_decision"
+                + "&limit=\(limit)&exclude_payloads=true"
         )
         return response.activities
     }
