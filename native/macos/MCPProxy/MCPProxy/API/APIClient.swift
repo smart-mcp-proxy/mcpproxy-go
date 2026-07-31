@@ -398,29 +398,11 @@ actor APIClient {
         return []
     }
 
-    /// Connect MCPProxy to a client via `POST /api/v1/connect/{clientId}`.
-    func connectToClient(_ clientId: String) async throws -> ConnectResult {
-        let data = try await postRaw(path: "/api/v1/connect/\(clientId)")
-        let decoder = JSONDecoder()
-        if let wrapper = try? decoder.decode(APIResponse<ConnectResult>.self, from: data),
-           let payload = wrapper.data {
-            return payload
-        }
-        return try decoder.decode(ConnectResult.self, from: data)
-    }
-
-    /// Disconnect MCPProxy from a client via `DELETE /api/v1/connect/{clientId}`.
-    func disconnectFromClient(_ clientId: String) async throws -> ConnectResult {
-        let data = try await deleteRaw(path: "/api/v1/connect/\(clientId)")
-        let decoder = JSONDecoder()
-        if let wrapper = try? decoder.decode(APIResponse<ConnectResult>.self, from: data),
-           let payload = wrapper.data {
-            return payload
-        }
-        return try decoder.decode(ConnectResult.self, from: data)
-    }
-
     // MARK: - Connect (native form surface, Spec 091)
+    //
+    // The preview-less `connectToClient` / `disconnectFromClient` pair that the
+    // legacy dashboard sheet used is deliberately gone (FR-012): the only writes
+    // this app can perform are the token-bound, preview-gated ones below.
 
     /// One client's authoritative state via `GET /api/v1/connect/{id}` — the
     /// only Connect read that opens a client config file, so it happens strictly
