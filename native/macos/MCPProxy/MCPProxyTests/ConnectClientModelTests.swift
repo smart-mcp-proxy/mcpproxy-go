@@ -263,6 +263,47 @@ final class ConnectClientModelTests: XCTestCase {
         XCTAssertTrue(source.connectCalls.isEmpty, "force must never be sent tokenless")
     }
 
+    /// ...and when it is not offered, the form says why. A resolved preview, a
+    /// backup promise and no button with no explanation is a silent dead end.
+    func testABlockedReplaceStatesWhyAndPromisesNoBackup() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(
+            FakeConnectSource.preview(entryExists: true, token: nil))]
+        let model = makeModel(source)
+
+        await model.select("claude-code")
+
+        XCTAssertFalse(model.connectControlExists)
+        let reason = try? XCTUnwrap(model.connectBlockedReason)
+        XCTAssertFalse((reason ?? "").isEmpty, "a hidden control must have a stated reason")
+        XCTAssertNil(model.currentPreview?.safetyNetStatement,
+                     "no backup is promised for a write that cannot be started")
+    }
+
+    /// Against a PRE-091 core (no precondition_token field at all) the write
+    /// falls back to its legacy behaviour, so the control stays available and
+    /// the replace is sent with force and NO token — the alternative is a form
+    /// that shows a full preview and offers nothing, forever.
+    func testAReplaceAgainstAPre091CoreIsOfferedAndSendsNoToken() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(
+            FakeConnectSource.preview(entryExists: true, token: nil, coreSupportsTokens: false))]
+        let model = makeModel(source)
+
+        await model.select("claude-code")
+
+        XCTAssertTrue(model.connectControlExists,
+                      "a core that never speaks the token protocol must not disable the form")
+        XCTAssertNil(model.connectBlockedReason)
+
+        await model.connect()
+
+        XCTAssertEqual(source.connectCalls.count, 1)
+        XCTAssertEqual(source.connectCalls.first?.force, true)
+        XCTAssertNil(source.connectCalls.first?.preconditionToken,
+                     "there is no token to send; the core falls back to its legacy write")
+    }
+
     func testASuccessfulConnectRefreshesTheClientState() async {
         let source = FakeConnectSource()
         source.detailResults = [

@@ -129,12 +129,26 @@ struct ConnectPreviewModel: Codable, Equatable {
     let accessState: ConnectAccessState
     let existingEntrySummary: ConnectEntrySummary?
     /// Opaque, keyed, single-session token binding this preview to the raw
-    /// pre-write state AND the pending entry. Nil only against a core older than
-    /// spec 091, where the write falls back to its legacy behaviour.
+    /// pre-write state AND the pending entry.
+    ///
+    /// Empty or nil from a spec-091 core means the write cannot be bound to
+    /// this preview, and an overwrite is then NOT offered — the form never
+    /// sends `force` without a token (FR-005). That is different from a
+    /// pre-091 core, which does not send the field at all: see
+    /// `coreSupportsPreconditionTokens`.
     let preconditionToken: String?
     /// Verbatim refusal from the same guard the write runs; presence means
     /// "Connect unavailable" (contracts §1).
     let connectRefusal: String?
+    /// Whether the core that produced this preview speaks the spec-091
+    /// precondition protocol at all — i.e. it sent `precondition_token`, which
+    /// a 091 core always does even when the value is empty.
+    ///
+    /// A pre-091 core omits the field entirely and its write falls back to its
+    /// legacy behaviour, so for THAT core the overwrite stays available and is
+    /// sent tokenless. Gating on the value alone left an app newer than its
+    /// core showing a full preview with no action and no explanation.
+    let coreSupportsPreconditionTokens: Bool
 
     enum CodingKeys: String, CodingKey {
         case client
@@ -159,7 +173,8 @@ struct ConnectPreviewModel: Codable, Equatable {
         accessState: ConnectAccessState,
         existingEntrySummary: ConnectEntrySummary? = nil,
         preconditionToken: String? = nil,
-        connectRefusal: String? = nil
+        connectRefusal: String? = nil,
+        coreSupportsPreconditionTokens: Bool = true
     ) {
         self.client = client
         self.configPath = configPath
@@ -171,6 +186,7 @@ struct ConnectPreviewModel: Codable, Equatable {
         self.existingEntrySummary = existingEntrySummary
         self.preconditionToken = preconditionToken
         self.connectRefusal = connectRefusal
+        self.coreSupportsPreconditionTokens = coreSupportsPreconditionTokens
     }
 
     init(from decoder: Decoder) throws {
@@ -187,6 +203,10 @@ struct ConnectPreviewModel: Codable, Equatable {
         existingEntrySummary = try container.decodeIfPresent(
             ConnectEntrySummary.self, forKey: .existingEntrySummary)
         preconditionToken = try container.decodeIfPresent(String.self, forKey: .preconditionToken)
+        // The KEY, not the value: a 091 core always sends the field (possibly
+        // empty), a pre-091 core never does — and only the latter is entitled
+        // to the legacy tokenless write.
+        coreSupportsPreconditionTokens = container.contains(.preconditionToken)
         // An empty string is the Go zero value for an omitted refusal; treat it
         // as "no refusal" so `connect_refusal: ""` cannot disable Connect.
         let refusal = try container.decodeIfPresent(String.self, forKey: .connectRefusal)
@@ -224,8 +244,18 @@ struct ConnectPreviewModel: Codable, Equatable {
     /// Whether a Connect control may exist for this preview (SC-002).
     var allowsConnect: Bool { changeKind.allowsConnect }
 
+    /// An overwrite this form may not offer: the core speaks the precondition
+    /// protocol but gave no token, so the write could not be bound to what the
+    /// user is looking at, and `force` is never sent without one (FR-005).
+    var replaceIsBlockedByAMissingToken: Bool {
+        changeKind.requiresForce && coreSupportsPreconditionTokens
+            && (preconditionToken ?? "").isEmpty
+    }
+
     /// The safety net the user is promised BEFORE the action button (FR-003).
     var safetyNetStatement: String? {
+        // Never promise a backup for a write that cannot even be started.
+        if replaceIsBlockedByAMissingToken { return nil }
         switch changeKind {
         case .create:
             return "This file does not exist; it will be created, and Undo removes it."

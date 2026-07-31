@@ -150,7 +150,8 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
         containsAPIKey: Bool = false,
         summary: ConnectEntrySummary? = nil,
         token: String? = "tok",
-        refusal: String? = nil
+        refusal: String? = nil,
+        coreSupportsTokens: Bool = true
     ) -> ConnectPreviewModel {
         ConnectPreviewModel(
             client: client,
@@ -162,7 +163,8 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
             accessState: accessState,
             existingEntrySummary: summary,
             preconditionToken: token,
-            connectRefusal: refusal
+            connectRefusal: refusal,
+            coreSupportsPreconditionTokens: coreSupportsTokens
         )
     }
 

@@ -450,10 +450,22 @@ final class ConnectClientModel: ObservableObject {
     /// precondition token, because the form never sends `force` without one.
     var connectControlExists: Bool {
         guard let preview = currentPreview, preview.allowsConnect else { return false }
-        if preview.changeKind.requiresForce && (preview.preconditionToken ?? "").isEmpty {
-            return false
-        }
-        return true
+        return !preview.replaceIsBlockedByAMissingToken
+    }
+
+    /// Why a resolved preview offers no Connect control, or nil when it does (or
+    /// when the core's own refusal already explains it).
+    ///
+    /// A preview that renders in full with no button and nothing said about it
+    /// is a dead end: the user has no way to tell a deliberate safety stop from
+    /// a broken form.
+    var connectBlockedReason: String? {
+        guard let preview = currentPreview, preview.allowsConnect,
+              preview.replaceIsBlockedByAMissingToken
+        else { return nil }
+        return "MCPProxy could not bind this replacement to the preview above, "
+            + "so it will not overwrite the existing entry. Reopen the form or "
+            + "reselect this client to get a fresh preview."
     }
 
     /// Why the mutating controls are disabled, or nil when they are usable.

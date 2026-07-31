@@ -55,6 +55,8 @@ enum ConnectClientAccessibility {
     static let safetyNet = "connect-client-safety-net"
     static let credentialNotice = "connect-client-credential-notice"
     static let refusal = "connect-client-refusal"
+    /// Shown where the Connect button would be when the write is not offered.
+    static let connectBlocked = "connect-client-connect-blocked"
     static let entryNameField = "connect-client-entry-name"
     static let advancedDisclosure = "connect-client-advanced"
     static let connectButton = "connect-client-connect"
@@ -72,7 +74,7 @@ enum ConnectClientAccessibility {
     /// Every fixed identifier, for the uniqueness check.
     static let allIdentifiers: [String] = [
         list, preview, entryText, configPath, existingSummary, safetyNet,
-        credentialNotice, refusal, entryNameField, advancedDisclosure,
+        credentialNotice, refusal, connectBlocked, entryNameField, advancedDisclosure,
         connectButton, undoButton, disconnectButton, disconnectConfirm,
         closeButton, status, waiting, transportNotice
     ]
@@ -318,6 +320,15 @@ struct ConnectClientView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .accessibilityIdentifier(ConnectClientAccessibility.refusal)
+                }
+
+                // A control that cannot exist always says so — a full preview
+                // with no button and no explanation is a dead end.
+                if let blocked = model.connectBlockedReason {
+                    Label(blocked, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(ConnectClientAccessibility.connectBlocked)
                 }
             }
             .accessibilityIdentifier(ConnectClientAccessibility.preview)

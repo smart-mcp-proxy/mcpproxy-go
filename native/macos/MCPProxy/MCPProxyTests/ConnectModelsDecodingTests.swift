@@ -155,6 +155,37 @@ final class ConnectModelsDecodingTests: XCTestCase {
         XCTAssertNil(preview.existingEntrySummary)
         XCTAssertNil(preview.connectRefusal)
         XCTAssertEqual(preview.changeKind, .add)
+        XCTAssertFalse(preview.coreSupportsPreconditionTokens,
+                       "a core that omits the field entirely does not speak the 091 protocol")
+    }
+
+    /// A spec-091 core ALWAYS sends the field, even when the value is empty, so
+    /// its presence is what distinguishes "this core has no tokens" from "this
+    /// core gave me no token".
+    func testAPresentButEmptyTokenStillMeansTheCoreSpeaksTheProtocol() throws {
+        let preview = try decodePreview("""
+        {"client":"cursor","config_path":"/x","server_name":"mcpproxy",
+         "entry_text":"…","entry_exists":true,"contains_api_key":false,
+         "access_state":"accessible","precondition_token":""}
+        """)
+
+        XCTAssertTrue(preview.coreSupportsPreconditionTokens)
+        XCTAssertTrue(preview.replaceIsBlockedByAMissingToken,
+                      "a 091 core owes a token for a replace; without one the write is not offered")
+    }
+
+    /// Against a PRE-091 core a replace is not blocked: that core never sends a
+    /// token and its write legitimately falls back to the legacy behaviour, so
+    /// blocking would leave the user with a full preview and no action at all.
+    func testAReplaceAgainstAPre091CoreIsNotBlocked() throws {
+        let preview = try decodePreview("""
+        {"client":"cursor","config_path":"/x","server_name":"mcpproxy",
+         "entry_text":"…","entry_exists":true,"contains_api_key":false,
+         "access_state":"accessible"}
+        """)
+
+        XCTAssertEqual(preview.changeKind, .replace(entryName: "mcpproxy"))
+        XCTAssertFalse(preview.replaceIsBlockedByAMissingToken)
     }
 
     // MARK: - changeKind derivation (all six cases)
