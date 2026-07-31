@@ -118,7 +118,7 @@ final class GlanceEventTests: XCTestCase {
         XCTAssertEqual(b.id, "req-5:internal_tool_call")
         XCTAssertNotEqual(a, b)
         XCTAssertEqual(a.requestId, b.requestId, "the shared request id is what rule 4 collapses on")
-        XCTAssertEqual(GlanceSelection.activityRows(from: [a, b]).map(\.id),
+        XCTAssertEqual(GlanceSelection.activityRows(from: [a, b]).map(\.newest.id),
                        ["req-5:tool_call"],
                        "rule 4 keeps the record that names the real server:tool")
     }

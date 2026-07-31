@@ -128,13 +128,13 @@ final class GlanceSection {
         items.append(.separator())
 
         items.append(disabledItem(titled: "Recent"))
-        let entries = GlanceSelection.activityRows(from: state.glanceActivity)
-        if entries.isEmpty {
+        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
+        if runs.isEmpty {
             items.append(disabledItem(titled: "No tool calls yet"))
         } else {
-            for entry in entries {
+            for run in runs {
                 var row = ActivityRow(item: actionableItem())
-                apply(entry, to: &row, now: now)
+                apply(run.newest, to: &row, now: now)
                 activityRows.append(row)
                 items.append(row.item)
             }
@@ -195,9 +195,9 @@ final class GlanceSection {
         guard isVisible(for: state) == builtVisible else { return false }
         guard builtVisible else { return true }
 
-        let entries = GlanceSelection.activityRows(from: state.glanceActivity)
+        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
         let clients = GlanceSelection.activeClients(from: state.glanceSessions)
-        guard entries.count == activityRows.count,
+        guard runs.count == activityRows.count,
               clients.count == clientRows.count else { return false }
 
         let summary = summaryTitle(for: state)
@@ -205,8 +205,8 @@ final class GlanceSection {
         // `zip`, like the sibling loop below: indexing `entries` by
         // `activityRows.indices` reads out of bounds if the count guard above is
         // ever weakened, and zip cannot.
-        for (index, entry) in zip(activityRows.indices, entries) {
-            apply(entry, to: &activityRows[index], now: now)
+        for (index, run) in zip(activityRows.indices, runs) {
+            apply(run.newest, to: &activityRows[index], now: now)
         }
         for (row, session) in zip(clientRows, clients) { apply(session, to: row, now: now) }
         return true
