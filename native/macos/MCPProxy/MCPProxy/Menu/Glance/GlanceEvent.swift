@@ -66,11 +66,37 @@ enum GlanceEvent {
             timestamp: timestamp,
             sessionId: nonEmptyString(payload["session_id"]),
             requestId: requestId,
-            metadata: nil,
+            metadata: contextMetadata(from: payload),
             hasSensitiveData: nil,
             detectionTypes: nil,
             maxSeverity: nil
         )
+    }
+
+    /// The contextual metadata a live row carries, and nothing else.
+    ///
+    /// It is deliberately the SAME whitelist the polled projection keeps
+    /// (`exclude_payloads=true`, contracts/api-deltas.md §1): a row must read
+    /// identically before and after the 30-second reconcile, so a reason that
+    /// only the poll could produce would blink into existence half a minute
+    /// late — and one only the event could produce would blink out again.
+    ///
+    /// Copying the whole payload instead would be worse than redundant: it
+    /// carries `arguments` and `response`, the two fields the projection exists
+    /// to strip, into the backing model of a menu row that renders neither.
+    private static func contextMetadata(from payload: [String: Any]) -> [String: JSONValue]? {
+        guard let intent = payload["intent"] as? [String: Any] else { return nil }
+
+        var kept: [String: JSONValue] = [:]
+        if let reason = nonEmptyString(intent["reason"]) { kept["reason"] = .string(reason) }
+        if let operation = nonEmptyString(intent["operation_type"]) {
+            kept["operation_type"] = .string(operation)
+        }
+        // An intent map that carried nothing we render is no metadata at all:
+        // `ActivityEntry.intent` would otherwise answer an empty object, which
+        // reads as "there is context here" everywhere downstream.
+        guard !kept.isEmpty else { return nil }
+        return ["intent": .object(kept)]
     }
 
     private static func nonEmptyString(_ value: Any?) -> String? {

@@ -156,6 +156,100 @@ final class GlanceEventTests: XCTestCase {
         XCTAssertEqual(parsed.timeIntervalSince1970, 1_753_800_000, accuracy: 0.001)
     }
 
+    // MARK: - Intent (spec 090 US2, FR-008)
+
+    /// The completed events already carry the caller's `intent` map
+    /// (event_bus.go `EmitActivityToolCallCompleted`, payload["intent"]), and
+    /// the adapter used to throw it away (`metadata: nil`). A live row must
+    /// expose the same reason the reconciling poll will bring, or the reason
+    /// would blink into existence 30 seconds late.
+    func testUpstreamCompletedPayloadCarriesTheIntentReason() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"transition_issue",
+        "request_id":"req-i1","status":"success",
+        "intent":{"reason":"Handoff: move ticket to review per user request",
+        "operation_type":"write","data_sensitivity":"internal"}},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.intentReason, "Handoff: move ticket to review per user request")
+        XCTAssertEqual(entry.reason, entry.intentReason,
+                       "a call row's reason IS its caller-declared intent")
+        XCTAssertEqual(entry.intentOperationType, "write")
+    }
+
+    /// Internal calls carry the same map, and the wrapper is where a failing
+    /// pre-dispatch call gets its only row — so it must carry the reason too.
+    func testInternalCompletedPayloadCarriesTheIntentReason() throws {
+        let json = """
+        {"payload":{"internal_tool_name":"call_tool_read","target_server":"jira",
+        "request_id":"req-i2","status":"error","error_message":"auth failed",
+        "intent":{"reason":"Verify the failed transition did not change the ticket",
+        "operation_type":"read"}},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.internal_tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.reason, "Verify the failed transition did not change the ticket")
+        XCTAssertEqual(entry.intentOperationType, "read")
+    }
+
+    /// Only the contextual whitelist rides the event — the same fields the
+    /// polled projection keeps (contracts/api-deltas.md §1). Copying the whole
+    /// payload into metadata would put arguments and responses into a menu row's
+    /// backing model, which is exactly what `exclude_payloads` exists to avoid.
+    func testOnlyTheContextualWhitelistIsCarriedIntoMetadata() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue",
+        "request_id":"req-i3","status":"success",
+        "arguments":{"issue":"MCP-1"},"response":"{\\"fields\\":{}}",
+        "tool_variant":"call_tool_read","content_trust":"untrusted",
+        "intent":{"reason":"Read the ticket","operation_type":"read"}},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.reason, "Read the ticket")
+        XCTAssertNil(entry.arguments, "arguments must never reach a menu row's model")
+        XCTAssertNil(entry.response)
+        XCTAssertEqual(Set(try XCTUnwrap(entry.metadata).keys), ["intent"])
+        let intent = try XCTUnwrap(entry.intent)
+        XCTAssertEqual(Set(intent.keys), ["reason", "operation_type"],
+                       "data_sensitivity and friends are not part of the glance whitelist")
+    }
+
+    /// A discovery built-in makes no intent claim, and an empty reason is not a
+    /// reason: both must leave the row single-line (FR-007).
+    func testAPayloadWithoutAnIntentHasNoReason() throws {
+        let bare = """
+        {"payload":{"internal_tool_name":"retrieve_tools","request_id":"req-i4",
+        "status":"success"},"timestamp":1753800000}
+        """
+        let empty = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue","request_id":"req-i5",
+        "status":"success","intent":{"reason":"","operation_type":""}},
+        "timestamp":1753800000}
+        """
+        let noIntent = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.internal_tool_call.completed", data: Data(bare.utf8)))
+        let emptyIntent = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed", data: Data(empty.utf8)))
+
+        XCTAssertNil(noIntent.reason)
+        XCTAssertNil(noIntent.metadata, "no context means no metadata at all, not an empty map")
+        XCTAssertNil(emptyIntent.reason)
+        XCTAssertNil(emptyIntent.metadata)
+    }
+
     /// SSE rows go in newest-first and the feed is bounded, so a busy agent
     /// cannot grow `glanceActivity` without limit between reconciling polls.
     func testPrependPutsNewestFirstAndCapsTheFeed() throws {
