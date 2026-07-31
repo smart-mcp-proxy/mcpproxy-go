@@ -45,6 +45,11 @@ or a manual ⇧⌘4 window grab of the open menu.
 
 ## Results
 
+**Status: NOT RUN.** T035's automated gates are green (see [gates.md](gates.md)),
+but this protocol still needs a live session — a built app, a seeded dev core on
+an isolated port/data-dir, and screen-recording permission for the shots. Treat
+it as open until the table below is filled.
+
 - Date / macOS version / app build:
 - Checks passed:
 - Waived:

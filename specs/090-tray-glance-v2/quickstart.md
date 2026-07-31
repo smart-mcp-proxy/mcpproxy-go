@@ -12,6 +12,9 @@ make swagger && make swagger-verify
 # Swift tray: pure pipeline + fixture replay + menu tests
 cd native/macos/MCPProxy && swift test
 
+# Go binary (needed before `./mcpproxy serve` below)
+make build
+
 # Full app build (DMG-less dev build)
 scripts/build-swift-app.sh
 ```

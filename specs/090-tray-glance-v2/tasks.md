@@ -80,7 +80,13 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 - [x] T032 [P] Write MCPProxyTests/GlanceFixtureReplayTests.swift: locate `specs/090-tray-glance-v2/fixtures/activity-replay.jsonl` by walking up from `#filePath`; chronological replay (reverse file order) with sliding latest-100 window; assert SC-001 (no two adjacent rows share a group key; ≥19-burst occupies one row) and SC-004 (all 52 blocks become visible at some step)
 - [x] T033 Write MCPProxyTests/MenuOpenNetworkTests.swift against the not-yet-existing injectable data-source initializer on the controller (red: fails to compile): construct the controller with a counting stub, drive the REAL `menuWillOpen` → rebuild → `updateInPlace` sequence on a real NSMenu, assert a zero request delta (FR-022, research D8)
 - [x] T034 Implement the injectable data-source seam in MCPProxy/MCPProxyApp.swift (production default APIClient); T033 green
-- [ ] T035 Documentation + gates: note the `exclude_payloads` contextual whitelist in docs/features/activity-log.md; validate specs/090-tray-glance-v2/quickstart.md commands still match reality; run `./scripts/run-linter.sh`, full `go test ./internal/...`, `cd native/macos/MCPProxy && swift test`, `make swagger-verify`; fill specs/090-tray-glance-v2/verification/manual-protocol.md results after a live run
+- [x] T035 Documentation + gates: note the `exclude_payloads` contextual whitelist in docs/features/activity-log.md; validate specs/090-tray-glance-v2/quickstart.md commands still match reality; run `./scripts/run-linter.sh`, full `go test ./internal/...`, `cd native/macos/MCPProxy && swift test`, `make swagger-verify`; fill specs/090-tray-glance-v2/verification/manual-protocol.md results after a live run
+
+**Outstanding after T035**: the four automated gates are green and recorded in
+specs/090-tray-glance-v2/verification/gates.md. The live visual run of
+specs/090-tray-glance-v2/verification/manual-protocol.md has NOT been performed —
+it needs a built app, a seeded dev core and screen-recording permission, so it
+stays open as a release-blocking manual step.
 
 ## Dependencies & Execution Order
 
