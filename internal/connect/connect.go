@@ -368,7 +368,26 @@ func (s *Service) entryAccess(client ClientDef, cfgPath string) (name string, fo
 // Connect registers MCPProxy in the specified client's configuration file.
 // serverName defaults to "mcpproxy" if empty. If force is false and an entry
 // already exists, an error is returned.
+//
+// This is the tokenless entry point kept for the Web UI, the CLI and every
+// existing caller; ConnectWithPrecondition adds the Spec 091 drift guard.
 func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResult, error) {
+	return s.ConnectWithPrecondition(clientID, serverName, force, "")
+}
+
+// ConnectWithPrecondition is Connect guarded by the opaque token a preview
+// returned (Spec 091 FR-005). When preconditionToken is non-empty, the core
+// re-resolves the raw pre-write state and the entry it would write, recomputes
+// the token, and refuses with the discriminated "precondition_failed" action —
+// writing nothing and taking no backup — if anything drifted since the preview:
+// the file appearing or vanishing, the resolved (possibly adopted) entry
+// changing in any way, or the proxy's own configuration changing what would be
+// written. force=true rides WITH the token for a replace-classified flow and
+// never rescues a stale one.
+//
+// An empty token means exactly today's behavior, so existing consumers are
+// unaffected (contracts §2).
+func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (*ConnectResult, error) {
 	client := FindClient(clientID)
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
@@ -387,6 +406,15 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 	}
 	if err := connectRefusal(client, cfgPath); err != nil {
 		return nil, err
+	}
+
+	// Precondition check BEFORE any backup or write, so a refusal is completely
+	// inert (Spec 091 FR-005).
+	if preconditionToken != "" {
+		stale, err := s.checkPrecondition(client, cfgPath, serverName, preconditionToken)
+		if stale != nil || err != nil {
+			return stale, err
+		}
 	}
 
 	var res *ConnectResult
