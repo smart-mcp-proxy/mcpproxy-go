@@ -163,11 +163,38 @@ final class ConnectClientModel: ObservableObject {
         case failed(String)
     }
 
+    /// One rendered client row (US2).
+    ///
+    /// Its label is the cheap truth from the existence-only aggregate until the
+    /// user selects the client; from then on it is the authoritative state the
+    /// core resolved. The tray never opens a client config to compute any of it.
+    struct ClientRow: Equatable, Identifiable {
+        let clientId: String
+        let displayName: String
+        let symbolName: String
+        /// A statement about the config FILE (or, once resolved, the connection)
+        /// — never about whether the application is installed.
+        let stateLabel: String
+        /// Unsupported clients stay visible but unselectable (FR-009).
+        let isSelectable: Bool
+        /// Extra guidance for the row: the core's remediation when access is
+        /// denied, or its caveat for a supported client.
+        let note: String?
+        let connected: Bool
+
+        var id: String { clientId }
+    }
+
     @Published private(set) var list: ListState = .loading
     @Published private(set) var selection: String?
     @Published private(set) var detail: DetailState = .idle
     @Published private(set) var preview: PreviewState = .idle
     @Published private(set) var action: ActionState = .idle
+
+    /// Authoritative per-client state, keyed by client id, as resolved by the
+    /// explicit detail reads. Only clients the user actually selected appear
+    /// here — that is what keeps opening the list content-read-free (FR-002).
+    @Published private(set) var resolvedDetails: [String: APIClient.ClientStatus] = [:]
 
     /// Entry name written into the client's config; the advanced override.
     ///
@@ -238,6 +265,9 @@ final class ConnectClientModel: ObservableObject {
         detail = .loading
         do {
             let status = try await source.clientDetail(clientId)
+            // The row keeps the resolved state even if the selection moved on:
+            // it was read for this client and remains true of it.
+            resolvedDetails[clientId] = status
             guard selection == clientId else { return }
             detail = .resolved(status)
         } catch {
@@ -274,6 +304,61 @@ final class ConnectClientModel: ObservableObject {
         preview = .idle
         previewKey = nil
         action = .idle
+    }
+
+    // MARK: - Rows (US2)
+
+    /// The client list as rendered: stat-only labels, overlaid with whatever the
+    /// core has resolved for clients the user selected (FR-002, US2).
+    var rows: [ClientRow] {
+        guard case .loaded(let clients) = list else { return [] }
+        return clients.map(row(for:))
+    }
+
+    private func row(for client: APIClient.ClientStatus) -> ClientRow {
+        let resolved = resolvedDetails[client.clientId] ?? client
+        return ClientRow(
+            clientId: client.clientId,
+            displayName: client.displayName,
+            symbolName: client.symbolName,
+            stateLabel: Self.stateLabel(for: resolved),
+            isSelectable: client.supported,
+            note: Self.note(for: resolved),
+            connected: resolved.connected
+        )
+    }
+
+    /// The row's one-line state. Order matters: platform support first (nothing
+    /// else is meaningful for a client that cannot be connected here), then the
+    /// access states that block a write, then the connection, then the file.
+    private static func stateLabel(for client: APIClient.ClientStatus) -> String {
+        if !client.supported {
+            let reason = client.reason ?? ""
+            return reason.isEmpty ? "Not supported on this platform" : reason
+        }
+        switch client.accessState {
+        case .malformed:
+            return "Config unreadable"
+        case .denied:
+            return "Access not granted"
+        case .accessible, .absent, .unknown, .none:
+            break
+        }
+        if client.connected {
+            let entry = client.serverName ?? ""
+            return entry.isEmpty ? "Connected" : "Connected as \"\(entry)\""
+        }
+        // The cheap truth: about the config FILE, not about the application.
+        return client.exists ? "Config present" : "No config found"
+    }
+
+    private static func note(for client: APIClient.ClientStatus) -> String? {
+        if client.accessState == .denied, let remediation = client.remediation,
+           !remediation.isEmpty {
+            return remediation
+        }
+        if let note = client.note, !note.isEmpty { return note }
+        return nil
     }
 
     // MARK: - Derived
@@ -345,8 +430,7 @@ final class ConnectClientModel: ObservableObject {
             )
             action = .succeeded(result)
             // The form shows the refreshed state without being reopened.
-            await refreshDetail()
-            await refreshPreviewPreservingAction()
+            await refreshAffectedClient()
         } catch let error as APIClientError {
             switch error {
             case .connectConflict(let conflictAction, let message)
@@ -370,6 +454,52 @@ final class ConnectClientModel: ObservableObject {
 
     /// The core's discriminator for "the state you previewed has changed".
     static let preconditionFailedAction = "precondition_failed"
+
+    // MARK: - Disconnect
+
+    /// The entry this client is currently registered under, when it is
+    /// connected — the name a disconnect would remove.
+    var connectedEntryName: String? {
+        guard let clientId = selection, let resolved = resolvedDetails[clientId],
+              resolved.connected
+        else { return nil }
+        let entry = resolved.serverName ?? ""
+        return entry.isEmpty ? entryName : entry
+    }
+
+    /// Disconnect is offered for any connected client (FR-006).
+    var disconnectControlExists: Bool { connectedEntryName != nil }
+
+    var isDisconnectEnabled: Bool {
+        disconnectControlExists && mutatingDisabledReason == nil && !isBusy
+    }
+
+    /// Send the disconnect for the selected client and refresh only that client
+    /// (US2 scenario 3). The confirmation that must precede it lives in T023's
+    /// `requestDisconnect` / `confirmDisconnect` pair.
+    func performDisconnect() async {
+        guard let clientId = selection,
+              let entry = connectedEntryName,
+              isDisconnectEnabled
+        else { return }
+
+        action = .inFlight
+        do {
+            let result = try await source.disconnect(clientId, serverName: entry)
+            action = .succeeded(result)
+            await refreshAffectedClient()
+        } catch {
+            action = .failed(Self.message(for: error))
+        }
+    }
+
+    /// After a completed action, re-read ONLY the affected client and re-run its
+    /// preview, so the form shows the new truth without being reopened and
+    /// without refetching (or reading) anything else (US2 scenario 3).
+    private func refreshAffectedClient() async {
+        await refreshDetail()
+        await refreshPreviewPreservingAction()
+    }
 
     /// Re-run the preview without letting `invalidatePreview`'s action reset
     /// erase the outcome the user is being shown.

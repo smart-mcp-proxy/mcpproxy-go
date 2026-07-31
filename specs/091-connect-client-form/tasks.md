@@ -41,8 +41,8 @@ Swift paths relative to `native/macos/MCPProxy/` (sources `MCPProxy/`, tests `MC
 
 ## Phase 4: User Story 2 — Client configuration state at a glance (P2)
 
-- [ ] T020 [US2] Write failing tests in MCPProxyTests/ConnectClientModelTests.swift: list rows render "config present" / "no config found" / unsupported-disabled (+reason) from the stat-only aggregate WITHOUT any detail fetch; selecting resolves connected + entry name; after a connect/disconnect completes only the affected client's state refetches (FR-002, US2 scenarios)
-- [ ] T021 [US2] Implement the list-state presentation + post-action refresh in MCPProxy/Views/ConnectClientModel.swift and ConnectClientView.swift; T020 green
+- [x] T020 [US2] Write failing tests in MCPProxyTests/ConnectClientModelTests.swift: list rows render "config present" / "no config found" / unsupported-disabled (+reason) from the stat-only aggregate WITHOUT any detail fetch; selecting resolves connected + entry name; after a connect/disconnect completes only the affected client's state refetches (FR-002, US2 scenarios)
+- [x] T021 [US2] Implement the list-state presentation + post-action refresh in MCPProxy/Views/ConnectClientModel.swift and ConnectClientView.swift; T020 green
 
 ## Phase 5: User Story 3 — Undo and disconnect safely (P2)
 

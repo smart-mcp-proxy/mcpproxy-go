@@ -144,48 +144,49 @@ struct ConnectClientView: View {
             .padding()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityIdentifier(ConnectClientAccessibility.waiting)
-        case .loaded(let clients):
-            List(clients, id: \.clientId, selection: $selectedID) { client in
-                row(client)
-                    .tag(client.clientId)
-                    .accessibilityIdentifier(ConnectClientAccessibility.row(client.clientId))
+        case .loaded:
+            List(model.rows, selection: $selectedID) { row in
+                rowView(row)
+                    .tag(row.clientId)
+                    .accessibilityIdentifier(ConnectClientAccessibility.row(row.clientId))
             }
             .accessibilityIdentifier(ConnectClientAccessibility.list)
             .onChange(of: selectedID) { newValue in
-                guard let newValue else { return }
+                // An unsupported client stays visible but is not a selection:
+                // there is nothing the form could do for it (FR-009).
+                guard let newValue,
+                      model.rows.first(where: { $0.clientId == newValue })?.isSelectable == true
+                else { return }
                 Task { await model.select(newValue) }
             }
         }
     }
 
-    private func row(_ client: APIClient.ClientStatus) -> some View {
+    /// Every label here is derived in the model (and unit-tested there); the row
+    /// only renders it.
+    private func rowView(_ row: ConnectClientModel.ClientRow) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: client.symbolName)
-                .foregroundStyle(client.connected ? Color.green : Color.secondary)
+            Image(systemName: row.symbolName)
+                .foregroundStyle(row.connected ? Color.green : Color.secondary)
                 .frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
-                Text(client.displayName)
+                Text(row.displayName)
                     .font(.subheadline)
-                Text(presenceLabel(client))
+                Text(row.stateLabel)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                if let note = row.note {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
         }
         .padding(.vertical, 2)
-        .opacity(client.supported ? 1 : 0.5)
+        .opacity(row.isSelectable ? 1 : 0.5)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(client.displayName), \(presenceLabel(client))")
-    }
-
-    /// The cheap truth: a statement about the config FILE, never about whether
-    /// the application is installed.
-    private func presenceLabel(_ client: APIClient.ClientStatus) -> String {
-        if !client.supported {
-            return client.reason ?? "Not supported on this platform"
-        }
-        if client.connected { return "Connected" }
-        return client.exists ? "Config present" : "No config found"
+        .accessibilityLabel("\(row.displayName), \(row.stateLabel)")
     }
 
     // MARK: Detail + preview

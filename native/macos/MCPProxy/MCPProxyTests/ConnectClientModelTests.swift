@@ -16,12 +16,16 @@ final class ConnectClientModelTests: XCTestCase {
     final class SleepRecorder {
         var intervals: [TimeInterval] = []
         var listStates: [ConnectClientModel.ListState] = []
+        var rowSnapshots: [[ConnectClientModel.ClientRow]] = []
         weak var model: ConnectClientModel?
 
         var sleeper: ConnectClientSleeper {
             { [weak self] interval in
                 self?.intervals.append(interval)
-                if let model = self?.model { self?.listStates.append(model.list) }
+                if let model = self?.model {
+                    self?.listStates.append(model.list)
+                    self?.rowSnapshots.append(model.rows)
+                }
             }
         }
     }
@@ -398,6 +402,172 @@ final class ConnectClientModelTests: XCTestCase {
         await model.connect()
 
         XCTAssertTrue(source.connectCalls.isEmpty)
+    }
+
+    // MARK: - US2: configuration state at a glance (T020)
+
+    /// The list speaks only the cheap truth — a statement about the config FILE,
+    /// derived from the existence-only aggregate. Rendering it must not read a
+    /// single client config's contents (FR-002 / SC-004).
+    func testListRowsRenderStatOnlyStatesWithoutReadingAnyConfig() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-code", name: "Claude Code", exists: true),
+            FakeConnectSource.client(id: "cursor", name: "Cursor", exists: false),
+            FakeConnectSource.client(id: "windsurf", name: "Windsurf", exists: false,
+                                     supported: false, reason: "Not available on this platform")
+        ])]
+        let model = makeModel(source)
+
+        await model.loadList()
+
+        XCTAssertEqual(model.rows.map(\.clientId), ["claude-code", "cursor", "windsurf"])
+        XCTAssertEqual(model.rows.map(\.stateLabel),
+                       ["Config present", "No config found", "Not available on this platform"])
+        // FR-009: an unsupported client is visible but disabled with its reason,
+        // never hidden.
+        XCTAssertEqual(model.rows.map(\.isSelectable), [true, true, false])
+        XCTAssertEqual(model.rows.map(\.displayName), ["Claude Code", "Cursor", "Windsurf"])
+        // "No config found" is a claim about the file, never about the app.
+        XCTAssertFalse(
+            model.rows.contains { $0.stateLabel.localizedCaseInsensitiveContains("installed") },
+            "labels must never claim an application is or is not installed")
+        XCTAssertTrue(source.detailCalls.isEmpty, "opening the list reads no config contents")
+        XCTAssertTrue(source.previewCalls.isEmpty)
+    }
+
+    /// An unsupported client the core gave no reason for still renders disabled
+    /// with a defined label rather than an empty one.
+    func testAnUnsupportedRowWithoutAReasonStillCarriesALabel() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "codex", supported: false)
+        ])]
+        let model = makeModel(source)
+
+        await model.loadList()
+
+        XCTAssertEqual(model.rows.first?.isSelectable, false)
+        XCTAssertEqual(model.rows.first?.stateLabel, "Not supported on this platform")
+    }
+
+    /// US2 scenario 2: the authoritative "connected, and under which entry name"
+    /// appears only once the user selects the client — the explicit read.
+    func testSelectingResolvesConnectedStateAndEntryNameInTheRow() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-code", name: "Claude Code", exists: true)
+        ])]
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "claude-code", name: "Claude Code", exists: true, connected: true,
+            accessState: .accessible, serverName: "my-proxy"))]
+        let model = makeModel(source)
+        await model.loadList()
+        XCTAssertEqual(model.rows.first?.stateLabel, "Config present")
+        XCTAssertEqual(model.rows.first?.connected, false)
+
+        await model.select("claude-code")
+
+        XCTAssertEqual(model.rows.first?.stateLabel, "Connected as \"my-proxy\"")
+        XCTAssertEqual(model.rows.first?.connected, true)
+    }
+
+    /// FR-009: the two unreadable access states get their defined labels, and
+    /// denied carries the core's remediation.
+    func testUnreadableAndDeniedRowsCarryTheirMappedLabels() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "cursor", exists: true)
+        ])]
+        source.detailResults = [
+            .success(FakeConnectSource.client(id: "cursor", exists: true, accessState: .malformed)),
+            .success(FakeConnectSource.client(id: "cursor", exists: true, accessState: .denied,
+                                              remediation: "Grant Full Disk Access to MCPProxy"))
+        ]
+        let model = makeModel(source)
+        await model.loadList()
+
+        await model.select("cursor")
+        XCTAssertEqual(model.rows.first?.stateLabel, "Config unreadable")
+
+        await model.refreshDetail()
+        XCTAssertEqual(model.rows.first?.stateLabel, "Access not granted")
+        XCTAssertEqual(model.rows.first?.note, "Grant Full Disk Access to MCPProxy")
+    }
+
+    /// US2 scenario 3: a completed connect refreshes the AFFECTED client from the
+    /// core — not the whole list, and never by the tray reading a config itself.
+    func testOnlyTheAffectedClientRefreshesAfterAConnect() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-code", name: "Claude Code", exists: true),
+            FakeConnectSource.client(id: "cursor", name: "Cursor", exists: false)
+        ])]
+        source.detailResults = [
+            .success(FakeConnectSource.client(id: "claude-code", name: "Claude Code",
+                                              exists: true, connected: false)),
+            .success(FakeConnectSource.client(id: "claude-code", name: "Claude Code",
+                                              exists: true, connected: true,
+                                              serverName: "mcpproxy"))
+        ]
+        let model = makeModel(source)
+        await model.loadList()
+        await model.select("claude-code")
+
+        await model.connect()
+
+        XCTAssertEqual(source.clientsCallCount, 1,
+                       "the whole list must not be refetched after an action")
+        XCTAssertEqual(source.detailCalls, ["claude-code", "claude-code"],
+                       "only the affected client's state is re-read")
+        XCTAssertEqual(model.rows.map(\.stateLabel),
+                       ["Connected as \"mcpproxy\"", "No config found"])
+    }
+
+    /// A disconnect settles the same way: the affected row re-reads, the rest of
+    /// the list is left alone.
+    func testOnlyTheAffectedClientRefreshesAfterADisconnect() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-code", name: "Claude Code", exists: true),
+            FakeConnectSource.client(id: "cursor", name: "Cursor", exists: false)
+        ])]
+        source.detailResults = [
+            .success(FakeConnectSource.client(id: "claude-code", name: "Claude Code",
+                                              exists: true, connected: true,
+                                              serverName: "mcpproxy")),
+            .success(FakeConnectSource.client(id: "claude-code", name: "Claude Code",
+                                              exists: true, connected: false))
+        ]
+        let model = makeModel(source)
+        await model.loadList()
+        await model.select("claude-code")
+        XCTAssertEqual(model.rows.first?.stateLabel, "Connected as \"mcpproxy\"")
+
+        await model.performDisconnect()
+
+        XCTAssertEqual(source.disconnectCalls, ["claude-code"])
+        XCTAssertEqual(source.clientsCallCount, 1)
+        XCTAssertEqual(model.rows.map(\.stateLabel), ["Config present", "No config found"])
+    }
+
+    /// The rows exist only for a loaded list; while waiting there is nothing to
+    /// render and nothing to select.
+    func testRowsAreEmptyUntilTheListLoads() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [
+            .failure(APIClientError.notReady),
+            .success([FakeConnectSource.client(id: "claude-code")])
+        ]
+        let recorder = SleepRecorder()
+        let model = makeModel(source, recorder: recorder)
+
+        XCTAssertTrue(model.rows.isEmpty, "nothing to render while loading")
+        await model.loadList()
+
+        XCTAssertEqual(recorder.rowSnapshots.first?.isEmpty, true,
+                       "an unreachable core renders no rows")
+        XCTAssertEqual(model.rows.count, 1)
     }
 }
 
