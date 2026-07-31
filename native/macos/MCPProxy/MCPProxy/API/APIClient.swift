@@ -9,6 +9,14 @@ enum APIClientError: Error, LocalizedError {
     case decodingError(underlying: Error)
     case noData
     case invalidURL(String)
+    /// A 409 from the connect write, carrying the core's own discriminator:
+    /// `precondition_failed` (the previewed state drifted — re-preview) versus
+    /// `already_exists` (the legacy conflict). Callers must be able to tell them
+    /// apart without string matching (contracts §2, research D9).
+    case connectConflict(action: String, message: String)
+    /// An administrative write was attempted while the app is not talking to the
+    /// core over its private local socket. Never sent, by design.
+    case socketRequired
 
     var errorDescription: String? {
         switch self {
@@ -22,6 +30,11 @@ enum APIClientError: Error, LocalizedError {
             return "No data in response"
         case .invalidURL(let url):
             return "Invalid URL: \(url)"
+        case .connectConflict(_, let message):
+            return message
+        case .socketRequired:
+            return "This action requires MCPProxy's private local socket; "
+                + "the app is currently talking to the core over TCP."
         }
     }
 }
@@ -36,6 +49,22 @@ actor APIClient {
     private let session: URLSession
     private let baseURL: String
     private let apiKey: String?
+
+    /// Which transport this client was configured for.
+    ///
+    /// The core treats socket callers as administrative, so the native form
+    /// gates its mutating controls on this identity (research D6). It is derived
+    /// from the configured endpoint, never probed — a probe answers "is the
+    /// socket up right now", which is a different question from "is this client
+    /// an administrative caller at all".
+    enum TransportKind: Equatable {
+        case unixSocket
+        case tcp
+    }
+
+    /// Transport identity of this client. `nonisolated` because callers need it
+    /// synchronously to decide whether a control is even enabled.
+    nonisolated let transportKind: TransportKind
 
     /// Create an API client.
     ///
@@ -63,18 +92,29 @@ actor APIClient {
         if let path = socketPath, path.isEmpty {
             // Explicitly requested TCP-only
             self.session = SocketTransport.makeTCPSession(timeout: requestTimeout)
+            self.transportKind = .tcp
         } else {
             // Always use socket-backed session — SocketURLProtocol falls through
             // to standard networking if the socket file doesn't exist yet.
             self.session = SocketTransport.makeURLSession(socketPath: socketPath, timeout: requestTimeout)
+            self.transportKind = .unixSocket
         }
     }
 
     /// Create an API client with an explicit URLSession (for testing).
-    init(session: URLSession, baseURL: String = "http://127.0.0.1:8080", apiKey: String? = nil) {
+    ///
+    /// A stubbed session has no transport of its own, so tests state the
+    /// identity they mean to exercise.
+    init(
+        session: URLSession,
+        baseURL: String = "http://127.0.0.1:8080",
+        apiKey: String? = nil,
+        transportKind: TransportKind = .unixSocket
+    ) {
         self.session = session
         self.baseURL = baseURL
         self.apiKey = apiKey
+        self.transportKind = transportKind
     }
 
     // MARK: - Health
@@ -312,7 +352,7 @@ actor APIClient {
     }
 
     /// Result of a connect/disconnect action.
-    struct ConnectResult: Codable {
+    struct ConnectResult: Codable, Equatable {
         let success: Bool
         let client: String?
         let configPath: String?
@@ -378,6 +418,135 @@ actor APIClient {
             return payload
         }
         return try decoder.decode(ConnectResult.self, from: data)
+    }
+
+    // MARK: - Connect (native form surface, Spec 091)
+
+    /// One client's authoritative state via `GET /api/v1/connect/{id}` — the
+    /// only Connect read that opens a client config file, so it happens strictly
+    /// on an explicit user selection.
+    func clientDetail(_ clientId: String) async throws -> ClientStatus {
+        let (data, _) = try await performRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)", method: "GET")
+        return try decodeConnectPayload(ClientStatus.self, from: data)
+    }
+
+    /// The no-write preview via `GET /api/v1/connect/{id}/preview?server_name=…`.
+    /// The entry name is mirrored from what the subsequent write would send, so
+    /// the preview describes exactly the pending change (FR-003).
+    func connectPreview(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName
+    ) async throws -> ConnectPreviewModel {
+        let path = "/api/v1/connect/\(clientId.uriComponentEncoded)/preview"
+            + "?server_name=\(serverName.uriComponentEncoded)"
+        let (data, _) = try await performRequest(path: path, method: "GET")
+        return try decodeConnectPayload(ConnectPreviewModel.self, from: data)
+    }
+
+    /// Write the entry via `POST /api/v1/connect/{id}`, echoing the preview's
+    /// precondition token (FR-005). A 409 surfaces as `.connectConflict` with
+    /// the core's own discriminator so the caller can re-preview on drift
+    /// instead of retrying blindly.
+    func connect(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName,
+        force: Bool,
+        preconditionToken: String?
+    ) async throws -> ConnectResult {
+        var body: [String: Any] = ["server_name": serverName]
+        if force { body["force"] = true }
+        if let preconditionToken, !preconditionToken.isEmpty {
+            body["precondition_token"] = preconditionToken
+        }
+        return try await mutatingConnectRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)", method: "POST", body: body)
+    }
+
+    /// Reverse the connect that produced `backupName` via
+    /// `POST /api/v1/connect/{id}/undo`. A nil backup identity means the connect
+    /// CREATED the file, and undo removes it — the core reads that from the
+    /// field being absent, so an empty string must not be sent instead.
+    func undoConnect(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName,
+        backupName: String?
+    ) async throws -> ConnectResult {
+        var body: [String: Any] = ["server_name": serverName]
+        if let backupName, !backupName.isEmpty { body["backup_name"] = backupName }
+        return try await mutatingConnectRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)/undo", method: "POST", body: body)
+    }
+
+    /// Remove the entry via `DELETE /api/v1/connect/{id}`.
+    func disconnect(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName
+    ) async throws -> ConnectResult {
+        try await mutatingConnectRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)",
+            method: "DELETE",
+            body: ["server_name": serverName]
+        )
+    }
+
+    /// Shared shape of the three mutating connect calls: socket-gated, sent in
+    /// strict-socket mode, and 409-aware.
+    private func mutatingConnectRequest(
+        path: String,
+        method: String,
+        body: [String: Any]
+    ) async throws -> ConnectResult {
+        guard transportKind == .unixSocket else { throw APIClientError.socketRequired }
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await rawRequest(
+            path: path, method: method, body: bodyData, strictSocket: true)
+
+        if response.statusCode == http409Conflict {
+            throw connectConflict(from: data)
+        }
+        guard (200...299).contains(response.statusCode) else {
+            throw APIClientError.httpError(
+                statusCode: response.statusCode, message: errorMessage(from: data, response: response))
+        }
+        return try decodeConnectPayload(ConnectResult.self, from: data)
+    }
+
+    private var http409Conflict: Int { 409 }
+
+    /// Build the typed conflict from a 409 body, preferring the typed result's
+    /// `action` (the machine-readable discriminator) over the error string.
+    private func connectConflict(from data: Data) -> APIClientError {
+        let decoder = JSONDecoder()
+        let result = (try? decoder.decode(APIResponse<ConnectResult>.self, from: data))?.data
+            ?? (try? decoder.decode(ConnectResult.self, from: data))
+        let errorText = (try? decoder.decode(APIErrorResponse.self, from: data))?.error
+        return .connectConflict(
+            action: result?.action ?? "conflict",
+            message: result?.message ?? errorText ?? "The client configuration changed."
+        )
+    }
+
+    /// Decode a payload that may or may not be enveloped.
+    private func decodeConnectPayload<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<T>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw APIClientError.decodingError(underlying: error)
+        }
+    }
+
+    private func errorMessage(from data: Data, response: HTTPURLResponse) -> String {
+        if let body = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           let apiError = body.error {
+            return apiError
+        }
+        return HTTPURLResponse.localizedString(forStatusCode: response.statusCode)
     }
 
     // MARK: - Sessions
@@ -779,7 +948,8 @@ actor APIClient {
     private func rawRequest(
         path: String,
         method: String,
-        body: Data? = nil
+        body: Data? = nil,
+        strictSocket: Bool = false
     ) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: baseURL + path) else {
             throw APIClientError.invalidURL(baseURL + path)
@@ -788,6 +958,13 @@ actor APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Administrative writes must never fall back to TCP if the socket
+        // disappears mid-session (research D6); the transport strips this hint
+        // before anything goes on the wire.
+        if strictSocket {
+            request.setValue("1", forHTTPHeaderField: SocketURLProtocol.strictSocketHeader)
+        }
 
         // Spec 042: telemetry surface header so the daemon can attribute
         // requests to the macOS tray for the surface_requests counter.
