@@ -2,7 +2,7 @@
 
 **Feature Branch**: `090-tray-glance-v2`
 **Created**: 2026-07-31
-**Status**: Draft
+**Status**: Draft (revised after Codex review round 1)
 **Input**: User description: "Tray glance v2 — grouped calls, intent reasons, failure-only marks, idle clients. Iterate on the merged tray glance section (PR #930) in the native macOS tray, driven by a real 6-week activity export from a work laptop (3,582 events)."
 
 ## Context & Evidence
@@ -23,15 +23,16 @@ An agent hammers one tool (e.g. 19 consecutive `jira_get_issue` calls) while wor
 
 **Why this priority**: This is the headline complaint. Without grouping, the five rows routinely show one tool five times, and every other change in this feature is invisible behind the flood.
 
-**Independent Test**: Feed the glance a recorded sequence containing consecutive same-tool runs; verify the rendered rows collapse each run to one row with the correct count, ordering, and age, while non-consecutive repeats stay separate rows.
+**Independent Test**: Feed the row pipeline a recorded sequence containing consecutive same-tool runs; verify the rendered rows collapse each run to one row with the correct count, ordering, and age, while non-consecutive repeats stay separate rows.
 
 **Acceptance Scenarios**:
 
 1. **Given** the activity feed holds 19 consecutive `jira_get_issue` calls followed by older calls to other tools, **When** the user opens the menu, **Then** the first row reads as one entry with a ×19 count and the remaining rows show the older distinct tools.
 2. **Given** a run of identical calls, **When** the row renders, **Then** its age is the age of the newest call in the run.
 3. **Given** calls to tool A, then tool B, then tool A again, **When** rows render, **Then** the two A episodes remain separate rows (grouping is consecutive-only, preserving the timeline).
-4. **Given** a run of 12 calls where one failed, **When** the row renders, **Then** the row is marked as failed (failure dominates the group) and its failure detail is available on the row.
+4. **Given** a run of 12 calls where one failed, **When** the row renders, **Then** the row is marked as failed (failure dominates the group) and shows the newest failing call's error clause.
 5. **Given** a single (non-repeated) call, **When** the row renders, **Then** no count suffix is shown.
+6. **Given** two calls to the same tool separated only by records that never render (management built-ins, collapsed wrapper records), **When** rows render, **Then** the two calls belong to one run — exclusion happens before grouping, so excluded records never split a run.
 
 ---
 
@@ -41,15 +42,16 @@ The user glances at the menu and understands not just *which* tools ran but *why
 
 **Why this priority**: The reason field is the difference between an audit trail and a story. It exists on almost every call already; showing it turns the glance into an explanation of agent behavior.
 
-**Independent Test**: Render rows from records with and without intent reasons; verify the reason renders as a subdued second line, truncated to fit, with the full text available on hover and to assistive technology.
+**Independent Test**: Render rows from records with and without intent reasons; verify the reason renders as a subdued second line on a standard (non-view-backed) menu row, truncated to fit, with the full text available on hover and to assistive technology.
 
 **Acceptance Scenarios**:
 
 1. **Given** a call with intent reason "Verify the failed transition did not change the ticket", **When** the row renders, **Then** the reason appears as a second, visually subdued line of the same menu row.
-2. **Given** a reason longer than the row budget, **When** the row renders, **Then** the reason is truncated with an ellipsis and the full reason is available in the row's tooltip.
+2. **Given** a reason longer than the reason budget, **When** the row renders, **Then** the reason is tail-truncated with an ellipsis and the full reason is available in the row's tooltip.
 3. **Given** a call without a reason (e.g. an internal discovery call), **When** the row renders, **Then** the row renders as a single line with no empty second line.
-4. **Given** a grouped row (×N), **When** the row renders, **Then** the reason shown is the newest call's reason.
+4. **Given** a grouped row (×N) whose newest record has no reason but an older record in the run does, **When** the row renders, **Then** the reason shown is the newest record in the run that has one.
 5. **Given** a row with a reason, **When** read by assistive technology, **Then** the spoken label includes the reason.
+6. **Given** a call arriving over the live stream, **When** its row renders before the next poll, **Then** the reason is already present (the live event carries the intent data).
 
 ---
 
@@ -65,8 +67,9 @@ Successful calls render without any status icon — quiet by default. A failed c
 
 1. **Given** a successful call, **When** the row renders, **Then** it carries no status icon and assistive technology still announces it as succeeded.
 2. **Given** a failed call, **When** the row renders, **Then** it carries a red failure mark and shows the first clause of the error message.
-3. **Given** a policy-blocked call (e.g. "Intent rejected: tool variant conflicts with server annotations"), **When** the feed refreshes, **Then** the block appears as a row with a warning mark distinct from the failure mark, and the block reason is shown where a reason line would be.
+3. **Given** a policy-blocked call (e.g. "Intent rejected: tool variant conflicts with server annotations"), **When** the feed refreshes, **Then** the block appears as a row with a warning mark distinct from the failure mark, and the block reason occupies the row's second line.
 4. **Given** a mix of successes and one failure in the feed, **When** the menu opens, **Then** the failure is visually the only marked row among them.
+5. **Given** 27 consecutive blocked attempts at the same tool, **When** rows render, **Then** they form one blocked row with a ×27 count, and never merge with successful calls to the same tool.
 
 ---
 
@@ -76,7 +79,7 @@ The user opens the menu after lunch. Instead of "No connected clients", the Clie
 
 **Why this priority**: An empty Clients section is actively misleading — the user reported it as the most confusing part of the current menu. Presence states match the stateless reality of the transport.
 
-**Independent Test**: Feed the section session records with various last-activity ages and statuses; verify classification into active/idle/seen, deduplication per client, and that the section is non-empty whenever any client was seen recently.
+**Independent Test**: Feed the section session records with various last-activity ages and statuses; verify classification into active/idle/seen, deduplication per client, ordering, and that the section is non-empty whenever any retained session falls inside the lookback window.
 
 **Acceptance Scenarios**:
 
@@ -84,8 +87,9 @@ The user opens the menu after lunch. Instead of "No connected clients", the Clie
 2. **Given** a client whose last activity was 20 minutes ago (session may already be closed), **When** the section renders, **Then** the client shows as idle with its age (e.g. "idle · 20m").
 3. **Given** a client last seen 3 hours ago within the lookback window, **When** the section renders, **Then** the client shows as seen with its age, visually quieter than idle.
 4. **Given** one client with several sessions (e.g. claude-code reconnecting), **When** the section renders, **Then** the client appears once, classified by its most recent session.
-5. **Given** no client activity within the lookback window, **When** the section renders, **Then** the section states no recent clients (and only then).
+5. **Given** no retained session inside the lookback window, **When** the section renders, **Then** the section states no recent clients (and only then).
 6. **Given** both active and idle clients, **When** the summary line renders, **Then** it reads counts by state (e.g. "2 active · 1 idle") instead of a single client count.
+7. **Given** a session that started two hours ago but was active one minute ago, alongside many newer short sessions, **When** the section renders, **Then** that client still appears as active — recency of *activity*, not of session start, decides both inclusion and ordering.
 
 ---
 
@@ -105,13 +109,15 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 
 ### Edge Cases
 
-- A run larger than the fetched page (e.g. 100+ identical calls): the count shows what is known (e.g. ×100) without claiming precision beyond the fetched window.
-- All five rows would be one group: grouping frees rows, so older distinct tools fill the remaining rows.
+- A run larger than the fetched page: the count reflects only the fetched window (e.g. a 150-call run over a 100-record page shows ×100); no claim is made beyond the page.
+- The five most recent ungrouped calls are one run: grouping frees rows, so older distinct tools *within the fetched page* fill the remaining rows; if the entire page is one run, one row renders.
 - A live-streamed (not yet persisted) record extends a group that started from polled records — the group must not split or double-count when the reconciling poll replaces provisional records.
-- A grouped row's count changes while the menu is open: the row updates in place (count/age text), but the menu's structure (row count) must not change under the pointer; structural changes wait for menu close.
-- A record with no reason and no error renders as a single-line row; mixed feeds render mixed one- and two-line rows without misalignment.
-- A blocked record has no paired tool-call record (the call never dispatched) — it must still render standalone.
+- A grouped row's count or age changes while the menu is open: the row's text updates in place; but a change that would alter the row's line count (reason appearing/disappearing) or the number of menu items is structural and waits for menu close.
+- A record with no reason and no error renders as a single-line row; mixed feeds render mixed one- and two-line rows.
+- A blocked record has no paired tool-call record (the call never dispatched) — it renders standalone.
+- A policy decision whose decision is a warning or redaction (not a block) does not qualify as a row.
 - A client session with no client name renders as "Unknown client", still classified by age.
+- A session with no last-activity value falls back to its start time; a session whose timestamps cannot be parsed is excluded.
 - Clock skew or a stale timestamp yielding a negative age renders as "0s", never a negative.
 - When the core is stopped or unreachable, the glance block hides entirely (existing behavior, unchanged).
 
@@ -119,51 +125,81 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 
 ### Functional Requirements
 
-- **FR-001**: The system MUST collapse consecutive activity rows that share the same server and tool into a single row bearing the run's size as a "×N" suffix when N > 1.
-- **FR-002**: A grouped row MUST derive its age from the newest record of the run, its reason from the newest record that has one, and its status from the worst outcome in the run (any error or block outranks success).
-- **FR-003**: Grouping MUST be consecutive-only: records of the same tool separated by a different tool's record form separate rows.
-- **FR-004**: Each row MUST display the caller-declared intent reason, when present, as a visually subdued second line, truncated to the row budget; the full reason MUST be available via tooltip and assistive-technology label.
-- **FR-005**: Rows for records without a reason MUST render as a single line.
-- **FR-006**: Live-streamed events MUST carry their intent reason into the row without waiting for the reconciling poll.
-- **FR-007**: Successful rows MUST render without a status icon; assistive technology MUST still announce the outcome.
-- **FR-008**: Failed rows MUST carry a red failure mark and the first clause of the error message; blocked rows MUST carry a visually distinct warning mark and the block reason.
-- **FR-009**: Policy-blocked calls MUST qualify as glance rows, including when no corresponding tool call record exists.
-- **FR-010**: The Activity (24h) entry MUST appear directly below the summary line and above the Recent rows.
-- **FR-011**: The Clients section MUST list clients seen within a 24-hour lookback window regardless of session status, deduplicated per client (name + version), each classified by time since last activity: active (< 5 minutes), idle (5–30 minutes), seen (> 30 minutes).
-- **FR-012**: Each client row MUST show a presence indicator whose shape or fill differs per state (not color alone) and, for idle/seen, the time since last activity.
-- **FR-013**: The summary line MUST report client counts by state — "N active · M idle" — omitting empty states; clients in the "seen" state are not counted in the summary.
-- **FR-014**: The "no clients" placeholder MUST appear only when no client was seen within the lookback window.
-- **FR-015**: Opening the menu MUST NOT trigger any network request (existing invariant, preserved).
-- **FR-016**: While the menu is open, row content MAY update in place, but the number and identity of menu items MUST NOT change; structural changes are deferred to menu close (existing invariant, preserved).
-- **FR-017**: All rows MUST remain reachable by keyboard navigation and meaningfully announced by VoiceOver (existing invariant, preserved).
+**Row pipeline** (pure, unit-testable, in this exact order):
+
+- **FR-001**: The row pipeline MUST process fetched records in four ordered steps: (1) qualify records (drop management built-ins and other non-qualifying records), (2) collapse wrapper/upstream record pairs sharing a request identity, (3) group maximal runs of consecutive surviving records sharing the same group key, (4) take the first five groups. Records dropped in steps 1–2 MUST NOT split a run in step 3.
+- **FR-002**: The group key MUST be (server, tool, outcome class), where outcome class separates policy blocks from calls: blocked records group only with blocked records; successful and errored calls group together.
+- **FR-003**: A group of N > 1 records MUST render a "×N" suffix; a single-record group renders no suffix.
+- **FR-004**: A grouped row MUST derive its age from the newest record of the run, its reason from the newest record in the run that has one, and its status from the worst outcome in the run, ordered error > success. When a run contains an error, the displayed error clause comes from the newest erroring record.
+
+**Reason display**:
+
+- **FR-005**: Each row MUST display its reason, when present, as a visually subdued second line on a standard menu row: call rows show the caller-declared intent reason; blocked rows show the policy block reason.
+- **FR-006**: The reason line has its own character budget (60 characters), independent of the label budget; longer reasons are tail-truncated with an ellipsis. The full reason MUST be available via tooltip and assistive-technology label.
+- **FR-007**: Rows for records without a reason MUST render as a single line.
+- **FR-008**: Live-streamed events MUST carry their intent reason into the row without waiting for the reconciling poll.
+- **FR-009**: Activity and client rows MUST remain standard text menu items (attributed text is permitted); custom view-backed rows are prohibited for these rows.
+
+**Status marking**:
+
+- **FR-010**: Successful rows MUST render without a status icon; assistive technology MUST still announce the outcome.
+- **FR-011**: Failed rows MUST carry a red failure mark and the first clause of the error message; blocked rows MUST carry a visually distinct warning mark (distinct in shape, not color alone).
+- **FR-012**: Policy-blocked records (block decisions only — warnings and redactions do not qualify) MUST qualify as glance rows, including when no corresponding tool-call record exists.
+
+**Data contract** (backend):
+
+- **FR-013**: The activity listing used by the glance poll MUST be able to return, per record, the small contextual fields — intent reason, intent operation type, policy decision and reason, client name — while continuing to omit bulky payload fields (arguments, responses). The poll's payload size must stay within the same order of magnitude as today's projected poll (tens of KB, not hundreds).
+- **FR-014**: The glance poll MUST include policy-decision records (type filter extended).
+- **FR-015**: Policy-decision records MUST carry the same request identity as other activity records, in both live events and persisted records, so live rows reconcile with polled rows without duplication. Records predating this change (no request identity) fall back to their storage identity and are never collapsed.
+- **FR-016**: The sessions listing used by the tray MUST return the N sessions most recent by *last activity* (not by session start) among retained sessions, regardless of session status.
+
+**Clients section**:
+
+- **FR-017**: The Clients section MUST consider retained sessions whose last activity falls within a 24-hour lookback window, regardless of session status, deduplicated per client (name + version, keeping the most recent), each classified by time since last activity: active (< 5 min), idle (≥ 5 min and ≤ 30 min), seen (> 30 min). Boundary values 5:00 and 30:00 are idle.
+- **FR-018**: The section MUST display at most five client rows, ordered by most recent activity; each row shows a presence indicator whose shape or fill differs per state (not color alone) and, for idle/seen states, the time since last activity.
+- **FR-019**: The summary line MUST count all qualifying clients in the lookback window (not only displayed rows), reported by state as "N active · M idle", omitting empty states; "seen" clients are excluded from the summary counts, so a feed with only "seen" clients yields a summary with no client segment while the rows remain visible.
+- **FR-020**: The "no recent clients" placeholder MUST appear only when no retained session falls within the lookback window.
+
+**Layout**:
+
+- **FR-021**: The Activity (24h) entry MUST appear directly below the summary line and above the "Recent" header.
+
+**Preserved invariants**:
+
+- **FR-022**: Opening the menu MUST NOT trigger any network request. This MUST be verified by a test that snapshots the request counters, drives the actual menu-open path, and asserts a zero delta.
+- **FR-023**: While the menu is open, existing menu items' text MAY update in place, but the number of menu items, their order, and each row's line count MUST NOT change; such structural changes are deferred to menu close. ("Identity" here means the menu-item objects; an item MAY come to represent a different record, in which case its click payload, icon, and accessibility text are rewritten together.)
+- **FR-024**: A grouped row's stable identity for in-place updates is the record identity of the *oldest* record in its run (stable while a run extends with newer records).
+- **FR-025**: All rows MUST remain reachable by keyboard navigation and meaningfully announced by VoiceOver.
 
 ### Key Entities
 
-- **Activity record**: One proxied event — a tool call, internal tool call, or policy decision — with server, tool, outcome, timestamp, optional intent reason, optional error message, and a request identity used for deduplication.
-- **Glance run (grouped row)**: A maximal sequence of consecutive activity records sharing server + tool, presented as one row with count, newest age, newest reason, and worst outcome.
-- **Client presence**: A deduplicated view of one client application derived from its recent sessions: display name, version, last-activity time, and derived state (active / idle / seen).
+- **Activity record**: One proxied event — a tool call, internal tool call, or policy decision — with server, tool, outcome, timestamp, optional reason (caller intent or policy block reason), optional error message, and a request identity used for wrapper collapse and live/poll reconciliation (absent only on legacy policy records, which are then never collapsed).
+- **Glance run (grouped row)**: A maximal sequence of consecutive qualifying records sharing a group key (server, tool, outcome class), presented as one row with count, newest age, newest available reason, and worst outcome; identified across updates by its oldest record.
+- **Client presence**: A deduplicated view of one client application derived from its retained sessions: display name, version, last-activity time, and derived state (active / idle / seen).
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-- **SC-001**: Replaying the reference 6-week export through the row pipeline, no two adjacent rendered rows ever show the same server + tool, and a burst of ≥ 19 identical calls occupies exactly one of the five rows.
+- **SC-001**: Replaying the committed reference fixture (a sanitized derivative of the 6-week export preserving its run-length, status, and reason-length distributions) through the row pipeline, no two adjacent rendered rows ever share a group key, and a burst of ≥ 19 identical calls occupies exactly one of the five rows.
 - **SC-002**: For call records carrying a reason (98.7% in the reference export), the reason (possibly truncated) is visible directly in the open menu without any further interaction.
 - **SC-003**: In a feed where under 6% of events are failures (the reference ratio), failed or blocked rows are the only rows carrying status marks.
-- **SC-004**: Every policy block in the reference export produces a visible row; today that number is zero.
-- **SC-005**: After 20 minutes of client inactivity, the Clients section still names the client (as idle) rather than showing an empty state; the empty state appears only after 24 hours without any client.
-- **SC-006**: Opening the menu issues zero network requests, verified by the existing counting test seam.
-- **SC-007**: All existing glance unit-test suites still pass, extended to cover grouping, reason rendering, failure-only marks, blocked rows, and presence classification.
+- **SC-004**: During sequential replay of the reference fixture, every policy block becomes visible as (part of) a rendered row at some point; today that number is zero.
+- **SC-005**: After 20 minutes of client inactivity, the Clients section still names the client (as idle) rather than showing an empty state; among retained sessions, the empty state appears only when nothing was active within 24 hours.
+- **SC-006**: Driving the real menu-open path issues zero network requests, asserted via request-counter deltas.
+- **SC-007**: All existing glance unit-test suites still pass, extended to cover the pipeline order, grouping, reason rendering, failure-only marks, blocked rows, presence classification, and boundary timestamps.
+- **SC-008**: Visual encodings (subdued second line, distinct failure/blocked marks, presence indicator fill/shape) are verified by a documented manual test protocol over the running app's menu (screenshot checklist), since automated tests assert only the model-level encoding.
 
 ## Assumptions
 
-- Presence thresholds (5 min active, 30 min idle, 24 h lookback) are fixed presentation policy, not user-configurable, matching the session inactivity timeout (30 min) on the idle boundary.
+- Presence thresholds (5 min active, 30 min idle, 24 h lookback) are fixed presentation policy, not user-configurable; the idle boundary matches the session inactivity timeout (30 min).
 - The dedupe key for clients is client name + version; two versions of the same client are two rows.
-- The row budget for the reason line equals the existing label budget; median reasons (~51 chars) fit untruncated.
+- Session retention (currently the 100 most recent sessions) bounds the client lookback: a client evicted from retention is absent even if it was active within 24 hours. The guarantee in FR-020/SC-005 is scoped to retained sessions.
 - Blocked rows draw their reason from the policy decision's own reason field; call rows draw theirs from the caller-declared intent.
 - The grouped count reflects the fetched window (up to 100 records per poll); runs longer than the window display the in-window count.
 - The existing histogram submenu content is unchanged; only its position moves.
-- No backend/API changes are required; all data needed (intent metadata, policy decisions, session recency including closed sessions) is already served by existing endpoints and live events.
+- The raw 6-week export contains workplace data and is NOT committed; the committed fixture is a sanitized derivative with equivalent statistical structure.
+- Backend changes are limited to: the lightweight contextual-metadata projection (FR-013), request identity on policy decisions (FR-015), and last-activity ordering for the sessions listing (FR-016). No storage schema migration is required; legacy records degrade gracefully.
 
 ## Out of Scope
 
@@ -172,6 +208,7 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 - Grouping non-consecutive records or cross-tool clustering (e.g. by work session).
 - User-configurable thresholds, row counts, or lookback windows.
 - Windows/Linux tray parity (the Go systray app has no glance section).
+- Raising the session retention cap or persisting handshake-only sessions.
 
 ## Commit Message Conventions *(mandatory)*
 
