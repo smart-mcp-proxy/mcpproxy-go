@@ -109,7 +109,10 @@ func (s *Service) preconditionToken(cfgPath string, fileExists bool, existing *e
 	var rawResolved json.RawMessage
 	if existing != nil {
 		resolvedName = existing.name
-		rawResolved = canonicalJSON(existing.entry)
+		// The RAW value, not the object projection: hashing the projection
+		// collapsed every non-object value (string, number, array) into the same
+		// "null" digest, hiding drift between two of them.
+		rawResolved = canonicalJSON(existing.value)
 	}
 	return DerivePreconditionToken(s.preconditionKey(), cfgPath, fileExists, resolvedName, rawResolved, canonicalJSON(pendingEntry))
 }
@@ -149,10 +152,12 @@ func (s *Service) checkPrecondition(client *ClientDef, cfgPath, serverName, toke
 	}
 }
 
-// canonicalJSON marshals a parsed entry deterministically. A nil map still
-// yields a non-nil "null" payload so a present-but-unparsable entry is
-// distinguishable from an absent one (which passes nil directly).
-func canonicalJSON(v map[string]interface{}) json.RawMessage {
+// canonicalJSON marshals a parsed value deterministically (encoding/json sorts
+// object keys), so reformatting the config alone does not invalidate a preview
+// while any semantic change does. A JSON-null value still yields a non-nil
+// "null" payload, which the presence field keeps distinguishable from an absent
+// entry (that one passes nil directly).
+func canonicalJSON(v interface{}) json.RawMessage {
 	encoded, err := json.Marshal(v)
 	if err != nil {
 		// Values here come from encoding/json or toml decoding, so this is

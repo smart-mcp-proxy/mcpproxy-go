@@ -179,11 +179,19 @@ func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (
 }
 
 // existingEntry is the entry a write would actually replace: the key it lives
-// under (which may differ from the requested server name after adoption) and its
-// parsed value (nil when the value is not an object).
+// under (which may differ from the requested server name after adoption), its
+// parsed value as an object (nil when the value is not one), and the raw value
+// exactly as the config held it.
+//
+// Both projections are needed: `entry` feeds the sanitized display summary,
+// which is defined over object fields, while `value` feeds the precondition
+// token, which must see every byte — a config hand-edited to hold a string, a
+// number or an array under the target key is still state the user was shown and
+// the write would clobber (Spec 091 FR-005).
 type existingEntry struct {
 	name  string
 	entry map[string]interface{}
+	value interface{}
 }
 
 // resolveExistingEntry returns the entry the write would target in the parsed
@@ -226,10 +234,11 @@ func (s *Service) resolveExistingEntry(client ClientDef, raw []byte, serverName 
 }
 
 // newExistingEntry wraps a resolved config value; a non-object value yields a
-// nil entry map (the key exists, but there is nothing to project).
+// nil entry map (the key exists, but there is nothing to project) while the raw
+// value is kept for the precondition token.
 func newExistingEntry(name string, value interface{}) *existingEntry {
 	obj, _ := value.(map[string]interface{})
-	return &existingEntry{name: name, entry: obj}
+	return &existingEntry{name: name, entry: obj, value: value}
 }
 
 // renderEntrySnippet renders the entry as the merge-ready snippet in the

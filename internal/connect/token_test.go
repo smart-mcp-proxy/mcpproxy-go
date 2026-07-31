@@ -281,3 +281,103 @@ func writeFileT(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestPreview_PreconditionToken_NonObjectEntryDrift closes the drift class the
+// map projection hid: a resolved entry whose value is NOT an object (a
+// hand-edited string, number or array) used to canonicalize to the constant
+// "null", so two entirely different values produced byte-identical tokens and
+// the write proceeded over state the user never saw (FR-005).
+func TestPreview_PreconditionToken_NonObjectEntryDrift(t *testing.T) {
+	svc, home := serviceWithKey(t, "")
+	cfgPath := ConfigPath("claude-code", home)
+
+	values := []string{
+		`"http://old-endpoint"`,
+		`"http://new-endpoint"`,
+		`["http://a"]`,
+		`["http://b"]`,
+		`42`,
+		`null`,
+		`{"type":"http","url":"http://127.0.0.1:8080/mcp"}`,
+	}
+	seen := map[string]string{}
+	for _, value := range values {
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":`+value+`}}`)
+		token := previewToken(t, svc, "claude-code")
+		if other, clash := seen[token]; clash {
+			t.Fatalf("entry values %s and %s produce the SAME token — drift between them is invisible", other, value)
+		}
+		seen[token] = value
+	}
+
+	// And an absent entry must still be distinguishable from a present one
+	// whose value happens to be JSON null.
+	writeFileT(t, cfgPath, `{"mcpServers":{}}`)
+	absentEntry := previewToken(t, svc, "claude-code")
+	writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":null}}`)
+	if nullEntry := previewToken(t, svc, "claude-code"); nullEntry == absentEntry {
+		t.Fatal("a present entry valued null must not hash like an absent one")
+	}
+}
+
+// The write side of the same class: a valid token minted over a non-object
+// entry must be refused once that value changes — force must not rescue it.
+func TestConnectWithPrecondition_NonObjectEntryDriftRefuses(t *testing.T) {
+	t.Run("array value changed", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":["http://a"]}}`)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if !preview.EntryExists {
+			t.Fatal("a present non-object value is still an existing entry")
+		}
+
+		const drifted = `{"mcpServers":{"mcpproxy":["http://totally-different"]}}`
+		writeFileT(t, cfgPath, drifted)
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("string value changed", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":"http://old-endpoint"}}`)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		const drifted = `{"mcpServers":{"mcpproxy":"http://new-endpoint"}}`
+		writeFileT(t, cfgPath, drifted)
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("an unchanged non-object entry still writes", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":"http://old-endpoint"}}`)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("an unchanged config must still write, got %+v", res)
+		}
+	})
+}
