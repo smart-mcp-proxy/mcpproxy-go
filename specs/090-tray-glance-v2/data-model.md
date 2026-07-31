@@ -58,7 +58,11 @@ Rows: top 5 by recency. Summary: counts over the FULL deduped set,
   orange `exclamationmark.triangle` (shape-distinct from error) (FR-010/011).
 - Subtitle: `if #available(macOS 14.4, *) { item.subtitle = reason.truncated(60) }`;
   a subtitle appearing/disappearing on an existing row while the menu is open
-  is a structural change → deferred rebuild (FR-023).
+  is a structural change → deferred rebuild (FR-023). **Atomic preflight**:
+  `updateInPlace` precomputes every row's old/new line count BEFORE mutating
+  anything; if any row's line count would change, it returns `false` having
+  made zero mutations (no half-updated menu). Tested with a case where a LATER
+  row changes line count, proving earlier rows were not already rewritten.
 - Presence indicator images: filled circle (active) / filled gray (idle) /
   hollow circle (seen) — fill+shape distinct, constant per state (FR-018).
 - Block order: summary → Activity (24h) → Recent → Clients (FR-021).
@@ -82,8 +86,10 @@ Everything else in metadata plus `arguments`/`response` remains excluded.
 
 `EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason)`
 — new `requestID` param; payload gains `request_id`; the persistence subscriber
-copies it to `ActivityRecord.RequestID`. Call sites (9, all in `mcp.go`) pass
-the dispatch request id, minting it above the earliest policy gate when needed.
+copies it to `ActivityRecord.RequestID`. All 16 emit sites across
+`internal/server` (13 in `mcp.go`, plus `mcp_routing.go` and
+`output_sanitisation.go`, whose helper signatures gain the parameter) pass the
+dispatch request id, minting it above the earliest policy gate when needed.
 
 ### Sessions listing (`internal/storage/manager.go`)
 

@@ -4,7 +4,10 @@
 
 ```bash
 # Go core: unit tests for the three backend deltas
-go test ./internal/httpapi/... ./internal/runtime/... ./internal/storage/... 
+go test ./internal/httpapi/... ./internal/runtime/... ./internal/storage/... ./internal/server/...
+
+# Regenerate + verify OpenAPI after the exclude_payloads doc change
+make swagger && make swagger-verify
 
 # Swift tray: pure pipeline + fixture replay + menu tests
 cd native/macos/MCPProxy && swift test

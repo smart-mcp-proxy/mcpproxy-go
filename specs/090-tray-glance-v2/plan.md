@@ -52,13 +52,17 @@ specs/090-tray-glance-v2/
 
 ```text
 # Go core (additive deltas)
-internal/httpapi/activity.go            # exclude_payloads → contextual-metadata whitelist
+internal/httpapi/activity.go            # exclude_payloads → contextual-metadata whitelist + swagger annotation fix
 internal/httpapi/activity_test.go       # projection tests
 internal/runtime/event_bus.go           # EmitActivityPolicyDecision gains requestID param
 internal/runtime/activity_service.go    # persist request_id on policy records
-internal/server/mcp.go                  # pass requestID at the policy-rejection call sites
+internal/runtime/activity_service_test.go # FR-015: SSE payload and persisted record share the id
+internal/server/mcp.go                  # requestID at ALL policy emit sites (13), minted above the earliest gate
+internal/server/mcp_routing.go          # direct-routing policy emits gain requestID
+internal/server/output_sanitisation.go  # sanitisation/validation emits gain requestID (helper signatures propagate it)
 internal/storage/manager.go             # GetRecentSessions: order by last_activity pre-truncation
 internal/storage/manager_test.go        # ordering tests
+oas/swagger.yaml, oas/docs.go           # regenerated via `make swagger` (exclude_payloads doc change)
 
 # Swift tray (native/macos/MCPProxy/MCPProxy)
 Menu/Glance/GlanceSelection.swift       # qualify + collapse + NEW: outcome-class grouping pipeline
@@ -67,10 +71,12 @@ Menu/Glance/GlanceSection.swift         # subtitle rendering (14.4+ gate), failu
                                         #   presence rows, block reorder, group-identity updates
 Menu/Glance/GlanceEvent.swift           # SSE adapter: extract intent + adapt policy_decision events
 Menu/Glance/GlancePresence.swift        # NEW: pure client-presence classification/dedup
+Core/CoreProcessManager.swift           # SSE dispatch switch gains activity.policy_decision routing
 State/AppState.swift                    # feed changes: policy type filter, 100-session unfiltered poll,
                                         #   summary counts by state
 API/APIClient.swift                     # glanceActivity type param + sessions limit/filter change
 API/Models.swift                        # ActivityEntry.reason accessor (metadata.intent.reason / metadata.reason)
+MCPProxyApp.swift                       # injectable data-source seam so the real menuWillOpen path is testable
 
 # Swift tests (native/macos/MCPProxy/MCPProxyTests)
 GlanceSelectionTests.swift, GlanceSelectionCollapseTests.swift   # extended: pipeline order, grouping
@@ -78,7 +84,13 @@ GlanceGroupingTests.swift               # NEW: run grouping, worst outcome, ×N,
 GlancePresenceTests.swift               # NEW: classification, dedup, boundaries, malformed timestamps
 GlanceFixtureReplayTests.swift          # NEW: SC-001/SC-004 chronological replay over the fixture
 GlanceFormattingTests.swift             # extended: reason budget, truncation precedence
-AppStateGlanceTests.swift               # extended: summary counts, menu-open zero-request delta
+GlanceEventTests.swift                  # extended: policy-event adaptation, intent extraction (FR-008/D9)
+GlanceSectionTests.swift                # extended: subtitle gate, failure-only icons, presence rows,
+                                        #   block order, atomic structural preflight (FR-005..011a, 018, 021, 023, 025)
+APIClientGlanceTests.swift              # extended: exact glance/sessions URLs (FR-014, FR-016a)
+GlanceMenuPolicyTests.swift             # extended: line-count change → deferred rebuild, zero partial mutation
+AppStateGlanceTests.swift               # extended: summary counts; SSE policy routing reaches the feed
+MenuOpenNetworkTests.swift              # NEW: real menuWillOpen path with counting stub, zero-request delta (FR-022)
 ```
 
 **Structure Decision**: Extend the existing glance module in place; one new pure Swift file per new pure concern (grouping stays in GlanceSelection; presence gets GlancePresence.swift). Backend deltas ride existing files — no new packages.
