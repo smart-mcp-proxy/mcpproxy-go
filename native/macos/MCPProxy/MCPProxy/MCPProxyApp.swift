@@ -424,17 +424,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.dismissConnectClientForm()
             })
         )
-        connectClientForm.adopt(window, model: model)
-
         // A sheet on the main window when there is one — the form belongs to the
         // app the user is already looking at; a standalone window otherwise,
         // because a menu-bar app often has no window at all.
         if let host = mainWindow, host.isVisible {
+            // The host is recorded so that closing IT tears the form down: a
+            // sheet gets no close notification of its own, and beginSheet's
+            // completion never runs when the parent closes underneath it.
+            connectClientForm.adopt(window, model: model, host: host)
             host.beginSheet(window) { [weak self] _ in
                 self?.connectClientForm.windowWillClose(window)
             }
             return
         }
+
+        connectClientForm.adopt(window, model: model)
 
         NSApp.setActivationPolicy(.regular)
         window.center()

@@ -68,6 +68,47 @@ final class ConnectFormWindowLifecycleTests: XCTestCase {
         XCTAssertNil(weakModel, "so the 2 s reachability poll cannot keep running unseen")
     }
 
+    /// Presented as a SHEET, the form's own window never gets a close
+    /// notification of its own: closing the host takes the sheet with it.
+    ///
+    /// Probed on this macOS: AppKit lets a sheet-bearing parent close, orders
+    /// the sheet out with it, posts `willClose` for the HOST ONLY, and never
+    /// runs `beginSheet`'s completion handler — so that completion cannot be
+    /// the teardown hook, and the host's close has to be.
+    func testClosingTheHostOfAnAttachedSheetTearsTheFormDown() {
+        let lifecycle = ConnectFormWindowLifecycle()
+        let host = makeWindow()
+        let sheet = makeWindow()
+        let model = ConnectClientModel(source: FakeConnectSource(), sleeper: { _ in })
+        lifecycle.adopt(sheet, model: model, host: host)
+
+        XCTAssertTrue(lifecycle.windowWillClose(host),
+                      "the host's close is the only notification this form will see")
+
+        XCTAssertNil(lifecycle.window)
+        XCTAssertNil(lifecycle.model)
+    }
+
+    /// Belt and braces: even a form adopted without its host is recognised
+    /// through AppKit's own sheet relationship.
+    func testClosingTheSheetParentTearsTheFormDown() throws {
+        let lifecycle = ConnectFormWindowLifecycle()
+        let host = makeWindow()
+        let sheet = makeWindow()
+        host.makeKeyAndOrderFront(nil)
+        host.beginSheet(sheet) { _ in }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        try XCTSkipIf(sheet.sheetParent == nil, "AppKit did not attach the sheet in this environment")
+
+        lifecycle.adopt(sheet, model: ConnectClientModel(source: FakeConnectSource(), sleeper: { _ in }))
+
+        XCTAssertTrue(lifecycle.windowWillClose(host))
+        XCTAssertNil(lifecycle.model)
+
+        host.endSheet(sheet)
+        host.close()
+    }
+
     func testAnUnrelatedWindowClosingIsIgnored() {
         let lifecycle = ConnectFormWindowLifecycle()
         let window = makeWindow()

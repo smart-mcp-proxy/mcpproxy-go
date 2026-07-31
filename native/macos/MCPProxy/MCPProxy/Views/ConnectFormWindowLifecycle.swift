@@ -18,13 +18,20 @@ final class ConnectFormWindowLifecycle {
     private(set) var window: NSWindow?
     private(set) var model: ConnectClientModel?
 
+    /// The window the form is attached to as a sheet, when it is presented that
+    /// way. Recorded at adoption rather than read back from `sheetParent`
+    /// alone, so the relationship is known before AppKit has attached anything.
+    private weak var host: NSWindow?
+
     /// A form is on screen right now.
     var isPresenting: Bool { window?.isVisible == true }
 
-    /// Take ownership of a freshly built form.
-    func adopt(_ window: NSWindow, model: ConnectClientModel) {
+    /// Take ownership of a freshly built form. `host` is the window it is being
+    /// presented on as a sheet, if any.
+    func adopt(_ window: NSWindow, model: ConnectClientModel, host: NSWindow? = nil) {
         self.window = window
         self.model = model
+        self.host = host
     }
 
     /// Bring an already-presented form forward. Returns false when there is
@@ -37,10 +44,18 @@ final class ConnectFormWindowLifecycle {
     }
 
     /// Handle a window-close notification. Returns true when the closing window
-    /// was this form's — i.e. the notification was consumed.
+    /// was this form's — or the window it is attached to as a sheet.
+    ///
+    /// The host matters because a sheet gets no close notification of its own:
+    /// AppKit lets a sheet-bearing parent close, orders the sheet out with it,
+    /// posts `willClose` for the HOST only, and never runs `beginSheet`'s
+    /// completion handler. Without this, closing the main window while the
+    /// Connect sheet was up left the model and its reachability poll alive.
     @discardableResult
     func windowWillClose(_ closing: NSWindow?) -> Bool {
-        guard let window, closing === window else { return false }
+        guard let window, let closing else { return false }
+        guard closing === window || closing === host || closing === window.sheetParent
+        else { return false }
         tearDown()
         return true
     }
@@ -66,5 +81,6 @@ final class ConnectFormWindowLifecycle {
         window?.contentView = NSView()
         window = nil
         model = nil
+        host = nil
     }
 }
