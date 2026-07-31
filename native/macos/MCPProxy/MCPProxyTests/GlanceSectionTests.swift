@@ -246,6 +246,133 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(items[3].image?.accessibilityDescription, "failed")
     }
 
+    // MARK: - Reason subtitles (spec 090 US2)
+
+    /// The reason is the row's standard subtitle — a subdued second line of the
+    /// SAME menu item, not a view-backed row (FR-005/FR-009), so keyboard
+    /// navigation and VoiceOver are untouched.
+    func testARowWithAReasonRendersItAsTheSubtitle() {
+        let state = Self.reasonState()
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+
+        XCTAssertEqual(row.title, "jira:get_issue — 30s", "the reason never joins the title line")
+        XCTAssertEqual(Self.subtitle(of: row), "Verify the ticket is still open")
+    }
+
+    /// FR-006: the subtitle has its OWN 60-character budget, and the full text
+    /// stays reachable in the tooltip.
+    func testALongReasonIsTailTruncatedToTheSubtitleBudget() {
+        let long = "Handoff: move the ticket to review per the user's request and notify the reporter"
+        let state = Self.reasonState(reason: long)
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+
+        let subtitle = Self.subtitle(of: row)
+        XCTAssertEqual(subtitle?.count, GlanceFormatting.reasonBudget)
+        XCTAssertEqual(subtitle?.hasSuffix("\u{2026}"), true)
+        XCTAssertEqual(row.toolTip, "jira:get_issue\n\(long)",
+                       "the tooltip carries the reason in full")
+    }
+
+    /// FR-007: no reason means one line, not an empty second one.
+    func testARowWithoutAReasonHasNoSubtitle() {
+        let section = Self.makeSection()
+        let row = section.items(for: Self.busyState(), now: Self.now)[3]
+        XCTAssertNil(Self.subtitle(of: row))
+    }
+
+    /// Below macOS 14.4 the subtitle mechanism does not exist, so the row is
+    /// single-line — but the reason must NOT be lost: tooltip and VoiceOver
+    /// carry it on every macOS version (FR-005/FR-006, US2 scenario 7).
+    func testWithoutTheSubtitleMechanismTheRowIsSingleLineAndKeepsTheReason() {
+        let state = Self.reasonState()
+        let section = Self.makeSection()
+        section.supportsRowSubtitles = false
+        let row = section.items(for: state, now: Self.now)[3]
+
+        XCTAssertNil(Self.subtitle(of: row))
+        XCTAssertEqual(row.title, "jira:get_issue — 30s")
+        XCTAssertEqual(row.toolTip, "jira:get_issue\nVerify the ticket is still open")
+        XCTAssertEqual(row.accessibilityLabel(),
+                       "jira:get_issue, succeeded, 30s ago, reason: Verify the ticket is still open")
+    }
+
+    /// US2 scenario 4: the run's reason is the NEWEST record that has one — a
+    /// later call that omitted its intent must not blank the row out.
+    func testAGroupedRowShowsTheNewestReasonInTheRun() {
+        let state = Self.busyState()
+        state.glanceActivity = [
+            Self.entry(id: "r1", server: "jira", tool: "get_issue",
+                       timestamp: "2027-01-15T07:59:30Z", session: "sess-r1"),
+            Self.entry(id: "r2", server: "jira", tool: "get_issue",
+                       timestamp: "2027-01-15T07:59:00Z", session: "sess-r2",
+                       reason: "Check the ticket after the failed transition"),
+            Self.entry(id: "r3", server: "jira", tool: "get_issue",
+                       timestamp: "2027-01-15T07:58:30Z", session: "sess-r3",
+                       reason: "An older reason nobody should see")
+        ]
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+
+        XCTAssertEqual(row.title, "jira:get_issue ×3 — 30s")
+        XCTAssertEqual(Self.subtitle(of: row), "Check the ticket after the failed transition")
+    }
+
+    /// FR-011a: on a failed row the error joins the TITLE and the reason keeps
+    /// the subtitle — the error never displaces the reason.
+    func testAFailedRowShowsTheErrorOnTheTitleAndKeepsTheReasonAsSubtitle() {
+        let state = Self.reasonState(status: "error", error: "auth failed: token expired")
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+
+        XCTAssertEqual(row.title, "jira:get_issue · auth failed — 30s")
+        XCTAssertEqual(Self.subtitle(of: row), "Verify the ticket is still open")
+        XCTAssertEqual(row.accessibilityLabel(),
+                       "jira:get_issue, failed: auth failed, 30s ago, "
+                       + "reason: Verify the ticket is still open")
+    }
+
+    /// FR-011a truncation precedence: the error clause is cut to its own
+    /// 40-character budget, the label keeps its 34-character middle-truncation
+    /// budget (it is never tightened to make room), and the age is never cut.
+    func testTheErrorClauseIsCutToItsOwnBudgetWhileTheLabelKeepsIts() {
+        let state = Self.busyState()
+        state.glanceActivity = [
+            Self.entry(id: "e1",
+                       server: "atlassian-jira-cloud",
+                       tool: "transition_issue_with_fields",
+                       status: "error",
+                       error: "the upstream server rejected the transition because the field is required",
+                       timestamp: "2027-01-15T07:59:30Z",
+                       session: "sess-e1")
+        ]
+        let section = Self.makeSection()
+        let title = section.items(for: state, now: Self.now)[3].title
+
+        let label = String(title.prefix(while: { $0 != "·" })).trimmingCharacters(in: .whitespaces)
+        let clause = title
+            .components(separatedBy: " · ")[1]
+            .components(separatedBy: " — ")[0]
+        XCTAssertEqual(label.count, 34, "the label budget must not be tightened by a long error")
+        XCTAssertEqual(clause.count, GlanceFormatting.errorClauseBudget)
+        XCTAssertTrue(clause.hasSuffix("\u{2026}"))
+        XCTAssertTrue(title.hasSuffix(" — 30s"), "the age is never truncated")
+    }
+
+    /// The tooltip is the row's full text: label, reason and the whole error
+    /// message, none of them truncated (FR-011a).
+    func testTheTooltipCarriesTheFullLabelReasonAndErrorMessage() {
+        let state = Self.reasonState(status: "error",
+                                     error: "auth failed: token expired. retry after refresh")
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+
+        XCTAssertEqual(row.toolTip,
+                       "jira:get_issue\nVerify the ticket is still open\n"
+                       + "auth failed: token expired. retry after refresh")
+    }
+
     // MARK: - Clients section and histogram
 
     func testClientRowCarriesSessionIdentity() {
@@ -593,6 +720,30 @@ final class GlanceSectionTests: XCTestCase {
         return state
     }
 
+    /// A connected core whose single call declared an intent reason.
+    private static func reasonState(
+        reason: String = "Verify the ticket is still open",
+        status: String = "success",
+        error: String? = nil
+    ) -> AppState {
+        let state = busyState()
+        state.glanceActivity = [
+            entry(id: "r", server: "jira", tool: "get_issue", status: status, error: error,
+                  timestamp: "2027-01-15T07:59:30Z", session: "sess-r", reason: reason)
+        ]
+        return state
+    }
+
+    /// `NSMenuItem.subtitle` exists only on macOS 14.4+, so reading it needs the
+    /// same availability gate the writer has. Below that it is nil by
+    /// definition — which is exactly what the single-line fallback asserts.
+    private static func subtitle(of item: NSMenuItem) -> String? {
+        if #available(macOS 14.4, *) {
+            return item.subtitle
+        }
+        return nil
+    }
+
     private static func entry(
         id: String,
         type: String = "tool_call",
@@ -602,7 +753,8 @@ final class GlanceSectionTests: XCTestCase {
         error: String? = nil,
         timestamp: String,
         session: String? = nil,
-        request: String? = nil
+        request: String? = nil,
+        reason: String? = nil
     ) -> ActivityEntry {
         var json: [String: Any] = [
             "id": id,
@@ -617,6 +769,10 @@ final class GlanceSectionTests: XCTestCase {
         if let tool { json["tool_name"] = tool }
         if let error { json["error_message"] = error }
         if let session { json["session_id"] = session }
+        // Shaped like the wire: a call's reason lives under `metadata.intent`,
+        // which is what the projection whitelist keeps and what the SSE adapter
+        // writes, so the row pipeline reads it the same way in both cases.
+        if let reason { json["metadata"] = ["intent": ["reason": reason]] }
         let data = try! JSONSerialization.data(withJSONObject: json)
         // swiftlint:disable:next force_try
         return try! JSONDecoder().decode(ActivityEntry.self, from: data)

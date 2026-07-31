@@ -58,7 +58,30 @@ final class GlanceSection {
     // MARK: Configuration
 
     /// Character budget for a row label before middle truncation kicks in.
+    ///
+    /// Never tightened to make room for anything else on the title line
+    /// (FR-011a): the error clause has its own, smaller budget and is cut first,
+    /// and the age — the shortest and most perishable part of the row — is never
+    /// cut at all.
     private static let labelBudget = 34
+
+    /// Whether rows may carry a second line.
+    ///
+    /// `NSMenuItem.subtitle` is macOS 14.4+, while the app's deployment floor is
+    /// macOS 13, so below 14.4 a row is single-line and its reason lives in the
+    /// tooltip and the accessibility label only (FR-005, documented degradation).
+    ///
+    /// It is a settable property rather than a bare `#available` check at the
+    /// point of use so both branches are testable on one host: the fallback is
+    /// the branch no CI machine runs, and an untested fallback is how a reason
+    /// silently disappears on an older Mac.
+    var supportsRowSubtitles: Bool = GlanceSection.systemSupportsRowSubtitles
+
+    /// Whether the *running* system has the subtitle mechanism.
+    static var systemSupportsRowSubtitles: Bool {
+        if #available(macOS 14.4, *) { return true }
+        return false
+    }
 
     // MARK: Owned items (kept so rows can be rewritten in place)
 
@@ -73,6 +96,12 @@ final class GlanceSection {
         /// The SF Symbol currently installed, so the icon is rebuilt only when
         /// the glyph really changes.
         var symbolName: String?
+        /// The subtitle currently installed, or nil when the row is single-line.
+        /// Kept here rather than read back off the item because reading
+        /// `NSMenuItem.subtitle` needs an availability gate, and because the
+        /// structural preflight has to know a row's line count without touching
+        /// the item at all.
+        var subtitleText: String?
     }
 
     private var summaryItem: NSMenuItem?
@@ -263,10 +292,24 @@ final class GlanceSection {
         let age = GlanceFormatting.relativeTime(run.timestamp, now: now)
         let status = run.worstStatus
         let failed = status != "success"
-        let detail = failed ? Self.firstClause(of: run.errorMessage) : nil
+        // The error clause is cut to its own budget before anything else on the
+        // line gives way (FR-011a): a backend that answers in paragraphs must
+        // not be able to squeeze out the name of the tool that ran.
+        let detail = failed
+            ? Self.firstClause(of: run.errorMessage).map {
+                GlanceFormatting.tailTruncated($0, limit: GlanceFormatting.errorClauseBudget)
+              }
+            : nil
+
+        // The reason is the row's second line, never part of its first: on a
+        // failed row the error joins the title and the reason keeps the
+        // subtitle, so "why it was attempted" and "how it went" are both
+        // readable at a glance (FR-011a).
+        let reason = run.displayReason
+        let subtitle = subtitleText(for: reason)
 
         let title: String
-        let accessibility: String
+        var accessibility: String
         if let detail {
             title = "\(label)\(countSuffix) · \(detail) — \(age)"
             accessibility = "\(fullLabel)\(spokenCount), failed: \(detail), \(age) ago"
@@ -275,17 +318,24 @@ final class GlanceSection {
             accessibility = "\(fullLabel)\(spokenCount), "
                 + "\(Self.outcomeDescription(forStatus: status)), \(age) ago"
         }
+        // Spoken in full, and spoken on every macOS version — the subtitle is
+        // where the reason is *seen*, not where it lives (FR-006, FR-025).
+        if let reason { accessibility += ", reason: \(reason)" }
 
-        let toolTip: String
-        if let message = run.errorMessage, !message.isEmpty {
-            toolTip = "\(fullLabel)\n\(message)"
-        } else {
-            toolTip = fullLabel
-        }
+        // The tooltip is the row without any budget at all: full label, full
+        // reason, full error message.
+        var toolTipLines = [fullLabel]
+        if let reason { toolTipLines.append(reason) }
+        if let message = run.errorMessage, !message.isEmpty { toolTipLines.append(message) }
+        let toolTip = toolTipLines.joined(separator: "\n")
 
         let symbol = GlanceFormatting.statusSymbolName(forStatus: status)
 
         if !sameRun || item.title != title { item.title = title }
+        if !sameRun || row.subtitleText != subtitle {
+            Self.setSubtitle(subtitle, on: item)
+            row.subtitleText = subtitle
+        }
         if !sameRun || item.accessibilityLabel() != accessibility {
             item.setAccessibilityLabel(accessibility)
         }
@@ -299,6 +349,20 @@ final class GlanceSection {
         }
 
         row.runIdentity = identity
+    }
+
+    /// The text a row's second line would show, or nil when it has none —
+    /// either because the record declared no reason (FR-007) or because this
+    /// system has no subtitle mechanism (FR-005).
+    private func subtitleText(for reason: String?) -> String? {
+        guard supportsRowSubtitles, let reason else { return nil }
+        return GlanceFormatting.tailTruncated(reason, limit: GlanceFormatting.reasonBudget)
+    }
+
+    /// Install (or clear) a row's second line. The availability gate lives here
+    /// alone, so every caller reasons in terms of `supportsRowSubtitles`.
+    private static func setSubtitle(_ text: String?, on item: NSMenuItem) {
+        if #available(macOS 14.4, *) { item.subtitle = text }
     }
 
     /// First clause of an error message — everything up to the first newline,

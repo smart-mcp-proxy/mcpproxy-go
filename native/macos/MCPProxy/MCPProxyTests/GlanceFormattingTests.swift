@@ -68,6 +68,38 @@ final class GlanceFormattingTests: XCTestCase {
         XCTAssertEqual(GlanceFormatting.middleTruncated("abcdef", limit: 1), "\u{2026}")
     }
 
+    // MARK: - Tail truncation (spec 090 FR-006, FR-011a)
+
+    /// A reason and an error clause both read front-to-back — the information is
+    /// at the head — so they are cut at the tail, unlike a `server:tool` label
+    /// whose tail is the tool name.
+    func testTailTruncationKeepsTheHeadAndEndsWithAnEllipsis() {
+        let result = GlanceFormatting.tailTruncated("Verify the failed transition did not change the ticket", limit: 20)
+        XCTAssertEqual(result.count, 20)
+        XCTAssertTrue(result.hasPrefix("Verify the failed"), "kept the head, got \(result)")
+        XCTAssertTrue(result.hasSuffix("\u{2026}"))
+    }
+
+    func testTailTruncationLeavesTextAtOrUnderTheBudgetAlone() {
+        XCTAssertEqual(GlanceFormatting.tailTruncated("auth failed", limit: 40), "auth failed")
+        // Pins `>` rather than `>=`: equal length must pass through untouched.
+        XCTAssertEqual(GlanceFormatting.tailTruncated("abcdef", limit: 6), "abcdef")
+    }
+
+    func testTailTruncationDegenerateLimits() {
+        XCTAssertEqual(GlanceFormatting.tailTruncated("abcdef", limit: 0), "")
+        XCTAssertEqual(GlanceFormatting.tailTruncated("abcdef", limit: 1), "\u{2026}")
+    }
+
+    /// The two budgets are spelled out in the spec (FR-006: 60 for the reason
+    /// subtitle, independent of the label's; FR-011a: 40 for the error clause on
+    /// the title line), so they are pinned here rather than read back from the
+    /// implementation.
+    func testReasonAndErrorClauseBudgetsAreTheSpecsNumbers() {
+        XCTAssertEqual(GlanceFormatting.reasonBudget, 60)
+        XCTAssertEqual(GlanceFormatting.errorClauseBudget, 40)
+    }
+
     // MARK: - Relative time
 
     func testCompactAgeUnits() {

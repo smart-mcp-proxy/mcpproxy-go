@@ -78,6 +78,32 @@ enum GlanceFormatting {
         return prefix + "\u{2026}" + suffix
     }
 
+    // MARK: - Budgets
+
+    /// Character budget for a row's reason subtitle (spec 090 FR-006).
+    ///
+    /// Independent of the label's budget on purpose: the two lines are truncated
+    /// separately, so a long `server:tool` never shortens the explanation and a
+    /// long explanation never shortens the name of what ran.
+    static let reasonBudget = 60
+
+    /// Character budget for the error clause on a failed row's title line
+    /// (FR-011a). Deliberately smaller than the reason's: it shares the title
+    /// with the label and the age, and the full message is in the tooltip.
+    static let errorClauseBudget = 40
+
+    /// Tail-truncate `text` to at most `limit` characters, keeping the head.
+    ///
+    /// The opposite end from `middleTruncated`, and for a reason: a `server:tool`
+    /// label carries information at both ends, while a sentence — a caller's
+    /// intent, an error message — carries it at the front and trails off into
+    /// detail.
+    static func tailTruncated(_ text: String, limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit - 1)) + "\u{2026}"
+    }
+
     // MARK: - Time
 
     private static let fractionalParser: ISO8601DateFormatter = {
