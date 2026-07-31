@@ -104,7 +104,7 @@ final class MenuOpenNetworkTests: XCTestCase {
 
         let titles = menu.items.map(\.title)
         XCTAssertTrue(titles.contains("Recent"), "the glance block was not built at all")
-        XCTAssertTrue(titles.contains("github:create_issue — 30s") || titles.contains { $0.hasPrefix("github:create_issue") },
+        XCTAssertTrue(titles.contains { $0.hasPrefix("github:create_issue") },
                       "the activity rows were not built")
         let summary = try XCTUnwrap(menu.items.first { $0.title.contains("calls this hour") })
 
