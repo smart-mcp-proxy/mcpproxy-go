@@ -1,18 +1,18 @@
 # Tasks: Tray Glance v2 — Grouped Calls, Intent Reasons, Failure-Only Marks, Idle Clients
 
 **Input**: Design documents from `/specs/090-tray-glance-v2/` (spec.md, plan.md, research.md D1–D9, data-model.md, contracts/api-deltas.md)
-**Tests**: TDD per constitution — every behavior task is preceded by a failing-test task in the same story phase.
+**Tests**: TDD per constitution — every implementation task is preceded by a distinct failing-test task (a test that fails to compile against a not-yet-existing seam counts as red).
 
 Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`, tests under `MCPProxyTests/`). Go paths are repo-relative.
 
 ## Phase 1: Setup
 
-- [ ] T001 Verify green baseline on branch 090-tray-glance-v2: `cd native/macos/MCPProxy && swift test` and `go test ./internal/httpapi/... ./internal/runtime/... ./internal/storage/... ./internal/server/...` both pass before any change (record failures that pre-exist, if any, in specs/090-tray-glance-v2/verification/baseline.md)
+- [ ] T001 Verify green baseline on branch 090-tray-glance-v2: `cd native/macos/MCPProxy && swift test` and `go test ./internal/httpapi/... ./internal/runtime/... ./internal/storage/... ./internal/server/...` both pass before any change (record pre-existing failures, if any, in specs/090-tray-glance-v2/verification/baseline.md)
 
 ## Phase 2: Foundational (blocking prerequisites)
 
 - [ ] T002 Write failing tests for `ActivityEntry` derived accessors (`intentReason`, `blockReason`, `reason`, `outcomeClass` incl. decision blocked/block and legacy-absence cases) in MCPProxyTests/ModelsTests.swift
-- [ ] T003 Implement the accessors as an `ActivityEntry` extension in MCPProxy/API/Models.swift (data-model.md table); make T002 pass
+- [ ] T003 Implement the accessors as an `ActivityEntry` extension in MCPProxy/API/Models.swift (data-model.md table); T002 green
 
 ## Phase 3: User Story 1 — Repeated calls collapse into one row (P1) 🎯 MVP
 
@@ -21,8 +21,9 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 **Independent test**: Feed recorded sequences through the pure pipeline; verify collapse, ordering, age, worst outcome, and stable run identity.
 
 - [ ] T004 [US1] Write failing tests in MCPProxyTests/GlanceGroupingTests.swift: maximal consecutive runs by (server, tool, outcomeClass); A-B-A stays 3 rows; dropped records (management built-ins, collapsed wrappers) don't split runs (US1 scenario 6); worst outcome error > success with error clause from newest erroring record; ×N only when N > 1; run identity = recordKey(oldest) stable under head-extension; window-capped counts (FR-001–004, FR-024)
-- [ ] T005 [US1] Implement `GlanceRun` and `groupConsecutive` as pure additions to MCPProxy/Menu/Glance/GlanceSelection.swift; re-shape `activityRows(from:)` into the 4-step pipeline returning `[GlanceRun]`; make T004 pass
-- [ ] T006 [US1] Update MCPProxy/Menu/Glance/GlanceSection.swift to render `GlanceRun` rows (×N suffix in title, age from newest, group identity drives `apply`'s same-record check) and adapt MCPProxy/State/AppState.swift call sites; update existing MCPProxyTests/GlanceSelectionTests.swift, GlanceSelectionCollapseTests.swift, AppStateGlanceTests.swift expectations; `swift test` green
+- [ ] T005 [US1] Implement `GlanceRun` and `groupConsecutive` as pure additions to MCPProxy/Menu/Glance/GlanceSelection.swift; re-shape `activityRows(from:)` into the 4-step pipeline returning `[GlanceRun]`; T004 green
+- [ ] T006 [US1] Write failing rendering tests: MCPProxyTests/GlanceSectionTests.swift asserts a run renders one row with "×N" title suffix, age from newest, and in-place `apply` keyed by run identity (same-run count bump ≠ different-run turnover); update MCPProxyTests/GlanceSelectionTests.swift, GlanceSelectionCollapseTests.swift, AppStateGlanceTests.swift expectations to the `[GlanceRun]` pipeline (red)
+- [ ] T007 [US1] Implement run rendering in MCPProxy/Menu/Glance/GlanceSection.swift and adapt MCPProxy/State/AppState.swift call sites; T006 and full `swift test` green
 
 **Checkpoint**: MVP — grouped rows visible; all other stories independent from here.
 
@@ -32,11 +33,14 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 **Independent test**: Records with/without reasons render one- or two-line rows; polled and SSE entries expose identical reasons.
 
-- [ ] T007 [P] [US2] Write failing Go test in internal/httpapi/activity_test.go: with `exclude_payloads=true` the response keeps ONLY the contextual whitelist (`intent.reason`, `intent.operation_type`, `decision`, `reason`, `client_name`, `client_version`) and still omits `arguments`, `response`, and all other metadata (contracts/api-deltas.md §1)
-- [ ] T008 [US2] Implement the whitelist projection in internal/httpapi/activity.go, fix the `exclude_payloads` swagger annotation, run `make swagger` (commits oas/swagger.yaml, oas/docs.go); T007 green, `make swagger-verify` green
-- [ ] T009 [US2] Write failing tests in MCPProxyTests/GlanceEventTests.swift for intent extraction from both completed-event payloads (metadata populated, reason exposed); then implement in MCPProxy/Menu/Glance/GlanceEvent.swift (research D9, intent part)
-- [ ] T010 [US2] Write failing tests in MCPProxyTests/GlanceSectionTests.swift + GlanceFormattingTests.swift for: subtitle set only on macOS 14.4+ (inject availability as a testable flag), 60-char tail truncation, single-line when no reason, FR-011a failed-row template and truncation precedence (error clause 40 tail-truncated before label's 34 middle-truncation tightens; age never truncated), tooltip carries full label+reason+error, VoiceOver label includes reason; then implement in MCPProxy/Menu/Glance/GlanceSection.swift + GlanceFormatting.swift (FR-005–007, FR-011a)
-- [ ] T011 [US2] Write failing test in MCPProxyTests/GlanceMenuPolicyTests.swift: `updateInPlace` precomputes ALL rows' line counts before mutating; when a LATER row's line count changes, it returns false with ZERO mutations to earlier rows; then implement the atomic preflight in MCPProxy/Menu/Glance/GlanceSection.swift `updateInPlace` (FR-023, data-model "Atomic preflight")
+- [ ] T008 [P] [US2] Write failing Go test in internal/httpapi/activity_test.go: with `exclude_payloads=true` the response keeps ONLY the contextual whitelist (`intent.reason`, `intent.operation_type`, `decision`, `reason`, `client_name`, `client_version`) and still omits `arguments`, `response`, and all other metadata (contracts/api-deltas.md §1)
+- [ ] T009 [US2] Implement the whitelist projection in internal/httpapi/activity.go, fix the `exclude_payloads` swagger annotation, run `make swagger` (commit oas/swagger.yaml, oas/docs.go); T008 green, `make swagger-verify` green
+- [ ] T010 [P] [US2] Write failing tests in MCPProxyTests/GlanceEventTests.swift: intent extraction from both completed-event payloads (metadata populated, reason exposed via the T003 accessors)
+- [ ] T011 [US2] Implement intent extraction in MCPProxy/Menu/Glance/GlanceEvent.swift (research D9, intent part); T010 green
+- [ ] T012 [P] [US2] Write failing tests in MCPProxyTests/GlanceSectionTests.swift + GlanceFormattingTests.swift: subtitle set only on macOS 14.4+ (availability injected as a testable flag), 60-char tail truncation, single-line when no reason, FR-011a failed-row template and truncation precedence (error clause 40 tail-truncated before the label's 34 middle-truncation tightens; age never truncated), tooltip carries full label+reason+error, VoiceOver label includes reason
+- [ ] T013 [US2] Implement subtitle rendering + budgets + failed-row template in MCPProxy/Menu/Glance/GlanceSection.swift and GlanceFormatting.swift (FR-005–007, FR-011a); T012 green
+- [ ] T014 [P] [US2] Write failing test in MCPProxyTests/GlanceMenuPolicyTests.swift: `updateInPlace` precomputes ALL rows' line counts before mutating; when a LATER row's line count changes, it returns false with ZERO mutations to earlier rows
+- [ ] T015 [US2] Implement the atomic line-count preflight in MCPProxy/Menu/Glance/GlanceSection.swift `updateInPlace` (FR-023, data-model "Atomic preflight"); T014 green
 
 ## Phase 5: User Story 3 — Only failures are marked, and blocked calls appear (P2)
 
@@ -44,11 +48,14 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 **Independent test**: A feed with successes, errors, and blocks renders exactly the failure/blocked marks; blocked SSE rows reconcile with polled records without duplication.
 
-- [ ] T012 [P] [US3] Write failing Go tests: internal/runtime/activity_service_test.go (persisted policy record carries `request_id`; SSE payload and persisted record share the identical non-empty id) and internal/server tests covering pre-intent-validation blocks, direct-routing blocks (internal/server/mcp_routing.go), output-sanitisation blocks/redactions and output-schema decisions (internal/server/output_sanitisation.go) each emitting a non-empty request id (research D3)
-- [ ] T013 [US3] Implement request-id threading: `Runtime.EmitActivityPolicyDecision` gains `requestID` param + payload field in internal/runtime/event_bus.go; persistence subscriber copies it in internal/runtime/activity_service.go; ALL 16 emit sites updated (13 in internal/server/mcp.go with minting hoisted above the earliest policy gate, 1 in internal/server/mcp_routing.go, 2 in internal/server/output_sanitisation.go via helper-signature propagation); T012 green
-- [ ] T014 [P] [US3] Write failing test in MCPProxyTests/APIClientGlanceTests.swift asserting the exact glance URL now includes `type=tool_call,internal_tool_call,policy_decision` with `exclude_payloads=true&limit=100`; then update MCPProxy/API/APIClient.swift `glanceActivity` (FR-014)
-- [ ] T015 [US3] Write failing tests in MCPProxyTests/GlanceEventTests.swift (adapt `activity.policy_decision`: status "blocked", provisional id `"<request_id>:policy_decision"`, reason into metadata slot) and a routing test in MCPProxyTests/AppStateGlanceTests.swift proving a policy SSE event reaches the glance feed; then implement in MCPProxy/Menu/Glance/GlanceEvent.swift and add the event name to the SSE dispatch switch in MCPProxy/Core/CoreProcessManager.swift (research D9)
-- [ ] T016 [US3] Write failing tests in MCPProxyTests/GlanceSelectionTests.swift (qualifies admits blocked policy_decision records — decision blocked/block only, warnings/redactions rejected; blocked runs never merge with call runs) and MCPProxyTests/GlanceSectionTests.swift (success rows have nil image + "succeeded" VoiceOver; error = red xmark.circle; blocked = orange exclamationmark.triangle, shape-distinct; blocked row's subtitle is the block reason); then implement in GlanceSelection.swift + GlanceSection.swift (FR-010–012, US3 scenario 5)
+- [ ] T016 [P] [US3] Write failing Go tests for policy request identity: internal/runtime/activity_service_test.go (persisted policy record carries `request_id`; SSE payload and persisted record share the identical non-empty id), internal/server/intent_validation_test.go (pre-intent-validation blocks), internal/server/mcp_routing_test.go (direct-routing blocks), internal/server/output_sanitisation_test.go (sanitisation blocks/redactions), internal/server/mcp_output_schema_test.go (output-schema decisions) — each asserting a non-empty request id on the emitted event (research D3)
+- [ ] T017 [US3] Implement request-id threading: `Runtime.EmitActivityPolicyDecision` gains `requestID` param + payload field in internal/runtime/event_bus.go; persistence subscriber copies it in internal/runtime/activity_service.go; ALL 16 emit sites updated (13 in internal/server/mcp.go with minting hoisted above the earliest policy gate, 1 in internal/server/mcp_routing.go, 2 in internal/server/output_sanitisation.go via helper-signature propagation); T016 green
+- [ ] T018 [P] [US3] Write failing test in MCPProxyTests/APIClientGlanceTests.swift asserting the exact glance URL includes `type=tool_call,internal_tool_call,policy_decision` with `exclude_payloads=true&limit=100`
+- [ ] T019 [US3] Update `glanceActivity` in MCPProxy/API/APIClient.swift (FR-014); T018 green
+- [ ] T020 [P] [US3] Write failing tests: MCPProxyTests/GlanceEventTests.swift adapts `activity.policy_decision` (status "blocked", provisional id `"<request_id>:policy_decision"`, reason into metadata slot); MCPProxyTests/AppStateGlanceTests.swift routing test proving a policy SSE event reaches the glance feed
+- [ ] T021 [US3] Implement policy-event adaptation in MCPProxy/Menu/Glance/GlanceEvent.swift and add the event name to the SSE dispatch switch in MCPProxy/Core/CoreProcessManager.swift (research D9); T020 green
+- [ ] T022 [P] [US3] Write failing tests: MCPProxyTests/GlanceSelectionTests.swift (qualifies admits blocked policy_decision records — decision blocked/block only, warnings/redactions rejected; blocked runs never merge with call runs); MCPProxyTests/GlanceSectionTests.swift (success rows have nil image + "succeeded" VoiceOver; error = red xmark.circle; blocked = orange exclamationmark.triangle, shape-distinct; blocked row's subtitle is the block reason)
+- [ ] T023 [US3] Implement blocked qualification + failure-only iconography in MCPProxy/Menu/Glance/GlanceSelection.swift + GlanceSection.swift (FR-010–012, US3 scenario 5); T022 green
 
 ## Phase 6: User Story 4 — Clients show presence honestly (P2)
 
@@ -56,28 +63,32 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 **Independent test**: Session records at various ages classify/dedupe/order correctly; summary counts cover the full deduped set.
 
-- [ ] T017 [P] [US4] Write failing Go test in internal/storage/manager_test.go: an old-start but recently-active session survives `GetRecentSessions(limit)` truncation (ordering by `last_activity` desc happens BEFORE limit, across statuses) (contracts §3)
-- [ ] T018 [US4] Implement collect-all→sort→filter→truncate in internal/storage/manager.go `GetRecentSessions`; T017 green; confirm runtime post-sort at internal/runtime/runtime.go stays harmless
-- [ ] T019 [P] [US4] Write failing tests in MCPProxyTests/GlancePresenceTests.swift: state boundaries (<5m active; 5:00 and 30:00 idle; >30m..24h seen; >24h excluded), missing `last_activity` falls back to start time, unparseable excluded, negative age → 0s, dedupe by name+version keeping most recent, "Unknown client" fallback, top-5 ordering, summary counts over full deduped set with seen excluded and empty states omitted; then implement pure MCPProxy/Menu/Glance/GlancePresence.swift (FR-017–020, research D6)
-- [ ] T020 [US4] Wire it: MCPProxy/API/APIClient.swift `activeSessions` → unfiltered `limit=100` (rename to `recentSessions`; assert exact URL in MCPProxyTests/APIClientGlanceTests.swift); MCPProxy/State/AppState.swift summary "N active · M idle"; MCPProxy/Menu/Glance/GlanceSection.swift presence rows (filled/gray/hollow indicators, idle/seen ages, placeholder only when lookback empty); update MCPProxyTests/GlanceSelectionTests.swift `activeClients` replacement + AppStateGlanceTests.swift + GlanceSectionTests.swift
+- [ ] T024 [P] [US4] Write failing Go test in internal/storage/manager_test.go: an old-start but recently-active session survives `GetRecentSessions(limit)` truncation (ordering by `last_activity` desc happens BEFORE limit, across statuses) (contracts §3)
+- [ ] T025 [US4] Implement collect-all→sort→filter→truncate in internal/storage/manager.go `GetRecentSessions`; T024 green; confirm the runtime post-sort in internal/runtime/runtime.go stays harmless
+- [ ] T026 [P] [US4] Write failing tests in MCPProxyTests/GlancePresenceTests.swift: state boundaries (<5m active; 5:00 and 30:00 idle; >30m..24h seen; >24h excluded), missing `last_activity` falls back to start time, unparseable excluded, negative age → 0s, dedupe by name+version keeping most recent, "Unknown client" fallback, top-5 ordering, summary counts over full deduped set with seen excluded and empty states omitted
+- [ ] T027 [US4] Implement pure MCPProxy/Menu/Glance/GlancePresence.swift (FR-017–020, research D6); T026 green
+- [ ] T028 [P] [US4] Write failing wiring tests: MCPProxyTests/APIClientGlanceTests.swift asserts the sessions URL is unfiltered `limit=100`; MCPProxyTests/AppStateGlanceTests.swift asserts the summary reads "N active · M idle" (seen excluded, empty states omitted); MCPProxyTests/GlanceSectionTests.swift asserts presence rows (filled/gray/hollow indicators, idle/seen ages) and the placeholder only when the lookback is empty; update GlanceSelectionTests.swift for the `activeClients` replacement
+- [ ] T029 [US4] Implement the wiring: MCPProxy/API/APIClient.swift `activeSessions` → unfiltered `recentSessions(limit: 100)`; MCPProxy/State/AppState.swift summary counts; MCPProxy/Menu/Glance/GlanceSection.swift presence rows; T028 green
 
 ## Phase 7: User Story 5 — 24h picture first (P3)
 
-- [ ] T021 [US5] Write failing order assertion in MCPProxyTests/GlanceSectionTests.swift (summary → Activity (24h) → "Recent" → rows → Clients), then move the histogram item in MCPProxy/Menu/Glance/GlanceSection.swift `items(for:)` (FR-021)
+- [ ] T030 [US5] Write failing order assertion in MCPProxyTests/GlanceSectionTests.swift (summary → Activity (24h) → "Recent" → rows → Clients)
+- [ ] T031 [US5] Move the histogram item in MCPProxy/Menu/Glance/GlanceSection.swift `items(for:)` (FR-021); T030 green
 
 ## Phase 8: Polish & Cross-Cutting
 
-- [ ] T022 [P] Write MCPProxyTests/GlanceFixtureReplayTests.swift: locate `specs/090-tray-glance-v2/fixtures/activity-replay.jsonl` by walking up from `#filePath`; chronological replay (reverse file order) with sliding latest-100 window; assert SC-001 (no two adjacent rows share a group key; ≥19-burst occupies one row) and SC-004 (all 52 blocks become visible at some step)
-- [ ] T023 Add the injectable data-source seam to MCPProxy/MCPProxyApp.swift (production default APIClient) and write MCPProxyTests/MenuOpenNetworkTests.swift driving the REAL `menuWillOpen` → rebuild → updateInPlace sequence on a real NSMenu with the counting stub, asserting a zero request delta (FR-022, research D8)
-- [ ] T024 Documentation + gates: note the `exclude_payloads` contextual whitelist in docs/features/activity-log.md; run `./scripts/run-linter.sh`, full `go test ./internal/...`, `cd native/macos/MCPProxy && swift test`, `make swagger-verify`; fill specs/090-tray-glance-v2/verification/manual-protocol.md results after a live run
+- [ ] T032 [P] Write MCPProxyTests/GlanceFixtureReplayTests.swift: locate `specs/090-tray-glance-v2/fixtures/activity-replay.jsonl` by walking up from `#filePath`; chronological replay (reverse file order) with sliding latest-100 window; assert SC-001 (no two adjacent rows share a group key; ≥19-burst occupies one row) and SC-004 (all 52 blocks become visible at some step)
+- [ ] T033 Write MCPProxyTests/MenuOpenNetworkTests.swift against the not-yet-existing injectable data-source initializer on the controller (red: fails to compile): construct the controller with a counting stub, drive the REAL `menuWillOpen` → rebuild → `updateInPlace` sequence on a real NSMenu, assert a zero request delta (FR-022, research D8)
+- [ ] T034 Implement the injectable data-source seam in MCPProxy/MCPProxyApp.swift (production default APIClient); T033 green
+- [ ] T035 Documentation + gates: note the `exclude_payloads` contextual whitelist in docs/features/activity-log.md; validate specs/090-tray-glance-v2/quickstart.md commands still match reality; run `./scripts/run-linter.sh`, full `go test ./internal/...`, `cd native/macos/MCPProxy && swift test`, `make swagger-verify`; fill specs/090-tray-glance-v2/verification/manual-protocol.md results after a live run
 
 ## Dependencies & Execution Order
 
 - Phase 1 → Phase 2 → everything else.
-- US1 (T004–T006) is the MVP and blocks nothing except sharing files with later stories.
-- US2, US3, US4 are mutually independent but all touch GlanceSection.swift/AppState.swift — execute sequentially (T007/T012/T017/T019 test-writing tasks marked [P] can be written in parallel).
-- US5 (T021) can run any time after Phase 3.
-- T022 needs US1+US3 (grouping + blocked rows); T023 needs US4 (session fetch changes); T024 last.
+- US1 (T004–T007) is the MVP.
+- US2, US3, US4 are logically independent, but shared-file contention forces sequential implementation: `GlanceSection.swift` is touched by US1/US2/US3/US4/US5; `AppState.swift` by US1/US3/US4; `GlanceEvent.swift` by US2/US3. Test-writing tasks marked [P] (T008, T010, T012, T014, T016, T018, T020, T022, T024, T026, T028, T032) touch distinct test files and may be authored in parallel.
+- US5 (T030–T031) can run any time after Phase 3.
+- T032 needs US1+US3 (grouping + blocked rows); T033–T034 need US4 (session fetch changes); T035 last.
 
 ## Implementation Strategy
 
