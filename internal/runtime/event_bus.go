@@ -494,7 +494,13 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 }
 
 // EmitActivityPolicyDecision emits an event when a policy blocks a tool call.
-func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, decision, reason string) {
+//
+// requestID is the dispatch's correlation id, and it is what lets a consumer
+// recognise the live event and the record persisted from it as one thing rather
+// than two. Every other activity event already carries it; policy decisions
+// gained it in spec 090, so records written before then have none and must not
+// be correlated at all (FR-015) rather than correlated by an empty key.
+func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason string) {
 	// Spec 042: classify policy blocks as a tool quarantine error category.
 	// "blocked" decisions are user-visible reliability events worth counting.
 	if decision == "blocked" || decision == "block" {
@@ -505,6 +511,7 @@ func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, de
 		"server_name": serverName,
 		"tool_name":   toolName,
 		"session_id":  sessionID,
+		"request_id":  requestID,
 		"decision":    decision,
 		"reason":      reason,
 	}

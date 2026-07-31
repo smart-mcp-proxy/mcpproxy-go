@@ -396,7 +396,7 @@ func TestEncodeToonBlocks_SanitisationBeforeEncoding(t *testing.T) {
 	result := toonTextResult(string(raw))
 
 	// Real pipeline order: sanitise first…
-	if block := p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustTrusted, result); block != nil {
+	if block := p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustTrusted, result); block != nil {
 		t.Fatal("redact mode must not block")
 	}
 	// …then encode.
