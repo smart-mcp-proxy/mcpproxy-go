@@ -46,8 +46,9 @@ The user glances at the menu and understands not just *which* tools ran but *why
 
 **Acceptance Scenarios**:
 
-1. **Given** a call with intent reason "Verify the failed transition did not change the ticket", **When** the row renders, **Then** the reason appears as a second, visually subdued line of the same menu row.
+1. **Given** a call with intent reason "Verify the failed transition did not change the ticket" on macOS 14.4 or newer, **When** the row renders, **Then** the reason appears as the row's standard subtitle — a visually subdued second line of the same menu row.
 2. **Given** a reason longer than the reason budget, **When** the row renders, **Then** the reason is tail-truncated with an ellipsis and the full reason is available in the row's tooltip.
+7. **Given** the app runs on macOS older than 14.4, **When** a row with a reason renders, **Then** the row renders as a single line and the reason remains available via tooltip and assistive-technology label (documented degradation; the subtitle mechanism does not exist there).
 3. **Given** a call without a reason (e.g. an internal discovery call), **When** the row renders, **Then** the row renders as a single line with no empty second line.
 4. **Given** a grouped row (×N) whose newest record has no reason but an older record in the run does, **When** the row renders, **Then** the reason shown is the newest record in the run that has one.
 5. **Given** a row with a reason, **When** read by assistive technology, **Then** the spoken label includes the reason.
@@ -134,24 +135,26 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 
 **Reason display**:
 
-- **FR-005**: Each row MUST display its reason, when present, as a visually subdued second line on a standard menu row: call rows show the caller-declared intent reason; blocked rows show the policy block reason.
-- **FR-006**: The reason line has its own character budget (60 characters), independent of the label budget; longer reasons are tail-truncated with an ellipsis. The full reason MUST be available via tooltip and assistive-technology label.
+- **FR-005**: Each row MUST display its reason, when present, via the standard menu-row subtitle mechanism (macOS 14.4+): call rows show the caller-declared intent reason; blocked rows show the policy block reason. On macOS versions where the subtitle mechanism does not exist (< 14.4, the app's current deployment floor is 13), the row renders single-line and the reason is available via tooltip and assistive-technology label only.
+- **FR-006**: The reason subtitle has its own character budget (60 characters), independent of the label budget; longer reasons are tail-truncated with an ellipsis. The full reason MUST be available via tooltip and assistive-technology label on all macOS versions.
 - **FR-007**: Rows for records without a reason MUST render as a single line.
 - **FR-008**: Live-streamed events MUST carry their intent reason into the row without waiting for the reconciling poll.
-- **FR-009**: Activity and client rows MUST remain standard text menu items (attributed text is permitted); custom view-backed rows are prohibited for these rows.
+- **FR-009**: Activity and client rows MUST remain standard text menu items; custom view-backed rows are prohibited for these rows. The subtitle mechanism is a property of standard menu items and preserves keyboard navigation and VoiceOver behavior.
 
 **Status marking**:
 
 - **FR-010**: Successful rows MUST render without a status icon; assistive technology MUST still announce the outcome.
 - **FR-011**: Failed rows MUST carry a red failure mark and the first clause of the error message; blocked rows MUST carry a visually distinct warning mark (distinct in shape, not color alone).
-- **FR-012**: Policy-blocked records (block decisions only — warnings and redactions do not qualify) MUST qualify as glance rows, including when no corresponding tool-call record exists.
+- **FR-011a**: When a failed call has both an error and an intent reason, the title line composes as "label [×N] · error-clause — age" and the subtitle remains the intent reason — the error never displaces the reason. Truncation precedence on the title line: the error clause is tail-truncated to a 40-character budget before the label's existing middle-truncation budget (34) is tightened; the age is never truncated. Tooltip carries the full label, full reason, and full error message.
+- **FR-012**: Policy-blocked records (persisted status "blocked" / decision "block" only — warnings and redactions do not qualify) MUST qualify as glance rows, including when no corresponding tool-call record exists.
 
 **Data contract** (backend):
 
 - **FR-013**: The activity listing used by the glance poll MUST be able to return, per record, the small contextual fields — intent reason, intent operation type, policy decision and reason, client name — while continuing to omit bulky payload fields (arguments, responses). The poll's payload size must stay within the same order of magnitude as today's projected poll (tens of KB, not hundreds).
 - **FR-014**: The glance poll MUST include policy-decision records (type filter extended).
 - **FR-015**: Policy-decision records MUST carry the same request identity as other activity records, in both live events and persisted records, so live rows reconcile with polled rows without duplication. Records predating this change (no request identity) fall back to their storage identity and are never collapsed.
-- **FR-016**: The sessions listing used by the tray MUST return the N sessions most recent by *last activity* (not by session start) among retained sessions, regardless of session status.
+- **FR-016**: The sessions listing used by the tray MUST return sessions ordered by *last activity* (not by session start) among retained sessions, regardless of session status, with the ordering applied before any truncation.
+- **FR-016a**: The tray's session poll MUST request the entire retained-session page (the retention cap, currently 100, unfiltered by status) so that deduplication and summary counts operate over every retained session, not a truncated page.
 
 **Clients section**:
 
@@ -181,14 +184,14 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 
 ### Measurable Outcomes
 
-- **SC-001**: Replaying the committed reference fixture (a sanitized derivative of the 6-week export preserving its run-length, status, and reason-length distributions) through the row pipeline, no two adjacent rendered rows ever share a group key, and a burst of ≥ 19 identical calls occupies exactly one of the five rows.
-- **SC-002**: For call records carrying a reason (98.7% in the reference export), the reason (possibly truncated) is visible directly in the open menu without any further interaction.
+- **SC-001**: Replaying the committed reference fixture (`specs/090-tray-glance-v2/fixtures/activity-replay.jsonl`, a sanitized derivative of the 6-week export preserving its event order, run-length, status, and reason-length distributions — 1,564 events, 52 blocked / 32 error / 1,480 success) through the row pipeline, no two adjacent rendered rows ever share a group key, and a burst of ≥ 19 identical calls occupies exactly one of the five rows.
+- **SC-002**: On macOS 14.4+, for call records carrying a reason (98.7% in the reference export), the reason (possibly truncated) is visible directly in the open menu without any further interaction.
 - **SC-003**: In a feed where under 6% of events are failures (the reference ratio), failed or blocked rows are the only rows carrying status marks.
 - **SC-004**: During sequential replay of the reference fixture, every policy block becomes visible as (part of) a rendered row at some point; today that number is zero.
 - **SC-005**: After 20 minutes of client inactivity, the Clients section still names the client (as idle) rather than showing an empty state; among retained sessions, the empty state appears only when nothing was active within 24 hours.
 - **SC-006**: Driving the real menu-open path issues zero network requests, asserted via request-counter deltas.
 - **SC-007**: All existing glance unit-test suites still pass, extended to cover the pipeline order, grouping, reason rendering, failure-only marks, blocked rows, presence classification, and boundary timestamps.
-- **SC-008**: Visual encodings (subdued second line, distinct failure/blocked marks, presence indicator fill/shape) are verified by a documented manual test protocol over the running app's menu (screenshot checklist), since automated tests assert only the model-level encoding.
+- **SC-008**: Visual encodings (subdued subtitle, distinct failure/blocked marks, presence indicator fill/shape) are verified by the manual test protocol at `specs/090-tray-glance-v2/verification/manual-protocol.md` — a step list with expected screenshots covering: two-line row with reason (macOS 14.4+), single-line fallback (macOS 13 if available, else waived), failed row, blocked row, grouped ×N row, each presence state, VoiceOver walk of the five rows, and summary line variants — since automated tests assert only the model-level encoding.
 
 ## Assumptions
 
@@ -198,6 +201,7 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 - Blocked rows draw their reason from the policy decision's own reason field; call rows draw theirs from the caller-declared intent.
 - The grouped count reflects the fetched window (up to 100 records per poll); runs longer than the window display the in-window count.
 - The existing histogram submenu content is unchanged; only its position moves.
+- The app's deployment floor stays at macOS 13; the reason subtitle is a macOS 14.4+ enhancement with a documented single-line degradation below that. Raising the floor is a separate product decision, out of scope here.
 - The raw 6-week export contains workplace data and is NOT committed; the committed fixture is a sanitized derivative with equivalent statistical structure.
 - Backend changes are limited to: the lightweight contextual-metadata projection (FR-013), request identity on policy decisions (FR-015), and last-activity ordering for the sessions listing (FR-016). No storage schema migration is required; legacy records degrade gracefully.
 
