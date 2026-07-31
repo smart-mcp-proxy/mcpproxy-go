@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -408,21 +409,28 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 		return nil, err
 	}
 
+	// Resolve the pre-write state ONCE for the whole operation. The token check
+	// and the write must cover the SAME entry — re-resolving per step is what
+	// let a token hash one entry while the write replaced or deleted another
+	// (Spec 091 FR-005).
+	fileExists, existing, _, err := s.preWriteState(client, cfgPath, serverName)
+	if err != nil {
+		return nil, s.asAccessError(client, cfgPath, err)
+	}
+
 	// Precondition check BEFORE any backup or write, so a refusal is completely
 	// inert (Spec 091 FR-005).
 	if preconditionToken != "" {
-		stale, err := s.checkPrecondition(client, cfgPath, serverName, preconditionToken)
-		if stale != nil || err != nil {
-			return stale, err
+		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, fileExists, existing); stale != nil {
+			return stale, nil
 		}
 	}
 
 	var res *ConnectResult
-	var err error
 	if client.Format == "toml" {
 		res, err = s.connectTOML(client, cfgPath, serverName, force)
 	} else {
-		res, err = s.connectJSON(client, cfgPath, serverName, force)
+		res, err = s.connectJSON(client, cfgPath, serverName, force, existing)
 	}
 	// A permission denial anywhere in the read/backup/write chain (the errors
 	// preserve their OS cause via %w) surfaces as a typed *AccessError with
@@ -530,7 +538,12 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 	return nil
 }
 
-func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool) (*ConnectResult, error) {
+// connectJSON writes the entry, adopting the entry `resolved` names when it
+// differs from serverName. The resolution is passed in rather than recomputed
+// so the write acts on exactly the entry the preview described and the
+// precondition token hashed (Spec 091 FR-005); nil means "resolve nothing" for
+// the tokenless callers that never previewed.
+func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool, resolved *existingEntry) (*ConnectResult, error) {
 	if err := s.guardJsoncComments(cfgPath); err != nil {
 		return nil, err
 	}
@@ -562,8 +575,12 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		action = "updated"
 	}
 
-	if client.ID == "opencode" {
-		if adoptedName, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found && adoptedName != serverName {
+	// Adopt the entry the caller already resolved — never a freshly looked-up
+	// one. A key that has vanished from the file since is not adopted: there is
+	// nothing left to delete.
+	if client.ID == "opencode" && resolved != nil && resolved.name != serverName {
+		if _, present := serversMap[resolved.name]; present {
+			adoptedName := resolved.name
 			if !force {
 				return &ConnectResult{
 					Success:    true,
@@ -937,9 +954,28 @@ func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
 	return nil
 }
 
+// findEquivalentJSONServerName resolves the entry a connect would adopt: the
+// requested name when it is already taken, otherwise an entry pointing at our
+// MCP endpoint under some other key (including the legacy ?apikey= shape) so an
+// upgrade updates the existing entry rather than duplicating it.
+//
+// The resolution is DETERMINISTIC by construction — exact name first, then the
+// lowest URL-equivalent name in sorted order. Go randomizes map iteration, and
+// this lookup feeds the preview's summary, the precondition token and the
+// write's delete: an order-dependent answer would let those cover different
+// entries, producing spurious precondition_failed refusals and, under force,
+// silently deleting an entry the user was never shown (Spec 091 FR-005).
 func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, requestedServerName string) (string, bool) {
-	for name, rawEntry := range serversMap {
-		entry, ok := rawEntry.(map[string]interface{})
+	if _, taken := serversMap[requestedServerName]; taken {
+		return requestedServerName, true
+	}
+	names := make([]string, 0, len(serversMap))
+	for name := range serversMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry, ok := serversMap[name].(map[string]interface{})
 		if !ok {
 			continue
 		}
@@ -948,14 +984,9 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 			if !ok {
 				continue
 			}
-			// Match both a clean base URL and a legacy ?apikey= variant so an
-			// upgrade adopts/updates the existing entry rather than duplicating.
 			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
 				return name, true
 			}
-		}
-		if name == requestedServerName {
-			return name, true
 		}
 	}
 	return "", false

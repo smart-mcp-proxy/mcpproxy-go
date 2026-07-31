@@ -122,22 +122,20 @@ func (s *Service) preconditionToken(cfgPath string, fileExists bool, existing *e
 // the user never saw (research D9).
 const actionPreconditionFailed = "precondition_failed"
 
-// checkPrecondition recomputes the token for the CURRENT pre-write state and
-// compares it with the one the caller echoed from its preview. It returns a
-// refusal result on drift, (nil, nil) when the precondition holds, and an error
-// only when the state cannot be resolved at all (e.g. a macOS App-Data denial,
-// which surfaces with its remediation as usual).
-func (s *Service) checkPrecondition(client *ClientDef, cfgPath, serverName, token string) (*ConnectResult, error) {
-	fileExists, existing, _, err := s.preWriteState(client, cfgPath, serverName)
-	if err != nil {
-		return nil, err
-	}
+// checkPrecondition recomputes the token for the pre-write state the caller
+// resolved and compares it with the one the caller echoed from its preview. It
+// returns a refusal result on drift and nil when the precondition holds.
+//
+// The state is passed in, not re-resolved: the write acts on exactly this
+// resolution, so checking a second, independently-resolved one would compare a
+// state neither the preview nor the write ever used (Spec 091 FR-005).
+func (s *Service) checkPrecondition(client *ClientDef, cfgPath, serverName, token string, fileExists bool, existing *existingEntry) *ConnectResult {
 	current := s.preconditionToken(cfgPath, fileExists, existing,
 		buildServerEntry(client.ID, s.entryParams(false)))
 	// Constant-time: the token is a MAC, and a byte-at-a-time comparison would
 	// leak enough to forge one.
 	if hmac.Equal([]byte(current), []byte(token)) {
-		return nil, nil
+		return nil
 	}
 	return &ConnectResult{
 		Success:    false,
@@ -148,7 +146,7 @@ func (s *Service) checkPrecondition(client *ClientDef, cfgPath, serverName, toke
 		Message: fmt.Sprintf(
 			"%s or the entry MCPProxy would write changed since the preview was generated; nothing was written — re-run the preview and confirm the new change",
 			cfgPath),
-	}, nil
+	}
 }
 
 // canonicalJSON marshals a parsed entry deterministically. A nil map still
