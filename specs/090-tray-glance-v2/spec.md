@@ -146,7 +146,7 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 - **FR-010**: Successful rows MUST render without a status icon; assistive technology MUST still announce the outcome.
 - **FR-011**: Failed rows MUST carry a red failure mark and the first clause of the error message; blocked rows MUST carry a visually distinct warning mark (distinct in shape, not color alone).
 - **FR-011a**: When a failed call has both an error and an intent reason, the title line composes as "label [×N] · error-clause — age" and the subtitle remains the intent reason — the error never displaces the reason. Truncation precedence on the title line: the error clause is tail-truncated to a 40-character budget before the label's existing middle-truncation budget (34) is tightened; the age is never truncated. Tooltip carries the full label, full reason, and full error message.
-- **FR-012**: Policy-blocked records (persisted status "blocked" / decision "block" only — warnings and redactions do not qualify) MUST qualify as glance rows, including when no corresponding tool-call record exists.
+- **FR-012**: Policy-blocked records (persisted status "blocked", decision "blocked" — the canonical value the runtime emits; legacy "block" is also accepted; warnings and redactions do not qualify) MUST qualify as glance rows, including when no corresponding tool-call record exists.
 
 **Data contract** (backend):
 
@@ -187,7 +187,7 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 - **SC-001**: Replaying the committed reference fixture (`specs/090-tray-glance-v2/fixtures/activity-replay.jsonl`, a sanitized derivative of the 6-week export preserving its event order, run-length, status, and reason-length distributions — 1,564 events, 52 blocked / 32 error / 1,480 success) through the row pipeline, no two adjacent rendered rows ever share a group key, and a burst of ≥ 19 identical calls occupies exactly one of the five rows.
 - **SC-002**: On macOS 14.4+, for call records carrying a reason (98.7% in the reference export), the reason (possibly truncated) is visible directly in the open menu without any further interaction.
 - **SC-003**: In a feed where under 6% of events are failures (the reference ratio), failed or blocked rows are the only rows carrying status marks.
-- **SC-004**: During sequential replay of the reference fixture, every policy block becomes visible as (part of) a rendered row at some point; today that number is zero.
+- **SC-004**: During chronological replay of the reference fixture (oldest event first — i.e. the fixture file, which is stored newest-first, replayed in reverse line order), where each step renders the pipeline over the latest 100-record window as the poll would see it, every policy block becomes visible as (part of) a rendered row at some step; today that number is zero.
 - **SC-005**: After 20 minutes of client inactivity, the Clients section still names the client (as idle) rather than showing an empty state; among retained sessions, the empty state appears only when nothing was active within 24 hours.
 - **SC-006**: Driving the real menu-open path issues zero network requests, asserted via request-counter deltas.
 - **SC-007**: All existing glance unit-test suites still pass, extended to cover the pipeline order, grouping, reason rendering, failure-only marks, blocked rows, presence classification, and boundary timestamps.
