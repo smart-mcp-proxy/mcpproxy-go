@@ -290,6 +290,21 @@ final class ConnectClientModel: ObservableObject {
 
     // MARK: - Selection
 
+    /// The selection the list may hold, given the row the user just clicked.
+    ///
+    /// An unsupported client is visible but is NOT a selection (FR-009) — and a
+    /// click on it still moves the list's own highlight. Left there, the
+    /// highlight names one client while the detail pane, the preview and an
+    /// enabled Connect button all still target the previous one, so the form
+    /// would write a config the user was not looking at. The view snaps the
+    /// highlight back to whatever this returns.
+    func listSelection(for candidate: String?) -> String? {
+        guard let candidate,
+              rows.first(where: { $0.clientId == candidate })?.isSelectable == true
+        else { return selection }
+        return candidate
+    }
+
     /// Select a client: resolve its authoritative state and a fresh preview.
     /// This is the only place a client config's *contents* are read, and only
     /// because the user explicitly asked for this client (FR-002).

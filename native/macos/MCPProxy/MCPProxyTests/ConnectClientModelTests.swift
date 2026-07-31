@@ -794,6 +794,46 @@ final class ConnectClientModelTests: XCTestCase {
         XCTAssertTrue(source.disconnectCalls.isEmpty)
         XCTAssertFalse(model.isDisconnectEnabled)
     }
+
+    // MARK: - List selection (FR-009)
+
+    /// An unsupported client stays visible but is not a selection. Clicking it
+    /// still moves the list's own highlight, so the model has to say what the
+    /// selection may be — otherwise the highlight sits on one client while the
+    /// detail pane, the preview and an ENABLED Connect button still target
+    /// another, and the user writes a config they were not looking at.
+    func testAnUnsupportedRowIsNotASelectionAndSnapsBack() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "cursor", name: "Cursor"),
+            FakeConnectSource.client(id: "opencode", name: "OpenCode", supported: false,
+                                     reason: "not supported on this platform")
+        ])]
+        let model = makeModel(source)
+        await model.loadList()
+        await model.select("cursor")
+
+        XCTAssertEqual(model.listSelection(for: "opencode"), "cursor",
+                       "the highlight must snap back to the client the form is showing")
+        XCTAssertEqual(model.listSelection(for: "cursor"), "cursor")
+        XCTAssertEqual(model.listSelection(for: nil), "cursor",
+                       "clearing the highlight must not orphan the pane either")
+        XCTAssertEqual(model.selection, "cursor", "and nothing about the form changed")
+    }
+
+    /// With nothing selected yet, an unsupported row resolves to no selection —
+    /// the pane keeps its "select a client" placeholder.
+    func testAnUnsupportedRowResolvesToNoSelectionWhenNoneExists() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "opencode", name: "OpenCode", supported: false)
+        ])]
+        let model = makeModel(source)
+        await model.loadList()
+
+        XCTAssertNil(model.listSelection(for: "opencode"))
+        XCTAssertNil(model.selection)
+    }
 }
 
 /// Presentation wiring for the Connect Client form (spec 091 T018): one shared

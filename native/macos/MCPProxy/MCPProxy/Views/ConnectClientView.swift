@@ -178,10 +178,15 @@ struct ConnectClientView: View {
             .disabled(model.isBusy)
             .onChange(of: selectedID) { newValue in
                 // An unsupported client stays visible but is not a selection:
-                // there is nothing the form could do for it (FR-009).
-                guard let newValue,
-                      model.rows.first(where: { $0.clientId == newValue })?.isSelectable == true
-                else { return }
+                // there is nothing the form could do for it (FR-009). Leaving
+                // the highlight on it would point at one client while the pane
+                // and the Connect button still target another, so it snaps back.
+                let allowed = model.listSelection(for: newValue)
+                guard allowed == newValue else {
+                    selectedID = allowed
+                    return
+                }
+                guard let newValue, newValue != model.selection else { return }
                 Task { await model.select(newValue) }
             }
         }
