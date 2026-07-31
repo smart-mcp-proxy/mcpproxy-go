@@ -160,8 +160,22 @@ func refusalText(errs ...error) string {
 // an unreadable-but-not-denied or unparseable config yields the corresponding
 // access state with no resolved entry.
 func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (fileExists bool, existing *existingEntry, accessState string, err error) {
-	if _, statErr := os.Stat(cfgPath); statErr != nil {
-		return false, nil, accessAbsent, nil
+	if _, statErr := s.stat(cfgPath); statErr != nil {
+		// ONLY "not there" is an absent config. Any other stat failure —
+		// a permission-blocked file or parent directory above all — means we do
+		// not know what is there, and reporting "absent" would render the create
+		// promise ("it will be created, and Undo removes it") over a write that
+		// cannot succeed, leaving the user to discover the denial by clicking.
+		if os.IsNotExist(statErr) {
+			return false, nil, accessAbsent, nil
+		}
+		state := classifyAccess(statErr)
+		if state == accessDenied {
+			return true, nil, state, s.newAccessError(client, cfgPath, statErr)
+		}
+		// Anything else is classified conservatively (malformed): no create
+		// promise, and the form offers no Connect control.
+		return true, nil, state, nil
 	}
 	raw, rerr := s.read(cfgPath)
 	if rerr != nil {

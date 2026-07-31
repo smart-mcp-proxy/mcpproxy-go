@@ -84,6 +84,11 @@ type Service struct {
 	// readFile is the content-read seam (Spec 075 T003). Defaults to os.ReadFile;
 	// tests inject a permission-denied error or a call counter through it.
 	readFile func(string) ([]byte, error)
+	// statFile is the metadata seam alongside readFile. Defaults to os.Stat.
+	// Existence checks route through it so a stat that fails for a reason OTHER
+	// than "not there" can be classified honestly instead of being reported as
+	// an absent config.
+	statFile func(string) (os.FileInfo, error)
 
 	// tokenKey is the per-core-instance HMAC key for connect-preview
 	// precondition tokens (Spec 091 FR-005). Generated lazily by
@@ -156,6 +161,20 @@ func NewServiceWithReader(listenAddr, apiKey, homeDir string, readFile func(stri
 
 // setReadFile overrides the content-read seam (test helper).
 func (s *Service) setReadFile(fn func(string) ([]byte, error)) { s.readFile = fn }
+
+// setStat overrides the metadata seam (test helper), so a permission-blocked
+// stat can be exercised without depending on OS permission bits (which root
+// ignores and Windows does not model the same way).
+func (s *Service) setStat(fn func(string) (os.FileInfo, error)) { s.statFile = fn }
+
+// stat performs a metadata check through the seam, falling back to os.Stat for
+// a zero-value Service. No config content is read (Spec 075 FR-001).
+func (s *Service) stat(path string) (os.FileInfo, error) {
+	if s.statFile != nil {
+		return s.statFile(path)
+	}
+	return os.Stat(path)
+}
 
 // read performs a config content read through the seam, falling back to
 // os.ReadFile for a zero-value Service.
@@ -291,8 +310,14 @@ func (s *Service) GetAllStatus() []ClientStatus {
 		}
 
 		// Metadata-only existence check (no content read).
-		if _, err := os.Stat(cfgPath); err == nil {
+		if _, err := s.stat(cfgPath); err == nil {
 			status.Exists = true
+		} else if !os.IsNotExist(err) {
+			// Still no content read — but a stat we were not allowed to make is
+			// not evidence of absence, and leaving the row to say "No config
+			// found" would name the wrong problem. Classifying the stat error
+			// costs nothing extra here.
+			status.AccessState = classifyAccess(err)
 		}
 
 		statuses = append(statuses, status)
@@ -324,8 +349,17 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		AccessState: accessUnknown,
 	}
 
-	if _, err := os.Stat(cfgPath); err == nil {
+	if _, err := s.stat(cfgPath); err == nil {
 		status.Exists = true
+	} else if !os.IsNotExist(err) {
+		// We could not even look. Claiming "no config found" here would report a
+		// permission block as "not installed" and hide the remediation the user
+		// needs (Spec 075 FR-004).
+		status.AccessState = classifyAccess(err)
+		if status.AccessState == accessDenied {
+			status.Remediation = remediationText(c.Name)
+		}
+		return status, nil
 	}
 	if !status.Exists {
 		status.AccessState = accessAbsent
