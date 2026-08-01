@@ -122,8 +122,21 @@ final class AppState: ObservableObject {
     /// an empty array means "loaded, and the proxy was idle".
     @Published var usageTimeline: [UsageBucket]?
 
-    /// Calls recorded in the CURRENT UTC hour. `nil` means "not loaded yet".
+    /// Calls recorded in the CURRENT UTC hour, as of the last usage poll. `nil`
+    /// means "not loaded yet".
+    ///
+    /// This is the POLLED number. What the header renders is
+    /// `glanceCallsThisHour(now:)`, which adds the calls that have arrived over
+    /// SSE since — see there for why the raw value cannot be shown.
     @Published var callsThisHour: Int?
+
+    /// When each live SSE call that the usage timeline will eventually count
+    /// arrived, for as long as the poll has not answered for it.
+    ///
+    /// Not `@Published`: every write here happens inside `prependGlanceActivity`
+    /// or `updateUsage`, both of which publish something the menu already
+    /// rebuilds on, so publishing this too would only double the churn.
+    private var liveCallsSinceUsagePoll: [Date] = []
 
     /// Last usage-refresh failure, surfaced as a muted row in the histogram
     /// submenu. `nil` means "no failure recorded"; the next successful refresh
@@ -369,6 +382,38 @@ final class AppState: ObservableObject {
         return 0
     }
 
+    /// Whether a live SSE row will show up in the usage timeline's call count
+    /// once the poll catches up.
+    ///
+    /// The core's aggregate counts records of type `tool_call` and nothing else
+    /// — a blocked policy decision never executed, and an internal (built-in)
+    /// call is not an upstream one (`UsageAggregate.Apply`,
+    /// internal/runtime/usage_aggregate.go). Counting anything wider here would
+    /// swap one disagreement for the opposite one: the header would overshoot
+    /// the rows and then jump BACK at the next poll.
+    static func countsTowardUsageTimeline(_ entry: ActivityEntry) -> Bool {
+        entry.type == "tool_call" && !(entry.toolName ?? "").isEmpty
+    }
+
+    /// The header's call count: the polled hour total plus the calls that have
+    /// arrived over SSE since that poll and fall in the same hour.
+    ///
+    /// The rows in the glance block come from SSE and are on screen within
+    /// milliseconds; the count came from a poll up to 30 seconds old, so the
+    /// header routinely sat one or more calls below the rows beneath it (GH
+    /// #934). Both now move on the same event.
+    ///
+    /// Still `nil` before the first usage response. A live call must not invent
+    /// "1 call this hour" for a proxy that has served hundreds — until the poll
+    /// answers there is no total to add to, and the header omits the segment.
+    @MainActor
+    func glanceCallsThisHour(now: Date = Date()) -> Int? {
+        guard let callsThisHour else { return nil }
+        let hour = AppState.floorToHour(now)
+        let live = liveCallsSinceUsagePoll.filter { AppState.floorToHour($0) == hour }.count
+        return callsThisHour + live
+    }
+
     /// Store the 24h timeline and derive the current-hour headline count.
     ///
     /// Ignored unless the core is `.connected`, like the other two glance
@@ -385,6 +430,10 @@ final class AppState: ObservableObject {
         if usageTimeline != timeline { usageTimeline = timeline }
         let calls = AppState.callsInCurrentHour(timeline, now: now)
         if callsThisHour != calls { callsThisHour = calls }
+        // The poll has now answered for everything that happened before it, so
+        // the live increments it superseded are dropped rather than added to
+        // it. That is what keeps the two from accumulating (GH #934).
+        liveCallsSinceUsagePoll = []
         if usageError != nil { usageError = nil }
         clearGlanceFailure(.usage)
     }
@@ -698,6 +747,12 @@ final class AppState: ObservableObject {
     @MainActor
     func prependGlanceActivity(_ entry: ActivityEntry, generation: Int) {
         guard isCurrentConnection(generation) else { return }
+        // Before the row it belongs to, so the two are published together: the
+        // header must never be a number the rows underneath it contradict.
+        if AppState.countsTowardUsageTimeline(entry),
+           let stamp = GlanceFormatting.parseTimestamp(entry.timestamp) {
+            liveCallsSinceUsagePoll.append(stamp)
+        }
         // Unconfirmed until a poll carries it back: this is the only row the
         // merge is allowed to keep against a page that omits it.
         unconfirmedLiveKeys.insert(GlanceSelection.recordKey(for: entry))
@@ -745,6 +800,7 @@ final class AppState: ObservableObject {
         if !glanceSessions.isEmpty { glanceSessions = [] }
         if usageTimeline != nil { usageTimeline = nil }
         if callsThisHour != nil { callsThisHour = nil }
+        if !liveCallsSinceUsagePoll.isEmpty { liveCallsSinceUsagePoll = [] }
         if usageError != nil { usageError = nil }
         if !unconfirmedLiveKeys.isEmpty { unconfirmedLiveKeys = [] }
         if !glanceFailureStreak.isEmpty { glanceFailureStreak = [:] }
