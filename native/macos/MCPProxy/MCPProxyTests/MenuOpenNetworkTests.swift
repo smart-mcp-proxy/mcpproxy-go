@@ -69,7 +69,13 @@ final class MenuOpenNetworkTests: XCTestCase {
         // give the run loop long enough for one to land. Without this the test
         // could only catch a synchronous regression, and there is no synchronous
         // way to fetch — every route is async.
-        let deadline = Date().addingTimeInterval(0.3)
+        //
+        // This window is the only thing between an async regression and a
+        // vacuous pass, so it errs long: a runner slow enough to schedule that
+        // Task in more than a second would otherwise report green. It costs the
+        // full second only when there is nothing to find — the loop leaves the
+        // moment a request appears.
+        let deadline = Date().addingTimeInterval(1.0)
         while Date() < deadline, source.totalCallCount == requestsBefore,
               GlanceStubURLProtocol.requestedURLs.isEmpty {
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
