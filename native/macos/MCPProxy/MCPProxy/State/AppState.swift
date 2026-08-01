@@ -130,6 +130,15 @@ final class AppState: ObservableObject {
     /// SSE since — see there for why the raw value cannot be shown.
     @Published var callsThisHour: Int?
 
+    /// The UTC hour `callsThisHour` is a total FOR.
+    ///
+    /// Without it the polled number outlives its hour: at 09:00:00, with the
+    /// last poll up to 30 seconds old, the header went on reporting 08:00's
+    /// total as "this hour" — and did so while the live half of the same sum
+    /// was already being filtered by hour, so the two halves disagreed about
+    /// which hour they were describing.
+    private var callsThisHourBucket: Date?
+
     /// When each live SSE call that the usage timeline will eventually count
     /// arrived, for as long as the poll has not answered for it.
     ///
@@ -137,6 +146,19 @@ final class AppState: ObservableObject {
     /// or `updateUsage`, both of which publish something the menu already
     /// rebuilds on, so publishing this too would only double the churn.
     private var liveCallsSinceUsagePoll: [Date] = []
+
+    /// The instant the most recent completed usage poll was ISSUED — the line
+    /// between "the core has already counted this call" and "it has not".
+    ///
+    /// A poll is an `await` across the network, and SSE rows land on the same
+    /// actor while it is in flight, so the two interleave. Clearing the live
+    /// list wholesale on any completed poll therefore dropped calls the poll
+    /// could not have seen (header falls from 13 back to 12 under a visible
+    /// thirteenth row), and re-admitting calls it already counted double-counted
+    /// them (header climbs to 14). Both are settled by one boundary: a live call
+    /// counts only while its timestamp is strictly after the poll that is
+    /// currently answering for the hour.
+    private var usagePollBoundary: Date = .distantPast
 
     /// Last usage-refresh failure, surfaced as a muted row in the histogram
     /// submenu. `nil` means "no failure recorded"; the next successful refresh
@@ -406,11 +428,21 @@ final class AppState: ObservableObject {
     /// Still `nil` before the first usage response. A live call must not invent
     /// "1 call this hour" for a proxy that has served hundreds — until the poll
     /// answers there is no total to add to, and the header omits the segment.
+    ///
+    /// Once the hour rolls over, the polled total is dropped rather than
+    /// carried: it is a total for the hour that just ended, and reporting it as
+    /// this hour's is the same kind of untruth the live increment exists to
+    /// remove. What is left is the calls seen since — 0 on a quiet proxy, which
+    /// is exactly right, and corrected within one poll if it is not.
     @MainActor
     func glanceCallsThisHour(now: Date = Date()) -> Int? {
         guard let callsThisHour else { return nil }
         let hour = AppState.floorToHour(now)
         let live = liveCallsSinceUsagePoll.filter { AppState.floorToHour($0) == hour }.count
+        // Dropped only when the total is KNOWN to be for another hour. A total
+        // with no recorded bucket has no provenance to distrust — production
+        // always writes the two together in `updateUsage`.
+        if let bucket = callsThisHourBucket, bucket != hour { return live }
         return callsThisHour + live
     }
 
@@ -424,16 +456,30 @@ final class AppState: ObservableObject {
     /// write feeds the debounced `objectWillChange → rebuildMenu()` sink in
     /// MCPProxyApp — an unguarded write here would rebuild the menu every 30s on
     /// a completely idle proxy. `UsageBucket` is `Equatable`, so the guard is free.
+    ///
+    /// `polledAt` is when the request that produced this timeline was ISSUED,
+    /// not when its answer arrived — the two differ by a round trip during
+    /// which SSE rows keep landing, and the difference is the whole reason the
+    /// parameter exists. It defaults to `now` for the callers (tests, mostly)
+    /// that have no separate notion of the two.
     @MainActor
-    func updateUsage(timeline: [UsageBucket], now: Date = Date()) {
+    func updateUsage(timeline: [UsageBucket], now: Date = Date(), polledAt: Date? = nil) {
         guard coreState == .connected else { return }
         if usageTimeline != timeline { usageTimeline = timeline }
         let calls = AppState.callsInCurrentHour(timeline, now: now)
         if callsThisHour != calls { callsThisHour = calls }
-        // The poll has now answered for everything that happened before it, so
-        // the live increments it superseded are dropped rather than added to
-        // it. That is what keeps the two from accumulating (GH #934).
-        liveCallsSinceUsagePoll = []
+        // Which hour that total is FOR. Not @Published: it only ever changes
+        // alongside `callsThisHour`, which already drives the rebuild.
+        callsThisHourBucket = AppState.floorToHour(now)
+        // This poll answered for everything that had already happened when it
+        // was issued, so those live increments are dropped rather than added to
+        // it — that is what keeps the two from accumulating (GH #934). What it
+        // could NOT have seen is kept: a call that arrived while the request was
+        // in flight is still ours to count, and dropping it made the header fall
+        // back below the row already on screen for up to 30 seconds.
+        let boundary = polledAt ?? now
+        usagePollBoundary = boundary
+        liveCallsSinceUsagePoll.removeAll { $0 <= boundary }
         if usageError != nil { usageError = nil }
         clearGlanceFailure(.usage)
     }
@@ -469,10 +515,14 @@ final class AppState: ObservableObject {
     @MainActor
     func refreshUsage(from source: GlanceDataSource) async {
         let generation = connectionGeneration
+        // Stamped BEFORE the await. Everything the core had counted by now is
+        // in the answer; anything that arrives over SSE while this request is in
+        // flight is not, and the two are told apart by this instant alone.
+        let issuedAt = Date()
         do {
             let usage = try await source.usageAggregate(window: "24h", top: 1)
             guard isCurrentConnection(generation) else { return }
-            updateUsage(timeline: usage.timeline)
+            updateUsage(timeline: usage.timeline, polledAt: issuedAt)
         } catch {
             guard isCurrentConnection(generation) else { return }
             recordUsageFailure(AppState.usageFailureMessage(for: error))
@@ -749,8 +799,14 @@ final class AppState: ObservableObject {
         guard isCurrentConnection(generation) else { return }
         // Before the row it belongs to, so the two are published together: the
         // header must never be a number the rows underneath it contradict.
+        //
+        // Only calls the last poll cannot already have counted. An SSE event for
+        // a call that happened before that poll was issued is a LATE row, not a
+        // new call — the aggregate has it, and adding it again pushed the header
+        // one above the rows until the next poll corrected it.
         if AppState.countsTowardUsageTimeline(entry),
-           let stamp = GlanceFormatting.parseTimestamp(entry.timestamp) {
+           let stamp = GlanceFormatting.parseTimestamp(entry.timestamp),
+           stamp > usagePollBoundary {
             liveCallsSinceUsagePoll.append(stamp)
         }
         // Unconfirmed until a poll carries it back: this is the only row the
@@ -800,7 +856,9 @@ final class AppState: ObservableObject {
         if !glanceSessions.isEmpty { glanceSessions = [] }
         if usageTimeline != nil { usageTimeline = nil }
         if callsThisHour != nil { callsThisHour = nil }
+        callsThisHourBucket = nil
         if !liveCallsSinceUsagePoll.isEmpty { liveCallsSinceUsagePoll = [] }
+        usagePollBoundary = .distantPast
         if usageError != nil { usageError = nil }
         if !unconfirmedLiveKeys.isEmpty { unconfirmedLiveKeys = [] }
         if !glanceFailureStreak.isEmpty { glanceFailureStreak = [:] }

@@ -91,7 +91,8 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
     /// it instead of waiting for the next usage poll.
     func testALiveCallIsCountedInTheHeaderBeforeTheNextPoll() {
         let state = Self.connectedState()
-        state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now)
+        state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now,
+                          polledAt: Self.now.addingTimeInterval(-1))
         XCTAssertEqual(Self.makeSection().items(for: state, now: Self.now).first?.title,
                        "12 calls this hour · 1 active",
                        "precondition: the polled count is what the header shows")
@@ -111,7 +112,8 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
     /// answer replaces it outright, so the two can never accumulate.
     func testTheNextPollSupersedesTheLiveIncrement() {
         let state = Self.connectedState()
-        state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now)
+        state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now,
+                          polledAt: Self.now.addingTimeInterval(-1))
         state.prependGlanceActivity(
             GlanceFixtures.entry(id: "live", server: "github", tool: "create_issue",
                                  timestamp: "2027-01-15T08:00:00Z", session: "sess-a"),
@@ -119,11 +121,58 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
         )
         XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 13)
 
-        // The poll that has now seen the same call.
-        state.updateUsage(timeline: [Self.bucket(calls: 13)], now: Self.now)
+        // The poll that has now seen the same call: issued after it happened.
+        state.updateUsage(timeline: [Self.bucket(calls: 13)], now: Self.now, polledAt: Self.now)
         XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 13,
                        "the poll's count already includes the live call; adding it twice "
                        + "is the drift this fix exists to remove")
+    }
+
+    /// A poll is an `await` across the network, and SSE rows land on the same
+    /// actor while it is in flight. A response that snapshotted the core BEFORE
+    /// a live call happened cannot answer for that call, so it must not delete
+    /// it: the header dropping from 13 back to 12 under a visible thirteenth row
+    /// — and staying there for up to 30 seconds — is the same inconsistency
+    /// #934 is about, arriving from the other direction.
+    func testAPollAlreadyInFlightDoesNotEraseACallItCouldNotHaveSeen() {
+        let state = Self.connectedState()
+        state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now,
+                          polledAt: Self.now.addingTimeInterval(-60))
+
+        // The next poll is issued…
+        let issuedAt = Self.now
+        // …a call arrives five seconds later, while it is still in flight…
+        state.prependGlanceActivity(
+            GlanceFixtures.entry(id: "live", server: "github", tool: "create_issue",
+                                 timestamp: "2027-01-15T08:00:05Z", session: "sess-a"),
+            generation: state.connectionGeneration
+        )
+        XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 13)
+
+        // …and the response, which counted 12, lands after it.
+        state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now, polledAt: issuedAt)
+        XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 13,
+                       "that poll answered for 08:00:00; the call at 08:00:05 is still ours")
+    }
+
+    /// The mirror image. The aggregate counted a call, the response was
+    /// processed, and the SSE event for that same call is delivered a few
+    /// milliseconds later. Adding it on top of a total that already contains it
+    /// makes the header overshoot the rows until the next poll.
+    func testACallTheLastPollAlreadyCountedIsNotAddedAgainWhenItsEventArrivesLate() {
+        let state = Self.connectedState()
+        let calledAt = "2027-01-15T08:00:05Z"
+        // Issued after the call happened, so its 13 includes it.
+        state.updateUsage(timeline: [Self.bucket(calls: 13)], now: Self.now,
+                          polledAt: GlanceFormatting.parseTimestamp("2027-01-15T08:00:10Z")!)
+
+        state.prependGlanceActivity(
+            GlanceFixtures.entry(id: "live", server: "github", tool: "create_issue",
+                                 timestamp: calledAt, session: "sess-a"),
+            generation: state.connectionGeneration
+        )
+        XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 13,
+                       "the row is late, the call is not: the poll already counted it")
     }
 
     /// Only what the usage timeline itself counts. A blocked call never
@@ -138,18 +187,39 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
     }
 
     /// A live call from the hour that just ended belongs to that hour's bucket,
-    /// not to this one.
-    func testALiveCallFromAnEarlierHourIsNotCountedInThisOne() {
+    /// not to this one — and neither does the POLLED total it was added to.
+    /// "12 calls this hour" for an hour in which nothing has happened yet is the
+    /// same lie as the one the live increment fixes, told by the other half of
+    /// the sum.
+    func testNeitherHalfOfTheCountSurvivesAnHourRollover() {
         let state = Self.connectedState()
         state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now)
         state.prependGlanceActivity(
             GlanceFixtures.entry(id: "live", server: "github", tool: "create_issue",
-                                 timestamp: "2027-01-15T08:00:00Z", session: "sess-a"),
+                                 timestamp: "2027-01-15T08:00:30Z", session: "sess-a"),
             generation: state.connectionGeneration
         )
+        XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 13,
+                       "precondition: both halves count inside the polled hour")
+
         // …an hour later, with no poll in between.
         let nextHour = Self.now.addingTimeInterval(3600)
-        XCTAssertEqual(state.glanceCallsThisHour(now: nextHour), 12)
+        XCTAssertEqual(state.glanceCallsThisHour(now: nextHour), 0,
+                       "the poll answered for 07:00–08:00; nothing has answered for 08:00–09:00")
+    }
+
+    /// The base is stale only until it is stale in the same direction as the
+    /// live calls: a call that arrives in the NEW hour is this hour's whole
+    /// count, and the previous hour's polled total must not be added to it.
+    func testAfterAnHourRolloverOnlyTheNewHoursLiveCallsCount() {
+        let state = Self.connectedState()
+        state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now)
+        state.prependGlanceActivity(
+            GlanceFixtures.entry(id: "next-hour", server: "github", tool: "create_issue",
+                                 timestamp: "2027-01-15T09:00:10Z", session: "sess-a"),
+            generation: state.connectionGeneration
+        )
+        XCTAssertEqual(state.glanceCallsThisHour(now: Self.now.addingTimeInterval(3600)), 1)
     }
 
     /// Nothing to add to. Until the first usage response the header has no call
