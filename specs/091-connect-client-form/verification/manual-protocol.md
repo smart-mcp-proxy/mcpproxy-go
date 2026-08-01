@@ -36,7 +36,32 @@ Run on the built app (`scripts/build-swift-app.sh`) against a dev core
 | 13 | Legacy path | dashboard connect control routes into this form (no preview-less native connect remains) | `12-dashboard.png` |
 | 14 | VoiceOver | ⌘F5: list rows, preview text, and buttons announced; identifiers stable | note below |
 
-## Results
+## Results (executed)
+
+**Status: RUN 2026-08-01 06:22–06:40** — macOS 26 / Darwin 25.5.0; app built from this branch (+ `MCPPROXY_SOCKET_PATH` override), isolated core `:18091` at `/tmp/mp91` with **`HOME=/tmp/mpqa-home`** so the user's real client configs were never touched. Seeded: cursor (entry present, stale port + secret header), windsurf (config, no entry), vscode (malformed JSON), gemini (user-authored entry with `user:pass@…?apikey=` URL), claude-code/codex/opencode (absent).
+
+| # | Check | Result | Evidence |
+|---|-------|--------|----------|
+| 1 | Menu item | PASS — "Connect Client…" directly under "Add Server…" | menu listing |
+| 2 | List states | PASS — Config present / No config found / bridge note for Claude Desktop; no TCC prompts on open | `shots/02-list.png` |
+| 2b | No content reads on open | PASS (log-verified: aggregate is stat-only; detail+preview fire only on selection) | core log |
+| 3 | SC-001 stopwatch | PASS — menu → connected in ~25 s, no browser | timed run |
+| 4/5 | Preview (replace) | PASS — pending entry, path, **structural summary** (`Replacing existing entry "mcpproxy"`, Type, Endpoint `…:9999/mcp`, `Headers: X-API-Key`) — **no secret values**, backup statement, Advanced collapsed | `shots/04-preview-replace.png` |
+| 7 | Credential notice | N/A this run — dev core had `require_mcp_auth` off, so the pending entry embedded no credential (correctly no notice) | — |
+| 8 | Connect + refresh | PASS — file written, `mcp.json.bak.20260801-062951` created, green banner, row → Connected without reopening | `shots/07-connected.png` |
+| 9 | Undo (session) | PASS — Undo appeared post-connect; restored the file **byte-exactly** (md5 `5e6ed766…` before == after) incl. the secret header | md5 diff |
+| 9d | Non-create-capable absent | PASS — OpenCode shows the core refusal verbatim in red; **Connect control absent** (Close only) | `shots/08d-opencode.png` |
+| 10 | Disconnect | PASS — confirmation names entry AND file before anything happens; Cancel wrote nothing (md5 unchanged) | `shots/09-disconnect.png` |
+| 11 | Malformed config | PASS — row "Config unreadable", path shown, **Connect control absent** | `shots/10-malformed.png` |
+| 14 | VoiceOver | WAIVED — user actively at the machine; AX identifiers unit-tested | — |
+
+**Waived / not run:** 6 (create-case preview — covered by 9d's sibling path and unit tests), 9b (created-file undo — unit-tested), 9c (live conflict re-preview — unit-tested incl. masked-credential drift), 12 (core-down waiting state — unit-tested 2 s poll), 13 (dashboard routing — unit-tested `DashboardConnectControl` → shared presentation path).
+
+**Observations (non-blocking):**
+- The malformed detail pane shows the path and withholds Connect, but gives no inline "why". Row label carries it. Possible polish.
+- `~/.config/opencode/opencode.json` and `~/.claude.json` **are** found correctly against a real home — verified separately (`exists=true` for claude-code, claude-desktop, cursor, codex, gemini, opencode). The "No config found" rows in these shots are an artifact of the deliberate scratch `HOME`, not a detection bug.
+
+## Results (template)
 
 **Status: NOT RUN.**
 
