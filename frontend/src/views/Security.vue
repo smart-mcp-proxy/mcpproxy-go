@@ -117,6 +117,15 @@
           {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
         </div>
       </div>
+      <!-- Offline TPA signature corpus (spec 086 FR-019 / #938): which
+           signatures are live, where they came from, and how fresh they are. -->
+      <div v-if="signatureBundle" class="stat" data-test="signature-bundle-stat">
+        <div class="stat-title">{{ signatureBundle.title }}</div>
+        <div class="stat-value" :class="signatureBundle.tone">{{ signatureBundle.value }}</div>
+        <div class="stat-desc truncate" :class="signatureBundle.tone" :title="signatureBundle.tooltip">
+          {{ signatureBundle.detail }}
+        </div>
+      </div>
     </div>
 
     <!-- Docker unavailable warning (only after overview has loaded) -->
@@ -469,6 +478,7 @@ import api from '@/services/api'
 import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { useSystemStore } from '@/stores/system'
 import { scanReportPath } from '@/utils/serverRoute'
+import { formatSignatureBundle } from '@/utils/signatureBundle'
 
 const systemStore = useSystemStore()
 
@@ -531,6 +541,11 @@ const customEnvValue = ref('')
 const configDockerImage = ref('')
 
 const totalFindings = computed(() => overview.value?.findings_by_severity?.total || 0)
+
+// Offline TPA signature corpus descriptor (spec 086 FR-019 / GH #938). Null on
+// an older daemon that does not report `signature_bundle`, so the stat is
+// simply absent rather than rendering a misleading zero.
+const signatureBundle = computed(() => formatSignatureBundle(overview.value?.signature_bundle))
 
 // Docker isolation state — populated from /api/v1/config + /api/v1/servers.
 const isolationEnabled = ref(false)

@@ -603,6 +603,17 @@ func applyTLSEnvOverrides(cfg *Config) {
 		cfg.TrustedHosts = hosts
 	}
 
+	// Override the offline TPA signature-bundle path from environment
+	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;
+	// the env value wins over the file value, and materializes the security
+	// block so a config with no `security` key can still point at a corpus.
+	if value := os.Getenv("MCPPROXY_TPA_BUNDLE_PATH"); value != "" {
+		if cfg.Security == nil {
+			cfg.Security = &SecurityConfig{}
+		}
+		cfg.Security.TPABundlePath = value
+	}
+
 	// Override retrieve_tools serialization mode from environment (Spec 085).
 	// Explicit MCPPROXY_* alias per the established loader convention; the
 	// value is validated by cfg.Validate() right after these overrides apply.

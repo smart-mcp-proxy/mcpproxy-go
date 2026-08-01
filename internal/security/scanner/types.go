@@ -357,6 +357,12 @@ type SecurityOverview struct {
 	ServersScanned     int           `json:"servers_scanned"`
 	LastScanAt         time.Time     `json:"last_scan_at,omitempty"`
 	DockerAvailable    bool          `json:"docker_available"`
+	// SignatureBundle describes the offline TPA signature corpus the scanner is
+	// actually running: source (embedded vs a configured file), version,
+	// freshness stamp, fingerprint, and the runnable/skipped rule split
+	// (spec 086 FR-019, GH #938 finding 2). Before this, a years-stale corpus
+	// was indistinguishable from a fresh export on every operator surface.
+	SignatureBundle *BundleInfo `json:"signature_bundle,omitempty"`
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler

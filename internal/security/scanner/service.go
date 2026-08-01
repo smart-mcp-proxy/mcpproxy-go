@@ -263,6 +263,13 @@ func (s *Service) DeepScanEnabled() bool {
 // nil-safe, so a nil SecurityConfig forces the layer fully off (baseline-only).
 // Idempotent: safe to call on every config.reloaded event.
 func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
+	// Spec 086 FR-019: the offline TPA signature corpus location is
+	// configuration-driven (security.tpa_bundle_path / MCPPROXY_TPA_BUNDLE_PATH)
+	// and re-read here, which is what makes it hot-reloadable. An empty path
+	// means the corpus embedded in this build; a broken configured bundle keeps
+	// the previously active corpus and surfaces the reason via BundleStatus().
+	ConfigureBundle(sec.EffectiveTPABundlePath(), s.logger)
+
 	enabled := sec.IsDeepScanEnabled()
 	s.SetDeepScan(enabled, sec.DeepScanScanners())
 	s.SetScannerDisableNoNewPrivileges(sec.IsDisableNoNewPrivileges())
@@ -271,6 +278,14 @@ func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
 		fetchPref = *f
 	}
 	s.SetFetchPackageSource(enabled && fetchPref)
+}
+
+// BundleStatus reports the offline TPA signature corpus this process is
+// running (spec 086 FR-019). Exposed on the service so the REST/CLI surfaces
+// can answer "which signatures is my proxy running, and how old are they?"
+// without importing the loader internals (GH #938 finding 2).
+func (s *Service) BundleStatus() BundleInfo {
+	return BundleStatus()
 }
 
 // isBaselineScanner reports whether a scanner id belongs to the deterministic
@@ -1857,6 +1872,12 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 
 	// Check Docker availability
 	overview.DockerAvailable = s.docker.IsDockerAvailable(ctx)
+
+	// Spec 086 FR-019 / GH #938: report the live TPA signature corpus so an
+	// operator can see which signatures are running, where they came from, and
+	// how fresh they are — including a failed configured-bundle load.
+	bundle := BundleStatus()
+	overview.SignatureBundle = &bundle
 
 	return overview, nil
 }

@@ -761,6 +761,21 @@ components:
           type: boolean
         scanner_registry_url:
           type: string
+        tpa_bundle_path:
+          description: |-
+            TPABundlePath is the filesystem path to the tpa-db scanner-bundle.json
+            the offline TPA scanner runs (spec 086 FR-019: the signature-DB location
+            MUST be configuration-driven, not hardcoded). Empty (the default) runs the
+            corpus embedded in this build.
+
+            Env override: MCPPROXY_TPA_BUNDLE_PATH. Hot-reloadable — the path is
+            re-read on every config.reloaded event via
+            scanner.Service.ApplySecurityConfig, so a corpus refresh needs no restart.
+            A configured bundle that fails to read/parse/version-check/compile is
+            REFUSED and the previously active corpus stays live (fail-closed, never
+            fail-empty); the reason is logged and surfaced in the security overview's
+            signature_bundle.load_error.
+          type: string
       type: object
     config.SensitiveDataDetectionConfig:
       description: Sensitive data detection settings (Spec 026)

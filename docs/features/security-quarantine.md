@@ -210,8 +210,35 @@ new-server admission and tool-change approval (superseding the binary
 | `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | Auto-approved only when the offline scan verdict is clean; otherwise held for review |
 | `manual` (default) | Quarantined for human review | Every change held for review |
 
-Unrecognized values fail closed to `manual`. Config field: per-server
-`trust_mode`; REST: `trust_mode` on `POST/PATCH/GET /api/v1/servers`.
+Config field: per-server `trust_mode`; REST: `trust_mode` on
+`POST/PATCH/GET /api/v1/servers`; CLI: `mcpproxy upstream add --trust-mode`.
+
+**Unrecognized values are rejected, not guessed.** The values are
+case-sensitive (`Scan` is not `scan`). A bogus value is refused with a `400`
+naming the accepted vocabulary on `POST`/`PATCH /api/v1/servers`, by the
+`upstream_servers` MCP tool, and by `--trust-mode`; a hand-edited
+`mcp_config.json` carrying one is reported by config validation. Should an
+unvalidated value ever reach the runtime, resolution still fails closed to
+`manual`.
+
+### Signature bundle (offline TPA corpus)
+
+The `scan` mode runs an offline TPA signature corpus (the tpa-db
+`scanner-bundle.json`). By default it is the corpus embedded in the build; set
+`security.tpa_bundle_path` in `mcp_config.json` (env override:
+`MCPPROXY_TPA_BUNDLE_PATH`) to run a corpus from disk instead. The path is
+re-read on config hot-reload, so refreshing signatures needs no restart.
+
+A configured bundle that cannot be read, parsed, version-checked, or compiled
+is **refused**: the previously active corpus stays live (fail-closed, never
+fail-empty) and the reason is logged and reported as `load_error` below.
+
+Which corpus is live is visible in:
+
+- `mcpproxy security overview` — source, version, freshness stamp, fingerprint,
+  and the runnable / skipped / declared-skipped rule split;
+- `GET /api/v1/security/overview` → `signature_bundle`;
+- the Web UI **Security** tab ("Signatures (runnable)" stat).
 
 **Web UI (spec 088)**: the server's Configuration tab has a tri-mode
 selector (choosing `auto` asks for confirmation and explains the risk); the

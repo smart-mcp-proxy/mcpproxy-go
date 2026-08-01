@@ -94,7 +94,7 @@
             viewBox="0 0 24 24"
           >
             <path d="M12 2L3.5 6.5V11c0 5.55 3.84 10.74 8.5 12 4.66-1.26 8.5-6.45 8.5-12V6.5L12 2zm0 2.18l6.5 3.35V11c0 4.52-3.15 8.76-6.5 9.93C8.65 19.76 5.5 15.52 5.5 11V7.53L12 4.18z"/>
-            <path v-if="securityScanStatus === 'clean'" d="M10 15.5l-3.5-3.5 1.41-1.41L10 12.67l5.59-5.59L17 8.5l-7 7z"/>
+            <path v-if="securityScanStatus === 'clean' && !hasHeldTools" d="M10 15.5l-3.5-3.5 1.41-1.41L10 12.67l5.59-5.59L17 8.5l-7 7z"/>
             <path v-else-if="securityScanStatus === 'dangerous'" d="M12 8v4m0 4h.01" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
           </svg>
           <span
@@ -108,6 +108,7 @@
             v-else
             class="text-xs"
             :class="securityBadgeColor"
+            data-test="security-scan-badge"
           >
             {{ securityBadgeText }}
           </span>
@@ -542,7 +543,17 @@ const securityScanStatus = computed(() => {
   return props.server.security_scan?.status || 'not_scanned'
 })
 
+// GH #938: a "Clean" verdict from the last FULL-SERVER scan sat as a green
+// shield directly above "1 tool changed since approval — re-review needed",
+// while the tool-level gate was holding that tool with a dangerous verdict.
+// The two gates are independent, and the reassuring one must never out-shout
+// the warning one. Whenever tools are held, the clean badge is downgraded to a
+// warning tone and says so. A harder verdict (warnings/dangerous/failed) is
+// left untouched — it already out-ranks the hold.
+const hasHeldTools = computed(() => quarantineToolCount.value > 0)
+
 const securityBadgeColor = computed(() => {
+  if (securityScanStatus.value === 'clean' && hasHeldTools.value) return 'text-warning'
   switch (securityScanStatus.value) {
     case 'clean': return 'text-success'
     case 'warnings': return 'text-warning'
@@ -555,6 +566,10 @@ const securityBadgeColor = computed(() => {
 const securityBadgeText = computed(() => {
   const scan = props.server.security_scan
   if (!scan) return 'Not scanned'
+  if (scan.status === 'clean' && hasHeldTools.value) {
+    const n = quarantineToolCount.value
+    return `Clean scan · ${n} tool${n !== 1 ? 's' : ''} held`
+  }
   switch (scan.status) {
     case 'clean': return 'Clean'
     case 'warnings': {
@@ -576,6 +591,10 @@ const securityBadgeTooltip = computed(() => {
   if (!scan) return ''
   const disclaimer =
     'Experimental heuristic — verify findings manually; results may not be precise.'
+  if (scan.status === 'clean' && hasHeldTools.value) {
+    const n = quarantineToolCount.value
+    return `The last full-server scan was clean, but ${n} tool${n !== 1 ? 's are' : ' is'} currently held by the tool-level approval gate — review the hold evidence below before trusting this badge. ${disclaimer}`
+  }
   switch (scan.status) {
     case 'clean':
       return `Clean: no findings above the warning threshold in the most recent scan. ${disclaimer}`

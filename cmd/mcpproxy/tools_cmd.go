@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
@@ -369,6 +370,53 @@ func formatToolHold(t map[string]interface{}) string {
 	return strings.Join(shown, ",") + suffix
 }
 
+// sanitizeCell makes an upstream-controlled string safe to print in a terminal
+// table and truncates it to maxRunes (GH #938 finding 3).
+//
+// Two bugs it fixes: the server-scoped tool list printed a poisoned description
+// verbatim — ANSI escapes, bidi overrides and zero-width runes reached the tty
+// unfiltered — and the global list truncated with a BYTE slice, which can split
+// a multi-byte rune. detect.CapEvidence is the project-wide render-safe
+// contract: it ESCAPES (never drops) control/format runes so smuggled content
+// is revealed rather than hidden.
+func sanitizeCell(s string, maxRunes int) string {
+	escaped := detect.CapEvidence(s)
+	runes := []rune(escaped)
+	if maxRunes > 3 && len(runes) > maxRunes {
+		return string(runes[:maxRunes-3]) + "..."
+	}
+	return escaped
+}
+
+// maxToolDescriptionCell is the description column width shared by the global
+// and server-scoped tool tables.
+const maxToolDescriptionCell = 60
+
+// serverToolRows builds the table for `mcpproxy tools list --server <name>`.
+//
+// GH #938 finding 3: the server-scoped view used to render only NAME and
+// DESCRIPTION, so a tool held by the trust_mode:scan gate was indistinguishable
+// from an approved one — the exact view an operator debugging ONE server opens.
+// It now carries the same APPROVAL/HELD state as the global view (the
+// per-server REST payload has always included those fields; only the renderer
+// dropped them) and escapes the description.
+func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
+	headers = []string{"NAME", "APPROVAL", "HELD", "DESCRIPTION"}
+	for _, t := range tools {
+		approval := getStringField(t, "approval_status")
+		if approval == "" {
+			approval = "-"
+		}
+		rows = append(rows, []string{
+			getStringField(t, "name"),
+			approval,
+			formatToolHold(t),
+			sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell),
+		})
+	}
+	return headers, rows
+}
+
 // outputGlobalTools renders the global tool list with extended columns.
 func outputGlobalTools(tools []map[string]interface{}) error {
 	outputFormat := ResolveOutputFormat()
@@ -417,10 +465,7 @@ func outputGlobalTools(tools []map[string]interface{}) error {
 			lastUsed = lu
 		}
 
-		desc := getStringField(t, "description")
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
-		}
+		desc := sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell)
 
 		rows = append(rows, []string{name, srv, state, approval, formatToolHold(t), usage, lastUsed, desc})
 	}
@@ -586,11 +631,14 @@ func outputToolsFromMetadata(tools []*config.ToolMetadata, serverName string) er
 		return nil
 	}
 
-	// Table format: show name and description
+	// Table format: show name and (escaped) description. The standalone path has
+	// no daemon and therefore no approval records, so it keeps the two-column
+	// shape — but the description is still sanitized (#938): a poisoned
+	// description must never reach the terminal raw on ANY path.
 	headers := []string{"NAME", "DESCRIPTION"}
 	var rows [][]string
 	for _, tool := range tools {
-		rows = append(rows, []string{tool.Name, tool.Description})
+		rows = append(rows, []string{tool.Name, sanitizeCell(tool.Description, maxToolDescriptionCell)})
 	}
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
@@ -649,14 +697,8 @@ func outputTools(tools []map[string]interface{}, _ *zap.Logger) error {
 		return nil
 	}
 
-	// Table format: show name and description
-	headers := []string{"NAME", "DESCRIPTION"}
-	var rows [][]string
-	for _, tool := range tools {
-		name, _ := tool["name"].(string)
-		desc, _ := tool["description"].(string)
-		rows = append(rows, []string{name, desc})
-	}
+	// Table format: name + approval/hold state + escaped description (#938).
+	headers, rows := serverToolRows(tools)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {

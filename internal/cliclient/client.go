@@ -1236,6 +1236,11 @@ type AddServerRequest struct {
 	Enabled        *bool             `json:"enabled,omitempty"`
 	Quarantined    *bool             `json:"quarantined,omitempty"`
 	ReconnectOnUse *bool             `json:"reconnect_on_use,omitempty"`
+	// TrustMode is the per-server trust tier (spec 086): auto|scan|manual.
+	// Empty is omitted from the wire so the daemon applies its own default; a
+	// non-empty value is validated CLI-side before the request is built and
+	// again by the REST layer (GH #938).
+	TrustMode string `json:"trust_mode,omitempty"`
 }
 
 // AddServerResult represents the result of adding a server.
