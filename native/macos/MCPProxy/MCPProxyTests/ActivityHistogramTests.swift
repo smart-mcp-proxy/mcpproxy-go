@@ -494,7 +494,7 @@ final class UsageRefreshWiringTests: XCTestCase {
                                           tokensSavedPercentage: 0, timeline: timeline)
         }
         func glanceActivity(limit: Int) async throws -> [ActivityEntry] { [] }
-        func activeSessions(limit: Int) async throws -> [APIClient.MCPSession] { [] }
+        func recentSessions(limit: Int) async throws -> [APIClient.MCPSession] { [] }
     }
 
     private func connectedState() -> AppState {

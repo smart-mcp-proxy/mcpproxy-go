@@ -103,7 +103,7 @@ func (p *MCPProxyServer) handleDescribeTool(ctx context.Context, request mcp.Cal
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-describe_tool", time.Now().UnixNano())
+	requestID := mintCorrelationID("describe_tool")
 
 	emitError := func(errMsg string, args map[string]interface{}) {
 		p.emitActivityInternalToolCall("describe_tool", "", "", "", sessionID, requestID,

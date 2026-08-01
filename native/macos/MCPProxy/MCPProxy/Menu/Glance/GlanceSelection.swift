@@ -7,6 +7,86 @@
 
 import Foundation
 
+/// One rendered activity row: a maximal run of *consecutive* qualifying records
+/// that share a group key (server, tool, outcome class) — spec 090 FR-001…004.
+///
+/// Consecutive-only is the whole point: the glance is a timeline, and clustering
+/// non-adjacent calls would claim an ordering that never happened. A burst of 19
+/// `jira_get_issue` calls becomes one row; the same tool called again after
+/// something else stays a second row.
+///
+/// The run is a *view* over the records, not a summary of them: every derived
+/// value names the record it came from, so a row can always be traced back.
+struct GlanceRun: Equatable {
+
+    /// What makes two adjacent records "the same thing happening again".
+    ///
+    /// Outcome class is in the key so a policy block never merges into a run of
+    /// calls to the same tool (FR-002): "27 blocked attempts" and "27 calls" are
+    /// different stories, and blocks are the ones worth reading.
+    struct Key: Equatable {
+        let server: String
+        let tool: String
+        let outcomeClass: OutcomeClass
+
+        init(for entry: ActivityEntry) {
+            self.server = entry.serverName ?? ""
+            self.tool = entry.toolName ?? ""
+            self.outcomeClass = entry.outcomeClass
+        }
+    }
+
+    let key: Key
+
+    /// The run's records, newest first (the feed's own order), never empty.
+    let records: [ActivityEntry]
+
+    init(key: Key, records: [ActivityEntry]) {
+        precondition(!records.isEmpty, "a run is a run of at least one record")
+        self.key = key
+        self.records = records
+    }
+
+    /// Repeat count — rendered as a `×N` suffix only when > 1 (FR-003).
+    ///
+    /// It counts what the fetched page holds and nothing more: a run longer than
+    /// the 100-record poll window reads ×100 (spec Edge Cases).
+    var count: Int { records.count }
+
+    /// The record whose clock the row shows.
+    var newest: ActivityEntry { records[0] }
+
+    /// The record the row is *identified* by — see `identity`.
+    var oldest: ActivityEntry { records[records.count - 1] }
+
+    /// Stable identity for in-place updates (FR-024).
+    ///
+    /// The oldest record, not the newest: a run grows at the head, so keying on
+    /// the newest would make every additional call in a burst look like a
+    /// brand-new row to `GlanceSection.updateInPlace` and rewrite the whole row
+    /// identity — icon, tooltip and click payload — on every tick.
+    var identity: String { GlanceSelection.recordKey(for: oldest) }
+
+    /// The newest failing record in the run, if any. `records` is newest-first,
+    /// so `first` is the newest.
+    var newestErroring: ActivityEntry? { records.first { $0.status == "error" } }
+
+    /// Worst outcome in the run, error beating success (FR-004). A run with no
+    /// failure reports the newest record's own status, so a call still running
+    /// is never announced as a failure.
+    var worstStatus: String { newestErroring?.status ?? newest.status }
+
+    /// The error clause to show, from the NEWEST erroring record (FR-004).
+    var errorMessage: String? { newestErroring?.errorMessage }
+
+    /// The reason to show: the newest record in the run that has one (FR-004) —
+    /// a later call that omitted its intent must not blank out the row.
+    var displayReason: String? { records.lazy.compactMap(\.reason).first }
+
+    /// The row's clock: the age of the newest record (FR-004).
+    var timestamp: String { newest.timestamp }
+}
+
 /// Presentation policy for the glance section. Pure and synchronous.
 enum GlanceSelection {
 
@@ -30,6 +110,18 @@ enum GlanceSelection {
 
         // Rule 2 — every real upstream call.
         if entry.type == "tool_call" { return true }
+
+        // Rule 6 (spec 090 FR-012) — a policy decision that actually STOPPED
+        // the call. It has no other trace anywhere in the menu: the call never
+        // dispatched, so no `tool_call` record was ever written for it, and
+        // without this a block is simply invisible. Warnings and redactions let
+        // the call through and are represented by the call's own record, so
+        // admitting them would spend one of five rows on a decision that
+        // changed nothing. `outcomeClass` is what decides, so a record whose
+        // `decision` metadata was projected away still qualifies on its status.
+        if entry.type == ActivityEntry.policyDecisionType {
+            return entry.outcomeClass == .blocked
+        }
 
         // Rule 3 — discovery/execution built-ins, plus any internal failure
         // (a wrapper that died before dispatch has no upstream record).
@@ -108,19 +200,52 @@ enum GlanceSelection {
         return entry.id
     }
 
-    // MARK: - Public entry points
+    // MARK: - Rule 5
 
-    /// Rules 1-4 applied in order, then the first `limit` survivors.
-    static func activityRows(from entries: [ActivityEntry], limit: Int = rowLimit) -> [ActivityEntry] {
-        let qualified = entries.filter(qualifies)
-        return Array(collapseByRequestID(qualified).prefix(limit))
+    /// Fold each maximal stretch of consecutive records sharing a group key into
+    /// one `GlanceRun`, preserving feed order (spec 090 FR-001 step 3).
+    ///
+    /// This runs *after* qualification and collapse, and that order is the
+    /// requirement, not an implementation detail: a record that never renders —
+    /// a management built-in, a wrapper folded into its upstream partner — must
+    /// not split the run around it (US1 scenario 6). Filtering afterwards would
+    /// leave two adjacent identical rows wherever noise happened to land between
+    /// two calls to the same tool.
+    static func groupConsecutive(_ entries: [ActivityEntry]) -> [GlanceRun] {
+        var runs: [GlanceRun] = []
+        var currentKey: GlanceRun.Key?
+        var current: [ActivityEntry] = []
+
+        for entry in entries {
+            let key = GlanceRun.Key(for: entry)
+            if key == currentKey {
+                current.append(entry)
+                continue
+            }
+            if let currentKey, !current.isEmpty {
+                runs.append(GlanceRun(key: currentKey, records: current))
+            }
+            currentKey = key
+            current = [entry]
+        }
+        if let currentKey, !current.isEmpty {
+            runs.append(GlanceRun(key: currentKey, records: current))
+        }
+        return runs
     }
 
-    /// Sessions currently connected, capped at `limit`, input order preserved.
-    static func activeClients(
-        from sessions: [APIClient.MCPSession],
-        limit: Int = rowLimit
-    ) -> [APIClient.MCPSession] {
-        Array(sessions.filter { $0.status == "active" }.prefix(limit))
+    // MARK: - Public entry points
+
+    /// The row pipeline, in the one order the spec fixes (FR-001):
+    /// qualify → collapse by request id → group consecutive runs → take `limit`.
+    ///
+    /// Every step is a narrowing, and each one must see the output of the one
+    /// before it: grouping before collapsing would count a wrapper and its
+    /// upstream partner as two calls, and taking the first five before grouping
+    /// would hand the whole menu to a single burst.
+    static func activityRows(from entries: [ActivityEntry], limit: Int = rowLimit) -> [GlanceRun] {
+        let qualified = entries.filter(qualifies)
+        let collapsed = collapseByRequestID(qualified)
+        return Array(groupConsecutive(collapsed).prefix(limit))
     }
 }

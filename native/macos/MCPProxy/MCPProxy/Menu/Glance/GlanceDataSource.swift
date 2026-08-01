@@ -15,11 +15,13 @@ protocol GlanceDataSource {
     /// `GET /api/v1/activity/usage?window=<window>&top=<top>`
     func usageAggregate(window: String, top: Int) async throws -> UsageAggregateResponse
 
-    /// `GET /api/v1/activity?type=tool_call,internal_tool_call&limit=<limit>`
+    /// `GET /api/v1/activity?type=tool_call,internal_tool_call,policy_decision&limit=<limit>`
     func glanceActivity(limit: Int) async throws -> [ActivityEntry]
 
-    /// `GET /api/v1/sessions?status=active&limit=<limit>`
-    func activeSessions(limit: Int) async throws -> [APIClient.MCPSession]
+    /// `GET /api/v1/sessions?limit=<limit>` — unfiltered by status, because the
+    /// Clients section shows presence (active / idle / seen) over every retained
+    /// session, not just the ones that happen to be open.
+    func recentSessions(limit: Int) async throws -> [APIClient.MCPSession]
 }
 
 /// The production data source. `APIClient` already has all three methods with

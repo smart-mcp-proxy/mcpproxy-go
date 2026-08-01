@@ -28,7 +28,7 @@ final class GlanceRefreshFailureTests: XCTestCase {
             if let activityError { throw activityError }
             return entries
         }
-        func activeSessions(limit: Int) async throws -> [APIClient.MCPSession] {
+        func recentSessions(limit: Int) async throws -> [APIClient.MCPSession] {
             if let sessionsError { throw sessionsError }
             return sessions
         }

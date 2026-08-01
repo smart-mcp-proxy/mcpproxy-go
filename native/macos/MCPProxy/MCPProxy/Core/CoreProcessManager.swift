@@ -1288,7 +1288,10 @@ actor CoreProcessManager {
     /// - Parameter generation: the connection whose stream delivered this event,
     ///   captured when that stream was opened. Glance publishes are rejected if
     ///   the tray has since reconnected.
-    private func handleSSEEvent(_ event: SSEEvent, generation: Int) async {
+    /// Internal, not private, so the glance routing test can drive the real
+    /// dispatch: an adapter for an event name this switch never routes is dead
+    /// code, and nothing else in the app would notice.
+    func handleSSEEvent(_ event: SSEEvent, generation: Int) async {
         switch event.event {
         case "status":
             // Status events contain inline stats. Spec 048: any change that
@@ -1346,8 +1349,12 @@ actor CoreProcessManager {
                 appState.activityVersion += 1
             }
 
-        case GlanceEvent.upstreamCompleted, GlanceEvent.internalCompleted:
+        case GlanceEvent.upstreamCompleted, GlanceEvent.internalCompleted, GlanceEvent.policyDecision:
             // Tray Glance: adapt the payload into a row and prepend it.
+            // `activity.policy_decision` is here because a blocked call emits
+            // nothing else — it never dispatches, so no completion event
+            // follows — and a block is the one outcome that must not wait 30
+            // seconds for the poll to reveal it.
             // Deliberately NO refreshActivity() here — a REST GET per event is
             // network amplification, not push. The 30s reconciling poll
             // (refreshGlanceActivity) replaces these optimistic rows with the

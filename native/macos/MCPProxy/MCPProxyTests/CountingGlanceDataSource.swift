@@ -36,7 +36,7 @@ final class CountingGlanceDataSource: GlanceDataSource {
         return activityToReturn
     }
 
-    func activeSessions(limit: Int) async throws -> [APIClient.MCPSession] {
+    func recentSessions(limit: Int) async throws -> [APIClient.MCPSession] {
         sessionCallCount += 1
         return sessionsToReturn
     }

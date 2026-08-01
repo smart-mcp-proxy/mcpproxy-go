@@ -58,7 +58,30 @@ final class GlanceSection {
     // MARK: Configuration
 
     /// Character budget for a row label before middle truncation kicks in.
+    ///
+    /// Never tightened to make room for anything else on the title line
+    /// (FR-011a): the error clause has its own, smaller budget and is cut first,
+    /// and the age — the shortest and most perishable part of the row — is never
+    /// cut at all.
     private static let labelBudget = 34
+
+    /// Whether rows may carry a second line.
+    ///
+    /// `NSMenuItem.subtitle` is macOS 14.4+, while the app's deployment floor is
+    /// macOS 13, so below 14.4 a row is single-line and its reason lives in the
+    /// tooltip and the accessibility label only (FR-005, documented degradation).
+    ///
+    /// It is a settable property rather than a bare `#available` check at the
+    /// point of use so both branches are testable on one host: the fallback is
+    /// the branch no CI machine runs, and an untested fallback is how a reason
+    /// silently disappears on an older Mac.
+    var supportsRowSubtitles: Bool = GlanceSection.systemSupportsRowSubtitles
+
+    /// Whether the *running* system has the subtitle mechanism.
+    static var systemSupportsRowSubtitles: Bool {
+        if #available(macOS 14.4, *) { return true }
+        return false
+    }
 
     // MARK: Owned items (kept so rows can be rewritten in place)
 
@@ -67,11 +90,18 @@ final class GlanceSection {
     /// "this row now represents a different call".
     private struct ActivityRow {
         let item: NSMenuItem
-        /// The record's key — see `recordKey(for:)`. Nil until first rendered.
-        var recordKey: String?
+        /// The run's identity — `GlanceRun.identity`, the key of its OLDEST
+        /// record. Nil until first rendered.
+        var runIdentity: String?
         /// The SF Symbol currently installed, so the icon is rebuilt only when
         /// the glyph really changes.
         var symbolName: String?
+        /// The subtitle currently installed, or nil when the row is single-line.
+        /// Kept here rather than read back off the item because reading
+        /// `NSMenuItem.subtitle` needs an availability gate, and because the
+        /// structural preflight has to know a row's line count without touching
+        /// the item at all.
+        var subtitleText: String?
     }
 
     private var summaryItem: NSMenuItem?
@@ -122,19 +152,29 @@ final class GlanceSection {
 
         var items: [NSMenuItem] = []
 
-        let summary = disabledItem(titled: summaryTitle(for: state))
+        let summary = disabledItem(titled: summaryTitle(for: state, now: now))
         summaryItem = summary
         items.append(summary)
+
+        // The day before the minute (FR-021). The histogram answers "what has
+        // been happening?" in one glyph, so it belongs beside the summary line
+        // it illustrates — it used to sit at the very bottom, below every row it
+        // summarises, which made the user read the detail to reach the overview.
+        // It stays above the separator for that reason: summary and shape are
+        // one block, the rows below are another.
+        let histogram = makeHistogramItem(for: state)
+        histogramItem = histogram
+        items.append(histogram)
         items.append(.separator())
 
         items.append(disabledItem(titled: "Recent"))
-        let entries = GlanceSelection.activityRows(from: state.glanceActivity)
-        if entries.isEmpty {
+        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
+        if runs.isEmpty {
             items.append(disabledItem(titled: "No tool calls yet"))
         } else {
-            for entry in entries {
+            for run in runs {
                 var row = ActivityRow(item: actionableItem())
-                apply(entry, to: &row, now: now)
+                apply(run, to: &row, now: now)
                 activityRows.append(row)
                 items.append(row.item)
             }
@@ -148,22 +188,17 @@ final class GlanceSection {
         items.append(.separator())
 
         items.append(disabledItem(titled: "Clients"))
-        let clients = GlanceSelection.activeClients(from: state.glanceSessions)
+        let clients = GlancePresence.clients(from: state.glanceSessions, now: now)
         if clients.isEmpty {
-            items.append(disabledItem(titled: "No connected clients"))
+            items.append(disabledItem(titled: Self.noClientsTitle))
         } else {
-            for session in clients {
+            for client in clients {
                 let row = actionableItem()
-                apply(session, to: row, now: now)
+                apply(client, to: row, now: now)
                 clientRows.append(row)
                 items.append(row)
             }
         }
-        items.append(.separator())
-
-        let histogram = makeHistogramItem(for: state)
-        histogramItem = histogram
-        items.append(histogram)
         items.append(.separator())
 
         return items
@@ -195,98 +230,159 @@ final class GlanceSection {
         guard isVisible(for: state) == builtVisible else { return false }
         guard builtVisible else { return true }
 
-        let entries = GlanceSelection.activityRows(from: state.glanceActivity)
-        let clients = GlanceSelection.activeClients(from: state.glanceSessions)
-        guard entries.count == activityRows.count,
+        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
+        let clients = GlancePresence.clients(from: state.glanceSessions, now: now)
+        guard runs.count == activityRows.count,
               clients.count == clientRows.count else { return false }
 
-        let summary = summaryTitle(for: state)
+        // Preflight, before a single write: a row that gains or loses its
+        // reason gains or loses a LINE, which resizes the menu just as surely as
+        // adding a row does — so it is structural and waits for close (FR-023).
+        //
+        // It is a separate pass on purpose. Deciding per row inside the write
+        // loop would refuse only after having already rewritten the summary and
+        // every earlier row, which is a half-updated menu on screen: the exact
+        // outcome deferring exists to avoid. Presence is what matters, not text
+        // — a reason whose wording changed still occupies one line and is an
+        // ordinary in-place rewrite.
+        for (index, run) in zip(activityRows.indices, runs)
+        where (subtitleText(for: run.displayReason) == nil) != (activityRows[index].subtitleText == nil) {
+            return false
+        }
+
+        let summary = summaryTitle(for: state, now: now)
         if summaryItem?.title != summary { summaryItem?.title = summary }
         // `zip`, like the sibling loop below: indexing `entries` by
         // `activityRows.indices` reads out of bounds if the count guard above is
         // ever weakened, and zip cannot.
-        for (index, entry) in zip(activityRows.indices, entries) {
-            apply(entry, to: &activityRows[index], now: now)
+        for (index, run) in zip(activityRows.indices, runs) {
+            apply(run, to: &activityRows[index], now: now)
         }
-        for (row, session) in zip(clientRows, clients) { apply(session, to: row, now: now) }
+        for (row, client) in zip(clientRows, clients) { apply(client, to: row, now: now) }
         return true
     }
 
     // MARK: Row rendering
 
-    /// Identity of the record a row is showing: its `requestId`, never its `id`.
+    /// Identity of the run a row is showing: `GlanceRun.identity`, which is the
+    /// `recordKey` (request id, never storage id) of the run's OLDEST record.
     ///
-    /// A row rendered from a live SSE event carries a *provisional* id of the
-    /// form `"<request_id>:<type>"`, which the 30-second reconciling poll
-    /// replaces with the storage-assigned ULID for the very same call. Keying on
-    /// `id` would therefore report a wholesale turnover of every row on every
-    /// poll, needlessly rewriting five rows' icons and click payloads each time.
-    /// `requestId` is identical on both sides, and is already what rule 4
-    /// (`GlanceSelection.collapseByRequestID`) groups on. Records with no
-    /// request id are never collapsed, so their `id` is a safe fallback key.
-    /// Delegates to `GlanceSelection.recordKey` rather than restating the rule:
-    /// the row diff, rule 4's collapse and `AppState`'s poll/SSE merge must all
-    /// agree on what "the same call" means, and three copies would be free to
-    /// drift.
-    private static func recordKey(for entry: ActivityEntry) -> String {
-        GlanceSelection.recordKey(for: entry)
-    }
+    /// Two reasons it is neither the row's index nor its newest record. First, a
+    /// row rendered from a live SSE event carries a *provisional* id of the form
+    /// `"<request_id>:<type>"`, which the 30-second reconciling poll replaces
+    /// with the storage-assigned ULID for the very same call — keying on `id`
+    /// would report a wholesale turnover of every row on every poll. Second, a
+    /// run grows at the head, so keying on its newest record would make every
+    /// additional call of a burst look like a different row.
+    ///
+    /// The rule itself lives in `GlanceSelection.recordKey`: the row diff, rule
+    /// 4's collapse and `AppState`'s poll/SSE merge must all agree on what "the
+    /// same call" means, and copies would be free to drift.
 
     /// Rewrite an activity row so its title, icon, tooltip, accessibility label
-    /// and click payload all describe `entry`.
+    /// and click payload all describe `run`.
     ///
-    /// When the row has changed record every one of those is written back
-    /// unconditionally: with a fixed set of rows each new event shifts which
-    /// record a row stands for, and a row that kept the previous record's click
-    /// payload or icon would mislead silently. When it is still the same record
-    /// — the common case, since the reconcile only re-ids it — only what
-    /// actually differs is written, so a menu the user is reading is not
-    /// re-laid-out on every tick. Either way the row ends up fully describing
-    /// `entry`; the distinction is only how much is written to get there.
-    private func apply(_ entry: ActivityEntry, to row: inout ActivityRow, now: Date) {
-        let key = Self.recordKey(for: entry)
-        let sameRecord = row.recordKey == key
+    /// A row shows a *run* — one or more consecutive records of the same
+    /// (server, tool, outcome class) — so what it says is assembled from the
+    /// run, not from one record: the clock and the click payload come from the
+    /// newest record, the mark and the error clause from the worst/newest
+    /// failing one, and the `×N` suffix from how many there are.
+    ///
+    /// When the row has changed run every one of those is written back
+    /// unconditionally: with a fixed set of rows each new event shifts which run
+    /// a row stands for, and a row that kept the previous run's click payload or
+    /// icon would mislead silently. When it is still the same run — the common
+    /// case, since a burst extends at the head and the reconcile only re-ids
+    /// records — only what actually differs is written, so a menu the user is
+    /// reading is not re-laid-out on every tick. Either way the row ends up
+    /// fully describing `run`; the distinction is only how much is written.
+    private func apply(_ run: GlanceRun, to row: inout ActivityRow, now: Date) {
+        let identity = run.identity
+        let sameRun = row.runIdentity == identity
         let item = row.item
+        let newest = run.newest
 
-        let fullLabel = GlanceFormatting.rowLabel(for: entry)
+        let fullLabel = GlanceFormatting.rowLabel(for: newest)
         let label = GlanceFormatting.middleTruncated(fullLabel, limit: Self.labelBudget)
-        let age = GlanceFormatting.relativeTime(entry.timestamp, now: now)
-        let failed = entry.status != "success"
-        let detail = failed ? Self.firstClause(of: entry.errorMessage) : nil
+        // Suffix and spoken count are the same fact twice: "×3" is compact
+        // enough for a menu row but reads as a multiplication sign to VoiceOver,
+        // so the label spells it out (FR-025).
+        let countSuffix = run.count > 1 ? " ×\(run.count)" : ""
+        let spokenCount = run.count > 1 ? ", repeated \(run.count) times" : ""
+        let age = GlanceFormatting.relativeTime(run.timestamp, now: now)
+        let status = run.worstStatus
+        let failed = status != "success"
+        // The error clause is cut to its own budget before anything else on the
+        // line gives way (FR-011a): a backend that answers in paragraphs must
+        // not be able to squeeze out the name of the tool that ran.
+        let detail = failed
+            ? Self.firstClause(of: run.errorMessage).map {
+                GlanceFormatting.tailTruncated($0, limit: GlanceFormatting.errorClauseBudget)
+              }
+            : nil
+
+        // The reason is the row's second line, never part of its first: on a
+        // failed row the error joins the title and the reason keeps the
+        // subtitle, so "why it was attempted" and "how it went" are both
+        // readable at a glance (FR-011a).
+        let reason = run.displayReason
+        let subtitle = subtitleText(for: reason)
 
         let title: String
-        let accessibility: String
+        var accessibility: String
         if let detail {
-            title = "\(label) · \(detail) — \(age)"
-            accessibility = "\(fullLabel), failed: \(detail), \(age) ago"
+            title = "\(label)\(countSuffix) · \(detail) — \(age)"
+            accessibility = "\(fullLabel)\(spokenCount), failed: \(detail), \(age) ago"
         } else {
-            title = "\(label) — \(age)"
-            accessibility = "\(fullLabel), \(Self.outcomeDescription(for: entry)), \(age) ago"
+            title = "\(label)\(countSuffix) — \(age)"
+            accessibility = "\(fullLabel)\(spokenCount), "
+                + "\(Self.outcomeDescription(forStatus: status)), \(age) ago"
         }
+        // Spoken in full, and spoken on every macOS version — the subtitle is
+        // where the reason is *seen*, not where it lives (FR-006, FR-025).
+        if let reason { accessibility += ", reason: \(reason)" }
 
-        let toolTip: String
-        if let message = entry.errorMessage, !message.isEmpty {
-            toolTip = "\(fullLabel)\n\(message)"
-        } else {
-            toolTip = fullLabel
+        // The tooltip is the row without any budget at all: full label, full
+        // reason, full error message.
+        var toolTipLines = [fullLabel]
+        if let reason { toolTipLines.append(reason) }
+        if let message = run.errorMessage, !message.isEmpty { toolTipLines.append(message) }
+        let toolTip = toolTipLines.joined(separator: "\n")
+
+        let symbol = GlanceFormatting.statusSymbolName(forStatus: status)
+
+        if !sameRun || item.title != title { item.title = title }
+        if !sameRun || row.subtitleText != subtitle {
+            Self.setSubtitle(subtitle, on: item)
+            row.subtitleText = subtitle
         }
-
-        let symbol = GlanceFormatting.statusSymbolName(for: entry)
-
-        if !sameRecord || item.title != title { item.title = title }
-        if !sameRecord || item.accessibilityLabel() != accessibility {
+        if !sameRun || item.accessibilityLabel() != accessibility {
             item.setAccessibilityLabel(accessibility)
         }
-        if !sameRecord || item.toolTip != toolTip { item.toolTip = toolTip }
-        if !sameRecord || row.symbolName != symbol {
-            item.image = Self.statusImage(for: entry)
+        if !sameRun || item.toolTip != toolTip { item.toolTip = toolTip }
+        if !sameRun || row.symbolName != symbol {
+            item.image = Self.statusImage(forStatus: status)
             row.symbolName = symbol
         }
-        if !sameRecord || (item.representedObject as? String) != entry.sessionId {
-            item.representedObject = entry.sessionId
+        if !sameRun || (item.representedObject as? String) != newest.sessionId {
+            item.representedObject = newest.sessionId
         }
 
-        row.recordKey = key
+        row.runIdentity = identity
+    }
+
+    /// The text a row's second line would show, or nil when it has none —
+    /// either because the record declared no reason (FR-007) or because this
+    /// system has no subtitle mechanism (FR-005).
+    private func subtitleText(for reason: String?) -> String? {
+        guard supportsRowSubtitles, let reason else { return nil }
+        return GlanceFormatting.tailTruncated(reason, limit: GlanceFormatting.reasonBudget)
+    }
+
+    /// Install (or clear) a row's second line. The availability gate lives here
+    /// alone, so every caller reasons in terms of `supportsRowSubtitles`.
+    private static func setSubtitle(_ text: String?, on item: NSMenuItem) {
+        if #available(macOS 14.4, *) { item.subtitle = text }
     }
 
     /// First clause of an error message — everything up to the first newline,
@@ -313,8 +409,10 @@ final class GlanceSection {
     ///
     /// This lives here rather than in `GlanceFormatting` because that file is
     /// deliberately AppKit-free (`import Foundation` only) and `NSColor` is not.
-    static func statusTint(for entry: ActivityEntry) -> NSColor {
-        switch entry.status {
+    /// Keyed on the status string, not a record: a row stands for a run, and the
+    /// outcome it shows is the run's worst (`GlanceRun.worstStatus`).
+    static func statusTint(forStatus status: String) -> NSColor {
+        switch status {
         case "success":
             return .systemGreen
         case "error":
@@ -324,28 +422,48 @@ final class GlanceSection {
         }
     }
 
+    static func statusTint(for entry: ActivityEntry) -> NSColor {
+        statusTint(forStatus: entry.status)
+    }
+
     /// Spoken outcome for VoiceOver. Three-valued so a call that is still
     /// running is not announced as a failure.
-    static func outcomeDescription(for entry: ActivityEntry) -> String {
-        switch entry.status {
+    static func outcomeDescription(forStatus status: String) -> String {
+        switch status {
         case "success":
             return "succeeded"
         case "error":
             return "failed"
+        case _ where ActivityEntry.blockingDecisions.contains(status):
+            // Spoken separately from "failed": the call did not go wrong, the
+            // proxy stopped it — and success is announced even though it is no
+            // longer drawn (FR-010), so VoiceOver loses nothing to the quiet.
+            return "blocked"
         default:
             return "in progress"
         }
     }
 
+    static func outcomeDescription(for entry: ActivityEntry) -> String {
+        outcomeDescription(forStatus: entry.status)
+    }
+
     /// The row icon: an SF Symbol whose shape carries the outcome, tinted to
-    /// carry it a second time.
+    /// carry it a second time — or nothing at all, when the call succeeded.
+    ///
+    /// Success is deliberately unmarked (FR-010). In a real 6-week export 1,480
+    /// of 1,564 outcome-bearing events succeeded, so a green tick appeared on
+    /// 95% of rows and told the user nothing; what it did do was bury the 32
+    /// errors and 52 blocks among identical-looking rows. A mark now means
+    /// "look at this".
     ///
     /// The image must be non-template — AppKit recolours a template menu image
     /// to the menu's own text colour, which would silently discard the tint.
-    private static func statusImage(for entry: ActivityEntry) -> NSImage? {
-        symbolImage(named: GlanceFormatting.statusSymbolName(for: entry),
-                    tint: statusTint(for: entry),
-                    description: outcomeDescription(for: entry))
+    private static func statusImage(forStatus status: String) -> NSImage? {
+        guard status != "success" else { return nil }
+        return symbolImage(named: GlanceFormatting.statusSymbolName(forStatus: status),
+                           tint: statusTint(forStatus: status),
+                           description: outcomeDescription(forStatus: status))
     }
 
     private static func symbolImage(named name: String, tint: NSColor, description: String) -> NSImage? {
@@ -358,49 +476,96 @@ final class GlanceSection {
         return tinted
     }
 
-    /// The client-row bullet. Every client row is an *active* session, so this
-    /// glyph is a constant — built once rather than re-tinted per row per poll.
-    private static let connectedDot = symbolImage(named: "circle.fill",
-                                                  tint: .systemGreen,
-                                                  description: "connected")
+    // MARK: Presence iconography
 
-    /// Rewrite a client row so it fully describes `session`.
+    /// Text shown when nothing at all falls inside the presence lookback
+    /// (FR-020). It says *recent*, not *connected*, because that is the claim
+    /// the section can actually stand behind: with a stateless transport there
+    /// is no such thing as a currently-connected client, and the old wording
+    /// announced "nothing is connected" every time the last session timed out.
+    static let noClientsTitle = "No recent clients"
+
+    /// The presence indicator's glyph.
     ///
-    /// Unlike an activity row this needs no `recordKey`: a session id does not
-    /// churn, so a row never comes to stand for a different client without the
-    /// row count changing (which `updateInPlace` already reports as structural).
+    /// Three distinct SHAPES, not one shape in three colours (FR-018): a filled
+    /// dot for a client working now, a half-filled one for a client gone quiet,
+    /// a hollow ring for one last heard from hours ago. Colour repeats the
+    /// distinction rather than carrying it, so the states survive greyscale and
+    /// a red-green deficiency. (data-model.md sketches idle as a *filled grey*
+    /// dot; that separates active from idle by colour alone, which FR-018
+    /// forbids, so the fill differs too.)
+    static func presenceSymbolName(for presence: ClientPresence) -> String {
+        switch presence {
+        case .active: return "circle.fill"
+        case .idle: return "circle.lefthalf.filled"
+        case .seen: return "circle"
+        }
+    }
+
+    static func presenceTint(for presence: ClientPresence) -> NSColor {
+        switch presence {
+        case .active: return .systemGreen
+        case .idle: return .systemGray
+        case .seen: return .tertiaryLabelColor
+        }
+    }
+
+    /// One image per state, built once.
+    ///
+    /// `updateInPlace` runs on nearly every 30s poll, under a menu the user may
+    /// have open; re-tinting a symbol per row per poll would allocate a fresh
+    /// image every time and force a re-layout for a glyph that never changed.
+    private static let presenceDots: [ClientPresence: NSImage] = {
+        var dots: [ClientPresence: NSImage] = [:]
+        for presence in ClientPresence.allCases {
+            dots[presence] = symbolImage(named: presenceSymbolName(for: presence),
+                                         tint: presenceTint(for: presence),
+                                         description: presence.rawValue)
+        }
+        return dots
+    }()
+
+    /// Rewrite a client row so it fully describes `client`.
+    ///
+    /// Unlike an activity row this needs no `recordKey`: rows are ordered by
+    /// activity and a row only comes to stand for a different client when the
+    /// row count changes, which `updateInPlace` already reports as structural.
     /// The write guards are still needed, and for a different reason — cost.
     /// `updateInPlace` runs on nearly every 30s poll for a busy proxy, under a
     /// menu the user may have open, where every write is a re-layout; so only
     /// what actually differs is written.
-    private func apply(_ session: APIClient.MCPSession, to item: NSMenuItem, now: Date) {
-        let name = session.clientName.flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown client"
-        let calls = session.toolCallCount ?? 0
+    ///
+    /// The age is shown only once the client has gone quiet (FR-018). On an
+    /// active row it would be noise — "active" already means "within the last
+    /// few minutes" — while on an idle or seen row it is the whole point: "idle
+    /// 20m" is what turns a vanished client into a legible one.
+    private func apply(_ client: ClientPresenceRow, to item: NSMenuItem, now: Date) {
+        let calls = client.session.toolCallCount ?? 0
         let callText = calls == 1 ? "1 call" : "\(calls) calls"
-        let age = session.lastActivity.map { GlanceFormatting.relativeTime($0, now: now) }
+        let age = GlanceFormatting.compactAge(client.age)
 
         let title: String
-        let accessibility: String
-        if let age {
-            title = "\(name) — \(callText) · \(age)"
-            accessibility = "\(name), \(callText), last active \(age) ago"
-        } else {
-            title = "\(name) — \(callText)"
-            accessibility = "\(name), \(callText)"
+        switch client.state {
+        case .active:
+            title = "\(client.name) — \(callText)"
+        case .idle, .seen:
+            title = "\(client.name) — \(callText) · \(client.state.rawValue) \(age)"
         }
+        // Spoken with the state named and the age always included: VoiceOver has
+        // no indicator to read, so what the glyph carries has to be said.
+        let accessibility = "\(client.name), \(callText), \(client.state.rawValue), "
+            + "last active \(age) ago"
 
-        let toolTip: String
-        if let version = session.clientVersion, !version.isEmpty {
-            toolTip = "\(name) \(version)"
-        } else {
-            toolTip = name
-        }
+        let toolTip = client.version.map { "\(client.name) \($0)" } ?? client.name
+        let dot = Self.presenceDots[client.state] ?? nil
 
         if item.title != title { item.title = title }
         if item.accessibilityLabel() != accessibility { item.setAccessibilityLabel(accessibility) }
         if item.toolTip != toolTip { item.toolTip = toolTip }
-        if item.image !== Self.connectedDot { item.image = Self.connectedDot }
-        if (item.representedObject as? String) != session.id { item.representedObject = session.id }
+        if item.image !== dot { item.image = dot }
+        if (item.representedObject as? String) != client.session.id {
+            item.representedObject = client.session.id
+        }
     }
 
     // MARK: Histogram
@@ -446,13 +611,18 @@ final class GlanceSection {
     /// clock every 30 seconds and the block ticks along presenting a previous
     /// core's numbers as live. A frozen menu is a hint that something is wrong;
     /// a ticking one is not.
-    private func summaryTitle(for state: AppState) -> String {
+    ///
+    /// The client segment reports states rather than a total ("2 active · 1
+    /// idle"), and disappears entirely when nobody is either (FR-019). A bare
+    /// count could not distinguish a proxy three agents are hammering from one
+    /// three agents used before lunch, and "0 clients" was the misleading
+    /// headline over a section that had rows in it.
+    private func summaryTitle(for state: AppState, now: Date = Date()) -> String {
         var parts: [String] = []
         if let calls = state.callsThisHour {
             parts.append(calls == 1 ? "1 call this hour" : "\(calls) calls this hour")
         }
-        let clients = GlanceSelection.activeClients(from: state.glanceSessions, limit: Int.max).count
-        parts.append(clients == 1 ? "1 client" : "\(clients) clients")
+        if let clients = state.glanceClientSummary(now: now) { parts.append(clients) }
         if state.glanceStale { parts.append("not updating") }
         return parts.joined(separator: " · ")
     }

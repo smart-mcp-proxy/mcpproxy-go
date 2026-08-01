@@ -938,4 +938,104 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(HealthAction.approve.rawValue, "approve")
         XCTAssertEqual(HealthAction.configure.rawValue, "configure")
     }
+
+    // MARK: - ActivityEntry glance accessors (spec 090, data-model.md)
+
+    /// Builds an entry from a JSON dictionary so the accessors are exercised
+    /// against decoded `JSONValue` metadata, exactly as the poll delivers it.
+    private func entry(
+        id: String = "e",
+        type: String,
+        status: String,
+        metadata: [String: Any]? = nil
+    ) throws -> ActivityEntry {
+        var json: [String: Any] = [
+            "id": id,
+            "type": type,
+            "status": status,
+            "timestamp": "2026-03-23T12:00:00Z"
+        ]
+        if let metadata { json["metadata"] = metadata }
+        let data = try JSONSerialization.data(withJSONObject: json)
+        return try JSONDecoder().decode(ActivityEntry.self, from: data)
+    }
+
+    func testIntentReasonComesFromTheIntentObject() throws {
+        let call = try entry(type: "tool_call", status: "success",
+                             metadata: ["intent": ["reason": "Verify the transition"]])
+        XCTAssertEqual(call.intentReason, "Verify the transition")
+        XCTAssertEqual(call.reason, "Verify the transition")
+    }
+
+    func testIntentReasonIsNilWhenAbsentOrEmpty() throws {
+        XCTAssertNil(try entry(type: "tool_call", status: "success").intentReason)
+        XCTAssertNil(try entry(type: "tool_call", status: "success",
+                               metadata: ["intent": ["operation_type": "read"]]).intentReason)
+        XCTAssertNil(try entry(type: "tool_call", status: "success",
+                               metadata: ["intent": ["reason": ""]]).intentReason)
+    }
+
+    func testBlockReasonComesFromTheTopLevelReasonKey() throws {
+        let blocked = try entry(type: "policy_decision", status: "blocked",
+                                metadata: ["decision": "blocked",
+                                           "reason": "Intent rejected: tool variant conflicts"])
+        XCTAssertEqual(blocked.blockReason, "Intent rejected: tool variant conflicts")
+    }
+
+    func testBlockReasonIsNilWhenAbsentOrEmpty() throws {
+        XCTAssertNil(try entry(type: "policy_decision", status: "blocked").blockReason)
+        XCTAssertNil(try entry(type: "policy_decision", status: "blocked",
+                               metadata: ["decision": "blocked", "reason": ""]).blockReason)
+    }
+
+    /// The pipeline-facing accessor: a policy row explains itself with the
+    /// policy's reason, a call row with the caller's declared intent.
+    func testReasonPrefersTheBlockReasonOnPolicyRecords() throws {
+        let blocked = try entry(type: "policy_decision", status: "blocked",
+                                metadata: ["decision": "blocked",
+                                           "reason": "Quarantined server",
+                                           "intent": ["reason": "Fetch the ticket"]])
+        XCTAssertEqual(blocked.reason, "Quarantined server",
+                       "a blocked row must explain the block, not the caller's plan")
+
+        let call = try entry(type: "tool_call", status: "error",
+                             metadata: ["reason": "unrelated", "intent": ["reason": "Fetch the ticket"]])
+        XCTAssertEqual(call.reason, "Fetch the ticket")
+    }
+
+    func testReasonIsNilWhenNeitherSourceHasOne() throws {
+        XCTAssertNil(try entry(type: "tool_call", status: "success").reason)
+        XCTAssertNil(try entry(type: "policy_decision", status: "blocked").reason)
+    }
+
+    func testOutcomeClassSeparatesBlocksFromCalls() throws {
+        for decision in ["blocked", "block"] {
+            let record = try entry(type: "policy_decision", status: decision,
+                                   metadata: ["decision": decision, "reason": "nope"])
+            XCTAssertEqual(record.outcomeClass, .blocked, "decision \(decision) is a block")
+        }
+
+        XCTAssertEqual(try entry(type: "tool_call", status: "success").outcomeClass, .call)
+        XCTAssertEqual(try entry(type: "tool_call", status: "error").outcomeClass, .call)
+        XCTAssertEqual(try entry(type: "internal_tool_call", status: "error").outcomeClass, .call)
+    }
+
+    /// Warnings and redactions are policy decisions that did NOT stop the call,
+    /// so they are not blocks (and, per FR-012, never become rows).
+    func testNonBlockingPolicyDecisionsAreNotBlocks() throws {
+        for decision in ["warning", "redacted", "allowed"] {
+            let record = try entry(type: "policy_decision", status: decision,
+                                   metadata: ["decision": decision, "reason": "fyi"])
+            XCTAssertEqual(record.outcomeClass, .call, "decision \(decision) is not a block")
+        }
+    }
+
+    /// Legacy/lossy records carry no `metadata.decision` — the persisted record's
+    /// own status is the decision (`activity_service.go` writes `Status: decision`),
+    /// so the class must fall back to it rather than silently declassifying a block.
+    func testOutcomeClassFallsBackToStatusWhenDecisionMetadataIsAbsent() throws {
+        XCTAssertEqual(try entry(type: "policy_decision", status: "blocked").outcomeClass, .blocked)
+        XCTAssertEqual(try entry(type: "policy_decision", status: "block").outcomeClass, .blocked)
+        XCTAssertEqual(try entry(type: "policy_decision", status: "warning").outcomeClass, .call)
+    }
 }

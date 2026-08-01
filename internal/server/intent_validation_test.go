@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -152,39 +155,39 @@ func TestMCPProxyServer_validateIntentForVariant(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		intent         *contracts.IntentDeclaration
-		toolVariant    string
-		wantErr        bool
-		wantOpType     string // expected operation_type after inference
+		name        string
+		intent      *contracts.IntentDeclaration
+		toolVariant string
+		wantErr     bool
+		wantOpType  string // expected operation_type after inference
 	}{
 		{
-			name:           "nil intent - creates default with inferred operation_type",
-			intent:         nil,
-			toolVariant:    contracts.ToolVariantRead,
-			wantErr:        false,
-			wantOpType:     contracts.OperationTypeRead,
+			name:        "nil intent - creates default with inferred operation_type",
+			intent:      nil,
+			toolVariant: contracts.ToolVariantRead,
+			wantErr:     false,
+			wantOpType:  contracts.OperationTypeRead,
 		},
 		{
-			name:           "empty intent - infers operation_type from read variant",
-			intent:         &contracts.IntentDeclaration{},
-			toolVariant:    contracts.ToolVariantRead,
-			wantErr:        false,
-			wantOpType:     contracts.OperationTypeRead,
+			name:        "empty intent - infers operation_type from read variant",
+			intent:      &contracts.IntentDeclaration{},
+			toolVariant: contracts.ToolVariantRead,
+			wantErr:     false,
+			wantOpType:  contracts.OperationTypeRead,
 		},
 		{
-			name:           "empty intent - infers operation_type from write variant",
-			intent:         &contracts.IntentDeclaration{},
-			toolVariant:    contracts.ToolVariantWrite,
-			wantErr:        false,
-			wantOpType:     contracts.OperationTypeWrite,
+			name:        "empty intent - infers operation_type from write variant",
+			intent:      &contracts.IntentDeclaration{},
+			toolVariant: contracts.ToolVariantWrite,
+			wantErr:     false,
+			wantOpType:  contracts.OperationTypeWrite,
 		},
 		{
-			name:           "empty intent - infers operation_type from destructive variant",
-			intent:         &contracts.IntentDeclaration{},
-			toolVariant:    contracts.ToolVariantDestructive,
-			wantErr:        false,
-			wantOpType:     contracts.OperationTypeDestructive,
+			name:        "empty intent - infers operation_type from destructive variant",
+			intent:      &contracts.IntentDeclaration{},
+			toolVariant: contracts.ToolVariantDestructive,
+			wantErr:     false,
+			wantOpType:  contracts.OperationTypeDestructive,
 		},
 		{
 			name: "intent with optional fields - operation_type inferred",
@@ -330,4 +333,72 @@ func TestMCPProxyServer_validateIntentAgainstServer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// =============================================================================
+// Spec 090 (T016): pre-intent-validation blocks carry a request id
+// =============================================================================
+
+// This is the earliest policy gate in handleCallToolVariant — it fires before
+// the point where the handler used to mint its request id, which is exactly why
+// it was the site most likely to emit an anonymous block. The id has to be
+// minted above this gate, not at the old spot further down.
+func TestCallToolVariant_IntentValidationBlock_CarriesRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+	probe := watchPolicyDecisions(t, rt)
+
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "call_tool_read",
+			Arguments: map[string]interface{}{
+				"name": "github:create_issue",
+				// Not one of public/internal/private/unknown, so
+				// validateIntentForVariant rejects the call.
+				"intent_data_sensitivity": "definitely-not-a-sensitivity",
+			},
+		},
+	}
+
+	result, err := proxy.handleCallToolVariant(context.Background(), request, contracts.ToolVariantRead)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError, "an invalid intent must be rejected")
+
+	payload := probe.awaitOne(t)
+	assert.Equal(t, "blocked", payload["decision"])
+	assert.Equal(t, "github", payload["server_name"])
+	assert.Equal(t, "create_issue", payload["tool_name"])
+	requestIDOf(t, payload)
+}
+
+// A gate further down the same handler — past the point where the id used to be
+// minted — must reuse that one id rather than mint a second, or two gates in one
+// dispatch would look like two unrelated requests.
+func TestCallToolVariant_CallabilityBlock_CarriesRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		{Name: "github", Enabled: true, Quarantined: true},
+	})
+	probe := watchPolicyDecisions(t, rt)
+
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "call_tool_read",
+			Arguments: map[string]interface{}{
+				"name": "github:create_issue",
+			},
+		},
+	}
+
+	result, err := proxy.handleCallToolVariant(context.Background(), request, contracts.ToolVariantRead)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError, "a quarantined server's tool is not callable")
+
+	payload := probe.awaitOne(t)
+	assert.Equal(t, "blocked", payload["decision"])
+	assert.Equal(t, "github", payload["server_name"])
+	assert.Contains(t, payload["reason"], "TOOL_BLOCKED")
+	requestIDOf(t, payload)
 }

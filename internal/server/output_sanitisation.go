@@ -68,10 +68,13 @@ func evaluateOutputSanitisation(cfg *config.OutputSanitisationConfig, trust stri
 // truncation, since it is a presentation frame that must not be cached.
 // Non-text blocks (image/audio/embedded) are never touched (FR-B5).
 //
+// `requestID` is the dispatch's correlation id; the block and redaction records
+// this writes belong to that call and would otherwise be unattributable.
+//
 // `result` is the upstream value (interface{}) handed to forwardContentResult;
 // when it is not a *mcp.CallToolResult (the legacy JSON-wrap path) sanitisation
 // is a no-op. The fast path returns immediately for the common opt-out case.
-func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName, toolName, contentTrust string, result interface{}) *mcp.CallToolResult {
+func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName, toolName, requestID, contentTrust string, result interface{}) *mcp.CallToolResult {
 	cfg := p.config.OutputSanitisation
 	if cfg == nil {
 		cfg = config.DefaultOutputSanitisationConfig()
@@ -106,7 +109,7 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 	}
 
 	if d.block {
-		p.emitActivityPolicyDecision(serverName, toolName, sessionID, "blocked", d.reason)
+		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", d.reason)
 		return mcp.NewToolResultError("tool output blocked by sanitisation policy: " + d.reason)
 	}
 
@@ -148,7 +151,7 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 
 	if redactedCount > 0 || len(strippedClasses) > 0 {
 		action, reason := summariseSanitisation(redactedCount, redactedCats, strippedClasses)
-		p.emitActivityPolicyDecision(serverName, toolName, sessionID, action, reason)
+		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, action, reason)
 	}
 
 	return nil

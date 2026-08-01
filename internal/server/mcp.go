@@ -637,10 +637,60 @@ func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, ses
 	}
 }
 
-func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessionID, decision, reason string) {
+// emitActivityPolicyDecision is the single funnel every policy block, warning
+// and redaction leaves through.
+//
+// requestID must be the same id the rest of the dispatch reports, so the live
+// event and the record persisted from it are recognisably one thing. Gates that
+// fire before a handler would otherwise mint an id have to mint it earlier
+// rather than pass "" — see mintActivityRequestID.
+func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason string) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, decision, reason)
+		p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason)
 	}
+}
+
+// activityRequestIDSeq disambiguates ids minted within the same nanosecond.
+// time.Now() is not guaranteed to advance between two goroutines reading it, so
+// two calls blocked at the same instant on the same tool would otherwise share
+// an id — and the tray, which collapses activity rows by request id, would show
+// two separate attempts as one.
+var activityRequestIDSeq atomic.Uint64
+
+// mintCorrelationIDAt builds "<nanos>-<part>-…-<seq>": the shape every call
+// path already emitted, with the counter appended. It is the ONLY place in the
+// package that turns the clock into an identifier — see
+// TestActivityIDsAreNeverMintedInline, which enforces that.
+//
+// The instant is a parameter because some records are keyed by when the work
+// started, not by when the id was needed.
+func mintCorrelationIDAt(at time.Time, parts ...string) string {
+	var b strings.Builder
+	b.WriteString(strconv.FormatInt(at.UnixNano(), 10))
+	for _, part := range parts {
+		b.WriteByte('-')
+		b.WriteString(part)
+	}
+	b.WriteByte('-')
+	b.WriteString(strconv.FormatUint(activityRequestIDSeq.Add(1), 10))
+	return b.String()
+}
+
+// mintCorrelationID is mintCorrelationIDAt for work starting now.
+func mintCorrelationID(parts ...string) string {
+	return mintCorrelationIDAt(time.Now(), parts...)
+}
+
+// mintActivityRequestID produces the correlation id shared by every activity
+// event of one dispatch. The nanosecond stamp and target keep the shape the
+// call paths already generated (and logs are grepped by); the counter suffix is
+// what actually guarantees uniqueness.
+//
+// Callers mint ONCE, above the earliest policy gate they can reach, and reuse
+// the value: minting per emit site would make two gates in one dispatch look
+// like two unrelated requests.
+func mintActivityRequestID(serverName, toolName string) string {
+	return mintCorrelationID(serverName, toolName)
 }
 
 // emitActivityInternalToolCall safely emits an internal tool call completion event (Spec 024)
@@ -1122,7 +1172,7 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-search_servers", time.Now().UnixNano())
+	requestID := mintCorrelationID("search_servers")
 
 	registry, err := request.RequireString("registry")
 	if err != nil {
@@ -1221,7 +1271,7 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-list_registries", time.Now().UnixNano())
+	requestID := mintCorrelationID("list_registries")
 
 	registriesList := []map[string]interface{}{}
 	allRegistries := registries.ListRegistries()
@@ -1298,7 +1348,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-retrieve_tools", time.Now().UnixNano())
+	requestID := mintCorrelationID("retrieve_tools")
 
 	query, err := request.RequireString("query")
 	if err != nil {
@@ -1765,6 +1815,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return ""
 	}
 
+	// Mint the activity request id HERE, above the first policy gate, not at
+	// the point the upstream call is prepared. Intent extraction and intent
+	// validation below can both block, and a block emitted before the id exists
+	// is an activity record nothing can be correlated with. serverName and
+	// actualToolName may still be empty for a malformed tool name; the
+	// timestamp alone keeps the id unique.
+	requestID := mintActivityRequestID(serverName, actualToolName)
+
 	// Extract intent (optional - operation_type is inferred from tool variant)
 	intent, err := p.extractIntent(request)
 	if err != nil {
@@ -1778,7 +1836,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if logTool == "" {
 			logTool = toolName
 		}
-		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), "blocked", errMsg)
+		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -1794,7 +1852,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if logTool == "" {
 			logTool = toolName
 		}
-		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), "blocked", "Intent validation failed")
+		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", "Intent validation failed")
 		return errResult, nil
 	}
 
@@ -1832,7 +1890,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// filtered, and so a base /mcp session that ran set_profile is bounded too.
 	if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -1841,7 +1899,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// Check server scope
 		if !authCtx.CanAccessServer(serverName) {
 			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 		// Check permission scope — map tool variant to required permission
@@ -1856,7 +1914,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
 			errMsg := fmt.Sprintf("Insufficient permissions: '%s' requires '%s' permission", toolVariant, requiredPerm)
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	}
@@ -1883,7 +1941,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if errResult := p.validateIntentAgainstServer(intent, toolVariant, serverName, actualToolName, annotations); errResult != nil {
 		// Record activity error for server annotation mismatch
 		reason := fmt.Sprintf("Intent rejected: tool variant '%s' conflicts with server annotations for %s:%s", toolVariant, serverName, actualToolName)
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", reason)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", reason)
 		return errResult, nil
 	}
 
@@ -1910,8 +1968,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
-	// Generate requestID for activity tracking
-	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+	// requestID was minted above the first policy gate, near the top of this
+	// handler — every activity event below shares that one value.
 
 	// Spec 057 FR-011 / Profiles v2: effective profile slug (token pin > URL >
 	// session set_profile) tagged on every activity record (success AND error
@@ -1930,7 +1988,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			zap.String("server_name", serverName))
 
 		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", "Server is quarantined for security review")
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", "Server is quarantined for security review")
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
@@ -1945,7 +2003,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 						zap.String("server_name", serverName),
 						zap.String("tool_name", actualToolName))
 
-					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
+					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
 						"Tool is pending approval (new unapproved tool)")
 
 					return toolPendingApprovalResult(serverName, actualToolName, approval), nil
@@ -1955,7 +2013,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 						zap.String("server_name", serverName),
 						zap.String("tool_name", actualToolName))
 
-					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
+					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
 						"Tool description/schema changed since last approval")
 
 					return toolChangedApprovalResult(serverName, actualToolName, approval), nil
@@ -1966,7 +2024,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	if !p.isToolCallable(serverName, actualToolName) {
 		errMsg := p.blockedToolMessage(serverName, actualToolName)
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2092,7 +2150,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ID:               mintCorrelationID(actualToolName),
 		ServerID:         serverID,
 		ServerName:       serverName,
 		ToolName:         actualToolName,
@@ -2188,7 +2246,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// forwardContentResult truncates/caches it, so the read_cache store never
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
-	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, contentTrust, result); blockResult != nil {
+	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -2215,7 +2273,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -2393,7 +2451,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	}
 
 	// Generate requestID for activity tracking
-	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
+	requestID := mintActivityRequestID(serverName, actualToolName)
 
 	// Spec 028: Inject auth identity into activity metadata (separate copy for logging only)
 	activityArgs := injectAuthMetadata(ctx, args)
@@ -2405,7 +2463,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("server_name", serverName))
 
 		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", "Server is quarantined for security review")
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", "Server is quarantined for security review")
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
@@ -2416,7 +2474,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	if !p.isToolCallable(serverName, actualToolName) {
 		errMsg := p.blockedToolMessage(serverName, actualToolName)
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2502,7 +2560,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Record tool call for history (even if error)
 	toolCallRecord := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-%s", time.Now().UnixNano(), actualToolName),
+		ID:               mintCorrelationID(actualToolName),
 		ServerID:         serverID,
 		ServerName:       serverName,
 		ToolName:         actualToolName,
@@ -2608,7 +2666,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// forwardContentResult truncates/caches it, so the read_cache store never
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
-	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, contentTrust, result); blockResult != nil {
+	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -2621,7 +2679,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -2800,7 +2858,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-upstream_servers", time.Now().UnixNano())
+	requestID := mintCorrelationID("upstream_servers")
 
 	operation, err := request.RequireString("operation")
 	if err != nil {
@@ -2924,7 +2982,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-quarantine_security", time.Now().UnixNano())
+	requestID := mintCorrelationID("quarantine_security")
 
 	operation, err := request.RequireString("operation")
 	if err != nil {
@@ -4805,7 +4863,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	requestID := fmt.Sprintf("%d-read_cache", time.Now().UnixNano())
+	requestID := mintCorrelationID("read_cache")
 
 	key, err := request.RequireString("key")
 	if err != nil {
@@ -5883,7 +5941,9 @@ func (p *MCPProxyServer) lookupOutputSchema(serverName, toolName string) string 
 // only), so validating it here is equivalent to validating the ORIGINAL
 // structured result (FR-010b) — TOON encoding can neither mask nor cause a
 // schema violation.
-func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName string, forwarded *mcp.CallToolResult) *mcp.CallToolResult {
+// requestID is the dispatch's correlation id, passed down because the decision
+// this records belongs to that call and is otherwise unattributable.
+func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName, requestID string, forwarded *mcp.CallToolResult) *mcp.CallToolResult {
 	// Disabled (mode=off) or validator not constructed -> no-op (FR-A4/FR-A7).
 	if p.outputValidator == nil || !p.config.OutputValidation.IsEnabled() {
 		return nil
@@ -5912,7 +5972,7 @@ func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, 
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	p.emitActivityPolicyDecision(serverName, toolName, sessionID, d.decision, d.reason)
+	p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, d.decision, d.reason)
 	if d.block {
 		return mcp.NewToolResultError("output schema validation failed: " + d.reason)
 	}

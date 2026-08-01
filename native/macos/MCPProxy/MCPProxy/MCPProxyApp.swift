@@ -9,6 +9,25 @@
 import SwiftUI
 import Combine
 
+// MARK: - Tray menu host
+
+/// Whatever owns the tray menu.
+///
+/// In production this is the `NSStatusItem`, and nothing else ever will be. It
+/// is a protocol so the menu paths — `menuWillOpen`, `rebuildMenu`,
+/// `menuDidClose` — can run in a test without putting an icon in the menu bar of
+/// whoever is running the suite. That is not a convenience: the spec-048
+/// invariant ("opening the menu performs zero network requests") is only
+/// meaningful if the REAL open sequence can be driven, and before this it could
+/// not be, so the test that claimed to check it counted a stub nothing was
+/// wired to. See `MenuOpenNetworkTests`.
+@MainActor
+protocol TrayMenuHost: AnyObject {
+    var menu: NSMenu? { get set }
+}
+
+extension NSStatusItem: TrayMenuHost {}
+
 // MARK: - App Delegate
 
 /// Manages the status bar item, menu, core process, and app lifecycle.
@@ -18,7 +37,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let updateService = UpdateService()
     var coreManager: CoreProcessManager?
 
-    private var statusItem: NSStatusItem!
+    private var statusItem: NSStatusItem?
+
+    /// Where the tray menu lives. Assigned to `statusItem` at launch; injected
+    /// by tests that drive the menu paths without a status bar item.
+    @MainActor
+    private var menuHost: TrayMenuHost?
+
+    /// Set only by the testing initializer; production leaves it nil and falls
+    /// back to the live core client.
+    private var injectedGlanceDataSource: GlanceDataSource?
+
+    /// The read surface any tray path is allowed to fetch through.
+    ///
+    /// Nothing in the menu-open sequence may call it — the menu renders from
+    /// state already in memory, fed by SSE and the background poll — and it is a
+    /// property precisely so that claim is falsifiable: a fetch added to
+    /// `menuWillOpen` tomorrow has somewhere to be counted, and
+    /// `MenuOpenNetworkTests` counts it.
+    @MainActor
+    var glanceDataSource: GlanceDataSource? {
+        injectedGlanceDataSource ?? appState.apiClient
+    }
+
     private var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
@@ -64,6 +105,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// bind to the very scheduler production uses — see
     /// `MenuRefreshSchedulerTests`.
     static let menuRefreshScheduler = DispatchQueue.main
+
+    override init() {
+        super.init()
+    }
+
+    /// Construct a controller whose tray menu is hosted outside the menu bar and
+    /// whose reads are countable — the seam `MenuOpenNetworkTests` drives the
+    /// real menu-open sequence through. Production goes through `init()` and
+    /// `applicationDidFinishLaunching`, which installs the status item as the
+    /// host and leaves the data source resolving to the live core client.
+    @MainActor
+    convenience init(glanceDataSource: GlanceDataSource, menuHost: TrayMenuHost) {
+        self.init()
+        self.injectedGlanceDataSource = glanceDataSource
+        self.menuHost = menuHost
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
@@ -131,8 +188,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         // Create the status bar item with the MCPProxy monochrome icon
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = item
+        menuHost = item
+        if let button = item.button {
             // Load the bundled icon-mono-44.png from the app bundle
             if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
                let icon = NSImage(contentsOfFile: iconPath) {
@@ -242,7 +301,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // but it does NOT reach this method: GlanceSection installs its own
         // HistogramSubmenuDelegate on that submenu, precisely so opening it
         // cannot rebuild the tray menu underneath the cursor.
-        guard menu === statusItem.menu else { return }
+        guard menu === menuHost?.menu else { return }
 
         // Spec 048: dropped the per-click `client.servers()` fetch. appState
         // is fed by SSE (spec 047), so it's already current within ~50 ms of
@@ -257,7 +316,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func menuDidClose(_ menu: NSMenu) {
-        guard menu === statusItem.menu else { return }
+        guard menu === menuHost?.menu else { return }
 
         // Run the structural rebuild that was suppressed while the menu was up.
         // Deferred to the next run-loop turn: AppKit is still tearing the menu
@@ -526,10 +585,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         let manager = CoreProcessManager(
             appState: appState,
-            notificationService: notificationService
+            notificationService: notificationService,
+            socketPath: Self.socketPathOverride
         )
         coreManager = manager
         await manager.start(maySpawn: policy.maySpawnCore)
+    }
+
+    /// Dev/QA-only escape hatch: point the app at a non-default core socket
+    /// (e.g. an isolated scratch core) without touching ~/.mcpproxy. The
+    /// CoreProcessManager initializer has always taken an injectable
+    /// socketPath "so a test (or a second app)" can use it; this is the
+    /// second-app case. Unset in normal use, so behavior is unchanged.
+    static var socketPathOverride: String? {
+        ProcessInfo.processInfo.environment["MCPPROXY_SOCKET_PATH"]
     }
 
     private func resolveBundledCoreBinary() -> String? {
@@ -557,7 +626,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// - Stopped: small orange stop badge overlay
     /// - Error: small red exclamation badge overlay
     private func updateStatusIcon() {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem?.button else { return }
 
         // Always start with the MCPProxy base icon
         let base: NSImage
@@ -601,8 +670,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// and rejects a future off-main caller at compile time (see the note on
     /// `MenuRebuildGuard.decide(refreshing:from:now:)` for how far that reaches
     /// under this package's concurrency checking).
+    ///
+    /// Internal rather than private only so `MenuOpenNetworkTests` can drive the
+    /// real open sequence — `menuWillOpen` → rebuild → in-place update →
+    /// `menuDidClose` — instead of re-implementing it beside the code, which is
+    /// how the previous version of that test came to assert nothing at all.
     @MainActor
-    private func rebuildMenu() {
+    func rebuildMenu() {
         // Tray Glance: while the menu is on screen its structure must not move
         // under the cursor. The rows are rewritten in place; a structural change
         // is suppressed here and re-run from menuDidClose. Non-glance sections
@@ -615,14 +689,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             break
         }
 
+        guard let menuHost else { return }
+
         let menu: NSMenu
-        if let existing = statusItem.menu {
+        if let existing = menuHost.menu {
             existing.removeAllItems()
             menu = existing
         } else {
             menu = NSMenu()
             menu.delegate = self
-            statusItem.menu = menu
+            menuHost.menu = menu
         }
 
         // Header with colored status dot
@@ -986,7 +1062,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
             let manager = CoreProcessManager(
                 appState: appState,
-                notificationService: notificationService
+                notificationService: notificationService,
+                socketPath: Self.socketPathOverride
             )
             coreManager = manager
             // An explicit "Start MCPProxy Core" always spawns, whatever the
