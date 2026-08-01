@@ -143,6 +143,12 @@ final class UpdateService: ObservableObject {
     private func checkWithGitHub() {
         guard !isChecking else { return }
         isChecking = true
+        // One line per check, on the record (#862 ask 3). The updater could
+        // neither be confirmed nor excluded during the original investigation
+        // because its hourly work logged nothing whatsoever.
+        AppLifecycle.shared.recordUpdateCheck(
+            "checking GitHub releases (running \(currentVersion.isEmpty ? "unknown" : currentVersion))"
+        )
 
         Task {
             defer { DispatchQueue.main.async { self.isChecking = false } }

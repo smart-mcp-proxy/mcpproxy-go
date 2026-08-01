@@ -145,6 +145,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Switch to accessory (menu bar only) now that launch is complete
         NSApp.setActivationPolicy(.accessory)
 
+        // Lifecycle bookkeeping FIRST, so a launch that fails later is still on
+        // the record — and so an unaccounted-for previous exit is reported now,
+        // while somebody is reading the log, rather than never (#862).
+        Self.logInstanceRoot()
+        AppLifecycle.shared.recordLaunch()
+        AppLifecycle.shared.installSignalHandlers {
+            // A caught signal goes through the normal quit path so the core is
+            // shut down properly; without this the SIG_IGN we install to catch
+            // it would make the app unkillable by SIGTERM.
+            NSApplication.shared.terminate(nil)
+        }
+        // Logout, restart and shutdown reach applicationWillTerminate exactly
+        // like a Quit does, so the difference has to be claimed here.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { _ in
+            AppLifecycle.shared.note("macOS is logging out, restarting or shutting down")
+        }
+
         // Monitor Cmd+/Cmd-/Cmd+0 globally for text size adjustment.
         // Store the monitor reference to prevent potential deallocation.
         // Match both "+" (Cmd+Shift+=) and "=" (Cmd+=) for zoom in,
@@ -341,7 +360,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Written BEFORE the core is torn down: whatever happens next, the
+        // journal already carries a reason for this exit. The previous
+        // behaviour — terminate the core and say nothing — is what made the
+        // original incident unattributable (#862).
+        AppLifecycle.shared.recordTermination()
         if let process = coreManager?.managedProcess {
+            AppLifecycle.shared.recordCoreTerminated(
+                pid: process.processIdentifier,
+                reason: "tray is terminating"
+            )
             process.terminate()
         }
     }
@@ -680,8 +708,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// CoreProcessManager initializer has always taken an injectable
     /// socketPath "so a test (or a second app)" can use it; this is the
     /// second-app case. Unset in normal use, so behavior is unchanged.
+    ///
+    /// Nil now means "whatever the instance root says", not "the real
+    /// ~/.mcpproxy": `MCPPROXY_HOME` moves the socket along with everything
+    /// else (GH #936), and `InstancePaths` is where the two are reconciled.
     static var socketPathOverride: String? {
-        ProcessInfo.processInfo.environment["MCPPROXY_SOCKET_PATH"]
+        ProcessInfo.processInfo.environment[InstancePaths.socketPathEnvVar]
+    }
+
+    /// Announce a relocated instance once, at launch, and say so loudly if the
+    /// socket it implies cannot be bound.
+    ///
+    /// Both lines are diagnostics for a human running a second instance on
+    /// purpose. The length check in particular: over 103 bytes the bind fails
+    /// silently and the tray simply never finds a core, which costs an hour to
+    /// work out from the outside.
+    static func logInstanceRoot() {
+        guard InstancePaths.isOverridden else { return }
+        NSLog("[MCPProxy] Instance root overridden by %@: %@ (socket %@)",
+              InstancePaths.rootEnvVar, InstancePaths.root.path, InstancePaths.socketPath)
+        if let problem = InstancePaths.socketPathProblem(InstancePaths.socketPath) {
+            NSLog("[MCPProxy] %@", problem)
+        }
     }
 
     private func resolveBundledCoreBinary() -> String? {
@@ -1282,8 +1330,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc private func openConfigFile() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        NSWorkspace.shared.open(home.appendingPathComponent(".mcpproxy/mcp_config.json"))
+        NSWorkspace.shared.open(InstancePaths.configFileURL)
     }
 
     @objc private func openLogsDirectory() {
@@ -1320,6 +1367,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc private func quitApp() {
+        // Claimed before anything else runs: the core teardown below would
+        // otherwise get there first and record its own mechanical description
+        // of what it is doing instead of the fact that the user asked (#862).
+        AppLifecycle.shared.note("user chose Quit in the tray menu")
         Task {
             await coreManager?.shutdown()
             try? await Task.sleep(nanoseconds: 200_000_000)

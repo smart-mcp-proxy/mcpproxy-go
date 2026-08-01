@@ -6,9 +6,58 @@ This guide explains how to control the mcpproxy tray during development and auto
 
 | Variable | Scope | Default | Purpose |
 |----------|-------|---------|---------|
+| `MCPPROXY_HOME` | macOS tray | `~/.mcpproxy` | Relocates the whole instance root: socket, config, database, autostart sidecar, lifecycle journal. |
+| `MCPPROXY_SOCKET_PATH` | macOS tray | `<root>/mcpproxy.sock` | Points the tray at one specific core's socket, wherever the root is. |
 | `MCPPROXY_TRAY_SKIP_CORE` | Tray | unset | Prevents the tray from launching the core binary. |
 | `MCPPROXY_CORE_URL` | Tray | `http://localhost:8080` | Overrides the core API endpoint the tray connects to. |
 | `MCPPROXY_DISABLE_OAUTH` | Core | unset | Disables OAuth popups and tray-driven login prompts. |
+
+## Running a Second (Dev/QA) macOS Tray Instance
+
+The native macOS tray resolves its paths through `homeDirectoryForCurrentUser`, which **ignores `$HOME`**. Without an override, a tray built from a branch and run out of a scratch bundle still reads and writes the real `~/.mcpproxy` — which means QA runs cannot go in parallel (they contend for one socket) and the autostart sidecar overwrites the user's real login-item state on every launch.
+
+`MCPPROXY_HOME` moves the whole instance in one step. It is unset in normal use, and with it unset every path resolves exactly where it always did.
+
+```bash
+# Keep the root SHORT: sockaddr_un caps the socket path at 103 bytes, and a
+# deep scratch directory silently fails to bind. The tray logs a warning if
+# the resolved path is over the limit.
+export MCPPROXY_HOME=/tmp/mcpproxy-qa
+/path/to/dev/mcpproxy.app/Contents/MacOS/MCPProxy
+```
+
+With it set:
+
+| File | Default | With `MCPPROXY_HOME=/tmp/mcpproxy-qa` |
+|------|---------|----------------------------------------|
+| Core socket | `~/.mcpproxy/mcpproxy.sock` | `/tmp/mcpproxy-qa/mcpproxy.sock` |
+| Config opened by **Open Config File** | `~/.mcpproxy/mcp_config.json` | `/tmp/mcpproxy-qa/mcp_config.json` |
+| Autostart sidecar | `~/.mcpproxy/tray-autostart.json` | `/tmp/mcpproxy-qa/tray-autostart.json` |
+| Lifecycle journal | `~/.mcpproxy/tray-lifecycle.jsonl` | `/tmp/mcpproxy-qa/tray-lifecycle.jsonl` |
+| Spawned core | `mcpproxy serve` | `mcpproxy serve --data-dir /tmp/mcpproxy-qa --config /tmp/mcpproxy-qa/mcp_config.json` |
+
+Notes and limits:
+
+- `MCPPROXY_SOCKET_PATH` still wins over the root. Use it to attach to a core somebody else started; use `MCPPROXY_HOME` to own a whole instance.
+- **Not** relocated: `~/Library/Logs/mcpproxy` (the core's log directory, which follows the core's own rules) and the app's preferences domain — `cfprefsd` honours neither `$HOME` nor this variable, so give a dev bundle a distinct bundle id if you need separate defaults.
+- The first-run dialog is a `UserDefaults` flag, so it lives in the preferences domain rather than the instance root; a fresh bundle id will show it again. Its "Launch at login" checkbox is pre-checked, so clicking through it in a dev instance registers a real login item.
+
+## Attributing a Tray or Core Exit
+
+Every start and stop is recorded in `<instance root>/tray-lifecycle.jsonl`, one JSON object per line, and mirrored to the macOS unified log at Notice level (`log show --predicate 'subsystem == "com.smartmcpproxy.mcpproxy"'`) — Notice because the Info and Debug tiers are purged within hours, which is precisely why an earlier silent exit could not be attributed.
+
+```bash
+tail -5 ~/.mcpproxy/tray-lifecycle.jsonl | python3 -m json.tool --json-lines
+```
+
+Recorded events: `appLaunched`, `appTerminating`, `signalReceived`, `coreLaunched`, `coreTerminated`, `coreExited`, `updateCheck`. Each carries a free-text reason, the uptime of the tray process, and a pid.
+
+The rules worth knowing when reading one:
+
+- Every shutdown records **who asked**. A shutdown nobody claimed is written as `unattributed (no initiator claimed this shutdown)` rather than as something plausible.
+- `SIGTERM`, `SIGINT` and `SIGHUP` are caught, recorded, and then routed through the normal quit path. `SIGKILL` and a jetsam kill cannot be caught by anyone.
+- Which is why the **next** launch reports an unaccounted-for previous run: if the last record before a launch is not an `appTerminating`, the new `appLaunched` record says so and names the last thing the dead run did. That marker is the signature of a SIGKILL-class death (jetsam, `pkill`, power loss) or a crash outside the app's handlers.
+- The journal is trimmed to its newest 500 records at launch.
 
 ## Use Cases
 

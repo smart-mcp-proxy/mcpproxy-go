@@ -22,13 +22,14 @@ import Foundation
 /// crashing the app over telemetry plumbing.
 enum AutostartSidecarService {
 
-    /// Returns `~/.mcpproxy/tray-autostart.json`.
-    private static var sidecarURL: URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".mcpproxy", isDirectory: true)
-            .appendingPathComponent("tray-autostart.json", isDirectory: false)
-    }
+    /// Returns `~/.mcpproxy/tray-autostart.json` — or the same file under the
+    /// instance root when one has been set (GH #936).
+    ///
+    /// This is the write that made a dev instance dangerous: `refresh()` reads
+    /// the RUNNING bundle's login-item state, and a copied bundle is never a
+    /// registered login item, so a QA run wrote `{"enabled":false}` over the
+    /// user's real `{"enabled":true}` on every launch.
+    private static var sidecarURL: URL { InstancePaths.autostartSidecarURL }
 
     /// Sidecar JSON schema. Matches `autostartSidecar` in
     /// `internal/telemetry/autostart.go`.
