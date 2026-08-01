@@ -1030,3 +1030,88 @@ func TestActivityServiceStartAfterStopIsNoOp(t *testing.T) {
 	svc.Stop()
 	svc.Stop()
 }
+
+// =============================================================================
+// Spec 090 (T016): policy decisions carry a request id end to end
+// =============================================================================
+
+// The tray glance renders a blocked call twice — once from the live SSE event
+// and once from the next poll of persisted records — unless the two can be
+// recognised as the same thing. Every other activity record already carries
+// `request_id` and the glance dedupes on it; policy decisions did not, so a
+// block always double-rendered. The id therefore has to survive the whole trip:
+// emitted on the event, copied onto the record, identical in both.
+func TestEmitActivityPolicyDecision_RequestIDReachesSSEAndRecord(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	rt := &Runtime{
+		logger:    logger,
+		eventSubs: make(map[chan Event]struct{}),
+	}
+
+	eventChan := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(eventChan)
+
+	rt.EmitActivityPolicyDecision(
+		"github", "create_issue", "mcp-session-abc", "req-block-42",
+		"blocked", "Server is quarantined for security review",
+	)
+
+	var evt Event
+	select {
+	case evt = <-eventChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive activity.policy_decision event within timeout")
+	}
+
+	require.Equal(t, EventTypeActivityPolicyDecision, evt.Type)
+	emittedID, _ := evt.Payload["request_id"].(string)
+	require.NotEmpty(t, emittedID, "the SSE payload must carry a request id")
+	assert.Equal(t, "req-block-42", emittedID, "the caller's id is used verbatim, not re-minted")
+
+	// The persistence subscriber consumes exactly this payload, so feeding the
+	// captured event through it is the real SSE-vs-record parity check.
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	assert.Equal(t, storage.ActivityTypePolicyDecision, records[0].Type)
+	require.NotEmpty(t, records[0].RequestID, "the persisted record must carry a request id")
+	assert.Equal(t, emittedID, records[0].RequestID,
+		"the SSE event and the persisted record must share one identity")
+}
+
+// Records written before this change have no request_id, and FR-015 says such
+// rows are never correlated rather than being correlated by an empty key — so
+// the subscriber must leave the field empty rather than inventing an id.
+func TestHandlePolicyDecision_LegacyPayloadWithoutRequestID(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityPolicyDecision,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "github",
+			"tool_name":   "create_issue",
+			"session_id":  "mcp-session-abc",
+			"decision":    "blocked",
+			"reason":      "Server is quarantined for security review",
+		},
+	})
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Empty(t, records[0].RequestID, "a missing id stays missing; nothing is synthesised")
+	assert.Equal(t, "blocked", records[0].Status, "the rest of the record is unaffected")
+}

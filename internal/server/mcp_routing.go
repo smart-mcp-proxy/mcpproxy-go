@@ -180,8 +180,16 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			sessionID = sess.SessionID()
 		}
 
-		// Get request ID from context
+		// Get request ID from context. Direct-mode calls that did not arrive
+		// over an HTTP transport carry none, and every activity this handler
+		// emits — including the callability block below, which fires before
+		// anything else — needs an id a consumer can correlate on. Mint one
+		// rather than emit anonymously; a transport-supplied id always wins so
+		// the records still line up with the access log.
 		requestID := reqcontext.GetRequestID(ctx)
+		if requestID == "" {
+			requestID = mintActivityRequestID(serverName, toolName)
+		}
 
 		// Get arguments from the request
 		args := request.GetArguments()
@@ -191,7 +199,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		// invoking upstream. Direct mode must not bypass disabled, quarantine, or
 		// approval controls enforced by call_tool_* variants.
 		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, enrichedArgs); blocked != nil {
-			p.emitActivityPolicyDecision(serverName, toolName, sessionID, "blocked", "direct tool is not callable")
+			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable")
 			return blocked, nil
 		}
 

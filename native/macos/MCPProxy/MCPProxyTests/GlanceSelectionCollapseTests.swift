@@ -14,8 +14,8 @@ final class GlanceSelectionCollapseTests: XCTestCase {
         ]
         let rows = GlanceSelection.activityRows(from: entries)
         XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0].id, "upstream")
-        XCTAssertEqual(rows[0].serverName, "jira")
+        XCTAssertEqual(rows[0].newest.id, "upstream")
+        XCTAssertEqual(rows[0].newest.serverName, "jira")
     }
 
     func testPreDispatchWrapperFailureWithNoPairStillRenders() {
@@ -24,15 +24,22 @@ final class GlanceSelectionCollapseTests: XCTestCase {
                                        status: "error", requestId: "req-2")
         ]
         let rows = GlanceSelection.activityRows(from: entries)
-        XCTAssertEqual(rows.map(\.id), ["wrapper"])
+        XCTAssertEqual(rows.map(\.newest.id), ["wrapper"])
     }
 
+    /// Rule 4 is about request identity, and two records without one are two
+    /// distinct calls — they are never merged into a single record. Rule 5
+    /// (grouping) then legitimately renders them as one ×2 row, so the
+    /// assertion is on the records inside the run, not on the row count.
     func testRecordsWithoutRequestIDsAreNeverCollapsed() {
         let entries = [
             GlanceSelectionTests.entry(id: "a", type: "tool_call", server: "s", tool: "t"),
             GlanceSelectionTests.entry(id: "b", type: "tool_call", server: "s", tool: "t")
         ]
-        XCTAssertEqual(GlanceSelection.activityRows(from: entries).map(\.id), ["a", "b"])
+        let runs = GlanceSelection.activityRows(from: entries)
+        XCTAssertEqual(runs.count, 1, "consecutive calls to one tool are one row…")
+        XCTAssertEqual(runs[0].records.map(\.id), ["a", "b"], "…but both records survive into it")
+        XCTAssertEqual(runs[0].count, 2)
     }
 
     func testCollapsedRowKeepsTheGroupsRecencyPosition() {
@@ -43,7 +50,7 @@ final class GlanceSelectionCollapseTests: XCTestCase {
             GlanceSelectionTests.entry(id: "upstream", type: "tool_call", server: "b", tool: "t",
                                        status: "error", requestId: "r-8")
         ]
-        XCTAssertEqual(GlanceSelection.activityRows(from: entries).map(\.id), ["newest", "upstream"])
+        XCTAssertEqual(GlanceSelection.activityRows(from: entries).map(\.newest.id), ["newest", "upstream"])
     }
 
     // MARK: - Capping over a realistic page
@@ -69,7 +76,7 @@ final class GlanceSelectionCollapseTests: XCTestCase {
         XCTAssertEqual(page.count, 50)
 
         let rows = GlanceSelection.activityRows(from: page)
-        XCTAssertEqual(rows.map(\.id), ["call-0", "call-1", "call-2", "call-3", "call-4"])
+        XCTAssertEqual(rows.map(\.newest.id), ["call-0", "call-1", "call-2", "call-3", "call-4"])
     }
 
     /// Depth, not just filtering. The client requests ONE page and applies
@@ -96,7 +103,7 @@ final class GlanceSelectionCollapseTests: XCTestCase {
         let page = Array(log.prefix(AppState.glanceActivityPageSize))
         let rows = GlanceSelection.activityRows(from: page)
 
-        XCTAssertEqual(rows.map(\.id), ["call-0", "call-1", "call-2", "call-3", "call-4"])
+        XCTAssertEqual(rows.map(\.newest.id), ["call-0", "call-1", "call-2", "call-3", "call-4"])
     }
 
     /// Five qualifying RECORDS are not five rows. A failed call emits a wrapper
@@ -118,7 +125,7 @@ final class GlanceSelectionCollapseTests: XCTestCase {
         let rows = GlanceSelection.activityRows(from: page)
 
         XCTAssertEqual(page.count, 6, "six qualifying records…")
-        XCTAssertEqual(rows.map(\.id), ["upstream-0", "upstream-1", "upstream-2"],
+        XCTAssertEqual(rows.map(\.newest.id), ["upstream-0", "upstream-1", "upstream-2"],
                        "…but three request groups, so three rows")
     }
 
@@ -154,23 +161,14 @@ final class GlanceSelectionCollapseTests: XCTestCase {
     }
 
     // MARK: - Clients
-
-    func testActiveClientsFiltersClosedSessionsAndCapsAtFive() {
-        var sessions = [GlanceSelectionTests.session(id: "closed-1", status: "closed")]
-        for i in 0..<7 {
-            sessions.append(GlanceSelectionTests.session(id: "active-\(i)", status: "active"))
-        }
-        sessions.append(GlanceSelectionTests.session(id: "closed-2", status: "closed"))
-
-        let clients = GlanceSelection.activeClients(from: sessions)
-        XCTAssertEqual(clients.map(\.id), ["active-0", "active-1", "active-2", "active-3", "active-4"])
-    }
-
-    func testActiveClientsIsEmptyWhenEverySessionIsClosed() {
-        let sessions = [
-            GlanceSelectionTests.session(id: "a", status: "closed"),
-            GlanceSelectionTests.session(id: "b", status: "closed")
-        ]
-        XCTAssertTrue(GlanceSelection.activeClients(from: sessions).isEmpty)
-    }
+    //
+    // `GlanceSelection.activeClients` — "keep the sessions whose status is
+    // active, cap at five" — is gone, and with it the two tests that pinned it.
+    // Its replacement is not a narrower filter but a different question: a
+    // stateless transport closes a session after 30 minutes of silence, so
+    // "which sessions are open" was never the same as "who is using the proxy",
+    // and filtering on it emptied the section for most of the day. The rules
+    // that answer the new question — presence states, dedupe, ordering, the
+    // 24-hour lookback — live in `GlancePresence` and are pinned by
+    // `GlancePresenceTests`.
 }

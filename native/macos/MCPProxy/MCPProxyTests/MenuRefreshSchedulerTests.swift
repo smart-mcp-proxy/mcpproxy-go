@@ -53,7 +53,7 @@ final class MenuRefreshSchedulerTests: XCTestCase {
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
         let header = items[0]
-        XCTAssertEqual(header.title, "12 calls this hour · 1 client")
+        XCTAssertEqual(header.title, "12 calls this hour · 1 active")
 
         var rebuildGuard = MenuRebuildGuard()
         rebuildGuard.menuWillOpen()
@@ -78,7 +78,7 @@ final class MenuRefreshSchedulerTests: XCTestCase {
 
         XCTAssertEqual(decisions, [.updateInPlace],
                        "a refresh during menu tracking must reach the section and take the in-place branch")
-        XCTAssertEqual(header.title, "13 calls this hour · 1 client",
+        XCTAssertEqual(header.title, "13 calls this hour · 1 active",
                        "the row on screen must show the new count, not the one captured at menu-open time")
     }
 

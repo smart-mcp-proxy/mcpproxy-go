@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
 func TestParseDirectToolName(t *testing.T) {
@@ -776,4 +777,54 @@ func TestSafeTruncateBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// =============================================================================
+// Spec 090 (T016): direct-routing blocks carry a request id
+// =============================================================================
+
+// Direct mode reads its request id from the transport context, which is empty
+// for anything that did not arrive over HTTP with a correlation header. A block
+// emitted with an empty id is indistinguishable from a legacy record, so the
+// handler has to fall back to a minted one.
+func TestDirectModeHandler_CallabilityBlock_CarriesRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		// Disabled, so directToolCallabilityBlock refuses the call.
+		{Name: "github", Enabled: false},
+	})
+	probe := watchPolicyDecisions(t, rt)
+
+	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	result, err := handler(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "github__list_repos"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.IsError, "a disabled server must not be callable in direct mode")
+
+	payload := probe.awaitOne(t)
+	assert.Equal(t, "blocked", payload["decision"])
+	assert.Equal(t, "github", payload["server_name"])
+	assert.Equal(t, "list_repos", payload["tool_name"])
+	requestIDOf(t, payload)
+}
+
+// When the transport DID supply a correlation id, that id must be used as-is —
+// the fallback is a fallback, not a replacement, or the block would stop
+// correlating with the HTTP access log it belongs to.
+func TestDirectModeHandler_CallabilityBlock_PrefersContextRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		{Name: "github", Enabled: false},
+	})
+	probe := watchPolicyDecisions(t, rt)
+
+	ctx := reqcontext.WithRequestID(context.Background(), "req-from-transport")
+	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	_, err := handler(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "github__list_repos"},
+	})
+	require.NoError(t, err)
+
+	payload := probe.awaitOne(t)
+	assert.Equal(t, "req-from-transport", requestIDOf(t, payload))
 }

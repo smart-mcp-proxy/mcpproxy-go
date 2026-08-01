@@ -71,6 +71,9 @@ final class APIClientGlanceTests: XCTestCase {
     /// interpolated: `AppState.glanceActivityPageSize` is only meaningful
     /// because the server clamps `limit` to 100, and a test that reads the
     /// constant back would follow it silently wherever it went.
+    /// `policy_decision` is in the filter because a block is the proxy doing its
+    /// job and today the glance cannot see one at all (FR-014): the type filter
+    /// excluded them, so 52 blocks in a 6-week export produced zero rows.
     func testGlanceActivityRequestsToolCallTypesAtTheServersMaximumPage() async throws {
         GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
         {"activities":[],"total":0,"limit":100,"offset":0}
@@ -81,7 +84,7 @@ final class APIClientGlanceTests: XCTestCase {
 
         XCTAssertEqual(
             GlanceStubURLProtocol.requestedURLs,
-            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call"
+            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call,policy_decision"
              + "&limit=100&exclude_payloads=true"]
         )
     }
@@ -130,19 +133,27 @@ final class APIClientGlanceTests: XCTestCase {
         XCTAssertEqual(entries.first?.status, "error")
     }
 
-    // MARK: - Active sessions
+    // MARK: - Recent sessions
 
-    func testActiveSessionsRequestsStatusActive() async throws {
+    /// The page is the whole retained set, unfiltered (FR-016a).
+    ///
+    /// Both halves matter. The `status=active` filter is gone because a
+    /// stateless transport closes a session after 30 minutes of silence, so
+    /// filtering on it hid every client the section now exists to show. And the
+    /// page is the retention cap rather than 25 because deduplication and the
+    /// summary counts run over what comes back: one client reconnecting 30 times
+    /// could otherwise fill the page by itself and hide the other three.
+    func testGlanceSessionsRequestsTheWholeRetainedPageUnfiltered() async throws {
         GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
-        {"sessions":[],"total":0,"limit":25}
+        {"sessions":[],"total":0,"limit":100}
         """)
         let client = GlanceStubURLProtocol.makeClient()
 
-        _ = try await client.activeSessions()
+        _ = try await client.recentSessions()
 
         XCTAssertEqual(
             GlanceStubURLProtocol.requestedURLs,
-            ["http://127.0.0.1:8080/api/v1/sessions?status=active&limit=25"]
+            ["http://127.0.0.1:8080/api/v1/sessions?limit=100"]
         )
     }
 
@@ -186,20 +197,20 @@ final class APIClientGlanceTests: XCTestCase {
         }
     }
 
-    /// The live core returns 400 for `?status=bogus`. The failure must surface as
-    /// an httpError keyed off the status code — note the error body also carries
-    /// `request_id`, which must not disturb the message extraction.
-    func testActiveSessionsSurfaces400AsHTTPError() async throws {
+    /// A rejected query must surface as an httpError keyed off the status code —
+    /// note the error body also carries `request_id`, which must not disturb the
+    /// message extraction.
+    func testRecentSessionsSurfaces400AsHTTPError() async throws {
         GlanceStubURLProtocol.statusCode = 400
         GlanceStubURLProtocol.responseBody = Data("""
-        {"success":false,"error":"invalid status filter: bogus","request_id":"req-7"}
+        {"success":false,"error":"invalid limit: -1","request_id":"req-7"}
         """.utf8)
         let client = GlanceStubURLProtocol.makeClient()
 
-        let failure = await expectHTTPError(try await client.activeSessions())
+        let failure = await expectHTTPError(try await client.recentSessions())
 
         XCTAssertEqual(failure?.statusCode, 400)
-        XCTAssertEqual(failure?.message, "invalid status filter: bogus")
+        XCTAssertEqual(failure?.message, "invalid limit: -1")
     }
 
     func testUsageAggregateSurfaces500AsHTTPError() async throws {
@@ -310,11 +321,11 @@ final class APIClientGlanceTests: XCTestCase {
 
     func testAPIClientConformsToGlanceDataSource() async throws {
         GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
-        {"sessions":[],"total":0,"limit":25}
+        {"sessions":[],"total":0,"limit":100}
         """)
         let source: any GlanceDataSource = GlanceStubURLProtocol.makeClient()
 
-        _ = try await source.activeSessions(limit: 25)
+        _ = try await source.recentSessions(limit: 100)
 
         XCTAssertEqual(GlanceStubURLProtocol.requestedURLs.count, 1)
     }
@@ -325,7 +336,7 @@ final class APIClientGlanceTests: XCTestCase {
 
         _ = try await source.usageAggregate(window: "24h", top: 1)
         _ = try await source.glanceActivity(limit: 50)
-        _ = try await source.activeSessions(limit: 25)
+        _ = try await source.recentSessions(limit: 100)
 
         XCTAssertEqual(stub.totalCallCount, 3)
         XCTAssertTrue(GlanceStubURLProtocol.requestedURLs.isEmpty)

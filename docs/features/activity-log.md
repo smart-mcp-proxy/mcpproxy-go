@@ -295,6 +295,47 @@ GET /api/v1/activity
 | `limit` | integer | Max records (1-100, default: 50) |
 | `offset` | integer | Pagination offset (default: 0) |
 | `include_call_tool` | boolean | Include successful `call_tool_*` internal tool calls (default: false). By default, successful `call_tool_*` are excluded because they appear as duplicates alongside their upstream `tool_call` entries. Failed `call_tool_*` are always shown. |
+| `exclude_payloads` | boolean | Omit the bulky fields — `arguments`, `response` — and narrow `metadata` to a contextual whitelist (default: false). See below. |
+
+#### `exclude_payloads` and the contextual metadata whitelist
+
+`exclude_payloads=true` is a projection, not a filter: it never changes which
+records match, only how much of each record is serialized. It exists for clients
+that poll frequently and render summary fields only (the macOS tray glance polls
+the newest 100 records on every menu open). Measured against a real log those
+100 records are ~848 KB whole and ~30 KB projected.
+
+The projection drops `arguments` and `response` entirely, and keeps only these
+`metadata` keys:
+
+| Kept key | Why |
+|----------|-----|
+| `intent.reason` | The caller's stated reason, rendered as the row subtitle |
+| `intent.operation_type` | `read` / `write` / `destructive` |
+| `decision` | `blocked`, `warned`, … for `policy_decision` records |
+| `reason` | Why a policy decision blocked or warned |
+| `client_name` | Which MCP client made the call |
+| `client_version` | Its version |
+
+Everything else in `metadata` — sensitive-data detection payloads, toon
+renderings, classifier scores, raw intent objects — is dropped. Whitelisted keys
+that a record does not have are simply omitted, and a record whose metadata is
+entirely non-whitelisted serializes with no `metadata` object at all.
+
+Every kept key is kept only when its value is a **string**. A whitelisted key is
+not a promise about its value: a producer that writes a structured error under
+`reason` would otherwise smuggle that whole payload through the projection, so
+non-string values are dropped like any other non-whitelisted content.
+
+Two things survive the projection deliberately:
+
+- `has_sensitive_data` is derived from `metadata` **before** it is narrowed, so
+  the flag outlives its source.
+- `request_id` is a top-level field, not metadata, so correlation still works on
+  projected responses.
+
+Fetch the full record with `GET /api/v1/activity/{id}` when a client needs the
+arguments, the response, or any non-whitelisted metadata.
 
 **Example:**
 
@@ -313,6 +354,9 @@ curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?server=github-s
 
 # Filter by time range
 curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?start_time=2025-01-15T00:00:00Z"
+
+# Summary-only poll: no arguments/response, metadata narrowed to the whitelist
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call,policy_decision&limit=100&exclude_payloads=true"
 ```
 
 **Response:**

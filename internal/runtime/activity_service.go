@@ -590,8 +590,12 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 			"decision": decision,
 			"reason":   reason,
 		}, sessionID),
-		Timestamp:     evt.Timestamp,
-		SessionID:     sessionID,
+		Timestamp: evt.Timestamp,
+		SessionID: sessionID,
+		// Copied straight from the event so the persisted record and the SSE
+		// event a client already saw share one identity (spec 090). Absent on
+		// pre-090 payloads, which stays absent rather than becoming "".
+		RequestID:     getStringPayload(evt.Payload, "request_id"),
 		WorkSessionID: s.resolveWorkSession(sessionID),
 	}
 

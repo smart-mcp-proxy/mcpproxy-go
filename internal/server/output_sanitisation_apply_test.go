@@ -52,7 +52,7 @@ func TestApplyOutputSanitisation_DefaultIsInert(t *testing.T) {
 	// Fully opt-in: default config leaves untrusted output byte-identical.
 	p := newSanProxy(t, config.DefaultOutputSanitisationConfig(), false)
 	fwd := textResult(mcp.TextContent{Type: "text", Text: "hello world"})
-	if block := p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustUntrusted, fwd); block != nil {
+	if block := p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustUntrusted, fwd); block != nil {
 		t.Fatalf("default config must not block")
 	}
 	if got := firstText(fwd); got != "hello world" {
@@ -82,7 +82,7 @@ func TestSpotlightForwarded_TrustedUnchanged(t *testing.T) {
 func TestApplyOutputSanitisation_TrustedUnchanged(t *testing.T) {
 	p := newSanProxy(t, config.DefaultOutputSanitisationConfig(), false)
 	fwd := textResult(mcp.TextContent{Type: "text", Text: "hello world"})
-	p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustTrusted, fwd)
+	p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustTrusted, fwd)
 	if got := firstText(fwd); got != "hello world" {
 		t.Fatalf("trusted text must be byte-identical, got %q", got)
 	}
@@ -95,7 +95,7 @@ func TestApplyOutputSanitisation_NonTextPreserved(t *testing.T) {
 	p := newSanProxy(t, cfg, true)
 	img := mcp.ImageContent{Type: "image", Data: "BASE64DATA", MIMEType: "image/png"}
 	fwd := textResult(mcp.TextContent{Type: "text", Text: "key=" + awsKeyFixture}, img)
-	p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustUntrusted, fwd)
+	p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustUntrusted, fwd)
 	// image block must be byte-identical and still present (FR-B5)
 	gotImg, ok := fwd.Content[1].(mcp.ImageContent)
 	if !ok || gotImg.Data != "BASE64DATA" || gotImg.MIMEType != "image/png" {
@@ -108,7 +108,7 @@ func TestApplyOutputSanitisation_RedactMasksSecret(t *testing.T) {
 	cfg.ResponseAction = "redact"
 	p := newSanProxy(t, cfg, true)
 	fwd := textResult(mcp.TextContent{Type: "text", Text: "key=" + awsKeyFixture + " end"})
-	p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustTrusted, fwd)
+	p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustTrusted, fwd)
 	got := firstText(fwd)
 	if strings.Contains(got, awsKeyFixture) {
 		t.Fatalf("secret not redacted: %q", got)
@@ -123,7 +123,7 @@ func TestApplyOutputSanitisation_BlockOnCritical(t *testing.T) {
 	cfg.ResponseAction = "block"
 	p := newSanProxy(t, cfg, true)
 	fwd := textResult(mcp.TextContent{Type: "text", Text: "leaked " + awsKeyFixture})
-	block := p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustUntrusted, fwd)
+	block := p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustUntrusted, fwd)
 	if block == nil || !block.IsError {
 		t.Fatalf("block mode + critical detection must return an error result")
 	}
@@ -134,7 +134,7 @@ func TestApplyOutputSanitisation_BlockNonCriticalPasses(t *testing.T) {
 	cfg.ResponseAction = "block"
 	p := newSanProxy(t, cfg, true)
 	fwd := textResult(mcp.TextContent{Type: "text", Text: "nothing sensitive here"})
-	if block := p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustUntrusted, fwd); block != nil {
+	if block := p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustUntrusted, fwd); block != nil {
 		t.Fatalf("block mode without critical detection must pass through")
 	}
 	// untrusted output is still spotlighted post-forward in block mode
@@ -150,7 +150,7 @@ func TestApplyOutputSanitisation_StripControlChars(t *testing.T) {
 	p := newSanProxy(t, cfg, false)
 	const bidiOverride = '\u202e' // RIGHT-TO-LEFT OVERRIDE
 	fwd := textResult(mcp.TextContent{Type: "text", Text: "clean" + string(bidiOverride) + "text"})
-	p.applyOutputSanitisation(context.Background(), "srv", "tool", contracts.ContentTrustUntrusted, fwd)
+	p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustUntrusted, fwd)
 	got := firstText(fwd)
 	if strings.ContainsRune(got, bidiOverride) {
 		t.Fatalf("bidi override not stripped: %q", got)

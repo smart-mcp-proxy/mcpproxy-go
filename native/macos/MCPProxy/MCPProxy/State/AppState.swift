@@ -461,14 +461,15 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Fetch the active-only session feed and publish the outcome — success or
+    /// Fetch the retained session feed and publish the outcome — success or
     /// failure. See `refreshGlanceActivity(from:)`; a permanently failing fetch
-    /// here rendered "No connected clients".
+    /// here rendered "No recent clients", the same thing a genuinely quiet
+    /// proxy renders.
     @MainActor
     func refreshGlanceSessions(from source: GlanceDataSource) async {
         let generation = connectionGeneration
         do {
-            let sessions = try await source.activeSessions(limit: AppState.glanceSessionsPageSize)
+            let sessions = try await source.recentSessions(limit: AppState.glanceSessionsPageSize)
             guard isCurrentConnection(generation) else { return }
             updateGlanceSessions(sessions)
             clearGlanceFailure(.sessions)
@@ -544,8 +545,30 @@ final class AppState: ObservableObject {
     /// `testFiveQualifyingRecordsSharingRequestIDsProduceFewerRows` the group one.
     static let glanceActivityPageSize = 100
 
-    /// Active sessions requested per poll.
-    static let glanceSessionsPageSize = 25
+    /// Sessions requested per poll — the entire retained set, unfiltered by
+    /// status (FR-016a).
+    ///
+    /// 100 is the retention cap (`enforceSessionRetention`), so this asks for
+    /// everything there is rather than a page of it. It has to: the Clients
+    /// section deduplicates per client and counts the whole deduped set, and one
+    /// client reconnecting through a long working day can occupy dozens of
+    /// session records — at 25 it could fill the response by itself and hide
+    /// every other client behind it.
+    static let glanceSessionsPageSize = 100
+
+    /// The Clients segment of the glance summary line — "2 active · 1 idle" —
+    /// or nil when no client is either (FR-019).
+    ///
+    /// Counted over the FULL deduped set rather than the five rows the section
+    /// shows: the headline answers "what is using the proxy", and the row cap is
+    /// a display limit, not a fact about the world. `seen` clients keep their
+    /// rows and stay out of this count — see `GlancePresence.summaryText`.
+    @MainActor
+    func glanceClientSummary(now: Date = Date()) -> String? {
+        GlancePresence.summaryText(
+            for: GlancePresence.clients(from: glanceSessions, now: now, limit: Int.max)
+        )
+    }
 
     /// Replace the glance activity feed. Leaves `recentActivity` untouched.
     ///

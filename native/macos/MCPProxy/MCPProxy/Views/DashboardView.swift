@@ -475,43 +475,9 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
             }
 
-            // Deduplicate by client name: prefer session with most tool calls, then most recent
+            // One row per client, most recently active first — see DashboardSessions.
             let rawSessions = mcpSessions.isEmpty ? appState.recentSessions : mcpSessions
-            let sessions: [APIClient.MCPSession] = {
-                var byClient: [String: APIClient.MCPSession] = [:]
-                for s in rawSessions {
-                    let key = s.clientName ?? "unknown"
-                    if let existing = byClient[key] {
-                        let existingCalls = existing.toolCallCount ?? 0
-                        let newCalls = s.toolCallCount ?? 0
-                        // Prefer active sessions, then most tool calls, then most recent
-                        if s.status == "active" && existing.status != "active" {
-                            byClient[key] = s
-                        } else if newCalls > existingCalls {
-                            byClient[key] = s
-                        } else if newCalls == existingCalls {
-                            let existingTime = existing.lastActivity ?? existing.startTime ?? ""
-                            let newTime = s.lastActivity ?? s.startTime ?? ""
-                            if newTime > existingTime { byClient[key] = s }
-                        }
-                    } else {
-                        byClient[key] = s
-                    }
-                }
-                // Sort most-recently-active first, break ties by tool call count,
-                // then by session ID so the order is deterministic when timestamps
-                // and call counts match. `.values` iteration is random, so an
-                // explicit sort key is required to keep the UI stable.
-                return byClient.values.sorted { lhs, rhs in
-                    let lTime = lhs.lastActivity ?? lhs.startTime ?? ""
-                    let rTime = rhs.lastActivity ?? rhs.startTime ?? ""
-                    if lTime != rTime { return lTime > rTime }
-                    let lCalls = lhs.toolCallCount ?? 0
-                    let rCalls = rhs.toolCallCount ?? 0
-                    if lCalls != rCalls { return lCalls > rCalls }
-                    return lhs.id < rhs.id
-                }
-            }()
+            let sessions = DashboardSessions.rows(from: rawSessions)
             if sessions.isEmpty {
                 HStack {
                     Spacer()
@@ -562,7 +528,7 @@ struct DashboardView: View {
                                 .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                                 .frame(width: 80, alignment: .trailing)
 
-                            Text(sessionRelativeTime(session.lastActivity ?? session.startTime))
+                            Text(DashboardSessions.relativeTime(for: session))
                                 .font(.scaled(.caption, scale: fontScale))
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -739,24 +705,6 @@ struct DashboardView: View {
         return session.id
     }
 
-    /// Relative time string from an ISO 8601 timestamp.
-    private func sessionRelativeTime(_ timestamp: String?) -> String {
-        guard let timestamp else { return "-" }
-        guard let date = parseISO8601(timestamp) else { return "-" }
-        let interval = Date().timeIntervalSince(date)
-        if interval < 60 { return "just now" }
-        if interval < 3600 { return "\(Int(interval / 60))m ago" }
-        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
-        return "\(Int(interval / 86400))d ago"
-    }
-
-    private func parseISO8601(_ string: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: string) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: string)
-    }
 }
 
 // MARK: - Stat Card

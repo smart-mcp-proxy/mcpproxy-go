@@ -1309,8 +1309,8 @@ func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int) ([]
 // GetRecentSessions returns recent MCP sessions.
 //
 // status filters on the session status ("active" / "closed"); an empty string
-// means no filtering. The filter is pushed down into the storage cursor walk so
-// it is applied before truncation to limit.
+// means no filtering. Both the filter and the last-activity ordering are pushed
+// down into storage, so they are applied before truncation to limit.
 func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -1341,8 +1341,10 @@ func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPS
 		})
 	}
 
-	// Stable order for UI consumers: most-recently-active first, break ties
-	// by session ID so the list doesn't reshuffle on identical timestamps.
+	// Storage already returns this order (and applies it before truncating, so
+	// re-sorting here can never recover a dropped record). Kept as a cheap
+	// belt-and-braces over an already-short page, and because it pins the
+	// tie-break to session ID rather than leaving it to storage's key order.
 	sort.SliceStable(sessions, func(i, j int) bool {
 		if !sessions[i].LastActivity.Equal(sessions[j].LastActivity) {
 			return sessions[i].LastActivity.After(sessions[j].LastActivity)

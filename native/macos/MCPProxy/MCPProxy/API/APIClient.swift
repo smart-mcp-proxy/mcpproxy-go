@@ -581,14 +581,23 @@ actor APIClient {
         return response.sessions
     }
 
-    /// Fetch only currently-active MCP sessions, for the tray glance "Clients" rows.
+    /// Fetch the retained MCP sessions for the tray glance "Clients" rows —
+    /// every one of them, whatever its status (spec 090 FR-016a).
     ///
-    /// The `status` filter is applied server-side during the storage cursor walk,
-    /// before truncation — a client-side filter over a page would miss a session
-    /// that started long ago but is calling tools right now.
-    func activeSessions(limit: Int = 25) async throws -> [MCPSession] {
+    /// This used to ask for `status=active` only, which is the wrong question
+    /// for a stateless transport: a session closes after 30 minutes of silence,
+    /// so the filter emptied the section for most of the day. The tray now
+    /// classifies what comes back by time since last activity
+    /// (`GlancePresence`), and it needs the whole retained page to do it: the
+    /// dedupe (one client, many reconnections) and the summary counts run over
+    /// the response, so a truncated page would understate both.
+    ///
+    /// The server orders by `last_activity` descending BEFORE truncating (spec
+    /// 090 FR-016), so the page is the most recently used sessions rather than
+    /// the most recently started ones.
+    func recentSessions(limit: Int = 100) async throws -> [MCPSession] {
         let response: SessionsResponse = try await fetchWrapped(
-            path: "/api/v1/sessions?status=active&limit=\(limit)"
+            path: "/api/v1/sessions?limit=\(limit)"
         )
         return response.sessions
     }
@@ -619,9 +628,16 @@ actor APIClient {
     /// ~30KB projected — a 28x saving on a request the tray repeats every 30
     /// seconds. `recentActivity(limit:)` deliberately does NOT set it: the
     /// Dashboard renders exactly those fields.
+    ///
+    /// `policy_decision` is in the type filter because a blocked call is the
+    /// proxy doing its job, and it is the one outcome with no other trace in the
+    /// menu: a block never dispatches, so there is no `tool_call` record to
+    /// stand in for it (spec 090 FR-014). Warnings and redactions ride the same
+    /// record type and are rejected later, by `GlanceSelection.qualifies`.
     func glanceActivity(limit: Int = AppState.glanceActivityPageSize) async throws -> [ActivityEntry] {
         let response: ActivityListResponse = try await fetchWrapped(
-            path: "/api/v1/activity?type=tool_call,internal_tool_call&limit=\(limit)&exclude_payloads=true"
+            path: "/api/v1/activity?type=tool_call,internal_tool_call,policy_decision"
+                + "&limit=\(limit)&exclude_payloads=true"
         )
         return response.activities
     }

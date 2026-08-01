@@ -103,7 +103,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Generate parent call ID before execution
 	executionStart := time.Now()
-	parentCallID := fmt.Sprintf("%d-code_execution", executionStart.UnixNano())
+	parentCallID := mintCorrelationIDAt(executionStart, "code_execution")
 
 	// Get config path (handle nil mainServer for CLI mode)
 	var configPath string
@@ -578,7 +578,7 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 
 	// Create tool call record for history
 	record := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-%s", startTime.UnixNano(), toolName),
+		ID:               mintCorrelationIDAt(startTime, toolName),
 		ServerID:         storage.GenerateServerID(serverConfig),
 		ServerName:       serverName,
 		ToolName:         toolName,

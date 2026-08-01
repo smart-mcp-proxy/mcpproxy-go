@@ -631,6 +631,67 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
     }
 }
 
+/// What a record *is*, for grouping purposes: a call (successful or failed) or
+/// a policy block. Blocks never group with calls — a burst of blocked attempts
+/// at a tool is a different story from a burst of calls to it (spec 090 FR-002).
+enum OutcomeClass: String, Equatable {
+    case call
+    case blocked
+}
+
+// MARK: - Glance accessors (spec 090)
+//
+// Derived, no stored fields. They exist so the tray's pure row pipeline reads
+// one vocabulary — `reason`, `outcomeClass` — instead of re-deriving the
+// metadata layout at every call site, and so a live SSE-adapted entry and a
+// polled entry answer identically (`GlanceEvent` populates the same slots).
+extension ActivityEntry {
+
+    /// Reason a policy decision gives for itself: `metadata.reason`.
+    ///
+    /// Separate from `intentReason`, which lives under `metadata.intent`: a
+    /// blocked record can carry both (the caller's plan and the policy's
+    /// refusal), and the row must show the refusal.
+    var blockReason: String? {
+        guard let meta = metadata,
+              case .string(let r) = meta["reason"] else { return nil }
+        return r.isEmpty ? nil : r
+    }
+
+    /// The reason to display for this record: the policy's on a policy record,
+    /// the caller's declared intent on everything else (FR-005).
+    var reason: String? {
+        type == ActivityEntry.policyDecisionType ? blockReason : intentReason
+    }
+
+    /// Grouping class (FR-002).
+    ///
+    /// A policy decision is a *block* only when it actually stopped the call —
+    /// `decision` (canonically "blocked"; legacy "block" accepted) rather than a
+    /// warning or a redaction, which let the call through. When the record
+    /// carries no `decision` metadata — legacy records, or a projection that
+    /// dropped it — the persisted status IS the decision (`activity_service.go`
+    /// writes `Status: decision`), so it is the fallback.
+    var outcomeClass: OutcomeClass {
+        guard type == ActivityEntry.policyDecisionType else { return .call }
+        let decision: String
+        if let meta = metadata, case .string(let d) = meta["decision"], !d.isEmpty {
+            decision = d
+        } else {
+            decision = status
+        }
+        return ActivityEntry.blockingDecisions.contains(decision) ? .blocked : .call
+    }
+
+    /// Activity record type of a policy decision (`storage.ActivityTypePolicyDecision`).
+    static let policyDecisionType = "policy_decision"
+
+    /// Decisions that stopped the call. "blocked" is what the runtime emits
+    /// today; "block" is accepted because `event_bus.go` still treats both as a
+    /// block and old records may carry it.
+    static let blockingDecisions: Set<String> = ["blocked", "block"]
+}
+
 /// Response wrapper for `GET /api/v1/activity`.
 struct ActivityListResponse: Codable {
     let activities: [ActivityEntry]

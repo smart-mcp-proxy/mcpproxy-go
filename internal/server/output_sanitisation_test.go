@@ -1,10 +1,16 @@
 package server
 
 import (
+	"context"
 	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 )
 
 // helper: a sanitisation config with a given action.
@@ -93,4 +99,54 @@ func TestEvaluateOutputSanitisation_NilConfig_NoOp(t *testing.T) {
 	if d.block || d.redact || d.strip || d.spotlight {
 		t.Fatalf("nil config must be a no-op (fully opt-in), got %+v", d)
 	}
+}
+
+// =============================================================================
+// Spec 090 (T016): sanitisation decisions carry the caller's request id
+// =============================================================================
+
+// applyOutputSanitisation runs deep inside a dispatch that already holds a
+// request id, but the helper had no parameter for it, so every block and every
+// redaction it recorded was anonymous. Threading the id through the signature
+// is what lets a redaction line up with the tool call it redacted.
+func TestApplyOutputSanitisation_Block_CarriesRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, nil)
+	proxy.config.OutputSanitisation = sanCfg("block", true, false)
+	proxy.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
+	probe := watchPolicyDecisions(t, rt)
+
+	fwd := &mcp.CallToolResult{Content: []mcp.Content{
+		mcp.TextContent{Type: "text", Text: "leaked " + awsKeyFixture},
+	}}
+
+	block := proxy.applyOutputSanitisation(context.Background(), "github", "get_secret", "req-san-block",
+		contracts.ContentTrustUntrusted, fwd)
+	require.NotNil(t, block, "a critical detection in block mode must block")
+	require.True(t, block.IsError)
+
+	payload := probe.awaitOne(t)
+	assert.Equal(t, "blocked", payload["decision"])
+	assert.Equal(t, "req-san-block", requestIDOf(t, payload))
+}
+
+// Redactions are recorded as policy decisions too (action "redacted", not
+// "blocked"), and they need the same identity — the tray shows them as marks on
+// the call they belong to, not as free-floating rows.
+func TestApplyOutputSanitisation_Redact_CarriesRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, nil)
+	proxy.config.OutputSanitisation = sanCfg("redact", false, false)
+	proxy.sanitisationDetector = security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
+	probe := watchPolicyDecisions(t, rt)
+
+	fwd := &mcp.CallToolResult{Content: []mcp.Content{
+		mcp.TextContent{Type: "text", Text: "key=" + awsKeyFixture + " end"},
+	}}
+
+	block := proxy.applyOutputSanitisation(context.Background(), "github", "get_secret", "req-san-redact",
+		contracts.ContentTrustTrusted, fwd)
+	require.Nil(t, block, "redaction forwards the (mutated) result rather than blocking")
+
+	payload := probe.awaitOne(t)
+	assert.NotEqual(t, "blocked", payload["decision"], "a redaction is not a block")
+	assert.Equal(t, "req-san-redact", requestIDOf(t, payload))
 }

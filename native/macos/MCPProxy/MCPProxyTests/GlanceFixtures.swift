@@ -33,7 +33,8 @@ enum GlanceFixtures {
         server: String,
         tool: String,
         timestamp: String,
-        session: String?
+        session: String?,
+        reason: String? = nil
     ) -> ActivityEntry {
         var json: [String: Any] = [
             "id": id,
@@ -45,6 +46,9 @@ enum GlanceFixtures {
             "tool_name": tool
         ]
         if let session { json["session_id"] = session }
+        // Wire shape: a call's reason rides under `metadata.intent`, which is
+        // what the projection whitelist keeps and the SSE adapter writes.
+        if let reason { json["metadata"] = ["intent": ["reason": reason]] }
         let data = try! JSONSerialization.data(withJSONObject: json)
         // swiftlint:disable:next force_try
         return try! JSONDecoder().decode(ActivityEntry.self, from: data)

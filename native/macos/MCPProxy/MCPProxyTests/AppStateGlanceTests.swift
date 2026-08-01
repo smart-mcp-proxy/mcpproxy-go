@@ -432,6 +432,116 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(published, 0)
     }
 
+    // MARK: - SSE routing (spec 090 US3, research D9)
+
+    /// Adapting a policy event is worth nothing if the dispatch never hands one
+    /// over. This drives the REAL `CoreProcessManager` SSE dispatch — the switch
+    /// that used to name only the two completion events — and asserts a blocked
+    /// row reaches the glance feed before any poll runs.
+    ///
+    /// A block is exactly the case that cannot wait for the poll: it is the only
+    /// outcome the user has no other way to notice.
+    func testAPolicyDecisionEventReachesTheGlanceFeed() async throws {
+        let state = AppState()
+        state.coreState = .connected
+        let manager = CoreProcessManager(
+            appState: state,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: NSTemporaryDirectory() + "glance-routing-\(UUID().uuidString).sock"
+        )
+
+        await manager.handleSSEEvent(
+            SSEEvent(
+                event: "activity.policy_decision",
+                data: """
+                {"payload":{"server_name":"jira","tool_name":"delete_issue",
+                "request_id":"req-blocked","decision":"blocked",
+                "reason":"Destructive operation blocked"},"timestamp":1753800000}
+                """,
+                retry: nil,
+                id: nil
+            ),
+            generation: state.connectionGeneration
+        )
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["req-blocked:policy_decision"])
+        XCTAssertEqual(state.glanceActivity.first?.reason, "Destructive operation blocked")
+    }
+
+    /// The dispatch must stay narrow: an event the adapter does not know is not
+    /// a glance row, and must not enter the feed as an empty one.
+    func testAnUnrelatedEventDoesNotReachTheGlanceFeed() async throws {
+        let state = AppState()
+        state.coreState = .connected
+        let manager = CoreProcessManager(
+            appState: state,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: NSTemporaryDirectory() + "glance-routing-\(UUID().uuidString).sock"
+        )
+
+        await manager.handleSSEEvent(
+            SSEEvent(event: "ping", data: "{}", retry: nil, id: nil),
+            generation: state.connectionGeneration
+        )
+
+        XCTAssertTrue(state.glanceActivity.isEmpty)
+    }
+
+    // MARK: - Client presence in the summary line (spec 090 FR-019)
+
+    /// The summary reports what the clients are DOING, not how many rows the
+    /// section happens to have: "2 active · 1 idle" answers "is anything using
+    /// the proxy right now", which a bare "3 clients" never did.
+    func testTheSummaryCountsClientsByState() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceSessions([
+            try Self.session(id: "s1", status: "active", lastActivity: "2027-01-15T07:59:00Z"),
+            try Self.session(id: "s2", status: "closed", name: "Cursor",
+                             lastActivity: "2027-01-15T07:58:00Z"),
+            try Self.session(id: "s3", status: "closed", name: "Codex",
+                             lastActivity: "2027-01-15T07:40:00Z")
+        ])
+
+        XCTAssertEqual(state.glanceClientSummary(now: Self.date("2027-01-15T08:00:00Z")),
+                       "2 active · 1 idle")
+    }
+
+    /// Counted over the whole deduped set, not the five that fit: the section
+    /// caps its rows, and a cap is a display limit rather than a fact about how
+    /// many clients are around.
+    func testTheSummaryCountsBeyondTheRowCap() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceSessions(try (0..<7).map { index in
+            try Self.session(id: "s\(index)", status: "active", name: "client-\(index)",
+                             lastActivity: "2027-01-15T07:59:00Z")
+        })
+
+        XCTAssertEqual(state.glanceClientSummary(now: Self.date("2027-01-15T08:00:00Z")),
+                       "7 active")
+    }
+
+    /// A feed of clients last heard from hours ago contributes no client segment
+    /// at all — they keep their rows, but the headline stays honest about what
+    /// is happening now.
+    func testASeenOnlyFeedContributesNoClientSegment() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceSessions([
+            try Self.session(id: "s1", status: "closed", lastActivity: "2027-01-15T05:00:00Z")
+        ])
+
+        XCTAssertNil(state.glanceClientSummary(now: Self.date("2027-01-15T08:00:00Z")))
+    }
+
+    /// FR-016a: the poll asks for the entire retained page. Deduplication and
+    /// the counts above run over what comes back, so a truncated page would make
+    /// both of them wrong — one client reconnecting can fill 30 slots.
+    func testTheSessionPollAsksForTheWholeRetainedPage() {
+        XCTAssertEqual(AppState.glanceSessionsPageSize, 100)
+    }
+
     // MARK: - Helpers
 
     private static func date(_ iso: String) -> Date {
@@ -458,9 +568,15 @@ final class AppStateGlanceTests: XCTestCase {
         return try JSONDecoder().decode(ActivityEntry.self, from: json.data(using: .utf8)!)
     }
 
-    private static func session(id: String, status: String, calls: Int = 3) throws -> APIClient.MCPSession {
+    private static func session(id: String,
+                                status: String,
+                                calls: Int = 3,
+                                name: String = "Claude Code",
+                                lastActivity: String? = nil) throws -> APIClient.MCPSession {
+        let activityField = lastActivity.map { ",\"last_activity\":\"\($0)\"" } ?? ""
         let json = """
-        {"id":"\(id)","client_name":"Claude Code","status":"\(status)","tool_call_count":\(calls)}
+        {"id":"\(id)","client_name":"\(name)","status":"\(status)",\
+        "tool_call_count":\(calls)\(activityField)}
         """
         // swiftlint:disable:next force_unwrapping
         return try JSONDecoder().decode(APIClient.MCPSession.self, from: json.data(using: .utf8)!)
