@@ -464,6 +464,7 @@ block** — off by default, best-effort, and unable to change the baseline verdi
     "integrity_check_interval": "1h",
     "integrity_check_on_restart": false,
     "scanner_registry_url": "",
+    "tpa_bundle_path": "",
     "deep_scan": {
       "enabled": false,
       "fetch_package_source": true,
@@ -476,6 +477,7 @@ block** — off by default, best-effort, and unable to change the baseline verdi
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `tpa_bundle_path` | string | `""` (embedded) | Filesystem path to the tpa-db `scanner-bundle.json` the offline TPA scanner runs. Empty uses the corpus embedded in the build. Env override: `MCPPROXY_TPA_BUNDLE_PATH`, which wins over this field on every path (loader, hot-reload, `/api/v1/config/apply`). Re-read on config hot-reload and honoured in every transport, stdio included. A bundle that fails to read/parse/version-check/compile — or that contributes zero runnable rules — is refused and the previously active corpus stays live; the reason is surfaced as `signature_bundle.load_error` in `GET /api/v1/security/overview` and in `mcpproxy security overview`. |
 | `deep_scan.enabled` | boolean | `false` | Master opt-in for the heavy layer. When `false`, no Docker scanner runs and no source extraction is attempted — only the in-process baseline scanner executes. |
 | `deep_scan.fetch_package_source` | boolean | `true` (when deep scan is on) | Whether the scanner fetches (never executes) the published source of `npx`/`uvx` package-runner servers when no local source is available. Set `false` for air-gapped deployments. |
 | `deep_scan.disable_no_new_privileges` | boolean | `false` | Omits `--security-opt no-new-privileges` from scanner container runs (snap-docker/AppArmor escape hatch). |

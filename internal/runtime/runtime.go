@@ -1410,6 +1410,20 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 
 	r.mu.Lock()
 
+	// Migrate an unrecognized per-server trust_mode to the fail-closed tier
+	// BEFORE validating, exactly as config.LoadFromFile does (GH #938). A
+	// full-config apply usually round-trips whatever is already on disk, so a
+	// bogus value a PREVIOUS release persisted would otherwise reject every
+	// subsequent apply — including ones that have nothing to do with trust
+	// tiers. The per-server write seams (POST/PATCH /api/v1/servers,
+	// upstream_servers, --trust-mode) still reject a bad value outright, which
+	// is where an operator is actually typing one.
+	for _, n := range config.NormalizeTrustModes(newCfg) {
+		r.logger.Warn("Unrecognized trust_mode in applied config; treating it as manual",
+			zap.String("server", n.Server),
+			zap.String("trust_mode", n.Original))
+	}
+
 	// Validate the new configuration first
 	validationErrors := newCfg.ValidateDetailed()
 	if len(validationErrors) > 0 {

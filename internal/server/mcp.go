@@ -4082,6 +4082,12 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	// explicit `quarantined` request boolean (#370) still wins after, as a
 	// distinct pre-existing escape hatch.
 	trustMode := request.GetString("trust_mode", "")
+	// GH #938: the tool schema declares an enum, but enum enforcement is
+	// client-side — reject an unrecognized value here so a bogus mode is never
+	// persisted and then silently treated as manual.
+	if !config.IsValidTrustMode(trustMode) {
+		return mcp.NewToolResultError(invalidTrustModeError(trustMode)), nil
+	}
 	defaultQuarantined := true
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if cfg := p.mainServer.runtime.Config(); cfg != nil {
@@ -4636,6 +4642,11 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		patch.Command = command
 	}
 	if trustMode := request.GetString("trust_mode", ""); trustMode != "" {
+		// GH #938: refuse an unrecognized tier rather than persisting a value the
+		// runtime will silently resolve to manual.
+		if !config.IsValidTrustMode(trustMode) {
+			return nil, opts, errors.New(invalidTrustModeError(trustMode))
+		}
 		patch.TrustMode = trustMode // spec 086: allow changing the per-server trust tier via update/patch
 	}
 

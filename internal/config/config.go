@@ -1655,6 +1655,78 @@ func (c *Config) QuarantineDefaultForServer(sc *ServerConfig) bool {
 	return sc.EffectiveTrustMode() != TrustModeAuto
 }
 
+// ValidTrustModes returns the accepted trust_mode values in their canonical
+// order. It is the single source of truth for the operator-facing error text
+// produced by config validation and by the REST layer (GH #938).
+func ValidTrustModes() []string {
+	return []string{string(TrustModeAuto), string(TrustModeScan), string(TrustModeManual)}
+}
+
+// IsValidTrustMode reports whether s is an acceptable trust_mode value. The
+// empty string is valid and means "inherit" (resolved by EffectiveTrustMode to
+// manual, or derived from the legacy fields by the load-time migration).
+//
+// Matching is exact and case-SENSITIVE on purpose: EffectiveTrustMode fails
+// closed to manual on an unrecognized value, so silently accepting "Scan" would
+// leave an operator believing scanning is on while the runtime holds everything
+// for manual review (GH #938 finding 1).
+func IsValidTrustMode(s string) bool {
+	switch TrustMode(s) {
+	case "", TrustModeAuto, TrustModeScan, TrustModeManual:
+		return true
+	default:
+		return false
+	}
+}
+
+// EnvTPABundlePath is the environment override for the offline TPA
+// signature-bundle location (spec 086 FR-019). It outranks
+// security.tpa_bundle_path on EVERY path that resolves the corpus — the loader,
+// /api/v1/config/apply, hot-reload, and stdio startup — because the precedence
+// is enforced in SecurityConfig.EffectiveTPABundlePath rather than only in the
+// loader's env pass.
+const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
+
+// TrustModeNormalization records one per-server trust_mode value that the load
+// path rewrote because it was not in the accepted vocabulary.
+type TrustModeNormalization struct {
+	// Server is the upstream server whose trust_mode was rewritten.
+	Server string
+	// Original is the unrecognized value that was found in the config.
+	Original string
+}
+
+// NormalizeTrustModes rewrites every unrecognized per-server trust_mode to the
+// fail-closed tier (manual) and reports what it changed.
+//
+// Rejecting a bogus trust_mode is right at the WRITE seams — REST
+// POST/PATCH /api/v1/servers, the upstream_servers tool, `--trust-mode` — where
+// an operator is handed the error immediately and nothing has been persisted.
+// It is WRONG on the LOAD path: a config carrying the bogus value that a
+// previous release persisted through the supported REST API would make
+// LoadFromFile fail, so `mcpproxy serve` refused to start and every subsequent
+// hot-reload was blocked until someone hand-edited the file. GH #938 asked for
+// "reject with 400, OR normalize and warn"; the load path normalizes.
+//
+// The rewrite is to manual, which is exactly the behavior EffectiveTrustMode()
+// already produced for the bad value — so nothing about the RUNTIME decision
+// changes, only the lie the read surfaces used to echo back. Nil-safe and
+// idempotent.
+func NormalizeTrustModes(c *Config) []TrustModeNormalization {
+	if c == nil {
+		return nil
+	}
+	var changed []TrustModeNormalization
+	for _, server := range c.Servers {
+		if server == nil || IsValidTrustMode(server.TrustMode) {
+			continue
+		}
+		changed = append(changed, TrustModeNormalization{Server: server.Name, Original: server.TrustMode})
+		server.TrustMode = string(TrustModeManual)
+	}
+	return changed
+}
+
 // EffectiveTrustMode is the single resolution point for a server's trust tier
 // (spec 086). It returns one of TrustModeAuto/Scan/Manual, defaulting to manual
 // (secure by default) for empty OR unrecognized trust_mode values (FR-009 —
@@ -1975,6 +2047,19 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, ValidationError{
 				Field:   fieldPrefix + ".toon_output",
 				Message: fmt.Sprintf("invalid toon_output: %s (must be off, adaptive, or always — or empty to inherit)", server.ToonOutput),
+			})
+		}
+
+		// Spec 086 / GH #938: per-server trust_mode. EffectiveTrustMode() fails
+		// closed to manual on an unrecognized value, so a hand-edited config
+		// carrying a typo ("Scan", "yolo") would otherwise behave as manual while
+		// every read surface echoed the typo back as if it were a real mode.
+		// Surface it as a validation error instead. Empty = inherit (valid).
+		if !IsValidTrustMode(server.TrustMode) {
+			errors = append(errors, ValidationError{
+				Field: fieldPrefix + ".trust_mode",
+				Message: fmt.Sprintf("invalid trust_mode: %q (must be one of: %s — or empty to inherit the default)",
+					server.TrustMode, strings.Join(ValidTrustModes(), ", ")),
 			})
 		}
 
@@ -2355,6 +2440,21 @@ type SecurityConfig struct {
 	// tool-definitions-only scan with no regression.
 	ScannerFetchPackageSource *bool `json:"scanner_fetch_package_source,omitempty" mapstructure:"scanner-fetch-package-source"`
 
+	// TPABundlePath is the filesystem path to the tpa-db scanner-bundle.json
+	// the offline TPA scanner runs (spec 086 FR-019: the signature-DB location
+	// MUST be configuration-driven, not hardcoded). Empty (the default) runs the
+	// corpus embedded in this build.
+	//
+	// Env override: MCPPROXY_TPA_BUNDLE_PATH. Hot-reloadable — the path is
+	// re-read on every config.reloaded event via
+	// scanner.Service.ApplySecurityConfig, so a corpus refresh needs no restart.
+	// A configured bundle that fails to read/parse/version-check/compile is
+	// REFUSED and the previously active corpus stays live (fail-closed, never
+	// fail-empty); the reason is logged and surfaced in the security overview's
+	// signature_bundle.load_error.
+	TPABundlePath string `json:"tpa_bundle_path,omitempty" mapstructure:"tpa-bundle-path"`
+	// (see EnvTPABundlePath for the env override that outranks this field)
+
 	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
 	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
 	// keys (migrated on load) and gates the heavy Docker-based scanners + source
@@ -2395,6 +2495,26 @@ type DeepScanConfig struct {
 // Nil-safe: a nil SecurityConfig or nil DeepScan means disabled (the default).
 func (sc *SecurityConfig) IsDeepScanEnabled() bool {
 	return sc != nil && sc.DeepScan != nil && sc.DeepScan.Enabled
+}
+
+// EffectiveTPABundlePath returns the TPA signature-bundle path the scanner must
+// run, or "" to mean "use the corpus embedded in this build" (spec 086 FR-019).
+//
+// Precedence: MCPPROXY_TPA_BUNDLE_PATH wins over the file value. The env check
+// lives HERE, not only in the loader's env-override pass, because config
+// objects reach the scanner without ever passing through config.Load — most
+// visibly POST /api/v1/config/apply, which would otherwise let a posted
+// security.tpa_bundle_path silently defeat the operator's env override on the
+// next scanner reconfigure. Nil-safe: a config with no security block still
+// honours the env var, and runs the embedded corpus without one.
+func (sc *SecurityConfig) EffectiveTPABundlePath() string {
+	if env := os.Getenv(EnvTPABundlePath); env != "" {
+		return env
+	}
+	if sc == nil {
+		return ""
+	}
+	return sc.TPABundlePath
 }
 
 // DeepScanScanners returns the optional per-scanner allow-list for the deep-scan

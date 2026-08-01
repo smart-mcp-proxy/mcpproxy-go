@@ -272,6 +272,7 @@ Examples:
 	upstreamAddTransport    string
 	upstreamAddIfNotExists  bool
 	upstreamAddNoQuarantine bool
+	upstreamAddTrustMode    string
 
 	// Remove command flags
 	upstreamRemoveYes      bool
@@ -350,6 +351,7 @@ func init() {
 	upstreamAddCmd.Flags().StringVar(&upstreamAddTransport, "transport", "", "Transport type: http or stdio (auto-detected if not specified)")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddIfNotExists, "if-not-exists", false, "Don't error if server already exists")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddNoQuarantine, "no-quarantine", false, "Don't quarantine the new server (use with caution)")
+	upstreamAddCmd.Flags().StringVar(&upstreamAddTrustMode, "trust-mode", "", "Per-server trust tier governing admission AND tool-change approval: auto (approve without scanning), scan (auto-approve only when the offline TPA scan is green), manual (human reviews every change). Unset inherits the default (manual)")
 
 	// Remove command flags
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
@@ -491,6 +493,64 @@ func outputServers(servers []map[string]interface{}) error {
 
 	// For table format, build headers and rows with formatted data
 	headers := []string{"", "NAME", "PROTOCOL", "TOOLS", "STATUS", "ACTION"}
+	rows := upstreamServerRows(servers)
+
+	result, err := formatter.FormatTable(headers, rows)
+	if err != nil {
+		return fmt.Errorf("failed to format table: %w", err)
+	}
+	fmt.Print(result)
+	return nil
+}
+
+// validateTrustModeFlag refuses an unrecognized --trust-mode value up front
+// (GH #938). Empty means "inherit the default"; matching is case-sensitive
+// because the runtime fails closed to manual on anything else, so silently
+// accepting "Scan" would leave the operator believing scanning is on.
+func validateTrustModeFlag(mode string) error {
+	if config.IsValidTrustMode(mode) {
+		return nil
+	}
+	return fmt.Errorf("invalid --trust-mode %q: must be one of: %s (values are case-sensitive)",
+		mode, strings.Join(config.ValidTrustModes(), ", "))
+}
+
+// serverHoldSummary reports whether any of a server's tools need human review
+// (count > 0 is the trigger — a record can be both blocked and pending, so the
+// number is not an exact tool total) plus a short label naming the breakdown.
+//
+// GH #938 finding 3: the quarantine counts have always been in the
+// GET /api/v1/servers payload (contracts.QuarantineStats) but `upstream list`
+// dropped them, so a server whose only tool was held by the scan gate still
+// rendered a green "✅ Connected (1 tool)". Blocked (disabled) tools are
+// included because they are equally invisible in the connected/tool-count view.
+func serverHoldSummary(srv map[string]interface{}) (count int, label string) {
+	q, ok := srv["quarantine"].(map[string]interface{})
+	if !ok {
+		return 0, ""
+	}
+	pending := getIntField(q, "pending_count")
+	changed := getIntField(q, "changed_count")
+	blocked := getIntField(q, "blocked_count")
+
+	var parts []string
+	if pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", pending))
+	}
+	if changed > 0 {
+		parts = append(parts, fmt.Sprintf("%d changed", changed))
+	}
+	if blocked > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocked", blocked))
+	}
+	if len(parts) == 0 {
+		return 0, ""
+	}
+	return pending + changed + blocked, strings.Join(parts, ", ")
+}
+
+// upstreamServerRows builds the `mcpproxy upstream list` table rows.
+func upstreamServerRows(servers []map[string]interface{}) [][]string {
 	rows := make([][]string, 0, len(servers))
 
 	for _, srv := range servers {
@@ -555,6 +615,20 @@ func outputServers(servers []map[string]interface{}) error {
 			actionHint = "Edit config"
 		}
 
+		// GH #938 finding 3: a tool held by the scan gate (or awaiting approval,
+		// or blocked) must not hide behind a green "Connected (N tools)". Name
+		// the hold in STATUS, downgrade the all-clear emoji, and point the
+		// operator at the view that carries the hold evidence.
+		if holds, holdLabel := serverHoldSummary(srv); holds > 0 {
+			healthSummary = fmt.Sprintf("%s · %s held", healthSummary, holdLabel)
+			if statusEmoji == "✅" {
+				statusEmoji = "⚠️ "
+			}
+			if actionHint == "-" {
+				actionHint = fmt.Sprintf("tools list --server=%s", name)
+			}
+		}
+
 		rows = append(rows, []string{
 			statusEmoji,
 			name,
@@ -565,12 +639,7 @@ func outputServers(servers []map[string]interface{}) error {
 		})
 	}
 
-	result, err := formatter.FormatTable(headers, rows)
-	if err != nil {
-		return fmt.Errorf("failed to format table: %w", err)
-	}
-	fmt.Print(result)
-	return nil
+	return rows
 }
 
 // outputError formats and outputs an error based on the current output format.
@@ -1203,6 +1272,12 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 		env[parts[0]] = parts[1]
 	}
 
+	// GH #938: refuse a typo'd tier before anything is written, with the same
+	// vocabulary the REST layer reports in its 400.
+	if err := validateTrustModeFlag(upstreamAddTrustMode); err != nil {
+		return err
+	}
+
 	// Build the request
 	req := &cliclient.AddServerRequest{
 		Name:       serverName,
@@ -1211,6 +1286,7 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 		Env:        env,
 		WorkingDir: upstreamAddWorkingDir,
 		Protocol:   transport,
+		TrustMode:  upstreamAddTrustMode,
 	}
 
 	// Set quarantine based on --no-quarantine flag
@@ -1313,8 +1389,16 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		}
 	}
 
-	// Determine quarantine status
-	quarantined := true // Default: quarantine new servers
+	// Determine quarantine status. This MUST match the daemon path
+	// (internal/httpapi POST /api/v1/servers), which derives the add-time
+	// default from the trust tier via Config.QuarantineDefaultForServer — auto is
+	// admitted unquarantined, scan|manual are quarantined on add (spec 086
+	// FR-011). Hardcoding true here meant `upstream add --trust-mode auto`
+	// produced a DIFFERENT server depending on whether the daemon happened to be
+	// running. The explicit --no-quarantine/--quarantine flag still wins after.
+	quarantined := globalConfig.QuarantineDefaultForServer(&config.ServerConfig{
+		TrustMode: req.TrustMode,
+	})
 	if req.Quarantined != nil {
 		quarantined = *req.Quarantined
 	}
@@ -1331,6 +1415,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		Protocol:    req.Protocol,
 		Enabled:     true,
 		Quarantined: quarantined,
+		TrustMode:   req.TrustMode,
 	}
 
 	// Add to config
@@ -1454,17 +1539,16 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 	return nil
 }
 
-// runUpstreamAddJSON handles the 'upstream add-json' command
-func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
-	serverName := args[0]
-	jsonStr := args[1]
-
-	// Validate server name
-	if err := validateServerName(serverName); err != nil {
-		return err
-	}
-
-	// Parse JSON
+// parseAddJSONRequest decodes the `upstream add-json` payload into an add
+// request.
+//
+// trust_mode is decoded and validated here (GH #938): the previous anonymous
+// struct had no such field, so `upstream add-json srv '{"url":…,
+// "trust_mode":"scan"}'` reported success and persisted the fail-closed default
+// — the operator believed the tier had been applied. A bogus value is refused
+// with the same vocabulary every other write seam uses instead of being
+// silently downgraded.
+func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerRequest, error) {
 	var jsonConfig struct {
 		URL        string            `json:"url"`
 		Command    string            `json:"command"`
@@ -1473,10 +1557,11 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 		Headers    map[string]string `json:"headers"`
 		WorkingDir string            `json:"working_dir"`
 		Protocol   string            `json:"protocol"`
+		TrustMode  string            `json:"trust_mode"`
 	}
 
 	if err := json.Unmarshal([]byte(jsonStr), &jsonConfig); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
+		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
 	// Auto-detect protocol
@@ -1491,11 +1576,13 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 
 	// Validate
 	if jsonConfig.URL == "" && jsonConfig.Command == "" {
-		return fmt.Errorf("JSON must contain either 'url' or 'command'")
+		return nil, fmt.Errorf("JSON must contain either 'url' or 'command'")
+	}
+	if err := validateTrustModeFlag(jsonConfig.TrustMode); err != nil {
+		return nil, err
 	}
 
-	// Build the request
-	req := &cliclient.AddServerRequest{
+	return &cliclient.AddServerRequest{
 		Name:       serverName,
 		URL:        jsonConfig.URL,
 		Command:    jsonConfig.Command,
@@ -1504,6 +1591,23 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 		Env:        jsonConfig.Env,
 		WorkingDir: jsonConfig.WorkingDir,
 		Protocol:   protocol,
+		TrustMode:  jsonConfig.TrustMode,
+	}, nil
+}
+
+// runUpstreamAddJSON handles the 'upstream add-json' command
+func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
+	serverName := args[0]
+	jsonStr := args[1]
+
+	// Validate server name
+	if err := validateServerName(serverName); err != nil {
+		return err
+	}
+
+	req, err := parseAddJSONRequest(serverName, jsonStr)
+	if err != nil {
+		return err
 	}
 
 	// Create context

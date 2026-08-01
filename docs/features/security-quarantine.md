@@ -210,8 +210,50 @@ new-server admission and tool-change approval (superseding the binary
 | `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | Auto-approved only when the offline scan verdict is clean; otherwise held for review |
 | `manual` (default) | Quarantined for human review | Every change held for review |
 
-Unrecognized values fail closed to `manual`. Config field: per-server
-`trust_mode`; REST: `trust_mode` on `POST/PATCH/GET /api/v1/servers`.
+Config field: per-server `trust_mode`; REST: `trust_mode` on
+`POST/PATCH/GET /api/v1/servers`; CLI: `mcpproxy upstream add --trust-mode`.
+
+**Unrecognized values are rejected, not guessed.** The values are
+case-sensitive (`Scan` is not `scan`). A bogus value is refused with a `400`
+naming the accepted vocabulary on `POST`/`PATCH /api/v1/servers`, by the
+`upstream_servers` MCP tool, and by `--trust-mode` / `upstream add-json` —
+every seam where a value is being *written*.
+
+**Loading is different: it normalizes instead of failing.** A bogus
+`trust_mode` already sitting in `mcp_config.json` (older releases persisted
+whatever the API was handed) is rewritten to `manual` at load time with a
+`WARN` on stderr naming the server and the offending value. This is the tier
+the runtime already applied to it, so nothing about the decision changes — but
+the daemon still starts and hot-reloads instead of refusing to boot on a file
+it cannot fix itself. `POST /api/v1/config/apply` normalizes the same way, so
+a full-config apply is never blocked by a legacy value it did not introduce.
+Should an unvalidated value ever reach the runtime anyway, resolution still
+fails closed to `manual`.
+
+### Signature bundle (offline TPA corpus)
+
+The `scan` mode runs an offline TPA signature corpus (the tpa-db
+`scanner-bundle.json`). By default it is the corpus embedded in the build; set
+`security.tpa_bundle_path` in `mcp_config.json` (env override:
+`MCPPROXY_TPA_BUNDLE_PATH`, which wins over the file value on every path —
+loader, hot-reload, `/api/v1/config/apply`) to run a corpus from disk instead.
+The path is re-read on config hot-reload, so refreshing signatures needs no
+restart, and it is honoured in **every transport**, stdio included.
+
+A configured bundle that cannot be read, parsed, version-checked, or compiled
+is **refused**: the previously active corpus stays live (fail-closed, never
+fail-empty) and the reason is logged and reported as `load_error` below.
+A bundle that parses but contributes **zero runnable rules** — an empty
+`rules` array, or rules that are all non-runnable offline — counts as a load
+failure for exactly the same reason: an empty corpus would leave the `scan`
+gate reporting full coverage while nothing at all was being matched.
+
+Which corpus is live is visible in:
+
+- `mcpproxy security overview` — source, version, freshness stamp, fingerprint,
+  and the runnable / skipped / declared-skipped rule split;
+- `GET /api/v1/security/overview` → `signature_bundle`;
+- the Web UI **Security** tab ("Signatures (runnable)" stat).
 
 **Web UI (spec 088)**: the server's Configuration tab has a tri-mode
 selector (choosing `auto` asks for confirmation and explains the risk); the

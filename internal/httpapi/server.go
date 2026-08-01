@@ -1517,6 +1517,14 @@ func (r *IsolationRequest) toConfig() *config.IsolationConfig {
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers [post]
+// invalidTrustModeMessage renders the operator-facing 400 body for a rejected
+// trust_mode (GH #938). It always names the offending value AND the accepted
+// vocabulary so a typo is self-diagnosing from the response alone.
+func invalidTrustModeMessage(mode string) string {
+	return fmt.Sprintf("invalid trust_mode %q: must be one of: %s (values are case-sensitive; omit the field to leave it unchanged)",
+		mode, strings.Join(config.ValidTrustModes(), ", "))
+}
+
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	var req AddServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1533,6 +1541,15 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// Must have either URL or command
 	if req.URL == "" && req.Command == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Either 'url' or 'command' is required")
+		return
+	}
+
+	// GH #938: reject an unrecognized trust_mode instead of persisting it.
+	// EffectiveTrustMode() fails closed to manual on a bogus value, so accepting
+	// "Scan" would leave the operator's typo echoed back by every read surface
+	// while the runtime silently behaved as manual.
+	if !config.IsValidTrustMode(req.TrustMode) {
+		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
 		return
 	}
 
@@ -1713,6 +1730,14 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	var req AddServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// GH #938: reject an unrecognized trust_mode before anything is persisted.
+	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
+	// unchanged); only a present-but-bogus value is refused.
+	if !config.IsValidTrustMode(req.TrustMode) {
+		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
 		return
 	}
 
