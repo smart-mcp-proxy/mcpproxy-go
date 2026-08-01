@@ -152,9 +152,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         AppLifecycle.shared.recordLaunch()
         AppLifecycle.shared.installSignalHandlers {
             // A caught signal goes through the normal quit path so the core is
-            // shut down properly; without this the SIG_IGN we install to catch
-            // it would make the app unkillable by SIGTERM.
-            NSApplication.shared.terminate(nil)
+            // shut down properly. The hop to main is made HERE, not by the
+            // signal machinery: reaching this decision must not depend on a
+            // main thread that may never answer, and if it does not answer the
+            // escalation inside AppLifecycle restores the signal's default
+            // action so the process still goes.
+            DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
         }
         // Logout, restart and shutdown reach applicationWillTerminate exactly
         // like a Quit does, so the difference has to be claimed here.

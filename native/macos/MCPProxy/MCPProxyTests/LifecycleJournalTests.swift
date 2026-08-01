@@ -103,6 +103,39 @@ final class LifecycleJournalTests: XCTestCase {
                        "the last thing recorded is the only lead an incident has")
     }
 
+    /// The shutdown record is not always the LAST record. The app writes its own
+    /// ending first and then tears the core down, so a perfectly clean logout
+    /// finishes with `coreTerminated`. Judging "clean" by the final line alone
+    /// turned every one of those into a reported SIGKILL at the next launch.
+    func testATerminationFollowedByItsCoreTeardownIsStillClean() {
+        let journal = LifecycleJournal(url: journalURL)
+        journal.append(Self.event(.appLaunched, "launch"))
+        journal.append(Self.event(.appTerminating, "macOS is logging out"))
+        journal.append(Self.event(.coreTerminated, "tray is terminating"))
+
+        guard case .clean(let last) = journal.previousRunEnding() else {
+            return XCTFail("the run named its reason; the core record after it is bookkeeping, "
+                           + "got \(journal.previousRunEnding())")
+        }
+        XCTAssertEqual(last.reason, "macOS is logging out",
+                       "the ending reported is the app's own, not the core's")
+    }
+
+    /// Scoped to the run being judged: an ending recorded before the last launch
+    /// belongs to an earlier run and cannot vouch for this one.
+    func testAnEndingFromBeforeTheLastLaunchDoesNotCountAsThisRunsEnding() {
+        let journal = LifecycleJournal(url: journalURL)
+        journal.append(Self.event(.appLaunched, "first launch"))
+        journal.append(Self.event(.appTerminating, "user quit"))
+        journal.append(Self.event(.appLaunched, "second launch"))
+        journal.append(Self.event(.coreLaunched, "autostart"))
+
+        guard case .unclean(let last) = journal.previousRunEnding() else {
+            return XCTFail("the second run recorded no ending, got \(journal.previousRunEnding())")
+        }
+        XCTAssertEqual(last?.kind, .coreLaunched)
+    }
+
     /// A signal we caught and logged is an accounted-for ending too — the point
     /// is attribution, not tidiness. `signalReceived` on its own is not it:
     /// the terminating record follows, and only that says the app is going.

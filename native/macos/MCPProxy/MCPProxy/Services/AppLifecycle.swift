@@ -160,24 +160,117 @@ final class AppLifecycle: @unchecked Sendable {
 
     // MARK: - Signals
 
+    /// The signals this app catches, with the names the journal records.
+    static let caughtSignals: [(number: Int32, name: String)] = [
+        (SIGTERM, "SIGTERM"), (SIGINT, "SIGINT"), (SIGHUP, "SIGHUP")
+    ]
+
+    /// Where a caught signal is reasoned about. Deliberately NOT `.main`.
+    ///
+    /// Catching a signal suppresses its default action, so a handler that can
+    /// only run on the main thread is a promise the app cannot keep: with the
+    /// main thread wedged (a deadlock, a hung synchronous call) `pkill -TERM`,
+    /// `launchctl kill TERM` and a launchd stop would all become no-ops, where
+    /// before any of this existed they simply killed the process. Diagnostics
+    /// must not make the thing they diagnose harder to stop.
+    private static let signalQueue = DispatchQueue(
+        label: "com.smartmcpproxy.mcpproxy.signals"
+    )
+
+    /// How long the polite path gets before the signal does what it came to do.
+    /// The same order as the core teardown the tray-menu Quit performs.
+    static let signalEscalationDelay: TimeInterval = 5.0
+
     /// Catch the signals that CAN be caught, so a `pkill` or a launchd stop is
     /// attributable instead of silent.
     ///
     /// SIGKILL and a jetsam kill are deliberately absent — they cannot be
     /// caught, which is exactly why the unclean-exit marker at the next launch
-    /// exists. Ignoring the default disposition first is required: without it
-    /// the process dies before the dispatch source ever runs.
-    func installSignalHandlers(onTerminate: @escaping @Sendable () -> Void) {
-        for (number, name) in [(SIGTERM, "SIGTERM"), (SIGINT, "SIGINT"), (SIGHUP, "SIGHUP")] {
-            signal(number, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+    /// exists.
+    func installSignalHandlers(
+        onTerminate: @escaping @Sendable () -> Void,
+        escalateAfter: TimeInterval = AppLifecycle.signalEscalationDelay,
+        escalate: @escaping @Sendable (Int32) -> Void = AppLifecycle.restoreDefaultActionAndReraise
+    ) {
+        for (number, name) in Self.caughtSignals {
+            Self.suppressDefaultAction(number)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: Self.signalQueue)
             source.setEventHandler { [weak self] in
-                self?.recordSignal(name)
-                onTerminate()
+                self?.respondToSignal(name, number: number, onTerminate: onTerminate,
+                                      escalateAfter: escalateAfter, escalate: escalate)
             }
             source.resume()
+            lock.lock()
             signalSources.append(source)
+            lock.unlock()
         }
+    }
+
+    /// Undo `installSignalHandlers`. Only tests need it — the app installs once
+    /// and lives with it — but a test that left TERM/INT/HUP rewired would take
+    /// the rest of the suite with it.
+    func uninstallSignalHandlers() {
+        lock.lock()
+        let sources = signalSources
+        signalSources = []
+        lock.unlock()
+        for source in sources { source.cancel() }
+        for (number, _) in Self.caughtSignals { signal(number, SIG_DFL) }
+    }
+
+    /// What a caught signal does: record it, ask for a graceful stop, and stop
+    /// asking nicely if the app is still here afterwards.
+    ///
+    /// Separated from the source plumbing so the policy is reachable from a
+    /// test — a real signal delivered to a test process is not.
+    func respondToSignal(
+        _ name: String,
+        number: Int32,
+        onTerminate: @escaping @Sendable () -> Void,
+        escalateAfter: TimeInterval,
+        escalate: @escaping @Sendable (Int32) -> Void
+    ) {
+        recordSignal(name)
+        // Called here, on the signal queue. Whatever needs the main thread —
+        // `NSApplication.terminate` does — hops there itself, so that a main
+        // thread which never answers delays the shutdown instead of cancelling
+        // it.
+        onTerminate()
+        // The fallback only ever runs in a process that is still alive: a
+        // successful termination takes this timer with it.
+        Self.signalQueue.asyncAfter(deadline: .now() + escalateAfter) {
+            NSLog("[MCPProxy] %@ did not stop the app within %.0fs — "
+                  + "restoring its default action", name, escalateAfter)
+            escalate(number)
+        }
+    }
+
+    /// Stop the signal from killing us by default, WITHOUT ignoring it.
+    ///
+    /// `SIG_IGN` would have been shorter and is wrong twice over. An ignored
+    /// disposition survives `execve`, and Go's runtime deliberately preserves an
+    /// inherited `SIG_IGN` for SIGHUP and SIGINT (`runtime.initsig`) — so every
+    /// core this tray spawns would spend its life unable to be stopped by
+    /// `kill -INT` or `kill -HUP`. A real (empty) handler is reset to the
+    /// default across `execve`, so children inherit nothing. `EVFILT_SIGNAL`,
+    /// which is what `DispatchSourceSignal` is built on, records the signal
+    /// whatever the disposition — it only needs the default action gone.
+    private static func suppressDefaultAction(_ number: Int32) {
+        var action = sigaction()
+        action.__sigaction_u.__sa_handler = { _ in }
+        sigemptyset(&action.sa_mask)
+        action.sa_flags = Int32(SA_RESTART)
+        sigaction(number, &action, nil)
+    }
+
+    /// Put the signal back the way the system found it and send it again.
+    ///
+    /// This is the production `escalate`. It is what makes catching a
+    /// termination signal safe: the worst case is now a five-second delay, not
+    /// a process that only `SIGKILL` can stop.
+    static func restoreDefaultActionAndReraise(_ number: Int32) {
+        signal(number, SIG_DFL)
+        kill(getpid(), number)
     }
 
     private func event(_ kind: LifecycleEvent.Kind, _ reason: String) -> LifecycleEvent {

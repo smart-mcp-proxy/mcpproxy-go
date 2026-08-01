@@ -153,10 +153,28 @@ final class LifecycleJournal {
 
     /// How the previous run ended. MUST be consulted before this run appends
     /// its own launch record, or it reads that record as the previous ending.
+    ///
+    /// The question is "did the previous run record a reason", not "is the last
+    /// line a shutdown line" — and those differ in the ordinary case. The app
+    /// writes its own ending FIRST, so that a reason is on disk whatever happens
+    /// next, and only then tears its core down, which appends a `coreTerminated`
+    /// record after it. Judging by the final record alone reported every logout,
+    /// every launchd stop and every caught signal as a SIGKILL-class crash at
+    /// the next launch: a confidently false claim in the one diagnostic this
+    /// file exists to provide.
+    ///
+    /// Scoped to the last run, not the whole file: an ending recorded before the
+    /// most recent `appLaunched` belongs to an earlier run and cannot vouch for
+    /// this one. A journal trimmed past its last launch record falls back to the
+    /// whole tail, which is the same reading as before.
     func previousRunEnding() -> PreviousRunEnding {
         let events = events()
         guard let last = events.last else { return .noPreviousRun }
-        if last.kind == .appTerminating { return .clean(last) }
+        let lastRun = events.lastIndex { $0.kind == .appLaunched }
+            .map { Array(events[$0...]) } ?? events
+        if let ending = lastRun.last(where: { $0.kind == .appTerminating }) {
+            return .clean(ending)
+        }
         return .unclean(last: last)
     }
 
