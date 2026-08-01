@@ -467,6 +467,13 @@ type ServerConfig struct {
 	OAuth       *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
 	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
+	// quarantineExplicitlySet records whether the decoded JSON actually carried a
+	// "quarantined" key (issue #937). Quarantined is a plain bool, so an ABSENT
+	// key and an explicit `false` are otherwise indistinguishable — which is what
+	// let a hand-written mcp_config.json entry bypass the trust-mode admission
+	// gate that every add path applies. Set only by UnmarshalJSON; read via
+	// QuarantineExplicitlySet().
+	quarantineExplicitlySet bool
 	// SkipQuarantine is DEPRECATED (MCP-2930): use AutoApproveToolChanges instead.
 	// Kept for back-compat parsing; on config load a legacy skip_quarantine:true is
 	// migrated to auto_approve_tool_changes:true only when the new field is unset
@@ -1630,6 +1637,49 @@ func (c *Config) IsQuarantineEnabled() bool {
 // globally via quarantine_enabled=false.
 func (c *Config) DefaultQuarantineForNewServer() bool {
 	return c.IsQuarantineEnabled()
+}
+
+// UnmarshalJSON decodes a ServerConfig and additionally records whether the
+// "quarantined" key was present at all (issue #937).
+//
+// The presence bit is what distinguishes "the operator opted out" from "the
+// operator never said anything", and it is the only thing the config-load
+// admission gate keys off. It is deliberately unexported and never serialized:
+// it describes the DOCUMENT that was parsed, not the server.
+//
+// Note this only fires for JSON decoding. Structs built in Go (REST handlers,
+// the add paths, tests) leave the bit false — i.e. "unstated" — which is the
+// safe default: the gate can only ever ADD quarantine, never remove it.
+func (sc *ServerConfig) UnmarshalJSON(data []byte) error {
+	type Alias ServerConfig
+	if err := json.Unmarshal(data, (*Alias)(sc)); err != nil {
+		return err
+	}
+
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		// A non-object payload cannot carry the key; the decode above would
+		// already have failed on anything we care about.
+		return nil //nolint:nilerr // presence detection is best-effort
+	}
+	_, sc.quarantineExplicitlySet = probe["quarantined"]
+	return nil
+}
+
+// QuarantineExplicitlySet reports whether the parsed configuration document
+// stated a "quarantined" value for this server. False means the key was absent
+// (or the struct was built in Go rather than decoded), which the config-load
+// admission gate treats as "never been through admission".
+func (sc *ServerConfig) QuarantineExplicitlySet() bool {
+	return sc != nil && sc.quarantineExplicitlySet
+}
+
+// MarkQuarantineExplicitlySet stamps the presence bit on a struct that did not
+// come from JSON. Used by copy helpers so the bit survives a config round-trip.
+func (sc *ServerConfig) MarkQuarantineExplicitlySet(explicit bool) {
+	if sc != nil {
+		sc.quarantineExplicitlySet = explicit
+	}
 }
 
 // QuarantineDefaultForServer resolves the add-time Quarantined default for a

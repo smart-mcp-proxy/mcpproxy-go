@@ -30,6 +30,34 @@ When a new server is added via an AI client (using the `upstream_servers` tool):
 2. Tool calls to quarantined servers return a **security analysis** instead of executing
 3. Server remains quarantined until **manually approved**
 
+### Servers added by hand-editing `mcp_config.json`
+
+Since issue #937, the same admission gate applies to servers written directly
+into the configuration file — hand-editing is a normal workflow, and config
+files get shared, templated and copied between machines, so an entry from a
+config edit is admitted on exactly the same terms as one from
+`mcpproxy upstream add`.
+
+A config-file server is held for review when **both** of the following are true:
+
+- the entry does **not** contain a `quarantined` key (writing `"quarantined": false`
+  is an explicit operator statement and is obeyed), **and**
+- the server is not yet recorded in `config.db`.
+
+The second condition is what makes upgrading safe: every server you are already
+running has a `config.db` record, so **upgrading never re-quarantines a server
+you have already vetted**. The boundary is that a server present in a
+hand-written config but absent from `config.db` — after a wiped data directory,
+or on a machine that has never seen that config before — is treated as
+first-seen and held for review.
+
+The decision is durable: once recorded, a quarantine is not reverted by a config
+file that never mentions the key. Un-quarantining stays a user action, and
+writes both the config file and `config.db`.
+
+No TPA scan runs at config-load admission; quarantine-by-default already keeps
+the tools away from agents, and the scan is what the human review step performs.
+
 ### Tool Discovery and Search Isolation
 
 **Quarantined servers are completely isolated from the tool discovery and search system:**
@@ -212,6 +240,11 @@ new-server admission and tool-change approval (superseding the binary
 
 Unrecognized values fail closed to `manual`. Config field: per-server
 `trust_mode`; REST: `trust_mode` on `POST/PATCH/GET /api/v1/servers`.
+
+The "Add time" column applies to every admission path — the `upstream_servers`
+tool, the REST API, a registry add, and (since issue #937) a first-seen server
+in `mcp_config.json`. See
+[Servers added by hand-editing `mcp_config.json`](#servers-added-by-hand-editing-mcp_configjson).
 
 **Web UI (spec 088)**: the server's Configuration tab has a tri-mode
 selector (choosing `auto` asks for confirmation and explains the risk); the

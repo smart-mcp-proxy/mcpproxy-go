@@ -942,6 +942,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		storedServerMap[storedServer.Name] = storedServer
 	}
 
+	// Issue #937: apply the trust-mode admission gate to servers that arrived by
+	// config edit. Runs BEFORE the storage save loop below so the gated value is
+	// what gets persisted, connected, and reported.
+	r.applyConfigLoadAdmissionGate(cfg, storedServerMap)
+
 	// GC orphaned tool-approval records (MCP-1002): drop approvals whose server
 	// is no longer configured. Configured-but-disabled servers are preserved so
 	// a later re-enable doesn't re-quarantine their previously-approved tools.

@@ -627,6 +627,11 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	dst.Isolation = copyIsolationConfig(src.Isolation)
 	dst.OAuth = copyOAuthConfig(src.OAuth)
 
+	// Carry the unexported "quarantined key was present" bit (issue #937).
+	// Dropping it here would make an explicitly-opted-out server look un-stated
+	// to the config-load admission gate on the next sync.
+	dst.quarantineExplicitlySet = src.quarantineExplicitlySet
+
 	return dst
 }
 

@@ -361,6 +361,12 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// UpstreamRecord so a REST/UI-set override survives a restart and a
 		// SaveConfiguration rebuild of the JSON server list.
 		"ToonOutput": true,
+		// Issue #937: unexported parse-time bit recording whether the JSON
+		// document carried a "quarantined" key. It describes the DOCUMENT that
+		// was parsed, not the server, so it is deliberately NOT persisted — a
+		// record read back from BBolt is not a config file and must not claim
+		// the operator stated anything.
+		"quarantineExplicitlySet": true,
 	}
 
 	// Get all fields from ServerConfig
@@ -398,6 +404,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		}
 		if fieldName == "AuthBroker" {
 			// Spec 074: server-edition JSON-config field, not persisted to BBolt
+			continue
+		}
+		if fieldName == "quarantineExplicitlySet" {
+			// Issue #937: parse-time-only bit, never persisted (see above)
 			continue
 		}
 		if !upstreamFields[fieldName] {
