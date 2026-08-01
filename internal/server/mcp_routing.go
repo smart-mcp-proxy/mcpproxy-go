@@ -229,6 +229,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		// Determine tool variant for activity logging
 		toolVariant := contracts.DeriveCallWith(annotations)
 
+		// Issue #935: direct mode reaches the same upstreams as call_tool_*, so
+		// it must classify an isError:true answer as a failure too. Read from
+		// the raw result, before the truncation loop below rewrites it.
+		activityStatus, activityErrMsg := activityStatusForResult(result)
+
 		// Forward content blocks (preserving ImageContent, AudioContent, etc.)
 		// while applying truncation only to TextContent. See issue #368.
 		//
@@ -292,11 +297,12 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			forwarded = mcp.NewToolResultText(responseText)
 		}
 
-		// Emit success activity
+		// Emit completion activity (success, or error when the upstream itself
+		// reported one — issue #935).
 		// Spec 069 A1: pre-truncation sizes; result was measured before the truncation loop above.
 		routingResponseBytes := rawByteSize(result)
 		routingRequestBytes := rawByteSize(enrichedArgs)
-		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "success", "", durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil)
+		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil)
 
 		return forwarded, nil
 	}

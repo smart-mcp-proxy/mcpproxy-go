@@ -1441,6 +1441,15 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// Idempotent + nil-safe.
 	config.MigrateDeepScanConfig(newCfg)
 
+	// Issue #937 (review P1): gate BEFORE the diff and BEFORE the disk write
+	// below. ApplyConfig saves first and only reaches LoadConfiguredServers at
+	// the very end — and not at all when result.RequiresRestart — so a
+	// `PUT /api/v1/config` that adds a first-seen server used to put it on disk
+	// unquarantined and, on the restart branch, never gate it in this process at
+	// all. Gating here also means the diff reports the value that is actually
+	// persisted. The gate returns a copy, so the caller's config is untouched.
+	newCfg = r.gateConfigForAdmission(newCfg)
+
 	// Detect changes and determine if restart is required
 	result := DetectConfigChanges(r.cfg, newCfg)
 	if !result.Success {

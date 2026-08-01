@@ -2212,8 +2212,19 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// activation flag means "succeeded", not merely "attempted".
 	p.recordRealToolCallSuccess()
 
-	// Record successful response
+	// Issue #935: the transport hop succeeded, but the upstream may still have
+	// ANSWERED "this failed" via isError:true (bad argument value, unknown
+	// tool, server-side validation). Classify here — before encodeToonBlocks /
+	// spotlighting mutate the result in place — so the recorded message is the
+	// upstream's own words. This governs the ACTIVITY RECORD ONLY; the result
+	// itself is still forwarded to the caller verbatim below.
+	activityStatus, activityErrMsg := activityStatusForResult(result)
+
+	// Record the response. An isError answer is still a response — it is stored
+	// as one, with the upstream's explanation mirrored into Error so the tool
+	// call history agrees with the activity log.
 	toolCallRecord.Response = result
+	toolCallRecord.Error = activityErrMsg
 
 	// Count output tokens for successful response
 	if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
@@ -2316,11 +2327,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions)
 
-	// Spec 024: Emit internal tool call event for success
+	// Spec 024: Emit internal tool call event. It carries the SAME classification
+	// as the tool_call record above (issue #935) — the two describe one dispatch,
+	// and a "success" wrapper around a failed call is exactly what made the
+	// failure invisible.
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
-	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "success", "", time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
+	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
 
 	return forwarded, nil
 }
@@ -2632,8 +2646,14 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
 
-	// Record successful response
+	// Issue #935: an upstream that answered isError:true failed, even though the
+	// transport hop did not. Classified before the result is truncated/forwarded.
+	activityStatus, activityErrMsg := activityStatusForResult(result)
+
+	// Record the response (an isError answer is still a response; its
+	// explanation is mirrored into Error so history agrees with activity).
 	toolCallRecord.Response = result
+	toolCallRecord.Error = activityErrMsg
 
 	// Count output tokens for successful response
 	if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
@@ -2714,9 +2734,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success with determined source (legacy - no intent)
+	// Emit activity completed event with determined source (legacy - no intent).
+	// Status comes from the upstream result, not from err alone (issue #935).
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil)
 
 	return forwarded, nil
 }

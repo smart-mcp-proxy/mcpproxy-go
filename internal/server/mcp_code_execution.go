@@ -360,7 +360,15 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		return nil, fmt.Errorf("failed to serialize result: %w", err)
 	}
 
-	// Spec 024: Emit internal tool call event for code_execution
+	// Spec 024: Emit internal tool call event for code_execution.
+	//
+	// This is the WRAPPER's own outcome and stays keyed on the JS runtime's
+	// result: a script that called a tool, got an isError answer and handled it
+	// has succeeded. The nested dispatches carry their own classification —
+	// upstreamToolCaller.CallTool records an isError:true answer as a failed
+	// tool call with the upstream's message (issue #935) — so a failure inside
+	// the sandbox is visible in the tool-call history rather than being folded
+	// into the wrapper.
 	var status, errorMsg string
 	if result.Ok {
 		status = "success"
@@ -447,7 +455,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	if !exists {
 		err := fmt.Errorf("server not found: %s", serverName)
 		duration := time.Since(startTime)
-		u.recordToolCall(serverName, toolName, startTime, duration, false, err)
+		u.recordToolCall(serverName, toolName, startTime, duration, false, err.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration)
 		return nil, err
 	}
@@ -456,8 +464,11 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	result, err := client.CallTool(ctx, toolName, args)
 	duration := time.Since(startTime)
 
-	// Record the tool call with timing and result
-	u.recordToolCall(serverName, toolName, startTime, duration, err == nil, err)
+	// Record the tool call with timing and result. Issue #935: code_execution
+	// is a fourth upstream dispatch path, so it classifies an isError:true
+	// answer as a failure exactly like call_tool_* does — otherwise the same
+	// upstream rejection is a clean success here and an error there.
+	u.recordUpstreamCall(serverName, toolName, startTime, duration, result, err)
 	u.storeToolCallInHistory(serverName, toolName, args, result, err, startTime, duration)
 
 	u.logger.Debug("upstream tool call completed",
@@ -465,7 +476,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		zap.String("server", serverName),
 		zap.String("tool", toolName),
 		zap.Duration("duration", duration),
-		zap.Bool("success", err == nil),
+		zap.Bool("success", err == nil && !upstreamAnsweredWithError(result)),
 	)
 
 	if err != nil {
@@ -475,24 +486,48 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	return result, nil
 }
 
+// upstreamAnsweredWithError reports whether a dispatched result is an MCP
+// answer flagged isError:true — a failure the upstream reported over a
+// successful transport hop (issue #935).
+func upstreamAnsweredWithError(result interface{}) bool {
+	status, _ := activityStatusForResult(result)
+	return status != "success"
+}
+
+// nestedCallFailure classifies one nested dispatch from the JS sandbox,
+// returning (success, message). A Go error wins over the upstream's own text:
+// when the call never completed, that is the useful explanation.
+func nestedCallFailure(result interface{}, err error) (bool, string) {
+	if err != nil {
+		return false, err.Error()
+	}
+	status, msg := activityStatusForResult(result)
+	if status == "success" {
+		return true, ""
+	}
+	return false, msg
+}
+
+// recordUpstreamCall records a nested tool call with timing and its classified
+// outcome (thread-safe).
+func (u *upstreamToolCaller) recordUpstreamCall(serverName, toolName string, startTime time.Time, duration time.Duration, result interface{}, err error) {
+	success, errMsg := nestedCallFailure(result, err)
+	u.recordToolCall(serverName, toolName, startTime, duration, success, errMsg)
+}
+
 // recordToolCall records a tool call with timing and result information (thread-safe)
-func (u *upstreamToolCaller) recordToolCall(serverName, toolName string, startTime time.Time, duration time.Duration, success bool, err error) {
+func (u *upstreamToolCaller) recordToolCall(serverName, toolName string, startTime time.Time, duration time.Duration, success bool, errMsg string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	record := toolCallRecord{
+	u.toolCalls = append(u.toolCalls, toolCallRecord{
 		ServerName: serverName,
 		ToolName:   toolName,
 		StartTime:  startTime,
 		Duration:   duration,
 		Success:    success,
-	}
-
-	if err != nil {
-		record.Error = err.Error()
-	}
-
-	u.toolCalls = append(u.toolCalls, record)
+		Error:      errMsg,
+	})
 }
 
 // getToolCalls returns all recorded tool calls (thread-safe)
@@ -596,8 +631,11 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 		Metrics:          tokenMetrics,
 	}
 
-	if callErr != nil {
-		record.Error = callErr.Error()
+	// Issue #935: an upstream that answered isError:true failed, even though the
+	// transport hop did not. Without this the nested history row was clean while
+	// the identical call through call_tool_read recorded the upstream's message.
+	if _, errMsg := nestedCallFailure(result, callErr); errMsg != "" {
+		record.Error = errMsg
 	}
 
 	// Store in database
