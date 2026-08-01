@@ -1679,6 +1679,54 @@ func IsValidTrustMode(s string) bool {
 	}
 }
 
+// EnvTPABundlePath is the environment override for the offline TPA
+// signature-bundle location (spec 086 FR-019). It outranks
+// security.tpa_bundle_path on EVERY path that resolves the corpus — the loader,
+// /api/v1/config/apply, hot-reload, and stdio startup — because the precedence
+// is enforced in SecurityConfig.EffectiveTPABundlePath rather than only in the
+// loader's env pass.
+const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
+
+// TrustModeNormalization records one per-server trust_mode value that the load
+// path rewrote because it was not in the accepted vocabulary.
+type TrustModeNormalization struct {
+	// Server is the upstream server whose trust_mode was rewritten.
+	Server string
+	// Original is the unrecognized value that was found in the config.
+	Original string
+}
+
+// NormalizeTrustModes rewrites every unrecognized per-server trust_mode to the
+// fail-closed tier (manual) and reports what it changed.
+//
+// Rejecting a bogus trust_mode is right at the WRITE seams — REST
+// POST/PATCH /api/v1/servers, the upstream_servers tool, `--trust-mode` — where
+// an operator is handed the error immediately and nothing has been persisted.
+// It is WRONG on the LOAD path: a config carrying the bogus value that a
+// previous release persisted through the supported REST API would make
+// LoadFromFile fail, so `mcpproxy serve` refused to start and every subsequent
+// hot-reload was blocked until someone hand-edited the file. GH #938 asked for
+// "reject with 400, OR normalize and warn"; the load path normalizes.
+//
+// The rewrite is to manual, which is exactly the behavior EffectiveTrustMode()
+// already produced for the bad value — so nothing about the RUNTIME decision
+// changes, only the lie the read surfaces used to echo back. Nil-safe and
+// idempotent.
+func NormalizeTrustModes(c *Config) []TrustModeNormalization {
+	if c == nil {
+		return nil
+	}
+	var changed []TrustModeNormalization
+	for _, server := range c.Servers {
+		if server == nil || IsValidTrustMode(server.TrustMode) {
+			continue
+		}
+		changed = append(changed, TrustModeNormalization{Server: server.Name, Original: server.TrustMode})
+		server.TrustMode = string(TrustModeManual)
+	}
+	return changed
+}
+
 // EffectiveTrustMode is the single resolution point for a server's trust tier
 // (spec 086). It returns one of TrustModeAuto/Scan/Manual, defaulting to manual
 // (secure by default) for empty OR unrecognized trust_mode values (FR-009 —
@@ -2405,6 +2453,7 @@ type SecurityConfig struct {
 	// fail-empty); the reason is logged and surfaced in the security overview's
 	// signature_bundle.load_error.
 	TPABundlePath string `json:"tpa_bundle_path,omitempty" mapstructure:"tpa-bundle-path"`
+	// (see EnvTPABundlePath for the env override that outranks this field)
 
 	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
 	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
@@ -2448,10 +2497,20 @@ func (sc *SecurityConfig) IsDeepScanEnabled() bool {
 	return sc != nil && sc.DeepScan != nil && sc.DeepScan.Enabled
 }
 
-// EffectiveTPABundlePath returns the configured TPA signature-bundle path, or
-// "" to mean "use the corpus embedded in this build" (spec 086 FR-019).
-// Nil-safe: a config with no security block runs the embedded corpus.
+// EffectiveTPABundlePath returns the TPA signature-bundle path the scanner must
+// run, or "" to mean "use the corpus embedded in this build" (spec 086 FR-019).
+//
+// Precedence: MCPPROXY_TPA_BUNDLE_PATH wins over the file value. The env check
+// lives HERE, not only in the loader's env-override pass, because config
+// objects reach the scanner without ever passing through config.Load — most
+// visibly POST /api/v1/config/apply, which would otherwise let a posted
+// security.tpa_bundle_path silently defeat the operator's env override on the
+// next scanner reconfigure. Nil-safe: a config with no security block still
+// honours the env var, and runs the embedded corpus without one.
 func (sc *SecurityConfig) EffectiveTPABundlePath() string {
+	if env := os.Getenv(EnvTPABundlePath); env != "" {
+		return env
+	}
 	if sc == nil {
 		return ""
 	}

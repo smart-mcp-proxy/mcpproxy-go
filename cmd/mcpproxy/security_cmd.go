@@ -2293,6 +2293,12 @@ func signatureBundleLines(overview map[string]interface{}) []string {
 		// live; say so loudly rather than letting the counts imply all is well.
 		lines = append(lines, fmt.Sprintf("    load error:  %s", loadErr))
 	}
+	if runnable, _ := bundle["runnable_rules"].(float64); runnable == 0 {
+		// Zero runnable rules means offline TPA coverage is OFF. Printed in the
+		// same tone as a healthy count, it read as "fine" — the exact class of
+		// "the runtime is right but the operator is misled" bug #938 is about.
+		lines = append(lines, "    WARNING:     no TPA signatures are running — offline scan coverage is OFF")
+	}
 	return append(lines, "")
 }
 

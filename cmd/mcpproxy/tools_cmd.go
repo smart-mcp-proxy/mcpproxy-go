@@ -392,6 +392,22 @@ func sanitizeCell(s string, maxRunes int) string {
 // and server-scoped tool tables.
 const maxToolDescriptionCell = 60
 
+// maxToolNameCell bounds the NAME column. Tool names are upstream-controlled
+// just like descriptions — an unbounded one can push every other column off
+// screen — so the same cap applies.
+const maxToolNameCell = 60
+
+// sanitizeName escapes an upstream-controlled tool name for terminal output.
+//
+// The description fix alone was bypassable: a server declaring a tool named
+// "\x1b[2J\x1b[1;1Happroved" writes ANSI straight to the operator's tty on
+// `mcpproxy tools list`, `tools list --server=<name>` and the no-daemon path —
+// the same trust boundary, the same attack. Names are upstream-controlled, so
+// they get the same render-safe treatment.
+func sanitizeName(s string) string {
+	return sanitizeCell(s, maxToolNameCell)
+}
+
 // serverToolRows builds the table for `mcpproxy tools list --server <name>`.
 //
 // GH #938 finding 3: the server-scoped view used to render only NAME and
@@ -408,11 +424,49 @@ func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 			approval = "-"
 		}
 		rows = append(rows, []string{
-			getStringField(t, "name"),
+			sanitizeName(getStringField(t, "name")),
 			approval,
 			formatToolHold(t),
 			sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell),
 		})
+	}
+	return headers, rows
+}
+
+// globalToolRows builds the table for `mcpproxy tools list` (all servers).
+// Split out of outputGlobalTools so the rendering — in particular the escaping
+// of the two upstream-controlled columns, NAME and DESCRIPTION — is directly
+// testable.
+func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
+	headers = []string{"NAME", "SERVER", "STATE", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
+	for _, t := range tools {
+		name := sanitizeName(getStringField(t, "name"))
+		srv := getStringField(t, "server_name")
+		disabled := getBoolField(t, "disabled")
+		configDenied := getBoolField(t, "config_denied")
+
+		state := "enabled"
+		if configDenied {
+			state = "config-denied"
+		} else if disabled {
+			state = "disabled"
+		}
+
+		approval := getStringField(t, "approval_status")
+		if approval == "" {
+			approval = "-"
+		}
+
+		usage := fmt.Sprintf("%d", getIntField(t, "usage"))
+
+		lastUsed := "-"
+		if lu := getStringField(t, "last_used"); lu != "" {
+			lastUsed = lu
+		}
+
+		desc := sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell)
+
+		rows = append(rows, []string{name, srv, state, approval, formatToolHold(t), usage, lastUsed, desc})
 	}
 	return headers, rows
 }
@@ -436,39 +490,7 @@ func outputGlobalTools(tools []map[string]interface{}) error {
 		return nil
 	}
 
-	// Table format with extended columns for global view
-	headers := []string{"NAME", "SERVER", "STATE", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
-	var rows [][]string
-	for _, t := range tools {
-		name := getStringField(t, "name")
-		srv := getStringField(t, "server_name")
-		disabled := getBoolField(t, "disabled")
-		configDenied := getBoolField(t, "config_denied")
-
-		state := "enabled"
-		if configDenied {
-			state = "config-denied"
-		} else if disabled {
-			state = "disabled"
-		}
-
-		approval := getStringField(t, "approval_status")
-		if approval == "" {
-			approval = "-"
-		}
-
-		usageVal := getIntField(t, "usage")
-		usage := fmt.Sprintf("%d", usageVal)
-
-		lastUsed := "-"
-		if lu := getStringField(t, "last_used"); lu != "" {
-			lastUsed = lu
-		}
-
-		desc := sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell)
-
-		rows = append(rows, []string{name, srv, state, approval, formatToolHold(t), usage, lastUsed, desc})
-	}
+	headers, rows := globalToolRows(tools)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {
@@ -597,6 +619,24 @@ func getAvailableServerNames(globalConfig *config.Config) []string {
 	return names
 }
 
+// standaloneToolRows builds the no-daemon table. That path has no approval
+// records, so it keeps the two-column shape — but BOTH upstream-controlled
+// columns are sanitized (#938): a poisoned name or description must never reach
+// the terminal raw on ANY path.
+func standaloneToolRows(tools []*config.ToolMetadata) (headers []string, rows [][]string) {
+	headers = []string{"NAME", "DESCRIPTION"}
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		rows = append(rows, []string{
+			sanitizeName(tool.Name),
+			sanitizeCell(tool.Description, maxToolDescriptionCell),
+		})
+	}
+	return headers, rows
+}
+
 // outputToolsFromMetadata formats and displays tools from ToolMetadata (standalone mode) using unified formatters.
 func outputToolsFromMetadata(tools []*config.ToolMetadata, serverName string) error {
 	// Convert to map format for unified output
@@ -631,15 +671,7 @@ func outputToolsFromMetadata(tools []*config.ToolMetadata, serverName string) er
 		return nil
 	}
 
-	// Table format: show name and (escaped) description. The standalone path has
-	// no daemon and therefore no approval records, so it keeps the two-column
-	// shape — but the description is still sanitized (#938): a poisoned
-	// description must never reach the terminal raw on ANY path.
-	headers := []string{"NAME", "DESCRIPTION"}
-	var rows [][]string
-	for _, tool := range tools {
-		rows = append(rows, []string{tool.Name, sanitizeCell(tool.Description, maxToolDescriptionCell)})
-	}
+	headers, rows := standaloneToolRows(tools)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {

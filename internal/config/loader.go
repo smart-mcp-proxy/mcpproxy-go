@@ -56,6 +56,10 @@ func LoadFromFile(configPath string) (*Config, error) {
 	// Apply environment variable overrides for TLS configuration
 	applyTLSEnvOverrides(cfg)
 
+	// Migrate an unrecognized per-server trust_mode to the fail-closed tier
+	// BEFORE validating: a bogus value must not brick an existing install.
+	warnNormalizedTrustModes(cfg)
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -65,6 +69,19 @@ func LoadFromFile(configPath string) (*Config, error) {
 	initializeRegistries(cfg)
 
 	return cfg, nil
+}
+
+// warnNormalizedTrustModes applies NormalizeTrustModes and reports each rewrite
+// on stderr (the loader has no injected logger; this matches the other
+// load-time WARN lines here). The daemon starts, the runtime behaves exactly as
+// it already did for the unrecognized value (manual), and the operator is told
+// instead of being left with a proxy that refuses to boot (GH #938).
+func warnNormalizedTrustModes(cfg *Config) {
+	for _, n := range NormalizeTrustModes(cfg) {
+		fmt.Fprintf(os.Stderr,
+			"WARN: server %q has an unrecognized trust_mode %q; treating it as %q (valid: %s)\n",
+			n.Server, n.Original, TrustModeManual, strings.Join(ValidTrustModes(), ", "))
+	}
 }
 
 // Load loads configuration from file, environment, and defaults
@@ -155,6 +172,9 @@ func Load() (*Config, error) {
 
 	// Apply environment variable overrides for TLS configuration
 	applyTLSEnvOverrides(cfg)
+
+	// Same migration as LoadFromFile: normalize-and-warn, never fail the load.
+	warnNormalizedTrustModes(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -607,7 +627,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;
 	// the env value wins over the file value, and materializes the security
 	// block so a config with no `security` key can still point at a corpus.
-	if value := os.Getenv("MCPPROXY_TPA_BUNDLE_PATH"); value != "" {
+	if value := os.Getenv(EnvTPABundlePath); value != "" {
 		if cfg.Security == nil {
 			cfg.Security = &SecurityConfig{}
 		}

@@ -268,6 +268,20 @@ func loadBundleCheck(data []byte) (*BundleCheck, bundleLoadStats, error) {
 	}
 	stats.Runnable = len(compiled)
 
+	// A corpus that contributes NO runnable rule is an empty corpus, not a
+	// working one. Accepting it produced a non-nil BundleCheck with no rules,
+	// which made the scan gate's bundlePresent (and therefore coverageOK) true
+	// while zero signatures were actually being matched — a trust_mode:scan
+	// server could then be auto-approved on a rug-pulled description with the
+	// scanner effectively switched off. Fail the load instead, so the fail-closed
+	// fallback in ConfigureBundle keeps the last-known-good corpus live and the
+	// reason reaches BundleInfo.LoadError (FR-005/FR-014).
+	if stats.Runnable == 0 {
+		return nil, bundleLoadStats{}, fmt.Errorf(
+			"scanner bundle: no runnable rules (%d rules declared, %d not runnable offline, %d bundle-declared skipped)",
+			len(b.Rules), stats.Skipped, stats.Declared)
+	}
+
 	return &BundleCheck{rules: compiled}, stats, nil
 }
 

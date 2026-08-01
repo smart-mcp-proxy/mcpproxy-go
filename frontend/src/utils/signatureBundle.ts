@@ -72,6 +72,13 @@ export function formatSignatureBundle(
     detail = `${detail} — configured bundle load failed`
     tooltipParts.push(bundle.load_error)
   }
+  if (runnable === 0) {
+    // Zero runnable rules means offline TPA coverage is OFF: nothing is being
+    // matched, so a scan verdict carries no signal at all. This outranks the
+    // load-error warning — a plain "0" in the default tone read as healthy.
+    tone = 'text-error'
+    detail = `${detail} — no signatures running`
+  }
 
   return {
     title: 'Signatures (runnable)',

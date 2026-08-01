@@ -1389,8 +1389,16 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		}
 	}
 
-	// Determine quarantine status
-	quarantined := true // Default: quarantine new servers
+	// Determine quarantine status. This MUST match the daemon path
+	// (internal/httpapi POST /api/v1/servers), which derives the add-time
+	// default from the trust tier via Config.QuarantineDefaultForServer — auto is
+	// admitted unquarantined, scan|manual are quarantined on add (spec 086
+	// FR-011). Hardcoding true here meant `upstream add --trust-mode auto`
+	// produced a DIFFERENT server depending on whether the daemon happened to be
+	// running. The explicit --no-quarantine/--quarantine flag still wins after.
+	quarantined := globalConfig.QuarantineDefaultForServer(&config.ServerConfig{
+		TrustMode: req.TrustMode,
+	})
 	if req.Quarantined != nil {
 		quarantined = *req.Quarantined
 	}
@@ -1531,17 +1539,16 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 	return nil
 }
 
-// runUpstreamAddJSON handles the 'upstream add-json' command
-func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
-	serverName := args[0]
-	jsonStr := args[1]
-
-	// Validate server name
-	if err := validateServerName(serverName); err != nil {
-		return err
-	}
-
-	// Parse JSON
+// parseAddJSONRequest decodes the `upstream add-json` payload into an add
+// request.
+//
+// trust_mode is decoded and validated here (GH #938): the previous anonymous
+// struct had no such field, so `upstream add-json srv '{"url":…,
+// "trust_mode":"scan"}'` reported success and persisted the fail-closed default
+// — the operator believed the tier had been applied. A bogus value is refused
+// with the same vocabulary every other write seam uses instead of being
+// silently downgraded.
+func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerRequest, error) {
 	var jsonConfig struct {
 		URL        string            `json:"url"`
 		Command    string            `json:"command"`
@@ -1550,10 +1557,11 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 		Headers    map[string]string `json:"headers"`
 		WorkingDir string            `json:"working_dir"`
 		Protocol   string            `json:"protocol"`
+		TrustMode  string            `json:"trust_mode"`
 	}
 
 	if err := json.Unmarshal([]byte(jsonStr), &jsonConfig); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
+		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
 	// Auto-detect protocol
@@ -1568,11 +1576,13 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 
 	// Validate
 	if jsonConfig.URL == "" && jsonConfig.Command == "" {
-		return fmt.Errorf("JSON must contain either 'url' or 'command'")
+		return nil, fmt.Errorf("JSON must contain either 'url' or 'command'")
+	}
+	if err := validateTrustModeFlag(jsonConfig.TrustMode); err != nil {
+		return nil, err
 	}
 
-	// Build the request
-	req := &cliclient.AddServerRequest{
+	return &cliclient.AddServerRequest{
 		Name:       serverName,
 		URL:        jsonConfig.URL,
 		Command:    jsonConfig.Command,
@@ -1581,6 +1591,23 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 		Env:        jsonConfig.Env,
 		WorkingDir: jsonConfig.WorkingDir,
 		Protocol:   protocol,
+		TrustMode:  jsonConfig.TrustMode,
+	}, nil
+}
+
+// runUpstreamAddJSON handles the 'upstream add-json' command
+func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
+	serverName := args[0]
+	jsonStr := args[1]
+
+	// Validate server name
+	if err := validateServerName(serverName); err != nil {
+		return err
+	}
+
+	req, err := parseAddJSONRequest(serverName, jsonStr)
+	if err != nil {
+		return err
 	}
 
 	// Create context

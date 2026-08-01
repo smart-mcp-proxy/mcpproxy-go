@@ -158,6 +158,19 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		return nil, err
 	}
 
+	// Install the configured offline TPA signature corpus (spec 086 FR-019)
+	// here, at construction, because the trust_mode:scan gate is
+	// TRANSPORT-INDEPENDENT: internal/runtime/tool_quarantine.go calls the
+	// package-level scanner.ScanToolMetadataVerdict in stdio mode exactly as it
+	// does over HTTP. The only other ConfigureBundle call site sits inside
+	// startCustomHTTPServer, a branch Start() skips entirely when listen is
+	// empty — so a stdio deployment silently ran the build's EMBEDDED
+	// signatures while security.tpa_bundle_path / MCPPROXY_TPA_BUNDLE_PATH was
+	// set and no error was logged. The HTTP path's later
+	// Service.ApplySecurityConfig re-applies the identical path; ConfigureBundle
+	// is idempotent.
+	configureTPABundle(cfg, logger)
+
 	// Initialize update checker with build version
 	// This must happen before StartBackgroundInitialization is called
 	rt.SetVersion(httpapi.GetBuildVersion())
@@ -660,15 +673,32 @@ func (s *Server) findServerConfig(serverName string) *config.ServerConfig {
 	return nil
 }
 
+// configureTPABundle installs the offline TPA signature corpus named by
+// security.tpa_bundle_path (or MCPPROXY_TPA_BUNDLE_PATH, which outranks it)
+// regardless of transport. Nil-safe: a config with no security block runs the
+// corpus embedded in this build. Idempotent — startup and every hot-reload call
+// it with the same resolution rule.
+func configureTPABundle(cfg *config.Config, logger *zap.Logger) {
+	var sec *config.SecurityConfig
+	if cfg != nil {
+		sec = cfg.Security
+	}
+	scanner.ConfigureBundle(sec.EffectiveTPABundlePath(), logger)
+}
+
 // reapplyScannerSecurityConfig re-applies the opt-in deep-scan gate (and the
 // engine-wide default isolation mode) to the running scanner service from the
 // live config, so a config hot-reload takes effect without a restart (Spec 077
 // US3). Mirrors the startup wiring; idempotent and nil-safe.
 func (s *Server) reapplyScannerSecurityConfig() {
+	cfg := s.runtime.Config()
+	// The TPA corpus is reconfigured on EVERY transport, including stdio where
+	// there is no scanner Service at all — the scan gate still runs (spec 086
+	// FR-019 hot-reload).
+	configureTPABundle(cfg, s.logger)
 	if s.securityScanner == nil {
 		return
 	}
-	cfg := s.runtime.Config()
 	if cfg == nil {
 		return
 	}

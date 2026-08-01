@@ -104,8 +104,13 @@ func TestBundleVersionRejected(t *testing.T) {
 	if _, _, err := loadBundleCheck(future); err == nil {
 		t.Error("expected error for unsupported bundle_version 1.0.0, got nil")
 	}
-	// A patch-level bump within the supported major.minor stays accepted.
-	patch := []byte(`{"bundle_version":"0.1.7","schema_version":"0.1.7","signature_count":0,"rules":[],"skipped":[]}`)
+	// A patch-level bump within the supported major.minor stays accepted. The
+	// bundle must carry at least one runnable rule — an empty corpus is refused
+	// on its own merits now (see TestLoadBundleCheck_ZeroRunnableRulesIsALoadError),
+	// so an empty rules array here would no longer isolate the version gate.
+	patch := []byte(`{"bundle_version":"0.1.7","schema_version":"0.1.7","signature_count":1,"rules":[` +
+		`{"id":"TPA-2099-0007","detector":"patch_level","engine":"regex","target":"tool_description","pattern":"canary","category":"rug-pull","confidence":0.5,"level":"high"}` +
+		`],"skipped":[]}`)
 	if _, _, err := loadBundleCheck(patch); err != nil {
 		t.Errorf("expected 0.1.7 accepted (same major.minor), got error %v", err)
 	}
