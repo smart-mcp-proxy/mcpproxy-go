@@ -58,6 +58,38 @@ writes both the config file and `config.db`.
 No TPA scan runs at config-load admission; quarantine-by-default already keeps
 the tools away from agents, and the scan is what the human review step performs.
 
+If mcpproxy writes the configuration file itself (any API apply, a quarantine
+toggle, an `upstream add`), it does **not** stamp `"quarantined": false` onto
+servers that never stated it — a value mcpproxy invented would otherwise read
+back as an operator statement and disable the gate for that server.
+
+#### Upgrading from a release affected by #937 — action required
+
+The gate treats "present in `config.db`" as "has already been through
+admission". That is what keeps upgrades safe, but it also means an install that
+was **already** hit by #937 is not remediated by upgrading: the buggy admission
+left exactly the `config.db` record the gate now reads as vetted, so a server
+that was admitted unquarantined stays live.
+
+At startup mcpproxy logs a warning naming any server that looks like this —
+configured, running unquarantined, never explicitly reviewed, and with a
+`trust_mode` that would have held it:
+
+```
+Configured servers predate the config-load admission gate and have never been
+explicitly reviewed  servers=["suspicious-server"]
+```
+
+For each server named, either:
+
+- review it and record the decision — quarantining and then releasing it from
+  the quarantine UI writes an explicit `"quarantined"` value to
+  `mcp_config.json`, which silences the warning; or
+- write the decision by hand: add `"quarantined": true` (hold it) or
+  `"quarantined": false` (you have vetted it) to that server's entry.
+
+Adding the key by hand is enough — the gate obeys an explicit value either way.
+
 ### Tool Discovery and Search Isolation
 
 **Quarantined servers are completely isolated from the tool discovery and search system:**

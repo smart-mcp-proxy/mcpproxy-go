@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -1644,8 +1645,14 @@ func (c *Config) DefaultQuarantineForNewServer() bool {
 //
 // The presence bit is what distinguishes "the operator opted out" from "the
 // operator never said anything", and it is the only thing the config-load
-// admission gate keys off. It is deliberately unexported and never serialized:
-// it describes the DOCUMENT that was parsed, not the server.
+// admission gate keys off. It is deliberately unexported: it describes the
+// DOCUMENT that was parsed, not the server. MarshalJSON below round-trips it by
+// OMITTING the key rather than by writing the bit out.
+//
+// A JSON `null` does NOT count as a statement. Everywhere else in mcpproxy null
+// means "unset" (RFC 7396 merge-patch semantics — see the env_json handling in
+// internal/server/mcp.go), and a templating tool or serializer that emits null
+// for an unset field must not be able to silently admit a first-seen server.
 //
 // Note this only fires for JSON decoding. Structs built in Go (REST handlers,
 // the add paths, tests) leave the bit false — i.e. "unstated" — which is the
@@ -1662,8 +1669,46 @@ func (sc *ServerConfig) UnmarshalJSON(data []byte) error {
 		// already have failed on anything we care about.
 		return nil //nolint:nilerr // presence detection is best-effort
 	}
-	_, sc.quarantineExplicitlySet = probe["quarantined"]
+	raw, present := probe["quarantined"]
+	sc.quarantineExplicitlySet = present && !isJSONNull(raw)
 	return nil
+}
+
+// isJSONNull reports whether a raw JSON value is the literal `null`.
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
+}
+
+// MarshalJSON writes a ServerConfig, omitting "quarantined" when the value is
+// false AND no configuration document ever stated it (issue #937, review P1).
+//
+// Without this, mcpproxy's own SaveConfig fabricated an operator statement:
+// `Quarantined` is a plain bool with no omitempty, so every save stamped
+// `"quarantined": false` onto servers that had never mentioned the key. Reading
+// that back set the presence bit, and the config-load admission gate then
+// skipped the server permanently — including servers the gate had itself just
+// quarantined, whose config.db record the next start would overwrite with
+// false. One API-triggered save disarmed the gate for good.
+//
+// A true value is ALWAYS written: a gate decision persisted to disk must be
+// readable back, and quarantine is never expressed by absence.
+func (sc *ServerConfig) MarshalJSON() ([]byte, error) {
+	type Alias ServerConfig
+
+	// The shallower field dominates the embedded alias's "quarantined" tag
+	// (encoding/json resolves name conflicts by depth), so a nil pointer here
+	// drops the key entirely instead of emitting it twice.
+	aux := struct {
+		Quarantined *bool `json:"quarantined,omitempty"`
+		*Alias
+	}{Alias: (*Alias)(sc)}
+
+	if sc.Quarantined || sc.quarantineExplicitlySet {
+		v := sc.Quarantined
+		aux.Quarantined = &v
+	}
+
+	return json.Marshal(aux)
 }
 
 // QuarantineExplicitlySet reports whether the parsed configuration document

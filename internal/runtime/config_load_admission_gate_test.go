@@ -30,6 +30,13 @@ import (
 // runtime built from it plus the parsed config.
 func gateEnv(t *testing.T, servers []map[string]any, extra map[string]any) (*Runtime, *config.Config) {
 	t.Helper()
+	rt, cfg, _ := gateEnvAt(t, servers, extra, zap.NewNop())
+	return rt, cfg
+}
+
+// gateEnvAt is gateEnv plus the config file path and an injectable logger.
+func gateEnvAt(t *testing.T, servers []map[string]any, extra map[string]any, logger *zap.Logger) (*Runtime, *config.Config, string) {
+	t.Helper()
 
 	dir := t.TempDir()
 	p := filepath.Join(dir, "mcp_config.json")
@@ -51,11 +58,11 @@ func gateEnv(t *testing.T, servers []map[string]any, extra map[string]any) (*Run
 	cfg, err := config.LoadFromFile(p)
 	require.NoError(t, err)
 
-	rt, err := New(cfg, p, zap.NewNop())
+	rt, err := New(cfg, p, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
 
-	return rt, cfg
+	return rt, cfg, p
 }
 
 func storedServer(t *testing.T, rt *Runtime, name string) *config.ServerConfig {
@@ -83,8 +90,8 @@ func TestConfigLoadAdmissionGate_QuarantinesFirstSeenServer(t *testing.T) {
 
 	assert.True(t, storedServer(t, rt, "handwritten").Quarantined,
 		"a first-seen config-file server under the default manual trust mode must be quarantined (issue #937)")
-	assert.True(t, cfg.Servers[0].Quarantined,
-		"the in-memory config must agree, or the supervisor will still connect it unquarantined")
+	assert.True(t, rt.Config().Servers[0].Quarantined,
+		"the PUBLISHED snapshot must agree, or the supervisor will still connect it unquarantined")
 }
 
 // trust_mode:auto is the documented opt-out. It must keep working, or the gate
@@ -147,7 +154,7 @@ func TestConfigLoadAdmissionGate_KnownServerIsNotRequarantined(t *testing.T) {
 
 	assert.False(t, storedServer(t, rt, "longstanding").Quarantined,
 		"a server already known to config.db has been through admission and must not be re-quarantined on upgrade")
-	assert.False(t, cfg.Servers[0].Quarantined)
+	assert.False(t, rt.Config().Servers[0].Quarantined)
 }
 
 // DURABILITY — the gate decision has to survive a restart.
@@ -170,7 +177,7 @@ func TestConfigLoadAdmissionGate_QuarantineSurvivesRestart(t *testing.T) {
 
 	assert.True(t, storedServer(t, rt, "handwritten").Quarantined,
 		"a quarantine recorded in config.db must not be reverted by a config file that never mentions the key")
-	assert.True(t, cfg.Servers[0].Quarantined)
+	assert.True(t, rt.Config().Servers[0].Quarantined)
 }
 
 // The issue's comparison table: the same server, same binary, same

@@ -77,6 +77,15 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Token saved callback registered for proactive refresh")
 	}
 
+	// Issue #937 (review): admission must be settled BEFORE the supervisor can
+	// reconcile. installAdmissionGateHook gates every future publication inside
+	// configsvc; gateInitialConfig covers the one snapshot that never goes
+	// through Update — the one NewService was constructed with. Both run while
+	// the supervisor is still stopped, so the startup gate cannot race a
+	// reconcile that would connect an ungated server and index its tools.
+	r.installAdmissionGateHook()
+	r.gateInitialConfig()
+
 	// Phase 6: Start Supervisor for state reconciliation and lock-free reads
 	if r.supervisor != nil {
 		r.supervisor.Start()
@@ -925,6 +934,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 	currentUpstreams := r.upstreamManager.GetAllServerNames()
 	storedServers, err := r.storageManager.ListUpstreamServers()
+	// A failed read is NOT an empty database. Flattening it into one made the
+	// admission gate below see every configured server as first-seen and
+	// quarantine the lot (review P2); the rest of the sync already tolerates an
+	// empty stored view, so only the gate needs to know the difference.
+	storageReadable := err == nil
 	if err != nil {
 		r.logger.Error("Failed to get stored servers for sync", zap.Error(err))
 		storedServers = []*config.ServerConfig{}
@@ -934,10 +948,6 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	storedServerMap := make(map[string]*config.ServerConfig)
 	var changed bool
 
-	for _, serverCfg := range cfg.Servers {
-		configuredServers[serverCfg.Name] = serverCfg
-	}
-
 	for _, storedServer := range storedServers {
 		storedServerMap[storedServer.Name] = storedServer
 	}
@@ -945,7 +955,22 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	// Issue #937: apply the trust-mode admission gate to servers that arrived by
 	// config edit. Runs BEFORE the storage save loop below so the gated value is
 	// what gets persisted, connected, and reported.
-	r.applyConfigLoadAdmissionGate(cfg, storedServerMap)
+	//
+	// The gate returns a COPY rather than writing through cfg.Servers: those
+	// pointers are the ones configsvc published, and the supervisor reads them
+	// concurrently. publishAdmissionGatedConfig swaps the whole config in so the
+	// decision reaches subscribers atomically. Normally this is already a no-op
+	// because configsvc's pre-publish hook gated the config on its way in; it
+	// still fires when storage changed after publication (e.g. a restart
+	// inheriting a recorded quarantine).
+	if gated, gateChanged := r.applyConfigLoadAdmissionGate(cfg, storedServerMap, storageReadable); gateChanged {
+		r.publishAdmissionGatedConfig(cfg, gated)
+		cfg = gated
+	}
+
+	for _, serverCfg := range cfg.Servers {
+		configuredServers[serverCfg.Name] = serverCfg
+	}
 
 	// GC orphaned tool-approval records (MCP-1002): drop approvals whose server
 	// is no longer configured. Configured-but-disabled servers are preserved so
@@ -1142,6 +1167,24 @@ func (r *Runtime) SaveConfiguration() error {
 
 	// Update servers with latest from storage
 	configCopy.Servers = latestServers
+
+	// config.db's UpstreamRecord has no field for the "a quarantine value was
+	// stated" bit (issue #937), so servers that came back from storage look
+	// un-stated again. Carry the bit across the round-trip from the snapshot,
+	// or an operator's explicit `"quarantined": false` — and the decision the
+	// user made in the quarantine UI, which QuarantineServer stamps — would be
+	// erased from the config file by the next save.
+	stated := make(map[string]bool, len(configCopy.Servers))
+	for _, sc := range snapshot.Config.Servers {
+		if sc != nil && sc.QuarantineExplicitlySet() {
+			stated[sc.Name] = true
+		}
+	}
+	for _, sc := range latestServers {
+		if sc != nil && stated[sc.Name] {
+			sc.MarkQuarantineExplicitlySet(true)
+		}
+	}
 
 	r.logger.Debug("Saving configuration to disk",
 		zap.Int("server_count", len(latestServers)),
@@ -1420,6 +1463,13 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 			r.reindexAffectedProfiles(serverName)
 		}
 	}
+
+	// A human toggling quarantine IS a statement about this server (issue #937).
+	// Record it in the config document so the admission gate — and the
+	// "predates the gate" advisory — can tell a reviewed server from one that
+	// merely happens to have a config.db row. Must happen before the save below,
+	// which is what writes the file.
+	r.markQuarantineDecisionExplicit(serverName)
 
 	// Save configuration synchronously to ensure changes are persisted before returning
 	if err := r.SaveConfiguration(); err != nil {

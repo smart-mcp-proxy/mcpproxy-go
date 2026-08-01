@@ -47,6 +47,13 @@ type Service struct {
 	version     int64
 	subscribers []chan Update
 	subMu       sync.RWMutex
+
+	// prePublish runs on an incoming config while it is still exclusively owned
+	// by the updater — before the snapshot is stored and therefore before any
+	// subscriber can observe it. It returns the config to publish. Used by the
+	// #937 admission gate so a poisoned server can never be reconciled and
+	// indexed in the window between "config parsed" and "config gated".
+	prePublish atomic.Value // func(*config.Config) *config.Config
 }
 
 // NewService creates a new configuration service with the given initial config.
@@ -84,11 +91,44 @@ func (s *Service) Current() *Snapshot {
 	return s.snapshot.Load().(*Snapshot)
 }
 
+// SetPrePublishHook installs a function invoked on every configuration on its
+// way into the snapshot, before subscribers are notified. The hook receives a
+// config nothing else can observe yet and returns the config to publish
+// (itself, or a modified copy — it must not mutate the one it is given, which
+// may still be the currently published snapshot).
+//
+// Passing nil removes the hook. Safe to call at any time.
+func (s *Service) SetPrePublishHook(hook func(*config.Config) *config.Config) {
+	if hook == nil {
+		s.prePublish.Store((func(*config.Config) *config.Config)(nil))
+		return
+	}
+	s.prePublish.Store(hook)
+}
+
+// runPrePublishHook applies the installed hook, if any.
+func (s *Service) runPrePublishHook(cfg *config.Config) *config.Config {
+	v := s.prePublish.Load()
+	if v == nil {
+		return cfg
+	}
+	hook, _ := v.(func(*config.Config) *config.Config)
+	if hook == nil {
+		return cfg
+	}
+	if gated := hook(cfg); gated != nil {
+		return gated
+	}
+	return cfg
+}
+
 // Update atomically updates the configuration and notifies all subscribers.
 // This operation is serialized to ensure consistency.
 func (s *Service) Update(newConfig *config.Config, updateType UpdateType, source string) error {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
+
+	newConfig = s.runPrePublishHook(newConfig)
 
 	current := s.Current()
 	s.version++
