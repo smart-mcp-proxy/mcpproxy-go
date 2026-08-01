@@ -988,8 +988,15 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	// Get routing mode from config
 	routingMode := config.RoutingModeRetrieveTools
-	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
-		routingMode = cfg.RoutingMode
+	// …and the data directory, which is where the tray's autostart sidecar
+	// lives. It is not always ~/.mcpproxy — MCPPROXY_HOME relocates the whole
+	// instance root, tray and core together (GH #936).
+	autostartDataDir := ""
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		if cfg.RoutingMode != "" {
+			routingMode = cfg.RoutingMode
+		}
+		autostartDataDir = cfg.DataDir
 	}
 
 	response := map[string]interface{}{
@@ -1035,7 +1042,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	// — this endpoint is read-only). autostart_enabled reads the tray-owned
 	// sidecar with its 1h TTL; nil on Linux / tray not running / malformed.
 	response["launch_source"] = string(telemetry.DetectLaunchSourceOnce())
-	response["autostart_enabled"] = telemetry.DefaultAutostartReader().Read()
+	response["autostart_enabled"] = telemetry.AutostartReaderForDataDir(autostartDataDir).Read()
 
 	s.writeSuccess(w, response)
 }

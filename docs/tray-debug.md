@@ -38,6 +38,8 @@ With it set:
 
 Notes and limits:
 
+- A brand-new root needs nothing prepared. The core creates the config file named by `--config` when it does not exist yet (printing `INFO: Created default configuration file at …`), so `export MCPPROXY_HOME=/tmp/mcpproxy-qa` and launching the tray is the whole setup. An existing file is never touched.
+- The core also reads its autostart sidecar out of the data directory it was given, so a QA instance reports its own login-item state rather than the real install's.
 - `MCPPROXY_SOCKET_PATH` still wins over the root. Use it to attach to a core somebody else started; use `MCPPROXY_HOME` to own a whole instance.
 - **Not** relocated: `~/Library/Logs/mcpproxy` (the core's log directory, which follows the core's own rules) and the app's preferences domain — `cfprefsd` honours neither `$HOME` nor this variable, so give a dev bundle a distinct bundle id if you need separate defaults.
 - The first-run dialog is a `UserDefaults` flag, so it lives in the preferences domain rather than the instance root; a fresh bundle id will show it again. Its "Launch at login" checkbox is pre-checked, so clicking through it in a dev instance registers a real login item.
@@ -55,8 +57,8 @@ Recorded events: `appLaunched`, `appTerminating`, `signalReceived`, `coreLaunche
 The rules worth knowing when reading one:
 
 - Every shutdown records **who asked**. A shutdown nobody claimed is written as `unattributed (no initiator claimed this shutdown)` rather than as something plausible.
-- `SIGTERM`, `SIGINT` and `SIGHUP` are caught, recorded, and then routed through the normal quit path. `SIGKILL` and a jetsam kill cannot be caught by anyone.
-- Which is why the **next** launch reports an unaccounted-for previous run: if the last record before a launch is not an `appTerminating`, the new `appLaunched` record says so and names the last thing the dead run did. That marker is the signature of a SIGKILL-class death (jetsam, `pkill`, power loss) or a crash outside the app's handlers.
+- `SIGTERM`, `SIGINT` and `SIGHUP` are caught, recorded, and then routed through the normal quit path — handled off the main thread, so a wedged main thread cannot swallow them. If the app has not gone five seconds later, the signal's default action is restored and re-raised: catching a termination signal delays the exit, it never prevents it. `SIGKILL` and a jetsam kill cannot be caught by anyone.
+- Which is why the **next** launch reports an unaccounted-for previous run: if the previous run recorded no `appTerminating` at all, the new `appLaunched` record says so and names the last thing the dead run did. That marker is the signature of a SIGKILL-class death (jetsam, `pkill`, power loss) or a crash outside the app's handlers. It is not the *last* record that decides this — an ordinary clean exit writes `appTerminating` first and then `coreTerminated` for the core it tears down.
 - The journal is trimmed to its newest 500 records at launch.
 
 ## Use Cases
