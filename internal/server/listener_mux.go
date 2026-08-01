@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sync"
@@ -121,6 +122,23 @@ func (m *multiplexListener) Addr() net.Addr {
 type taggedConn struct {
 	net.Conn
 	source ConnectionSource
+}
+
+// taggedConnContext is the http.Server ConnContext hook that carries a
+// connection's source into every request context served over it. It is the ONLY
+// place the transport identity enters the request path: the API-key middleware
+// grants an admin auth context to tray (Unix socket / named pipe) connections on
+// its strength, so the admin write gate ultimately rests on this hook.
+//
+// Named (rather than inlined at the http.Server literal) so an integration test
+// can serve the real handler over a real socket through the exact production
+// tagging, instead of a look-alike copy that could drift from it.
+func taggedConnContext(ctx context.Context, c net.Conn) context.Context {
+	// Extract source from tagged connection
+	if tc, ok := c.(*taggedConn); ok {
+		return TagConnectionContext(ctx, tc.source)
+	}
+	return TagConnectionContext(ctx, ConnectionSourceTCP) // Default to TCP
 }
 
 // PermissionError represents a permission-related error (exit code 5)

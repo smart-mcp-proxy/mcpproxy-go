@@ -1068,6 +1068,25 @@ components:
           description: '"already_exists", "filtered_out", "invalid_name"'
           type: string
       type: object
+    connect.ConnectResult:
+      description: The full result; its action mirrors the top-level one
+      properties:
+        action:
+          description: '"created", "updated", "already_exists", "removed", "not_found"'
+          type: string
+        backup_path:
+          type: string
+        client:
+          type: string
+        config_path:
+          type: string
+        message:
+          type: string
+        server_name:
+          type: string
+        success:
+          type: boolean
+      type: object
     contracts.APIResponse:
       allOf:
       - $ref: '#/components/schemas/data'
@@ -2660,11 +2679,36 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.ConnectConflictResponse:
+      properties:
+        action:
+          description: already_exists | precondition_failed
+          type: string
+        data:
+          $ref: '#/components/schemas/connect.ConnectResult'
+        error:
+          description: Human-readable message
+          type: string
+        success:
+          description: Always false
+          type: boolean
+      type: object
     httpapi.ConnectRequest:
       properties:
         force:
           description: Overwrite existing entry
           type: boolean
+        precondition_token:
+          description: |-
+            PreconditionToken is the opaque token from the preview this write was
+            confirmed against (Spec 091 FR-005). When present, the core rechecks it
+            at write time and responds 409 with action "precondition_failed" —
+            writing nothing — if the config or the entry MCPProxy would write has
+            drifted since; the caller then re-previews instead of retrying. Absent
+            means exactly the pre-091 behavior. A replace-classified flow sends this
+            TOGETHER with force=true: the token, not the absence of force, is the
+            overwrite safety.
+          type: string
         server_name:
           description: Defaults to "mcpproxy"
           type: string
@@ -3832,6 +3876,12 @@ paths:
       description: |-
         Register MCPProxy as an MCP server in the specified client's configuration file.
         Creates a backup of the existing config before modifying.
+        Optionally accepts precondition_token from a preview (Spec 091): when supplied,
+        the core rechecks the raw pre-write state and the entry it would write, and
+        refuses a drifted write with 409 before taking any backup. The 409 body's
+        action discriminates the two conflict kinds: "precondition_failed" (stale
+        preview — re-preview, do not retry) vs "already_exists" (entry present — pass
+        force=true). force=true never rescues a stale token.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
           codex, gemini, opencode)
@@ -3845,7 +3895,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/httpapi.ConnectRequest'
-        description: Optional connection parameters
+        description: Optional connection parameters (server_name, force, precondition_token)
       responses:
         "200":
           content:
@@ -3875,8 +3925,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Already connected (use force=true)
+                $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
+          description: 'Conflict: action=already_exists (use force=true) or action=precondition_failed
+            (preview is stale; re-preview)'
         "503":
           content:
             application/json:
@@ -3899,6 +3950,14 @@ paths:
         entry_exists distinguishes a create from an overwrite of a same-named entry.
         Reads the config on demand to classify create-vs-overwrite, so on macOS this
         may raise an App-Data privacy prompt; a denial returns 403 + remediation.
+        Spec 091 adds three fields: existing_entry_summary (present only when
+        entry_exists — a sanitized, non-secret projection of the entry being replaced:
+        its name, type, endpoint with query/userinfo stripped, command, and header and
+        env NAMES, never values); precondition_token (always present — an opaque keyed
+        digest of the raw pre-write state and the pending entry, echoed back on POST
+        connect to detect drift); and connect_refusal (present when the write would
+        refuse regardless of intent, e.g. a non-create-capable client with no config —
+        treat its presence as "Connect unavailable").
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
           codex, gemini, opencode)

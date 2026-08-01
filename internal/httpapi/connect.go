@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +16,30 @@ import (
 type ConnectRequest struct {
 	ServerName string `json:"server_name,omitempty"` // Defaults to "mcpproxy"
 	Force      bool   `json:"force,omitempty"`       // Overwrite existing entry
+	// PreconditionToken is the opaque token from the preview this write was
+	// confirmed against (Spec 091 FR-005). When present, the core rechecks it
+	// at write time and responds 409 with action "precondition_failed" —
+	// writing nothing — if the config or the entry MCPProxy would write has
+	// drifted since; the caller then re-previews instead of retrying. Absent
+	// means exactly the pre-091 behavior. A replace-classified flow sends this
+	// TOGETHER with force=true: the token, not the absence of force, is the
+	// overwrite safety.
+	PreconditionToken string `json:"precondition_token,omitempty"`
+}
+
+// ConnectConflictResponse is the 409 body of POST /api/v1/connect/{client}.
+//
+// It is a typed response rather than the generic error shape because Action is
+// the machine-readable discriminator the contract depends on: "already_exists"
+// means "an entry is there, pass force", "precondition_failed" means "your
+// preview is stale, re-preview". A client that cannot tell them apart either
+// loops forever or forces a write over state the user never saw (research D9),
+// so the field must be visible in the OpenAPI document, not only in prose.
+type ConnectConflictResponse struct {
+	Success bool                  `json:"success"` // Always false
+	Data    connect.ConnectResult `json:"data"`    // The full result; its action mirrors the top-level one
+	Error   string                `json:"error"`   // Human-readable message
+	Action  string                `json:"action"`  // already_exists | precondition_failed
 }
 
 // handleGetConnectStatus godoc
@@ -86,6 +111,14 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Description entry_exists distinguishes a create from an overwrite of a same-named entry.
 // @Description Reads the config on demand to classify create-vs-overwrite, so on macOS this
 // @Description may raise an App-Data privacy prompt; a denial returns 403 + remediation.
+// @Description Spec 091 adds three fields: existing_entry_summary (present only when
+// @Description entry_exists — a sanitized, non-secret projection of the entry being replaced:
+// @Description its name, type, endpoint with query/userinfo stripped, command, and header and
+// @Description env NAMES, never values); precondition_token (always present — an opaque keyed
+// @Description digest of the raw pre-write state and the pending entry, echoed back on POST
+// @Description connect to detect drift); and connect_refusal (present when the write would
+// @Description refuse regardless of intent, e.g. a non-create-capable client with no config —
+// @Description treat its presence as "Connect unavailable").
 // @Tags        connect
 // @Produce     json
 // @Security    ApiKeyAuth
@@ -134,18 +167,24 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Summary     Connect MCPProxy to a client
 // @Description Register MCPProxy as an MCP server in the specified client's configuration file.
 // @Description Creates a backup of the existing config before modifying.
+// @Description Optionally accepts precondition_token from a preview (Spec 091): when supplied,
+// @Description the core rechecks the raw pre-write state and the entry it would write, and
+// @Description refuses a drifted write with 409 before taking any backup. The 409 body's
+// @Description action discriminates the two conflict kinds: "precondition_failed" (stale
+// @Description preview — re-preview, do not retry) vs "already_exists" (entry present — pass
+// @Description force=true). force=true never rescues a stale token.
 // @Tags        connect
 // @Accept      json
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
-// @Param       body   body   ConnectRequest false "Optional connection parameters"
+// @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
-// @Failure     409    {object} contracts.ErrorResponse "Already connected (use force=true)"
+// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview)"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client} [post]
 func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
@@ -162,14 +201,12 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ConnectRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
 	}
 
-	result, err := svc.Connect(clientID, req.ServerName, req.Force)
+	result, err := svc.ConnectWithPrecondition(clientID, req.ServerName, req.Force, req.PreconditionToken)
 	if err != nil {
 		// A macOS App-Data (TCC) denial surfaces as 403 carrying remediation,
 		// distinct from a generic 400 or a 404 not-found (Spec 075 contract).
@@ -186,11 +223,17 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !result.Success && result.Action == "already_exists" {
-		s.writeJSON(w, http.StatusConflict, map[string]interface{}{
-			"success": false,
-			"data":    result,
-			"error":   result.Message,
+	// Both 409 kinds carry their discriminator in `action` — mirrored at the top
+	// level so a client can branch without unwrapping `data`. "already_exists"
+	// means "an entry is there, pass force"; "precondition_failed" means "your
+	// preview is stale, re-preview" (contracts §2). Conflating them would make a
+	// replace flow either loop or force a write over unseen state.
+	if !result.Success && (result.Action == "already_exists" || result.Action == "precondition_failed") {
+		s.writeJSON(w, http.StatusConflict, ConnectConflictResponse{
+			Success: false,
+			Data:    *result,
+			Error:   result.Message,
+			Action:  result.Action,
 		})
 		return
 	}
@@ -229,9 +272,7 @@ func (s *Server) handleDisconnectClient(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req ConnectRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		_ = json.NewDecoder(r.Body).Decode(&req) // best effort
-	}
+	_ = decodeOptionalJSONBody(r, &req) // best effort
 
 	result, err := svc.Disconnect(clientID, req.ServerName)
 	if err != nil {
@@ -307,11 +348,9 @@ func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req UndoConnectRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
 	}
 
 	result, err := svc.Undo(clientID, req.ServerName, req.BackupName)
@@ -345,6 +384,24 @@ func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSuccess(w, result)
+}
+
+// decodeOptionalJSONBody decodes an optional JSON request body. An absent or
+// empty body leaves out untouched — that is what "no body" means for these
+// endpoints — and any other malformed input is returned as an error.
+//
+// Deliberately NOT gated on Content-Length: a chunked or otherwise streamed
+// request arrives with ContentLength == -1, and skipping the decode there
+// silently dropped the fields the caller relies on for safety (force and,
+// above all, precondition_token), running the write in unguarded legacy mode.
+func decodeOptionalJSONBody(r *http.Request, out interface{}) error {
+	if r.Body == nil {
+		return nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 // writeIfAccessDenied maps a permission-denied client-config access to a 403

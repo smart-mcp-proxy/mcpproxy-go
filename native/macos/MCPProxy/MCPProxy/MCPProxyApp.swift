@@ -62,6 +62,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    /// The Connect Client form. Presented as a sheet on the main window when one
+    /// is up, and as its own window otherwise. The lifecycle owns the window and
+    /// its model together so BOTH exits — the form's Close button and the
+    /// titlebar's red button — tear the form down (see the type's header).
+    @MainActor private let connectClientForm = ConnectFormWindowLifecycle()
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
 
@@ -269,6 +274,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             name: .openWebUI, object: nil
         )
 
+        // Spec 091: the one route into the native Connect Client form. Presented
+        // directly from here — no delayed notification chains, which is what
+        // made the Add Server path fragile.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(presentConnectClientForm),
+            name: ConnectClientPresentation.route, object: nil
+        )
+
         // Start core
         Task {
             await startCore()
@@ -436,6 +449,70 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Present the native Connect Client form (spec 091).
+    ///
+    /// Direct presentation, on purpose: the Add Server path posts a notification
+    /// and then hopes two `asyncAfter` hops land in the right order, which is a
+    /// race dressed as a workflow (research D5). Here the window is built and
+    /// shown in this call.
+    @MainActor @objc func presentConnectClientForm() {
+        if connectClientForm.makeKeyIfPresenting() {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // Resolved per call: the form may be opened before the core is up, and
+        // must populate itself once it answers rather than needing a reopen.
+        let appState = self.appState
+        let source = DeferredConnectSource(
+            transportKind: appState.apiClient?.transportKind ?? .unixSocket,
+            resolve: { await MainActor.run { appState.apiClient } }
+        )
+        let model = ConnectClientModel(source: source)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Connect Client"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: ConnectClientView(model: model, onClose: { [weak self] in
+                self?.dismissConnectClientForm()
+            })
+        )
+        // A sheet on the main window when there is one — the form belongs to the
+        // app the user is already looking at; a standalone window otherwise,
+        // because a menu-bar app often has no window at all.
+        if let host = mainWindow, host.isVisible {
+            // The host is recorded so that closing IT tears the form down: a
+            // sheet gets no close notification of its own, and beginSheet's
+            // completion never runs when the parent closes underneath it.
+            connectClientForm.adopt(window, model: model, host: host)
+            host.beginSheet(window) { [weak self] _ in
+                self?.connectClientForm.windowWillClose(window)
+            }
+            return
+        }
+
+        connectClientForm.adopt(window, model: model)
+
+        NSApp.setActivationPolicy(.regular)
+        window.center()
+        // Owning the delegate is what makes the red button reach the teardown.
+        window.delegate = self
+        setupMainMenu()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Dismiss the form from its own Close button, whichever way it was shown.
+    @MainActor private func dismissConnectClientForm() {
+        connectClientForm.dismiss()
+    }
+
     @objc private func showAddServer() {
         showMainWindow()
         // First switch to the Servers tab so ServersView is mounted and
@@ -460,6 +537,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // NSWindowDelegate — hide from Dock when the last managed window closes.
     func windowWillClose(_ notification: Notification) {
+        // The titlebar's red button lands here and nowhere else: without this,
+        // closing the Connect form that way left its model and its 2 s
+        // reachability poll alive inside a retained, invisible window.
+        MainActor.assumeIsolated {
+            connectClientForm.windowWillClose(notification.object as? NSWindow)
+        }
         // Defer so the closing window has already left the visible set.
         DispatchQueue.main.async { [weak self] in self?.restoreAccessoryIfNoVisibleWindows() }
     }
@@ -924,6 +1007,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let addServer = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
         addServer.target = self
         menu.addItem(addServer)
+
+        // Spec 091 FR-001: the native connect journey, beside Add Server. The
+        // item is built by its router so the item and its routing are tested
+        // together (a nil target would make it silently do nothing).
+        menu.addItem(ConnectClientMenuRouter.shared.makeMenuItem())
 
         let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: "")
         openApp.target = self

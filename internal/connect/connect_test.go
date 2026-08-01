@@ -1254,3 +1254,328 @@ func TestConnect_FilePermissionsPreserved(t *testing.T) {
 		t.Errorf("Expected permissions 0600, got %o", info.Mode().Perm())
 	}
 }
+
+// --- Spec 091: precondition-token guarded writes (FR-005, contracts §2) ---
+
+// backupCount reports how many timestamped backups exist beside a config, so a
+// refusal can be proven to happen BEFORE the backup step rather than after it.
+func backupCount(t *testing.T, cfgPath string) int {
+	t.Helper()
+	matches, err := filepath.Glob(cfgPath + ".bak.*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	return len(matches)
+}
+
+func readConfigT(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(raw)
+}
+
+// TestConnectWithPrecondition_ValidTokenWrites covers every change kind: a
+// create (absent file), an add (file present, no entry), a replace (same key)
+// and an adopted-entry replace (OpenCode, entry under a different key).
+func TestConnectWithPrecondition_ValidTokenWrites(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		svc, home := testService(t)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success || res.Action != "created" {
+			t.Fatalf("expected a successful create, got %+v", res)
+		}
+		if _, err := os.Stat(ConfigPath("claude-code", home)); err != nil {
+			t.Fatalf("config should have been created: %v", err)
+		}
+	})
+
+	t.Run("add", func(t *testing.T) {
+		svc, home := testService(t)
+		seedClientConfig(t, home, "claude-code")
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("expected success, got %+v", res)
+		}
+	})
+
+	t.Run("replace", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:9999/mcp"}}}`)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if !preview.EntryExists {
+			t.Fatal("fixture should classify as replace")
+		}
+		// A replace sends force=true TOGETHER with the token: the token, not the
+		// absence of force, is the overwrite safety (contracts §2).
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success || res.Action != "updated" {
+			t.Fatalf("expected a successful replace, got %+v", res)
+		}
+		if strings.Contains(readConfigT(t, cfgPath), "9999") {
+			t.Fatal("stale entry should have been overwritten")
+		}
+	})
+
+	t.Run("adopted replace", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("opencode", home)
+		writeFileT(t, cfgPath, `{"mcp":{"proxy-alt":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`)
+		preview, err := svc.Preview("opencode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("expected success, got %+v", res)
+		}
+		if strings.Contains(readConfigT(t, cfgPath), "proxy-alt") {
+			t.Fatal("the adopted entry should have been replaced")
+		}
+	})
+}
+
+// TestConnectWithPrecondition_StaleTokenRefuses walks every drift class the
+// token exists to catch, and proves each refusal is inert: no write, no backup.
+func TestConnectWithPrecondition_StaleTokenRefuses(t *testing.T) {
+	t.Run("file appeared after an absent-file preview", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		const drifted = `{"mcpServers":{"other":{"type":"http","url":"http://127.0.0.1:7000/mcp"}}}`
+		writeFileT(t, cfgPath, drifted)
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("file disappeared after an add preview", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		seedClientConfig(t, home, "claude-code")
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		if err := os.Remove(cfgPath); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Success || res.Action != "precondition_failed" {
+			t.Fatalf("expected a precondition refusal, got %+v", res)
+		}
+		if _, statErr := os.Stat(cfgPath); statErr == nil {
+			t.Fatal("a refused write must not create the config file")
+		}
+	})
+
+	t.Run("existing entry changed in a way the summary hides", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"first"}}}}`)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		// Only a header VALUE changes — the sanitized summary is byte-identical,
+		// so nothing but the token can catch this.
+		const drifted = `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"second"}}}}`
+		writeFileT(t, cfgPath, drifted)
+
+		// force=true must NOT rescue a stale token.
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("adopted entry changed under its own key", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("opencode", home)
+		writeFileT(t, cfgPath, `{"mcp":{"proxy-alt":{"type":"remote","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"first"}}}}`)
+		preview, err := svc.Preview("opencode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		const drifted = `{"mcp":{"proxy-alt":{"type":"remote","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"second"}}}}`
+		writeFileT(t, cfgPath, drifted)
+
+		res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("proxy-side drift changes what would be written", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+		cfgPath := ConfigPath("claude-code", home)
+		const unchanged = `{"mcpServers":{}}`
+		writeFileT(t, cfgPath, unchanged)
+
+		apiKey, requireAuth := "key-one", false
+		svc := NewServiceWithHome("127.0.0.1:8080", apiKey, home).
+			WithConfigProvider(func() (string, string, bool) { return "127.0.0.1:8080", apiKey, requireAuth })
+
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if preview.ContainsAPIKey {
+			t.Fatal("fixture should preview a keyless entry")
+		}
+
+		// The user is looking at a keyless preview; auth is toggled on behind
+		// their back. Writing now would embed a credential the FR-004 notice
+		// never announced — the token must refuse even though the FILE is
+		// untouched.
+		requireAuth = true
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, unchanged)
+	})
+}
+
+// TestConnectWithPrecondition_AbsentTokenIsLegacyBehavior keeps the delta
+// backward compatible: without a token, the Web UI/CLI path behaves exactly as
+// before (contracts §2).
+func TestConnectWithPrecondition_AbsentTokenIsLegacyBehavior(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:9999/mcp"}}}`)
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Success || res.Action != "already_exists" {
+		t.Fatalf("expected the legacy already_exists refusal, got %+v", res)
+	}
+
+	// And Connect() itself is still the tokenless entry point.
+	forced, err := svc.Connect("claude-code", "mcpproxy", true)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if !forced.Success || forced.Action != "updated" {
+		t.Fatalf("expected a forced update, got %+v", forced)
+	}
+}
+
+// assertPreconditionRefusal pins the refusal contract: a discriminated action
+// distinct from already_exists, a byte-identical config, and no backup — the
+// refusal happens BEFORE the backup step.
+func assertPreconditionRefusal(t *testing.T, res *ConnectResult, cfgPath, wantContent string) {
+	t.Helper()
+	if res == nil {
+		t.Fatal("expected a result, got nil")
+	}
+	if res.Success {
+		t.Fatalf("expected refusal, got success: %+v", res)
+	}
+	if res.Action != "precondition_failed" {
+		t.Fatalf("expected action precondition_failed (distinct from already_exists), got %q", res.Action)
+	}
+	if got := readConfigT(t, cfgPath); got != wantContent {
+		t.Fatalf("config must be byte-identical after a refusal:\n got:  %s\n want: %s", got, wantContent)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup, found %d", n)
+	}
+}
+
+// TestConnectWithPrecondition_OpenCodeFileVanished pins the drift contract for
+// the one client that also has a force-proof refusal. Spec 091 FR-005 lists
+// "the file disappearing after an add/replace preview" as a drift class for ALL
+// change kinds: the caller echoed a token that described an existing file, so it
+// must get the discriminated conflict and re-preview — not OpenCode's flat
+// "no config found" refusal, which reads as a permanent "not connectable" and
+// leaves the form in a dead-end failure state.
+func TestConnectWithPrecondition_OpenCodeFileVanished(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	writeFileT(t, cfgPath, `{"mcp":{}}`)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ConnectRefusal != "" {
+		t.Fatalf("a present OpenCode config is connectable, got refusal %q", preview.ConnectRefusal)
+	}
+	if preview.PreconditionToken == "" {
+		t.Fatal("expected a precondition token")
+	}
+
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", false, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("a drifted write must be reported as a conflict, not an error: %v", err)
+	}
+	if res == nil || res.Success || res.Action != "precondition_failed" {
+		t.Fatalf("expected action precondition_failed, got %+v", res)
+	}
+	if _, statErr := os.Stat(cfgPath); statErr == nil {
+		t.Fatal("a refused write must not create the config file")
+	}
+}
+
+// Without a token the refusal is the whole answer: nothing described a
+// pre-write state, so there is no drift to report.
+func TestConnect_OpenCodeAbsentConfigStillRefuses(t *testing.T) {
+	svc, _ := testService(t)
+	if _, err := svc.Connect("opencode", "mcpproxy", false); err == nil {
+		t.Fatal("expected the absent-config refusal for a tokenless connect")
+	} else if !strings.Contains(err.Error(), "no OpenCode config found") {
+		t.Fatalf("expected the OpenCode refusal, got %v", err)
+	}
+}

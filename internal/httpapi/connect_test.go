@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -630,4 +631,261 @@ func TestHandleUndoConnectClient_NoPriorFileDeletes(t *testing.T) {
 	assert.Equal(t, "deleted", resp.Data.Action)
 	_, statErr := os.Stat(res.ConfigPath)
 	assert.True(t, os.IsNotExist(statErr), "config created by connect must be removed")
+}
+
+// --- Spec 091: precondition token over the HTTP connect surface (contracts §1–2) ---
+
+// connectTestServer builds a server with a connect service rooted at an
+// isolated home, returning both plus the home dir.
+func connectTestServer(t *testing.T) (*Server, *connect.Service, string) {
+	t.Helper()
+	logger := zap.NewNop().Sugar()
+	srv := NewServer(&mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}, logger, nil)
+	home := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
+	srv.SetConnectService(svc)
+	return srv, svc, home
+}
+
+// fetchPreview drives GET /api/v1/connect/{client}/preview and returns the
+// decoded payload as a generic map, so assertions run over the SERIALIZED
+// contract rather than the Go struct.
+func fetchPreview(t *testing.T, srv *Server, clientID string) map[string]interface{} {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/"+clientID+"/preview?server_name=mcpproxy", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.True(t, resp.Success)
+	return resp.Data
+}
+
+func postConnect(t *testing.T, srv *Server, clientID string, body ConnectRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	encoded, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/"+clientID, bytes.NewReader(encoded))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	return w
+}
+
+// TestHandleConnectClientPreview_SerializesSpec091Fields pins contracts §1: the
+// preview response carries the three new fields with the documented shapes.
+func TestHandleConnectClientPreview_SerializesSpec091Fields(t *testing.T) {
+	srv, _, home := connectTestServer(t)
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(
+		`{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp?apikey=WIRE-SECRET","headers":{"X-API-Key":"WIRE-HEADER-SECRET"}}}}`), 0o644))
+
+	data := fetchPreview(t, srv, "claude-code")
+
+	token, ok := data["precondition_token"].(string)
+	require.True(t, ok, "precondition_token must always be present: %v", data)
+	assert.NotEmpty(t, token)
+
+	summary, ok := data["existing_entry_summary"].(map[string]interface{})
+	require.True(t, ok, "existing_entry_summary must be present when entry_exists: %v", data)
+	assert.Equal(t, "mcpproxy", summary["entry_name"])
+	assert.Equal(t, "http", summary["type"])
+	assert.Equal(t, "http://127.0.0.1:8080/mcp", summary["endpoint"])
+	assert.Equal(t, []interface{}{"X-API-Key"}, summary["header_names"])
+
+	// connect_refusal is omitted for a connectable client.
+	assert.Nil(t, data["connect_refusal"])
+
+	// Nothing secret rides out on the wire.
+	serialized, err := json.Marshal(data)
+	require.NoError(t, err)
+	assert.NotContains(t, string(serialized), "WIRE-SECRET")
+	assert.NotContains(t, string(serialized), "WIRE-HEADER-SECRET")
+}
+
+// TestHandleConnectClientPreview_SerializesConnectRefusal covers the third
+// field: a non-create-capable client with an absent config.
+func TestHandleConnectClientPreview_SerializesConnectRefusal(t *testing.T) {
+	srv, _, _ := connectTestServer(t)
+	data := fetchPreview(t, srv, "opencode")
+	refusal, ok := data["connect_refusal"].(string)
+	require.True(t, ok, "connect_refusal must be present for OpenCode without a config: %v", data)
+	assert.Contains(t, refusal, "no OpenCode config found")
+}
+
+// TestHandleConnectClient_AcceptsPreconditionToken proves the POST body carries
+// the token through to a successful write.
+func TestHandleConnectClient_AcceptsPreconditionToken(t *testing.T) {
+	srv, _, home := connectTestServer(t)
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{"mcpServers":{}}`), 0o644))
+
+	token := fetchPreview(t, srv, "claude-code")["precondition_token"].(string)
+
+	w := postConnect(t, srv, "claude-code", ConnectRequest{
+		ServerName: "mcpproxy", PreconditionToken: token,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Success bool                  `json:"success"`
+		Data    connect.ConnectResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp.Success)
+}
+
+// TestHandleConnectClient_StaleTokenReturnsDiscriminatedConflict pins contracts
+// §2: drift is a 409 whose action discriminates it from the legacy
+// already_exists conflict, so a client knows to re-preview rather than retry.
+func TestHandleConnectClient_StaleTokenReturnsDiscriminatedConflict(t *testing.T) {
+	srv, _, home := connectTestServer(t)
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(
+		`{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"first"}}}}`), 0o644))
+
+	token := fetchPreview(t, srv, "claude-code")["precondition_token"].(string)
+
+	drifted := []byte(`{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"second"}}}}`)
+	require.NoError(t, os.WriteFile(cfgPath, drifted, 0o644))
+
+	// force=true rides WITH the token and still must not rescue it.
+	w := postConnect(t, srv, "claude-code", ConnectRequest{
+		ServerName: "mcpproxy", Force: true, PreconditionToken: token,
+	})
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+
+	var resp struct {
+		Success bool                  `json:"success"`
+		Action  string                `json:"action"`
+		Data    connect.ConnectResult `json:"data"`
+		Error   string                `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.False(t, resp.Success)
+	assert.Equal(t, "precondition_failed", resp.Data.Action)
+	assert.Equal(t, "precondition_failed", resp.Action, "the discriminator must be readable at the top level too")
+	assert.NotEmpty(t, resp.Error)
+
+	// Nothing was written.
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(drifted), string(after))
+}
+
+// TestHandleConnectClient_LegacyConflictKeepsItsDiscriminator guards the other
+// side of the discriminator: a tokenless force=false write over an existing
+// entry is still already_exists, which a client must NOT treat as re-previewable.
+func TestHandleConnectClient_LegacyConflictKeepsItsDiscriminator(t *testing.T) {
+	srv, svc, _ := connectTestServer(t)
+	_, err := svc.Connect("claude-code", "mcpproxy", false)
+	require.NoError(t, err)
+
+	w := postConnect(t, srv, "claude-code", ConnectRequest{ServerName: "mcpproxy"})
+	require.Equal(t, http.StatusConflict, w.Code)
+
+	var resp struct {
+		Action string                `json:"action"`
+		Data   connect.ConnectResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "already_exists", resp.Data.Action)
+	assert.Equal(t, "already_exists", resp.Action)
+}
+
+// chunkedBody hides the reader's Len method so net/http cannot compute a
+// Content-Length and streams the body with Transfer-Encoding: chunked — what
+// curl --header 'Transfer-Encoding: chunked' and any streaming HTTP client
+// produce. The handler sees ContentLength == -1.
+func chunkedBody(payload []byte) io.Reader {
+	return struct{ io.Reader }{bytes.NewReader(payload)}
+}
+
+// TestHandleConnectClient_ChunkedBodyIsDecoded pins that the request body is
+// read from the BODY, not from a Content-Length guess: force and, above all,
+// precondition_token are safety fields, and silently dropping them ran the
+// write in unguarded legacy mode.
+func TestHandleConnectClient_ChunkedBodyIsDecoded(t *testing.T) {
+	newFixture := func(t *testing.T) (*httptest.Server, *connect.Service, string) {
+		t.Helper()
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+		srv := NewServer(mockCtrl, logger, nil)
+		home := t.TempDir()
+		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+		svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
+		srv.SetConnectService(svc)
+		ts := httptest.NewServer(srv)
+		t.Cleanup(ts.Close)
+		return ts, svc, home
+	}
+
+	post := func(t *testing.T, ts *httptest.Server, payload ConnectRequest) (int, map[string]interface{}) {
+		t.Helper()
+		body, err := json.Marshal(payload)
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/connect/claude-code", chunkedBody(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		// Streamed, so the handler sees ContentLength == -1 (the transport also
+		// chunks an unknown-length body on its own; this makes it explicit).
+		req.TransferEncoding = []string{"chunked"}
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		var decoded map[string]interface{}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&decoded))
+		return resp.StatusCode, decoded
+	}
+
+	t.Run("force is honored", func(t *testing.T) {
+		ts, svc, _ := newFixture(t)
+		_, err := svc.Connect("claude-code", "mcpproxy", false)
+		require.NoError(t, err)
+
+		status, decoded := post(t, ts, ConnectRequest{ServerName: "mcpproxy", Force: true})
+		assert.Equal(t, http.StatusOK, status, "force=true in a chunked body must overwrite, not 409: %v", decoded)
+		data, _ := decoded["data"].(map[string]interface{})
+		assert.Equal(t, "updated", data["action"])
+	})
+
+	t.Run("a stale precondition token still refuses", func(t *testing.T) {
+		ts, svc, home := newFixture(t)
+		cfgPath := connect.ConfigPath("claude-code", home)
+		require.NoError(t, os.WriteFile(cfgPath,
+			[]byte(`{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"first"}}}}`), 0o644))
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		require.NoError(t, err)
+		require.NotEmpty(t, preview.PreconditionToken)
+
+		// Drift after the preview: the echoed token no longer describes reality.
+		const drifted = `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"second"}}}}`
+		require.NoError(t, os.WriteFile(cfgPath, []byte(drifted), 0o644))
+
+		status, decoded := post(t, ts, ConnectRequest{
+			ServerName:        "mcpproxy",
+			Force:             true,
+			PreconditionToken: preview.PreconditionToken,
+		})
+		assert.Equal(t, http.StatusConflict, status, "a token sent in a chunked body must still be checked: %v", decoded)
+		assert.Equal(t, "precondition_failed", decoded["action"])
+
+		after, err := os.ReadFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, drifted, string(after), "a refused write must not touch the config")
+	})
 }

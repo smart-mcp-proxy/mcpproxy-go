@@ -204,7 +204,12 @@ func opencodeConfigCandidates(homeDir string) []string {
 func (s *Service) configPath(clientID string) string {
 	if clientID == "opencode" {
 		for _, p := range opencodeConfigCandidates(s.homeDir) {
-			if _, err := os.Stat(p); err == nil {
+			// A candidate we cannot stat counts as PRESENT: the only reason to
+			// prefer .jsonc is that it shadows .json, and skipping an
+			// unstattable one would silently target the shadowed file, where
+			// the write has no effect. Targeting it instead surfaces the real
+			// permission error on the read that follows.
+			if _, err := s.stat(p); err == nil || !os.IsNotExist(err) {
 				return p
 			}
 		}

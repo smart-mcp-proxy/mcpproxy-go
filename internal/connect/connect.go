@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 )
@@ -82,6 +84,18 @@ type Service struct {
 	// readFile is the content-read seam (Spec 075 T003). Defaults to os.ReadFile;
 	// tests inject a permission-denied error or a call counter through it.
 	readFile func(string) ([]byte, error)
+	// statFile is the metadata seam alongside readFile. Defaults to os.Stat.
+	// Existence checks route through it so a stat that fails for a reason OTHER
+	// than "not there" can be classified honestly instead of being reported as
+	// an absent config.
+	statFile func(string) (os.FileInfo, error)
+
+	// tokenKey is the per-core-instance HMAC key for connect-preview
+	// precondition tokens (Spec 091 FR-005). Generated lazily by
+	// preconditionKey(), never persisted, never exposed: it keeps a token
+	// unforgeable and non-oracular, and scopes it to this process.
+	tokenKeyOnce sync.Once
+	tokenKey     []byte
 }
 
 // WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,
@@ -147,6 +161,20 @@ func NewServiceWithReader(listenAddr, apiKey, homeDir string, readFile func(stri
 
 // setReadFile overrides the content-read seam (test helper).
 func (s *Service) setReadFile(fn func(string) ([]byte, error)) { s.readFile = fn }
+
+// setStat overrides the metadata seam (test helper), so a permission-blocked
+// stat can be exercised without depending on OS permission bits (which root
+// ignores and Windows does not model the same way).
+func (s *Service) setStat(fn func(string) (os.FileInfo, error)) { s.statFile = fn }
+
+// stat performs a metadata check through the seam, falling back to os.Stat for
+// a zero-value Service. No config content is read (Spec 075 FR-001).
+func (s *Service) stat(path string) (os.FileInfo, error) {
+	if s.statFile != nil {
+		return s.statFile(path)
+	}
+	return os.Stat(path)
+}
 
 // read performs a config content read through the seam, falling back to
 // os.ReadFile for a zero-value Service.
@@ -282,8 +310,14 @@ func (s *Service) GetAllStatus() []ClientStatus {
 		}
 
 		// Metadata-only existence check (no content read).
-		if _, err := os.Stat(cfgPath); err == nil {
+		if _, err := s.stat(cfgPath); err == nil {
 			status.Exists = true
+		} else if !os.IsNotExist(err) {
+			// Still no content read — but a stat we were not allowed to make is
+			// not evidence of absence, and leaving the row to say "No config
+			// found" would name the wrong problem. Classifying the stat error
+			// costs nothing extra here.
+			status.AccessState = classifyAccess(err)
 		}
 
 		statuses = append(statuses, status)
@@ -315,8 +349,17 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		AccessState: accessUnknown,
 	}
 
-	if _, err := os.Stat(cfgPath); err == nil {
+	if _, err := s.stat(cfgPath); err == nil {
 		status.Exists = true
+	} else if !os.IsNotExist(err) {
+		// We could not even look. Claiming "no config found" here would report a
+		// permission block as "not installed" and hide the remediation the user
+		// needs (Spec 075 FR-004).
+		status.AccessState = classifyAccess(err)
+		if status.AccessState == accessDenied {
+			status.Remediation = remediationText(c.Name)
+		}
+		return status, nil
 	}
 	if !status.Exists {
 		status.AccessState = accessAbsent
@@ -360,7 +403,26 @@ func (s *Service) entryAccess(client ClientDef, cfgPath string) (name string, fo
 // Connect registers MCPProxy in the specified client's configuration file.
 // serverName defaults to "mcpproxy" if empty. If force is false and an entry
 // already exists, an error is returned.
+//
+// This is the tokenless entry point kept for the Web UI, the CLI and every
+// existing caller; ConnectWithPrecondition adds the Spec 091 drift guard.
 func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResult, error) {
+	return s.ConnectWithPrecondition(clientID, serverName, force, "")
+}
+
+// ConnectWithPrecondition is Connect guarded by the opaque token a preview
+// returned (Spec 091 FR-005). When preconditionToken is non-empty, the core
+// re-resolves the raw pre-write state and the entry it would write, recomputes
+// the token, and refuses with the discriminated "precondition_failed" action —
+// writing nothing and taking no backup — if anything drifted since the preview:
+// the file appearing or vanishing, the resolved (possibly adopted) entry
+// changing in any way, or the proxy's own configuration changing what would be
+// written. force=true rides WITH the token for a replace-classified flow and
+// never rescues a stale one.
+//
+// An empty token means exactly today's behavior, so existing consumers are
+// unaffected (contracts §2).
+func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (*ConnectResult, error) {
 	client := FindClient(clientID)
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
@@ -377,27 +439,66 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
-	if client.ID == "opencode" {
-		// configPath already prefers whichever candidate exists; reaching a
-		// nonexistent path here means NO OpenCode global config was found.
-		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-			return nil, fmt.Errorf(
-				"no OpenCode config found (looked for opencode.jsonc and opencode.json in %s) — is OpenCode installed?",
-				filepath.Dir(cfgPath))
+	// Resolve the pre-write state ONCE for the whole operation. The token check
+	// and the write must cover the SAME entry — re-resolving per step is what
+	// let a token hash one entry while the write replaced or deleted another
+	// (Spec 091 FR-005).
+	fileExists, existing, _, err := s.preWriteState(client, cfgPath, serverName)
+	if err != nil {
+		return nil, s.asAccessError(client, cfgPath, err)
+	}
+
+	// Precondition check BEFORE any backup or write, so a refusal is completely
+	// inert (Spec 091 FR-005).
+	if preconditionToken != "" {
+		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, fileExists, existing); stale != nil {
+			return stale, nil
 		}
 	}
 
+	// The refusal guard runs AFTER the drift check. Both orders refuse the
+	// write, but a caller that echoed a token describing a file which has since
+	// vanished is looking at drift, and FR-005 promises drift is reported as the
+	// discriminated conflict for every change kind — a flat refusal instead
+	// reads as a permanent "not connectable" and strands the form.
+	if err := connectRefusal(client, cfgPath); err != nil {
+		return nil, err
+	}
+
 	var res *ConnectResult
-	var err error
 	if client.Format == "toml" {
 		res, err = s.connectTOML(client, cfgPath, serverName, force)
 	} else {
-		res, err = s.connectJSON(client, cfgPath, serverName, force)
+		res, err = s.connectJSON(client, cfgPath, serverName, force, existing)
 	}
 	// A permission denial anywhere in the read/backup/write chain (the errors
 	// preserve their OS cause via %w) surfaces as a typed *AccessError with
 	// remediation; other errors keep their existing semantics (Spec 075 FR-004).
 	return res, s.asAccessError(client, cfgPath, err)
+}
+
+// connectRefusal reports the reason a connect would refuse for this client
+// regardless of user intent, or nil when the client is connectable.
+//
+// Today the single case is a non-create-capable client whose config is absent:
+// OpenCode owns a config schema mcpproxy will not invent, so connect refuses
+// rather than creating one. It is a package-level function, not a method,
+// precisely so the PREVIEW can run the exact same guard the write runs and
+// surface the reason verbatim before the user ever presses Connect (Spec 091
+// FR-003, research D8) — a divergent copy would let the form promise "a new
+// file will be created; Undo removes it" for a client where that is false.
+func connectRefusal(client *ClientDef, cfgPath string) error {
+	if client.ID != "opencode" {
+		return nil
+	}
+	// configPath already prefers whichever candidate exists; reaching a
+	// nonexistent path here means NO OpenCode global config was found.
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		return fmt.Errorf(
+			"no OpenCode config found (looked for opencode.jsonc and opencode.json in %s) — is OpenCode installed?",
+			filepath.Dir(cfgPath))
+	}
+	return nil
 }
 
 // Disconnect removes the MCPProxy entry from the specified client's configuration.
@@ -476,7 +577,12 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 	return nil
 }
 
-func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool) (*ConnectResult, error) {
+// connectJSON writes the entry, adopting the entry `resolved` names when it
+// differs from serverName. The resolution is passed in rather than recomputed
+// so the write acts on exactly the entry the preview described and the
+// precondition token hashed (Spec 091 FR-005); nil means "resolve nothing" for
+// the tokenless callers that never previewed.
+func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool, resolved *existingEntry) (*ConnectResult, error) {
 	if err := s.guardJsoncComments(cfgPath); err != nil {
 		return nil, err
 	}
@@ -508,8 +614,12 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		action = "updated"
 	}
 
-	if client.ID == "opencode" {
-		if adoptedName, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found && adoptedName != serverName {
+	// Adopt the entry the caller already resolved — never a freshly looked-up
+	// one. A key that has vanished from the file since is not adopted: there is
+	// nothing left to delete.
+	if client.ID == "opencode" && resolved != nil && resolved.name != serverName {
+		if _, present := serversMap[resolved.name]; present {
+			adoptedName := resolved.name
 			if !force {
 				return &ConnectResult{
 					Success:    true,
@@ -883,9 +993,28 @@ func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
 	return nil
 }
 
+// findEquivalentJSONServerName resolves the entry a connect would adopt: the
+// requested name when it is already taken, otherwise an entry pointing at our
+// MCP endpoint under some other key (including the legacy ?apikey= shape) so an
+// upgrade updates the existing entry rather than duplicating it.
+//
+// The resolution is DETERMINISTIC by construction — exact name first, then the
+// lowest URL-equivalent name in sorted order. Go randomizes map iteration, and
+// this lookup feeds the preview's summary, the precondition token and the
+// write's delete: an order-dependent answer would let those cover different
+// entries, producing spurious precondition_failed refusals and, under force,
+// silently deleting an entry the user was never shown (Spec 091 FR-005).
 func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, requestedServerName string) (string, bool) {
-	for name, rawEntry := range serversMap {
-		entry, ok := rawEntry.(map[string]interface{})
+	if _, taken := serversMap[requestedServerName]; taken {
+		return requestedServerName, true
+	}
+	names := make([]string, 0, len(serversMap))
+	for name := range serversMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry, ok := serversMap[name].(map[string]interface{})
 		if !ok {
 			continue
 		}
@@ -894,14 +1023,9 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 			if !ok {
 				continue
 			}
-			// Match both a clean base URL and a legacy ?apikey= variant so an
-			// upgrade adopts/updates the existing entry rather than duplicating.
 			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
 				return name, true
 			}
-		}
-		if name == requestedServerName {
-			return name, true
 		}
 	}
 	return "", false

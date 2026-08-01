@@ -7,12 +7,27 @@
 
 import SwiftUI
 
+// MARK: - Connect Clients Control
+
+/// The dashboard's way into the native Connect Client form (FR-012).
+///
+/// The dashboard used to own a sheet that connected a client *directly* — no
+/// preview, no backup disclosure. That sheet is gone: this control only opens
+/// the shared form, so every native config write goes through the same
+/// preview-before-write path as the tray menu item.
+enum DashboardConnectControl {
+    static let title = "Connect Clients…"
+
+    static func activate() {
+        ConnectClientPresentation.present()
+    }
+}
+
 // MARK: - Dashboard View
 
 struct DashboardView: View {
     @ObservedObject var appState: AppState
     @Environment(\.fontScale) var fontScale
-    @State private var showConnectClients = false
     @State private var mcpSessions: [APIClient.MCPSession] = []
 
     var body: some View {
@@ -52,9 +67,6 @@ struct DashboardView: View {
             } catch {
                 // Non-fatal; sessions will be empty
             }
-        }
-        .sheet(isPresented: $showConnectClients) {
-            ConnectClientsSheet(appState: appState, isPresented: $showConnectClients)
         }
     }
 
@@ -130,9 +142,9 @@ struct DashboardView: View {
                     // Left column buttons
                     VStack(spacing: 6) {
                         Button {
-                            showConnectClients = true
+                            DashboardConnectControl.activate()
                         } label: {
-                            Label("Connect Clients", systemImage: "link")
+                            Label(DashboardConnectControl.title, systemImage: "link")
                                 .font(.scaled(.caption, scale: fontScale))
                                 .frame(maxWidth: .infinity)
                         }
@@ -1057,282 +1069,6 @@ private struct AttentionRow: View {
             }
         } catch {
             // Action errors are visible via server health refresh
-        }
-    }
-}
-
-// MARK: - Connect Clients Sheet
-
-private struct ConnectClientsSheet: View {
-    @ObservedObject var appState: AppState
-    @Binding var isPresented: Bool
-    @State private var clients: [APIClient.ClientStatus] = []
-    @State private var loading = true
-    @State private var errorMessage: String?
-    @State private var successMessage: String?
-    @State private var actionInProgress: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // Header
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Connect MCPProxy to AI Agents")
-                    .font(.headline)
-                Text("Register MCPProxy in your AI tools' MCP config files so they can discover and use your upstream servers.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            if loading {
-                HStack {
-                    Spacer()
-                    ProgressView("Loading clients...")
-                    Spacer()
-                }
-                .padding(.vertical, 20)
-            } else if clients.isEmpty {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 8) {
-                        Image(systemName: "questionmark.circle")
-                            .font(.title2)
-                            .foregroundStyle(.secondary)
-                        Text("No AI clients detected")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        Text("The connect API may not be available in this version.")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                }
-                .padding(.vertical, 20)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(clients) { client in
-                            clientRow(client)
-                            if client.id != clients.last?.id {
-                                Divider().padding(.leading, 8)
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 300)
-            }
-
-            // Status messages
-            if let msg = successMessage {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text(msg)
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                }
-            }
-
-            if let err = errorMessage {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                    Text(err)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
-
-            Divider()
-
-            // Footer
-            HStack {
-                Button("Refresh") {
-                    loadClients()
-                }
-                .controlSize(.small)
-
-                Spacer()
-
-                Button("Close") {
-                    isPresented = false
-                }
-                .keyboardShortcut(.cancelAction)
-            }
-        }
-        .padding(20)
-        .frame(width: 500)
-        .onAppear { loadClients() }
-    }
-
-    @ViewBuilder
-    private func clientRow(_ client: APIClient.ClientStatus) -> some View {
-        HStack(spacing: 12) {
-            // Client icon
-            Image(systemName: clientIcon(for: client.clientId))
-                .font(.title3)
-                .foregroundStyle(client.connected ? .green : .secondary)
-                .frame(width: 24)
-
-            // Client info
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(client.name)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                    if client.connected {
-                        Text("Connected")
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.15))
-                            .foregroundStyle(.green)
-                            .clipShape(Capsule())
-                    }
-                }
-                Text(client.configPath)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            Spacer()
-
-            // Action button
-            if !client.supported {
-                Text(client.reason ?? "Not supported")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else if client.connected {
-                Button {
-                    disconnect(client.clientId)
-                } label: {
-                    if actionInProgress == client.clientId {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("Disconnect")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(actionInProgress != nil)
-            } else {
-                Button {
-                    connect(client.clientId)
-                } label: {
-                    if actionInProgress == client.clientId {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("Connect")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(actionInProgress != nil)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 8)
-    }
-
-    private func clientIcon(for clientId: String) -> String {
-        switch clientId {
-        case "claude-code", "claude-desktop":
-            return "brain"
-        case "cursor":
-            return "cursorarrow.rays"
-        case "vscode", "copilot":
-            return "chevron.left.forwardslash.chevron.right"
-        case "windsurf":
-            return "wind"
-        default:
-            return "app.connected.to.app.below.fill"
-        }
-    }
-
-    private func loadClients() {
-        loading = true
-        errorMessage = nil
-        successMessage = nil
-        Task {
-            guard let client = appState.apiClient else {
-                await MainActor.run {
-                    loading = false
-                    errorMessage = "Core is not connected"
-                }
-                return
-            }
-            do {
-                let result = try await client.connectClients()
-                await MainActor.run {
-                    clients = result
-                    loading = false
-                }
-            } catch {
-                await MainActor.run {
-                    loading = false
-                    errorMessage = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private func connect(_ clientId: String) {
-        errorMessage = nil
-        successMessage = nil
-        actionInProgress = clientId
-        Task {
-            guard let client = appState.apiClient else { return }
-            do {
-                let result = try await client.connectToClient(clientId)
-                await MainActor.run {
-                    actionInProgress = nil
-                    if result.success {
-                        successMessage = result.message ?? "Connected to \(clientId)"
-                    } else {
-                        errorMessage = result.message ?? "Failed to connect"
-                    }
-                }
-                // Reload the list to reflect changes
-                loadClients()
-            } catch {
-                await MainActor.run {
-                    actionInProgress = nil
-                    errorMessage = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private func disconnect(_ clientId: String) {
-        errorMessage = nil
-        successMessage = nil
-        actionInProgress = clientId
-        Task {
-            guard let client = appState.apiClient else { return }
-            do {
-                let result = try await client.disconnectFromClient(clientId)
-                await MainActor.run {
-                    actionInProgress = nil
-                    if result.success {
-                        successMessage = result.message ?? "Disconnected from \(clientId)"
-                    } else {
-                        errorMessage = result.message ?? "Failed to disconnect"
-                    }
-                }
-                // Reload the list to reflect changes
-                loadClients()
-            } catch {
-                await MainActor.run {
-                    actionInProgress = nil
-                    errorMessage = error.localizedDescription
-                }
-            }
         }
     }
 }

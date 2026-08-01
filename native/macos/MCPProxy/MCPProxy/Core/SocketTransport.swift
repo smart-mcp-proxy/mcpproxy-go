@@ -37,6 +37,33 @@ final class SocketURLProtocol: URLProtocol {
     /// `/Users/<name>/.mcpproxy/mcpproxy.sock` is not.
     static let routeHeader = "X-MCPProxy-Route"
 
+    /// Header marking a request that must NEVER leave over TCP.
+    ///
+    /// The unrouted fallback below ("intercept only if the default socket
+    /// exists, otherwise let it go out over TCP") is right for reads and wrong
+    /// for administrative writes: if the socket disappears mid-session, a
+    /// connect/undo/disconnect would silently ride 127.0.0.1:8080 instead, which
+    /// is exactly the non-socket case the spec forbids (research D6). A strict
+    /// request is intercepted regardless, so it fails loudly instead.
+    ///
+    /// Like the route header it is a transport hint and never goes on the wire.
+    static let strictSocketHeader = "X-MCPProxy-Strict-Socket"
+
+    /// Whether this request refuses a TCP fallback.
+    static func isStrictSocket(_ request: URLRequest) -> Bool {
+        request.value(forHTTPHeaderField: strictSocketHeader) != nil
+    }
+
+    /// The interception rule, as a pure function of the request and whether the
+    /// default socket file exists — so it can be tested without a socket.
+    static func shouldIntercept(request: URLRequest, defaultSocketExists: Bool) -> Bool {
+        // A request that carries a route is PINNED to that socket (see canInit).
+        if routedSocketPath(for: request) != nil { return true }
+        // A strict request may not fall back to TCP, ever.
+        if isStrictSocket(request) { return true }
+        return defaultSocketExists
+    }
+
     /// token -> socket path. Written once per session at creation and read on
     /// every request. Not an alias for "the current path": each entry belongs to
     /// exactly one session, which is the whole point.
@@ -105,12 +132,13 @@ final class SocketURLProtocol: URLProtocol {
         // there would silently send a client that was told "talk to this core"
         // to whatever happens to be listening on 127.0.0.1:8080 — a different
         // core's health reported as this one's, which is precisely the failure
-        // the routing exists to prevent.
-        if routedSocketPath(for: request) != nil { return true }
-
-        // Unrouted request: legacy behaviour, intercept only if the default
-        // socket exists, otherwise let it go out over TCP.
-        return FileManager.default.fileExists(atPath: socketPath)
+        // the routing exists to prevent. A strict request refuses the fallback
+        // for the same reason. Everything else keeps the legacy behaviour:
+        // intercept only if the default socket exists.
+        return shouldIntercept(
+            request: request,
+            defaultSocketExists: FileManager.default.fileExists(atPath: socketPath)
+        )
     }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -249,8 +277,9 @@ final class SocketURLProtocol: URLProtocol {
             for (key, value) in allHeaders {
                 let lowerKey = key.lowercased()
                 if lowerKey == "host" { continue } // already added
-                // Transport routing hint — never goes on the wire.
+                // Transport routing hints — never go on the wire.
                 if lowerKey == Self.routeHeader.lowercased() { continue }
+                if lowerKey == Self.strictSocketHeader.lowercased() { continue }
                 if lowerKey == "content-length" { hasContentLength = true }
                 lines.append("\(key): \(value)")
             }

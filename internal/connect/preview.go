@@ -35,6 +35,29 @@ type ConnectPreview struct {
 	// EntryExists (Spec 075): accessible|absent|malformed. A denied read never
 	// reaches here — it is returned as a typed *AccessError (403 + remediation).
 	AccessState string `json:"access_state"`
+
+	// ExistingEntrySummary describes the entry this connect would REPLACE, and
+	// is populated only when EntryExists (Spec 091 FR-003). It is built by
+	// construction from non-secret projections — see EntrySummary — so no
+	// arbitrary value from the user's config can ride out in a preview. It is
+	// display-only: drift detection uses PreconditionToken, never this.
+	ExistingEntrySummary *EntrySummary `json:"existing_entry_summary,omitempty"`
+
+	// PreconditionToken is the opaque, keyed digest of the raw pre-write state
+	// this preview describes plus the exact entry that would be written (Spec
+	// 091 FR-005). A caller echoes it on the subsequent write; the core
+	// recomputes and refuses with a discriminated conflict when anything has
+	// drifted — externally (the file or the target entry changed) or
+	// proxy-side (credential rotation, auth toggle, address change).
+	PreconditionToken string `json:"precondition_token"`
+
+	// ConnectRefusal carries, verbatim, the reason a connect would refuse for
+	// this client regardless of user intent — today only a non-create-capable
+	// client (OpenCode) whose config is absent. It is produced by the SAME guard
+	// the write runs, so the form can hide the Connect control and show the
+	// reason instead of letting the user discover it by clicking (Spec 091
+	// FR-003). Empty means connectable.
+	ConnectRefusal string `json:"connect_refusal,omitempty"`
 }
 
 // Preview computes the exact entry a Connect would write for the given client,
@@ -62,28 +85,16 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	// Determine create-vs-overwrite via an on-demand read. This is the same
 	// scoped, explicit-action read semantics as GetStatus: only touched when the
 	// file exists, so an absent config raises no macOS App-Data prompt.
-	accessState := accessAbsent
-	entryExists := false
-	if _, statErr := os.Stat(cfgPath); statErr == nil {
-		raw, rerr := s.read(cfgPath)
-		if rerr != nil {
-			if classifyAccess(rerr) == accessDenied {
-				// A denial must surface the actionable remediation, never a
-				// misleading "no changes" preview (Spec 078 FR-012).
-				return nil, s.newAccessError(client, cfgPath, rerr)
-			}
-			accessState = classifyAccess(rerr)
-		} else {
-			exists, parsedOK := s.previewEntryExists(*client, raw, serverName)
-			if parsedOK {
-				accessState = accessAccessible
-				entryExists = exists
-			} else {
-				// Unparseable config: the preview cannot claim "create" or
-				// "overwrite" honestly; report malformed and let the UI degrade.
-				accessState = accessMalformed
-			}
-		}
+	fileExists, existing, accessState, err := s.preWriteState(client, cfgPath, serverName)
+	if err != nil {
+		// A denial must surface the actionable remediation, never a misleading
+		// "no changes" preview (Spec 078 FR-012).
+		return nil, err
+	}
+	var existingSummary *EntrySummary
+	if existing != nil {
+		// Sanitized projections only — never the entry itself (Spec 091 FR-003).
+		existingSummary = buildEntrySummary(existing.name, existing.entry)
 	}
 
 	// Build the entry from the SAME constructor the write uses, with the
@@ -98,42 +109,132 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	}
 
 	return &ConnectPreview{
-		Client:         clientID,
-		ConfigPath:     cfgPath,
-		Format:         client.Format,
-		ServerKey:      client.ServerKey,
-		ServerName:     serverName,
-		Entry:          maskedEntry,
-		EntryText:      entryText,
-		EntryExists:    entryExists,
-		ContainsAPIKey: s.containsCredential(),
-		Bridge:         client.Bridge,
-		AccessState:    accessState,
+		Client:               clientID,
+		ConfigPath:           cfgPath,
+		Format:               client.Format,
+		ServerKey:            client.ServerKey,
+		ServerName:           serverName,
+		Entry:                maskedEntry,
+		EntryText:            entryText,
+		EntryExists:          existing != nil,
+		ContainsAPIKey:       s.containsCredential(),
+		Bridge:               client.Bridge,
+		AccessState:          accessState,
+		ExistingEntrySummary: existingSummary,
+		// The token binds THIS preview to the operation it described — this
+		// client, this file, this requested entry name — and to the state it
+		// just observed, over the unmasked pending entry the write would
+		// produce (Spec 091 FR-005).
+		PreconditionToken: s.preconditionToken(clientID, cfgPath, serverName, fileExists, existing,
+			buildServerEntry(clientID, s.entryParams(false))),
+		// Run the write's own refusal guards so the form learns "not
+		// connectable" from the preview, never from a failed click (FR-003).
+		// BOTH force-proof guards belong here: the absent-config refusal, and
+		// the commented-.jsonc refusal — a commented file parses leniently, so
+		// without this the preview would render a clean, enabled Connect for a
+		// write that always refuses.
+		ConnectRefusal: refusalText(connectRefusal(client, cfgPath), s.guardJsoncComments(cfgPath)),
 	}, nil
 }
 
-// previewEntryExists reports whether an entry under the exact serverName the
-// write would target already exists in the parsed config, and whether the bytes
-// parsed at all (parsedOK=false => malformed). It mirrors the create-vs-overwrite
-// decision connectJSON / connectTOML make (`serversMap[serverName]` presence),
-// so preview's classification matches the write's force behavior. It never
-// touches the filesystem — the caller supplies already-read bytes.
-func (s *Service) previewEntryExists(client ClientDef, raw []byte, serverName string) (exists, parsedOK bool) {
+// refusalText renders the first refusal error as its verbatim reason string, or
+// empty when every guard passed. Guards are evaluated in the order the write
+// runs them, so the reason the user is shown is the one they would have hit.
+func refusalText(errs ...error) string {
+	for _, err := range errs {
+		if err != nil {
+			return err.Error()
+		}
+	}
+	return ""
+}
+
+// preWriteState resolves the raw pre-write state shared by the preview and the
+// write's precondition check: whether the config file exists, which entry the
+// write would actually replace (adoption-aware, nil when none), and the Spec 075
+// access classification. Both callers must derive the token from the SAME
+// resolution — that is the whole point of the guarantee — so the lookup lives
+// here rather than being duplicated.
+//
+// A permission denial is returned as the typed *AccessError (403 + remediation);
+// an unreadable-but-not-denied or unparseable config yields the corresponding
+// access state with no resolved entry.
+func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (fileExists bool, existing *existingEntry, accessState string, err error) {
+	if _, statErr := s.stat(cfgPath); statErr != nil {
+		// ONLY "not there" is an absent config. Any other stat failure —
+		// a permission-blocked file or parent directory above all — means we do
+		// not know what is there, and reporting "absent" would render the create
+		// promise ("it will be created, and Undo removes it") over a write that
+		// cannot succeed, leaving the user to discover the denial by clicking.
+		if os.IsNotExist(statErr) {
+			return false, nil, accessAbsent, nil
+		}
+		state := classifyAccess(statErr)
+		if state == accessDenied {
+			return true, nil, state, s.newAccessError(client, cfgPath, statErr)
+		}
+		// Anything else is classified conservatively (malformed): no create
+		// promise, and the form offers no Connect control.
+		return true, nil, state, nil
+	}
+	raw, rerr := s.read(cfgPath)
+	if rerr != nil {
+		state := classifyAccess(rerr)
+		if state == accessDenied {
+			return true, nil, state, s.newAccessError(client, cfgPath, rerr)
+		}
+		return true, nil, state, nil
+	}
+	resolved, parsedOK := s.resolveExistingEntry(*client, raw, serverName)
+	if !parsedOK {
+		// Unparseable config: the preview cannot claim "create" or "overwrite"
+		// honestly; report malformed and let the UI degrade.
+		return true, nil, accessMalformed, nil
+	}
+	return true, resolved, accessAccessible, nil
+}
+
+// existingEntry is the entry a write would actually replace: the key it lives
+// under (which may differ from the requested server name after adoption), its
+// parsed value as an object (nil when the value is not one), and the raw value
+// exactly as the config held it.
+//
+// Both projections are needed: `entry` feeds the sanitized display summary,
+// which is defined over object fields, while `value` feeds the precondition
+// token, which must see every byte — a config hand-edited to hold a string, a
+// number or an array under the target key is still state the user was shown and
+// the write would clobber (Spec 091 FR-005).
+type existingEntry struct {
+	name  string
+	entry map[string]interface{}
+	value interface{}
+}
+
+// resolveExistingEntry returns the entry the write would target in the parsed
+// config — nil when there is none — and whether the bytes parsed at all
+// (parsedOK=false => malformed). It mirrors the create-vs-overwrite decision
+// connectJSON / connectTOML make (`serversMap[serverName]` presence, then
+// OpenCode's equivalent-entry adoption), so preview's classification matches the
+// write's force behavior, the sanitized summary names the key that actually
+// disappears, and the precondition token hashes the value the write would
+// clobber. It never touches the filesystem — the caller supplies already-read
+// bytes.
+func (s *Service) resolveExistingEntry(client ClientDef, raw []byte, serverName string) (found *existingEntry, parsedOK bool) {
 	var data map[string]interface{}
 	if client.Format == "toml" {
 		if _, err := toml.Decode(string(raw), &data); err != nil {
-			return false, false
+			return nil, false
 		}
 	} else if err := unmarshalLenientJSON(raw, &data); err != nil {
-		return false, false
+		return nil, false
 	}
 
 	serversMap, ok := data[client.ServerKey].(map[string]interface{})
 	if !ok {
-		return false, true
+		return nil, true
 	}
-	if _, ok := serversMap[serverName]; ok {
-		return true, true
+	if value, ok := serversMap[serverName]; ok {
+		return newExistingEntry(serverName, value), true
 	}
 	// OpenCode's write path adopts an already-installed entry pointing at our MCP
 	// URL even under a different key (incl. the legacy ?apikey= shape) and
@@ -141,11 +242,19 @@ func (s *Service) previewEntryExists(client ClientDef, raw []byte, serverName st
 	// instead of a misleading "create" that then diverges from the write (Spec
 	// 078 FR-002).
 	if client.ID == "opencode" {
-		if _, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found {
-			return true, true
+		if adopted, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found {
+			return newExistingEntry(adopted, serversMap[adopted]), true
 		}
 	}
-	return false, true
+	return nil, true
+}
+
+// newExistingEntry wraps a resolved config value; a non-object value yields a
+// nil entry map (the key exists, but there is nothing to project) while the raw
+// value is kept for the precondition token.
+func newExistingEntry(name string, value interface{}) *existingEntry {
+	obj, _ := value.(map[string]interface{})
+	return &existingEntry{name: name, entry: obj, value: value}
 }
 
 // renderEntrySnippet renders the entry as the merge-ready snippet in the

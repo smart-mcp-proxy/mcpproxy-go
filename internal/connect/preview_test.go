@@ -560,3 +560,222 @@ func TestConnect_LegacyEntryMigration(t *testing.T) {
 		t.Fatalf("expected removed, got %s", res.Action)
 	}
 }
+
+// --- Spec 091: preview secrecy over arbitrary existing-config content ---
+
+// TestPreview_NeverLeaksExistingEntrySecrets is the adversarial half of FR-003:
+// the preview reads a client config that carries credentials in every carrier
+// mcpproxy knows about (header value, bridge --header arg, env value, ?apikey=
+// query, URL userinfo) plus a user-authored field, and asserts NONE of those
+// values appear anywhere in the serialized preview response. The proxy's own
+// live credential must not appear either — it is masked at construction.
+func TestPreview_NeverLeaksExistingEntrySecrets(t *testing.T) {
+	const liveKey = "LIVE-ROTATED-PROXY-KEY"
+
+	secrets := []string{
+		"HEADER-VALUE-SECRET", "BEARER-VALUE-SECRET", "ENV-VALUE-SECRET",
+		"QUERY-VALUE-SECRET", "USERINFO-VALUE-SECRET", "ARG-HEADER-SECRET",
+		"USER-AUTHORED-SECRET", liveKey,
+	}
+
+	cases := []struct {
+		clientID string
+		config   string
+	}{
+		{
+			clientID: "claude-code",
+			config: `{"mcpServers":{"mcpproxy":{"type":"http",` +
+				`"url":"http://user:USERINFO-VALUE-SECRET@127.0.0.1:8080/mcp?apikey=QUERY-VALUE-SECRET",` +
+				`"headers":{"X-API-Key":"HEADER-VALUE-SECRET","Authorization":"Bearer BEARER-VALUE-SECRET"},` +
+				`"env":{"TOKEN":"ENV-VALUE-SECRET"},"note":"USER-AUTHORED-SECRET"}}}`,
+		},
+		{
+			clientID: "claude-desktop",
+			config: `{"mcpServers":{"mcpproxy":{"command":"npx","args":` +
+				`["-y","mcp-remote","http://127.0.0.1:8080/mcp?apikey=QUERY-VALUE-SECRET",` +
+				`"--header","X-API-Key:ARG-HEADER-SECRET"],"env":{"TOKEN":"ENV-VALUE-SECRET"}}}}`,
+		},
+		{
+			clientID: "opencode",
+			config: `{"mcp":{"proxy-alt":{"type":"remote",` +
+				`"url":"http://127.0.0.1:8080/mcp?apikey=QUERY-VALUE-SECRET",` +
+				`"headers":{"X-API-Key":"HEADER-VALUE-SECRET"},"note":"USER-AUTHORED-SECRET"}}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.clientID, func(t *testing.T) {
+			svc, home := serviceWithKey(t, liveKey)
+			svc.WithRequireMCPAuth(true)
+			cfgPath := ConfigPath(tc.clientID, home)
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			preview, err := svc.Preview(tc.clientID, "mcpproxy")
+			if err != nil {
+				t.Fatalf("Preview: %v", err)
+			}
+			if !preview.EntryExists {
+				t.Fatalf("fixture should present an existing entry for %s", tc.clientID)
+			}
+			if preview.ExistingEntrySummary == nil {
+				t.Fatalf("expected an existing-entry summary for %s", tc.clientID)
+			}
+
+			serialized, err := json.Marshal(preview)
+			if err != nil {
+				t.Fatalf("marshal preview: %v", err)
+			}
+			for _, secret := range secrets {
+				if strings.Contains(string(serialized), secret) {
+					t.Errorf("preview leaked %q: %s", secret, serialized)
+				}
+			}
+		})
+	}
+}
+
+// TestPreview_TOMLExistingEntryNeverLeaksQuerySecret covers the TOML client's
+// ?apikey= carrier, the one shape whose credential lives inside the URL itself.
+func TestPreview_TOMLExistingEntryNeverLeaksQuerySecret(t *testing.T) {
+	svc, home := serviceWithKey(t, "LIVE-ROTATED-PROXY-KEY")
+	svc.WithRequireMCPAuth(true)
+	cfgPath := ConfigPath("codex", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "[mcp_servers.mcpproxy]\nurl = \"http://127.0.0.1:8080/mcp?apikey=CODEX-QUERY-SECRET\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := svc.Preview("codex", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	serialized, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatalf("marshal preview: %v", err)
+	}
+	for _, secret := range []string{"CODEX-QUERY-SECRET", "LIVE-ROTATED-PROXY-KEY"} {
+		if strings.Contains(string(serialized), secret) {
+			t.Errorf("preview leaked %q: %s", secret, serialized)
+		}
+	}
+}
+
+// --- Spec 091: the preview carries the write's refusal (research D8) ---
+
+// TestPreview_ConnectRefusal_MatchesWriteVerbatim pins FR-003's last clause: a
+// client the core will NOT create a config for (OpenCode) must surface that
+// refusal in the PREVIEW, verbatim, so the user never discovers it by clicking
+// Connect. The assertion compares against the real write's error text, which is
+// what makes "the preview runs the same guard the write would" testable rather
+// than aspirational.
+func TestPreview_ConnectRefusal_MatchesWriteVerbatim(t *testing.T) {
+	svc, _ := serviceWithKey(t, "")
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview must still succeed and REPORT the refusal, got error: %v", err)
+	}
+	if preview.ConnectRefusal == "" {
+		t.Fatal("expected ConnectRefusal for OpenCode with no config file")
+	}
+
+	_, writeErr := svc.Connect("opencode", "mcpproxy", false)
+	if writeErr == nil {
+		t.Fatal("the write must refuse for OpenCode with no config file")
+	}
+	if preview.ConnectRefusal != writeErr.Error() {
+		t.Fatalf("refusal must be the write's reason verbatim:\n preview: %q\n write:   %q",
+			preview.ConnectRefusal, writeErr.Error())
+	}
+}
+
+// TestPreview_ConnectRefusal_EmptyWhenConnectable keeps the field strictly a
+// refusal signal: present ONLY when the write would refuse regardless of user
+// intent. A create-capable client with no config, and OpenCode WITH a config,
+// must both be connectable.
+func TestPreview_ConnectRefusal_EmptyWhenConnectable(t *testing.T) {
+	t.Run("create-capable client, absent config", func(t *testing.T) {
+		svc, _ := serviceWithKey(t, "")
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if preview.ConnectRefusal != "" {
+			t.Fatalf("claude-code is create-capable; got refusal %q", preview.ConnectRefusal)
+		}
+		if preview.AccessState != "absent" {
+			t.Fatalf("expected access_state=absent, got %q", preview.AccessState)
+		}
+	})
+
+	t.Run("opencode with an existing config", func(t *testing.T) {
+		svc, home := serviceWithKey(t, "")
+		seedClientConfig(t, home, "opencode")
+		preview, err := svc.Preview("opencode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if preview.ConnectRefusal != "" {
+			t.Fatalf("OpenCode with a config is connectable; got refusal %q", preview.ConnectRefusal)
+		}
+	})
+}
+
+// TestPreview_ConnectRefusal_CommentedJsonc is the second half of the refusal
+// parity guarantee (FR-003, research D8): the write has TWO force-proof refusal
+// guards, and the preview must surface both. A commented opencode.jsonc parses
+// leniently, so the preview used to report a clean, connectable "add" — and the
+// user discovered the comment refusal only by pressing Connect.
+func TestPreview_ConnectRefusal_CommentedJsonc(t *testing.T) {
+	svc, home := serviceWithKey(t, "")
+	// Platform-aware seeding: on Windows OpenCode lives under %LOCALAPPDATA%.
+	// A hardcoded ~/.config path would leave the file unread there, and this
+	// test would then pass on the absent-config refusal instead of the comment
+	// refusal it exists to check.
+	content := "{\n  // keep my comments\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n"
+	writeOpencodeFile(t, home, "opencode.jsonc", content)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview must report the refusal, not fail: %v", err)
+	}
+	if preview.ConnectRefusal == "" {
+		t.Fatal("expected ConnectRefusal for a commented .jsonc — the write refuses it regardless of intent")
+	}
+
+	_, writeErr := svc.Connect("opencode", "mcpproxy", false)
+	if writeErr == nil {
+		t.Fatal("the write must refuse a commented .jsonc")
+	}
+	if preview.ConnectRefusal != writeErr.Error() {
+		t.Fatalf("refusal must be the write's reason verbatim:\n preview: %q\n write:   %q",
+			preview.ConnectRefusal, writeErr.Error())
+	}
+}
+
+// A comment-free .jsonc rewrites safely (OpenCode's bootstrap stub), so it must
+// stay connectable — the guard is about comments, not about the extension.
+func TestPreview_ConnectRefusal_CommentFreeJsoncIsConnectable(t *testing.T) {
+	svc, home := serviceWithKey(t, "")
+	// Use the platform-aware helper: OpenCode resolves to %LOCALAPPDATA% on
+	// Windows, not ~/.config, so a hardcoded Unix path seeds a file the code
+	// never looks at and the preview reports "no OpenCode config found".
+	writeOpencodeFile(t, home, "opencode.jsonc", `{"$schema":"https://opencode.ai/config.json"}`)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ConnectRefusal != "" {
+		t.Fatalf("a comment-free .jsonc is connectable; got refusal %q", preview.ConnectRefusal)
+	}
+}

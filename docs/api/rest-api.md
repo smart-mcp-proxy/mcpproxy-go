@@ -720,6 +720,29 @@ never overwritten. Backups accumulate one per operation and are **never
 deleted automatically**; there is no retention bound, so an undo (below) can
 always find its backup.
 
+`POST` optionally accepts `precondition_token` (Spec 091) — the opaque token
+from the preview this write was confirmed against:
+
+```json
+{ "server_name": "mcpproxy", "force": true, "precondition_token": "…" }
+```
+
+When supplied, the core recomputes the token at write time and, if it no longer
+matches, responds **`409 Conflict`** having written **nothing** (the check runs
+before any backup or write). `force=true` does not override a stale token. When
+omitted, behavior is exactly as before.
+
+The `409` body carries a top-level `action` discriminating the two conflict
+kinds:
+
+| `action` | Meaning | Caller should |
+|----------|---------|---------------|
+| `precondition_failed` | The preview is stale — the config file, the existing entry, or the entry mcpproxy would now write has changed. | Re-fetch the preview; do not blindly retry. |
+| `already_exists` | Pre-existing semantics: an entry with that name is present and `force` was not set. | Confirm with the user, then retry with `force=true` (and a fresh token). |
+
+See [Connect Clients](../features/connect-clients.md) for the token's contents
+and threat model.
+
 #### GET /api/v1/connect/{client}/preview
 
 Returns the exact change a subsequent connect would make — target config path,
@@ -731,6 +754,17 @@ same-named entry. Reads the config on demand to classify create-vs-overwrite,
 so on macOS this may raise an App-Data prompt; a denial returns `403` +
 remediation. Optional `?server_name=` mirrors the name a subsequent connect
 would use.
+
+Spec 091 adds three response fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `existing_entry_summary` | object, present only when `entry_exists=true` | Sanitized description of the entry that would be **replaced**: `entry_name` (the key it actually lives under, which may differ from `server_name` when the write adopts an endpoint-equivalent entry), `type`, `endpoint` (query string, `user:pass@` userinfo and fragment stripped), `command`, `header_names` and `env_names` — **names only, never values**. Built by whitelist projection, so no other config content can reach the response. |
+| `precondition_token` | string, always present | Opaque keyed HMAC binding this preview to the exact pre-write state. Pass it to `POST` (above) to make a stale preview unwritable. Per-core-instance key, never persisted. |
+| `connect_refusal` | string, optional | The verbatim reason a subsequent connect would refuse regardless of user intent (today: a non-create-capable client such as **OpenCode** with no config present). Treat as "Connect unavailable". |
+
+The preview evaluates the refusal with the write's own guard, so the two cannot
+drift. Full semantics: [Connect Clients](../features/connect-clients.md).
 
 #### POST /api/v1/connect/{client}/undo
 
