@@ -737,9 +737,12 @@ func TestPreview_ConnectRefusal_EmptyWhenConnectable(t *testing.T) {
 // user discovered the comment refusal only by pressing Connect.
 func TestPreview_ConnectRefusal_CommentedJsonc(t *testing.T) {
 	svc, home := serviceWithKey(t, "")
-	cfgPath := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
+	// Platform-aware seeding: on Windows OpenCode lives under %LOCALAPPDATA%.
+	// A hardcoded ~/.config path would leave the file unread there, and this
+	// test would then pass on the absent-config refusal instead of the comment
+	// refusal it exists to check.
 	content := "{\n  // keep my comments\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n"
-	writeFileT(t, cfgPath, content)
+	writeOpencodeFile(t, home, "opencode.jsonc", content)
 
 	preview, err := svc.Preview("opencode", "mcpproxy")
 	if err != nil {
@@ -763,8 +766,10 @@ func TestPreview_ConnectRefusal_CommentedJsonc(t *testing.T) {
 // stay connectable — the guard is about comments, not about the extension.
 func TestPreview_ConnectRefusal_CommentFreeJsoncIsConnectable(t *testing.T) {
 	svc, home := serviceWithKey(t, "")
-	cfgPath := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
-	writeFileT(t, cfgPath, `{"$schema":"https://opencode.ai/config.json"}`)
+	// Use the platform-aware helper: OpenCode resolves to %LOCALAPPDATA% on
+	// Windows, not ~/.config, so a hardcoded Unix path seeds a file the code
+	// never looks at and the preview reports "no OpenCode config found".
+	writeOpencodeFile(t, home, "opencode.jsonc", `{"$schema":"https://opencode.ai/config.json"}`)
 
 	preview, err := svc.Preview("opencode", "mcpproxy")
 	if err != nil {

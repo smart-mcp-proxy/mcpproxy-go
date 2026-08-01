@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -33,22 +34,41 @@ func TestConfigPathRejectsUnknownAndTraversalClientIDs(t *testing.T) {
 	}
 }
 
-// TestConfigPathKeepsKnownClientsInsideHome is the positive half: every
-// registry client resolves under the supplied home directory, so no known ID
-// escapes it either.
-func TestConfigPathKeepsKnownClientsInsideHome(t *testing.T) {
-	const home = "/home/u"
+// TestConfigPathKnownClientsCannotEscapeTheirRoot is the positive half: every
+// registry client resolves to a clean, traversal-free path, and any client
+// whose location derives from the supplied home directory stays inside it.
+//
+// Not every client derives from home — on Windows several correctly resolve to
+// %APPDATA% / %LOCALAPPDATA% instead — so membership is detected rather than
+// assumed: call ConfigPath with two different homes and see whether the answer
+// moves. That keeps the assertion meaningful on every platform instead of
+// encoding Unix layout.
+func TestConfigPathKnownClientsCannotEscapeTheirRoot(t *testing.T) {
+	homeA := filepath.Join(string(filepath.Separator), "home", "a")
+	homeB := filepath.Join(string(filepath.Separator), "home", "b")
 
 	for _, def := range GetAllClients() {
-		path := ConfigPath(def.ID, home)
+		path := ConfigPath(def.ID, homeA)
 		if path == "" {
 			continue // not supported on this platform
 		}
-		if !strings.HasPrefix(path, home+"/") {
-			t.Errorf("ConfigPath(%q) = %q, want a path under %q", def.ID, path, home)
+
+		if path != filepath.Clean(path) {
+			t.Errorf("ConfigPath(%q) = %q, want a cleaned path", def.ID, path)
 		}
-		if strings.Contains(path, "..") {
-			t.Errorf("ConfigPath(%q) = %q, want no parent-directory segments", def.ID, path)
+		for _, seg := range strings.Split(path, string(filepath.Separator)) {
+			if seg == ".." {
+				t.Errorf("ConfigPath(%q) = %q, want no parent-directory segments", def.ID, path)
+			}
+		}
+
+		// Home-derived? Then it must stay under the home it was given.
+		if ConfigPath(def.ID, homeB) == path {
+			continue // OS-standard location (e.g. %APPDATA%), independent of home
+		}
+		rel, err := filepath.Rel(homeA, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Errorf("ConfigPath(%q) = %q, want a path under %q (rel=%q, err=%v)", def.ID, path, homeA, rel, err)
 		}
 	}
 }
