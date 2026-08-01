@@ -1657,6 +1657,15 @@ func (c *Config) DefaultQuarantineForNewServer() bool {
 // Note this only fires for JSON decoding. Structs built in Go (REST handlers,
 // the add paths, tests) leave the bit false — i.e. "unstated" — which is the
 // safe default: the gate can only ever ADD quarantine, never remove it.
+//
+// WARNING — do not EMBED ServerConfig (by pointer or value) in another struct
+// that adds JSON fields of its own. Go promotes these methods to the outer
+// type, so encoding/json treats the wrapper as a Marshaler/Unmarshaler and
+// delegates the whole value here: the wrapper's own fields are silently dropped
+// on encode, and decode fails with "json: Unmarshal(nil *config.Alias)" while
+// the embedded pointer is still nil. A wrapper that needs to embed this must
+// declare its own MarshalJSON/UnmarshalJSON — see
+// internal/serveredition/api.ServerResponse.
 func (sc *ServerConfig) UnmarshalJSON(data []byte) error {
 	type Alias ServerConfig
 	if err := json.Unmarshal(data, (*Alias)(sc)); err != nil {

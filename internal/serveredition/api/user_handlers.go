@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -110,10 +111,89 @@ type EnableServerRequest struct {
 }
 
 // ServerResponse wraps a ServerConfig with ownership information.
+//
+// NOTE (issue #937 fallout): config.ServerConfig carries custom
+// MarshalJSON/UnmarshalJSON methods, and Go PROMOTES those to any struct that
+// embeds it. Without the explicit methods below, encoding/json saw
+// ServerResponse as a json.Marshaler/Unmarshaler and delegated the whole value
+// to the embedded config — silently dropping `ownership` and `user_enabled`
+// from every response, and failing every decode with
+// "json: Unmarshal(nil *config.Alias)" because the embedded pointer is nil
+// before decoding starts. Keep the methods in sync with the fields here;
+// TestServerResponse_JSONRoundTrip pins the behaviour.
 type ServerResponse struct {
 	*config.ServerConfig
 	Ownership   string `json:"ownership"`              // "personal" or "shared"
 	UserEnabled *bool  `json:"user_enabled,omitempty"` // Per-user preference for shared servers (nil = no preference, defaults to enabled)
+}
+
+// serverResponseWrapperFields holds only the fields ServerResponse adds on top
+// of the embedded config, so both JSON methods share one definition.
+type serverResponseWrapperFields struct {
+	Ownership   string `json:"ownership"`
+	UserEnabled *bool  `json:"user_enabled,omitempty"`
+}
+
+// MarshalJSON flattens the embedded *config.ServerConfig and the wrapper fields
+// into a single JSON object.
+//
+// The embedded config is marshaled through its OWN MarshalJSON so the #937
+// "quarantined" presence semantics (omit an unstated false, always write true)
+// are preserved verbatim; the wrapper fields are then spliced on top.
+func (r ServerResponse) MarshalJSON() ([]byte, error) {
+	fields := map[string]json.RawMessage{}
+
+	if r.ServerConfig != nil {
+		raw, err := json.Marshal(r.ServerConfig)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, err
+		}
+	}
+
+	wrapper, err := json.Marshal(serverResponseWrapperFields{
+		Ownership:   r.Ownership,
+		UserEnabled: r.UserEnabled,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var wrapperFields map[string]json.RawMessage
+	if err := json.Unmarshal(wrapper, &wrapperFields); err != nil {
+		return nil, err
+	}
+	// Wrapper fields win: they are what the endpoint promises.
+	for k, v := range wrapperFields {
+		fields[k] = v
+	}
+
+	return json.Marshal(fields)
+}
+
+// UnmarshalJSON decodes a flattened ServerResponse, allocating the embedded
+// config first so the config's own UnmarshalJSON (and its "quarantined"
+// presence detection) runs against a non-nil target.
+func (r *ServerResponse) UnmarshalJSON(data []byte) error {
+	if string(bytes.TrimSpace(data)) == "null" {
+		return nil
+	}
+
+	sc := &config.ServerConfig{}
+	if err := json.Unmarshal(data, sc); err != nil {
+		return err
+	}
+
+	var wrapper serverResponseWrapperFields
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return err
+	}
+
+	r.ServerConfig = sc
+	r.Ownership = wrapper.Ownership
+	r.UserEnabled = wrapper.UserEnabled
+	return nil
 }
 
 // ServerListResponse contains personal and shared servers for a user.
