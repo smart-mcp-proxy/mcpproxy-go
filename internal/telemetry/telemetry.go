@@ -864,8 +864,15 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		payload.AutostartEnabled = s.autostartReader.Read()
 	} else {
 		// Lazy-init the default reader on first heartbeat. The reader is
-		// safe to reuse across heartbeats (1h TTL cache inside).
-		s.autostartReader = DefaultAutostartReader()
+		// safe to reuse across heartbeats (1h TTL cache inside). It reads the
+		// sidecar inside THIS instance's data directory: the tray writes it
+		// into the same root it hands the core, and MCPPROXY_HOME moves both
+		// (GH #936).
+		dataDir := ""
+		if s.config != nil {
+			dataDir = s.config.DataDir
+		}
+		s.autostartReader = AutostartReaderForDataDir(dataDir)
 		payload.AutostartEnabled = s.autostartReader.Read()
 	}
 

@@ -101,6 +101,10 @@ actor CoreProcessManager {
     /// Socket path for the core process.
     private let socketPath: String
 
+    /// The bbolt database whose lock answers "is a core alive here?" when the
+    /// socket has stopped answering (GH #933). Derived from `socketPath`.
+    private let dataDirectoryLockPath: String
+
     /// How often the periodic refresh tick runs. Injectable so tests can drive
     /// the tick — and the liveness probe on it — without waiting 30 seconds.
     private let refreshInterval: TimeInterval
@@ -218,9 +222,14 @@ actor CoreProcessManager {
         self.unresponsiveCoreTimeout = unresponsiveCoreTimeout
         self.socketWaitTimeout = socketWaitTimeout
 
-        // Compute socket path: ~/.mcpproxy/mcpproxy.sock
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        self.socketPath = socketPath ?? "\(home)/.mcpproxy/mcpproxy.sock"
+        // `~/.mcpproxy/mcpproxy.sock`, or wherever this instance has been
+        // relocated to (GH #936).
+        let resolvedSocket = socketPath ?? InstancePaths.socketPath
+        self.socketPath = resolvedSocket
+        // The database of the core that owns THAT socket — see
+        // `DataDirectoryLock.path(forSocket:)` for why it is derived from the
+        // socket rather than from this instance's own root.
+        self.dataDirectoryLockPath = DataDirectoryLock.path(forSocket: resolvedSocket)
     }
 
     // MARK: - Public API
@@ -420,8 +429,16 @@ actor CoreProcessManager {
         }
 
         /// A socket FILE exists and not one connection has ever been accepted on
-        /// it. The only reading of that which is consistent with everything we
-        /// have seen is: the process that created it is gone.
+        /// it. Consistent with a dead core's leftovers — and equally consistent
+        /// with a live core whose listen backlog was already full when the
+        /// episode began, which is why this is never the whole answer.
+        ///
+        /// The data-directory lock is what separates the two (GH #933), and it
+        /// is deliberately NOT folded in here: a lock is a fact about RIGHT NOW,
+        /// not accumulated evidence. Latching it turned "a core is busy" into a
+        /// verdict that outlived the core, so a saturated core that then died
+        /// left the tray parked forever. See `reportUnresponsiveCore`, which
+        /// asks the kernel afresh at every deadline.
         var onlyEverRefused: Bool { refusals > 0 && !somethingAccepted }
     }
 
@@ -742,6 +759,7 @@ actor CoreProcessManager {
 
         guard proc.isRunning else { return }
         NSLog("[MCPProxy] Terminating PID %d (%@)", proc.processIdentifier, reason)
+        AppLifecycle.shared.recordCoreTerminated(pid: proc.processIdentifier, reason: reason)
         kill(proc.processIdentifier, SIGTERM)
 
         let deadline = Date().addingTimeInterval(5.0)
@@ -788,6 +806,32 @@ actor CoreProcessManager {
         // This task IS the deadline; drop the handle before doing anything that
         // might cancel it, or we would cancel ourselves mid-launch.
         unresponsiveDeadlineTask = nil
+
+        // Before concluding "stale", ask the one question the socket cannot
+        // answer: is a live process holding this core's data directory RIGHT
+        // NOW? A saturated core refuses every probe exactly as a dead core's
+        // leftover file does, and only the lock tells them apart (GH #933).
+        //
+        // Asked fresh at every deadline, and never remembered between them.
+        // "Something held it once" is not a reason to keep waiting: the kernel
+        // drops `flock` the instant the holder dies, so a saturated core that
+        // is subsequently SIGKILLed (jetsam, `kill -9`) leaves its socket file
+        // behind and nothing else. A remembered verdict re-armed the deadline
+        // on that dead core forever, and `.waitingForCore` offers neither Stop
+        // nor Retry — quitting the app was the only way out.
+        if socketEvidence.onlyEverRefused,
+           case .heldByALiveProcess = DataDirectoryLock.probe(path: dataDirectoryLockPath) {
+            // Keep waiting rather than launching or erroring: the attach watch
+            // is still running underneath, so the core is picked up the moment
+            // it drains its backlog — which is what the tray failed to do when
+            // this was reproduced live, staying wedged on an error for 75
+            // seconds while the core answered /ready normally.
+            NSLog("[MCPProxy] %@ refuses every probe, but a live process holds %@ — "
+                  + "a busy core, not a stale socket. Waiting again (%@)",
+                  socketPath, dataDirectoryLockPath, reason)
+            armUnresponsiveCoreDeadline(reason: reason)
+            return
+        }
 
         if socketEvidence.onlyEverRefused, await escalateToLaunchOverAStaleSocket(reason: reason) {
             return
@@ -1065,7 +1109,11 @@ actor CoreProcessManager {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
-        proc.arguments = ["serve"]
+        // `["serve"]` unless this instance has been relocated, in which case the
+        // core is told the same root the tray resolved — a core writing the real
+        // ~/.mcpproxy while the tray watches a scratch socket is the accident
+        // GH #936 is about.
+        proc.arguments = InstancePaths.coreArguments
 
         // Let core use its own config API key (or auto-generate one).
         // We fetch the key from core via socket after it starts.
@@ -1127,6 +1175,13 @@ actor CoreProcessManager {
 
         coresLaunched += 1
         process = proc
+        // On the record before anything can go wrong with it: "which tray
+        // started this core, and when" is the first question a dropped MCP
+        // session raises (#862).
+        AppLifecycle.shared.recordCoreLaunched(
+            pid: proc.processIdentifier,
+            reason: "tray launched core (\(binaryPath))"
+        )
     }
 
     /// Append a line to the stderr buffer (called from background task).
@@ -1714,6 +1769,16 @@ actor CoreProcessManager {
         }
 
         let stderr = stderrBuffer
+
+        // Recorded whatever we decide to do about it, and recorded here rather
+        // than only in the retry branches: an exit that leads to no retry (the
+        // user stopped it, a clean shutdown) is exactly the one that otherwise
+        // leaves no trace at all (#862).
+        AppLifecycle.shared.recordCoreExited(
+            pid: process?.processIdentifier ?? 0,
+            status: status,
+            reason: "core process exited"
+        )
 
         // If stopped by user, don't retry — this is intentional
         let isStopped = await MainActor.run { appState.isStopped }

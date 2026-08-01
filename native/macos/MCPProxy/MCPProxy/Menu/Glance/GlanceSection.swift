@@ -108,6 +108,15 @@ final class GlanceSection {
     private var activityRows: [ActivityRow] = []
     private var clientRows: [NSMenuItem] = []
 
+    /// The "+N more" row under a truncated Clients list, or nil when every
+    /// client has a row of its own.
+    ///
+    /// Owned like the rows are, because N moves without the row COUNT moving:
+    /// a twelfth client beyond a cap of five changes nothing structural, and a
+    /// row left saying "+6 more" under a header that has already counted twelve
+    /// is the very disagreement this row exists to end (GH #934).
+    private var clientOverflowItem: NSMenuItem?
+
     /// Snapshot of the structure the current items were built from, so an
     /// in-place update can detect that a full rebuild is required instead.
     private var hasBuilt = false
@@ -145,6 +154,7 @@ final class GlanceSection {
         summaryItem = nil
         activityRows = []
         clientRows = []
+        clientOverflowItem = nil
         histogramItem = nil
         hasBuilt = true
         builtVisible = isVisible(for: state)
@@ -188,15 +198,20 @@ final class GlanceSection {
         items.append(.separator())
 
         items.append(disabledItem(titled: "Clients"))
-        let clients = GlancePresence.clients(from: state.glanceSessions, now: now)
-        if clients.isEmpty {
+        let presence = Self.clientList(for: state, now: now)
+        if presence.rows.isEmpty {
             items.append(disabledItem(titled: Self.noClientsTitle))
         } else {
-            for client in clients {
+            for client in presence.rows {
                 let row = actionableItem()
                 apply(client, to: row, now: now)
                 clientRows.append(row)
                 items.append(row)
+            }
+            if presence.hidden > 0 {
+                let overflow = disabledItem(titled: Self.overflowTitle(presence.hidden))
+                clientOverflowItem = overflow
+                items.append(overflow)
             }
         }
         items.append(.separator())
@@ -231,9 +246,14 @@ final class GlanceSection {
         guard builtVisible else { return true }
 
         let runs = GlanceSelection.activityRows(from: state.glanceActivity)
-        let clients = GlancePresence.clients(from: state.glanceSessions, now: now)
+        let presence = Self.clientList(for: state, now: now)
+        let clients = presence.rows
         guard runs.count == activityRows.count,
               clients.count == clientRows.count else { return false }
+        // Gaining or losing the "+N more" row is gaining or losing a row, which
+        // resizes an open menu exactly as an extra client does — structural, so
+        // it waits for close (FR-023). A change to N alone is not.
+        guard (presence.hidden > 0) == (clientOverflowItem != nil) else { return false }
 
         // Preflight, before a single write: a row that gains or loses its
         // reason gains or loses a LINE, which resizes the menu just as surely as
@@ -259,8 +279,33 @@ final class GlanceSection {
             apply(run, to: &activityRows[index], now: now)
         }
         for (row, client) in zip(clientRows, clients) { apply(client, to: row, now: now) }
+        if let clientOverflowItem {
+            let title = Self.overflowTitle(presence.hidden)
+            if clientOverflowItem.title != title { clientOverflowItem.title = title }
+        }
         return true
     }
+
+    /// The Clients section's rows and how many clients they leave out.
+    ///
+    /// Both numbers come from ONE deduplicated set, and the header's own
+    /// segment (`AppState.glanceClientSummary`) counts over the same rule — so
+    /// "8 active · 3 idle" above five rows is always accompanied by the row
+    /// that accounts for the difference.
+    private static func clientList(
+        for state: AppState, now: Date
+    ) -> (rows: [ClientPresenceRow], hidden: Int) {
+        let all = GlancePresence.clients(from: state.glanceSessions, now: now, limit: Int.max)
+        let shown = Array(all.prefix(GlancePresence.rowLimit))
+        return (shown, all.count - shown.count)
+    }
+
+    private static func overflowTitle(_ hidden: Int) -> String { "+\(hidden) more" }
+
+    /// The overflow row's current text, for tests that pin it after an in-place
+    /// update — the item itself is private, and reaching into the menu to find
+    /// it by title would assert nothing about which row was rewritten.
+    var clientOverflowTitleForTesting: String? { clientOverflowItem?.title }
 
     // MARK: Row rendering
 
@@ -385,16 +430,45 @@ final class GlanceSection {
         if #available(macOS 14.4, *) { item.subtitle = text }
     }
 
-    /// First clause of an error message — everything up to the first newline,
-    /// period or colon — so a multi-sentence backend error still fits one row.
-    /// The full message stays in the tooltip.
+    /// First clause of an error message — everything up to the first clause
+    /// BOUNDARY — so a multi-sentence backend error still fits one row. The full
+    /// message stays in the tooltip.
+    ///
+    /// A period or colon is a boundary only when whitespace (or the end of the
+    /// message) follows it (GH #934). Splitting on a bare `.` or `:` cut inside
+    /// the two things mcpproxy errors are most likely to contain: a `server:tool`
+    /// identifier and a host:port. `invalid arguments for
+    /// memory:create_entities: at '/entities': …` rendered as "invalid arguments
+    /// for memory", which reads as though the server named `memory` were at
+    /// fault — and that is the common shape of these messages, not an edge case.
     static func firstClause(of message: String?) -> String? {
         guard let message else { return nil }
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let head = trimmed.components(separatedBy: CharacterSet(charactersIn: ".:\n")).first ?? trimmed
+        let head = clauseBoundary(in: trimmed).map { trimmed[trimmed.startIndex..<$0] }
+            ?? Substring(trimmed)
         let clause = head.trimmingCharacters(in: .whitespaces)
         return clause.isEmpty ? trimmed : clause
+    }
+
+    /// Index of the first character that ends the leading clause, or nil when
+    /// the whole message is one clause. `text` must already be trimmed, so a
+    /// trailing separator is genuinely final rather than the start of "…. ".
+    private static func clauseBoundary(in text: String) -> String.Index? {
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character.isNewline { return index }
+            if character == "." || character == ":" {
+                let next = text.index(after: index)
+                // Nothing after it, or space after it: a separator. Anything
+                // else and it is part of a token — `memory:create_entities`,
+                // `127.0.0.1`, `a.txt` — which is the whole point of this rule.
+                if next == text.endIndex || text[next].isWhitespace { return index }
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 
     // MARK: Status iconography
@@ -619,7 +693,10 @@ final class GlanceSection {
     /// headline over a section that had rows in it.
     private func summaryTitle(for state: AppState, now: Date = Date()) -> String {
         var parts: [String] = []
-        if let calls = state.callsThisHour {
+        // `glanceCallsThisHour`, not the raw polled `callsThisHour`: the rows
+        // below arrive over SSE and the poll is 30 seconds apart, so the raw
+        // count sat under rows it had never heard of (GH #934).
+        if let calls = state.glanceCallsThisHour(now: now) {
             parts.append(calls == 1 ? "1 call this hour" : "\(calls) calls this hour")
         }
         if let clients = state.glanceClientSummary(now: now) { parts.append(clients) }

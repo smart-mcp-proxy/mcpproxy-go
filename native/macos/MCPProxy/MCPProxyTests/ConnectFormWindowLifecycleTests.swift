@@ -97,7 +97,13 @@ final class ConnectFormWindowLifecycleTests: XCTestCase {
         let sheet = makeWindow()
         host.makeKeyAndOrderFront(nil)
         host.beginSheet(sheet) { _ in }
-        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        // Attachment is asynchronous, so wait for it rather than for a fixed
+        // slice of wall clock: a loaded runner that needed 0.3 s used to turn
+        // this test into a silent skip.
+        let attached = Date().addingTimeInterval(2)
+        while sheet.sheetParent == nil, Date() < attached {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
         try XCTSkipIf(sheet.sheetParent == nil, "AppKit did not attach the sheet in this environment")
 
         lifecycle.adopt(sheet, model: ConnectClientModel(source: FakeConnectSource(), sleeper: { _ in }))
@@ -109,12 +115,15 @@ final class ConnectFormWindowLifecycleTests: XCTestCase {
         host.close()
     }
 
-    /// Counts what the poll asked the clock for, so "it stopped" is a measured
-    /// fact rather than an inference.
+    /// Counts what the poll asked the clock for, and records the moment the
+    /// loop returned, so "it stopped" is a measured fact rather than an
+    /// inference.
     @MainActor
     final class PollCounter {
         private(set) var ticks = 0
+        private(set) var loopReturned = false
         func tick() { ticks += 1 }
+        func markReturned() { loopReturned = true }
     }
 
     /// The leak that mattered is a poll that keeps running, so this drives the
@@ -133,6 +142,14 @@ final class ConnectFormWindowLifecycleTests: XCTestCase {
     /// Note the sleeper mirrors the production one, which returns IMMEDIATELY
     /// once cancelled (`try? await Task.sleep`): a loop that did not check
     /// `Task.isCancelled` would not slow down here, it would spin.
+    ///
+    /// What "stopped" is measured as, and why it is not a wall-clock guess: the
+    /// cancellation can land while an iteration is already in flight — suspended
+    /// in the source call, past that iteration's cancellation check — and that
+    /// iteration still unwinds through the sleeper once. Counting from the
+    /// pre-cancellation total therefore proves nothing on a loaded runner. So
+    /// this waits for the loop to RETURN, allows that single settling tick as a
+    /// hard ceiling, and then samples the counter twice to show it is frozen.
     func testTheReachabilityPollRunsAndThenProvablyStops() async {
         let source = FakeConnectSource()
         source.clientsResults = [.failure(APIClientError.notReady)]
@@ -142,12 +159,17 @@ final class ConnectFormWindowLifecycleTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 5_000_000)
         })
 
-        let poll = Task { await model.loadList() }
+        let poll = Task {
+            await model.loadList()
+            counter.markReturned()
+        }
         defer { poll.cancel() }
 
         // It is polling: wait for real iterations rather than assuming any.
-        for _ in 0..<200 where counter.ticks < 3 {
+        var waits = 0
+        while counter.ticks < 3, waits < 200 {
             try? await Task.sleep(nanoseconds: 5_000_000)
+            waits += 1
         }
         XCTAssertGreaterThanOrEqual(counter.ticks, 3,
                                     "precondition: the form is polling an unreachable core")
@@ -156,10 +178,27 @@ final class ConnectFormWindowLifecycleTests: XCTestCase {
         poll.cancel()
         let atCancellation = counter.ticks
 
-        // Well past several poll intervals at this cadence.
+        // A cancelled loop returns; a runaway one never does, so this waits on
+        // the event rather than on the clock and a slow runner only makes the
+        // test slower, never red.
+        waits = 0
+        while !counter.loopReturned, waits < 400 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            waits += 1
+        }
+        XCTAssertTrue(counter.loopReturned,
+                      "cancellation must END loadList, not merely slow it down")
+        XCTAssertLessThanOrEqual(counter.ticks, atCancellation + 1,
+                                 "only the one already-in-flight iteration may settle; "
+                                 + "a second means the loop went round again after cancellation")
+
+        // And it stays stopped. 200 ms is 40 of this sleeper's own delays, and
+        // an uncancellable loop does not add a tick per delay here — it spins,
+        // because the production sleeper returns immediately once cancelled.
+        let settled = counter.ticks
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        XCTAssertEqual(counter.ticks, atCancellation,
+        XCTAssertEqual(counter.ticks, settled,
                        "the poll must STOP, not merely slow down, once its task is cancelled")
     }
 

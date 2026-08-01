@@ -119,10 +119,31 @@ final class GlanceSectionTests: XCTestCase {
 
     func testFirstClauseKeepsOnlyTheLeadingClause() {
         XCTAssertEqual(GlanceSection.firstClause(of: "auth failed: token expired"), "auth failed")
-        XCTAssertEqual(GlanceSection.firstClause(of: "dial tcp 127.0.0.1"), "dial tcp 127")
         XCTAssertEqual(GlanceSection.firstClause(of: "  boom  "), "boom")
+        XCTAssertEqual(GlanceSection.firstClause(of: "timed out.\nretrying"), "timed out")
+        XCTAssertEqual(GlanceSection.firstClause(of: "not found."), "not found")
         XCTAssertNil(GlanceSection.firstClause(of: "   "))
         XCTAssertNil(GlanceSection.firstClause(of: nil))
+    }
+
+    /// A separator only ends a clause when something separates because of it
+    /// (GH #934). mcpproxy names tools `server:tool` and hosts `127.0.0.1`, and
+    /// cutting at a bare `:` or `.` lands inside both — the observed rendering
+    /// of `invalid arguments for memory:create_entities: …` was "invalid
+    /// arguments for memory", which reads as an accusation against the server.
+    func testFirstClauseDoesNotCutInsideAnIdentifier() {
+        XCTAssertEqual(
+            GlanceSection.firstClause(
+                of: "invalid arguments for memory:create_entities: at '/entities': "
+                    + "got string, want array"
+            ),
+            "invalid arguments for memory:create_entities"
+        )
+        XCTAssertEqual(GlanceSection.firstClause(of: "dial tcp 127.0.0.1"), "dial tcp 127.0.0.1")
+        XCTAssertEqual(GlanceSection.firstClause(of: "dial tcp 127.0.0.1:8080: refused"),
+                       "dial tcp 127.0.0.1:8080")
+        XCTAssertEqual(GlanceSection.firstClause(of: "read file a.txt failed: EACCES"),
+                       "read file a.txt failed")
     }
 
     // MARK: - Grouped rows (spec 090 US1)

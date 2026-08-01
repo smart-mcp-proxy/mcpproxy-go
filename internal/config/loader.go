@@ -506,6 +506,54 @@ func CreateSampleConfig(path string) error {
 	return SaveConfig(cfg, path)
 }
 
+// EnsureConfigFile seeds a default configuration at an explicitly named path
+// that does not exist yet, and reports whether it created one.
+//
+// It exists for the first run of an instance whose config path is named on the
+// command line rather than discovered — the relocated tray instance of GH #936
+// spawns its core with BOTH `--data-dir <root>` and `--config
+// <root>/mcp_config.json`, and on a fresh root that file has never been
+// written. LoadFromFile refuses a missing explicit path, so without this the
+// core exited on the spot with "no such file or directory" and the instance
+// could never come up.
+//
+// Why here and not inside LoadFromFile: LoadFromFile is also the HOT-RELOAD
+// entry point (internal/runtime/lifecycle.go, internal/runtime/configsvc). A
+// config file that disappears under a running proxy must fail the reload and
+// leave the live config alone; creating a default there would replace every
+// server the user has with nothing. Seeding is a startup decision, so it is
+// made at startup, once.
+//
+// dataDir is the directory the caller will run out of (the `--data-dir` flag
+// when one was given); the seeded file records it, exactly as the implicit path
+// records its own. An empty dataDir leaves the field unset, so the loader's
+// usual default applies.
+func EnsureConfigFile(path, dataDir string) (created bool, err error) {
+	if path == "" {
+		return false, nil
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, nil
+	} else if !os.IsNotExist(statErr) {
+		return false, fmt.Errorf("failed to inspect config file %s: %w", path, statErr)
+	}
+
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return false, fmt.Errorf("failed to create config directory %s: %w", dir, err)
+		}
+	}
+
+	seed := &Config{DataDir: dataDir}
+	if err := createDefaultConfigFile(path, seed); err != nil {
+		return false, fmt.Errorf("failed to create default config file %s: %w", path, err)
+	}
+	// Same notice the implicit path prints, for the same reason: a typo in
+	// --config would otherwise create a blank instance in silence.
+	fmt.Fprintf(os.Stderr, "INFO: Created default configuration file at %s\n", path)
+	return true, nil
+}
+
 // Helper function to get current time (useful for testing)
 var now = time.Now
 

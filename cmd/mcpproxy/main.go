@@ -714,6 +714,15 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 
 	// Load configuration - use LoadFromFile if config file specified, otherwise use Load
 	if configFile != "" {
+		// A named config that has never been written is a FIRST RUN, not an
+		// error: the relocated tray instance of GH #936 spawns its core with
+		// --data-dir <root> --config <root>/mcp_config.json against a root
+		// nothing has used before. The implicit path has always created its
+		// default here; the explicit one used to exit with "no such file or
+		// directory" instead, which made that whole flow unusable.
+		if _, ensureErr := config.EnsureConfigFile(configFile, dataDir); ensureErr != nil {
+			return nil, ensureErr
+		}
 		cfg, err = config.LoadFromFile(configFile)
 	} else {
 		cfg, err = config.Load()
