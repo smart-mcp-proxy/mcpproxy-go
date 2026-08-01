@@ -410,20 +410,6 @@ actor CoreProcessManager {
         /// file) is a core, and taking its socket is two writers on one database.
         private(set) var somethingAccepted: Bool = false
 
-        /// Whether a live process was found holding the data directory this
-        /// socket belongs to (GH #933).
-        ///
-        /// Separate from `somethingAccepted` because it is a different KIND of
-        /// evidence — it does not come from the socket at all — and because it
-        /// is the only thing that can speak for a core that has refused every
-        /// probe since the episode began. `flock` is released by the kernel on
-        /// process death, so unlike a leftover socket file it cannot be stale.
-        private(set) var dataDirectoryHeld: Bool = false
-
-        mutating func record(_ lock: DataDirectoryLock) {
-            if case .heldByALiveProcess = lock { dataDirectoryHeld = true }
-        }
-
         mutating func record(_ probe: SocketTransport.SocketProbe) {
             switch probe {
             case .connectable:
@@ -442,17 +428,18 @@ actor CoreProcessManager {
             }
         }
 
-        /// A socket FILE exists, not one connection has ever been accepted on
-        /// it, and no live process holds the data directory behind it. The only
-        /// reading of that which is consistent with everything we have seen is:
-        /// the process that created it is gone.
+        /// A socket FILE exists and not one connection has ever been accepted on
+        /// it. Consistent with a dead core's leftovers — and equally consistent
+        /// with a live core whose listen backlog was already full when the
+        /// episode began, which is why this is never the whole answer.
         ///
-        /// The lock clause is what separates a dead core's leftovers from a
-        /// live core with a saturated listen backlog — the two are identical to
-        /// every socket probe there is (GH #933).
-        var onlyEverRefused: Bool {
-            refusals > 0 && !somethingAccepted && !dataDirectoryHeld
-        }
+        /// The data-directory lock is what separates the two (GH #933), and it
+        /// is deliberately NOT folded in here: a lock is a fact about RIGHT NOW,
+        /// not accumulated evidence. Latching it turned "a core is busy" into a
+        /// verdict that outlived the core, so a saturated core that then died
+        /// left the tray parked forever. See `reportUnresponsiveCore`, which
+        /// asks the kernel afresh at every deadline.
+        var onlyEverRefused: Bool { refusals > 0 && !somethingAccepted }
     }
 
     /// Fold one probe into the episode's evidence. Called from the two places
@@ -821,13 +808,19 @@ actor CoreProcessManager {
         unresponsiveDeadlineTask = nil
 
         // Before concluding "stale", ask the one question the socket cannot
-        // answer: is a live process holding this core's data directory? A
-        // saturated core refuses every probe exactly as a dead core's leftover
-        // file does, and only the lock tells them apart (GH #933).
-        if socketEvidence.onlyEverRefused {
-            socketEvidence.record(DataDirectoryLock.probe(path: dataDirectoryLockPath))
-        }
-        if socketEvidence.dataDirectoryHeld {
+        // answer: is a live process holding this core's data directory RIGHT
+        // NOW? A saturated core refuses every probe exactly as a dead core's
+        // leftover file does, and only the lock tells them apart (GH #933).
+        //
+        // Asked fresh at every deadline, and never remembered between them.
+        // "Something held it once" is not a reason to keep waiting: the kernel
+        // drops `flock` the instant the holder dies, so a saturated core that
+        // is subsequently SIGKILLed (jetsam, `kill -9`) leaves its socket file
+        // behind and nothing else. A remembered verdict re-armed the deadline
+        // on that dead core forever, and `.waitingForCore` offers neither Stop
+        // nor Retry — quitting the app was the only way out.
+        if socketEvidence.onlyEverRefused,
+           case .heldByALiveProcess = DataDirectoryLock.probe(path: dataDirectoryLockPath) {
             // Keep waiting rather than launching or erroring: the attach watch
             // is still running underneath, so the core is picked up the moment
             // it drains its backlog — which is what the tray failed to do when

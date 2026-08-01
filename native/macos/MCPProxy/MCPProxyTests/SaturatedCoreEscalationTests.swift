@@ -110,6 +110,47 @@ final class SaturatedCoreEscalationTests: XCTestCase {
                              + "core's leftovers; refusing to launch would deadlock startup")
     }
 
+    /// The saturated core then dies — SIGKILL, jetsam, `kill -9` — leaving its
+    /// socket file behind. The lock is gone the instant the process is (the
+    /// kernel drops `flock`), so the very next deadline must see a stale socket
+    /// and escalate.
+    ///
+    /// The regression this pins: the "a live process holds it" verdict was
+    /// latched for the lifetime of the episode and the lock was only ever
+    /// re-probed while the evidence still LOOKED stale — which that same verdict
+    /// made impossible. Every subsequent deadline re-armed itself on a fact that
+    /// stopped being true minutes ago, and `.waitingForCore` offers neither Stop
+    /// nor Retry, so quitting the app was the only way out. Before this change
+    /// the same sequence recovered at the first deadline.
+    func testACoreThatDiesAfterTheFirstDeadlineIsEventuallyEscalatedOver() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let socketPath = try refusingSocket()
+        holdTheDataDirectoryLock()
+
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(appState: appState, socketPath: socketPath)
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+
+        // Past the first deadline: the lock is held, so nothing is launched.
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        var launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0, "precondition: a held lock still parks the tray")
+
+        // The core dies. Its socket file survives it; its lock cannot.
+        releaseTheDataDirectoryLock()
+
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        launched = await manager.coresLaunched
+        XCTAssertGreaterThan(launched, 0,
+                             "nothing holds the data directory any more — that socket is a "
+                             + "dead core's leftovers and the tray has to get past it on its own")
+    }
+
     // MARK: - Fixtures
 
     private func makeManager(appState: AppState, socketPath: String) -> CoreProcessManager {
@@ -152,5 +193,13 @@ final class SaturatedCoreEscalationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(heldDescriptor, 0)
         XCTAssertEqual(flock(heldDescriptor, LOCK_EX | LOCK_NB), 0,
                        "precondition: this test holds the lock a live core would hold")
+    }
+
+    /// What the kernel does when the holding process dies.
+    private func releaseTheDataDirectoryLock() {
+        guard heldDescriptor >= 0 else { return }
+        flock(heldDescriptor, LOCK_UN)
+        close(heldDescriptor)
+        heldDescriptor = -1
     }
 }
