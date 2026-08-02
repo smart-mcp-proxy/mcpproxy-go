@@ -787,8 +787,19 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 	}
 }
 
-// startBackgroundMonitoring starts monitoring the connection health
+// startBackgroundMonitoring starts monitoring the connection health.
+//
+// Idempotent: tryReconnect() re-enters Connect() after tearing down only the
+// core client, so this is reached again on every reconnect while the existing
+// monitor is still running (stopBackgroundMonitoring is only called from the
+// managed client's Disconnect()). Without this guard each reconnect leaked
+// another backgroundHealthCheck goroutine, multiplying the ListTools liveness
+// probes sent to the upstream server for the rest of the process's life.
 func (mc *Client) startBackgroundMonitoring() {
+	if mc.monitoringStarted {
+		return
+	}
+
 	// Mark that monitoring has been started
 	mc.monitoringStarted = true
 	mc.monitoringWG.Add(1)
