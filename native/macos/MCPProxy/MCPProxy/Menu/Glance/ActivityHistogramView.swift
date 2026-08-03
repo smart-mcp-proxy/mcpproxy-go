@@ -1,12 +1,12 @@
 // ActivityHistogramView.swift
 // MCPProxy
 //
-// The 24-hour calls-per-hour bar chart shown in the tray glance's
-// "Activity (24h)" submenu, plus the pure bucket-shaping and accessibility
-// helpers it renders from.
+// The 24-hour calls-per-hour bar chart rendered inline at the top of the tray
+// glance, plus the pure bucket-shaping and accessibility helpers it renders
+// from.
 //
-// The chart renders from `AppState.usageTimeline` only — opening the submenu
-// performs no network request (spec 048 invariant).
+// The chart renders from `AppState.usageTimeline` only — building it performs
+// no network request (spec 048 invariant).
 
 import SwiftUI
 import Charts
@@ -33,9 +33,9 @@ struct HistogramBar: Identifiable, Equatable {
     var total: Int { succeeded + errors }
 }
 
-// MARK: - What the submenu shows
+// MARK: - What the histogram row shows
 
-/// What the histogram submenu renders right now.
+/// What the histogram row renders right now.
 ///
 /// `loading` and `failed` are deliberately distinct: both leave the timeline
 /// nil, and telling the user "Loading…" forever after a failed fetch is the
@@ -123,7 +123,7 @@ enum ActivityHistogram {
             + "Busiest hour \(formatter.string(from: peak.hourStart)) with \(peak.total) calls."
     }
 
-    /// Decide what the submenu shows. A timeline that has loaded wins over a
+    /// Decide what the histogram row shows. A timeline that has loaded wins over a
     /// recorded failure: showing real (if slightly stale) data beats showing an
     /// error row.
     static func state(timeline: [UsageBucket]?, errorMessage: String?, now: Date) -> HistogramState {
@@ -193,12 +193,13 @@ struct ActivityHistogramView: View {
                 AxisValueLabel(format: .dateTime.hour())
             }
         }
-        // Height covers the plot AND the legend below it. Sized so the legend
-        // is additive: it must not buy its place by shrinking 24 bars that are
-        // already only ~10 pt wide apiece.
-        .frame(width: 260, height: 116)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        // Height covers the plot AND the legend below it. Deliberately shallow:
+        // the chart is a shape to recognise, not a plot to read values off —
+        // relative bar heights survive 60 pt of plot, and a menu is the wrong
+        // place for more (the Web UI has the full-size version).
+        .frame(width: 248, height: 84)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         // One label for the whole chart: VoiceOver reading 48 unlabelled bar
         // marks would be worse than useless.
         .accessibilityElement(children: .ignore)
@@ -210,12 +211,12 @@ extension ActivityHistogram {
 
     /// Size of the hosted chart item, in points. Menu items do not auto-size a
     /// hosting view, so the frame is explicit — and it must match the view's
-    /// own size, or the row grows a band of dead space. 260 + 2*14 = 288 wide,
-    /// 116 + 2*8 = 132 tall; measured `NSHostingView.fittingSize` agrees, and
+    /// own size, or the row grows a band of dead space. 248 + 2*12 = 272 wide,
+    /// 84 + 2*6 = 96 tall; measured `NSHostingView.fittingSize` agrees, and
     /// `testRealChartItemIsSizedAndLabelled` keeps the two in step.
-    static let chartItemSize = NSSize(width: 288, height: 132)
+    static let chartItemSize = NSSize(width: 272, height: 96)
 
-    /// The submenu's single custom item: an `NSHostingView` wrapping the chart.
+    /// The glance's single custom item: an `NSHostingView` wrapping the chart.
     ///
     /// Custom menu-item views receive mouse events but not keyboard events, so
     /// the item is disabled (nothing to activate) and carries the whole series
@@ -231,114 +232,6 @@ extension ActivityHistogram {
         host.frame = NSRect(origin: .zero, size: chartItemSize)
         host.setAccessibilityLabel(summary)
         item.view = host
-        return item
-    }
-}
-
-// MARK: - Submenu delegate
-
-/// Builds the single row of `GlanceSection`'s "Activity (24h)" submenu when
-/// that submenu opens.
-///
-/// This is NOT a second submenu — `GlanceSection` owns the item and the menu,
-/// and this object only fills it in on demand. It is a separate `NSObject`
-/// purely because `NSMenuDelegate` requires `NSObjectProtocol`, which
-/// `GlanceSection` (a plain `@MainActor final class`) does not conform to.
-///
-/// Building on open — rather than inside `items(for:)` — keeps the chart off
-/// the menu's hot path: `rebuildMenu()` runs on every debounced
-/// `objectWillChange`, menu open or closed, so building eagerly would construct
-/// an `NSHostingView` and render a SwiftUI Chart on every state change,
-/// including for a menu nobody has opened. Reading `AppState` at open time also
-/// means a timeline that arrives while the menu sits closed is shown on the
-/// next open, with no rebuild of the parent menu.
-///
-/// It reads `AppState` and nothing else: opening the submenu performs no
-/// network request (spec 048 invariant).
-///
-/// `NSMenu.delegate` is a WEAK reference, so `GlanceSection` must retain this.
-final class HistogramSubmenuDelegate: NSObject, NSMenuDelegate {
-
-    private let appState: AppState
-    private let chartItemFactory: ([HistogramBar]) -> NSMenuItem
-
-    /// - Parameter chartItemFactory: injected so submenu-structure tests are
-    ///   independent of how the chart itself renders. It defaults to the real
-    ///   chart: the seam this replaced was optional, nothing in production ever
-    ///   set it, and the tray consequently shipped a text row instead of a
-    ///   chart. A default that already works cannot fail that way.
-    init(appState: AppState,
-         chartItemFactory: @escaping ([HistogramBar]) -> NSMenuItem = ActivityHistogram.chartMenuItem) {
-        self.appState = appState
-        self.chartItemFactory = chartItemFactory
-        super.init()
-    }
-
-    // MARK: NSMenuDelegate
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        for item in currentItems() { menu.addItem(item) }
-    }
-
-    // MARK: Rows
-
-    /// The rows the submenu shows for the current `AppState`: the data row,
-    /// preceded by a stale marker when the feeds have stopped arriving.
-    ///
-    /// `ActivityHistogram.state()` charts a loaded timeline in preference to a
-    /// recorded failure, which is right for a blip and wrong for a core that is
-    /// never coming back — the failure is then recorded every 30 seconds and
-    /// rendered never. The marker is what makes it visible without taking the
-    /// real (if stale) data off the screen.
-    ///
-    /// It is suppressed when the data row is itself the failure row, which
-    /// already says the same thing.
-    func currentItems() -> [NSMenuItem] {
-        let item = currentItem()
-        guard appState.glanceStale, item.title != Self.unavailableTitle else { return [item] }
-
-        let marker = Self.mutedItem("Not updating")
-        marker.toolTip = appState.glanceError
-        return [marker, item]
-    }
-
-    /// Title of the row shown when the usage fetch failed with nothing loaded.
-    private static let unavailableTitle = "Usage unavailable"
-
-    /// The single row the submenu shows for the current `AppState`.
-    ///
-    /// The clock is read here, at open time, rather than injected: every
-    /// assertion about this row is structural (which row, how many), and the
-    /// axis contents `now` decides are covered exhaustively by the pure
-    /// `ActivityHistogram.bars` tests.
-    func currentItem() -> NSMenuItem {
-        switch ActivityHistogram.state(
-            timeline: appState.usageTimeline,
-            errorMessage: appState.usageError,
-            now: Date()
-        ) {
-        case .loading:
-            return Self.mutedItem("Loading…")
-        case .failed(let message):
-            let item = Self.mutedItem(Self.unavailableTitle)
-            item.toolTip = message
-            return item
-        case .loaded(let bars):
-            return chartItemFactory(bars)
-        }
-    }
-
-    /// A disabled, secondary-coloured text row. Setting `attributedTitle`
-    /// leaves `title` intact, so the plain string stays available to tests and
-    /// to accessibility.
-    static func mutedItem(_ title: String) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        item.attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: NSFont.menuFont(ofSize: 0),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ])
         return item
     }
 }

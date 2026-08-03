@@ -331,11 +331,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // a full rebuild (removeAllItems) on a menu already on screen and
         // re-arm/disarm the guard under the parent — exactly the
         // restructuring-while-open the design forbids.
-        //
-        // The glance histogram submenu does build its single row lazily on open,
-        // but it does NOT reach this method: GlanceSection installs its own
-        // HistogramSubmenuDelegate on that submenu, precisely so opening it
-        // cannot rebuild the tray menu underneath the cursor.
         guard menu === menuHost?.menu else { return }
 
         // Spec 048: dropped the per-click `client.servers()` fetch. appState
@@ -903,25 +898,42 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(row)
         }
 
-        // Needs Attention — only auth required, connection errors, quarantine (NOT disabled)
+        // Needs Attention — only auth required, connection errors, quarantine
+        // (NOT disabled). One collapsed row: the count is the glanceable fact,
+        // the per-server detail is a hover away, and N servers no longer cost
+        // N rows of a menu that opens with a chart. Absent entirely when
+        // nothing needs attention.
         let attentionServers = appState.serversNeedingAttention
         if !attentionServers.isEmpty {
-            let header = NSMenuItem(title: "Needs Attention (\(attentionServers.count))", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
+            let parent = NSMenuItem(title: "Needs Attention (\(attentionServers.count))",
+                                    action: nil, keyEquivalent: "")
+            parent.image = NSImage(systemSymbolName: "exclamationmark.triangle",
+                                   accessibilityDescription: "needs attention")
+            let submenu = NSMenu(title: "Needs Attention")
 
             for server in attentionServers {
                 let action = server.health?.action ?? ""
                 let summary = server.health?.summary ?? ""
                 let icon = actionIcon(for: action)
 
-                let title = "\(server.name) — \(summary.isEmpty ? actionDisplayName(for: action) : summary)"
+                let fullTitle = "\(server.name) — \(summary.isEmpty ? actionDisplayName(for: action) : summary)"
+                // Same width discipline as the glance rows: an untruncated core
+                // error must not stretch the whole menu past the chart block.
+                // The full text stays in the tooltip.
+                let title = GlanceFormatting.tailTruncated(
+                    fullTitle, limit: GlanceFormatting.reasonBudget)
                 let item = NSMenuItem(title: title, action: #selector(handleAttentionAction(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = server
+                item.toolTip = fullTitle
+                // Truncated on screen, spoken in full — tooltips are not read
+                // by VoiceOver (same FR-025 discipline as the glance rows).
+                item.setAccessibilityLabel(fullTitle)
                 item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
-                menu.addItem(item)
+                submenu.addItem(item)
             }
+            parent.submenu = submenu
+            menu.addItem(parent)
             menu.addItem(.separator())
         }
 

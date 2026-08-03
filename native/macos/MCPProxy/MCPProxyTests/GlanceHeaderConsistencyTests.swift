@@ -94,7 +94,7 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
         state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now,
                           polledAt: Self.now.addingTimeInterval(-1))
         XCTAssertEqual(Self.makeSection().items(for: state, now: Self.now).first?.title,
-                       "12 calls this hour · 1 active",
+                       "12 calls in the last 24h · 1 active",
                        "precondition: the polled count is what the header shows")
 
         state.prependGlanceActivity(
@@ -104,7 +104,7 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
         )
 
         XCTAssertEqual(Self.makeSection().items(for: state, now: Self.now).first?.title,
-                       "13 calls this hour · 1 active",
+                       "13 calls in the last 24h · 1 active",
                        "the row is on screen, so the number above it has to include it")
     }
 

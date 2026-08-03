@@ -14,7 +14,7 @@ enum GlanceFixtures {
         let state = AppState()
         // coreState first: its didSet clears the glance feeds on any non-connected state.
         state.coreState = .connected
-        state.callsThisHour = 12
+        state.usageTimeline = [UsageBucket(start: now, calls: 12, errors: 0, totalRespBytes: 0)]
         state.glanceActivity = [
             entry(id: "a", server: "github", tool: "create_issue",
                   timestamp: "2027-01-15T07:59:30Z", session: "sess-a"),

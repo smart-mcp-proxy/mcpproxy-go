@@ -53,7 +53,7 @@ final class MenuRefreshSchedulerTests: XCTestCase {
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
         let header = items[0]
-        XCTAssertEqual(header.title, "12 calls this hour · 1 active")
+        XCTAssertEqual(header.title, "12 calls in the last 24h · 1 active")
 
         var rebuildGuard = MenuRebuildGuard()
         rebuildGuard.menuWillOpen()
@@ -72,13 +72,13 @@ final class MenuRefreshSchedulerTests: XCTestCase {
         defer { token.cancel() }
 
         // A call lands while the user is reading the menu.
-        state.callsThisHour = 13
+        state.usageTimeline = [UsageBucket(start: Self.now, calls: 13, errors: 0, totalRespBytes: 0)]
 
         Self.pump(.eventTracking, until: { !decisions.isEmpty })
 
         XCTAssertEqual(decisions, [.updateInPlace],
                        "a refresh during menu tracking must reach the section and take the in-place branch")
-        XCTAssertEqual(header.title, "13 calls this hour · 1 active",
+        XCTAssertEqual(header.title, "13 calls in the last 24h · 1 active",
                        "the row on screen must show the new count, not the one captured at menu-open time")
     }
 

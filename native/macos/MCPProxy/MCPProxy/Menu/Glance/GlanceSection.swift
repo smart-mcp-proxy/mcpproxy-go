@@ -2,14 +2,16 @@
 // MCPProxy
 //
 // Builds the "glance" block at the top of the tray menu: a one-line summary,
-// the most recent qualifying tool calls, the active MCP clients, and the
-// 24h histogram submenu.
+// the inline 24h histogram, the most recent qualifying tool calls, and the
+// active MCP clients.
 //
 // Every text row is a plain NSMenuItem. Custom (view-backed) menu items receive
 // mouse events but NOT keyboard events, so building the rows as hosted SwiftUI
 // would silently cost keyboard navigation and VoiceOver. Only the histogram —
-// which genuinely needs drawing — is view-backed, and it lives alone inside its
-// own submenu.
+// which genuinely needs drawing — is view-backed; it renders inline, directly
+// under the summary line, so the day's shape is visible the moment the menu
+// opens (it used to hide in an "Activity (24h)" submenu, which made the
+// overview the only row that required a second navigation step).
 //
 // This component never builds a Web UI URL. It is handed only AppState, whose
 // webUIBaseURL is scheme/host/port by design, while the API key lives on the
@@ -49,21 +51,19 @@ final class GlanceSection {
     private weak var clickTarget: AnyObject?
     private let clickAction: Selector
 
-    /// Builds the histogram submenu's single custom item from a shaped 24-hour
-    /// axis. Injected so submenu-structure tests are independent of how the
-    /// chart renders; it defaults to the real chart, so no wiring step can
-    /// forget to set it.
+    /// Builds the inline chart item from a shaped 24-hour axis. Injected so
+    /// block-structure tests are independent of how the chart renders; it
+    /// defaults to the real chart, so no wiring step can forget to set it.
     var histogramChartItemFactory: ([HistogramBar]) -> NSMenuItem = ActivityHistogram.chartMenuItem
 
     // MARK: Configuration
 
     /// Character budget for a row label before middle truncation kicks in.
     ///
-    /// Never tightened to make room for anything else on the title line
-    /// (FR-011a): the error clause has its own, smaller budget and is cut first,
-    /// and the age — the shortest and most perishable part of the row — is never
-    /// cut at all.
-    private static let labelBudget = 34
+    /// Sized so `label ×N — age` sits within the chart block's width — the
+    /// chart, not the longest tool name, is what bounds the menu. The age —
+    /// the shortest and most perishable part of the row — is never cut at all.
+    private static let labelBudget = 30
 
     /// Whether rows may carry a second line.
     ///
@@ -122,16 +122,23 @@ final class GlanceSection {
     private var hasBuilt = false
     private var builtVisible = false
 
-    /// Held only so ownership of the submenu is explicit; `updateInPlace`
-    /// deliberately never touches it (re-creating it would disturb an open
-    /// submenu), so nothing reads this back.
-    private var histogramItem: NSMenuItem?
+    /// What kind of row the histogram block was last built with. The three
+    /// text kinds share one-line geometry and rewrite each other in place; a
+    /// text ↔ chart change is structural (a text row and a 96 pt chart have
+    /// different heights).
+    private enum HistogramRowKind: Equatable { case loading, failed, idle, chart }
+    private var builtHistogramKind: HistogramRowKind?
 
-    /// The submenu's delegate, which fills the submenu in when it opens.
-    /// `NSMenu.delegate` is a WEAK reference, so without this the delegate
-    /// would deallocate the moment `items(for:)` returned and the submenu would
-    /// silently open empty forever.
-    private var histogramDelegate: HistogramSubmenuDelegate?
+    /// The histogram row currently installed, and — when it is the chart — the
+    /// shaped bars it renders. The pair is the cache that keeps `items(for:)`
+    /// from re-rendering a SwiftUI chart on every debounced rebuild of a menu
+    /// nobody has opened: same bars, same item, no work.
+    private var histogramRow: NSMenuItem?
+    private var builtHistogramBars: [HistogramBar]?
+    /// Time zone the cached chart's VoiceOver summary was formatted in. The
+    /// bars are UTC-keyed and survive a zone change, but "Busiest hour 14:00"
+    /// does not — a zone change invalidates the cache even with equal bars.
+    private var builtHistogramTimeZoneID: String?
 
     init(target: AnyObject?, action: Selector) {
         self.clickTarget = target
@@ -155,33 +162,37 @@ final class GlanceSection {
         activityRows = []
         clientRows = []
         clientOverflowItem = nil
-        histogramItem = nil
         hasBuilt = true
         builtVisible = isVisible(for: state)
         guard builtVisible else { return [] }
 
         var items: [NSMenuItem] = []
 
-        let summary = disabledItem(titled: summaryTitle(for: state, now: now))
-        summaryItem = summary
-        items.append(summary)
+        // The summary has nothing to say for an idle proxy with no clients —
+        // the idle histogram row already speaks for the day — so an empty
+        // title gets no row rather than a blank line.
+        let summaryText = summaryTitle(for: state, now: now)
+        if !summaryText.isEmpty {
+            let summary = disabledItem(titled: summaryText)
+            summaryItem = summary
+            items.append(summary)
+        }
 
         // The day before the minute (FR-021). The histogram answers "what has
         // been happening?" in one glyph, so it belongs beside the summary line
-        // it illustrates — it used to sit at the very bottom, below every row it
-        // summarises, which made the user read the detail to reach the overview.
-        // It stays above the separator for that reason: summary and shape are
-        // one block, the rows below are another.
-        let histogram = makeHistogramItem(for: state)
-        histogramItem = histogram
-        items.append(histogram)
+        // it illustrates, above the separator: summary and shape are one block,
+        // the rows below are another. It renders inline — no submenu — so the
+        // shape is on screen the moment the menu opens.
+        items.append(histogramRowItem(for: state, now: now))
         items.append(.separator())
 
-        items.append(disabledItem(titled: "Recent"))
-        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
-        if runs.isEmpty {
-            items.append(disabledItem(titled: "No tool calls yet"))
-        } else {
+        // One frame for the whole menu: rows outside the histogram's 24 hours
+        // do not appear beside a chart (or an idle sentence) that says the day
+        // was quieter. When nothing qualifies the section is just the door to
+        // the full log — a header over an empty list explains nothing.
+        let runs = Self.recentRuns(for: state, now: now)
+        if !runs.isEmpty {
+            items.append(disabledItem(titled: "Recent"))
             for run in runs {
                 var row = ActivityRow(item: actionableItem())
                 apply(run, to: &row, now: now)
@@ -234,18 +245,25 @@ final class GlanceSection {
     /// text would leave a row whose click still opened the previous record's
     /// session. See `apply(_:to:now:)` for how "different record" is decided.
     ///
-    /// The histogram submenu is deliberately not touched, and does not need to
-    /// be: its single row is built by `HistogramSubmenuDelegate` when it opens,
-    /// reading `AppState` at that moment. Whether the timeline has loaded
-    /// therefore changes nothing about the structure built here, which is why
-    /// this no longer reports structural when it flips.
+    /// The histogram never freezes the block: the timeline loading while the
+    /// menu is open must not cost the user live rows for the whole menu
+    /// session (see `testTheTimelineArrivingWhileTheMenuIsOpenKeepsRowsUpdating`).
+    /// Its two TEXT kinds share one-line geometry and rewrite each other in
+    /// place; a text ↔ chart flip DOES change the row's height, so that row
+    /// alone stays as built until the next rebuild — `menuWillOpen` runs one
+    /// before every display — while everything else keeps updating.
     @discardableResult
     func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
         guard hasBuilt else { return false }
         guard isVisible(for: state) == builtVisible else { return false }
         guard builtVisible else { return true }
 
-        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
+        let summary = summaryTitle(for: state, now: now)
+        // The summary row appears only when it has something to say, so its
+        // presence flipping is gaining or losing a row — structural (FR-023).
+        guard summary.isEmpty == (summaryItem == nil) else { return false }
+
+        let runs = Self.recentRuns(for: state, now: now)
         let presence = Self.clientList(for: state, now: now)
         let clients = presence.rows
         guard runs.count == activityRows.count,
@@ -266,12 +284,11 @@ final class GlanceSection {
         // — a reason whose wording changed still occupies one line and is an
         // ordinary in-place rewrite.
         for (index, run) in zip(activityRows.indices, runs)
-        where (subtitleText(for: run.displayReason) == nil) != (activityRows[index].subtitleText == nil) {
+        where (subtitleText(for: run) == nil) != (activityRows[index].subtitleText == nil) {
             return false
         }
 
-        let summary = summaryTitle(for: state, now: now)
-        if summaryItem?.title != summary { summaryItem?.title = summary }
+        if let summaryItem, summaryItem.title != summary { summaryItem.title = summary }
         // `zip`, like the sibling loop below: indexing `entries` by
         // `activityRows.indices` reads out of bounds if the count guard above is
         // ever weakened, and zip cannot.
@@ -283,6 +300,9 @@ final class GlanceSection {
             let title = Self.overflowTitle(presence.hidden)
             if clientOverflowItem.title != title { clientOverflowItem.title = title }
         }
+        refreshHistogramRow(with: ActivityHistogram.state(timeline: state.usageTimeline,
+                                                          errorMessage: state.usageError,
+                                                          now: now))
         return true
     }
 
@@ -301,6 +321,22 @@ final class GlanceSection {
     }
 
     private static func overflowTitle(_ hidden: Int) -> String { "+\(hidden) more" }
+
+    /// The Recent section's rows: qualifying runs whose newest record falls
+    /// inside the menu's ONE frame — the same HOUR-ALIGNED 24-bar axis the
+    /// histogram draws and `glanceCallsLast24h` sums, not a raw 86,400-second
+    /// cutoff. The two must agree at the edge: a run 23 h 40 m old whose hour
+    /// has already slid off the axis showing in Recent would recreate, one
+    /// hour at a time, the very contradiction this frame exists to end. A
+    /// record the log still retains from days ago never appears; an
+    /// unparseable timestamp keeps its row — showing it is the safer failure.
+    private static func recentRuns(for state: AppState, now: Date) -> [GlanceRun] {
+        let oldestHour = AppState.floorToHour(now).addingTimeInterval(-23 * 3600)
+        return GlanceSelection.activityRows(from: state.glanceActivity).filter { run in
+            guard let at = GlanceFormatting.parseTimestamp(run.timestamp) else { return true }
+            return AppState.floorToHour(at) >= oldestHour
+        }
+    }
 
     /// The overflow row's current text, for tests that pin it after an in-place
     /// update — the item itself is private, and reaching into the menu to find
@@ -357,34 +393,35 @@ final class GlanceSection {
         let age = GlanceFormatting.relativeTime(run.timestamp, now: now)
         let status = run.worstStatus
         let failed = status != "success"
-        // The error clause is cut to its own budget before anything else on the
-        // line gives way (FR-011a): a backend that answers in paragraphs must
-        // not be able to squeeze out the name of the tool that ran.
-        let detail = failed
-            ? Self.firstClause(of: run.errorMessage).map {
-                GlanceFormatting.tailTruncated($0, limit: GlanceFormatting.errorClauseBudget)
-              }
-            : nil
+        let clause = failed ? Self.firstClause(of: run.errorMessage) : nil
 
-        // The reason is the row's second line, never part of its first: on a
-        // failed row the error joins the title and the reason keeps the
-        // subtitle, so "why it was attempted" and "how it went" are both
-        // readable at a glance (FR-011a).
+        // One fact per line bounds the menu (compact revision of FR-011a): the
+        // title is always `label ×N — age`, and on a failed row the error
+        // clause takes the second line — the failure mark already flags the row
+        // — while the reason retreats to the tooltip. Error prose on the title
+        // line was what made the whole menu wider than the chart it opens with.
+        //
+        // Pre-14.4 there is no second line, so the clause rejoins the title
+        // under its own, smaller budget (the documented FR-005 degradation).
         let reason = run.displayReason
-        let subtitle = subtitleText(for: reason)
+        let subtitle = subtitleText(for: run)
 
         let title: String
         var accessibility: String
-        if let detail {
+        if let clause, !supportsRowSubtitles {
+            let detail = GlanceFormatting.tailTruncated(clause, limit: GlanceFormatting.errorClauseBudget)
             title = "\(label)\(countSuffix) · \(detail) — \(age)"
-            accessibility = "\(fullLabel)\(spokenCount), failed: \(detail), \(age) ago"
         } else {
             title = "\(label)\(countSuffix) — \(age)"
+        }
+        // Spoken in full, and spoken on every macOS version — the lines are
+        // where facts are *seen*, not where they live (FR-006, FR-025).
+        if let clause {
+            accessibility = "\(fullLabel)\(spokenCount), failed: \(clause), \(age) ago"
+        } else {
             accessibility = "\(fullLabel)\(spokenCount), "
                 + "\(Self.outcomeDescription(forStatus: status)), \(age) ago"
         }
-        // Spoken in full, and spoken on every macOS version — the subtitle is
-        // where the reason is *seen*, not where it lives (FR-006, FR-025).
         if let reason { accessibility += ", reason: \(reason)" }
 
         // The tooltip is the row without any budget at all: full label, full
@@ -416,11 +453,18 @@ final class GlanceSection {
         row.runIdentity = identity
     }
 
-    /// The text a row's second line would show, or nil when it has none —
-    /// either because the record declared no reason (FR-007) or because this
-    /// system has no subtitle mechanism (FR-005).
-    private func subtitleText(for reason: String?) -> String? {
-        guard supportsRowSubtitles, let reason else { return nil }
+    /// The text a row's second line would show, or nil when it has none.
+    ///
+    /// On a failed row the line belongs to the error clause — "how it went"
+    /// outranks "why it was attempted" once something is wrong, and the full
+    /// reason stays in the tooltip. Otherwise it is the reason (FR-006/FR-007).
+    /// Nil on systems without the subtitle mechanism (FR-005).
+    private func subtitleText(for run: GlanceRun) -> String? {
+        guard supportsRowSubtitles else { return nil }
+        if run.worstStatus != "success", let clause = Self.firstClause(of: run.errorMessage) {
+            return GlanceFormatting.tailTruncated(clause, limit: GlanceFormatting.reasonBudget)
+        }
+        guard let reason = run.displayReason else { return nil }
         return GlanceFormatting.tailTruncated(reason, limit: GlanceFormatting.reasonBudget)
     }
 
@@ -557,7 +601,7 @@ final class GlanceSection {
     /// the section can actually stand behind: with a stateless transport there
     /// is no such thing as a currently-connected client, and the old wording
     /// announced "nothing is connected" every time the last session timed out.
-    static let noClientsTitle = "No recent clients"
+    static let noClientsTitle = "No clients in the last 24h"
 
     /// The presence indicator's glyph.
     ///
@@ -644,34 +688,138 @@ final class GlanceSection {
 
     // MARK: Histogram
 
-    /// The "Activity (24h)" item and its (initially empty) submenu.
+    /// The inline histogram row: the chart when the timeline has loaded, a
+    /// muted placeholder while it is loading or after the fetch failed.
     ///
-    /// The submenu's single row is built by its delegate when it opens, not
-    /// here: `items(for:)` runs on every `rebuildMenu()` — which itself runs on
-    /// every debounced `objectWillChange`, menu open or closed — and building
-    /// eagerly would render a SwiftUI Chart on every state change, including
-    /// for a menu nobody has opened.
-    ///
-    /// The submenu carries its OWN delegate rather than the tray menu's. That
-    /// is what keeps opening it off `AppController.menuWillOpen`, which
-    /// rebuilds the whole menu; a submenu opening under the cursor must not
-    /// restructure the menu it hangs from.
-    private func makeHistogramItem(for state: AppState) -> NSMenuItem {
-        let item = NSMenuItem(title: "Activity (24h)", action: nil, keyEquivalent: "")
-        let submenu = NSMenu(title: "Activity (24h)")
-        // Nothing in here is actionable, and AppKit's automatic enabling runs
-        // its own validation at display time. Turning it off makes the row's
-        // disabled state ours — and makes what the tests assert the same thing
-        // the user sees.
-        submenu.autoenablesItems = false
+    /// The chart reads `AppState` and nothing else — building this row
+    /// performs no network request (spec 048 invariant). It is view-backed and
+    /// eagerly built — but `items(for:)` runs on every `rebuildMenu()`, which
+    /// itself runs on every debounced `objectWillChange`, menu open or closed. The
+    /// bars cache is what keeps that affordable: the chart item is rebuilt only
+    /// when the shaped 24-hour axis actually changed (`HistogramBar` is
+    /// Equatable precisely so that is cheap to decide), and every other rebuild
+    /// hands back the item it already has. `rebuildMenu` reuses one `NSMenu`
+    /// via `removeAllItems()`, so re-adding the cached item is safe.
+    private func histogramRowItem(for state: AppState, now: Date) -> NSMenuItem {
+        let histogramState = ActivityHistogram.state(timeline: state.usageTimeline,
+                                                     errorMessage: state.usageError,
+                                                     now: now)
+        switch histogramState {
+        case .loading:
+            builtHistogramKind = .loading
+            builtHistogramBars = nil
+            let item = Self.mutedItem("Activity (24h) — loading…")
+            histogramRow = item
+            return item
+        case .failed(let message):
+            builtHistogramKind = .failed
+            builtHistogramBars = nil
+            let item = Self.mutedItem("Activity (24h) unavailable")
+            item.toolTip = message
+            histogramRow = item
+            return item
+        case .loaded(let bars):
+            // A loaded-but-idle day is a sentence, not a chart: 24 empty bars
+            // read as a broken widget, while the words say exactly what the
+            // flat axis would have implied.
+            if bars.allSatisfy({ $0.total == 0 }) {
+                builtHistogramKind = .idle
+                builtHistogramBars = nil
+                let item = Self.mutedItem(Self.idleHistogramTitle)
+                histogramRow = item
+                return item
+            }
+            builtHistogramKind = .chart
+            if let cached = histogramRow, builtHistogramBars == bars,
+               builtHistogramTimeZoneID == TimeZone.current.identifier {
+                return cached
+            }
+            let item = histogramChartItemFactory(bars)
+            histogramRow = item
+            builtHistogramBars = bars
+            builtHistogramTimeZoneID = TimeZone.current.identifier
+            return item
+        }
+    }
 
-        let delegate = HistogramSubmenuDelegate(appState: state,
-                                                chartItemFactory: histogramChartItemFactory)
-        histogramDelegate = delegate
-        submenu.delegate = delegate
+    /// The idle row's text — a statement about the last 24 hours, matching the
+    /// claim the accessibility summary makes for the same axis.
+    static let idleHistogramTitle = "No calls in the last 24h"
 
-        item.submenu = submenu
+    private static func kind(of state: HistogramState) -> HistogramRowKind {
+        switch state {
+        case .loading: return .loading
+        case .failed: return .failed
+        case .loaded(let bars):
+            return bars.allSatisfy { $0.total == 0 } ? .idle : .chart
+        }
+    }
+
+    /// Refresh the histogram row without restructuring the menu — never a
+    /// resize. Within the chart kind, new bars swap the hosted view (the frame
+    /// is a fixed `chartItemSize`). The two TEXT kinds share one-line
+    /// geometry, so loading ↔ failed rewrites the row in place — a fetch that
+    /// fails while the menu is open must not leave "loading…" on screen
+    /// telling a quiet lie. A text ↔ chart flip is the one transition that
+    /// would change the row's height; that row alone stays as built, and the
+    /// next rebuild installs the right one.
+    private func refreshHistogramRow(with histogramState: HistogramState) {
+        guard let item = histogramRow, let builtKind = builtHistogramKind else { return }
+        let newKind = Self.kind(of: histogramState)
+        switch (builtKind == .chart, newKind == .chart) {
+        case (true, true):
+            guard case .loaded(let bars) = histogramState, builtHistogramBars != bars else { return }
+            item.view = histogramChartItemFactory(bars).view
+            builtHistogramBars = bars
+            builtHistogramTimeZoneID = TimeZone.current.identifier
+        case (false, false):
+            applyMutedHistogramText(for: histogramState, kind: newKind, to: item)
+        default:
+            break
+        }
+    }
+
+    /// Rewrite a text-kind histogram row to describe `histogramState`.
+    private func applyMutedHistogramText(
+        for histogramState: HistogramState, kind: HistogramRowKind, to item: NSMenuItem
+    ) {
+        switch kind {
+        case .loading:
+            Self.setMutedTitle("Activity (24h) — loading…", on: item)
+            item.toolTip = nil
+        case .failed:
+            Self.setMutedTitle("Activity (24h) unavailable", on: item)
+            if case .failed(let message) = histogramState, item.toolTip != message {
+                item.toolTip = message
+            }
+        case .idle:
+            Self.setMutedTitle(Self.idleHistogramTitle, on: item)
+            item.toolTip = nil
+        case .chart:
+            return
+        }
+        builtHistogramKind = kind
+    }
+
+    /// A disabled, secondary-coloured text row. Setting `attributedTitle`
+    /// leaves `title` intact, so the plain string stays available to tests and
+    /// to accessibility.
+    static func mutedItem(_ title: String) -> NSMenuItem {
+        // Created with an empty title so `setMutedTitle`'s no-change guard
+        // cannot skip the attributed styling on first install.
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        setMutedTitle(title, on: item)
         return item
+    }
+
+    private static func setMutedTitle(_ title: String, on item: NSMenuItem) {
+        guard item.title != title else { return }
+        item.title = title
+        item.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.menuFont(ofSize: 0),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ])
     }
 
     // MARK: Header
@@ -693,11 +841,16 @@ final class GlanceSection {
     /// headline over a section that had rows in it.
     private func summaryTitle(for state: AppState, now: Date = Date()) -> String {
         var parts: [String] = []
-        // `glanceCallsThisHour`, not the raw polled `callsThisHour`: the rows
-        // below arrive over SSE and the poll is 30 seconds apart, so the raw
-        // count sat under rows it had never heard of (GH #934).
-        if let calls = state.glanceCallsThisHour(now: now) {
-            parts.append(calls == 1 ? "1 call this hour" : "\(calls) calls this hour")
+        // The menu speaks ONE time frame: the same 24 hours the histogram
+        // draws, the Recent rows are filtered to, and the presence lookback
+        // uses — a header counting a different window than the chart under it
+        // is how "no calls" ends up above rows from days ago.
+        //
+        // `glanceCallsLast24h` reconciles the poll with live SSE (GH #934),
+        // and a zero says nothing the idle histogram row does not already say,
+        // so the segment appears only when there is something to count.
+        if let calls = state.glanceCallsLast24h(now: now), calls > 0 {
+            parts.append(calls == 1 ? "1 call in the last 24h" : "\(calls) calls in the last 24h")
         }
         if let clients = state.glanceClientSummary(now: now) { parts.append(clients) }
         if state.glanceStale { parts.append("not updating") }

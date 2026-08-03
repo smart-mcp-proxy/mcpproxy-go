@@ -96,17 +96,23 @@ enum GlanceFormatting {
 
     // MARK: - Budgets
 
-    /// Character budget for a row's reason subtitle (spec 090 FR-006).
+    /// Character budget for a row's second line (spec 090 FR-006) — the reason,
+    /// or on a failed row the error clause.
     ///
     /// Independent of the label's budget on purpose: the two lines are truncated
     /// separately, so a long `server:tool` never shortens the explanation and a
     /// long explanation never shortens the name of what ran.
-    static let reasonBudget = 60
+    ///
+    /// 44 is the menu's width discipline: at the menu font it is about the width
+    /// of the 24h chart block, so the widest thing in the menu is the chart —
+    /// the element designed to be looked at — never a backend's error prose.
+    static let reasonBudget = 44
 
-    /// Character budget for the error clause on a failed row's title line
-    /// (FR-011a). Deliberately smaller than the reason's: it shares the title
-    /// with the label and the age, and the full message is in the tooltip.
-    static let errorClauseBudget = 40
+    /// Character budget for the error clause when it must share the TITLE line
+    /// — the pre-14.4 fallback with no subtitle mechanism. Deliberately smaller
+    /// than the reason's: it shares the line with the label and the age, and
+    /// the full message is in the tooltip.
+    static let errorClauseBudget = 28
 
     /// Tail-truncate `text` to at most `limit` characters, keeping the head.
     ///
