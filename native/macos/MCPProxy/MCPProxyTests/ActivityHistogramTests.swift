@@ -321,10 +321,47 @@ final class GlanceInlineHistogramTests: XCTestCase {
         let state = connectedState()
         XCTAssertEqual(histogramRow(section, state).title, "Activity (24h) — loading…")
 
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+
+        XCTAssertEqual(histogramRow(section, state).title, "CHART:24")
+    }
+
+    /// A day with zero calls is a sentence, not 24 empty bars — an all-zero
+    /// chart reads as a broken widget (FR-020 spirit: say the claim outright).
+    func testAnIdleTimelineShowsWordsNotAnEmptyChart() {
+        let state = connectedState()
         state.usageTimeline = []
 
-        XCTAssertEqual(histogramRow(section, state).title, "CHART:24",
-                       "an idle timeline is a flat axis, not a loading row")
+        let row = histogramRow(makeSection(), state)
+
+        XCTAssertEqual(row.title, GlanceSection.idleHistogramTitle)
+        XCTAssertFalse(row.isEnabled)
+        XCTAssertNil(row.submenu)
+    }
+
+    /// Zero-call buckets are as idle as no buckets: the words appear whenever
+    /// the axis would have been flat.
+    func testAnAllZeroTimelineIsIdleToo() {
+        let state = connectedState()
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 0, errors: 0)]
+
+        XCTAssertEqual(histogramRow(makeSection(), state).title,
+                       GlanceSection.idleHistogramTitle)
+    }
+
+    /// Loading and idle share one-line geometry, so a timeline that loads
+    /// EMPTY while the menu is open replaces "loading…" in place — the words
+    /// change, the menu does not move.
+    func testLoadingBecomesTheIdleLabelInPlace() {
+        let section = makeSection()
+        let state = connectedState()
+        let row = histogramRow(section, state)
+        XCTAssertEqual(row.title, "Activity (24h) — loading…")
+
+        state.usageTimeline = []
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now))
+        XCTAssertEqual(row.title, GlanceSection.idleHistogramTitle)
     }
 
     // MARK: - The eager-build cache
@@ -379,7 +416,7 @@ final class GlanceInlineHistogramTests: XCTestCase {
         let items = section.items(for: state, now: Fixture.now)
         XCTAssertEqual(items[1].title, "Activity (24h) — loading…")
 
-        state.usageTimeline = []
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now),
                       "the rest of the block keeps updating in place")
@@ -392,7 +429,7 @@ final class GlanceInlineHistogramTests: XCTestCase {
     func testLosingTheTimelineKeepsTheChartUntilTheNextRebuild() {
         let section = makeSection()
         let state = connectedState()
-        state.usageTimeline = []
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
         let row = histogramRow(section, state)
         XCTAssertEqual(row.title, "CHART:24")
 

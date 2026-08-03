@@ -898,12 +898,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(row)
         }
 
-        // Needs Attention — only auth required, connection errors, quarantine (NOT disabled)
+        // Needs Attention — only auth required, connection errors, quarantine
+        // (NOT disabled). One collapsed row: the count is the glanceable fact,
+        // the per-server detail is a hover away, and N servers no longer cost
+        // N rows of a menu that opens with a chart. Absent entirely when
+        // nothing needs attention.
         let attentionServers = appState.serversNeedingAttention
         if !attentionServers.isEmpty {
-            let header = NSMenuItem(title: "Needs Attention (\(attentionServers.count))", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
+            let parent = NSMenuItem(title: "Needs Attention (\(attentionServers.count))",
+                                    action: nil, keyEquivalent: "")
+            parent.image = NSImage(systemSymbolName: "exclamationmark.triangle",
+                                   accessibilityDescription: "needs attention")
+            let submenu = NSMenu(title: "Needs Attention")
 
             for server in attentionServers {
                 let action = server.health?.action ?? ""
@@ -924,8 +930,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // by VoiceOver (same FR-025 discipline as the glance rows).
                 item.setAccessibilityLabel(fullTitle)
                 item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
-                menu.addItem(item)
+                submenu.addItem(item)
             }
+            parent.submenu = submenu
+            menu.addItem(parent)
             menu.addItem(.separator())
         }
 

@@ -122,10 +122,11 @@ final class GlanceSection {
     private var hasBuilt = false
     private var builtVisible = false
 
-    /// What kind of row the histogram block was last built with. A text row and
-    /// a 96 pt chart have different heights, so a kind change is structural;
-    /// content changes within a kind are in-place rewrites.
-    private enum HistogramRowKind: Equatable { case loading, failed, chart }
+    /// What kind of row the histogram block was last built with. The three
+    /// text kinds share one-line geometry and rewrite each other in place; a
+    /// text ↔ chart change is structural (a text row and a 96 pt chart have
+    /// different heights).
+    private enum HistogramRowKind: Equatable { case loading, failed, idle, chart }
     private var builtHistogramKind: HistogramRowKind?
 
     /// The histogram row currently installed, and — when it is the chart — the
@@ -690,6 +691,16 @@ final class GlanceSection {
             histogramRow = item
             return item
         case .loaded(let bars):
+            // A loaded-but-idle day is a sentence, not a chart: 24 empty bars
+            // read as a broken widget, while the words say exactly what the
+            // flat axis would have implied.
+            if bars.allSatisfy({ $0.total == 0 }) {
+                builtHistogramKind = .idle
+                builtHistogramBars = nil
+                let item = Self.mutedItem(Self.idleHistogramTitle)
+                histogramRow = item
+                return item
+            }
             builtHistogramKind = .chart
             if let cached = histogramRow, builtHistogramBars == bars,
                builtHistogramTimeZoneID == TimeZone.current.identifier {
@@ -703,11 +714,16 @@ final class GlanceSection {
         }
     }
 
+    /// The idle row's text — a statement about the last 24 hours, matching the
+    /// claim the accessibility summary makes for the same axis.
+    static let idleHistogramTitle = "No calls in the last 24h"
+
     private static func kind(of state: HistogramState) -> HistogramRowKind {
         switch state {
         case .loading: return .loading
         case .failed: return .failed
-        case .loaded: return .chart
+        case .loaded(let bars):
+            return bars.allSatisfy { $0.total == 0 } ? .idle : .chart
         }
     }
 
@@ -721,33 +737,40 @@ final class GlanceSection {
     /// next rebuild installs the right one.
     private func refreshHistogramRow(with histogramState: HistogramState) {
         guard let item = histogramRow, let builtKind = builtHistogramKind else { return }
-        switch (builtKind, Self.kind(of: histogramState)) {
-        case (.chart, .chart):
+        let newKind = Self.kind(of: histogramState)
+        switch (builtKind == .chart, newKind == .chart) {
+        case (true, true):
             guard case .loaded(let bars) = histogramState, builtHistogramBars != bars else { return }
             item.view = histogramChartItemFactory(bars).view
             builtHistogramBars = bars
             builtHistogramTimeZoneID = TimeZone.current.identifier
-        case (.loading, .loading), (.failed, .failed), (.loading, .failed), (.failed, .loading):
-            applyMutedHistogramText(for: histogramState, to: item)
-        case (.chart, _), (_, .chart):
+        case (false, false):
+            applyMutedHistogramText(for: histogramState, kind: newKind, to: item)
+        default:
             break
         }
     }
 
     /// Rewrite a text-kind histogram row to describe `histogramState`.
-    private func applyMutedHistogramText(for histogramState: HistogramState, to item: NSMenuItem) {
-        switch histogramState {
+    private func applyMutedHistogramText(
+        for histogramState: HistogramState, kind: HistogramRowKind, to item: NSMenuItem
+    ) {
+        switch kind {
         case .loading:
             Self.setMutedTitle("Activity (24h) — loading…", on: item)
             item.toolTip = nil
-            builtHistogramKind = .loading
-        case .failed(let message):
+        case .failed:
             Self.setMutedTitle("Activity (24h) unavailable", on: item)
-            if item.toolTip != message { item.toolTip = message }
-            builtHistogramKind = .failed
-        case .loaded:
-            break
+            if case .failed(let message) = histogramState, item.toolTip != message {
+                item.toolTip = message
+            }
+        case .idle:
+            Self.setMutedTitle(Self.idleHistogramTitle, on: item)
+            item.toolTip = nil
+        case .chart:
+            return
         }
+        builtHistogramKind = kind
     }
 
     /// A disabled, secondary-coloured text row. Setting `attributedTitle`
