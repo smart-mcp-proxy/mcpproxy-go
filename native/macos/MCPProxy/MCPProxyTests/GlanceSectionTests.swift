@@ -136,6 +136,24 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertFalse(titles.contains("Recent"))
     }
 
+    /// The frame is the histogram's HOUR-ALIGNED axis, not a raw 24×3600
+    /// cutoff: a call 23 h 30 m old whose hour has already slid off the axis
+    /// is invisible to the chart and the header, so a Recent row for it would
+    /// recreate the contradiction one hour at a time.
+    func testARowWhoseHourSlidOffTheAxisIsHiddenWithIt() {
+        let state = Self.busyState()
+        state.glanceActivity = [
+            // 23 h 30 m before `now` (08:00) — inside 86,400 s, but its hour
+            // (yesterday 08:00) is older than the axis's oldest (09:00).
+            Self.entry(id: "edge", server: "github", tool: "create_issue",
+                       timestamp: "2027-01-14T08:30:00Z", session: "sess-edge")
+        ]
+        let section = Self.makeSection()
+        let titles = section.items(for: state, now: Self.now).map(\.title)
+        XCTAssertFalse(titles.contains { $0.hasPrefix("github:create_issue") },
+                       "Recent and the chart must agree at the window's edge")
+    }
+
     func testFirstClauseKeepsOnlyTheLeadingClause() {
         XCTAssertEqual(GlanceSection.firstClause(of: "auth failed: token expired"), "auth failed")
         XCTAssertEqual(GlanceSection.firstClause(of: "  boom  "), "boom")

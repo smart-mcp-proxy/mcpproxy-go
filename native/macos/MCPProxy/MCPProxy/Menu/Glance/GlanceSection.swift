@@ -323,15 +323,18 @@ final class GlanceSection {
     private static func overflowTitle(_ hidden: Int) -> String { "+\(hidden) more" }
 
     /// The Recent section's rows: qualifying runs whose newest record falls
-    /// inside the menu's ONE frame — `GlancePresence.lookback`, the same 24
-    /// hours the histogram draws and the header counts. A record the log still
-    /// retains from days ago must not sit beside a chart that says the day was
-    /// quiet (the inconsistency this frame exists to end). An unparseable
-    /// timestamp keeps its row: showing it is the safer failure.
+    /// inside the menu's ONE frame — the same HOUR-ALIGNED 24-bar axis the
+    /// histogram draws and `glanceCallsLast24h` sums, not a raw 86,400-second
+    /// cutoff. The two must agree at the edge: a run 23 h 40 m old whose hour
+    /// has already slid off the axis showing in Recent would recreate, one
+    /// hour at a time, the very contradiction this frame exists to end. A
+    /// record the log still retains from days ago never appears; an
+    /// unparseable timestamp keeps its row — showing it is the safer failure.
     private static func recentRuns(for state: AppState, now: Date) -> [GlanceRun] {
-        GlanceSelection.activityRows(from: state.glanceActivity).filter { run in
+        let oldestHour = AppState.floorToHour(now).addingTimeInterval(-23 * 3600)
+        return GlanceSelection.activityRows(from: state.glanceActivity).filter { run in
             guard let at = GlanceFormatting.parseTimestamp(run.timestamp) else { return true }
-            return now.timeIntervalSince(at) <= GlancePresence.lookback
+            return AppState.floorToHour(at) >= oldestHour
         }
     }
 
