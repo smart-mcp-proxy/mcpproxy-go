@@ -29,13 +29,13 @@ final class GlanceSectionTests: XCTestCase {
     func testHeaderShowsCallsThisHourAndClientCount() {
         let section = Self.makeSection()
         let items = section.items(for: Self.busyState(), now: Self.now)
-        XCTAssertEqual(items.first?.title, "12 calls this hour · 1 active")
+        XCTAssertEqual(items.first?.title, "12 calls in the last 24h · 1 active")
         XCTAssertFalse(items[0].isEnabled, "the header is a muted, non-clickable line")
     }
 
     func testHeaderOmitsCallCountUntilUsageLoads() {
         let state = Self.busyState()
-        state.callsThisHour = nil
+        state.usageTimeline = nil
         let section = Self.makeSection()
         XCTAssertEqual(section.items(for: state, now: Self.now).first?.title, "1 active")
     }
@@ -52,7 +52,7 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
 
         XCTAssertEqual(section.items(for: state, now: Self.now).first?.title,
-                       "12 calls this hour · 1 active · not updating")
+                       "12 calls in the last 24h · 1 active · not updating")
     }
 
     /// …and stops saying so once the feeds recover, without a rebuild: the
@@ -68,7 +68,7 @@ final class GlanceSectionTests: XCTestCase {
         state.clearGlanceFailure(.activity)
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "12 calls this hour · 1 active")
+        XCTAssertEqual(items[0].title, "12 calls in the last 24h · 1 active")
     }
 
     // MARK: - Recent section
@@ -79,8 +79,8 @@ final class GlanceSectionTests: XCTestCase {
             $0.isSeparatorItem ? "—" : $0.title
         }
         XCTAssertEqual(Array(titles.prefix(7)), [
-            "12 calls this hour · 1 active",
-            "Activity (24h) — loading…",
+            "12 calls in the last 24h · 1 active",
+            "Activity (24h)",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -108,13 +108,32 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertNotNil(items[6].action)
     }
 
-    func testNoActivityShowsOneMutedRow() {
+    /// One frame everywhere: with nothing inside the 24 hours the Recent
+    /// header would explain an empty list, so the section is just the door to
+    /// the full log.
+    func testNoQualifyingActivityHidesTheRecentSection() {
         let state = Self.busyState()
         state.glanceActivity = []
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[4]
-        XCTAssertEqual(row.title, "No tool calls yet")
-        XCTAssertFalse(row.isEnabled)
+        let titles = section.items(for: state, now: Self.now).map(\.title)
+        XCTAssertFalse(titles.contains("Recent"))
+        XCTAssertFalse(titles.contains("No tool calls yet"))
+        XCTAssertTrue(titles.contains("Open Activity…"),
+                      "the door to the full log stays")
+    }
+
+    /// The frame in action: a record the log retains from days ago must not
+    /// sit beside a chart that says the day was quiet.
+    func testRowsOlderThanTheFrameAreNotShown() {
+        let state = Self.busyState()
+        state.glanceActivity = [
+            Self.entry(id: "old", server: "github", tool: "create_issue",
+                       timestamp: "2027-01-05T08:00:00Z", session: "sess-old")
+        ]
+        let section = Self.makeSection()
+        let titles = section.items(for: state, now: Self.now).map(\.title)
+        XCTAssertFalse(titles.contains { $0.hasPrefix("github:create_issue") })
+        XCTAssertFalse(titles.contains("Recent"))
     }
 
     func testFirstClauseKeepsOnlyTheLeadingClause() {
@@ -455,7 +474,7 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
 
         let row = section.items(for: state, now: Self.now)[9]
-        XCTAssertEqual(row.title, "No recent clients")
+        XCTAssertEqual(row.title, "No clients in the last 24h")
         XCTAssertFalse(row.isEnabled)
 
         state.glanceSessions = [
@@ -472,7 +491,7 @@ final class GlanceSectionTests: XCTestCase {
         state.glanceSessions = []
         let section = Self.makeSection()
         let row = section.items(for: state, now: Self.now)[9]
-        XCTAssertEqual(row.title, "No recent clients")
+        XCTAssertEqual(row.title, "No clients in the last 24h")
         XCTAssertFalse(row.isEnabled)
     }
 
@@ -539,7 +558,7 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
 
-        XCTAssertEqual(items[0].title, "12 calls this hour")
+        XCTAssertEqual(items[0].title, "12 calls in the last 24h")
         XCTAssertEqual(items[9].title, "Codex — 1 call · seen 3h")
     }
 
@@ -547,8 +566,10 @@ final class GlanceSectionTests: XCTestCase {
     /// muted placeholder, read straight out of `items(for:)` — there is no
     /// submenu to open any more.
     func testHistogramShowsLoadingUntilUsageArrives() {
+        let state = Self.busyState()
+        state.usageTimeline = nil
         let section = Self.makeSection()
-        let histogram = section.items(for: Self.busyState(), now: Self.now)[1]
+        let histogram = section.items(for: state, now: Self.now)[1]
         XCTAssertEqual(histogram.title, "Activity (24h) — loading…")
         XCTAssertNil(histogram.submenu)
     }
@@ -589,8 +610,8 @@ final class GlanceSectionTests: XCTestCase {
         let items = section.items(for: Self.busyState(), now: Self.now)
         let titles = items.map { $0.isSeparatorItem ? "—" : $0.title }
         XCTAssertEqual(titles, [
-            "12 calls this hour · 1 active",
-            "Activity (24h) — loading…",
+            "12 calls in the last 24h · 1 active",
+            "Activity (24h)",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -610,8 +631,9 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let items = section.items(for: Self.busyState(), now: Self.now)
 
-        XCTAssertEqual(items[0].title, "12 calls this hour · 1 active")
-        XCTAssertEqual(items[1].title, "Activity (24h) — loading…")
+        XCTAssertEqual(items[0].title, "12 calls in the last 24h · 1 active")
+        XCTAssertEqual(items[1].title, "Activity (24h)",
+                       "busyState's loaded timeline puts the real chart here")
         XCTAssertNil(items[1].submenu, "the histogram renders inline, not behind a submenu")
         XCTAssertTrue(items[2].isSeparatorItem)
         XCTAssertEqual(items[3].title, "Recent")
@@ -632,10 +654,10 @@ final class GlanceSectionTests: XCTestCase {
                        error: "auth failed: token expired. retry after refresh",
                        timestamp: "2027-01-15T07:58:00Z", session: "sess-b")
         ]
-        state.callsThisHour = 13
+        state.usageTimeline = [UsageBucket(start: Self.now, calls: 13, errors: 0, totalRespBytes: 0)]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "13 calls this hour · 1 active")
+        XCTAssertEqual(items[0].title, "13 calls in the last 24h · 1 active")
         XCTAssertEqual(row.title, "obsidian:search_notes — 5s")
         XCTAssertEqual(row.representedObject as? String, "sess-c",
                        "the click payload must follow the title, or the row opens the previous record's session")
@@ -668,17 +690,16 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
 
-        state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
-        state.callsThisHour = 13
+        state.usageTimeline = [UsageBucket(start: Self.now, calls: 13, errors: 0, totalRespBytes: 0)]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "13 calls this hour · 1 active")
+        XCTAssertEqual(items[0].title, "13 calls in the last 24h · 1 active")
 
         // And it is still updating a cycle later: the freeze was for the rest
         // of the session, not for one tick.
-        state.callsThisHour = 14
+        state.usageTimeline = [UsageBucket(start: Self.now, calls: 14, errors: 0, totalRespBytes: 0)]
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "14 calls this hour · 1 active")
+        XCTAssertEqual(items[0].title, "14 calls in the last 24h · 1 active")
     }
 
     func testUpdateInPlaceBeforeFirstBuildReportsStructural() {
@@ -941,7 +962,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = AppState()
         // coreState first: its didSet clears the glance feeds on any non-connected state.
         state.coreState = .connected
-        state.callsThisHour = 12
+        state.usageTimeline = [UsageBucket(start: now, calls: 12, errors: 0, totalRespBytes: 0)]
         state.glanceActivity = [
             entry(id: "a", server: "github", tool: "create_issue",
                   timestamp: "2027-01-15T07:59:30Z", session: "sess-a"),

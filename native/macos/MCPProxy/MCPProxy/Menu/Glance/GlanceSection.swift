@@ -168,9 +168,15 @@ final class GlanceSection {
 
         var items: [NSMenuItem] = []
 
-        let summary = disabledItem(titled: summaryTitle(for: state, now: now))
-        summaryItem = summary
-        items.append(summary)
+        // The summary has nothing to say for an idle proxy with no clients —
+        // the idle histogram row already speaks for the day — so an empty
+        // title gets no row rather than a blank line.
+        let summaryText = summaryTitle(for: state, now: now)
+        if !summaryText.isEmpty {
+            let summary = disabledItem(titled: summaryText)
+            summaryItem = summary
+            items.append(summary)
+        }
 
         // The day before the minute (FR-021). The histogram answers "what has
         // been happening?" in one glyph, so it belongs beside the summary line
@@ -180,11 +186,13 @@ final class GlanceSection {
         items.append(histogramRowItem(for: state, now: now))
         items.append(.separator())
 
-        items.append(disabledItem(titled: "Recent"))
-        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
-        if runs.isEmpty {
-            items.append(disabledItem(titled: "No tool calls yet"))
-        } else {
+        // One frame for the whole menu: rows outside the histogram's 24 hours
+        // do not appear beside a chart (or an idle sentence) that says the day
+        // was quieter. When nothing qualifies the section is just the door to
+        // the full log — a header over an empty list explains nothing.
+        let runs = Self.recentRuns(for: state, now: now)
+        if !runs.isEmpty {
+            items.append(disabledItem(titled: "Recent"))
             for run in runs {
                 var row = ActivityRow(item: actionableItem())
                 apply(run, to: &row, now: now)
@@ -250,7 +258,12 @@ final class GlanceSection {
         guard isVisible(for: state) == builtVisible else { return false }
         guard builtVisible else { return true }
 
-        let runs = GlanceSelection.activityRows(from: state.glanceActivity)
+        let summary = summaryTitle(for: state, now: now)
+        // The summary row appears only when it has something to say, so its
+        // presence flipping is gaining or losing a row — structural (FR-023).
+        guard summary.isEmpty == (summaryItem == nil) else { return false }
+
+        let runs = Self.recentRuns(for: state, now: now)
         let presence = Self.clientList(for: state, now: now)
         let clients = presence.rows
         guard runs.count == activityRows.count,
@@ -275,8 +288,7 @@ final class GlanceSection {
             return false
         }
 
-        let summary = summaryTitle(for: state, now: now)
-        if summaryItem?.title != summary { summaryItem?.title = summary }
+        if let summaryItem, summaryItem.title != summary { summaryItem.title = summary }
         // `zip`, like the sibling loop below: indexing `entries` by
         // `activityRows.indices` reads out of bounds if the count guard above is
         // ever weakened, and zip cannot.
@@ -309,6 +321,19 @@ final class GlanceSection {
     }
 
     private static func overflowTitle(_ hidden: Int) -> String { "+\(hidden) more" }
+
+    /// The Recent section's rows: qualifying runs whose newest record falls
+    /// inside the menu's ONE frame — `GlancePresence.lookback`, the same 24
+    /// hours the histogram draws and the header counts. A record the log still
+    /// retains from days ago must not sit beside a chart that says the day was
+    /// quiet (the inconsistency this frame exists to end). An unparseable
+    /// timestamp keeps its row: showing it is the safer failure.
+    private static func recentRuns(for state: AppState, now: Date) -> [GlanceRun] {
+        GlanceSelection.activityRows(from: state.glanceActivity).filter { run in
+            guard let at = GlanceFormatting.parseTimestamp(run.timestamp) else { return true }
+            return now.timeIntervalSince(at) <= GlancePresence.lookback
+        }
+    }
 
     /// The overflow row's current text, for tests that pin it after an in-place
     /// update — the item itself is private, and reaching into the menu to find
@@ -573,7 +598,7 @@ final class GlanceSection {
     /// the section can actually stand behind: with a stateless transport there
     /// is no such thing as a currently-connected client, and the old wording
     /// announced "nothing is connected" every time the last session timed out.
-    static let noClientsTitle = "No recent clients"
+    static let noClientsTitle = "No clients in the last 24h"
 
     /// The presence indicator's glyph.
     ///
@@ -813,11 +838,16 @@ final class GlanceSection {
     /// headline over a section that had rows in it.
     private func summaryTitle(for state: AppState, now: Date = Date()) -> String {
         var parts: [String] = []
-        // `glanceCallsThisHour`, not the raw polled `callsThisHour`: the rows
-        // below arrive over SSE and the poll is 30 seconds apart, so the raw
-        // count sat under rows it had never heard of (GH #934).
-        if let calls = state.glanceCallsThisHour(now: now) {
-            parts.append(calls == 1 ? "1 call this hour" : "\(calls) calls this hour")
+        // The menu speaks ONE time frame: the same 24 hours the histogram
+        // draws, the Recent rows are filtered to, and the presence lookback
+        // uses — a header counting a different window than the chart under it
+        // is how "no calls" ends up above rows from days ago.
+        //
+        // `glanceCallsLast24h` reconciles the poll with live SSE (GH #934),
+        // and a zero says nothing the idle histogram row does not already say,
+        // so the segment appears only when there is something to count.
+        if let calls = state.glanceCallsLast24h(now: now), calls > 0 {
+            parts.append(calls == 1 ? "1 call in the last 24h" : "\(calls) calls in the last 24h")
         }
         if let clients = state.glanceClientSummary(now: now) { parts.append(clients) }
         if state.glanceStale { parts.append("not updating") }

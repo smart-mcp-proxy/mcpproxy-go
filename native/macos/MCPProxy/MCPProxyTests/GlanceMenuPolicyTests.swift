@@ -62,7 +62,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
         let rows = section.items(for: state, now: GlanceFixtures.now)
 
         let summaryBefore = rows[0].title
-        XCTAssertEqual(summaryBefore, "12 calls this hour · 1 active")
+        XCTAssertEqual(summaryBefore, "12 calls in the last 24h · 1 active")
 
         var guardState = MenuRebuildGuard()
         guardState.menuWillOpen()
@@ -71,7 +71,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
         // count moves with it. The header is set deliberately: refusing an
         // update has to change *nothing*, and a header that alone kept moving
         // would describe a set of rows that is not the one below it.
-        state.callsThisHour = 99
+        state.usageTimeline = [UsageBucket(start: GlanceFixtures.now, calls: 99, errors: 0, totalRespBytes: 0)]
         state.glanceActivity.insert(
             GlanceFixtures.entry(id: "c", server: "slack", tool: "post_message",
                                  timestamp: "2027-01-15T07:59:50Z", session: "sess-a"),
@@ -110,7 +110,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
 
         // Only the SECOND row changes shape; the first row's own text would
         // still move, because `later` is five minutes on.
-        state.callsThisHour = 99
+        state.usageTimeline = [UsageBucket(start: GlanceFixtures.now, calls: 99, errors: 0, totalRespBytes: 0)]
         state.glanceActivity[1] = GlanceFixtures.entry(
             id: "b", server: "jira", tool: "get_issue",
             timestamp: "2027-01-15T07:58:00Z", session: nil,

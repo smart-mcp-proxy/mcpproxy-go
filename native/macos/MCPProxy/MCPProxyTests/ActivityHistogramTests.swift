@@ -255,14 +255,16 @@ final class GlanceInlineHistogramTests: XCTestCase {
                       action: #selector(ClickStub.openGlanceRow(_:)))
     }
 
-    /// The histogram row: always the summary line's neighbour.
+    /// The histogram row: the last item of the block that precedes the first
+    /// separator — its position relative to the summary moves with whether the
+    /// summary has anything to say.
     private func histogramRow(_ section: GlanceSection, _ state: AppState) -> NSMenuItem {
         let items = section.items(for: state, now: Fixture.now)
-        guard items.count > 1 else {
+        guard let separator = items.firstIndex(where: { $0.isSeparatorItem }), separator > 0 else {
             XCTFail("the block is hidden, so there is no histogram row")
             return NSMenuItem()
         }
-        return items[1]
+        return items[separator - 1]
     }
 
     // MARK: - The three kinds
@@ -414,13 +416,14 @@ final class GlanceInlineHistogramTests: XCTestCase {
         let section = makeSection()
         let state = connectedState()
         let items = section.items(for: state, now: Fixture.now)
-        XCTAssertEqual(items[1].title, "Activity (24h) — loading…")
+        XCTAssertEqual(items[0].title, "Activity (24h) — loading…")
 
         state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
 
-        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now),
-                      "the rest of the block keeps updating in place")
-        XCTAssertEqual(items[1].title, "Activity (24h) — loading…",
+        XCTAssertFalse(section.updateInPlace(for: state, now: Fixture.now),
+                       "the timeline also brings the header's call count into being — "
+                       + "a new summary row is structural, and the rebuild installs the chart")
+        XCTAssertEqual(items[0].title, "Activity (24h) — loading…",
                        "the row's height cannot change under the cursor")
         XCTAssertEqual(histogramRow(section, state).title, "CHART:24",
                        "the next rebuild installs the chart")
@@ -435,7 +438,8 @@ final class GlanceInlineHistogramTests: XCTestCase {
 
         state.usageTimeline = nil
 
-        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now))
+        XCTAssertFalse(section.updateInPlace(for: state, now: Fixture.now),
+                       "losing the whole timeline also empties the header segment — structural")
         XCTAssertEqual(row.title, "CHART:24",
                        "real (if stale) data stays on screen; the next rebuild decides")
     }

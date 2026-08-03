@@ -45,7 +45,7 @@ final class MenuOpenNetworkTests: XCTestCase {
         // menuWillOpen tomorrow fails this test whichever route it takes.
         state.apiClient = GlanceStubURLProtocol.makeClient()
         state.coreState = .connected
-        state.callsThisHour = 12
+        state.usageTimeline = [UsageBucket(start: Date(), calls: 12, errors: 0, totalRespBytes: 0)]
         state.glanceActivity = [
             Self.entry(id: "a", server: "github", tool: "create_issue",
                        timestamp: "2027-01-15T07:59:30Z"),
@@ -61,7 +61,7 @@ final class MenuOpenNetworkTests: XCTestCase {
         // The real sequence.
         controller.menuWillOpen(menu)
         // A poll lands while the user is reading the menu: the in-place branch.
-        state.callsThisHour = 13
+        state.usageTimeline = [UsageBucket(start: Date(), calls: 13, errors: 0, totalRespBytes: 0)]
         controller.rebuildMenu()
         controller.menuDidClose(menu)
 
@@ -97,7 +97,7 @@ final class MenuOpenNetworkTests: XCTestCase {
 
         let state = controller.appState
         state.coreState = .connected
-        state.callsThisHour = 12
+        state.usageTimeline = [UsageBucket(start: Date(), calls: 12, errors: 0, totalRespBytes: 0)]
         state.glanceActivity = [
             Self.entry(id: "a", server: "github", tool: "create_issue",
                        timestamp: "2027-01-15T07:59:30Z")
@@ -112,12 +112,12 @@ final class MenuOpenNetworkTests: XCTestCase {
         XCTAssertTrue(titles.contains("Recent"), "the glance block was not built at all")
         XCTAssertTrue(titles.contains { $0.hasPrefix("github:create_issue") },
                       "the activity rows were not built")
-        let summary = try XCTUnwrap(menu.items.first { $0.title.contains("calls this hour") })
+        let summary = try XCTUnwrap(menu.items.first { $0.title.contains("calls in the last 24h") })
 
-        state.callsThisHour = 13
+        state.usageTimeline = [UsageBucket(start: Date(), calls: 13, errors: 0, totalRespBytes: 0)]
         controller.rebuildMenu()
 
-        XCTAssertTrue(summary.title.hasPrefix("13 calls this hour"),
+        XCTAssertTrue(summary.title.hasPrefix("13 calls in the last 24h"),
                       "the open menu's rows must be rewritten in place, not left at menu-open time")
         XCTAssertEqual(source.totalCallCount, 0)
     }

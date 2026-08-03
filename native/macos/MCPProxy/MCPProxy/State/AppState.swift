@@ -417,6 +417,35 @@ final class AppState: ObservableObject {
         entry.type == "tool_call" && !(entry.toolName ?? "").isEmpty
     }
 
+    /// Calls recorded on the 24-hour axis ending at `now` — the same window
+    /// the histogram draws and `GlancePresence.lookback` uses, so every number
+    /// in the glance describes ONE frame.
+    ///
+    /// Buckets are UTC-hour aligned and sparse; anything whose hour has slid
+    /// off the axis is dropped, exactly as `ActivityHistogram.bars` drops it.
+    static func callsInLast24Hours(_ timeline: [UsageBucket], now: Date = Date()) -> Int {
+        let oldestHour = floorToHour(now).addingTimeInterval(-23 * 3600)
+        return timeline.reduce(0) { total, bucket in
+            floorToHour(bucket.start) >= oldestHour ? total + max(0, bucket.calls) : total
+        }
+    }
+
+    /// The header's call count over the menu's 24h frame: the polled window
+    /// total plus the calls that arrived over SSE since that poll — the same
+    /// two-source reconciliation as `glanceCallsThisHour` (GH #934), on the
+    /// window the rest of the glance describes. Still `nil` before the first
+    /// usage response, so the header omits the segment rather than inventing
+    /// a count.
+    @MainActor
+    func glanceCallsLast24h(now: Date = Date()) -> Int? {
+        guard let usageTimeline else { return nil }
+        let base = AppState.callsInLast24Hours(usageTimeline, now: now)
+        // Live increments are all newer than the poll they follow; the age
+        // filter only matters for a menu left open across a very long gap.
+        let live = liveCallsSinceUsagePoll.filter { now.timeIntervalSince($0) < 24 * 3600 }.count
+        return base + live
+    }
+
     /// The header's call count: the polled hour total plus the calls that have
     /// arrived over SSE since that poll and fall in the same hour.
     ///
