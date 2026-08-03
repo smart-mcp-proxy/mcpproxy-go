@@ -208,6 +208,11 @@ final class ConnectClientModel: ObservableObject {
         /// Extra guidance for the row: the core's remediation when access is
         /// denied, or its caveat for a supported client.
         let note: String?
+        /// Whether the note is cautionary (remediation, a core caveat) or
+        /// merely informational (the looked-for paths). Drives which visual
+        /// channel renders it — the warning channel must not be diluted by
+        /// path hints on every not-installed row.
+        let noteIsWarning: Bool
         let connected: Bool
 
         var id: String { clientId }
@@ -387,13 +392,15 @@ final class ConnectClientModel: ObservableObject {
 
     private func row(for client: APIClient.ClientStatus) -> ClientRow {
         let resolved = resolvedDetails[client.clientId] ?? client
+        let note = Self.note(for: resolved)
         return ClientRow(
             clientId: client.clientId,
             displayName: client.displayName,
             symbolName: client.symbolName,
             stateLabel: Self.stateLabel(for: resolved),
             isSelectable: client.supported,
-            note: Self.note(for: resolved),
+            note: note?.text,
+            noteIsWarning: note?.isWarning ?? false,
             connected: resolved.connected
         )
     }
@@ -422,15 +429,24 @@ final class ConnectClientModel: ObservableObject {
         return client.exists ? "Config present" : "No config found"
     }
 
-    private static func note(for client: APIClient.ClientStatus) -> String? {
+    private static func note(for client: APIClient.ClientStatus) -> (text: String, isWarning: Bool)? {
         if client.accessState == .denied, let remediation = client.remediation,
            !remediation.isEmpty {
-            return remediation
+            return (remediation, true)
         }
-        if let note = client.note, !note.isEmpty { return note }
-        if client.supported, !client.connected, !client.exists,
-           client.accessState != .malformed {
-            return lookedForDescription(for: client)
+        if let note = client.note, !note.isEmpty { return (note, true) }
+        if client.supported, !client.connected, !client.exists {
+            switch client.accessState {
+            case .none, .unknown, .absent:
+                if let looked = lookedForDescription(for: client) { return (looked, false) }
+            case .accessible, .denied, .malformed:
+                // A denied stat is not evidence of absence: the aggregate list
+                // sets "denied" WITHOUT remediation, and saying "Looked for …"
+                // there would claim the files were checked when the check was
+                // forbidden — the exact wrong-problem label the core refuses
+                // to produce.
+                break
+            }
         }
         return nil
     }

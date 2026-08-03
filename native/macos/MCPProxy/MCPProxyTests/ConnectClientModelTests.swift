@@ -505,7 +505,7 @@ final class ConnectClientModelTests: XCTestCase {
     }
 
     /// The looked-for hint never displaces a real caveat: an explicit core note
-    /// (e.g. a bridge requirement) outranks it.
+    /// (e.g. a bridge requirement) outranks it — and keeps the warning channel.
     func testACoreNoteOutranksTheLookedForHint() async {
         let source = FakeConnectSource()
         source.clientsResults = [.success([
@@ -517,6 +517,61 @@ final class ConnectClientModelTests: XCTestCase {
         await model.loadList()
 
         XCTAssertEqual(model.rows.first?.note, "Requires the bundled stdio bridge")
+        XCTAssertEqual(model.rows.first?.noteIsWarning, true)
+    }
+
+    /// A denied stat is not evidence of absence. The aggregate list classifies a
+    /// permission-blocked stat as denied WITHOUT remediation; that row must not
+    /// say "Looked for …" — the files were never checked, and the note would
+    /// name the wrong problem under an "Access not granted" label.
+    func testADeniedRowWithoutRemediationGetsNoLookedForNote() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "cursor", exists: false, accessState: .denied)
+        ])]
+        let model = makeModel(source)
+
+        await model.loadList()
+
+        XCTAssertEqual(model.rows.first?.stateLabel, "Access not granted")
+        XCTAssertNil(model.rows.first?.note)
+    }
+
+    /// The looked-for hint is informational, not cautionary — it must not light
+    /// up the warning channel every real remediation uses.
+    func testTheLookedForHintIsNotAWarning() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "cursor", exists: false)
+        ])]
+        let model = makeModel(source)
+
+        await model.loadList()
+
+        XCTAssertEqual(model.rows.first?.noteIsWarning, false)
+    }
+
+    /// Paths under the actual home directory — which is where every real client
+    /// config lives — render tilde-abbreviated, with the shared directory named
+    /// once.
+    func testCheckedPathsUnderTheRealHomeAreTildeAbbreviated() async {
+        let home = NSHomeDirectory()
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(
+                id: "opencode", exists: false,
+                checkedPaths: ["\(home)/.config/opencode/opencode.jsonc",
+                               "\(home)/.config/opencode/opencode.json"]),
+            FakeConnectSource.client(id: "cursor", exists: false,
+                                     checkedPaths: ["\(home)/.cursor/mcp.json"])
+        ])]
+        let model = makeModel(source)
+
+        await model.loadList()
+
+        XCTAssertEqual(model.rows[0].note,
+                       "Looked for opencode.jsonc or opencode.json in ~/.config/opencode")
+        XCTAssertEqual(model.rows[1].note, "Looked for ~/.cursor/mcp.json")
     }
 
     /// An unsupported client the core gave no reason for still renders disabled

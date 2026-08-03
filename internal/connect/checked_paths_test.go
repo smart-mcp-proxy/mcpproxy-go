@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -50,6 +51,29 @@ func TestGetAllStatusReportsCheckedPaths(t *testing.T) {
 	cursor := statusFor(t, statuses, "cursor")
 	if len(cursor.CheckedPaths) != 1 || cursor.CheckedPaths[0] != ConfigPath("cursor", home) {
 		t.Fatalf("cursor checked_paths = %v, want [%s]", cursor.CheckedPaths, ConfigPath("cursor", home))
+	}
+}
+
+// Production Services are built without a homeDir (NewService); the opencode
+// candidates must still resolve to absolute paths, or both the jsonc
+// preference and checked_paths silently degrade to CWD-relative stats.
+func TestOpencodePathsAreAbsoluteWithoutAnExplicitHome(t *testing.T) {
+	if _, err := os.UserHomeDir(); err != nil {
+		t.Skip("no resolvable home directory")
+	}
+	s := NewService("127.0.0.1:8080", "key")
+
+	paths := s.checkedPaths("opencode")
+	if len(paths) != 2 {
+		t.Fatalf("checked paths = %v, want both opencode candidates", paths)
+	}
+	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			t.Fatalf("checked path %q is CWD-relative — empty homeDir must resolve via os.UserHomeDir", p)
+		}
+	}
+	if p := s.configPath("opencode"); !filepath.IsAbs(p) {
+		t.Fatalf("configPath %q is CWD-relative — the jsonc preference never fires in production", p)
 	}
 }
 
