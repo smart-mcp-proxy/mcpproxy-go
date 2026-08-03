@@ -188,7 +188,18 @@ func opencodeConfigDir(homeDir string) string {
 // opencodeConfigCandidates lists the global config files OpenCode itself loads,
 // highest precedence first: opencode.jsonc shadows opencode.json for the same
 // keys, and recent OpenCode versions bootstrap the .jsonc variant (#922).
+//
+// An empty homeDir resolves through os.UserHomeDir, exactly like ConfigPath —
+// production Services are built without one (NewService), and joining "" would
+// yield CWD-relative candidates that stat against the wrong directory.
 func opencodeConfigCandidates(homeDir string) []string {
+	if homeDir == "" {
+		var err error
+		homeDir, err = os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+	}
 	dir := opencodeConfigDir(homeDir)
 	return []string{
 		filepath.Join(dir, "opencode.jsonc"),
@@ -215,6 +226,19 @@ func (s *Service) configPath(clientID string) string {
 		}
 	}
 	return ConfigPath(clientID, s.homeDir)
+}
+
+// checkedPaths lists the config files the existence check consults for a
+// client, highest precedence first — the paths a "no config found" UI should
+// name. Static: no stat calls, so it is safe on the content-read-free path.
+func (s *Service) checkedPaths(clientID string) []string {
+	if clientID == "opencode" {
+		return opencodeConfigCandidates(s.homeDir)
+	}
+	if p := ConfigPath(clientID, s.homeDir); p != "" {
+		return []string{p}
+	}
+	return nil
 }
 
 // buildServerEntry returns the JSON/TOML-serializable map inserted into the

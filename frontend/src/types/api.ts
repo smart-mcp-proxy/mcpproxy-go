@@ -883,6 +883,9 @@ export interface ClientStatus {
   // privacy fix including the exact tccutil reset command).
   access_state?: AccessState
   remediation?: string
+  // Every config location the existence check consults, highest precedence
+  // first (e.g. OpenCode's opencode.jsonc then opencode.json).
+  checked_paths?: string[]
 }
 
 export interface ConnectResult {

@@ -231,7 +231,7 @@ struct ConnectClientView: View {
                 if let note = row.note {
                     Text(note)
                         .font(.caption2)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(row.noteIsWarning ? Color.orange : Color.secondary)
                 }
             }
             Spacer()
@@ -239,7 +239,9 @@ struct ConnectClientView: View {
         .padding(.vertical, 2)
         .opacity(row.isSelectable ? 1 : 0.5)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(row.displayName), \(row.stateLabel)")
+        .accessibilityLabel(
+            row.note.map { "\(row.displayName), \(row.stateLabel), \($0)" }
+                ?? "\(row.displayName), \(row.stateLabel)")
     }
 
     // MARK: Detail + preview
