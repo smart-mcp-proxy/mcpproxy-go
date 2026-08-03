@@ -51,10 +51,9 @@ final class GlanceSection {
     private weak var clickTarget: AnyObject?
     private let clickAction: Selector
 
-    /// Builds the histogram submenu's single custom item from a shaped 24-hour
-    /// axis. Injected so submenu-structure tests are independent of how the
-    /// chart renders; it defaults to the real chart, so no wiring step can
-    /// forget to set it.
+    /// Builds the inline chart item from a shaped 24-hour axis. Injected so
+    /// block-structure tests are independent of how the chart renders; it
+    /// defaults to the real chart, so no wiring step can forget to set it.
     var histogramChartItemFactory: ([HistogramBar]) -> NSMenuItem = ActivityHistogram.chartMenuItem
 
     // MARK: Configuration
@@ -136,6 +135,10 @@ final class GlanceSection {
     /// nobody has opened: same bars, same item, no work.
     private var histogramRow: NSMenuItem?
     private var builtHistogramBars: [HistogramBar]?
+    /// Time zone the cached chart's VoiceOver summary was formatted in. The
+    /// bars are UTC-keyed and survive a zone change, but "Busiest hour 14:00"
+    /// does not — a zone change invalidates the cache even with equal bars.
+    private var builtHistogramTimeZoneID: String?
 
     init(target: AnyObject?, action: Selector) {
         self.clickTarget = target
@@ -234,21 +237,18 @@ final class GlanceSection {
     /// text would leave a row whose click still opened the previous record's
     /// session. See `apply(_:to:now:)` for how "different record" is decided.
     ///
-    /// The histogram renders inline, so its KIND is structural again: a text
-    /// placeholder and a 132 pt chart have different heights, and swapping one
-    /// for the other resizes an open menu exactly as an extra row does. Within
-    /// a kind it is an ordinary in-place rewrite — a same-size view swap when
-    /// the bars moved, a tooltip refresh on the failure row.
+    /// The histogram never freezes the block: the timeline loading while the
+    /// menu is open must not cost the user live rows for the whole menu
+    /// session (see `testTheTimelineArrivingWhileTheMenuIsOpenKeepsRowsUpdating`).
+    /// Its two TEXT kinds share one-line geometry and rewrite each other in
+    /// place; a text ↔ chart flip DOES change the row's height, so that row
+    /// alone stays as built until the next rebuild — `menuWillOpen` runs one
+    /// before every display — while everything else keeps updating.
     @discardableResult
     func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
         guard hasBuilt else { return false }
         guard isVisible(for: state) == builtVisible else { return false }
         guard builtVisible else { return true }
-
-        let histogramState = ActivityHistogram.state(timeline: state.usageTimeline,
-                                                     errorMessage: state.usageError,
-                                                     now: now)
-        guard Self.kind(of: histogramState) == builtHistogramKind else { return false }
 
         let runs = GlanceSelection.activityRows(from: state.glanceActivity)
         let presence = Self.clientList(for: state, now: now)
@@ -288,7 +288,9 @@ final class GlanceSection {
             let title = Self.overflowTitle(presence.hidden)
             if clientOverflowItem.title != title { clientOverflowItem.title = title }
         }
-        refreshHistogramRow(with: histogramState)
+        refreshHistogramRow(with: ActivityHistogram.state(timeline: state.usageTimeline,
+                                                          errorMessage: state.usageError,
+                                                          now: now))
         return true
     }
 
@@ -682,12 +684,14 @@ final class GlanceSection {
             return item
         case .loaded(let bars):
             builtHistogramKind = .chart
-            if let cached = histogramRow, builtHistogramBars == bars {
+            if let cached = histogramRow, builtHistogramBars == bars,
+               builtHistogramTimeZoneID == TimeZone.current.identifier {
                 return cached
             }
             let item = histogramChartItemFactory(bars)
             histogramRow = item
             builtHistogramBars = bars
+            builtHistogramTimeZoneID = TimeZone.current.identifier
             return item
         }
     }
@@ -700,21 +704,42 @@ final class GlanceSection {
         }
     }
 
-    /// Refresh the histogram row's content within its built kind: a same-size
-    /// view swap when the bars moved, a tooltip refresh on the failure row.
-    /// Never a resize — `updateInPlace` already reported a kind change as
-    /// structural, and the chart's frame is a fixed `chartItemSize`.
+    /// Refresh the histogram row without restructuring the menu — never a
+    /// resize. Within the chart kind, new bars swap the hosted view (the frame
+    /// is a fixed `chartItemSize`). The two TEXT kinds share one-line
+    /// geometry, so loading ↔ failed rewrites the row in place — a fetch that
+    /// fails while the menu is open must not leave "loading…" on screen
+    /// telling a quiet lie. A text ↔ chart flip is the one transition that
+    /// would change the row's height; that row alone stays as built, and the
+    /// next rebuild installs the right one.
     private func refreshHistogramRow(with histogramState: HistogramState) {
-        guard let item = histogramRow else { return }
-        switch histogramState {
-        case .loading:
-            break
-        case .failed(let message):
-            if item.toolTip != message { item.toolTip = message }
-        case .loaded(let bars):
-            guard builtHistogramBars != bars else { return }
+        guard let item = histogramRow, let builtKind = builtHistogramKind else { return }
+        switch (builtKind, Self.kind(of: histogramState)) {
+        case (.chart, .chart):
+            guard case .loaded(let bars) = histogramState, builtHistogramBars != bars else { return }
             item.view = histogramChartItemFactory(bars).view
             builtHistogramBars = bars
+            builtHistogramTimeZoneID = TimeZone.current.identifier
+        case (.loading, .loading), (.failed, .failed), (.loading, .failed), (.failed, .loading):
+            applyMutedHistogramText(for: histogramState, to: item)
+        case (.chart, _), (_, .chart):
+            break
+        }
+    }
+
+    /// Rewrite a text-kind histogram row to describe `histogramState`.
+    private func applyMutedHistogramText(for histogramState: HistogramState, to item: NSMenuItem) {
+        switch histogramState {
+        case .loading:
+            Self.setMutedTitle("Activity (24h) — loading…", on: item)
+            item.toolTip = nil
+            builtHistogramKind = .loading
+        case .failed(let message):
+            Self.setMutedTitle("Activity (24h) unavailable", on: item)
+            if item.toolTip != message { item.toolTip = message }
+            builtHistogramKind = .failed
+        case .loaded:
+            break
         }
     }
 
@@ -722,13 +747,21 @@ final class GlanceSection {
     /// leaves `title` intact, so the plain string stays available to tests and
     /// to accessibility.
     static func mutedItem(_ title: String) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        // Created with an empty title so `setMutedTitle`'s no-change guard
+        // cannot skip the attributed styling on first install.
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         item.isEnabled = false
+        setMutedTitle(title, on: item)
+        return item
+    }
+
+    private static func setMutedTitle(_ title: String, on item: NSMenuItem) {
+        guard item.title != title else { return }
+        item.title = title
         item.attributedTitle = NSAttributedString(string: title, attributes: [
             .font: NSFont.menuFont(ofSize: 0),
             .foregroundColor: NSColor.secondaryLabelColor
         ])
-        return item
     }
 
     // MARK: Header

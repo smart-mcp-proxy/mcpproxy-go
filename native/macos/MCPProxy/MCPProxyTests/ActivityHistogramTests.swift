@@ -368,27 +368,58 @@ final class GlanceInlineHistogramTests: XCTestCase {
     // MARK: - In-place rules
 
     /// A text placeholder and a 132 pt chart have different heights, so the
-    /// row's KIND changing is structural: it must wait for the menu to close.
-    func testAKindFlipIsStructural() {
+    /// flip cannot happen under the cursor — but it must not freeze the block
+    /// either (the timeline loads seconds after launch, exactly when the menu
+    /// is likely open). The update succeeds, the placeholder stays, and the
+    /// next rebuild — `menuWillOpen` runs one before every display — installs
+    /// the chart.
+    func testATextToChartFlipKeepsThePlaceholderButNotForever() {
         let section = makeSection()
         let state = connectedState()
-        _ = section.items(for: state, now: Fixture.now)
+        let items = section.items(for: state, now: Fixture.now)
+        XCTAssertEqual(items[1].title, "Activity (24h) — loading…")
 
         state.usageTimeline = []
 
-        XCTAssertFalse(section.updateInPlace(for: state, now: Fixture.now),
-                       "loading -> chart resizes the menu, so it defers to close")
+        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now),
+                      "the rest of the block keeps updating in place")
+        XCTAssertEqual(items[1].title, "Activity (24h) — loading…",
+                       "the row's height cannot change under the cursor")
+        XCTAssertEqual(histogramRow(section, state).title, "CHART:24",
+                       "the next rebuild installs the chart")
     }
 
-    func testLosingTheTimelineIsStructuralToo() {
+    func testLosingTheTimelineKeepsTheChartUntilTheNextRebuild() {
         let section = makeSection()
         let state = connectedState()
         state.usageTimeline = []
-        _ = section.items(for: state, now: Fixture.now)
+        let row = histogramRow(section, state)
+        XCTAssertEqual(row.title, "CHART:24")
 
         state.usageTimeline = nil
 
-        XCTAssertFalse(section.updateInPlace(for: state, now: Fixture.now))
+        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now))
+        XCTAssertEqual(row.title, "CHART:24",
+                       "real (if stale) data stays on screen; the next rebuild decides")
+    }
+
+    /// The two text kinds share one-line geometry, so a fetch that fails while
+    /// the menu is open replaces "loading…" in place — leaving it up would be
+    /// the quiet lie `HistogramState` exists to prevent.
+    func testALoadingRowBecomesTheFailureRowInPlace() {
+        let section = makeSection()
+        let state = connectedState()
+        let row = histogramRow(section, state)
+        XCTAssertEqual(row.title, "Activity (24h) — loading…")
+
+        state.recordUsageFailure("connection refused")
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now))
+        XCTAssertEqual(row.title, "Activity (24h) unavailable")
+        XCTAssertEqual(row.toolTip, "connection refused")
+        let attributes = row.attributedTitle!.attributes(at: 0, effectiveRange: nil)
+        XCTAssertEqual(attributes[.foregroundColor] as? NSColor, NSColor.secondaryLabelColor,
+                       "the in-place rewrite keeps the muted styling")
     }
 
     /// Within the chart kind, new bars are an ordinary in-place rewrite: the
