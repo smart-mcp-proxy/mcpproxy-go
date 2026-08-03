@@ -110,8 +110,11 @@ final class GlanceFormattingTests: XCTestCase {
     /// the title line), so they are pinned here rather than read back from the
     /// implementation.
     func testReasonAndErrorClauseBudgetsAreTheSpecsNumbers() {
-        XCTAssertEqual(GlanceFormatting.reasonBudget, 60)
-        XCTAssertEqual(GlanceFormatting.errorClauseBudget, 40)
+        // 44 keeps the widest text line inside the 24h chart block's width —
+        // the chart, never error prose, bounds the menu. 28 is the tighter
+        // budget for the pre-14.4 fallback where the clause shares the title.
+        XCTAssertEqual(GlanceFormatting.reasonBudget, 44)
+        XCTAssertEqual(GlanceFormatting.errorClauseBudget, 28)
     }
 
     // MARK: - Relative time

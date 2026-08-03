@@ -60,11 +60,10 @@ final class GlanceSection {
 
     /// Character budget for a row label before middle truncation kicks in.
     ///
-    /// Never tightened to make room for anything else on the title line
-    /// (FR-011a): the error clause has its own, smaller budget and is cut first,
-    /// and the age — the shortest and most perishable part of the row — is never
-    /// cut at all.
-    private static let labelBudget = 34
+    /// Sized so `label ×N — age` sits within the chart block's width — the
+    /// chart, not the longest tool name, is what bounds the menu. The age —
+    /// the shortest and most perishable part of the row — is never cut at all.
+    private static let labelBudget = 30
 
     /// Whether rows may carry a second line.
     ///
@@ -271,7 +270,7 @@ final class GlanceSection {
         // — a reason whose wording changed still occupies one line and is an
         // ordinary in-place rewrite.
         for (index, run) in zip(activityRows.indices, runs)
-        where (subtitleText(for: run.displayReason) == nil) != (activityRows[index].subtitleText == nil) {
+        where (subtitleText(for: run) == nil) != (activityRows[index].subtitleText == nil) {
             return false
         }
 
@@ -365,34 +364,35 @@ final class GlanceSection {
         let age = GlanceFormatting.relativeTime(run.timestamp, now: now)
         let status = run.worstStatus
         let failed = status != "success"
-        // The error clause is cut to its own budget before anything else on the
-        // line gives way (FR-011a): a backend that answers in paragraphs must
-        // not be able to squeeze out the name of the tool that ran.
-        let detail = failed
-            ? Self.firstClause(of: run.errorMessage).map {
-                GlanceFormatting.tailTruncated($0, limit: GlanceFormatting.errorClauseBudget)
-              }
-            : nil
+        let clause = failed ? Self.firstClause(of: run.errorMessage) : nil
 
-        // The reason is the row's second line, never part of its first: on a
-        // failed row the error joins the title and the reason keeps the
-        // subtitle, so "why it was attempted" and "how it went" are both
-        // readable at a glance (FR-011a).
+        // One fact per line bounds the menu (compact revision of FR-011a): the
+        // title is always `label ×N — age`, and on a failed row the error
+        // clause takes the second line — the failure mark already flags the row
+        // — while the reason retreats to the tooltip. Error prose on the title
+        // line was what made the whole menu wider than the chart it opens with.
+        //
+        // Pre-14.4 there is no second line, so the clause rejoins the title
+        // under its own, smaller budget (the documented FR-005 degradation).
         let reason = run.displayReason
-        let subtitle = subtitleText(for: reason)
+        let subtitle = subtitleText(for: run)
 
         let title: String
         var accessibility: String
-        if let detail {
+        if let clause, !supportsRowSubtitles {
+            let detail = GlanceFormatting.tailTruncated(clause, limit: GlanceFormatting.errorClauseBudget)
             title = "\(label)\(countSuffix) · \(detail) — \(age)"
-            accessibility = "\(fullLabel)\(spokenCount), failed: \(detail), \(age) ago"
         } else {
             title = "\(label)\(countSuffix) — \(age)"
+        }
+        // Spoken in full, and spoken on every macOS version — the lines are
+        // where facts are *seen*, not where they live (FR-006, FR-025).
+        if let clause {
+            accessibility = "\(fullLabel)\(spokenCount), failed: \(clause), \(age) ago"
+        } else {
             accessibility = "\(fullLabel)\(spokenCount), "
                 + "\(Self.outcomeDescription(forStatus: status)), \(age) ago"
         }
-        // Spoken in full, and spoken on every macOS version — the subtitle is
-        // where the reason is *seen*, not where it lives (FR-006, FR-025).
         if let reason { accessibility += ", reason: \(reason)" }
 
         // The tooltip is the row without any budget at all: full label, full
@@ -424,11 +424,18 @@ final class GlanceSection {
         row.runIdentity = identity
     }
 
-    /// The text a row's second line would show, or nil when it has none —
-    /// either because the record declared no reason (FR-007) or because this
-    /// system has no subtitle mechanism (FR-005).
-    private func subtitleText(for reason: String?) -> String? {
-        guard supportsRowSubtitles, let reason else { return nil }
+    /// The text a row's second line would show, or nil when it has none.
+    ///
+    /// On a failed row the line belongs to the error clause — "how it went"
+    /// outranks "why it was attempted" once something is wrong, and the full
+    /// reason stays in the tooltip. Otherwise it is the reason (FR-006/FR-007).
+    /// Nil on systems without the subtitle mechanism (FR-005).
+    private func subtitleText(for run: GlanceRun) -> String? {
+        guard supportsRowSubtitles else { return nil }
+        if run.worstStatus != "success", let clause = Self.firstClause(of: run.errorMessage) {
+            return GlanceFormatting.tailTruncated(clause, limit: GlanceFormatting.reasonBudget)
+        }
+        guard let reason = run.displayReason else { return nil }
         return GlanceFormatting.tailTruncated(reason, limit: GlanceFormatting.reasonBudget)
     }
 

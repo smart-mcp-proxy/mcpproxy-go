@@ -910,10 +910,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let summary = server.health?.summary ?? ""
                 let icon = actionIcon(for: action)
 
-                let title = "\(server.name) — \(summary.isEmpty ? actionDisplayName(for: action) : summary)"
+                let fullTitle = "\(server.name) — \(summary.isEmpty ? actionDisplayName(for: action) : summary)"
+                // Same width discipline as the glance rows: an untruncated core
+                // error must not stretch the whole menu past the chart block.
+                // The full text stays in the tooltip.
+                let title = GlanceFormatting.tailTruncated(
+                    fullTitle, limit: GlanceFormatting.reasonBudget)
                 let item = NSMenuItem(title: title, action: #selector(handleAttentionAction(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = server
+                item.toolTip = fullTitle
                 item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
                 menu.addItem(item)
             }

@@ -193,12 +193,13 @@ struct ActivityHistogramView: View {
                 AxisValueLabel(format: .dateTime.hour())
             }
         }
-        // Height covers the plot AND the legend below it. Sized so the legend
-        // is additive: it must not buy its place by shrinking 24 bars that are
-        // already only ~10 pt wide apiece.
-        .frame(width: 260, height: 116)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        // Height covers the plot AND the legend below it. Deliberately shallow:
+        // the chart is a shape to recognise, not a plot to read values off —
+        // relative bar heights survive 60 pt of plot, and a menu is the wrong
+        // place for more (the Web UI has the full-size version).
+        .frame(width: 248, height: 84)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         // One label for the whole chart: VoiceOver reading 48 unlabelled bar
         // marks would be worse than useless.
         .accessibilityElement(children: .ignore)
@@ -210,10 +211,10 @@ extension ActivityHistogram {
 
     /// Size of the hosted chart item, in points. Menu items do not auto-size a
     /// hosting view, so the frame is explicit — and it must match the view's
-    /// own size, or the row grows a band of dead space. 260 + 2*14 = 288 wide,
-    /// 116 + 2*8 = 132 tall; measured `NSHostingView.fittingSize` agrees, and
+    /// own size, or the row grows a band of dead space. 248 + 2*12 = 272 wide,
+    /// 84 + 2*6 = 96 tall; measured `NSHostingView.fittingSize` agrees, and
     /// `testRealChartItemIsSizedAndLabelled` keeps the two in step.
-    static let chartItemSize = NSSize(width: 288, height: 132)
+    static let chartItemSize = NSSize(width: 272, height: 96)
 
     /// The glance's single custom item: an `NSHostingView` wrapping the chart.
     ///

@@ -84,7 +84,7 @@ final class GlanceSectionTests: XCTestCase {
             "—",
             "Recent",
             "github:create_issue — 30s",
-            "jira:get_issue · auth failed — 2m",
+            "jira:get_issue — 2m",
             "Open Activity…"
         ])
     }
@@ -92,7 +92,7 @@ final class GlanceSectionTests: XCTestCase {
     func testActivityRowCarriesFullIdentity() {
         let section = Self.makeSection()
         let failed = section.items(for: Self.busyState(), now: Self.now)[5]
-        XCTAssertEqual(failed.title, "jira:get_issue · auth failed — 2m")
+        XCTAssertEqual(failed.title, "jira:get_issue — 2m")
         XCTAssertEqual(failed.representedObject as? String, "sess-b")
         XCTAssertEqual(failed.image?.accessibilityDescription, "failed")
         XCTAssertEqual(failed.toolTip, "jira:get_issue\nauth failed: token expired. retry after refresh")
@@ -190,7 +190,9 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let row = section.items(for: state, now: Self.now)[4]
 
-        XCTAssertEqual(row.title, "jira:get_issue ×3 · auth failed — 30s")
+        XCTAssertEqual(row.title, "jira:get_issue ×3 — 30s")
+        XCTAssertEqual(Self.subtitle(of: row), "auth failed",
+                       "the newest failure's clause takes the second line")
         XCTAssertEqual(row.image?.accessibilityDescription, "failed")
         XCTAssertEqual(row.toolTip, "jira:get_issue\nauth failed: token expired")
         XCTAssertEqual(row.accessibilityLabel(),
@@ -236,6 +238,10 @@ final class GlanceSectionTests: XCTestCase {
     func testADifferentRunInTheSameSlotRewritesTheRowIdentity() {
         let state = Self.burstState()
         let section = Self.makeSection()
+        // One-line rows on purpose: with subtitles, the failing replacement
+        // would also gain a line (structural, deferred); the turnover itself
+        // is what this test pins.
+        section.supportsRowSubtitles = false
         let items = section.items(for: state, now: Self.now)
         let iconBefore = items[4].image
         XCTAssertNil(iconBefore, "precondition: the successful burst row is unmarked")
@@ -260,6 +266,9 @@ final class GlanceSectionTests: XCTestCase {
     func testASameRunStillPicksUpALateFailure() {
         let state = Self.burstState()
         let section = Self.makeSection()
+        // One-line rows: with subtitles the late failure would gain a line,
+        // which is the structural case the next test pins.
+        section.supportsRowSubtitles = false
         let items = section.items(for: state, now: Self.now)
 
         state.glanceActivity[0] = Self.entry(
@@ -270,6 +279,22 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
         XCTAssertEqual(items[4].title, "jira:get_issue ×3 · rate limited — 30s")
         XCTAssertEqual(items[4].image?.accessibilityDescription, "failed")
+    }
+
+    /// With subtitles available, a late failure ADDS the error line — a row
+    /// growing a line resizes the menu, so it is structural and waits for
+    /// close (FR-023), exactly like a run gaining its reason.
+    func testALateFailureGainingItsErrorLineIsStructural() {
+        let state = Self.burstState()
+        let section = Self.makeSection()
+        _ = section.items(for: state, now: Self.now)
+
+        state.glanceActivity[0] = Self.entry(
+            id: "j1", server: "jira", tool: "get_issue", status: "error",
+            error: "rate limited: try later",
+            timestamp: "2027-01-15T07:59:30Z", session: "sess-j1")
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Self.now))
     }
 
     // MARK: - Reason subtitles (spec 090 US2)
@@ -345,23 +370,28 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(Self.subtitle(of: row), "Check the ticket after the failed transition")
     }
 
-    /// FR-011a: on a failed row the error joins the TITLE and the reason keeps
-    /// the subtitle — the error never displaces the reason.
-    func testAFailedRowShowsTheErrorOnTheTitleAndKeepsTheReasonAsSubtitle() {
+    /// FR-011a (compact revision): one fact per line. On a failed row the
+    /// error clause takes the second line — "how it went" outranks "why it was
+    /// attempted" once something is wrong — and the reason stays reachable in
+    /// the tooltip and spoken by VoiceOver.
+    func testAFailedRowShowsTheErrorAsTheSubtitleAndKeepsTheReasonInTheTooltip() {
         let state = Self.reasonState(status: "error", error: "auth failed: token expired")
         let section = Self.makeSection()
         let row = section.items(for: state, now: Self.now)[4]
 
-        XCTAssertEqual(row.title, "jira:get_issue · auth failed — 30s")
-        XCTAssertEqual(Self.subtitle(of: row), "Verify the ticket is still open")
+        XCTAssertEqual(row.title, "jira:get_issue — 30s",
+                       "error prose never widens the title line")
+        XCTAssertEqual(Self.subtitle(of: row), "auth failed")
+        XCTAssertTrue(row.toolTip?.contains("Verify the ticket is still open") == true,
+                      "the displaced reason stays in the tooltip")
         XCTAssertEqual(row.accessibilityLabel(),
                        "jira:get_issue, failed: auth failed, 30s ago, "
                        + "reason: Verify the ticket is still open")
     }
 
-    /// FR-011a truncation precedence: the error clause is cut to its own
-    /// 40-character budget, the label keeps its 34-character middle-truncation
-    /// budget (it is never tightened to make room), and the age is never cut.
+    /// Truncation precedence on the pre-14.4 fallback (the only path where the
+    /// clause still shares the title): the clause is cut to its own budget,
+    /// the label keeps its middle-truncation budget, and the age is never cut.
     func testTheErrorClauseIsCutToItsOwnBudgetWhileTheLabelKeepsIts() {
         let state = Self.busyState()
         state.glanceActivity = [
@@ -374,13 +404,14 @@ final class GlanceSectionTests: XCTestCase {
                        session: "sess-e1")
         ]
         let section = Self.makeSection()
+        section.supportsRowSubtitles = false
         let title = section.items(for: state, now: Self.now)[4].title
 
         let label = String(title.prefix(while: { $0 != "·" })).trimmingCharacters(in: .whitespaces)
         let clause = title
             .components(separatedBy: " · ")[1]
             .components(separatedBy: " — ")[0]
-        XCTAssertEqual(label.count, 34, "the label budget must not be tightened by a long error")
+        XCTAssertEqual(label.count, 30, "the label budget must not be tightened by a long error")
         XCTAssertEqual(clause.count, GlanceFormatting.errorClauseBudget)
         XCTAssertTrue(clause.hasSuffix("\u{2026}"))
         XCTAssertTrue(title.hasSuffix(" — 30s"), "the age is never truncated")
@@ -563,7 +594,7 @@ final class GlanceSectionTests: XCTestCase {
             "—",
             "Recent",
             "github:create_issue — 30s",
-            "jira:get_issue · auth failed — 2m",
+            "jira:get_issue — 2m",
             "Open Activity…",
             "—",
             "Clients",
@@ -684,6 +715,9 @@ final class GlanceSectionTests: XCTestCase {
     func testDifferentRecordInTheSameSlotRewritesTheIcon() {
         let state = Self.busyState()
         let section = Self.makeSection()
+        // One-line rows: the failing replacement would otherwise also gain a
+        // line (structural, deferred); the identity rewrite is what this pins.
+        section.supportsRowSubtitles = false
         let items = section.items(for: state, now: Self.now)
         let previousFailure = state.glanceActivity[1]
         XCTAssertNil(items[4].image, "precondition: the successful row is unmarked")
@@ -706,6 +740,9 @@ final class GlanceSectionTests: XCTestCase {
     func testSameRecordStillPicksUpALateStatusCorrection() {
         let state = Self.busyState()
         let section = Self.makeSection()
+        // One-line rows, so the late failure rewrites in place instead of
+        // gaining a line (the structural case has its own test).
+        section.supportsRowSubtitles = false
         let items = section.items(for: state, now: Self.now)
         let previousFailure = state.glanceActivity[1]
 
