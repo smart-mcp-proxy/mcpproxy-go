@@ -2,14 +2,16 @@
 // MCPProxy
 //
 // Builds the "glance" block at the top of the tray menu: a one-line summary,
-// the most recent qualifying tool calls, the active MCP clients, and the
-// 24h histogram submenu.
+// the inline 24h histogram, the most recent qualifying tool calls, and the
+// active MCP clients.
 //
 // Every text row is a plain NSMenuItem. Custom (view-backed) menu items receive
 // mouse events but NOT keyboard events, so building the rows as hosted SwiftUI
 // would silently cost keyboard navigation and VoiceOver. Only the histogram —
-// which genuinely needs drawing — is view-backed, and it lives alone inside its
-// own submenu.
+// which genuinely needs drawing — is view-backed; it renders inline, directly
+// under the summary line, so the day's shape is visible the moment the menu
+// opens (it used to hide in an "Activity (24h)" submenu, which made the
+// overview the only row that required a second navigation step).
 //
 // This component never builds a Web UI URL. It is handed only AppState, whose
 // webUIBaseURL is scheme/host/port by design, while the API key lives on the
@@ -122,16 +124,18 @@ final class GlanceSection {
     private var hasBuilt = false
     private var builtVisible = false
 
-    /// Held only so ownership of the submenu is explicit; `updateInPlace`
-    /// deliberately never touches it (re-creating it would disturb an open
-    /// submenu), so nothing reads this back.
-    private var histogramItem: NSMenuItem?
+    /// What kind of row the histogram block was last built with. A text row and
+    /// a 132 pt chart have different heights, so a kind change is structural;
+    /// content changes within a kind are in-place rewrites.
+    private enum HistogramRowKind: Equatable { case loading, failed, chart }
+    private var builtHistogramKind: HistogramRowKind?
 
-    /// The submenu's delegate, which fills the submenu in when it opens.
-    /// `NSMenu.delegate` is a WEAK reference, so without this the delegate
-    /// would deallocate the moment `items(for:)` returned and the submenu would
-    /// silently open empty forever.
-    private var histogramDelegate: HistogramSubmenuDelegate?
+    /// The histogram row currently installed, and — when it is the chart — the
+    /// shaped bars it renders. The pair is the cache that keeps `items(for:)`
+    /// from re-rendering a SwiftUI chart on every debounced rebuild of a menu
+    /// nobody has opened: same bars, same item, no work.
+    private var histogramRow: NSMenuItem?
+    private var builtHistogramBars: [HistogramBar]?
 
     init(target: AnyObject?, action: Selector) {
         self.clickTarget = target
@@ -155,7 +159,6 @@ final class GlanceSection {
         activityRows = []
         clientRows = []
         clientOverflowItem = nil
-        histogramItem = nil
         hasBuilt = true
         builtVisible = isVisible(for: state)
         guard builtVisible else { return [] }
@@ -168,13 +171,10 @@ final class GlanceSection {
 
         // The day before the minute (FR-021). The histogram answers "what has
         // been happening?" in one glyph, so it belongs beside the summary line
-        // it illustrates — it used to sit at the very bottom, below every row it
-        // summarises, which made the user read the detail to reach the overview.
-        // It stays above the separator for that reason: summary and shape are
-        // one block, the rows below are another.
-        let histogram = makeHistogramItem(for: state)
-        histogramItem = histogram
-        items.append(histogram)
+        // it illustrates, above the separator: summary and shape are one block,
+        // the rows below are another. It renders inline — no submenu — so the
+        // shape is on screen the moment the menu opens.
+        items.append(histogramRowItem(for: state, now: now))
         items.append(.separator())
 
         items.append(disabledItem(titled: "Recent"))
@@ -234,16 +234,21 @@ final class GlanceSection {
     /// text would leave a row whose click still opened the previous record's
     /// session. See `apply(_:to:now:)` for how "different record" is decided.
     ///
-    /// The histogram submenu is deliberately not touched, and does not need to
-    /// be: its single row is built by `HistogramSubmenuDelegate` when it opens,
-    /// reading `AppState` at that moment. Whether the timeline has loaded
-    /// therefore changes nothing about the structure built here, which is why
-    /// this no longer reports structural when it flips.
+    /// The histogram renders inline, so its KIND is structural again: a text
+    /// placeholder and a 132 pt chart have different heights, and swapping one
+    /// for the other resizes an open menu exactly as an extra row does. Within
+    /// a kind it is an ordinary in-place rewrite — a same-size view swap when
+    /// the bars moved, a tooltip refresh on the failure row.
     @discardableResult
     func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
         guard hasBuilt else { return false }
         guard isVisible(for: state) == builtVisible else { return false }
         guard builtVisible else { return true }
+
+        let histogramState = ActivityHistogram.state(timeline: state.usageTimeline,
+                                                     errorMessage: state.usageError,
+                                                     now: now)
+        guard Self.kind(of: histogramState) == builtHistogramKind else { return false }
 
         let runs = GlanceSelection.activityRows(from: state.glanceActivity)
         let presence = Self.clientList(for: state, now: now)
@@ -283,6 +288,7 @@ final class GlanceSection {
             let title = Self.overflowTitle(presence.hidden)
             if clientOverflowItem.title != title { clientOverflowItem.title = title }
         }
+        refreshHistogramRow(with: histogramState)
         return true
     }
 
@@ -644,33 +650,84 @@ final class GlanceSection {
 
     // MARK: Histogram
 
-    /// The "Activity (24h)" item and its (initially empty) submenu.
+    /// The inline histogram row: the chart when the timeline has loaded, a
+    /// muted placeholder while it is loading or after the fetch failed.
     ///
-    /// The submenu's single row is built by its delegate when it opens, not
-    /// here: `items(for:)` runs on every `rebuildMenu()` — which itself runs on
-    /// every debounced `objectWillChange`, menu open or closed — and building
-    /// eagerly would render a SwiftUI Chart on every state change, including
-    /// for a menu nobody has opened.
-    ///
-    /// The submenu carries its OWN delegate rather than the tray menu's. That
-    /// is what keeps opening it off `AppController.menuWillOpen`, which
-    /// rebuilds the whole menu; a submenu opening under the cursor must not
-    /// restructure the menu it hangs from.
-    private func makeHistogramItem(for state: AppState) -> NSMenuItem {
-        let item = NSMenuItem(title: "Activity (24h)", action: nil, keyEquivalent: "")
-        let submenu = NSMenu(title: "Activity (24h)")
-        // Nothing in here is actionable, and AppKit's automatic enabling runs
-        // its own validation at display time. Turning it off makes the row's
-        // disabled state ours — and makes what the tests assert the same thing
-        // the user sees.
-        submenu.autoenablesItems = false
+    /// The chart reads `AppState` and nothing else — building this row
+    /// performs no network request (spec 048 invariant). It is view-backed and
+    /// eagerly built — but `items(for:)` runs on every `rebuildMenu()`, which
+    /// itself runs on every debounced `objectWillChange`, menu open or closed. The
+    /// bars cache is what keeps that affordable: the chart item is rebuilt only
+    /// when the shaped 24-hour axis actually changed (`HistogramBar` is
+    /// Equatable precisely so that is cheap to decide), and every other rebuild
+    /// hands back the item it already has. `rebuildMenu` reuses one `NSMenu`
+    /// via `removeAllItems()`, so re-adding the cached item is safe.
+    private func histogramRowItem(for state: AppState, now: Date) -> NSMenuItem {
+        let histogramState = ActivityHistogram.state(timeline: state.usageTimeline,
+                                                     errorMessage: state.usageError,
+                                                     now: now)
+        switch histogramState {
+        case .loading:
+            builtHistogramKind = .loading
+            builtHistogramBars = nil
+            let item = Self.mutedItem("Activity (24h) — loading…")
+            histogramRow = item
+            return item
+        case .failed(let message):
+            builtHistogramKind = .failed
+            builtHistogramBars = nil
+            let item = Self.mutedItem("Activity (24h) unavailable")
+            item.toolTip = message
+            histogramRow = item
+            return item
+        case .loaded(let bars):
+            builtHistogramKind = .chart
+            if let cached = histogramRow, builtHistogramBars == bars {
+                return cached
+            }
+            let item = histogramChartItemFactory(bars)
+            histogramRow = item
+            builtHistogramBars = bars
+            return item
+        }
+    }
 
-        let delegate = HistogramSubmenuDelegate(appState: state,
-                                                chartItemFactory: histogramChartItemFactory)
-        histogramDelegate = delegate
-        submenu.delegate = delegate
+    private static func kind(of state: HistogramState) -> HistogramRowKind {
+        switch state {
+        case .loading: return .loading
+        case .failed: return .failed
+        case .loaded: return .chart
+        }
+    }
 
-        item.submenu = submenu
+    /// Refresh the histogram row's content within its built kind: a same-size
+    /// view swap when the bars moved, a tooltip refresh on the failure row.
+    /// Never a resize — `updateInPlace` already reported a kind change as
+    /// structural, and the chart's frame is a fixed `chartItemSize`.
+    private func refreshHistogramRow(with histogramState: HistogramState) {
+        guard let item = histogramRow else { return }
+        switch histogramState {
+        case .loading:
+            break
+        case .failed(let message):
+            if item.toolTip != message { item.toolTip = message }
+        case .loaded(let bars):
+            guard builtHistogramBars != bars else { return }
+            item.view = histogramChartItemFactory(bars).view
+            builtHistogramBars = bars
+        }
+    }
+
+    /// A disabled, secondary-coloured text row. Setting `attributedTitle`
+    /// leaves `title` intact, so the plain string stays available to tests and
+    /// to accessibility.
+    static func mutedItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.menuFont(ofSize: 0),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ])
         return item
     }
 

@@ -213,28 +213,24 @@ final class AppStateUsageErrorTests: XCTestCase {
 }
 
 
-/// The histogram submenu belongs to `GlanceSection` — there is exactly one, and
-/// it builds its single row when it opens rather than on every `rebuildMenu()`.
-/// These tests drive it through the delegate the section installs, which is the
-/// same path AppKit uses.
+/// The inline histogram row belongs to `GlanceSection`: it renders directly
+/// under the summary line — no submenu — so the day's shape is on screen the
+/// moment the menu opens. These tests assert the row's three kinds (loading,
+/// failed, chart), the cache that keeps eager builds affordable, and the
+/// structural rules `updateInPlace` enforces for it.
+///
+/// The old "Not updating" marker tests were dropped, not ported: the submenu
+/// needed its own stale marker because the summary line was not visible from
+/// inside it, while the inline row sits directly under the summary — whose
+/// "not updating" segment (`GlanceSectionTests` header tests) already says it.
 @MainActor
-final class GlanceHistogramSubmenuTests: XCTestCase {
+final class GlanceInlineHistogramTests: XCTestCase {
 
     private final class ClickStub: NSObject {
         @objc func openGlanceRow(_ sender: NSMenuItem) {}
     }
 
     private static let clickStub = ClickStub()
-
-    /// Every section built during a test, kept alive for its whole duration.
-    /// The section is the only strong reference to the submenu delegate — the
-    /// menu's own is weak — so letting one die mid-test empties the submenu.
-    private var sections: [GlanceSection] = []
-
-    override func tearDown() {
-        sections = []
-        super.tearDown()
-    }
 
     /// A connected core — the block is hidden otherwise.
     private func connectedState() -> AppState {
@@ -243,7 +239,7 @@ final class GlanceHistogramSubmenuTests: XCTestCase {
         return state
     }
 
-    /// A section whose chart row is stubbed, so these tests assert on submenu
+    /// A section whose chart row is stubbed, so these tests assert on block
     /// structure alone, independent of how the chart itself renders.
     private func makeSection() -> GlanceSection {
         let section = makeBareSection()
@@ -255,140 +251,55 @@ final class GlanceHistogramSubmenuTests: XCTestCase {
 
     /// A section with nothing injected, so the production defaults apply.
     private func makeBareSection() -> GlanceSection {
-        let section = GlanceSection(target: Self.clickStub,
-                                    action: #selector(ClickStub.openGlanceRow(_:)))
-        sections.append(section)
-        return section
+        GlanceSection(target: Self.clickStub,
+                      action: #selector(ClickStub.openGlanceRow(_:)))
     }
 
-    /// The "Activity (24h)" item, wherever it sits in the block.
-    private func histogramItem(_ section: GlanceSection, _ state: AppState) -> NSMenuItem {
+    /// The histogram row: always the summary line's neighbour.
+    private func histogramRow(_ section: GlanceSection, _ state: AppState) -> NSMenuItem {
         let items = section.items(for: state, now: Fixture.now)
-        guard let item = items.first(where: { $0.title == "Activity (24h)" }) else {
-            XCTFail("no Activity (24h) item in the block")
+        guard items.count > 1 else {
+            XCTFail("the block is hidden, so there is no histogram row")
             return NSMenuItem()
         }
-        return item
+        return items[1]
     }
 
-    /// Fire the delegate the way AppKit does, through the menu's own reference,
-    /// so a delegate that was never installed fails the test.
-    private func open(_ menu: NSMenu) {
-        guard let delegate = menu.delegate else {
-            return XCTFail("the submenu has no delegate, so opening it would build nothing")
-        }
-        delegate.menuNeedsUpdate?(menu)
-    }
-
-    /// Nothing is built until the submenu opens. `rebuildMenu()` runs on every
-    /// debounced state change, menu open or closed, so building the chart there
-    /// would render a SwiftUI Chart nobody is looking at.
-    func testSubmenuIsEmptyUntilItOpens() {
-        let item = histogramItem(makeSection(), connectedState())
-
-        XCTAssertEqual(item.submenu?.numberOfItems, 0)
-    }
-
-    /// `NSMenu.delegate` is a WEAK reference: if the section does not retain the
-    /// delegate it deallocates the moment `items(for:)` returns, and the submenu
-    /// silently opens empty forever. Nothing but a test catches that.
-    func testTheDelegateOutlivesTheBuildCall() {
-        let section = makeSection()
-        let item = histogramItem(section, connectedState())
-
-        XCTAssertNotNil(item.submenu?.delegate,
-                        "the section must retain the submenu delegate")
-    }
-
-    /// The submenu delegate must be its own object, not the section's owner:
-    /// `AppController.menuWillOpen` rebuilds the whole tray menu, and having it
-    /// fire for a submenu opening under the cursor is exactly the
-    /// restructuring-while-open the design forbids.
-    func testTheSubmenuHasItsOwnDelegateNotTheTrayMenusOwner() {
-        let section = makeSection()
-        let item = histogramItem(section, connectedState())
-
-        let delegate = item.submenu?.delegate
-        XCTAssertNotNil(delegate)
-        XCTAssertFalse(delegate === Self.clickStub)
-        XCTAssertFalse(delegate === section as AnyObject)
-    }
+    // MARK: - The three kinds
 
     func testLoadingRowWhileTheTimelineIsNil() {
-        let menu = histogramItem(makeSection(), connectedState()).submenu!
+        let row = histogramRow(makeSection(), connectedState())
 
-        open(menu)
-
-        XCTAssertEqual(menu.numberOfItems, 1)
-        XCTAssertEqual(menu.items[0].title, "Loading…")
-        XCTAssertFalse(menu.items[0].isEnabled)
-        let attributes = menu.items[0].attributedTitle!.attributes(at: 0, effectiveRange: nil)
+        XCTAssertEqual(row.title, "Activity (24h) — loading…")
+        XCTAssertFalse(row.isEnabled)
+        XCTAssertNil(row.submenu, "the histogram renders inline, never behind a submenu")
+        let attributes = row.attributedTitle!.attributes(at: 0, effectiveRange: nil)
         XCTAssertEqual(attributes[.foregroundColor] as? NSColor, NSColor.secondaryLabelColor)
     }
 
     func testErrorRowWhenTheFetchFailedBeforeAnyTimelineArrived() {
         let state = connectedState()
         state.recordUsageFailure("connection refused")
-        let menu = histogramItem(makeSection(), state).submenu!
 
-        open(menu)
+        let row = histogramRow(makeSection(), state)
 
-        XCTAssertEqual(menu.numberOfItems, 1)
-        XCTAssertEqual(menu.items[0].title, "Usage unavailable")
-        XCTAssertEqual(menu.items[0].toolTip, "connection refused")
-        XCTAssertFalse(menu.items[0].isEnabled)
-        let attributes = menu.items[0].attributedTitle!.attributes(at: 0, effectiveRange: nil)
+        XCTAssertEqual(row.title, "Activity (24h) unavailable")
+        XCTAssertEqual(row.toolTip, "connection refused")
+        XCTAssertFalse(row.isEnabled)
+        let attributes = row.attributedTitle!.attributes(at: 0, effectiveRange: nil)
         XCTAssertEqual(attributes[.foregroundColor] as? NSColor, NSColor.secondaryLabelColor)
     }
 
-    /// The case that made the block confidently wrong: a timeline is loaded, so
-    /// `ActivityHistogram.state()` charts it and the recorded failure is never
-    /// rendered — every 30 seconds, forever. Real data still wins the chart row,
-    /// but a failure that keeps happening now gets a row of its own above it.
-    func testAPersistentFailureIsShownEvenWithALoadedTimeline() {
+    /// The headline behaviour: with a timeline loaded, the chart itself is the
+    /// second row of the menu — visible on open, no navigation step.
+    func testChartRendersInlineWithNoSubmenu() {
         let state = connectedState()
         state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
-        for _ in 0..<AppState.glanceStaleFailureThreshold {
-            state.recordGlanceFailure(.activity, "connection refused")
-        }
-        let menu = histogramItem(makeSection(), state).submenu!
 
-        open(menu)
+        let row = histogramRow(makeSection(), state)
 
-        XCTAssertEqual(menu.numberOfItems, 2)
-        XCTAssertEqual(menu.items[0].title, "Not updating")
-        XCTAssertEqual(menu.items[0].toolTip, "connection refused")
-        XCTAssertFalse(menu.items[0].isEnabled)
-        XCTAssertEqual(menu.items[1].title, "CHART:24", "the data it does have is still charted")
-    }
-
-    /// A failure that has not persisted stays invisible — one blip during a
-    /// core restart is not worth a row.
-    func testASingleFailureAddsNoRow() {
-        let state = connectedState()
-        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
-        state.recordGlanceFailure(.activity, "connection refused")
-        let menu = histogramItem(makeSection(), state).submenu!
-
-        open(menu)
-
-        XCTAssertEqual(menu.numberOfItems, 1)
-        XCTAssertEqual(menu.items[0].title, "CHART:24")
-    }
-
-    /// The usage feed's own failure row already says it; a second row saying
-    /// the same thing would just be noise.
-    func testTheUnavailableRowIsNotDoubledByTheStaleMarker() {
-        let state = connectedState()
-        for _ in 0..<AppState.glanceStaleFailureThreshold {
-            state.recordUsageFailure("connection refused")
-        }
-        let menu = histogramItem(makeSection(), state).submenu!
-
-        open(menu)
-
-        XCTAssertEqual(menu.numberOfItems, 1)
-        XCTAssertEqual(menu.items[0].title, "Usage unavailable")
+        XCTAssertEqual(row.title, "CHART:24", "the factory receives the shaped 24-hour axis")
+        XCTAssertNil(row.submenu)
     }
 
     /// Real data beats a stale failure.
@@ -396,53 +307,126 @@ final class GlanceHistogramSubmenuTests: XCTestCase {
         let state = connectedState()
         state.recordUsageFailure("connection refused")
         state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
-        let menu = histogramItem(makeSection(), state).submenu!
 
-        open(menu)
+        let row = histogramRow(makeSection(), state)
 
-        XCTAssertEqual(menu.numberOfItems, 1)
-        XCTAssertEqual(menu.items[0].title, "CHART:24")
+        XCTAssertEqual(row.title, "CHART:24")
     }
 
-    /// The row is read from AppState at OPEN time, not at build time — so a
-    /// timeline that arrives while the menu sits closed is shown on the next
-    /// open, and reopening replaces the row instead of appending to it.
-    func testReopeningRereadsStateAndReplacesTheRow() {
+    /// A timeline that arrives while the menu sits closed is charted by the
+    /// next rebuild — `menuWillOpen` runs one before the menu is drawn, so the
+    /// next open never shows a stale loading row.
+    func testATimelineArrivingWhileClosedIsChartedOnTheNextRebuild() {
+        let section = makeSection()
         let state = connectedState()
-        let menu = histogramItem(makeSection(), state).submenu!
-
-        open(menu)
-        XCTAssertEqual(menu.items[0].title, "Loading…")
+        XCTAssertEqual(histogramRow(section, state).title, "Activity (24h) — loading…")
 
         state.usageTimeline = []
-        open(menu)
 
-        XCTAssertEqual(menu.numberOfItems, 1, "reopening replaces the row, never appends")
-        XCTAssertEqual(menu.items[0].title, "CHART:24", "an idle timeline is a flat axis, not a loading row")
+        XCTAssertEqual(histogramRow(section, state).title, "CHART:24",
+                       "an idle timeline is a flat axis, not a loading row")
     }
 
-    /// Opening the submenu must not restructure the menu it hangs from. The
-    /// whole point of the lazy build is that it touches the submenu and nothing
-    /// else — a parent that grew, shrank or re-created its rows while the user
-    /// had it open is the irritation `MenuRebuildGuard` exists to prevent.
-    func testOpeningTheSubmenuDoesNotRestructureTheParentMenu() {
-        let section = makeSection()
+    // MARK: - The eager-build cache
+
+    /// `items(for:)` runs on every debounced rebuild, menu open or closed; the
+    /// chart must not be re-rendered when the shaped axis has not moved.
+    func testTheChartItemIsCachedAcrossRebuildsWithUnchangedBars() {
+        let section = makeBareSection()
+        var factoryCalls = 0
+        section.histogramChartItemFactory = { bars in
+            factoryCalls += 1
+            return NSMenuItem(title: "CHART:\(bars.count)", action: nil, keyEquivalent: "")
+        }
         let state = connectedState()
         state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
 
-        let parent = NSMenu()
-        for item in section.items(for: state, now: Fixture.now) { parent.addItem(item) }
-        let countBefore = parent.numberOfItems
-        let itemsBefore = parent.items
+        let first = histogramRow(section, state)
+        let second = histogramRow(section, state)
 
-        open(parent.items.first { $0.title == "Activity (24h)" }!.submenu!)
-
-        XCTAssertEqual(parent.numberOfItems, countBefore)
-        XCTAssertTrue(zip(parent.items, itemsBefore).allSatisfy { $0 === $1 },
-                      "opening the submenu must not replace any row of the parent")
-        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now),
-                      "and must not make the block look structurally different afterwards")
+        XCTAssertEqual(factoryCalls, 1, "unchanged bars must not re-render the chart")
+        XCTAssertTrue(first === second, "the cached item itself is reused")
     }
+
+    func testChangedBarsRebuildTheChartItem() {
+        let section = makeBareSection()
+        var factoryCalls = 0
+        section.histogramChartItemFactory = { bars in
+            factoryCalls += 1
+            return NSMenuItem(title: "CHART:\(bars.count)", action: nil, keyEquivalent: "")
+        }
+        let state = connectedState()
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+        _ = histogramRow(section, state)
+
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 5, errors: 0)]
+        _ = histogramRow(section, state)
+
+        XCTAssertEqual(factoryCalls, 2)
+    }
+
+    // MARK: - In-place rules
+
+    /// A text placeholder and a 132 pt chart have different heights, so the
+    /// row's KIND changing is structural: it must wait for the menu to close.
+    func testAKindFlipIsStructural() {
+        let section = makeSection()
+        let state = connectedState()
+        _ = section.items(for: state, now: Fixture.now)
+
+        state.usageTimeline = []
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Fixture.now),
+                       "loading -> chart resizes the menu, so it defers to close")
+    }
+
+    func testLosingTheTimelineIsStructuralToo() {
+        let section = makeSection()
+        let state = connectedState()
+        state.usageTimeline = []
+        _ = section.items(for: state, now: Fixture.now)
+
+        state.usageTimeline = nil
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Fixture.now))
+    }
+
+    /// Within the chart kind, new bars are an ordinary in-place rewrite: the
+    /// item keeps its place and its frame, only its hosted view is swapped.
+    func testBarsChangingUnderAnOpenMenuSwapTheViewInPlace() {
+        let section = makeBareSection()
+        section.histogramChartItemFactory = { bars in
+            let item = NSMenuItem(title: "CHART:\(bars.count)", action: nil, keyEquivalent: "")
+            let view = NSView(frame: NSRect(x: 0, y: 0, width: 288, height: 132))
+            view.setAccessibilityLabel("total \(bars.reduce(0) { $0 + $1.total })")
+            item.view = view
+            return item
+        }
+        let state = connectedState()
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+        let row = histogramRow(section, state)
+        XCTAssertEqual(row.view?.accessibilityLabel(), "total 3")
+
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 7, errors: 0)]
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now))
+        XCTAssertEqual(row.view?.accessibilityLabel(), "total 7",
+                       "the same row now hosts the fresh chart")
+    }
+
+    func testFailureTooltipRefreshesInPlace() {
+        let section = makeSection()
+        let state = connectedState()
+        state.recordUsageFailure("connection refused")
+        let row = histogramRow(section, state)
+
+        state.recordUsageFailure("socket closed")
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now))
+        XCTAssertEqual(row.toolTip, "socket closed")
+    }
+
+    // MARK: - The real chart
 
     /// The real chart item, not the stub: `chartItemSize` is otherwise an
     /// unverified constant, and a mismatch with the view's own size shows up as
@@ -460,20 +444,18 @@ final class GlanceHistogramSubmenuTests: XCTestCase {
         XCTAssertFalse(item.isEnabled)
     }
 
-    /// With no factory injected the submenu must still show a REAL chart. The
+    /// With no factory injected the block must still show a REAL chart. The
     /// seam this replaced was optional and nothing in production ever set it,
     /// so the shipped tray showed a text fallback and never a chart; a default
     /// that already works cannot fail that way.
     func testTheDefaultFactoryProducesTheRealChart() {
         let state = connectedState()
         state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
-        let menu = histogramItem(makeBareSection(), state).submenu!
 
-        open(menu)
+        let row = histogramRow(makeBareSection(), state)
 
-        XCTAssertEqual(menu.numberOfItems, 1)
-        XCTAssertEqual(menu.items[0].view?.frame.size, ActivityHistogram.chartItemSize)
-        XCTAssertNotNil(menu.items[0].view?.accessibilityLabel())
+        XCTAssertEqual(row.view?.frame.size, ActivityHistogram.chartItemSize)
+        XCTAssertNotNil(row.view?.accessibilityLabel())
     }
 }
 

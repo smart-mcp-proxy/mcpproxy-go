@@ -80,7 +80,7 @@ final class GlanceSectionTests: XCTestCase {
         }
         XCTAssertEqual(Array(titles.prefix(7)), [
             "12 calls this hour · 1 active",
-            "Activity (24h)",
+            "Activity (24h) — loading…",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -512,31 +512,22 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(items[9].title, "Codex — 1 call · seen 3h")
     }
 
-    /// The submenu's row is built by its delegate when it opens, so these two
-    /// tests fire `menuNeedsUpdate` where they previously read the row straight
-    /// out of `items(for:)`. What they assert is unchanged.
-    private func open(_ menu: NSMenu?) {
-        guard let menu, let delegate = menu.delegate else {
-            return XCTFail("the histogram submenu has no delegate, so opening it builds nothing")
-        }
-        delegate.menuNeedsUpdate?(menu)
-    }
-
-    func testHistogramSubmenuShowsLoadingUntilUsageArrives() {
+    /// The histogram renders inline: until the usage feed arrives its row is a
+    /// muted placeholder, read straight out of `items(for:)` — there is no
+    /// submenu to open any more.
+    func testHistogramShowsLoadingUntilUsageArrives() {
         let section = Self.makeSection()
         let histogram = section.items(for: Self.busyState(), now: Self.now)[1]
-        XCTAssertEqual(histogram.title, "Activity (24h)")
-        open(histogram.submenu)
-        XCTAssertEqual(histogram.submenu?.item(at: 0)?.title, "Loading…")
+        XCTAssertEqual(histogram.title, "Activity (24h) — loading…")
+        XCTAssertNil(histogram.submenu)
     }
 
-    func testHistogramSubmenuUsesInjectedViewWhenAvailable() {
+    func testHistogramUsesInjectedViewWhenAvailable() {
         let state = Self.busyState()
         state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
         let section = Self.makeSection()
-        // The seam now takes the shaped 24-hour axis and returns the whole item,
-        // rather than taking raw buckets and returning a view — so the count
-        // below is the axis width, not the timeline length.
+        // The seam takes the shaped 24-hour axis and returns the whole item —
+        // so the count below is the axis width, not the timeline length.
         section.histogramChartItemFactory = { bars in
             let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 90))
@@ -544,11 +535,9 @@ final class GlanceSectionTests: XCTestCase {
             item.view = view
             return item
         }
-        let submenu = section.items(for: state, now: Self.now)[1].submenu
-        open(submenu)
-        let chart = submenu?.item(at: 0)
-        XCTAssertNotNil(chart?.view)
-        XCTAssertEqual(chart?.view?.accessibilityLabel(), "24 bars")
+        let chart = section.items(for: state, now: Self.now)[1]
+        XCTAssertNotNil(chart.view)
+        XCTAssertEqual(chart.view?.accessibilityLabel(), "24 bars")
     }
 
     // `testHistogramSubmenuFallsBackToTextWithoutABuilder` was REMOVED here, not
@@ -570,7 +559,7 @@ final class GlanceSectionTests: XCTestCase {
         let titles = items.map { $0.isSeparatorItem ? "—" : $0.title }
         XCTAssertEqual(titles, [
             "12 calls this hour · 1 active",
-            "Activity (24h)",
+            "Activity (24h) — loading…",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -591,8 +580,8 @@ final class GlanceSectionTests: XCTestCase {
         let items = section.items(for: Self.busyState(), now: Self.now)
 
         XCTAssertEqual(items[0].title, "12 calls this hour · 1 active")
-        XCTAssertEqual(items[1].title, "Activity (24h)")
-        XCTAssertNotNil(items[1].submenu, "it is still the histogram submenu, only moved")
+        XCTAssertEqual(items[1].title, "Activity (24h) — loading…")
+        XCTAssertNil(items[1].submenu, "the histogram renders inline, not behind a submenu")
         XCTAssertTrue(items[2].isSeparatorItem)
         XCTAssertEqual(items[3].title, "Recent")
     }

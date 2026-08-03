@@ -331,11 +331,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // a full rebuild (removeAllItems) on a menu already on screen and
         // re-arm/disarm the guard under the parent — exactly the
         // restructuring-while-open the design forbids.
-        //
-        // The glance histogram submenu does build its single row lazily on open,
-        // but it does NOT reach this method: GlanceSection installs its own
-        // HistogramSubmenuDelegate on that submenu, precisely so opening it
-        // cannot rebuild the tray menu underneath the cursor.
         guard menu === menuHost?.menu else { return }
 
         // Spec 048: dropped the per-click `client.servers()` fetch. appState
