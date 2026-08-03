@@ -313,6 +313,9 @@ actor APIClient {
         let note: String?
         /// Connects through a stdio bridge; connectable without an existing config.
         let bridge: Bool?
+        /// Every config location the core's existence check consults, highest
+        /// precedence first (e.g. OpenCode's opencode.jsonc then opencode.json).
+        let checkedPaths: [String]?
 
         enum CodingKeys: String, CodingKey {
             case clientId = "id"
@@ -322,6 +325,7 @@ actor APIClient {
             case serverName = "server_name"
             case accessState = "access_state"
             case remediation
+            case checkedPaths = "checked_paths"
         }
 
         /// Name to render; a core newer than the app may report a client this

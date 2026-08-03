@@ -56,6 +56,11 @@ type ClientStatus struct {
 	// Empty/"unknown" in the content-read-free overall status; resolved to
 	// "accessible"/"absent"/"malformed" (and "denied" in US2) by on-demand reads.
 	AccessState string `json:"access_state"`
+	// CheckedPaths lists every config location the existence check consults,
+	// highest precedence first. For most clients this is just ConfigPath; for
+	// OpenCode it names both opencode.jsonc and opencode.json (#922), so a
+	// "no config found" UI can say exactly which files were looked for.
+	CheckedPaths []string `json:"checked_paths,omitempty"`
 	// Remediation carries actionable fix text, populated only when access is denied.
 	Remediation string `json:"remediation,omitempty"`
 }
@@ -298,15 +303,16 @@ func (s *Service) GetAllStatus() []ClientStatus {
 	for _, c := range clients {
 		cfgPath := s.configPath(c.ID)
 		status := ClientStatus{
-			ID:          c.ID,
-			Name:        c.Name,
-			ConfigPath:  cfgPath,
-			Supported:   c.Supported,
-			Reason:      c.Reason,
-			Note:        c.Note,
-			Bridge:      c.Bridge,
-			Icon:        c.Icon,
-			AccessState: accessUnknown,
+			ID:           c.ID,
+			Name:         c.Name,
+			ConfigPath:   cfgPath,
+			CheckedPaths: s.checkedPaths(c.ID),
+			Supported:    c.Supported,
+			Reason:       c.Reason,
+			Note:         c.Note,
+			Bridge:       c.Bridge,
+			Icon:         c.Icon,
+			AccessState:  accessUnknown,
 		}
 
 		// Metadata-only existence check (no content read).
@@ -338,15 +344,16 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 
 	cfgPath := s.configPath(c.ID)
 	status := ClientStatus{
-		ID:          c.ID,
-		Name:        c.Name,
-		ConfigPath:  cfgPath,
-		Supported:   c.Supported,
-		Reason:      c.Reason,
-		Note:        c.Note,
-		Bridge:      c.Bridge,
-		Icon:        c.Icon,
-		AccessState: accessUnknown,
+		ID:           c.ID,
+		Name:         c.Name,
+		ConfigPath:   cfgPath,
+		CheckedPaths: s.checkedPaths(c.ID),
+		Supported:    c.Supported,
+		Reason:       c.Reason,
+		Note:         c.Note,
+		Bridge:       c.Bridge,
+		Icon:         c.Icon,
+		AccessState:  accessUnknown,
 	}
 
 	if _, err := s.stat(cfgPath); err == nil {

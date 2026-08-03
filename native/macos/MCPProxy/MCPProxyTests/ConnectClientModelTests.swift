@@ -477,6 +477,48 @@ final class ConnectClientModelTests: XCTestCase {
         XCTAssertTrue(source.previewCalls.isEmpty)
     }
 
+    /// "No config found" must name the files the verdict is about: a user whose
+    /// opencode.jsonc exists needs to see which paths were actually checked
+    /// before concluding the client is not set up.
+    func testANoConfigRowNamesTheCheckedPaths() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(
+                id: "opencode", name: "OpenCode", exists: false,
+                checkedPaths: ["/Users/x/.config/opencode/opencode.jsonc",
+                               "/Users/x/.config/opencode/opencode.json"]),
+            FakeConnectSource.client(id: "cursor", name: "Cursor", exists: false),
+            FakeConnectSource.client(id: "claude-code", name: "Claude Code", exists: true)
+        ])]
+        let model = makeModel(source)
+
+        await model.loadList()
+
+        // Same directory: name the files once and the directory once.
+        XCTAssertEqual(
+            model.rows[0].note,
+            "Looked for opencode.jsonc or opencode.json in /Users/x/.config/opencode")
+        // A core without checked_paths still names its single config_path.
+        XCTAssertEqual(model.rows[1].note, "Looked for /Users/x/.cursor/config.json")
+        // A present config needs no explanation of where it was looked for.
+        XCTAssertNil(model.rows[2].note)
+    }
+
+    /// The looked-for hint never displaces a real caveat: an explicit core note
+    /// (e.g. a bridge requirement) outranks it.
+    func testACoreNoteOutranksTheLookedForHint() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-desktop", exists: false,
+                                     note: "Requires the bundled stdio bridge")
+        ])]
+        let model = makeModel(source)
+
+        await model.loadList()
+
+        XCTAssertEqual(model.rows.first?.note, "Requires the bundled stdio bridge")
+    }
+
     /// An unsupported client the core gave no reason for still renders disabled
     /// with a defined label rather than an empty one.
     func testAnUnsupportedRowWithoutAReasonStillCarriesALabel() async {

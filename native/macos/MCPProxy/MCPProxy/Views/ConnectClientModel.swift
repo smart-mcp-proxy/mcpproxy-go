@@ -428,7 +428,34 @@ final class ConnectClientModel: ObservableObject {
             return remediation
         }
         if let note = client.note, !note.isEmpty { return note }
+        if client.supported, !client.connected, !client.exists,
+           client.accessState != .malformed {
+            return lookedForDescription(for: client)
+        }
         return nil
+    }
+
+    /// Names the exact files behind a "No config found" verdict, so a user
+    /// whose config lives at a path this build never checks (say, an
+    /// opencode.jsonc against a pre-#923 core) can see the mismatch instead of
+    /// guessing.
+    private static func lookedForDescription(for client: APIClient.ClientStatus) -> String? {
+        var paths = client.checkedPaths ?? []
+        if paths.isEmpty, !client.configPath.isEmpty { paths = [client.configPath] }
+        guard !paths.isEmpty else { return nil }
+        let abbreviated = paths.map(abbreviatingHome)
+        let dirs = Set(abbreviated.map { ($0 as NSString).deletingLastPathComponent })
+        if abbreviated.count > 1, dirs.count == 1, let dir = dirs.first, !dir.isEmpty {
+            let names = abbreviated.map { ($0 as NSString).lastPathComponent }
+            return "Looked for \(names.joined(separator: " or ")) in \(dir)"
+        }
+        return "Looked for \(abbreviated.joined(separator: ", "))"
+    }
+
+    private static func abbreviatingHome(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        guard home.count > 1, path.hasPrefix(home + "/") else { return path }
+        return "~" + path.dropFirst(home.count)
     }
 
     // MARK: - Derived
