@@ -920,6 +920,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 item.target = self
                 item.representedObject = server
                 item.toolTip = fullTitle
+                // Truncated on screen, spoken in full — tooltips are not read
+                // by VoiceOver (same FR-025 discipline as the glance rows).
+                item.setAccessibilityLabel(fullTitle)
                 item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
                 menu.addItem(item)
             }

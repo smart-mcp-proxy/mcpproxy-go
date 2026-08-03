@@ -123,7 +123,7 @@ final class GlanceSection {
     private var builtVisible = false
 
     /// What kind of row the histogram block was last built with. A text row and
-    /// a 132 pt chart have different heights, so a kind change is structural;
+    /// a 96 pt chart have different heights, so a kind change is structural;
     /// content changes within a kind are in-place rewrites.
     private enum HistogramRowKind: Equatable { case loading, failed, chart }
     private var builtHistogramKind: HistogramRowKind?

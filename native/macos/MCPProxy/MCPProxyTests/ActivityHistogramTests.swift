@@ -367,7 +367,7 @@ final class GlanceInlineHistogramTests: XCTestCase {
 
     // MARK: - In-place rules
 
-    /// A text placeholder and a 132 pt chart have different heights, so the
+    /// A text placeholder and a 96 pt chart have different heights, so the
     /// flip cannot happen under the cursor — but it must not freeze the block
     /// either (the timeline loads seconds after launch, exactly when the menu
     /// is likely open). The update succeeds, the placeholder stays, and the
@@ -588,7 +588,7 @@ final class UsageRefreshWiringTests: XCTestCase {
 @MainActor
 final class ActivityHistogramEncodingTests: XCTestCase {
 
-    /// The chart is 132 pt tall and the bottom 24 pt of that is the legend —
+    /// The chart is 96 pt tall and the bottom 24 pt of that is the legend —
     /// the band the frame grew to pay for. Everything above it is the plot.
     private static let legendBandHeight = 24.0
 
