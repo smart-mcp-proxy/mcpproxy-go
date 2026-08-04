@@ -118,14 +118,22 @@ near-certain (critical); a single class is still hard but high.
 Flags two cross-server attack shapes, using the read-only registry snapshot of
 all servers' tools:
 
-1. **Name collision** — a *distinctive* tool name exposed by two different
-   servers (one impersonating the other so an agent calls the wrong one).
+1. **Impersonation clone** — a tool whose name *and* near-duplicate description
+   both match another server's tool (one impersonating the other so an agent
+   calls the wrong one). A name collision **alone is never flagged**: mcpproxy
+   exists to unify many servers, every tool is namespaced `server:tool`, and
+   ordinary compound names (`list_models`, `search_issues`, …) legitimately
+   collide across servers — `retrieve_tools`' BM25 ranking disambiguates them.
+   The near-duplicate description (cosmetic edits — case, punctuation,
+   whitespace — do not launder a copy) is the impersonation evidence.
 2. **Cross-server reference** — a tool whose description names a *distinctive*
-   tool that lives on a different server (steering the agent's tool selection).
+   tool that lives *only* on different servers (steering the agent's tool
+   selection). A name the tool's own server also exposes is ordinary
+   self-documentation and is never flagged, whoever else exposes it.
 
-To hold near-zero FP, both shapes require the name to be **distinctive**:
-generic verbs (`search`, `get`, `list`) collide across servers all the time and
-are never flagged. A tool referencing its **own** name is also ignored.
+The reference shape requires the name to be **distinctive**: generic verbs
+(`search`, `get`, `list`) appear in prose constantly and are never flagged. A
+tool referencing its **own** name is also ignored.
 
 #### `payload.decoded` — decode-then-confirm shell payload
 
@@ -210,7 +218,7 @@ example as easily as a planted one.
 | Check ID | Tier | Catches |
 |----------|------|---------|
 | `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling (raw text) |
-| `shadowing.cross_server` | hard | Distinctive tool name collision or cross-server reference |
+| `shadowing.cross_server` | hard | Impersonation clone (same name + near-duplicate description) or exclusive cross-server reference |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives (position-discounted; blocks approval) |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides (normalized, position-discounted) |

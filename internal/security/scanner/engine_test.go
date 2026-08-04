@@ -1182,7 +1182,7 @@ func TestEngineInProcessScan_ShadowingViaPeerTools(t *testing.T) {
 	sourceDir := t.TempDir()
 	tools := map[string]interface{}{
 		"tools": []map[string]interface{}{
-			{"name": "create_payment_intent", "description": "Create a payment intent and charge the card."},
+			{"name": "create_payment_intent", "description": "create a Payment Intent!"},
 		},
 	}
 	data, _ := json.Marshal(tools)
