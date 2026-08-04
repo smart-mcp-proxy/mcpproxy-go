@@ -1061,10 +1061,12 @@ function handleScannerChanged(e: Event) {
 }
 
 onMounted(async () => {
-  await Promise.all([refresh(), loadHistory(), loadIsolationState()])
-  // Subscribe to live scanner updates.
+  // Listeners first, before any await: an unmount during startup runs the
+  // cleanup in onUnmounted immediately, and a listener added after that
+  // resumption would leak with nothing left to remove it.
   window.addEventListener('mcpproxy:scanner-changed', handleScannerChanged)
   window.addEventListener('focus', refreshDeepScanOnFocus)
+  await Promise.all([refresh(), loadHistory(), loadIsolationState()])
   // Check if a batch scan is already running
   try {
     const res = await api.getQueueProgress()
