@@ -123,16 +123,47 @@ func cloneDescriptions(a, b string) bool {
 }
 
 // descTokens lowercases and splits a description into its letter/digit tokens.
-// Unicode-aware on purpose: a Cyrillic or CJK description must tokenize to
-// real words, not to an empty set that can never evidence a clone.
+// Unicode-aware on purpose: a Cyrillic description must tokenize to real
+// words, not to an empty set that can never evidence a clone. Runs of
+// spaceless scripts (Han, kana, Hangul, Thai) have no word boundaries for
+// FieldsFunc to find — an informative sentence would collapse to ONE token
+// and duck under the floor — so those are emitted as character bigrams, the
+// standard segmentation-free indexing unit for CJK text.
 func descTokens(s string) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, tok := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
+		runes := []rune(tok)
+		if len(runes) >= 2 && isSpacelessScript(runes) {
+			for i := 0; i+1 < len(runes); i++ {
+				out[string(runes[i:i+2])] = struct{}{}
+			}
+			continue
+		}
 		out[tok] = struct{}{}
 	}
 	return out
+}
+
+// spacelessScripts are writing systems that do not separate words with spaces.
+var spacelessScripts = []*unicode.RangeTable{
+	unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul, unicode.Thai,
+}
+
+// isSpacelessScript reports whether a token is written mostly in a script
+// with no word separators, and therefore needs bigram tokenization.
+func isSpacelessScript(runes []rune) bool {
+	hits := 0
+	for _, r := range runes {
+		for _, tbl := range spacelessScripts {
+			if unicode.Is(tbl, r) {
+				hits++
+				break
+			}
+		}
+	}
+	return hits*2 > len(runes)
 }
 
 // wordRe extracts identifier-like tokens (incl. snake_case / camelCase words)
