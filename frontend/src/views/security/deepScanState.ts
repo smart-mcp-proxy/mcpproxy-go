@@ -56,7 +56,7 @@ export function deepScanSummary(enabled: boolean | null, enabledScanners: number
     return 'Checking configuration…'
   }
   if (enabled) {
-    return 'Enabled scanners below run in Docker with every scan, after the built-in offline baseline.'
+    return 'Enabled scanners below run in Docker with every scan, alongside the built-in offline baseline.'
   }
   if (enabledScanners > 0) {
     const n = enabledScanners

@@ -60,7 +60,7 @@
               data-test="deep-scan-toggle"
               :checked="deepScanEnabled === true"
               :disabled="deepScanBusy || deepScanEnabled === null"
-              @change="setDeepScan(($event.target as HTMLInputElement).checked)"
+              @change="setDeepScan($event)"
             />
           </label>
         </div>
@@ -785,7 +785,9 @@ async function refresh() {
 // Flip the deep-scan master layer. Hot-reloaded
 // by the core — the same key Settings writes, so the two controls can never
 // disagree for more than one refresh.
-async function setDeepScan(on: boolean) {
+async function setDeepScan(event: Event) {
+  const input = event.target as HTMLInputElement
+  const on = input.checked
   deepScanBusy.value = true
   try {
     const res = await api.patchConfig({ security: { deep_scan: { enabled: on } } })
@@ -801,9 +803,27 @@ async function setDeepScan(on: boolean) {
         : 'Scans run only the offline baseline.',
     })
   } catch (e: any) {
+    // The browser flipped the checkbox before the PATCH failed, and Vue sees
+    // an unchanged :checked prop — snap the DOM back explicitly so the
+    // toggle, badge and summary cannot disagree.
+    input.checked = deepScanEnabled.value === true
     systemStore.addToast({ type: 'error', title: 'Could not change deep scan', message: e.message })
   } finally {
     deepScanBusy.value = false
+  }
+}
+
+// A Settings tab (or another window) can flip the same config field; refresh
+// the card whenever this tab regains focus so the truth badges cannot go
+// stale for longer than a glance away.
+async function refreshDeepScanOnFocus() {
+  try {
+    const res = await api.getConfig()
+    if (res.success) {
+      deepScanEnabled.value = res.data?.config?.security?.deep_scan?.enabled === true
+    }
+  } catch {
+    // Non-fatal: the next full refresh will catch up.
   }
 }
 
@@ -1044,6 +1064,7 @@ onMounted(async () => {
   await Promise.all([refresh(), loadHistory(), loadIsolationState()])
   // Subscribe to live scanner updates.
   window.addEventListener('mcpproxy:scanner-changed', handleScannerChanged)
+  window.addEventListener('focus', refreshDeepScanOnFocus)
   // Check if a batch scan is already running
   try {
     const res = await api.getQueueProgress()
@@ -1061,5 +1082,6 @@ onUnmounted(() => {
   stopQueuePolling()
   if (scanAllElapsedTimer) { clearInterval(scanAllElapsedTimer); scanAllElapsedTimer = null }
   window.removeEventListener('mcpproxy:scanner-changed', handleScannerChanged)
+  window.removeEventListener('focus', refreshDeepScanOnFocus)
 })
 </script>
