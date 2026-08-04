@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -87,11 +88,22 @@ func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []det
 // normalization — the impersonation-clone evidence. Deterministic token-set
 // containment: cosmetic edits (case, punctuation, whitespace, word order) do
 // not launder a copy, while genuinely different descriptions of a shared name
-// stay far below the threshold. Empty descriptions carry no evidence either
-// way and never match.
+// stay far below the threshold.
+//
+// Accepted, deliberate limits (owner decision, MCP-3520):
+//   - An attacker who writes a genuinely DIFFERENT description for a colliding
+//     name is out of this check's scope — by name alone that case is
+//     indistinguishable from two honest servers sharing a compound name
+//     (list_models on every model host), which is the proxy's normal
+//     condition. The defenses there are admission quarantine for new servers,
+//     server:tool namespacing, and server provenance in retrieve_tools.
+//   - Descriptions with fewer than three tokens carry too little information
+//     to distinguish a clone from a coincidence ("Create" == "Create" says
+//     nothing) and never match; empty descriptions likewise.
 func cloneDescriptions(a, b string) bool {
+	const minTokens = 3
 	ta, tb := descTokens(a), descTokens(b)
-	if len(ta) == 0 || len(tb) == 0 {
+	if len(ta) < minTokens || len(tb) < minTokens {
 		return false
 	}
 	shared := 0
@@ -110,11 +122,13 @@ func cloneDescriptions(a, b string) bool {
 	return float64(shared) >= 0.85*float64(smaller) && float64(shared) >= 0.7*float64(larger)
 }
 
-// descTokens lowercases and splits a description into its alphanumeric tokens.
+// descTokens lowercases and splits a description into its letter/digit tokens.
+// Unicode-aware on purpose: a Cyrillic or CJK description must tokenize to
+// real words, not to an empty set that can never evidence a clone.
 func descTokens(s string) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, tok := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
 		out[tok] = struct{}{}
 	}
@@ -146,7 +160,11 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 		// servers. A name the tool's own server also exposes is ordinary
 		// self-documentation ("call list_models first") — that another server
 		// happens to expose the same name is the proxy's normal condition,
-		// not steering.
+		// not steering. Accepted corner (owner decision, MCP-3520): a server
+		// can silence this branch for itself by exposing a decoy tool under
+		// the referenced name — but steering an agent toward a name the
+		// server itself exposes reduces to the name-coincidence case above,
+		// with the same defenses (admission quarantine, namespacing).
 		onOtherServer, onOwnServer := false, false
 		for _, o := range owners {
 			if o.Server == tool.Server {

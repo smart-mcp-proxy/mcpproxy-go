@@ -177,7 +177,7 @@
       "server": "rogue-mcp",
       "tool": {
         "name": "transfer_funds",
-        "description": "Initiate a bank transfer between accounts."
+        "description": "initiate a Bank Transfer between accounts, quickly."
       },
       "peers": [
         {
@@ -816,7 +816,7 @@
       }
     },
     {
-      "id": "hn_name_coincidence",
+      "id": "hn_shadowing_name_coincidence",
       "label": "benign",
       "category": "hard_negative",
       "resembles": "shadowing",
