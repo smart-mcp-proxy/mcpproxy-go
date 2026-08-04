@@ -204,6 +204,14 @@ type Server struct {
 	connectService     *connect.Service   // Client connect/disconnect operations
 	securityController SecurityController // Security scanner operations (Spec 039)
 
+	// patchConfigMu serializes PATCH /api/v1/config's read-merge-apply
+	// sequence. The handler reads the live config, deep-merges the client's
+	// keys, then applies the FULL merged snapshot — two concurrent PATCHes
+	// (say, deep scan from the Security page and a toggle from Settings in
+	// another tab) would otherwise both merge from the same snapshot and the
+	// later apply would silently drop the earlier one's change.
+	patchConfigMu sync.Mutex
+
 	// telemetryRegistry is the Tier 2 counter aggregator (Spec 042). May be
 	// nil before SetTelemetryRegistry is called; middlewares use the nil-safe
 	// telemetry helpers so the call sites do not need to nil-check.
@@ -4227,6 +4235,11 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
+	// One PATCH at a time: the read-merge-apply below is not atomic, and a
+	// concurrent PATCH merging from the same snapshot would be silently
+	// clobbered by whichever full-config apply lands second.
+	s.patchConfigMu.Lock()
+	defer s.patchConfigMu.Unlock()
 	if len(patchMap) == 0 {
 		s.writeError(w, r, http.StatusBadRequest, "Patch body must contain at least one field")
 		return

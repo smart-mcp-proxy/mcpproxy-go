@@ -24,23 +24,46 @@
       </div>
     </div>
 
-    <!-- Baseline vs. deep scan (Spec 077 US3): the deterministic offline
-         baseline runs for every server with zero setup; the Docker-based
-         scanners below are an opt-in "deep scan" that enriches the report but
-         never blocks or degrades the baseline verdict. -->
-    <div class="alert alert-info shadow-sm">
-      <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-      <div>
-        <div class="font-semibold">Deterministic baseline is always on</div>
-        <span class="text-sm">
-          Every server is scanned by the offline baseline engine with no Docker required.
-          The scanners below are an opt-in <span class="font-medium">deep scan</span> for extra
-          source-level analysis — turn it on with the “Deep scan (Docker scanners)” toggle in
-          <router-link to="/settings" class="link link-primary" data-test="deep-scan-settings-link">Settings → Security</router-link>.
-          Deep-scan failures are informational and never change the baseline verdict.
-        </span>
+    <!-- Deep scan is the master switch for every Docker scanner below (Spec
+         077 US3). It is controllable HERE, not only in Settings: this page is
+         where an operator discovers that an "enabled" scanner never ran, so
+         this page is where the fix has to live. Settings keeps its copy of
+         the same toggle; both write the same deep-scan config field, so the
+         two controls can never disagree for more than one refresh. -->
+    <div class="card bg-base-100 shadow" data-test="deep-scan-card">
+      <div class="card-body py-4">
+        <div class="flex items-start justify-between gap-4 flex-wrap">
+          <div class="min-w-0">
+            <h3 class="font-semibold flex items-center gap-2">
+              Deep scan
+              <span class="badge badge-sm" :class="deepScanEnabled ? 'badge-success' : 'badge-ghost'" data-test="deep-scan-state">
+                {{ deepScanEnabled === null ? '…' : deepScanEnabled ? 'on' : 'off' }}
+              </span>
+            </h3>
+            <p class="text-sm text-base-content/70 mt-1" data-test="deep-scan-summary">
+              {{ deepScanSummary(deepScanEnabled, enabledScannerCount) }}
+            </p>
+            <p class="text-xs text-base-content/50 mt-1">
+              The offline baseline scan is always on and needs no setup. Deep-scan failures are
+              informational and never change the baseline verdict.
+              Also in <router-link to="/settings" class="link" data-test="deep-scan-settings-link">Settings → Security</router-link>.
+            </p>
+            <div v-if="deepScanEnabled && overview && overview.docker_available === false" class="alert alert-warning mt-2 py-2 text-sm" data-test="deep-scan-docker-warning">
+              Docker is not running — deep scanners cannot start until it is.
+            </div>
+          </div>
+          <label class="flex items-center gap-2 shrink-0 cursor-pointer">
+            <span v-if="deepScanBusy" class="loading loading-spinner loading-xs"></span>
+            <input
+              type="checkbox"
+              class="toggle toggle-primary"
+              data-test="deep-scan-toggle"
+              :checked="deepScanEnabled === true"
+              :disabled="deepScanBusy || deepScanEnabled === null"
+              @change="setDeepScan($event)"
+            />
+          </label>
+        </div>
       </div>
     </div>
 
@@ -246,7 +269,18 @@
                   </td>
                   <td>
                     <div class="flex flex-col gap-1">
-                      <span class="badge badge-sm gap-1" :class="statusBadgeClass(scanner.status)">
+                      <!-- The truth badge: an "enabled" scanner that the off
+                           deep-scan layer will never run must not read as a
+                           green "enabled" — that lie is what this page is for. -->
+                      <span
+                        v-if="scannerWontRun(scanner, deepScanEnabled)"
+                        class="badge badge-sm badge-warning badge-outline whitespace-nowrap tooltip tooltip-right"
+                        data-tip="Selected, but deep scan is off — this scanner will not run. Turn deep scan on above."
+                        data-test="wont-run-badge"
+                      >
+                        won’t run
+                      </span>
+                      <span v-else class="badge badge-sm gap-1" :class="statusBadgeClass(scanner.status)">
                         <span v-if="scanner.status === 'pulling'" class="loading loading-spinner loading-xs"></span>
                         {{ scannerDisplayStatus(scanner.status) }}
                       </span>
@@ -479,6 +513,7 @@ import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerSt
 import { useSystemStore } from '@/stores/system'
 import { scanReportPath } from '@/utils/serverRoute'
 import { formatSignatureBundle } from '@/utils/signatureBundle'
+import { deepScanSummary, enabledDockerScanners, scannerWontRun } from './security/deepScanState'
 
 const systemStore = useSystemStore()
 
@@ -505,6 +540,12 @@ const overview = ref<any>({})
 // in flight (overview.docker_available is undefined before the fetch lands).
 const overviewLoaded = ref(false)
 const installing = ref<string | null>(null)
+
+// Deep-scan master state. `null` until the config loads, so the truth badges
+// stay quiet instead of flickering an accusation on every page load.
+const deepScanEnabled = ref<boolean | null>(null)
+const deepScanBusy = ref(false)
+const enabledScannerCount = computed(() => enabledDockerScanners(scanners.value))
 
 // Scan history state
 const scanHistory = ref<any[]>([])
@@ -713,10 +754,14 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const [scannersRes, overviewRes] = await Promise.all([
+    const [scannersRes, overviewRes, configRes] = await Promise.all([
       api.listScanners(),
       api.getSecurityOverview(),
+      api.getConfig(),
     ])
+    if (configRes.success) {
+      deepScanEnabled.value = configRes.data?.config?.security?.deep_scan?.enabled === true
+    }
     if (scannersRes.success) {
       const list = (scannersRes.data || []) as any[]
       // Defensive sort: the backend already returns scanners alphabetically
@@ -734,6 +779,51 @@ async function refresh() {
   } finally {
     loading.value = false
     initialized.value = true
+  }
+}
+
+// Flip the deep-scan master layer. Hot-reloaded
+// by the core — the same key Settings writes, so the two controls can never
+// disagree for more than one refresh.
+async function setDeepScan(event: Event) {
+  const input = event.target as HTMLInputElement
+  const on = input.checked
+  deepScanBusy.value = true
+  try {
+    const res = await api.patchConfig({ security: { deep_scan: { enabled: on } } })
+    if (!res.success) {
+      throw new Error(res.error || 'config update rejected')
+    }
+    deepScanEnabled.value = on
+    systemStore.addToast({
+      type: 'success',
+      title: on ? 'Deep scan on' : 'Deep scan off',
+      message: on
+        ? 'Enabled scanners run with every scan.'
+        : 'Scans run only the offline baseline.',
+    })
+  } catch (e: any) {
+    // The browser flipped the checkbox before the PATCH failed, and Vue sees
+    // an unchanged :checked prop — snap the DOM back explicitly so the
+    // toggle, badge and summary cannot disagree.
+    input.checked = deepScanEnabled.value === true
+    systemStore.addToast({ type: 'error', title: 'Could not change deep scan', message: e.message })
+  } finally {
+    deepScanBusy.value = false
+  }
+}
+
+// A Settings tab (or another window) can flip the same config field; refresh
+// the card whenever this tab regains focus so the truth badges cannot go
+// stale for longer than a glance away.
+async function refreshDeepScanOnFocus() {
+  try {
+    const res = await api.getConfig()
+    if (res.success) {
+      deepScanEnabled.value = res.data?.config?.security?.deep_scan?.enabled === true
+    }
+  } catch {
+    // Non-fatal: the next full refresh will catch up.
   }
 }
 
@@ -971,9 +1061,12 @@ function handleScannerChanged(e: Event) {
 }
 
 onMounted(async () => {
-  await Promise.all([refresh(), loadHistory(), loadIsolationState()])
-  // Subscribe to live scanner updates.
+  // Listeners first, before any await: an unmount during startup runs the
+  // cleanup in onUnmounted immediately, and a listener added after that
+  // resumption would leak with nothing left to remove it.
   window.addEventListener('mcpproxy:scanner-changed', handleScannerChanged)
+  window.addEventListener('focus', refreshDeepScanOnFocus)
+  await Promise.all([refresh(), loadHistory(), loadIsolationState()])
   // Check if a batch scan is already running
   try {
     const res = await api.getQueueProgress()
@@ -991,5 +1084,6 @@ onUnmounted(() => {
   stopQueuePolling()
   if (scanAllElapsedTimer) { clearInterval(scanAllElapsedTimer); scanAllElapsedTimer = null }
   window.removeEventListener('mcpproxy:scanner-changed', handleScannerChanged)
+  window.removeEventListener('focus', refreshDeepScanOnFocus)
 })
 </script>
