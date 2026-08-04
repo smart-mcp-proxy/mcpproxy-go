@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -11,14 +12,23 @@ import (
 // Shadowing is a HARD check that flags cross-server tool impersonation and
 // reference (FR — shadowing). Two distinct attack shapes:
 //
-//  1. Name collision: a DISTINCTIVE tool name exposed by two different servers
-//     (one impersonating the other so an agent calls the wrong one).
-//  2. Cross-server reference: a tool whose description names a DISTINCTIVE tool
-//     that lives on a different server (steering the agent's tool selection).
+//  1. Impersonation clone: a tool whose name AND near-duplicate description
+//     both match another server's tool (one impersonating the other so an
+//     agent calls the wrong one). A name collision ALONE is never flagged:
+//     mcpproxy exists to unify many servers, every tool is namespaced
+//     server:tool, and ordinary compound names (list_models, search_issues…)
+//     legitimately collide across servers — retrieve_tools' ranking is what
+//     disambiguates them, and no fixed "distinctive name" heuristic can
+//     separate those from attacks (MCP-3520: ElevenLabs vs kaggle
+//     list_models). The description clone is the evidence.
+//  2. Cross-server reference: a tool whose description names a DISTINCTIVE
+//     tool that lives ONLY on different servers (steering the agent's tool
+//     selection). A name the tool's own server also exposes is ordinary
+//     self-documentation, whoever else exposes it.
 //
-// To hold near-zero FP, both shapes require the name to be distinctive: generic
-// verbs ("search", "get", "list") collide across servers all the time and are
-// never flagged. A tool referencing its OWN name is also ignored.
+// The reference shape still requires the name to be distinctive: generic verbs
+// ("search", "get", "list") appear in prose constantly. A tool referencing its
+// OWN name is also ignored.
 type Shadowing struct{}
 
 // ID implements detect.Check.
@@ -51,31 +61,109 @@ func distinctiveName(name string) bool {
 // Inspect implements detect.Check. Cross-tool reasoning uses the RegistryView
 // indexes built once per scan.
 func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []detect.Signal {
-	if !distinctiveName(tool.Name) {
-		// Still allow this tool to reference OTHER distinctive tools, so only
-		// the collision branch is gated on the tool's own name.
-		return c.referenceSignals(tool, reg)
-	}
-
 	var sigs []detect.Signal
 
-	// 1. Name collision across servers.
+	// 1. Impersonation clone: same name on another server AND a near-duplicate
+	// description. The clone is the evidence — a bare name coincidence is the
+	// proxy's normal operating condition, not a finding.
 	for _, other := range reg.ToolsByName[tool.Name] {
-		if other.Server != tool.Server {
+		if other.Server != tool.Server && cloneDescriptions(tool.Description, other.Description) {
 			sigs = append(sigs, detect.Signal{
 				CheckID:    c.ID(),
 				Tier:       detect.TierHard,
 				ThreatType: detect.ThreatToolPoisoning,
 				Confidence: 0.85,
-				Evidence:   detect.CapEvidence(fmt.Sprintf("tool %q also exposed by server %q", tool.Name, other.Server)),
-				Detail:     fmt.Sprintf("Distinctive tool name %q collides with server %q — possible impersonation.", tool.Name, other.Server),
+				Evidence:   detect.CapEvidence(fmt.Sprintf("tool %q duplicates server %q's tool of the same name, description included", tool.Name, other.Server)),
+				Detail:     fmt.Sprintf("Tool %q clones server %q's tool — same name and near-identical description — possible impersonation.", tool.Name, other.Server),
 			})
-			break // one collision signal is enough
+			break // one clone signal is enough
 		}
 	}
 
 	sigs = append(sigs, c.referenceSignals(tool, reg)...)
 	return sigs
+}
+
+// cloneDescriptions reports whether two descriptions are near-duplicates after
+// normalization — the impersonation-clone evidence. Deterministic token-set
+// containment: cosmetic edits (case, punctuation, whitespace, word order) do
+// not launder a copy, while genuinely different descriptions of a shared name
+// stay far below the threshold.
+//
+// Accepted, deliberate limits (owner decision, MCP-3520):
+//   - An attacker who writes a genuinely DIFFERENT description for a colliding
+//     name is out of this check's scope — by name alone that case is
+//     indistinguishable from two honest servers sharing a compound name
+//     (list_models on every model host), which is the proxy's normal
+//     condition. The defenses there are admission quarantine for new servers,
+//     server:tool namespacing, and server provenance in retrieve_tools.
+//   - Descriptions with fewer than three tokens carry too little information
+//     to distinguish a clone from a coincidence ("Create" == "Create" says
+//     nothing) and never match; empty descriptions likewise.
+func cloneDescriptions(a, b string) bool {
+	const minTokens = 3
+	ta, tb := descTokens(a), descTokens(b)
+	if len(ta) < minTokens || len(tb) < minTokens {
+		return false
+	}
+	shared := 0
+	for tok := range ta {
+		if _, ok := tb[tok]; ok {
+			shared++
+		}
+	}
+	smaller, larger := len(ta), len(tb)
+	if smaller > larger {
+		smaller, larger = larger, smaller
+	}
+	// Both directions matter: containment of the smaller set catches a copy
+	// with words bolted on, while the larger-set floor keeps a short generic
+	// sentence from "matching" a long one that merely contains its words.
+	return float64(shared) >= 0.85*float64(smaller) && float64(shared) >= 0.7*float64(larger)
+}
+
+// descTokens lowercases and splits a description into its letter/digit tokens.
+// Unicode-aware on purpose: a Cyrillic description must tokenize to real
+// words, not to an empty set that can never evidence a clone. Runs of
+// spaceless scripts (Han, kana, Hangul, Thai) have no word boundaries for
+// FieldsFunc to find — an informative sentence would collapse to ONE token
+// and duck under the floor — so those are emitted as character bigrams, the
+// standard segmentation-free indexing unit for CJK text.
+func descTokens(s string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, tok := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		runes := []rune(tok)
+		if len(runes) >= 2 && isSpacelessScript(runes) {
+			for i := 0; i+1 < len(runes); i++ {
+				out[string(runes[i:i+2])] = struct{}{}
+			}
+			continue
+		}
+		out[tok] = struct{}{}
+	}
+	return out
+}
+
+// spacelessScripts are writing systems that do not separate words with spaces.
+var spacelessScripts = []*unicode.RangeTable{
+	unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul, unicode.Thai,
+}
+
+// isSpacelessScript reports whether a token is written mostly in a script
+// with no word separators, and therefore needs bigram tokenization.
+func isSpacelessScript(runes []rune) bool {
+	hits := 0
+	for _, r := range runes {
+		for _, tbl := range spacelessScripts {
+			if unicode.Is(tbl, r) {
+				hits++
+				break
+			}
+		}
+	}
+	return hits*2 > len(runes)
 }
 
 // wordRe extracts identifier-like tokens (incl. snake_case / camelCase words)
@@ -99,15 +187,24 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 		if !ok || !distinctiveName(tok) {
 			continue
 		}
-		// Only flag when the referenced tool lives on a DIFFERENT server.
-		onOtherServer := false
+		// Only flag when the referenced tool lives EXCLUSIVELY on different
+		// servers. A name the tool's own server also exposes is ordinary
+		// self-documentation ("call list_models first") — that another server
+		// happens to expose the same name is the proxy's normal condition,
+		// not steering. Accepted corner (owner decision, MCP-3520): a server
+		// can silence this branch for itself by exposing a decoy tool under
+		// the referenced name — but steering an agent toward a name the
+		// server itself exposes reduces to the name-coincidence case above,
+		// with the same defenses (admission quarantine, namespacing).
+		onOtherServer, onOwnServer := false, false
 		for _, o := range owners {
-			if o.Server != tool.Server {
+			if o.Server == tool.Server {
+				onOwnServer = true
+			} else {
 				onOtherServer = true
-				break
 			}
 		}
-		if !onOtherServer {
+		if !onOtherServer || onOwnServer {
 			continue
 		}
 		seen[tok] = struct{}{}

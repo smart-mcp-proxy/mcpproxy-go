@@ -229,7 +229,7 @@ block approval, and three **soft** checks that raise a human-review item:
 | Check | Tier | Catches |
 |-------|------|---------|
 | `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling |
-| `shadowing.cross_server` | hard | Distinctive tool-name collision or cross-server reference |
+| `shadowing.cross_server` | hard | Impersonation clone (same name + near-duplicate description on another server) or exclusive cross-server reference |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides |
