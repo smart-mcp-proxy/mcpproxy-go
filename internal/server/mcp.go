@@ -1600,7 +1600,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// ranked order of `results` is already final here — the mode selects
 	// serialization only (FR-007).
 	entryOpts := toolEntryOpts{includeStats: includeStats}
-	var mcpTools []map[string]interface{}
+	// Issue #953: must be non-nil so zero matches serialize as [] — strict MCP
+	// clients crash iterating a null tools array.
+	mcpTools := make([]map[string]interface{}, 0, len(results))
 	for _, result := range results {
 		mcpTools = append(mcpTools, p.buildToolEntry(result, responseMode, entryOpts))
 	}
@@ -3778,7 +3780,9 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 		return mcp.NewToolResultError(reason), nil
 	}
 
-	var toolsAnalysis []map[string]interface{}
+	// Non-nil so a tool-less server serializes as "tools": [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array).
+	toolsAnalysis := make([]map[string]interface{}, 0)
 
 	// REQUEST TEMPORARY CONNECTION EXEMPTION FOR INSPECTION
 	p.logger.Warn("⚠️ Requesting temporary connection exemption for quarantined server inspection",
