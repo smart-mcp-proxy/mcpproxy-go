@@ -661,6 +661,24 @@ func (r *Runtime) EmitSecurityScanFailed(serverName, _, errMsg string) {
 	r.publishScanSettled(serverName, "failed", nil, errMsg)
 }
 
+// EmitSecurityScanTelemetry is the sole producer of the schema-v8 TPA scanner
+// counters. The scanner package calls it exactly once per terminal, real
+// (non-dry-run) Pass-1 scan JOB — never per scanner and never for the Pass-2
+// deep supply-chain audit — so scans_completed/scans_failed count scans, not
+// scanner invocations or passes. See scanCallbackAdapter.countsForTelemetry.
+//
+// Only counts cross this boundary: the server name, the scanner id, and the
+// error text are not parameters at all, and the registry drops any severity key
+// outside the fixed enum. Nil-safe: telemetry may be disabled or not yet
+// initialized.
+func (r *Runtime) EmitSecurityScanTelemetry(completed bool, findingsBySeverity map[string]int) {
+	if completed {
+		telemetry.RecordTPAScanCompletedOn(r.TelemetryRegistry(), findingsBySeverity)
+		return
+	}
+	telemetry.RecordTPAScanFailedOn(r.TelemetryRegistry())
+}
+
 // publishScanSettled emits the single debounced terminal scan event.
 func (r *Runtime) publishScanSettled(serverName, status string, findingsSummary map[string]int, errMsg string) {
 	payload := map[string]any{

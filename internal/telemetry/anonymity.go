@@ -85,6 +85,10 @@ type anonymityScanEnvelope struct {
 	ActiveDays30d     *json.RawMessage `json:"active_days_30d"`
 	PreviousShutdown  *json.RawMessage `json:"previous_shutdown"`
 	LastErrorCode     *json.RawMessage `json:"last_error_code"`
+
+	// Schema v8 structural check: the security-scanner sub-object must be
+	// counts-and-fixed-enum-keys only.
+	TPAScanner *json.RawMessage `json:"tpa_scanner"`
 }
 
 // v7FieldViolation builds the violation for a Spec 080 field that broke its
@@ -112,6 +116,12 @@ func scanV7Bool(raw *json.RawMessage, field string) *AnonymityViolation {
 // scanV7NonNegativeInt asserts raw (if present) is a non-negative JSON
 // integer — no fractions, no strings, no null.
 func scanV7NonNegativeInt(raw *json.RawMessage, field string) *AnonymityViolation {
+	return scanNonNegativeInt(raw, field, v7FieldViolation)
+}
+
+// scanNonNegativeInt is the shared non-negative-integer assertion. mkViolation
+// tags the failure with the schema-version rule of the calling scan pass.
+func scanNonNegativeInt(raw *json.RawMessage, field string, mkViolation func(field, reason string) *AnonymityViolation) *AnonymityViolation {
 	if raw == nil {
 		return nil
 	}
@@ -119,18 +129,18 @@ func scanV7NonNegativeInt(raw *json.RawMessage, field string) *AnonymityViolatio
 	// number token so strings never masquerade as counters.
 	trimmed := bytes.TrimSpace(*raw)
 	if len(trimmed) == 0 || trimmed[0] == '"' {
-		return v7FieldViolation(field, "must be a number")
+		return mkViolation(field, "must be a number")
 	}
 	var n json.Number
 	if err := json.Unmarshal(trimmed, &n); err != nil {
-		return v7FieldViolation(field, "must be a number")
+		return mkViolation(field, "must be a number")
 	}
 	i, err := n.Int64()
 	if err != nil {
-		return v7FieldViolation(field, "must be a whole integer")
+		return mkViolation(field, "must be a whole integer")
 	}
 	if i < 0 {
-		return v7FieldViolation(field, "must be non-negative")
+		return mkViolation(field, "must be non-negative")
 	}
 	return nil
 }
@@ -197,6 +207,80 @@ func scanV7Fields(env *anonymityScanEnvelope) *AnonymityViolation {
 	return nil
 }
 
+// v8FieldViolation builds the violation for a schema-v8 field that broke its
+// documented shape (whitelisted keys, non-negative counts, fixed severity
+// enum).
+func v8FieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "v8_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("v8 field %s %s", field, reason),
+	}
+}
+
+// tpaScannerScalarKeys is the fixed set of non-negative-integer keys allowed
+// in the tpa_scanner sub-object.
+var tpaScannerScalarKeys = []string{"scans_completed", "scans_failed", "scans_with_findings"}
+
+// scanV8TPAScanner asserts the schema-v8 tpa_scanner sub-object (if present)
+// carries counts and fixed enum keys ONLY: an object whose keys are
+// whitelisted, whose scalars are non-negative integers, and whose findings map
+// is keyed exclusively by the severity enum with non-negative integer values.
+// This is the wire-form backstop for the producer-side filtering in
+// CounterRegistry.RecordTPAScanCompleted — a regression there (e.g. a server
+// name or rule id leaking in as a map key) is caught before transmit.
+func scanV8TPAScanner(raw *json.RawMessage) *AnonymityViolation {
+	if raw == nil {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(*raw, &obj); err != nil {
+		return v8FieldViolation("tpa_scanner", "must be an object")
+	}
+
+	allowed := make(map[string]struct{}, len(tpaScannerScalarKeys)+1)
+	for _, k := range tpaScannerScalarKeys {
+		allowed[k] = struct{}{}
+	}
+	allowed["findings"] = struct{}{}
+	for k := range obj {
+		if _, ok := allowed[k]; !ok {
+			return v8FieldViolation("tpa_scanner."+k, "is not a whitelisted key")
+		}
+	}
+
+	for _, k := range tpaScannerScalarKeys {
+		v, ok := obj[k]
+		if !ok {
+			continue
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "tpa_scanner."+k, v8FieldViolation); viol != nil {
+			return viol
+		}
+	}
+
+	rawFindings, ok := obj["findings"]
+	if !ok {
+		return nil
+	}
+	var findings map[string]json.RawMessage
+	if err := json.Unmarshal(rawFindings, &findings); err != nil {
+		return v8FieldViolation("tpa_scanner.findings", "must be an object")
+	}
+	for sev, v := range findings {
+		if !IsTPASeverity(sev) {
+			return v8FieldViolation("tpa_scanner.findings",
+				"carries a key outside the fixed severity enum")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "tpa_scanner.findings."+sev, v8FieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
 // ScanForPII scans a serialized telemetry payload (v3+) for PII leaks and
 // structural violations. Returns nil when the payload is clean; otherwise
 // returns an *AnonymityViolation. The returned error satisfies
@@ -211,6 +295,9 @@ func scanV7Fields(env *anonymityScanEnvelope) *AnonymityViolation {
 //     (wizard_shown), non-negative integers (web_ui_opened,
 //     days_since_install, active_days_30d), or fixed enums
 //     (wizard_connect_step, previous_shutdown, last_error_code = MCPX_*).
+//  5. tpa_scanner (schema v8), if present, is not an object of whitelisted
+//     keys holding non-negative integer counts, with a findings map keyed
+//     exclusively by the fixed severity enum.
 //
 // The implementation never logs the payload — it only reports which rule
 // tripped and the offending pattern (a small literal). Callers should log at
@@ -268,6 +355,11 @@ func ScanForPII(payloadJSON []byte) error {
 	// Rule 4: Spec 080 v7 fields must keep their boolean / non-negative
 	// integer / fixed-enum shapes.
 	if v := scanV7Fields(&env); v != nil {
+		return v
+	}
+
+	// Rule 5: schema-v8 tpa_scanner must be counts + fixed severity keys only.
+	if v := scanV8TPAScanner(env.TPAScanner); v != nil {
 		return v
 	}
 

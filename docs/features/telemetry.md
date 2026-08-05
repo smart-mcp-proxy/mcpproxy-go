@@ -4,7 +4,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 7** (`schema_version: 7` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 8** (`schema_version: 8` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -32,6 +32,8 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `active_days_30d` | `5` | Distinct UTC days with process activity in the trailing 30 days (schema v7). Only the count — never the per-day breakdown |
 | `previous_shutdown` | `clean` | How the previous process instance ended — fixed enum `clean` / `crash`, absent on first run (schema v7) |
 | `last_error_code` | `MCPX_DOCKER_CLI_NOT_FOUND` | Most recent stable `MCPX_*` diagnostic code (schema v7). Enum code only, never error text |
+| `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2}}` | Security/TPA scanner activity (schema v8) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan ran |
+| `feature_flags.deep_scan_enabled` | `false` | Whether the opt-in deep-scan layer is turned on (schema v8) |
 
 The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
 
@@ -131,6 +133,30 @@ You can inspect exactly what would be sent — including every v7 field — with
 ```bash
 mcpproxy telemetry show-payload
 ```
+
+## Schema v8 — security-scanner stats
+
+Schema v8 adds two purely **additive** signals so we can see whether the TPA / security scanner actually runs in the fleet, whether it fails, and whether it finds anything — without learning *what* it found or *where*.
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `tpa_scanner.scans_completed` | non-negative integer | Terminal, successful **scan jobs** since the last accepted heartbeat | A count of our own scan runs |
+| `tpa_scanner.scans_failed` | non-negative integer | Terminal **scan job** failures in the same window | The scanner id, the server, and the error text are never accepted by the counter API |
+| `tpa_scanner.scans_with_findings` | non-negative integer | Subset of `scans_completed` that produced at least one finding | Tells "scanner is running" apart from "scanner is finding things" |
+| `tpa_scanner.findings` | map, **fixed enum keys only** (`critical`/`high`/`medium`/`low`/`info`) → non-negative integer | Per-severity finding totals across the window. Severities with a zero total are omitted | Severity is a five-value enum; rule ids, finding titles, tool names, and file paths are dropped before they reach the counter |
+| `feature_flags.deep_scan_enabled` | boolean | The `security.deep_scan.enabled` master switch | A single boolean about our own config |
+
+**Unit of measure — one non-deep-scan (Pass 1) scan job.** Every `scans_*` counter counts *scan jobs*, not scanner invocations and not passes:
+
+- a job that runs five scanners counts **once**, however many of them fail — `scans_failed` counts failed jobs (all scanners failed), and a job that loses some scanners but still completes counts only in `scans_completed`;
+- the **Pass-2 deep supply-chain audit** that deep scan auto-starts after Pass 1 is **not counted**. Counting it would report ~2× the scans for exactly the deep-scan cohort that `feature_flags.deep_scan_enabled` exists to compare against everyone else;
+- **dry-run** jobs are not counted.
+
+The decision lives in the scanner package (`scanCallbackAdapter.countsForTelemetry` in `internal/security/scanner/service.go`), which is the only layer that knows a job's pass and dry-run status; it calls the single-purpose `EmitSecurityScanTelemetry` emitter hook, implemented on `Runtime` (`internal/runtime/event_bus.go`) as the only caller of the counter API. The UI-facing scan events (`EmitSecurityScanCompleted` / `EmitSecurityScanFailed`) deliberately record nothing — they fire per scanner and per pass.
+
+The whole `tpa_scanner` object is **omitted** when every counter is zero, so an install that never scans emits a payload shape-identical to v7. The anonymity scanner (`internal/telemetry/anonymity.go`, rule `v8_field_invalid`) re-asserts the contract on the serialized payload before every send: whitelisted keys, non-negative integers, and severity-enum keys only — a producer-side regression that leaked a server name or rule id as a map key would block the heartbeat rather than transmit it.
+
+**Never transmitted**: the scanned server's name, the scanner id, rule ids, finding titles or descriptions, matched content, file paths, and scan error messages.
 
 ## One-time opt-out signal
 

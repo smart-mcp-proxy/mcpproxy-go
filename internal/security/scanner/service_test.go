@@ -315,6 +315,15 @@ func (e *mockEmitter) EmitSecurityScannerChanged(scannerID, status, errMsg strin
 	})
 }
 
+func (e *mockEmitter) EmitSecurityScanTelemetry(completed bool, findingsBySeverity map[string]int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, mockEvent{
+		eventType: "scan_telemetry",
+		data:      map[string]interface{}{"completed": completed, "findings": findingsBySeverity},
+	})
+}
+
 // mockUnquarantiner records UnquarantineServer calls for test assertions.
 type mockUnquarantiner struct {
 	mu    sync.Mutex

@@ -7,10 +7,16 @@ import (
 	"time"
 )
 
-// TestSchemaVersionIsV7 pins FR-014: the Spec 080 payload contract is v7.
-func TestSchemaVersionIsV7(t *testing.T) {
-	if SchemaVersion != 7 {
-		t.Fatalf("SchemaVersion = %d, want 7 (Spec 080 FR-014)", SchemaVersion)
+// TestSchemaVersionIsAtLeastV7 pins FR-014: the Spec 080 payload contract
+// shipped at v7 and may only move forward. The current version is 8 (the
+// additive tpa_scanner / deep_scan_enabled bump); a downgrade below 7 would
+// drop the Spec 080 fields.
+func TestSchemaVersionIsAtLeastV7(t *testing.T) {
+	if SchemaVersion < 7 {
+		t.Fatalf("SchemaVersion = %d, want >= 7 (Spec 080 FR-014)", SchemaVersion)
+	}
+	if SchemaVersion != 8 {
+		t.Fatalf("SchemaVersion = %d, want 8 (v8 tpa_scanner additions)", SchemaVersion)
 	}
 }
 
@@ -72,7 +78,7 @@ func TestPayloadV7_FullyPopulatedPassesScanner(t *testing.T) {
 	}
 
 	for _, required := range []string{
-		`"schema_version":7`,
+		`"schema_version":8`,
 		`"wizard_shown":true`,
 		`"wizard_connect_step":"completed_external"`,
 		`"web_ui_opened":3`,
@@ -103,8 +109,8 @@ func TestPayloadV7_ZeroNewFieldsShapeCompatibleWithV6(t *testing.T) {
 	}
 	js := string(data)
 
-	if !strings.Contains(js, `"schema_version":7`) {
-		t.Errorf("expected schema_version:7 even on a zero-valued payload, got:\n%s", js)
+	if !strings.Contains(js, `"schema_version":8`) {
+		t.Errorf("expected schema_version:8 even on a zero-valued payload, got:\n%s", js)
 	}
 	for _, forbidden := range []string{
 		`"wizard_shown"`,
