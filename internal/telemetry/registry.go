@@ -438,6 +438,13 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 }
 
 // Reset zeros all counters. Called only after a successful heartbeat send.
+//
+// Deliberate, registry-wide trade-off: an event recorded between Snapshot()
+// (payload build) and this Reset() (2xx received) is zeroed without ever
+// being transmitted. The window is the seconds a daily send is in flight,
+// the stats are anonymous aggregates, and the alternative — drain-and-restore
+// on failure — buys nothing worth its complexity here. Every counter in this
+// registry shares this semantic; do not "fix" it for one field.
 func (r *CounterRegistry) Reset() {
 	for i := range r.surfaceCounts {
 		r.surfaceCounts[i].Store(0)

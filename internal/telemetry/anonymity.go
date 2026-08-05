@@ -87,8 +87,11 @@ type anonymityScanEnvelope struct {
 	LastErrorCode     *json.RawMessage `json:"last_error_code"`
 
 	// Schema v8 structural check: the security-scanner sub-object must be
-	// counts-and-fixed-enum-keys only.
-	TPAScanner *json.RawMessage `json:"tpa_scanner"`
+	// counts-and-fixed-enum-keys only. Deliberately NOT a pointer: JSON null
+	// sets a *RawMessage pointer to nil, which is indistinguishable from an
+	// absent field — as a plain RawMessage, absent stays empty while null
+	// arrives as the literal bytes "null" and fails the object-shape check.
+	TPAScanner json.RawMessage `json:"tpa_scanner"`
 }
 
 // v7FieldViolation builds the violation for a Spec 080 field that broke its
@@ -229,12 +232,15 @@ var tpaScannerScalarKeys = []string{"scans_completed", "scans_failed", "scans_wi
 // This is the wire-form backstop for the producer-side filtering in
 // CounterRegistry.RecordTPAScanCompleted — a regression there (e.g. a server
 // name or rule id leaking in as a map key) is caught before transmit.
-func scanV8TPAScanner(raw *json.RawMessage) *AnonymityViolation {
-	if raw == nil {
+func scanV8TPAScanner(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
 		return nil
 	}
 	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(*raw, &obj); err != nil {
+	// json.Unmarshal accepts `null` into a nil map, so nil-ness must be
+	// rejected explicitly — the field, when present, is required to be a
+	// real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return v8FieldViolation("tpa_scanner", "must be an object")
 	}
 
@@ -245,7 +251,10 @@ func scanV8TPAScanner(raw *json.RawMessage) *AnonymityViolation {
 	allowed["findings"] = struct{}{}
 	for k := range obj {
 		if _, ok := allowed[k]; !ok {
-			return v8FieldViolation("tpa_scanner."+k, "is not a whitelisted key")
+			// The violation is logged on send failure — echoing the
+			// rejected key there would itself be the leak this rule
+			// exists to stop, so the pattern stays constant.
+			return v8FieldViolation("tpa_scanner", "carries a key outside the whitelist")
 		}
 	}
 
@@ -265,7 +274,9 @@ func scanV8TPAScanner(raw *json.RawMessage) *AnonymityViolation {
 		return nil
 	}
 	var findings map[string]json.RawMessage
-	if err := json.Unmarshal(rawFindings, &findings); err != nil {
+	// Same nil-map guard as the parent object: `findings: null` is not an
+	// object either.
+	if err := json.Unmarshal(rawFindings, &findings); err != nil || findings == nil {
 		return v8FieldViolation("tpa_scanner.findings", "must be an object")
 	}
 	for sev, v := range findings {

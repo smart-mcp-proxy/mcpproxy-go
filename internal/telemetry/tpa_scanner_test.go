@@ -380,6 +380,12 @@ func TestScanForPII_TPAScannerShapeViolations(t *testing.T) {
 			`{"tpa_scanner":"github"}`},
 		{"findings not an object",
 			`{"tpa_scanner":{"findings":["high"]}}`},
+		// json.Unmarshal accepts null into a nil map, so null must be
+		// rejected explicitly — it is not the required object shape.
+		{"null tpa_scanner",
+			`{"tpa_scanner":null}`},
+		{"null findings",
+			`{"tpa_scanner":{"scans_completed":1,"findings":null}}`},
 	}
 	for _, tc := range dirty {
 		err := ScanForPII([]byte(tc.payload))
@@ -396,8 +402,9 @@ func TestScanForPII_TPAScannerShapeViolations(t *testing.T) {
 			t.Errorf("%s: rule = %q, want v8_field_invalid", tc.name, v.Rule)
 		}
 		// The violation must never echo the offending (possibly identifying)
-		// map key back into logs.
-		for _, secret := range []string{"TPA-2026-0001", "my-private-server", "github"} {
+		// map KEY or value back into logs — keys are where a server name
+		// would leak in, so "server_name" is in this list on purpose.
+		for _, secret := range []string{"TPA-2026-0001", "my-private-server", "github", "server_name"} {
 			if strings.Contains(v.Pattern, secret) || strings.Contains(v.Reason, secret) {
 				t.Errorf("%s: violation echoed %q back: pattern=%q reason=%q",
 					tc.name, secret, v.Pattern, v.Reason)
