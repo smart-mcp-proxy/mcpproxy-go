@@ -281,7 +281,8 @@ final class GlanceSectionTests: XCTestCase {
         section.supportsRowSubtitles = false
         let items = section.items(for: state, now: Self.now)
         let iconBefore = items[4].image
-        XCTAssertNil(iconBefore, "precondition: the successful burst row is unmarked")
+        XCTAssertTrue(iconBefore === GlanceSection.clearRowImage,
+                      "precondition: the successful burst row is visibly unmarked")
 
         state.glanceActivity = [
             Self.entry(id: "o1", server: "obsidian", tool: "search_notes", status: "error",
@@ -642,6 +643,24 @@ final class GlanceSectionTests: XCTestCase {
         ])
     }
 
+    /// "Recent" and "Clients" are real section headers on macOS 14+, not
+    /// full-size disabled rows pretending to be — the system style is what
+    /// gives them the standard header margin and small grey type. Reverting
+    /// `sectionHeaderItem` to `disabledItem` keeps every title assertion green,
+    /// so the header-ness itself must be pinned.
+    func testRecentAndClientsAreSectionHeaders() throws {
+        guard #available(macOS 14.0, *) else {
+            throw XCTSkip("sectionHeader items exist on macOS 14+ only")
+        }
+        let section = Self.makeSection()
+        let items = section.items(for: Self.busyState(), now: Self.now)
+
+        let recent = try XCTUnwrap(items.first { $0.title == "Recent" })
+        let clients = try XCTUnwrap(items.first { $0.title == "Clients" })
+        XCTAssertTrue(recent.isSectionHeader)
+        XCTAssertTrue(clients.isSectionHeader)
+    }
+
     /// The histogram sits with the summary, above the separator that opens the
     /// detail — "directly below the summary line and above the Recent header"
     /// is a statement about neighbours, not merely about relative order.
@@ -679,7 +698,8 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(row.title, "obsidian:search_notes — 5s")
         XCTAssertEqual(row.representedObject as? String, "sess-c",
                        "the click payload must follow the title, or the row opens the previous record's session")
-        XCTAssertNil(row.image, "a successful row carries no mark")
+        XCTAssertTrue(row.image === GlanceSection.clearRowImage,
+                      "a successful row carries no visible mark, only the alignment placeholder")
         XCTAssertEqual(row.toolTip, "obsidian:search_notes")
         XCTAssertEqual(row.accessibilityLabel(), "obsidian:search_notes, succeeded, 5s ago")
     }
@@ -759,7 +779,8 @@ final class GlanceSectionTests: XCTestCase {
         section.supportsRowSubtitles = false
         let items = section.items(for: state, now: Self.now)
         let previousFailure = state.glanceActivity[1]
-        XCTAssertNil(items[4].image, "precondition: the successful row is unmarked")
+        XCTAssertTrue(items[4].image === GlanceSection.clearRowImage,
+                      "precondition: the successful row is visibly unmarked")
 
         state.glanceActivity = [
             Self.entry(id: "c", server: "obsidian", tool: "search_notes", status: "error",
@@ -855,7 +876,11 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let row = section.items(for: Self.busyState(), now: Self.now)[4]
 
-        XCTAssertNil(row.image, "a quiet row is the whole point of failure-only marks")
+        XCTAssertTrue(row.image === GlanceSection.clearRowImage,
+                      "a quiet row is the whole point of failure-only marks — the placeholder "
+                      + "only reserves the icon column so titles align across the section")
+        XCTAssertNil(row.image?.accessibilityDescription,
+                     "the placeholder must be silent for VoiceOver")
         XCTAssertEqual(row.accessibilityLabel(), "github:create_issue, succeeded, 30s ago")
     }
 
@@ -910,7 +935,7 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let rows = Array(section.items(for: state, now: Self.now)[4...6])
 
-        XCTAssertEqual(rows.map { $0.image == nil }, [true, false, true])
+        XCTAssertEqual(rows.map { $0.image === GlanceSection.clearRowImage }, [true, false, true])
     }
 
     /// US3 scenario 5: a burst of blocked attempts is one row with its count,
@@ -932,7 +957,8 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(items[4].title, "jira:get_issue ×27 — 1s")
         XCTAssertEqual(items[4].image?.accessibilityDescription, "blocked")
         XCTAssertEqual(items[5].title, "jira:get_issue — 10m")
-        XCTAssertNil(items[5].image, "the successful calls are a separate, unmarked row")
+        XCTAssertTrue(items[5].image === GlanceSection.clearRowImage,
+                      "the successful calls are a separate, visibly unmarked row")
     }
 
     // MARK: - Status is carried by shape AND colour

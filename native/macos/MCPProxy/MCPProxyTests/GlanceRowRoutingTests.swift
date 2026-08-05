@@ -48,7 +48,7 @@ final class GlanceRowRoutingTests: XCTestCase {
 
     /// Two producers make `representedObject` nil: a record the core never
     /// attributed to a session, and the "Open Activity…" row itself. Both mean
-    /// the same thing downstream — open the unfiltered log.
+    /// the same thing downstream — open the log with no session context.
     func testNilRepresentedObjectOpensTheUnfilteredLog() throws {
         let state = GlanceFixtures.connectedState()
         state.glanceActivity = [
@@ -66,14 +66,5 @@ final class GlanceRowRoutingTests: XCTestCase {
                      "a record with no session_id must not carry a stale id")
         XCTAssertNil(openActivityRow.representedObject,
                      "the Open Activity… row is deliberately unfiltered")
-
-        for row in [unattributedRow, openActivityRow] {
-            XCTAssertEqual(
-                activityURLString(baseURL: "http://127.0.0.1:8080",
-                                  apiKey: "",
-                                  sessionID: row.representedObject as? String),
-                "http://127.0.0.1:8080/ui/activity"
-            )
-        }
     }
 }

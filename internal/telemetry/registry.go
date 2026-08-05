@@ -115,6 +115,21 @@ type CounterRegistry struct {
 	restEndpoints   map[string]map[string]int64 // method+template -> status class -> count
 	errorCategories map[ErrorCategory]int64
 	doctorChecks    map[string]*DoctorCounts
+
+	// Schema v8: TPA / security-scanner outcome counters. Counts only — the
+	// scanned server's name, the scanner id, the rule id, and the finding
+	// title NEVER reach the registry (the Record* methods do not accept them).
+	//
+	// These are plain int64 guarded by mu (NOT atomics) on purpose: the scalar
+	// counters and tpaFindings are always written together and read together,
+	// so a lock-free scalar would let Snapshot observe findings without the
+	// scan that produced them (or a scan with its findings not yet visible).
+	tpaScansCompleted    int64
+	tpaScansFailed       int64
+	tpaScansWithFindings int64
+	// tpaFindings is keyed ONLY by the fixed severity enum (see
+	// tpaSeverityKeys); unknown keys are dropped by RecordTPAScanCompleted.
+	tpaFindings map[string]int64
 }
 
 // NewCounterRegistry creates an empty registry. All counters start at zero.
@@ -124,6 +139,7 @@ func NewCounterRegistry() *CounterRegistry {
 		restEndpoints:   make(map[string]map[string]int64),
 		errorCategories: make(map[ErrorCategory]int64),
 		doctorChecks:    make(map[string]*DoctorCounts),
+		tpaFindings:     make(map[string]int64),
 	}
 }
 
@@ -177,6 +193,24 @@ func RecordErrorOn(reg *CounterRegistry, c ErrorCategory) {
 		return
 	}
 	reg.RecordError(c)
+}
+
+// RecordTPAScanCompletedOn calls reg.RecordTPAScanCompleted(...) if reg is
+// non-nil (schema v8).
+func RecordTPAScanCompletedOn(reg *CounterRegistry, findingsBySeverity map[string]int) {
+	if reg == nil {
+		return
+	}
+	reg.RecordTPAScanCompleted(findingsBySeverity)
+}
+
+// RecordTPAScanFailedOn calls reg.RecordTPAScanFailed() if reg is non-nil
+// (schema v8).
+func RecordTPAScanFailedOn(reg *CounterRegistry) {
+	if reg == nil {
+		return
+	}
+	reg.RecordTPAScanFailed()
 }
 
 // RecordBuiltinTool increments the counter for the named built-in tool.
@@ -234,6 +268,51 @@ func (r *CounterRegistry) RecordError(c ErrorCategory) {
 	r.mu.Unlock()
 }
 
+// RecordTPAScanCompleted records one terminal, successful security scan
+// (schema v8). findingsBySeverity is the per-severity finding count for that
+// scan; only the fixed severity enum (critical/high/medium/low/info) is
+// aggregated — any other key is silently dropped so scanner-specific or
+// user-controlled strings can never inflate the payload's cardinality.
+//
+// A scan whose summary contains at least one POSITIVE count also increments
+// the scans-with-findings counter. Nothing identifying the scanned server, the
+// scanner, or the finding itself is accepted by this method.
+func (r *CounterRegistry) RecordTPAScanCompleted(findingsBySeverity map[string]int) {
+	// Filter to the fixed enum first so the lock is held only for real work.
+	var filtered map[string]int64
+	for sev, n := range findingsBySeverity {
+		if n <= 0 || !IsTPASeverity(sev) {
+			continue
+		}
+		if filtered == nil {
+			filtered = make(map[string]int64, len(tpaSeverityKeys))
+		}
+		filtered[sev] += int64(n)
+	}
+
+	// One critical section for the whole sample: a concurrent Snapshot must
+	// never see the findings without the scan, or vice versa.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tpaScansCompleted++
+	if len(filtered) == 0 {
+		return
+	}
+	r.tpaScansWithFindings++
+	for sev, n := range filtered {
+		r.tpaFindings[sev] += n
+	}
+}
+
+// RecordTPAScanFailed records one terminal security-scan failure (schema v8).
+// The error message, scanner id, and server name are intentionally not
+// accepted: only an aggregate count is recorded.
+func (r *CounterRegistry) RecordTPAScanFailed() {
+	r.mu.Lock()
+	r.tpaScansFailed++
+	r.mu.Unlock()
+}
+
 // RecordDoctorRun aggregates the structured doctor check results into the
 // registry's doctor counter. Each result increments either Pass or Fail for
 // its check name.
@@ -270,6 +349,38 @@ type RegistrySnapshot struct {
 	RESTEndpointCalls           map[string]map[string]int64 `json:"rest_endpoint_calls"`
 	ErrorCategoryCounts         map[string]int64            `json:"error_category_counts"`
 	DoctorChecks                map[string]DoctorCounts     `json:"doctor_checks"`
+
+	// Schema v8: TPA / security-scanner outcome counters. TPAFindings always
+	// carries exactly the fixed severity keys (zeros included), mirroring the
+	// SurfaceCounts convention.
+	TPAScansCompleted    int64            `json:"tpa_scans_completed"`
+	TPAScansFailed       int64            `json:"tpa_scans_failed"`
+	TPAScansWithFindings int64            `json:"tpa_scans_with_findings"`
+	TPAFindings          map[string]int64 `json:"tpa_findings"`
+}
+
+// TPAScannerStats projects the schema-v8 scanner counters out of the snapshot,
+// or returns nil when every counter is zero so the heartbeat can omit the
+// sub-object entirely (same posture as Diagnostics).
+func (s RegistrySnapshot) TPAScannerStats() *TPAScannerStats {
+	stats := &TPAScannerStats{
+		ScansCompleted:    s.TPAScansCompleted,
+		ScansFailed:       s.TPAScansFailed,
+		ScansWithFindings: s.TPAScansWithFindings,
+	}
+	for sev, n := range s.TPAFindings {
+		if n == 0 {
+			continue
+		}
+		if stats.Findings == nil {
+			stats.Findings = make(map[string]int64, len(tpaSeverityKeys))
+		}
+		stats.Findings[sev] = n
+	}
+	if stats.isZero() {
+		return nil
+	}
+	return stats
 }
 
 // Snapshot returns an immutable view of all counters. The registry is NOT
@@ -282,6 +393,12 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 		RESTEndpointCalls:           make(map[string]map[string]int64),
 		ErrorCategoryCounts:         make(map[string]int64),
 		DoctorChecks:                make(map[string]DoctorCounts),
+		TPAFindings:                 make(map[string]int64, len(tpaSeverityKeys)),
+	}
+
+	// TPA findings: every severity key is always present, even if zero.
+	for _, sev := range tpaSeverityKeys {
+		snap.TPAFindings[sev] = 0
 	}
 
 	// Surface counts: every key is always present, even if zero.
@@ -308,11 +425,26 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 	for k, v := range r.doctorChecks {
 		snap.DoctorChecks[k] = *v
 	}
+	// TPA scalars are read under the same lock as tpaFindings so the sample is
+	// internally consistent (see the field comment on tpaScansCompleted).
+	snap.TPAScansCompleted = r.tpaScansCompleted
+	snap.TPAScansFailed = r.tpaScansFailed
+	snap.TPAScansWithFindings = r.tpaScansWithFindings
+	for k, v := range r.tpaFindings {
+		snap.TPAFindings[k] = v
+	}
 
 	return snap
 }
 
 // Reset zeros all counters. Called only after a successful heartbeat send.
+//
+// Deliberate, registry-wide trade-off: an event recorded between Snapshot()
+// (payload build) and this Reset() (2xx received) is zeroed without ever
+// being transmitted. The window is the seconds a daily send is in flight,
+// the stats are anonymous aggregates, and the alternative — drain-and-restore
+// on failure — buys nothing worth its complexity here. Every counter in this
+// registry shares this semantic; do not "fix" it for one field.
 func (r *CounterRegistry) Reset() {
 	for i := range r.surfaceCounts {
 		r.surfaceCounts[i].Store(0)
@@ -325,6 +457,10 @@ func (r *CounterRegistry) Reset() {
 	r.restEndpoints = make(map[string]map[string]int64)
 	r.errorCategories = make(map[ErrorCategory]int64)
 	r.doctorChecks = make(map[string]*DoctorCounts)
+	r.tpaScansCompleted = 0
+	r.tpaScansFailed = 0
+	r.tpaScansWithFindings = 0
+	r.tpaFindings = make(map[string]int64)
 }
 
 // bucketUpstream maps an upstream tool call count to its log bucket label.

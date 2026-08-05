@@ -63,6 +63,18 @@ type EventEmitter interface {
 	// changed (e.g., background pull started/finished/failed) so the web UI
 	// can refresh its scanner list without polling.
 	EmitSecurityScannerChanged(scannerID, status, errMsg string)
+	// EmitSecurityScanTelemetry records ONE anonymous, counts-only sample for a
+	// terminal scan JOB. It is deliberately separate from the UI-facing
+	// EmitSecurityScanCompleted/EmitSecurityScanFailed events, which fire per
+	// SCANNER and per PASS and would therefore over-count: the unit measured
+	// here is "one non-deep-scan (Pass 1) scan job".
+	//
+	// Only the scanner package knows a job's pass and dry-run status, so the
+	// decision of whether a job counts lives here (scanCallbackAdapter) rather
+	// than in the emitter. Implementations must accept counts only:
+	// findingsBySeverity is severity -> count and carries no server name,
+	// scanner id, rule id, or free text.
+	EmitSecurityScanTelemetry(completed bool, findingsBySeverity map[string]int)
 }
 
 // NoopEmitter is a no-op implementation of EventEmitter
@@ -74,6 +86,7 @@ func (n *NoopEmitter) EmitSecurityScanCompleted(string, map[string]int)     {}
 func (n *NoopEmitter) EmitSecurityScanFailed(string, string, string)        {}
 func (n *NoopEmitter) EmitSecurityIntegrityAlert(string, string, string)    {}
 func (n *NoopEmitter) EmitSecurityScannerChanged(string, string, string)    {}
+func (n *NoopEmitter) EmitSecurityScanTelemetry(bool, map[string]int)       {}
 
 // ServerInfoProvider resolves server configuration for auto-source resolution
 type ServerInfoProvider interface {
@@ -831,6 +844,17 @@ type scanCallbackAdapter struct {
 	serverInfo *ServerInfo // Cached server info for pass 2 auto-start
 }
 
+// countsForTelemetry reports whether this job is the unit the anonymous
+// schema-v8 scanner counters measure: one real (non-dry-run) Pass-1 scan job.
+//
+// Pass 2 (the deep supply-chain audit auto-started after Pass 1) is excluded
+// deliberately — counting it would double the reported scan volume of exactly
+// the deep-scan cohort the counters exist to compare. Dry-run jobs are excluded
+// because they do not affect quarantine state and are not real scans.
+func (a *scanCallbackAdapter) countsForTelemetry(job *ScanJob) bool {
+	return job != nil && a.scanPass == ScanPassSecurityScan && !job.DryRun
+}
+
 func (a *scanCallbackAdapter) OnScanStarted(job *ScanJob) {
 	_ = a.service.storage.SaveScanJob(job)
 	a.service.emit().EmitSecurityScanStarted(job.ServerName, job.Scanners, job.ID)
@@ -866,6 +890,11 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 		}
 	}
 	a.service.emit().EmitSecurityScanCompleted(job.ServerName, summary)
+	// Anonymous telemetry (schema v8): one sample per real Pass-1 job, NOT per
+	// scanner and NOT for the Pass-2 deep audit.
+	if a.countsForTelemetry(job) {
+		a.service.emit().EmitSecurityScanTelemetry(true, summary)
+	}
 	// Cleanup auto-resolved source directory
 	if a.cleanup != nil {
 		a.cleanup()
@@ -890,6 +919,13 @@ func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 	_ = a.service.storage.SaveScanJob(job)
 	// Invalidate cached summary
 	a.service.invalidateScanSummaryCache(job.ServerName)
+	// Anonymous telemetry (schema v8): a FAILED job counts once here. The
+	// per-scanner OnScannerFailed path must not record — a job with three
+	// failing scanners is still one failed scan, and a job that fails some
+	// scanners but still completes is a completion, not a failure.
+	if a.countsForTelemetry(job) {
+		a.service.emit().EmitSecurityScanTelemetry(false, nil)
+	}
 	// Cleanup auto-resolved source directory
 	if a.cleanup != nil {
 		a.cleanup()

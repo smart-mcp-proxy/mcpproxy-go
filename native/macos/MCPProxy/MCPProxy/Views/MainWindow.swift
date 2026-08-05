@@ -26,7 +26,16 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
 struct MainWindow: View {
     @ObservedObject var appState: AppState
-    @State private var selectedItem: SidebarItem? = .dashboard
+    @State private var selectedItem: SidebarItem?
+
+    /// `initialTab` seeds the sidebar selection for a window created to land
+    /// on a specific section (tray "Open Activity…" → Activity). Once the
+    /// window exists, later switches arrive as `.switchToSidebarTab`
+    /// notifications instead — state is only readable at creation time.
+    init(appState: AppState, initialTab: SidebarItem = .dashboard) {
+        self.appState = appState
+        _selectedItem = State(initialValue: initialTab)
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -82,6 +91,20 @@ struct MainWindow: View {
         .onReceive(NotificationCenter.default.publisher(for: .switchToServers)) { _ in
             selectedItem = .servers
         }
+        .onReceive(NotificationCenter.default.publisher(for: .switchToSidebarTab)) { note in
+            guard let item = MainWindow.sidebarItem(from: note) else { return }
+            selectedItem = item
+        }
+    }
+
+    /// Decode a `.switchToSidebarTab` notification's payload. The wire form is
+    /// the SidebarItem raw value as a String (posted by
+    /// `AppController.showMainWindow(tab:)`); anything else — including a
+    /// SidebarItem posted as the object itself — is deliberately dropped
+    /// rather than crashing a notification handler.
+    static func sidebarItem(from note: Notification) -> SidebarItem? {
+        guard let raw = note.object as? String else { return nil }
+        return SidebarItem(rawValue: raw)
     }
 
     /// Hidden ⌘1…⌘5 shortcuts to jump straight to each sidebar section. Keeps

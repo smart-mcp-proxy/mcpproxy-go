@@ -69,7 +69,34 @@ import (
 // All v7 fields are omitempty (zero-valued payloads stay shape-compatible
 // with v6), fixed-enum/boolean/non-negative-integer only (enforced by
 // ScanForPII), and ride the existing opt-out gate.
-const SchemaVersion = 7
+//
+// v8 (schema bump from 7): anonymous TPA / security-scanner stats. Additive
+// only; v7-and-earlier consumers ignore both additions:
+//   - tpa_scanner (object, omitted entirely when every counter is zero — the
+//     same posture as diagnostics): scans_completed, scans_failed,
+//     scans_with_findings (non-negative integer counts over the reporting
+//     window, reset only after an accepted heartbeat) and findings, a sparse
+//     map from the FIXED severity enum (critical|high|medium|low|info) to a
+//     non-negative count.
+//   - feature_flags.deep_scan_enabled (bool): the opt-in deep-scan master
+//     switch (security.deep_scan.enabled), so scan volume can be read against
+//     the population that actually enabled the layer.
+//
+// The unit of every tpa_scanner counter is ONE NON-DEEP-SCAN (PASS 1) SCAN JOB:
+// the Pass-2 deep supply-chain audit that deep scan auto-starts after Pass 1 is
+// NOT counted (counting it would double the apparent scan volume of exactly the
+// deep-scan cohort deep_scan_enabled exists to compare), dry-run jobs are NOT
+// counted, and a job with several failing scanners is still one scan —
+// scans_failed counts failed jobs, not failed scanners. The producer is
+// scanCallbackAdapter.countsForTelemetry in internal/security/scanner.
+//
+// Anonymity properties: counts and fixed enum keys ONLY. Scanned server
+// names, scanner ids, rule ids, finding titles, file paths, and error
+// messages are never accepted by the counter API, and ScanForPII re-asserts
+// the shape on the wire form (rule "v8_field_invalid"): tpa_scanner must be
+// an object whose keys are whitelisted, whose scalar values are non-negative
+// integers, and whose findings keys are members of the severity enum.
+const SchemaVersion = 8
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -248,6 +275,13 @@ type HeartbeatPayload struct {
 	// all counters are zero (omitempty on the pointer). No PII: only stable
 	// MCPX_* enum strings, non-negative int counts.
 	Diagnostics *DiagnosticsCounters `json:"diagnostics,omitempty"`
+
+	// Schema v8: anonymous TPA / security-scanner outcome counters. Omitted
+	// entirely when all counters are zero (omitempty on the pointer) — an
+	// install that never scans is shape-identical to a v7 payload. No PII:
+	// non-negative counts keyed by the fixed severity enum only; never a
+	// scanned server name, scanner id, rule id, or finding title.
+	TPAScanner *TPAScannerStats `json:"tpa_scanner,omitempty"`
 }
 
 // OnboardingSnapshot is the data the telemetry service needs to populate
@@ -885,6 +919,9 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		payload.RESTEndpointCalls = snap.RESTEndpointCalls
 		payload.ErrorCategoryCounts = snap.ErrorCategoryCounts
 		payload.DoctorChecks = snap.DoctorChecks
+		// Schema v8: security-scanner counters. nil (and therefore omitted)
+		// when the install never completed or failed a scan in the window.
+		payload.TPAScanner = snap.TPAScannerStats()
 	}
 
 	// Spec 046: onboarding funnel snapshot. Provider closes over connect.Service

@@ -40,6 +40,13 @@ type FeatureFlagSnapshot struct {
 	// Populated by the telemetry service at heartbeat time (the resolution is a
 	// runtime concern) — mirrors DockerAvailable.
 	DockerCLISource string `json:"docker_cli_source,omitempty"`
+
+	// Schema v8: DeepScanEnabled is the opt-in deep-scan master switch
+	// (security.deep_scan.enabled). Set by BuildFeatureFlagSnapshot (pure,
+	// config-only) like DockerIsolationEnabled. It lets the dashboard read
+	// tpa_scanner scan volume against the population that actually turned the
+	// deep-scan layer on.
+	DeepScanEnabled bool `json:"deep_scan_enabled"`
 }
 
 // protocolKeys is the canonical fixed-enum set of protocol labels emitted by
@@ -141,6 +148,11 @@ func BuildFeatureFlagSnapshot(cfg *config.Config) *FeatureFlagSnapshot {
 	if cfg.DockerIsolation != nil {
 		snap.DockerIsolationEnabled = cfg.DockerIsolation.Enabled
 	}
+
+	// Schema v8: deep-scan master switch. IsDeepScanEnabled is nil-safe on
+	// both the SecurityConfig and its DeepScan block, so a config without the
+	// security block reports false.
+	snap.DeepScanEnabled = cfg.Security.IsDeepScanEnabled()
 
 	// Derive OAuth provider types from upstream server URLs.
 	var providerTypes []string
