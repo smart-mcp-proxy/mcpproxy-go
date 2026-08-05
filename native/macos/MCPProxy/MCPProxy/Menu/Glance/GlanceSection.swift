@@ -13,11 +13,11 @@
 // opens (it used to hide in an "Activity (24h)" submenu, which made the
 // overview the only row that required a second navigation step).
 //
-// This component never builds a Web UI URL. It is handed only AppState, whose
-// webUIBaseURL is scheme/host/port by design, while the API key lives on the
-// core manager. Rows therefore carry a target/action pair plus a
-// representedObject holding the record's session id, and the app delegate opens
-// the authenticated URL through the same path as every other menu action.
+// Clicking a row (or "Open Activity…") opens the app's native window at the
+// Activity section — never a browser. Rows carry a target/action pair into the
+// app delegate, plus a representedObject holding the record's session id; the
+// id is what the in-place update uses to tell "same run, later clock" from
+// "this row now shows a different record" (see `apply(_:to:now:)`).
 //
 // @MainActor as a type: every member here either builds live NSMenuItems or
 // reads AppState, so main-thread-only is the truth about this component, and
@@ -192,7 +192,7 @@ final class GlanceSection {
         // the full log — a header over an empty list explains nothing.
         let runs = Self.recentRuns(for: state, now: now)
         if !runs.isEmpty {
-            items.append(disabledItem(titled: "Recent"))
+            items.append(sectionHeaderItem(titled: "Recent"))
             for run in runs {
                 var row = ActivityRow(item: actionableItem())
                 apply(run, to: &row, now: now)
@@ -203,12 +203,16 @@ final class GlanceSection {
 
         let openActivity = actionableItem()
         openActivity.title = "Open Activity…"
-        openActivity.image = NSImage(systemSymbolName: "list.bullet.rectangle",
-                                     accessibilityDescription: "activity log")
+        let activityIcon = NSImage(systemSymbolName: "list.bullet.rectangle",
+                                   accessibilityDescription: "activity log")
+        // Same slot width as the row glyphs above, so this title shares their
+        // leading edge instead of sitting a few points off.
+        activityIcon?.size = Self.rowImageSize
+        openActivity.image = activityIcon
         items.append(openActivity)
         items.append(.separator())
 
-        items.append(disabledItem(titled: "Clients"))
+        items.append(sectionHeaderItem(titled: "Clients"))
         let presence = Self.clientList(for: state, now: now)
         if presence.rows.isEmpty {
             items.append(disabledItem(titled: Self.noClientsTitle))
@@ -567,7 +571,8 @@ final class GlanceSection {
     }
 
     /// The row icon: an SF Symbol whose shape carries the outcome, tinted to
-    /// carry it a second time — or nothing at all, when the call succeeded.
+    /// carry it a second time — or a clear placeholder, when the call
+    /// succeeded.
     ///
     /// Success is deliberately unmarked (FR-010). In a real 6-week export 1,480
     /// of 1,564 outcome-bearing events succeeded, so a green tick appeared on
@@ -575,14 +580,31 @@ final class GlanceSection {
     /// errors and 52 blocks among identical-looking rows. A mark now means
     /// "look at this".
     ///
+    /// Unmarked is not the same as slotless: AppKit reserves the image column
+    /// per item, so a success row with a nil image would start its title a
+    /// full icon-width left of a failed sibling's — rows in one section at two
+    /// x-origins. The placeholder is invisible but keeps every Recent title on
+    /// the same leading edge.
+    ///
     /// The image must be non-template — AppKit recolours a template menu image
     /// to the menu's own text colour, which would silently discard the tint.
     private static func statusImage(forStatus status: String) -> NSImage? {
-        guard status != "success" else { return nil }
+        guard status != "success" else { return clearRowImage }
         return symbolImage(named: GlanceFormatting.statusSymbolName(forStatus: status),
                            tint: statusTint(forStatus: status),
                            description: outcomeDescription(forStatus: status))
     }
+
+    /// One point size for every image in the glance rows, so titles align
+    /// regardless of which glyph (or none) a row carries.
+    static let rowImageSize = NSSize(width: 16, height: 16)
+
+    /// A fully transparent image the size of a row glyph. VoiceOver ignores it
+    /// (no accessibility description), eyes ignore it — only layout sees it.
+    /// Internal so tests can assert "visibly unmarked" by identity.
+    static let clearRowImage: NSImage = {
+        NSImage(size: rowImageSize, flipped: false) { _ in true }
+    }()
 
     private static func symbolImage(named name: String, tint: NSColor, description: String) -> NSImage? {
         guard let base = NSImage(systemSymbolName: name, accessibilityDescription: description) else {
@@ -591,6 +613,7 @@ final class GlanceSection {
         let tinted = base.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [tint])) ?? base
         tinted.isTemplate = false
         tinted.accessibilityDescription = description
+        tinted.size = rowImageSize
         return tinted
     }
 
@@ -732,6 +755,15 @@ final class GlanceSection {
             builtHistogramKind = .chart
             if let cached = histogramRow, builtHistogramBars == bars,
                builtHistogramTimeZoneID == TimeZone.current.identifier {
+                // Undo the width ratchet: the last display stretched the
+                // hosted view to that menu's final width, and a view-backed
+                // item's frame is itself a width floor — returning it as-is
+                // would keep the menu as wide as its widest-ever row. Reset
+                // to the minimum and let the next display stretch it again.
+                if let view = cached.view, view.frame.width != ActivityHistogram.chartItemSize.width {
+                    view.setFrameSize(NSSize(width: ActivityHistogram.chartItemSize.width,
+                                             height: view.frame.height))
+                }
                 return cached
             }
             let item = histogramChartItemFactory(bars)
@@ -769,7 +801,12 @@ final class GlanceSection {
         switch (builtKind == .chart, newKind == .chart) {
         case (true, true):
             guard case .loaded(let bars) = histogramState, builtHistogramBars != bars else { return }
-            item.view = histogramChartItemFactory(bars).view
+            let replacement = histogramChartItemFactory(bars).view
+            // The menu already stretched the old view to the menu's final
+            // width; a factory-fresh view still has the minimum frame, and
+            // swapping it in mid-open would visibly shrink the chart.
+            if let current = item.view, let replacement { replacement.frame = current.frame }
+            item.view = replacement
             builtHistogramBars = bars
             builtHistogramTimeZoneID = TimeZone.current.identifier
         case (false, false):
@@ -863,6 +900,18 @@ final class GlanceSection {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
+    }
+
+    /// A section header ("Recent", "Clients") rendered the way the system
+    /// renders its own menu sections — small grey caps with the standard
+    /// header margin — instead of a full-size disabled row masquerading as
+    /// one. Pre-macOS 14 there is no header style, so the disabled row is the
+    /// documented degradation.
+    private func sectionHeaderItem(titled title: String) -> NSMenuItem {
+        if #available(macOS 14.0, *) {
+            return NSMenuItem.sectionHeader(title: title)
+        }
+        return disabledItem(titled: title)
     }
 
     private func actionableItem() -> NSMenuItem {

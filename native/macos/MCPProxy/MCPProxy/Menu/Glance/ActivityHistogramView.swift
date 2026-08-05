@@ -197,7 +197,12 @@ struct ActivityHistogramView: View {
         // the chart is a shape to recognise, not a plot to read values off —
         // relative bar heights survive 60 pt of plot, and a menu is the wrong
         // place for more (the Web UI has the full-size version).
-        .frame(width: 248, height: 84)
+        //
+        // Width is elastic: 248 pt is the floor that keeps the axis readable,
+        // but when another row makes the menu wider the chart must follow —
+        // a fixed-width chart in a wider menu reads as a band of dead space
+        // on the right (the hosting view stretches via its autoresizing mask).
+        .frame(minWidth: 248, maxWidth: .infinity, minHeight: 84, maxHeight: 84)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         // One label for the whole chart: VoiceOver reading 48 unlabelled bar
@@ -209,11 +214,15 @@ struct ActivityHistogramView: View {
 
 extension ActivityHistogram {
 
-    /// Size of the hosted chart item, in points. Menu items do not auto-size a
-    /// hosting view, so the frame is explicit — and it must match the view's
-    /// own size, or the row grows a band of dead space. 248 + 2*12 = 272 wide,
-    /// 84 + 2*6 = 96 tall; measured `NSHostingView.fittingSize` agrees, and
-    /// `testRealChartItemIsSizedAndLabelled` keeps the two in step.
+    /// Minimum size of the hosted chart item, in points. Menu items do not
+    /// auto-size a hosting view, so the frame is explicit — and it must match
+    /// the view's own minimum size, or the row grows a band of dead space.
+    /// 248 + 2*12 = 272 wide, 84 + 2*6 = 96 tall; measured
+    /// `NSHostingView.fittingSize` agrees, and
+    /// `testRealChartItemIsSizedAndLabelled` keeps the two in step. Width is a
+    /// floor, not a fix: the host's flexible-width autoresizing mask lets
+    /// AppKit stretch the row to the menu's final width, and the SwiftUI chart
+    /// (maxWidth: .infinity) fills whatever it is given.
     static let chartItemSize = NSSize(width: 272, height: 96)
 
     /// The glance's single custom item: an `NSHostingView` wrapping the chart.
@@ -230,6 +239,10 @@ extension ActivityHistogram {
             rootView: ActivityHistogramView(bars: bars, accessibilitySummary: summary)
         )
         host.frame = NSRect(origin: .zero, size: chartItemSize)
+        // The menu stretches an item view to its final width only when the
+        // view opts in — without this the chart stays 272 pt wide and any
+        // wider row leaves a dead band on the chart's right edge.
+        host.autoresizingMask = [.width]
         host.setAccessibilityLabel(summary)
         item.view = host
         return item

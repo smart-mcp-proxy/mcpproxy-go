@@ -511,6 +511,9 @@ final class GlanceInlineHistogramTests: XCTestCase {
         XCTAssertEqual(item.view?.frame.size, ActivityHistogram.chartItemSize)
         XCTAssertEqual(item.view?.fittingSize, ActivityHistogram.chartItemSize,
                        "the hosting view must fit its frame exactly, or the row grows dead space")
+        XCTAssertEqual(item.view?.autoresizingMask, [.width],
+                       "without flexible width the menu never stretches the chart, "
+                       + "and any wider row leaves a dead band on the chart's right edge")
         XCTAssertEqual(item.view?.accessibilityLabel(),
                        "Activity over the last 24 hours: no tool calls.")
         XCTAssertFalse(item.isEnabled)

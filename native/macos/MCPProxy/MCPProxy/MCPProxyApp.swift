@@ -73,8 +73,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Tray Glance: builds the activity / clients / histogram rows, and keeps
     /// references to them so a refresh landing while the menu is on screen can
     /// rewrite them in place instead of restructuring the menu. Rows call back
-    /// into this delegate (see `openActivityForSession`) so Web UI key handling
-    /// stays in one place — the section is handed only AppState, which has no key.
+    /// into this delegate (see `openActivityForSession`), which opens the
+    /// native main window at the Activity section.
     ///
     /// `@MainActor` because `GlanceSection` is an isolated type and this class is
     /// not, so constructing it from a plain stored-property initializer would not
@@ -379,11 +379,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ///
     /// - Parameter tab: Optional sidebar item to select when the window opens.
     func showMainWindow(tab: SidebarItem? = nil) {
-        if let window = mainWindow, window.isVisible {
+        // isVisible is false for a miniaturized window — falling through to
+        // window creation there would leave the original in the Dock and
+        // spawn a duplicate, with both subscribed to the tab notifications.
+        if let window = mainWindow, window.isVisible || window.isMiniaturized {
+            if window.isMiniaturized { window.deminiaturize(nil) }
             NSApp.setActivationPolicy(.regular)
             setupMainMenu() // Reapply our menu when becoming regular app
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            // The window is already live, so its `onReceive` observers are
+            // subscribed — a notification is the reliable path to switch tabs.
+            if let tab {
+                NotificationCenter.default.post(name: .switchToSidebarTab, object: tab.rawValue)
+            }
             return
         }
 
@@ -399,7 +408,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // MainWindow reads apiClient from appState, so we create it once.
         // When appState.apiClient is set by CoreProcessManager, all views
         // automatically re-render — no need to replace the NSHostingView.
-        let contentView = MainWindow(appState: appState)
+        //
+        // A fresh window gets its tab as initial state rather than a
+        // notification: the `onReceive` observers only subscribe once the view
+        // appears, so a notification posted now would be dropped on the floor.
+        let contentView = MainWindow(appState: appState, initialTab: tab ?? .dashboard)
         let hostingView = NSHostingView(rootView: contentView)
 
         let window = NSWindow(
@@ -1125,11 +1138,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         menu.addItem(.separator())
 
         // Stop / Start
+        // No icons on the lifecycle commands: every other command in the
+        // bottom half of the menu (Add Server…, Settings…, Run at Startup,
+        // Quit) is a bare title, and a per-item image indents only its own
+        // title — an icon here put "Stop MCPProxy Core" on a different
+        // leading edge from its neighbours.
         if appState.isStopped {
             let start = NSMenuItem(title: "Start MCPProxy Core", action: #selector(startCoreAction), keyEquivalent: "")
             start.target = self
-            start.image = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "start")
-            start.image?.size = NSSize(width: 18, height: 18)
             menu.addItem(start)
         } else if appState.coreState == .connected || appState.coreState.isOperational {
             // A core we only attached to cannot be stopped by us — we hold no PID
@@ -1138,9 +1154,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let ownership = appState.ownership
             let stop = NSMenuItem(title: ownership.stopActionTitle, action: #selector(stopCore), keyEquivalent: "")
             stop.target = self
-            let symbol = ownership.shouldTerminateOnShutdown ? "stop.circle.fill" : "eject.circle.fill"
-            stop.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "stop")
-            stop.image?.size = NSSize(width: 18, height: 18)
             if !ownership.shouldTerminateOnShutdown {
                 stop.toolTip = "This core was started outside MCPProxy. Disconnecting leaves it running."
             }
@@ -1328,21 +1341,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Open the Web UI activity log filtered by a glance row's session.
     ///
-    /// Reuses `openWebUI()`'s key path: `webUIBaseURL` is scheme/host/port only
-    /// and a first-time browser session needs the API key appended, which only
-    /// the core manager holds. A row with no session id (an empty-state row, or
-    /// a record the core never attributed) opens the unfiltered log.
+    /// Opens the app's own window at the Activity section — the activity log
+    /// has a native home, and a tray click should not context-switch the user
+    /// into a browser (the Web UI stays reachable via "Open Web UI"). The
+    /// row's session id (representedObject) stays on the item because the
+    /// glance in-place update reads it as row identity; the native log
+    /// currently opens unfiltered.
     @objc private func openActivityForSession(_ sender: NSMenuItem) {
-        let sessionID = sender.representedObject as? String
-        Task {
-            let apiKey = await coreManager?.currentAPIKey ?? ""
-            let baseURL = await MainActor.run { appState.webUIBaseURL }
-            let urlString = activityURLString(baseURL: baseURL, apiKey: apiKey, sessionID: sessionID)
-            if let url = URL(string: urlString) {
-                NSWorkspace.shared.open(url)
-            }
-        }
+        showMainWindow(tab: Self.glanceActivityDestination)
     }
+
+    /// Where a glance row click lands. A constant so tests can pin the
+    /// destination without instantiating the app delegate.
+    static let glanceActivityDestination: SidebarItem = .activity
 
     @objc private func openConfigFile() {
         NSWorkspace.shared.open(InstancePaths.configFileURL)
@@ -1437,6 +1448,9 @@ extension Notification.Name {
     static let switchToServers = Notification.Name("MCPProxy.switchToServers")
     /// Posted by tray menu to open the detail view for a specific server (object = server name string).
     static let showServerDetail = Notification.Name("MCPProxy.showServerDetail")
+    /// Posted by `showMainWindow(tab:)` to select a sidebar section in an
+    /// already-open main window (object = SidebarItem raw value string).
+    static let switchToSidebarTab = Notification.Name("MCPProxy.switchToSidebarTab")
 }
 
 @main
