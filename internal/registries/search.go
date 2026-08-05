@@ -103,6 +103,14 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 		filtered[i].Registry = reg.Name
 	}
 
+	// Non-nil so an empty result serializes as "servers": [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array). An empty
+	// query skips filterServers' allocation, so a nil fetch result would
+	// otherwise flow straight through.
+	if filtered == nil {
+		filtered = []ServerEntry{}
+	}
+
 	return filtered, nil
 }
 

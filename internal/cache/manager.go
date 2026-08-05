@@ -219,7 +219,9 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 		end = totalRecords
 	}
 
-	var paginatedRecords []interface{}
+	// Non-nil so an empty page serializes as "records": [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array).
+	paginatedRecords := make([]interface{}, 0)
 	if offset < totalRecords {
 		paginatedRecords = records[offset:end]
 	}

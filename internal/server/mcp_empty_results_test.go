@@ -1,12 +1,25 @@
 package server
 
 import (
-	"strings"
+	"context"
+	"encoding/json"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 )
+
+// assertJSONFieldIsEmptyArray decodes raw and asserts field is exactly [] on
+// the wire — the strict-client contract from issue #953 (null crashes clients
+// that iterate the array).
+func assertJSONFieldIsEmptyArray(t *testing.T, raw, field string) {
+	t.Helper()
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(raw), &payload))
+	require.Contains(t, payload, field)
+	require.JSONEq(t, `[]`, string(payload[field]),
+		"%q must serialize as an empty array, not %s", field, payload[field])
+}
 
 // Issue #953: a retrieve_tools search with zero matches must serialize the
 // tools array as [] — never null. Strict MCP clients iterate over the array
@@ -20,7 +33,18 @@ func TestRetrieveTools_EmptyResultSerializesEmptyArray(t *testing.T) {
 	})
 
 	require.Equal(t, 0, resp.Total, "fixture must not match the nonsense query")
-	assert.NotContains(t, raw, `"tools":null`, "nil slice must not serialize as null")
-	assert.True(t, strings.Contains(raw, `"tools":[]`),
-		"empty result must serialize tools as an empty array, got: %s", raw)
+	assertJSONFieldIsEmptyArray(t, raw, "tools")
+}
+
+// Same contract for quarantine_security list_quarantined with no quarantined
+// servers: "servers" must be [] on the wire, never null.
+func TestListQuarantined_EmptySerializesEmptyArray(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	result, err := proxy.handleListQuarantinedUpstreams(context.Background())
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	raw := result.Content[0].(mcp.TextContent).Text
+	assertJSONFieldIsEmptyArray(t, raw, "servers")
 }

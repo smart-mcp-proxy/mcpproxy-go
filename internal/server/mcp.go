@@ -3780,7 +3780,9 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 		return mcp.NewToolResultError(reason), nil
 	}
 
-	var toolsAnalysis []map[string]interface{}
+	// Non-nil so a tool-less server serializes as "tools": [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array).
+	toolsAnalysis := make([]map[string]interface{}, 0)
 
 	// REQUEST TEMPORARY CONNECTION EXEMPTION FOR INSPECTION
 	p.logger.Warn("⚠️ Requesting temporary connection exemption for quarantined server inspection",

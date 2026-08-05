@@ -242,7 +242,9 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 	m.logger.Debugw("Retrieved all upstream records for quarantine filtering",
 		"total_records", len(records))
 
-	var quarantinedServers []*config.ServerConfig
+	// Non-nil so an empty list serializes as "servers": [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array).
+	quarantinedServers := make([]*config.ServerConfig, 0)
 	for _, record := range records {
 		m.logger.Debugw("Checking server quarantine status",
 			"server", record.Name,
@@ -819,7 +821,9 @@ func (m *Manager) GetToolStats(topN int) ([]map[string]interface{}, error) {
 		return nil, err
 	}
 
-	var result []map[string]interface{}
+	// Non-nil so usage_summary.top_tools serializes as [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array).
+	result := make([]map[string]interface{}, 0, len(stats.TopTools))
 	for _, tool := range stats.TopTools {
 		result = append(result, map[string]interface{}{
 			"tool_name": tool.ToolName,
