@@ -68,7 +68,8 @@ The operator also sets a global concurrency cap as a backstop for the whole prox
 - Limits change while requests are queued → old waiters drain under the old rules; new arrivals see new rules; no double-counting or lost slots during the swap.
 - A server is disabled/quarantined/removed while calls are queued for it → queued calls fail with the existing server-unavailable semantics, not a hang until queue timeout.
 - Per-server limit larger than global → global still wins; documentation states effective concurrency is min of the two.
-- Zero/absent values mean unlimited; nonsensical configs (negative values, queue without a concurrency limit) are rejected at validation with clear messages.
+- Per-server tri-state: absent inherits the global default; explicit 0 opts a server out of per-server limiting while the global aggregate cap still applies; nonsensical configs (negative values, queue attached to an unlimited limit) are rejected at validation with clear messages.
+- A queued call must never stall unrelated server management: admission happens outside any shared manager lock, and disabling/removing a server promptly fails its queued calls.
 - Internal traffic that is not upstream tool calls (local tool search, cached tool listings, lightweight health probes) is not throttled and cannot deadlock behind the limiter.
 - The standalone CLI debug client (separate process) is out of scope and documented as such.
 
@@ -81,39 +82,42 @@ The operator also sets a global concurrency cap as a backstop for the whole prox
 - **FR-001**: Operators MUST be able to set a per-server maximum on concurrently executing upstream tool calls; excess calls wait in a bounded FIFO queue of configurable size (`max_concurrent_requests`, `queue_size` per server).
 - **FR-002**: Operators MUST be able to set a global maximum on concurrently executing upstream tool calls across all servers, layered with per-server limits such that waiting for a specific server's slot does not consume global capacity.
 - **FR-003**: Every in-process origin of upstream tool calls MUST be subject to the limits — the MCP tool-call variants, the legacy tool-call path, direct-routing mode, the REST tool-call endpoint, sandboxed code-execution scripts, and activity replay. No origin may bypass the limiter.
-- **FR-004**: A call arriving when the queue is full MUST be rejected immediately. A queued call MUST be rejected when its wait exceeds the configured `queue_timeout`. Queue order MUST be first-in-first-out.
-- **FR-005**: Queue waiting time MUST NOT count against the call's execution timeout; caller cancellation while queued MUST release the slot immediately and be reported as cancellation, not as shedding.
-- **FR-006**: With no limits configured (all values zero/absent — the default), behavior MUST be byte-for-byte today's: no queueing, no limiting, no new errors. Limits are strictly opt-in.
+- **FR-004**: A call arriving when the queue is full MUST be rejected immediately. A queued call MUST be rejected when its total wait exceeds the configured `queue_timeout` — a single absolute deadline spanning both the per-server and global admission steps combined (never `queue_timeout` per step). Queue order MUST be first-in-first-out.
+- **FR-005**: The call's execution timeout MUST begin only after admission (all limiter tiers acquired) so queue waiting never consumes execution budget; this applies to every origin, including internal ones whose execution deadline is currently created before the upstream call (activity replay MUST be adjusted accordingly). A caller's own deadline/cancellation is still honored while queued: cancellation MUST release the slot immediately and be reported as cancellation, not as shedding.
+- **FR-006**: With no limits configured (the default), observable behavior MUST be unchanged: no queueing, no limiting, no new errors, and performance overhead within the agreed regression threshold (see SC-002).
 - **FR-007**: Lightweight non-tool-call traffic (local tool search, coalesced tool listings, health probes) MUST NOT be throttled by these limits.
+- **FR-008**: A call MUST NOT wait in a limiter queue while holding any proxy-wide or manager-wide lock: the dispatch layer MUST resolve the target client and release shared locks before admission begins, so queued calls never block server add/remove/disable, reconciliation, or config reload.
+- **FR-009**: When a server is disabled, removed, or quarantined, its queued calls MUST be failed promptly with the existing server-unavailable semantics (not left to hit `queue_timeout`), and its limiter state MUST be released.
 
 **Shed semantics**
 
-- **FR-010**: A shed MCP tool call MUST return a normal tool-call error result (readable by agent LLMs, retry-friendly) that names the server, states it is at its concurrency limit, and advises retrying shortly — never a transport/protocol failure that can abort an agent session.
-- **FR-011**: A shed REST tool call MUST return HTTP 429 with a Retry-After hint.
-- **FR-012**: Shed calls MUST be recorded in the activity log with a dedicated "rejected" status, distinguishable from upstream errors, including the reason (queue full vs. queue timeout) and the server name.
-- **FR-013**: Rejection counters (per server, per reason) and queue depth MUST be exposed through the existing metrics surface.
+- **FR-010**: A shed MCP tool call MUST return a normal tool-call error result (readable by agent LLMs, retry-friendly) that states which limit triggered — the named server's limit or the proxy-wide (global) limit — and advises retrying shortly; never a transport/protocol failure that can abort an agent session. The message MUST NOT blame a server when the global limiter was the trigger.
+- **FR-011**: A shed REST tool call MUST return HTTP 429 with a Retry-After hint. The limiter's typed rejection identity MUST be preserved end-to-end through the REST dispatch path (today intermediate layers flatten errors into strings, which would make 429 mapping impossible); Retry-After derives from the effective `queue_timeout` (or a documented constant when unlimited queueing is configured).
+- **FR-012**: Every shed call MUST be recorded with a dedicated "rejected" activity status regardless of origin — including origins that bypass the MCP dispatch layer (sandboxed code execution, activity replay) — via an origin-independent rejection seam at or below the limiter, carrying stable metadata: `reason` (queue_full | queue_timeout) and `scope` (server | global) plus the server name and origin. Because activity status is a closed vocabulary today, the new status MUST be propagated through the full consumer contract: storage/API schema, activity filters and summaries, usage aggregation, exports, and Web UI rendering.
+- **FR-013**: Rejection counters (per server, per reason, per scope) and queue depth MUST be exposed through the existing metrics surface, again independent of call origin.
 
 **Configuration & operations**
 
-- **FR-020**: Limits MUST be configurable globally and per server in the standard config file, with per-server values overriding global defaults; a per-server value of zero/absent inherits the global setting; global zero means unlimited.
-- **FR-021**: All limit settings MUST be hot-reloadable: config-file edits apply to a running instance without restart; in-flight and queued calls complete under the rules in force when they were admitted.
-- **FR-022**: All limit settings MUST be overridable via environment variables following the existing naming convention, documented, and reflected in the API schema like any other config field.
-- **FR-023**: Validation MUST reject negative values and a nonzero queue size without a concurrency limit, with actionable error messages.
+- **FR-020**: Limits MUST be configurable globally and per server in the standard config file with explicit tri-state per-server semantics: **absent = inherit the global per-server default; explicit 0 = no per-server limit for this server (the global aggregate limiter still applies); positive = override**. Global `max_concurrent_requests: 0` (the default) means no global limiter. The global limiter's own queue settings and the inherited per-server defaults MUST be distinguishable in the config surface, and documentation MUST state that a server's effective concurrency is bounded by both its own and the global limit.
+- **FR-021**: All limit settings MUST be hot-reloadable without restart. A reload MUST publish the global and per-server limit values as one atomic generation — a call is "admitted" under exactly one generation (captured at admission), and calls never observe a mix of new global and old per-server rules (or vice versa). In-flight and already-queued calls complete under the generation they captured.
+- **FR-022**: The global limit settings MUST be overridable via environment variables following the existing naming convention, documented, and reflected in the API schema like any other config field. Per-server values are file/API-configured only (no per-server env scheme exists or is introduced).
+- **FR-023**: Validation MUST reject negative values and a nonzero queue size whose corresponding concurrency limit resolves to unlimited, with actionable error messages naming the offending server and field.
 - **FR-024**: Limits MUST apply identically in the personal and server editions; in the server edition, per-server limits bound the combined load of all users on that upstream.
 
 ### Key Entities
 
-- **Concurrency limit (per server / global)**: maximum simultaneously executing upstream tool calls; zero = unlimited.
+- **Concurrency limit (per server / global)**: maximum simultaneously executing upstream tool calls; per-server values are tri-state (absent = inherit, 0 = no per-server limit, positive = override); global 0 = no global limiter.
 - **Wait queue**: bounded FIFO of admitted-but-not-yet-running calls for a given limit; characterized by size and per-call wait deadline.
-- **Shed event**: a rejected call — reason (queue full | queue timeout), origin surface, server, timestamp; appears in the activity log and metrics.
-- **Effective limit resolution**: per-server override → global default → unlimited; effective concurrency for a server is bounded by both its own and the global limit.
+- **Shed event**: a rejected call — reason (queue_full | queue_timeout), scope (server | global), origin surface, server, timestamp; appears in the activity log and metrics regardless of origin.
+- **Limit generation**: the atomically published snapshot of all limit values (global + per-server) a call is admitted under; hot reload replaces the generation as a unit.
+- **Effective limit resolution**: per-server explicit value (0 = none, positive = cap) → absent inherits global default → unlimited; effective concurrency for a server is bounded by both its own and the global limit.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
 - **SC-001**: With a per-server limit of N configured, the upstream never observes more than N simultaneous requests, under bursts of at least 10× N, from any mix of origins — verified for both stdio and HTTP upstreams.
-- **SC-002**: With defaults (no limits), a full regression pass shows zero behavioral or performance change versus the previous release.
+- **SC-002**: With defaults (no limits), the existing regression suites (unit, race, API E2E) pass unchanged, and tool-call latency overhead versus the previous release stays within an agreed threshold (≤1% median in the standard benchmark) — measured, not asserted.
 - **SC-003**: Under sustained 5× overload of a limited server, agent clients continue operating: 100% of shed calls surface as readable retryable errors; zero client sessions abort due to shedding.
 - **SC-004**: An operator can raise or lower any limit on a loaded instance and see it take effect within one config-reload cycle, with zero dropped in-flight calls.
 - **SC-005**: Every shed call is attributable in the activity log (status, reason, server) and counted in metrics; queue-full sheds respond in under 100 ms (no waiting on a full queue).
@@ -122,6 +126,7 @@ The operator also sets a global concurrency cap as a backstop for the whole prox
 ## Assumptions
 
 - The chosen approach is Option A from the decision report: a two-tier (admission + run) limiter at the single managed-client choke point, per-server acquired before global. The report's choke-point audit — including the finding that code-execution and replay paths bypass the manager layer — is the authoritative placement rationale.
+- Cross-model review (Codex, round 1) established two placement corrections the plan must honor: (1) the manager dispatch path currently holds a manager-wide read lock across the upstream call, so dispatch must snapshot the client and release shared locks before admission (FR-008); (2) activity replay currently creates its execution-timeout context before calling the client, so it must be restructured for FR-005 to hold.
 - Defaults ship as unlimited (0/0, 30s queue timeout when queueing is enabled): zero behavior change on upgrade. Documentation will recommend a small limit (e.g. 5) for stdio upstreams, mirroring common SDK worker-pool sizes; stdio does not require limit=1 since the transport legitimately multiplexes.
 - Per-user fairness within a server's queue (server edition) is out of scope for v1; the design keys limiters by server name so a future per-(user,server) extension (Spec 074 direction) does not require rework.
 - Upstream tool listings and health probes stay outside the limits (already coalesced / lightweight); a strict "count everything" mode is not offered in v1.
