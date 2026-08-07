@@ -37,7 +37,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/typography": "^0.5.20",
-    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/eslint-plugin": "^8.66.0",
     "@typescript-eslint/parser": "^8.65.0",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vitest/coverage-v8": "^4.1.10",
@@ -45,16 +45,16 @@
     "@vue/eslint-config-typescript": "^14.9.0",
     "@vue/test-utils": "^2.4.11",
     "@vue/tsconfig": "^0.9.1",
-    "daisyui": "^5.7.4",
+    "daisyui": "^5.7.16",
     "eslint": "^10.8.0",
     "eslint-plugin-vue": "^10.10.0",
-    "jsdom": "^30.0.0",
-    "postcss": "^8.5.24",
+    "jsdom": "^30.0.1",
+    "postcss": "^8.5.25",
     "tailwindcss": "^4.1.0",
     "typescript": "^6.0.0",
-    "vite": "^8.1.5",
+    "vite": "^8.2.0",
     "vitest": "^4.1.7",
-    "vue-tsc": "^3.3.8"
+    "vue-tsc": "^3.3.9"
   },
   "overrides": {
     "dompurify": "^3.4.12",
