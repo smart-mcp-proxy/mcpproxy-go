@@ -65,7 +65,7 @@ The operator also sets a global concurrency cap as a backstop for the whole prox
 
 - Caller cancels/disconnects while queued → the queue slot frees immediately; no leaked capacity.
 - Queue wait must not silently consume the existing per-call execution timeout — a call that queues 20s still gets its full execution time budget.
-- Limits change while requests are queued → old waiters drain under the old rules; new arrivals see new rules; no double-counting or lost slots during the swap.
+- Limits change while requests are queued → existing waiters keep their original absolute deadlines but are admitted under the new caps (per FR-021's shared occupancy accounting); new arrivals see new rules; no double-counting or lost slots during the swap.
 - A server is disabled/quarantined/removed while calls are queued for it → queued calls fail with the existing server-unavailable semantics, not a hang until queue timeout.
 - Per-server limit larger than global → global still wins; documentation states effective concurrency is min of the two.
 - Per-server tri-state: absent inherits the per-server default set (not the global limiter); explicit 0 opts a server out of that setting while the global aggregate cap still applies; nonsensical configs (negative values, queue attached to a disabled limit) are rejected at validation with clear messages.
