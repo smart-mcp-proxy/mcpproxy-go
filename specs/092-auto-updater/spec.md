@@ -6,6 +6,8 @@
 **Input**: User description: "One-click auto-updater for macOS + channel-aware mcpproxy update CLI (fixes #957). Phase 0 fixes the stale-process bug for every upgrade path (version-mismatch supersede in tray, bundle-replacement detection, postinstall quit-before-launch). Phase 1 finishes the half-plumbed Sparkle 2 integration (one-click download, verify, bundle swap, relaunch; EdDSA keys, CI appcast, notarized stapled .app zip enclosure). Phase 2 adds mcpproxy update CLI branching on existing install-channel detection (self-update only on tarball/unknown-writable channels, cosign-verified; package-manager guidance elsewhere; DMG delegates to tray). Decision report: docs/research/auto-updater-issue-957-2026-08-07.html"
 
 > Related: issue #957 ("old version App still after upgrade"). Decision analysis with option comparison and verification appendix: `docs/research/auto-updater-issue-957-2026-08-07.html` (Option A chosen).
+>
+> Note: the Input above is the verbatim original description. Where it says "self-update only on tarball/unknown-writable channels", FR-020 supersedes it: self-update requires a positively identified tarball install; `unknown` is guidance-only absent an explicit user override.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -53,7 +55,7 @@ A CLI user runs `mcpproxy update`. The command knows how mcpproxy was installed 
 
 **Why this priority**: Completes the story for headless/CLI users; independent of the macOS GUI work and lower risk. Mirrors the behavior of best-in-class CLIs (uv, deno).
 
-**Independent Test**: Run `mcpproxy update` on each channel fixture and verify: self-replace happens only on tarball/unknown-writable installs, with integrity verification; all other channels get correct guidance and a zero-side-effect exit.
+**Independent Test**: Run `mcpproxy update` on each channel fixture and verify: self-replace happens only on positively identified tarball installs (or on `unknown` with the explicit self-managed override), with integrity verification; all other channels — including plain `unknown` — get correct guidance and a zero-side-effect exit.
 
 **Acceptance Scenarios**:
 
@@ -62,7 +64,7 @@ A CLI user runs `mcpproxy update`. The command knows how mcpproxy was installed 
 3. **Given** a macOS DMG install, **When** the user runs `mcpproxy update`, **Then** the command directs the user to the tray's updater (and never modifies the app bundle or any staged copy of it).
 4. **Given** a tarball install in a user-writable location, **When** the user runs `mcpproxy update`, **Then** the new binary is downloaded, its integrity verified against the release's signed checksums, and swapped in atomically; the old binary is recoverable until success is confirmed.
 5. **Given** the target binary location is not writable (e.g. root-owned), **When** the user runs `mcpproxy update`, **Then** the command fails with an explicit message naming the path and owner and suggesting options — it never escalates privileges itself.
-6. **Given** the available version is the same or older than the running one, **When** the user runs `mcpproxy update`, **Then** the command reports "already up to date" and refuses to downgrade unless `--force` is passed.
+6. **Given** the available version is the same or older than the running one, **When** the user runs `mcpproxy update`, **Then** the command reports "already up to date"; a downgrade requires BOTH an explicit target-version option AND `--force` (per FR-022 — a bare "update to latest" has nothing to force).
 7. **Given** any channel, **When** the user runs `mcpproxy update --check` (or `mcpproxy update` with no newer version), **Then** the command reports current/latest versions and the detected channel without side effects.
 
 ---
