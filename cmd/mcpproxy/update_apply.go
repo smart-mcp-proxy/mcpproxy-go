@@ -37,6 +37,11 @@ const (
 	// and "the replacement verified", so finding one means a swap died
 	// halfway. See applyNewBinary.
 	swapSentinelSuffix = ".updating"
+
+	// backupSuffix names the copy of the previous binary kept until the new
+	// one has proved itself. Named rather than inlined because
+	// canonicalUpdateTarget has to recognise it.
+	backupSuffix = ".old"
 )
 
 // parseChecksums parses a sha256sum-format manifest ("<hex>  <name>" or
@@ -225,7 +230,16 @@ func ensureTargetWritable(target string) error {
 // recovery reads it to tell the two states apart. Nothing removes the backup
 // while the sentinel exists.
 func applyNewBinary(target, staged string, verify func(path string) error) (err error) {
-	backup := target + ".old"
+	// Before anything else, and before the lock: a target that is itself one of
+	// our working files means the path we were handed is an alias for a binary
+	// some other update owns. Swapping it would move that update's backup out
+	// from under it — the lock cannot help, because the two processes would be
+	// naming different files.
+	if aliasErr := refuseAliasedUpdateTarget(target); aliasErr != nil {
+		return aliasErr
+	}
+
+	backup := target + backupSuffix
 	sentinel := target + swapSentinelSuffix
 
 	// The whole recover-and-swap sequence runs under an exclusive per-target

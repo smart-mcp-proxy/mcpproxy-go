@@ -662,3 +662,113 @@ func TestApplyNewBinary_RefusedWhileAnotherSwapHoldsTheLock(t *testing.T) {
 		t.Fatalf("target changed by refused swap: %q", got)
 	}
 }
+
+// On Linux os.Executable() reads /proc/self/exe, which names the running
+// INODE — so a process whose binary a concurrent update has just renamed to
+// <name>.old resolves its own path to <name>.old. Keying the lock on that name
+// gives two "exclusive" holders on two different files, and the second one's
+// swap then moves the first one's backup aside.
+func TestCanonicalUpdateTarget(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"mcpproxy", "mcpproxy"},
+		{"mcpproxy" + backupSuffix, "mcpproxy"},
+		{"mcpproxy" + swapSentinelSuffix, "mcpproxy"},
+		{"mcpproxy" + updateLockSuffix, "mcpproxy"},
+		// A swap of an already-aliased path would have produced this.
+		{"mcpproxy" + backupSuffix + backupSuffix, "mcpproxy"},
+		{".mcpproxy.new-4242", "mcpproxy"},
+		// Directories are preserved, and only the base name is examined.
+		{filepath.Join("/usr", "local", "bin", "mcpproxy"+backupSuffix), filepath.Join("/usr", "local", "bin", "mcpproxy")},
+		{filepath.Join("/opt", "old", "mcpproxy"), filepath.Join("/opt", "old", "mcpproxy")},
+		// Not ours: no suffix to strip, and nothing that only looks like one.
+		{"mcpproxy.new-notdigits", "mcpproxy.new-notdigits"},
+		{backupSuffix, backupSuffix},
+	} {
+		if got := canonicalUpdateTarget(tc.in); got != tc.want {
+			t.Errorf("canonicalUpdateTarget(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The two processes must contend on ONE lock however each of them spells the
+// path — this is the aliasing bug reduced to its mechanism.
+func TestAcquireUpdateLock_AliasedPathsContendOnOneLock(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+
+	release, err := acquireUpdateLock(target)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	// What the second process sees for its own executable mid-swap.
+	if _, err := acquireUpdateLock(target + backupSuffix); !errors.Is(err, errUpdateInProgress) {
+		t.Fatalf("acquire via the .old alias: want errUpdateInProgress, got %v", err)
+	}
+
+	release()
+	release2, err := acquireUpdateLock(target + backupSuffix)
+	if err != nil {
+		t.Fatalf("re-acquire via the alias after release: %v", err)
+	}
+	release2()
+
+	// One lock file, under the canonical name — not two.
+	if _, err := os.Stat(target + updateLockSuffix); err != nil {
+		t.Errorf("canonical lock file missing: %v", err)
+	}
+	if _, err := os.Stat(target + backupSuffix + updateLockSuffix); !os.IsNotExist(err) {
+		t.Error("an aliased lock file was created; the two processes did not contend")
+	}
+}
+
+// Canonicalizing the lock key is not enough on its own: the swap must also
+// refuse to REPLACE a file named like our own working files, because it cannot
+// tell a concurrent update's backup from a copy the user renamed themselves.
+func TestApplyNewBinary_RefusesAnAliasedTarget(t *testing.T) {
+	dir := t.TempDir()
+	canonical := filepath.Join(dir, "mcpproxy")
+	aliased := canonical + backupSuffix
+	staged := filepath.Join(dir, "staged")
+
+	writeAll(t, map[string]string{
+		canonical: "the binary another update is replacing",
+		aliased:   "that update's only backup",
+		staged:    "new",
+	})
+
+	err := applyNewBinary(aliased, staged, nil)
+	if !errors.Is(err, errUpdateTargetIsArtifact) {
+		t.Fatalf("want errUpdateTargetIsArtifact, got %v", err)
+	}
+
+	// Nothing may have moved: the backup above is the only copy of a working
+	// binary that the other process still expects to find.
+	got, readErr := os.ReadFile(aliased)
+	if readErr != nil {
+		t.Fatalf("the other update's backup must survive: %v", readErr)
+	}
+	if string(got) != "that update's only backup" {
+		t.Errorf("backup content = %q", got)
+	}
+	if _, statErr := os.Stat(aliased + backupSuffix); !os.IsNotExist(statErr) {
+		t.Error("the refused swap moved the backup aside")
+	}
+	if _, statErr := os.Stat(aliased + swapSentinelSuffix); !os.IsNotExist(statErr) {
+		t.Error("the refused swap marked itself in progress")
+	}
+}
+
+func TestRefuseAliasedUpdateTarget(t *testing.T) {
+	for _, name := range []string{"mcpproxy" + backupSuffix, "mcpproxy" + swapSentinelSuffix,
+		"mcpproxy" + updateLockSuffix, ".mcpproxy.new-17"} {
+		if err := refuseAliasedUpdateTarget(filepath.Join("/usr/local/bin", name)); err == nil {
+			t.Errorf("%s must be refused", name)
+		}
+	}
+	for _, name := range []string{"mcpproxy", "mcpproxy-server", "mcpproxy.exe", "oldmcpproxy"} {
+		if err := refuseAliasedUpdateTarget(filepath.Join("/usr/local/bin", name)); err != nil {
+			t.Errorf("%s must be accepted: %v", name, err)
+		}
+	}
+}

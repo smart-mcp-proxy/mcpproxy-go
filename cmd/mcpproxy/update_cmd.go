@@ -430,6 +430,11 @@ func (r *updateRunner) selfUpdate(release *updatecheck.GitHubRelease) error {
 		// Defence in depth: decideAction already routes bundles to the tray.
 		return fmt.Errorf("refusing to modify %s: it is inside a macOS app bundle", target)
 	}
+	// Checked here as well as inside applyNewBinary so a concurrent update is
+	// caught before ~90 MB is downloaded on its behalf.
+	if aliasErr := refuseAliasedUpdateTarget(target); aliasErr != nil {
+		return aliasErr
+	}
 
 	// Fail before spending a ~90 MB download on an install we cannot write.
 	if err := ensureTargetWritable(target); err != nil {
