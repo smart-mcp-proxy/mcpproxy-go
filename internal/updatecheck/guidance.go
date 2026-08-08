@@ -6,9 +6,9 @@ import "fmt"
 // install channel, or "" when no command can be safely offered (Spec 079
 // FR-009: never emit a channel-specific command that could be wrong).
 //
-// Only package-manager/toolchain channels get a command; dmg,
-// windows-installer, tarball, docker, and unknown installs get guidance text
-// via GuidanceLine instead.
+// Only package-manager/toolchain channels and the self-managed tarball
+// channel get a command; dmg, windows-installer, docker, and unknown installs
+// get guidance text via GuidanceLine instead.
 func UpdateCommand(channel string) string {
 	switch channel {
 	case ChannelHomebrew:
@@ -19,6 +19,13 @@ func UpdateCommand(channel string) string {
 		return "sudo dnf upgrade mcpproxy"
 	case ChannelGoInstall:
 		return "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest"
+	case ChannelTarball:
+		// Spec 092 FR-020: a positively identified tarball install is the one
+		// channel mcpproxy owns end-to-end, so the command is our own
+		// verified self-update rather than a re-download-and-extract dance.
+		// Only the (weak) tarball build marker can produce this channel, so
+		// this command is never offered to a package-manager-owned binary.
+		return "mcpproxy update"
 	default:
 		return ""
 	}
@@ -35,6 +42,13 @@ func UpdateCommand(channel string) string {
 func PrereleaseUpdateCommand(channel, version string) string {
 	if channel == ChannelGoInstall && version != "" {
 		return "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@" + ensureVPrefix(version)
+	}
+	// Spec 092: `mcpproxy update` resolves releases through the same
+	// prerelease-channel selection that produced this offer (update_check.
+	// channel / MCPPROXY_ALLOW_PRERELEASE_UPDATES), so it delivers the
+	// advertised rc — unlike brew/apt/dnf, which only serve stable.
+	if channel == ChannelTarball {
+		return "mcpproxy update"
 	}
 	return ""
 }

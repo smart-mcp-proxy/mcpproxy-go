@@ -217,6 +217,14 @@ jobs:
           fi
 
           # Create clean core binary for archive
+          #
+          # NOTE (Spec 092 FR-014/FR-020): unlike release.yml, the RC archive is
+          # deliberately NOT stamped with updatecheck.buildChannel=tarball yet.
+          # A tarball-stamped binary makes `mcpproxy update` self-update, which
+          # requires the release to carry checksums.txt + its cosign bundle —
+          # artifacts this prerelease pipeline does not publish today. Stamp this
+          # build in the same change that adds signed checksum manifests here, so
+          # RC tarball users never get a self-update path that cannot verify.
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
           # Build tray binary for macOS

@@ -171,10 +171,10 @@ guided command in `mcpproxy status`, `mcpproxy doctor`, and the Web UI
 banner).
 
 Detection prefers a **build-time channel marker** stamped into
-single-channel artifacts at packaging time (the Docker image and the Windows
-installer). When no marker is present — the release archives feed the
-tarball, Homebrew, and DMG channels from one binary — runtime heuristics run
-in decreasing confidence order:
+single-channel artifacts at packaging time (the Docker image, the Windows
+installer, and — since Spec 092 — the release `.tar.gz`/`.zip` archives).
+When no marker is present, runtime heuristics run in decreasing confidence
+order:
 
 1. **Homebrew**: the (symlink-resolved) executable path lives under a
    Homebrew prefix (`/opt/homebrew/`, a `Cellar/` path, or
@@ -208,6 +208,22 @@ in decreasing confidence order:
 Ambiguity always resolves to `unknown`: MCPProxy never guesses a channel,
 because a wrong update command is worse than a generic instruction.
 
+### Why the `tarball` marker is weak
+
+The `tarball` marker is the one exception to "the marker wins". Homebrew
+installs the *same* release `.tar.gz` into its Cellar, so a stamped binary can
+legitimately end up in a Homebrew (or, after a future packaging change, some
+other) install. The detector therefore runs heuristics 1–5 first and only
+applies a `tarball` marker when none of them matched — that is, when the
+binary is an official release archive extracted somewhere no package manager
+owns. Every other marker (docker, windows-installer, …) still short-circuits
+detection.
+
+This is what makes `tarball` a *positive* identification: `mcpproxy update`
+self-replaces the binary only on this channel (Spec 092 FR-020). A plain
+`unknown` install is never self-updated, no matter how writable it is —
+writability is not ownership.
+
 ### Update Commands per Channel
 
 | Channel | `update_command` | Guidance shown instead |
@@ -219,7 +235,8 @@ because a wrong update command is worse than a generic instruction.
 | `dmg` | — | Download the latest DMG (release page is deep-linked) |
 | `windows-installer` | — | Download the latest Windows installer |
 | `docker` | — | Pull or rebuild the newer image for your deployment |
-| `tarball` / `unknown` | — | Download the latest release from the releases page |
+| `tarball` | `mcpproxy update` | — |
+| `unknown` | — | Download the latest release from the releases page |
 
 Every surface always deep-links the release notes for the latest version,
 whether or not a command is available.
@@ -229,9 +246,10 @@ whether or not a command is available.
 published only to the GitHub pre-release channel, so the package-manager
 commands above would not deliver them (`brew`/`apt`/`dnf` serve stable
 artifacts, and Go's `@latest` resolves to the newest stable). When the offered
-version is a prerelease, only `go-install` gets a command — pinned to the
-exact version (`…/cmd/mcpproxy@v0.48.0-rc.1`) — and every other channel falls
-back to the release-page guidance.
+version is a prerelease, only `go-install` (pinned to the exact version,
+`…/cmd/mcpproxy@v0.48.0-rc.1`) and `tarball` (`mcpproxy update`, which resolves
+releases through the same prerelease selection) keep a command — every other
+channel falls back to the release-page guidance.
 
 ## Updating MCPProxy
 

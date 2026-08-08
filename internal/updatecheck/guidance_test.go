@@ -14,6 +14,10 @@ func TestUpdateCommand_ExactPerChannel(t *testing.T) {
 		{ChannelDeb, "sudo apt update && sudo apt install --only-upgrade mcpproxy"},
 		{ChannelRPM, "sudo dnf upgrade mcpproxy"},
 		{ChannelGoInstall, "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest"},
+		// Spec 092 FR-020/FR-024: a positively identified tarball install is
+		// self-managed, so its "command" is mcpproxy's own verified
+		// self-update.
+		{ChannelTarball, "mcpproxy update"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.channel, func(t *testing.T) {
@@ -25,9 +29,11 @@ func TestUpdateCommand_ExactPerChannel(t *testing.T) {
 }
 
 func TestUpdateCommand_NoCommandChannels(t *testing.T) {
-	// dmg / windows-installer / tarball / docker / unknown must never emit a
-	// command that could be wrong for the user's setup (FR-009).
-	for _, channel := range []string{ChannelDMG, ChannelWindowsInstaller, ChannelTarball, ChannelDocker, ChannelUnknown, ""} {
+	// dmg / windows-installer / docker / unknown must never emit a command
+	// that could be wrong for the user's setup (FR-009). unknown stays
+	// command-free even though it is writable: writability is not ownership
+	// (Spec 092 FR-020).
+	for _, channel := range []string{ChannelDMG, ChannelWindowsInstaller, ChannelDocker, ChannelUnknown, ""} {
 		if got := UpdateCommand(channel); got != "" {
 			t.Errorf("UpdateCommand(%q) = %q, want empty", channel, got)
 		}
@@ -60,10 +66,19 @@ func TestPrereleaseUpdateCommand(t *testing.T) {
 	})
 
 	t.Run("package-manager channels never get a prerelease command", func(t *testing.T) {
-		for _, channel := range []string{ChannelHomebrew, ChannelDeb, ChannelRPM, ChannelDMG, ChannelWindowsInstaller, ChannelTarball, ChannelDocker, ChannelUnknown, ""} {
+		for _, channel := range []string{ChannelHomebrew, ChannelDeb, ChannelRPM, ChannelDMG, ChannelWindowsInstaller, ChannelDocker, ChannelUnknown, ""} {
 			if got := PrereleaseUpdateCommand(channel, "v0.48.0-rc.1"); got != "" {
 				t.Errorf("PrereleaseUpdateCommand(%q) = %q, want empty", channel, got)
 			}
+		}
+	})
+
+	t.Run("tarball self-update honors the prerelease channel", func(t *testing.T) {
+		// `mcpproxy update` resolves the release through the same
+		// prerelease selection that produced the offer, so unlike brew/apt/dnf
+		// it actually delivers the advertised rc (Spec 092).
+		if got := PrereleaseUpdateCommand(ChannelTarball, "v0.48.0-rc.1"); got != "mcpproxy update" {
+			t.Errorf("PrereleaseUpdateCommand(tarball) = %q, want %q", got, "mcpproxy update")
 		}
 	})
 }

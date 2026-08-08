@@ -392,12 +392,13 @@ jobs:
           CGO_LDFLAGS: "-mmacosx-version-min=13.0"
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          # NOTE (Spec 079): the updatecheck.buildChannel install-channel marker is
-          # intentionally NOT stamped here — this one matrix binary feeds the tarball,
-          # Homebrew, and DMG artifacts, so any single channel value would be wrong for
-          # some consumers. Those installs rely on runtime heuristics
-          # (internal/updatecheck/channel.go); only single-channel pipelines stamp it
-          # (Dockerfile -> docker, scripts/build-windows-installer.ps1 -> windows-installer).
+          # NOTE (Spec 079/092): the shared matrix binary stays UNSTAMPED. It feeds
+          # the DMG/PKG app bundle and the .deb/.rpm packages, which must keep
+          # detecting their own channel via runtime heuristics
+          # (internal/updatecheck/channel.go). Single-channel pipelines stamp their
+          # own marker: Dockerfile -> docker,
+          # scripts/build-windows-installer.ps1 -> windows-installer, and the
+          # archive build below -> tarball.
           LDFLAGS="-s -w -X main.version=${VERSION} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
 
           # Determine clean binary name and build flags
@@ -412,8 +413,27 @@ jobs:
             CLEAN_BINARY="mcpproxy"
           fi
 
-          # Create clean core binary for archive
+          # Create clean core binary (app bundle, .deb/.rpm, installers)
           go build ${BUILD_TAGS} -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
+
+          # Spec 092 FR-020: build a SEPARATE core binary for the .tar.gz/.zip
+          # archive, stamped with the tarball install-channel marker. Only this
+          # copy is stamped — a positively identified tarball install is the one
+          # channel `mcpproxy update` is allowed to self-replace, and the DMG /
+          # deb / rpm consumers of ${CLEAN_BINARY} must never inherit that.
+          #
+          # Homebrew is the one consumer that still shares this artifact (the tap
+          # formula downloads the very same .tar.gz). That is safe because the
+          # tarball marker is deliberately WEAK: detect() runs its positive
+          # heuristics first, so a binary living under a Homebrew prefix/Cellar
+          # resolves to homebrew regardless of the stamp. See
+          # internal/updatecheck/channel.go and its channel_tarball_test.go.
+          TARBALL_STAGE="tarball-stage"
+          rm -rf "${TARBALL_STAGE}"
+          mkdir -p "${TARBALL_STAGE}"
+          go build ${BUILD_TAGS} \
+            -ldflags "${LDFLAGS} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck.buildChannel=tarball" \
+            -o "${TARBALL_STAGE}/${CLEAN_BINARY}" ./cmd/mcpproxy
 
           # Build tray binary for platforms with GUI support (macOS and Windows, personal only)
           if [ "$EDITION" != "server" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
@@ -526,6 +546,45 @@ jobs:
               exit 1
             fi
 
+            # Sign the tarball-stamped core binary (Spec 092 FR-020). It is a
+            # separate build product from ${CLEAN_BINARY}, so it needs its own
+            # signature — an unsigned binary in the .tar.gz would be a Gatekeeper
+            # regression for tarball users.
+            echo "Signing tarball-stamped core binary: ${TARBALL_STAGE}/${CLEAN_BINARY}"
+            TARBALL_SIGN_SUCCESS=false
+            for attempt in 1 2 3; do
+              echo "Tarball core signing attempt $attempt/3..."
+              if $TIMEOUT_CMD 300 codesign --force \
+                --options runtime \
+                --entitlements scripts/entitlements.plist \
+                --sign "${CERT_IDENTITY}" \
+                --timestamp \
+                "${TARBALL_STAGE}/${CLEAN_BINARY}"; then
+
+                TARBALL_SIGN_SUCCESS=true
+                echo "✅ Tarball core signing succeeded on attempt $attempt"
+                break
+              else
+                echo "❌ Tarball core signing attempt $attempt failed or timed out"
+                if [ $attempt -lt 3 ]; then
+                  echo "Retrying in 10 seconds..."
+                  sleep 10
+                fi
+              fi
+            done
+
+            if [ "$TARBALL_SIGN_SUCCESS" != "true" ]; then
+              echo "❌ All tarball core signing attempts failed"
+              exit 1
+            fi
+
+            if codesign -vvv --deep --strict "${TARBALL_STAGE}/${CLEAN_BINARY}"; then
+              echo "✅ Tarball core strict verification PASSED"
+            else
+              echo "❌ Tarball core strict verification FAILED"
+              exit 1
+            fi
+
             # Sign tray binary
             echo "Signing tray binary: mcpproxy-tray"
             TRAY_SIGN_SUCCESS=false
@@ -623,37 +682,57 @@ jobs:
           ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
           LATEST_ARCHIVE_BASE="mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}"
 
-          # Determine files to include in archive
+          # Archives ship the tarball-stamped core from ${TARBALL_STAGE} (Spec 092
+          # FR-020); everything downstream (DMG/PKG, .deb/.rpm, installers) keeps
+          # using the unstamped ${CLEAN_BINARY} in the working directory.
+          # Archive members must stay at the archive root, so the tray binary is
+          # copied into the stage directory and archives are created from there.
           FILES_TO_ARCHIVE="${CLEAN_BINARY}"
 
           # Add tray binary if it exists (Windows and macOS)
           if [ "${{ matrix.goos }}" = "windows" ] && [ -f "mcpproxy-tray.exe" ]; then
+            cp mcpproxy-tray.exe "${TARBALL_STAGE}/"
             FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray.exe"
             echo "Including mcpproxy-tray.exe in archive"
           elif [ "${{ matrix.goos }}" = "darwin" ] && [ -f "mcpproxy-tray" ]; then
+            cp mcpproxy-tray "${TARBALL_STAGE}/"
             FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
             echo "Including mcpproxy-tray in archive"
           fi
+
+          ARCHIVE_OUT="$(pwd)"
 
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
             # Create ZIP archive (Windows)
             # Use PowerShell Compress-Archive on Windows since zip command isn't available
             if [ "${{ matrix.goos }}" = "windows" ]; then
-              # Convert space-separated list to comma-separated for PowerShell
-              PS_FILES=$(echo ${FILES_TO_ARCHIVE} | sed 's/ /,/g')
+              # Convert space-separated list to comma-separated for PowerShell.
+              # Compress-Archive stores each file at the archive root regardless
+              # of the source directory, so the staged paths are safe here.
+              PS_FILES=$(echo ${FILES_TO_ARCHIVE} | sed "s#[^ ]*#${TARBALL_STAGE}/&#g" | sed 's/ /,/g')
               powershell -Command "Compress-Archive -Path ${PS_FILES} -DestinationPath '${ARCHIVE_BASE}.zip'"
               powershell -Command "Compress-Archive -Path ${PS_FILES} -DestinationPath '${LATEST_ARCHIVE_BASE}.zip'"
             else
-              # Create versioned archive
-              zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
-              # Create latest archive
-              zip "${LATEST_ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+              (cd "${TARBALL_STAGE}" && zip "${ARCHIVE_OUT}/${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE})
+              (cd "${TARBALL_STAGE}" && zip "${ARCHIVE_OUT}/${LATEST_ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE})
             fi
           else
             # Create versioned archive
-            tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
+            tar -czf "${ARCHIVE_BASE}.tar.gz" -C "${TARBALL_STAGE}" ${FILES_TO_ARCHIVE}
             # Create latest archive
-            tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
+            tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" -C "${TARBALL_STAGE}" ${FILES_TO_ARCHIVE}
+          fi
+
+          # Fail loudly if the stamp did not land. A silently unstamped archive
+          # would leave every tarball install on the `unknown` channel and
+          # `mcpproxy update` permanently guidance-only — the exact failure
+          # FR-020 exists to prevent. `go version -m` reads the recorded build
+          # settings, so this works for cross-compiled targets too.
+          if go version -m "${TARBALL_STAGE}/${CLEAN_BINARY}" | grep -q "updatecheck.buildChannel=tarball"; then
+            echo "✅ Archive core carries the tarball install-channel marker"
+          else
+            echo "❌ Archive core is missing the tarball install-channel marker"
+            exit 1
           fi
 
       - name: Build Linux .deb and .rpm packages
