@@ -1,5 +1,19 @@
 components:
   schemas:
+    config.ConcurrencyDefaults:
+      description: |-
+        ServerConcurrencyDefaults is scope (b) of FR-020: the blanket per-server
+        default set inherited by every server that does not override a setting.
+        Absent (the default) = no per-server limiting unless a server configures
+        it explicitly. File/API-configured only — no env scheme (FR-022).
+      properties:
+        max_concurrent_requests:
+          type: integer
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
+      type: object
     config.Config:
       properties:
         activity_cleanup_interval_min:
@@ -122,6 +136,19 @@ components:
           type: string
         logging:
           $ref: '#/components/schemas/config.LogConfig'
+        max_concurrent_requests:
+          description: |-
+            Concurrency limits (spec 093, GH #955). Scope (a) of FR-020: the GLOBAL
+            AGGREGATE limiter — one proxy-wide cap on concurrently running upstream
+            tool calls, with its own bounded wait queue. Tri-state pointers: absent =
+            the limiter does not exist (default, zero behavior change); an explicit 0
+            max also disables it; positive = that cap. This scope is NEVER a
+            per-server inheritance source — per-server values come from
+            ServerConcurrencyDefaults / the per-server overrides — but a server's
+            effective concurrency is bounded by BOTH its own limiter and this one.
+            Resolved by ResolveGlobalConcurrency; hot-reloadable; overridable via
+            MCPPROXY_MAX_CONCURRENT_REQUESTS / _QUEUE_SIZE / _QUEUE_TIMEOUT (FR-022).
+          type: integer
         max_result_size_chars:
           description: Advertised on every tool as `_meta.anthropic/maxResultSizeChars`;
             raises Claude Code's inline-response ceiling from 50k to up to 500k chars.
@@ -164,6 +191,10 @@ components:
             explicit false to opt out of both. Per-server SkipQuarantine still
             applies for the tool-level check on individual servers.
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         read_only_mode:
           type: boolean
         registries:
@@ -215,6 +246,8 @@ components:
           $ref: '#/components/schemas/config.SecurityConfig'
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
+        server_concurrency_defaults:
+          $ref: '#/components/schemas/config.ConcurrencyDefaults'
         telemetry:
           $ref: '#/components/schemas/config.TelemetryConfig'
         tls:
@@ -892,6 +925,17 @@ components:
             mcpproxy starts the process AND connects via network. Stdio servers ignore
             this field. Zero or unset → 30s default.
           type: string
+        max_concurrent_requests:
+          description: |-
+            Per-server concurrency overrides — scope (c) of FR-020 (spec 093, #955).
+            Tri-state per setting, exactly like HealthCheckInterval: absent = inherit
+            the per-server default set (server_concurrency_defaults), explicit 0 =
+            disable that setting for this server (0 max = no per-server limiter at
+            all; 0 queue_size = no pending capacity, shed immediately at the cap),
+            positive = override. The global aggregate limiter is never inherited from
+            here — it applies on top, so effective concurrency is min(per-server,
+            global). Resolved by Config.ResolveServerConcurrency.
+          type: integer
         name:
           type: string
         oauth:
@@ -902,6 +946,10 @@ components:
         quarantined:
           description: Security quarantine status
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         reconnect_on_use:
           description: Attempt reconnection when a tool call targets a disconnected
             server

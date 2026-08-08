@@ -340,6 +340,31 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.InitTimeout = &it
 	}
 
+	// Per-server concurrency overrides (spec 093, FR-020(c)): same tri-state
+	// patch semantics as InitTimeout — a non-nil pointer sets/replaces the
+	// override (including an explicit 0 = opt out), nil leaves the base value.
+	if patch.MaxConcurrentRequests != nil {
+		v := *patch.MaxConcurrentRequests
+		if diff != nil && (base.MaxConcurrentRequests == nil || *base.MaxConcurrentRequests != v) {
+			diff.Modified["max_concurrent_requests"] = FieldChange{Path: "max_concurrent_requests", From: base.MaxConcurrentRequests, To: patch.MaxConcurrentRequests}
+		}
+		merged.MaxConcurrentRequests = &v
+	}
+	if patch.QueueSize != nil {
+		v := *patch.QueueSize
+		if diff != nil && (base.QueueSize == nil || *base.QueueSize != v) {
+			diff.Modified["queue_size"] = FieldChange{Path: "queue_size", From: base.QueueSize, To: patch.QueueSize}
+		}
+		merged.QueueSize = &v
+	}
+	if patch.QueueTimeout != nil {
+		v := *patch.QueueTimeout
+		if diff != nil && (base.QueueTimeout == nil || *base.QueueTimeout != v) {
+			diff.Modified["queue_timeout"] = FieldChange{Path: "queue_timeout", From: base.QueueTimeout, To: patch.QueueTimeout}
+		}
+		merged.QueueTimeout = &v
+	}
+
 	// Always update the Updated timestamp
 	merged.Updated = time.Now()
 
@@ -613,6 +638,21 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	if src.InitTimeout != nil {
 		it := *src.InitTimeout
 		dst.InitTimeout = &it
+	}
+
+	// Per-server concurrency overrides (spec 093): tri-state pointers copied by
+	// value so a copy-on-write snapshot never shares state with the live config.
+	if src.MaxConcurrentRequests != nil {
+		v := *src.MaxConcurrentRequests
+		dst.MaxConcurrentRequests = &v
+	}
+	if src.QueueSize != nil {
+		v := *src.QueueSize
+		dst.QueueSize = &v
+	}
+	if src.QueueTimeout != nil {
+		v := *src.QueueTimeout
+		dst.QueueTimeout = &v
 	}
 
 	// Copy the per-upstream auth-broker block by value (spec 074, server edition).
