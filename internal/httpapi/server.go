@@ -159,6 +159,12 @@ type ServerController interface {
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
 	RefreshVersionInfo() *updatecheck.VersionInfo
+	// UpdatePolicy reports the effective update policy (Spec 092 FR-015).
+	// Separate from GetVersionInfo because that one returns nil BOTH when
+	// checking is disabled and when no result exists yet — the tray must be
+	// able to tell those apart before deciding whether it may run its own
+	// feed check.
+	UpdatePolicy() updatecheck.Policy
 
 	// Activity logging (RFC-003)
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
@@ -1162,6 +1168,11 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 		// stop mechanism available to it — and the difference between a consent
 		// action that works and one that can only print instructions.
 		"pid": pidFn(),
+		// Spec 092 FR-015: the effective update policy, ALWAYS present. The
+		// `update` object below is absent both when checking is disabled and
+		// when no check has produced a result yet, so it cannot be used to
+		// infer permission; this field states it.
+		"update_policy": s.controller.UpdatePolicy(),
 	}
 	if versionInfo != nil {
 		response["update"] = versionInfo.ToAPIResponse()

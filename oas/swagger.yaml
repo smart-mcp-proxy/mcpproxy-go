@@ -1687,6 +1687,8 @@ components:
           type: integer
         update:
           $ref: '#/components/schemas/contracts.UpdateInfo'
+        update_policy:
+          $ref: '#/components/schemas/contracts.UpdatePolicy'
         version:
           description: Current MCPProxy version
           type: string
@@ -2502,6 +2504,29 @@ components:
           description: One-line update command for the channel; only set when an update
             is available and the channel has one — Spec 079 FR-009
           type: string
+      type: object
+    contracts.UpdatePolicy:
+      description: |-
+        UpdatePolicy is the effective, hot-reloadable update policy (Spec 092
+        FR-015). Always present: the `update` object above is omitted both when
+        update checking is disabled AND when no check has produced a result
+        yet, so its absence cannot tell a client whether it is allowed to run
+        its own (e.g. Sparkle feed) check. This field states the answer.
+      properties:
+        channel:
+          description: 'Channel is the tracked release channel: "stable" or "rc".'
+          type: string
+        enabled:
+          description: |-
+            Enabled is the effective automatic-check kill switch: update_check.enabled
+            with MCPPROXY_DISABLE_AUTO_UPDATE=true winning over it. A user-initiated
+            "Check for Updates" stays available regardless.
+          type: boolean
+        nudges_suppressed:
+          description: |-
+            NudgesSuppressed asks UI surfaces to stay quiet (CI / non-interactive)
+            while machine-readable fields keep reporting the facts.
+          type: boolean
       type: object
     contracts.UpstreamError:
       properties:

@@ -2666,6 +2666,17 @@ func (r *Runtime) GetVersionInfo() *updatecheck.VersionInfo {
 	return r.updateChecker.GetVersionInfo()
 }
 
+// UpdatePolicy returns the effective update policy (Spec 092 FR-015): the
+// kill-switch state, the release channel, and whether UI nudges are suppressed.
+// Without an update checker automatic checking cannot happen at all, which is
+// reported as an explicit disabled policy rather than as missing data.
+func (r *Runtime) UpdatePolicy() updatecheck.Policy {
+	if r.updateChecker == nil {
+		return updatecheck.UnavailablePolicy()
+	}
+	return r.updateChecker.Policy()
+}
+
 // RefreshVersionInfo performs an immediate update check and returns the result.
 // Returns nil if the update checker has not been initialized.
 func (r *Runtime) RefreshVersionInfo() *updatecheck.VersionInfo {
