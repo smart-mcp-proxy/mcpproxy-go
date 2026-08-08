@@ -71,6 +71,26 @@ if [ -f "MCPProxy/Info.plist" ]; then
   cp "MCPProxy/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION#v}" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+
+  # Spec 092 FR-011: pin the Sparkle EdDSA PUBLIC key into the shipped bundle.
+  # The checked-in Info.plist carries SPARKLE_PUBLIC_KEY_PLACEHOLDER; a release
+  # build stamps the real key from the environment. Deliberately optional:
+  # a local/dev/fork build without the key produces a bundle whose updater
+  # refuses to start, which the tray reports as "one-click updates
+  # unavailable" and falls back to the browser path (FR-017) — never a bundle
+  # that would accept an unverified update.
+  if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${SPARKLE_PUBLIC_ED_KEY}" "$APP_BUNDLE/Contents/Info.plist"
+    echo "✅ Sparkle public key stamped into Info.plist"
+  else
+    echo "ℹ️  SPARKLE_PUBLIC_ED_KEY not set — Sparkle stays disabled in this build (browser-download fallback)"
+  fi
+  if [ -n "${SPARKLE_FEED_URL:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :SUFeedURL ${SPARKLE_FEED_URL}" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :SUFeedURL string ${SPARKLE_FEED_URL}" "$APP_BUNDLE/Contents/Info.plist"
+    echo "✅ Sparkle feed URL set to ${SPARKLE_FEED_URL}"
+  fi
 else
   # Generate minimal Info.plist
   cat > "$APP_BUNDLE/Contents/Info.plist" << EOF

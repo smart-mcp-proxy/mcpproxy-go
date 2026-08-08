@@ -1552,6 +1552,10 @@ actor CoreProcessManager {
         await MainActor.run {
             appState.version = info.version
             appState.webUIBaseURL = webUIBase
+            // Spec 092 FR-015: the explicit policy contract. Assigned on every
+            // connect (including reconnects), which is how a config hot-reload
+            // on the core side reaches the tray.
+            appState.coreUpdatePolicy = info.updatePolicy
             if let update = info.update, update.available, let latest = update.latestVersion {
                 appState.updateAvailable = latest.hasPrefix("v") ? String(latest.dropFirst()) : latest
             }

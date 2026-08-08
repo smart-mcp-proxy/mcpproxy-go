@@ -217,6 +217,14 @@ final class AppState: ObservableObject {
     @Published var updateAvailable: String? = nil
     @Published var autoStartEnabled: Bool = false
 
+    /// Spec 092 FR-015 — the effective update policy the attached core reports
+    /// (`/api/v1/info` → `update_policy`). Nil before a core is reached and for
+    /// cores older than 092; `UpdatePolicyResolver` maps that to the permissive
+    /// default rather than to "updates off". Published so a config hot-reload
+    /// picked up on the next connect reaches `UpdateService` without the
+    /// service having to poll anything.
+    @Published var coreUpdatePolicy: CoreUpdatePolicy? = nil
+
     /// Spec 092 FR-002 — an older core is running that the tray is NOT allowed
     /// to stop on its own. Nil in the steady state; when set, the menu offers
     /// the restart as an explicit user action. Published rather than derived so

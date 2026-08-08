@@ -1,10 +1,21 @@
 // UpdateService.swift
 // MCPProxy
 //
-// Update checking service. Uses GitHub Releases API as a lightweight
-// alternative to Sparkle when Sparkle SPM dependency is not available.
-// When Sparkle IS linked, it takes precedence for the full update UX
-// (download, verify, replace, relaunch).
+// Spec 092 Phase 1 (FR-010 / FR-015 / FR-016 / FR-017) — the single owner of
+// everything the tray knows about updates.
+//
+// Two update brains exist and both are legitimate:
+//
+//   · the FEED (Sparkle appcast) — can download, verify and install; the only
+//     one that can deliver FR-010's one click;
+//   · the LEGACY check (the core's `/api/v1/info` + a direct GitHub call) —
+//     always reachable, but can only open a browser.
+//
+// Before Phase 1 they were rendered independently by the menu, which is what
+// FR-017 forbids. This service now resolves them into ONE ordered list of menu
+// entries (`UpdateMenuState`), gates every unattended check on the effective
+// policy (`UpdatePolicyResolver`), and stops the managed core before Sparkle
+// replaces the bundle (`ManagedCoreStop`).
 
 import Foundation
 import AppKit
@@ -12,21 +23,23 @@ import Darwin
 
 // MARK: - Update Service
 
-/// Manages software update checks.
-///
-/// Strategy:
-/// 1. If Sparkle framework is linked → use SPUStandardUpdaterController
-/// 2. Otherwise → check GitHub Releases API directly (notify only, no auto-install)
+/// Manages software update checks and owns the update section of the menu.
 final class UpdateService: ObservableObject {
 
-    /// Whether an update check can be performed.
+    /// Whether an update check can be performed. A user-initiated check is
+    /// always allowed (FR-015) — including when the policy has disabled the
+    /// automatic ones.
     var canCheckForUpdates: Bool { true }
 
     /// Whether an update check is currently in progress.
     @Published private(set) var isChecking: Bool = false
 
-    /// Latest available version (nil if current or unknown).
+    /// Latest version the LEGACY check knows about (nil if current or unknown).
     @Published private(set) var latestVersion: String?
+
+    /// Latest version the FEED offers (nil when Sparkle has nothing, or is
+    /// unavailable).
+    @Published private(set) var feedVersion: String?
 
     /// URL to download the latest release.
     @Published private(set) var downloadURL: String?
@@ -34,8 +47,22 @@ final class UpdateService: ObservableObject {
     /// Release notes for the latest version.
     @Published private(set) var releaseNotes: String?
 
-    /// Whether Sparkle framework is linked.
-    private let sparkleAvailable: Bool
+    /// FR-016: why an in-place update cannot work here, when it cannot.
+    @Published private(set) var blockedReason: UpdateBlockedReason?
+
+    /// Last error worth telling the user about (feed check/install failures).
+    @Published private(set) var lastErrorMessage: String?
+
+    /// The effective policy in force (FR-015).
+    @Published private(set) var policy: EffectiveUpdatePolicy = .permissive
+
+    /// The feed updater, when one could be built. Injected in tests.
+    private var feedUpdater: (any FeedUpdating)?
+
+    /// Stops the tray-managed core synchronously before the bundle is replaced
+    /// (FR-012). Set by the app delegate, which is the only thing that knows
+    /// the managed process. Nil in tests and before the core starts.
+    var stopManagedCore: (() -> Void)?
 
     /// GitHub API endpoint for latest release.
     private let githubReleaseURL = "https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest"
@@ -43,21 +70,145 @@ final class UpdateService: ObservableObject {
     /// Current version from the core (set by AppController).
     var currentVersion: String = ""
 
+    /// Environment used for policy resolution; injected in tests.
+    private let environment: [String: String]
+
+    /// Bundle whose in-place updatability is evaluated; injected in tests.
+    private let hostBundleURL: URL
+
+    /// The legacy GitHub check. Injected in tests so the suite issues no
+    /// network requests — nil means "use the real one".
+    private let legacyCheck: (() -> Void)?
+
     // MARK: - Initialization
 
-    init() {
-        self.sparkleAvailable = NSClassFromString("SPUStandardUpdaterController") != nil
+    init(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        hostBundleURL: URL = Bundle.main.bundleURL,
+        feedUpdater: (any FeedUpdating)? = nil,
+        legacyCheck: (() -> Void)? = nil
+    ) {
+        self.environment = environment
+        self.hostBundleURL = hostBundleURL
+        self.feedUpdater = feedUpdater
+        self.legacyCheck = legacyCheck
+        self.policy = UpdatePolicyResolver.resolve(core: nil, environment: environment)
+        self.blockedReason = UpdateInstallability.evaluate(bundleURL: hostBundleURL)
+    }
+
+    // MARK: - Wiring
+
+    /// Build and start the real Sparkle updater. Called once at launch by the
+    /// app delegate; a no-op when Sparkle is not compiled in, and harmless when
+    /// the bundle is not one Sparkle can work with (it reports why).
+    func startFeedUpdater() {
+        guard feedUpdater == nil else { return }
+        #if canImport(Sparkle)
+        let sparkle = SparkleFeedUpdater(observer: self)
+        sparkle.start(policy: policy)
+        feedUpdater = sparkle
+        if !sparkle.isAvailable, let reason = sparkle.unavailableReason {
+            NSLog("[MCPProxy] One-click updates unavailable: %@", reason)
+        }
+        #endif
+    }
+
+    /// Inject a feed updater (tests, and the fallback build).
+    func installFeedUpdater(_ updater: any FeedUpdating) {
+        feedUpdater = updater
+        updater.apply(policy: policy)
+    }
+
+    /// Whether the feed updater can actually install (FR-017: only then may the
+    /// menu offer a one-click item).
+    var feedUpdaterAvailable: Bool { feedUpdater?.isAvailable ?? false }
+
+    /// FR-015: apply the policy the core reports. Idempotent; safe to call on
+    /// every connect and on every config hot-reload.
+    func applyCorePolicy(_ corePolicy: CoreUpdatePolicy?) {
+        let resolved = UpdatePolicyResolver.resolve(core: corePolicy, environment: environment)
+        guard resolved != policy else { return }
+        policy = resolved
+        feedUpdater?.apply(policy: resolved)
+        if !resolved.automaticChecksAllowed {
+            NSLog("[MCPProxy] Automatic update checks are off: %@", resolved.disabledReason)
+            // Anything already advertised was advertised under the old policy.
+            // Retract it rather than leave a nudge the operator just disabled.
+            feedVersion = nil
+            latestVersion = nil
+        }
     }
 
     // MARK: - Public API
 
-    /// Check for updates. Uses Sparkle if available, otherwise GitHub API.
+    /// A check nobody asked for: the launch check and the periodic one. Gated
+    /// on the effective policy (FR-015).
+    func checkForUpdatesInBackground() {
+        guard policy.automaticChecksAllowed else {
+            AppLifecycle.shared.recordUpdateCheck("skipped — \(policy.disabledReason)")
+            return
+        }
+        runCheck(userInitiated: false)
+    }
+
+    /// The menu's "Check for Updates". Always allowed (FR-015).
     func checkForUpdates() {
-        if sparkleAvailable {
-            checkWithSparkle()
+        runCheck(userInitiated: true)
+    }
+
+    private func runCheck(userInitiated: Bool) {
+        lastErrorMessage = nil
+        // Re-evaluate: the app may have been moved into /Applications since
+        // launch, which is exactly the fallback FR-016's message asks for.
+        blockedReason = UpdateInstallability.evaluate(bundleURL: hostBundleURL)
+
+        if let feedUpdater, feedUpdater.isAvailable {
+            feedUpdater.check(userInitiated: userInitiated)
+            // The legacy check still runs: it is the FR-017 fallback for a
+            // version the feed does not carry, and the only source of the
+            // browser-download URL.
+        }
+        if let legacyCheck {
+            legacyCheck()
         } else {
             checkWithGitHub()
         }
+    }
+
+    /// FR-010: activating the one-click item. Sparkle already has the update in
+    /// hand from the gentle-reminder check; `check(userInitiated:)` surfaces its
+    /// own UI and drives download → verify → replace → relaunch.
+    func installFeedUpdate() {
+        guard let feedUpdater, feedUpdater.isAvailable else {
+            openDownloadPage()
+            return
+        }
+        feedUpdater.check(userInitiated: true)
+    }
+
+    /// The update section of the tray menu, resolved from both sources
+    /// (FR-017).
+    var menuEntries: [UpdateMenuEntry] {
+        UpdateMenuState.entries(
+            feedVersion: feedUpdaterAvailable ? feedVersion : nil,
+            legacyVersion: latestVersion,
+            blocked: blockedReason,
+            nudgesSuppressed: policy.nudgesSuppressed
+        )
+    }
+
+    /// Merge the legacy version reported by the core (`/api/v1/info` →
+    /// `update.latest_version`). Kept behind a setter so the FR-017 resolution
+    /// has exactly one input path per source.
+    func setCoreReportedVersion(_ version: String?) {
+        guard !policy.nudgesSuppressed else { return }
+        guard let version, !version.isEmpty else { return }
+        let normalized = UpdateMenuState.normalized(version)
+        if let existing = latestVersion,
+           let order = SemanticVersion.compare(existing, normalized), order >= 0 {
+            return
+        }
+        latestVersion = normalized
     }
 
     /// Returns the release-asset architecture token for the host machine
@@ -112,17 +263,6 @@ final class UpdateService: ObservableObject {
         if let url = URL(string: urlString) {
             NSWorkspace.shared.open(url)
         }
-    }
-
-    // MARK: - Sparkle
-
-    private func checkWithSparkle() {
-        // When Sparkle is linked:
-        // import Sparkle
-        // let controller = SPUStandardUpdaterController(startingUpdater: true, ...)
-        // controller.checkForUpdates(nil)
-        // For now, fall through to GitHub check
-        checkWithGitHub()
     }
 
     // MARK: - GitHub Releases API
@@ -198,5 +338,50 @@ final class UpdateService: ObservableObject {
                 // Silently fail — update checks are non-critical
             }
         }
+    }
+}
+
+// MARK: - FeedUpdaterObserver
+
+extension UpdateService: FeedUpdaterObserver {
+
+    func feedUpdater(didFindVersion version: String) {
+        let normalized = UpdateMenuState.normalized(version)
+        onMain {
+            self.feedVersion = normalized
+            AppLifecycle.shared.recordUpdateCheck("feed offers v\(normalized)")
+        }
+    }
+
+    func feedUpdaterDidNotFindUpdate() {
+        onMain { self.feedVersion = nil }
+    }
+
+    func feedUpdater(didFailWith message: String) {
+        onMain {
+            self.lastErrorMessage = message
+            AppLifecycle.shared.recordUpdateCheck("feed check failed: \(message)")
+        }
+    }
+
+    /// Publish on the main thread — synchronously when already there.
+    ///
+    /// The synchronous branch is not an optimization: Sparkle's callbacks
+    /// arrive on the main thread, and an unconditional `async` hop would leave
+    /// the menu one run-loop turn behind the state that produced it (and make
+    /// every test of this path a waiting game).
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    /// FR-012. Synchronous by contract: Sparkle replaces the bundle the moment
+    /// this returns, so the core has to already be down.
+    func feedUpdaterWillInstallUpdate() {
+        AppLifecycle.shared.note("stopping the managed core before the update is installed")
+        stopManagedCore?()
     }
 }

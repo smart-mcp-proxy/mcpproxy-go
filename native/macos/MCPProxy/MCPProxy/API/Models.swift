@@ -805,6 +805,13 @@ struct InfoResponse: Codable, Equatable {
     /// one, which downgrades the supersede action to "show instructions".
     let pid: Int32?
 
+    /// Spec 092 FR-015 — the effective update policy. Optional for the same
+    /// reason as the two fields above: a pre-092 core omits it, and the tray
+    /// must keep working against one. Absence maps to the permissive default
+    /// those builds already behaved as (see `UpdatePolicyResolver`), never to
+    /// "silently disable updates".
+    let updatePolicy: CoreUpdatePolicy?
+
     enum CodingKeys: String, CodingKey {
         case version
         case webUiUrl = "web_ui_url"
@@ -813,6 +820,7 @@ struct InfoResponse: Codable, Equatable {
         case update
         case launchedBy = "launched_by"
         case pid
+        case updatePolicy = "update_policy"
     }
 }
 

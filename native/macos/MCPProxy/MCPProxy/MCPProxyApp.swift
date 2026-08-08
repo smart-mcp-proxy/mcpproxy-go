@@ -34,7 +34,10 @@ extension NSStatusItem: TrayMenuHost {}
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     let appState = AppState()
     let notificationService = NotificationService()
-    let updateService = UpdateService()
+    /// Owns everything the tray knows about updates (Spec 092 FR-017). A `var`
+    /// so a test can substitute a service built around a fixture bundle and a
+    /// stub feed updater; production never reassigns it.
+    var updateService = UpdateService()
     var coreManager: CoreProcessManager?
 
     private var statusItem: NSStatusItem?
@@ -121,10 +124,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `applicationDidFinishLaunching`, which installs the status item as the
     /// host and leaves the data source resolving to the live core client.
     @MainActor
-    convenience init(glanceDataSource: GlanceDataSource, menuHost: TrayMenuHost) {
+    convenience init(
+        glanceDataSource: GlanceDataSource,
+        menuHost: TrayMenuHost,
+        updateService: UpdateService? = nil
+    ) {
         self.init()
         self.injectedGlanceDataSource = glanceDataSource
         self.menuHost = menuHost
+        if let updateService { self.updateService = updateService }
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -261,9 +269,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
-        // Auto-check GitHub for a newer release as soon as the core reports its version,
-        // and again every hour. This avoids relying solely on the core's 4h cache, which
-        // can lag behind freshly published releases.
+        // Spec 092 FR-012: give the updater a synchronous way to stop the core
+        // it manages. Installed before the feed updater starts, because a
+        // Sparkle session resumed from a previous launch can reach the install
+        // hook almost immediately.
+        updateService.stopManagedCore = { [weak self] in
+            guard let self else { return }
+            let pid = self.coreManager?.managedProcess?.processIdentifier
+            let outcome = ManagedCoreStop.stop(pid: pid)
+            NSLog("[MCPProxy] Pre-update core stop: pid=%d outcome=%@",
+                  pid ?? -1, String(describing: outcome))
+            AppLifecycle.shared.note("pre-update core stop: \(outcome)")
+        }
+
+        // Spec 092 FR-015: every tray-side check is governed by the policy the
+        // core publishes. Applied before the first check is scheduled.
+        appState.$coreUpdatePolicy
+            .removeDuplicates()
+            .sink { [weak self] policy in
+                self?.updateService.applyCorePolicy(policy)
+            }
+            .store(in: &cancellables)
+
+        // Spec 092 FR-010: start the feed updater. It gates its own scheduled
+        // cycle on the policy above and reports back through UpdateService.
+        updateService.startFeedUpdater()
+
+        // Auto-check for a newer release as soon as the core reports its version,
+        // and again every hour. Both are UNATTENDED checks, so they go through
+        // the policy-gated entry point (FR-015) — unlike the menu's "Check for
+        // Updates", which is always allowed.
         appState.$version
             .removeDuplicates()
             .filter { !$0.isEmpty }
@@ -271,7 +306,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .sink { [weak self] version in
                 guard let self else { return }
                 self.updateService.currentVersion = version
-                self.updateService.checkForUpdates()
+                self.updateService.checkForUpdatesInBackground()
             }
             .store(in: &cancellables)
 
@@ -280,7 +315,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .sink { [weak self] _ in
                 guard let self, !self.appState.version.isEmpty else { return }
                 self.updateService.currentVersion = self.appState.version
-                self.updateService.checkForUpdates()
+                self.updateService.checkForUpdatesInBackground()
             }
             .store(in: &cancellables)
 
@@ -1140,25 +1175,45 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         checkUpdates.isEnabled = updateService.canCheckForUpdates
         menu.addItem(checkUpdates)
 
-        // Show update from either appState (from core /api/v1/info) or UpdateService (direct
-        // GitHub check). Prefer whichever source advertises the newer version so a stale
-        // core cache never masks a freshly-published release.
-        let updateVersion: String? = {
-            switch (appState.updateAvailable, updateService.latestVersion) {
-            case let (.some(a), .some(b)):
-                return UpdateService.compareSemver(a, b) >= 0 ? a : b
-            case let (.some(a), .none):
-                return a
-            case let (.none, .some(b)):
-                return b
-            case (.none, .none):
-                return nil
+        // Spec 092 FR-017: exactly one source of truth owns the update item.
+        // The core's cached result (`appState.updateAvailable`) is merged into
+        // the service's legacy version first, so the resolver sees ONE legacy
+        // input and one feed input — the two used to be rendered independently,
+        // which is how a single release produced two competing menu items.
+        updateService.setCoreReportedVersion(appState.updateAvailable)
+        for entry in updateService.menuEntries {
+            switch entry {
+            case .oneClick(let version):
+                // FR-010's exact shape: gentle, and honest about what happens.
+                let item = NSMenuItem(
+                    title: "Update \(version) — ready to restart?",
+                    action: #selector(installFeedUpdate), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = "Downloads and verifies the update, stops the core, "
+                    + "replaces MCPProxy and relaunches it."
+                menu.addItem(item)
+
+            case .browserGuidance(let version):
+                let item = NSMenuItem(
+                    title: "Update available: v\(version) — Download",
+                    action: #selector(openDownloadPage), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = "Opens the download page. This version cannot be installed "
+                    + "from here."
+                menu.addItem(item)
+
+            case .blocked(let reason):
+                // FR-016: never silent. The title says it, the action explains.
+                let item = NSMenuItem(
+                    title: reason.menuTitle,
+                    action: #selector(showUpdateBlockedReason), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = reason.explanation
+                menu.addItem(item)
             }
-        }()
-        if let available = updateVersion {
-            let updateNote = NSMenuItem(title: "Update available: v\(available)", action: #selector(openDownloadPage), keyEquivalent: "")
-            updateNote.target = self
-            menu.addItem(updateNote)
         }
 
         // Spec 092 FR-003: the app on disk is newer than the one running — a
@@ -1537,6 +1592,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func openDownloadPage() {
         updateService.openDownloadPage()
+    }
+
+    /// Spec 092 FR-010: one click — download, verify, replace, relaunch.
+    @objc private func installFeedUpdate() {
+        updateService.installFeedUpdate()
+    }
+
+    /// Spec 092 FR-016: say why an in-place update is impossible, and what to
+    /// do instead. The alternative — an update item that quietly does nothing —
+    /// is the failure mode the requirement names.
+    @MainActor
+    @objc private func showUpdateBlockedReason() {
+        guard let reason = updateService.blockedReason else { return }
+        presentAlert(title: reason.menuTitle, message: reason.message)
     }
 
     @objc private func quitApp() {
