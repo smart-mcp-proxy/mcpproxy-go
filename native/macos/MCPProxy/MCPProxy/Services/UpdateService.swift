@@ -87,36 +87,23 @@ final class UpdateService: ObservableObject {
         return "amd64"
     }
 
-    /// Compare two semver-ish version strings (no leading "v"). Returns:
+    /// Compare two semver version strings. Returns:
     /// - positive if `a` > `b`
     /// - negative if `a` < `b`
     /// - zero if equal or unparseable
     ///
-    /// Pre-release identifiers (e.g. `1.2.3-rc.1`) sort *before* the matching
-    /// release per semver §11. Anything we can't parse is treated as equal so
-    /// the caller falls back to its existing behaviour.
+    /// A thin adapter over `SemanticVersion.compare` (Spec 092 FR-006). The
+    /// hand-rolled comparison that used to live here compared prerelease
+    /// identifiers as whole strings, which ordered `rc.10` *below* `rc.2` — so
+    /// an RC user was offered a downgrade as an "update". The shared type
+    /// compares numeric identifiers numerically; see its header.
+    ///
+    /// Unparseable input keeps mapping to `0` HERE, and only here: the update
+    /// nudge treats "not greater" as "no update", so an unknown version can
+    /// only ever suppress a nudge. Decisions that can stop a process must use
+    /// `SemanticVersion.compare(_:_:) -> Int?` and handle nil explicitly.
     static func compareSemver(_ a: String, _ b: String) -> Int {
-        func parse(_ s: String) -> (core: [Int], pre: String)? {
-            let parts = s.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
-            let coreParts = parts[0].split(separator: ".")
-            var core: [Int] = []
-            for p in coreParts {
-                guard let n = Int(p) else { return nil }
-                core.append(n)
-            }
-            while core.count < 3 { core.append(0) }
-            let pre = parts.count > 1 ? String(parts[1]) : ""
-            return (core, pre)
-        }
-        guard let pa = parse(a), let pb = parse(b) else { return 0 }
-        for i in 0..<min(pa.core.count, pb.core.count) {
-            if pa.core[i] != pb.core[i] { return pa.core[i] - pb.core[i] }
-        }
-        // Equal core: a release outranks any pre-release.
-        if pa.pre.isEmpty && !pb.pre.isEmpty { return 1 }
-        if !pa.pre.isEmpty && pb.pre.isEmpty { return -1 }
-        if pa.pre == pb.pre { return 0 }
-        return pa.pre < pb.pre ? -1 : 1
+        SemanticVersion.compare(a, b) ?? 0
     }
 
     /// Open the download page in the browser.
