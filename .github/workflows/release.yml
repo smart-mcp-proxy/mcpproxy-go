@@ -1586,6 +1586,7 @@ jobs:
           path: enclosures
 
       - name: Generate and publish the appcast
+        id: appcast
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # This job deliberately does not check the repo out (it only needs the
@@ -1663,6 +1664,7 @@ jobs:
           done
 
           gh release upload "${GITHUB_REF_NAME}" appcast-out/*.xml --clobber
+          echo "generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload appcast artifact for the website repo
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -1670,6 +1672,21 @@ jobs:
           name: sparkle-appcast
           path: appcast-out/*
           if-no-files-found: ignore
+
+      # Tell mcpproxy.app to serve the freshly uploaded feeds (they are public
+      # release assets by now — the site's publish-appcast workflow downloads
+      # them from the release, so no artifact plumbing crosses repos).
+      # Non-blocking: the feeds stay downloadable from the release either way,
+      # and the site workflow can be re-run by hand (workflow_dispatch).
+      - name: Publish feeds to mcpproxy.app
+        if: steps.appcast.outputs.generated == 'true'
+        continue-on-error: true
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
+        with:
+          token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
+          repository: smart-mcp-proxy/mcpproxy.app-website
+          event-type: publish-appcast
+          client-payload: '{"version": "${{ github.ref_name }}", "channel": "stable"}'
 
   provenance:
     needs: [release]

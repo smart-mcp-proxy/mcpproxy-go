@@ -1111,6 +1111,7 @@ jobs:
           path: enclosures
 
       - name: Generate and publish the beta appcast
+        id: appcast
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No actions/checkout in this job, so `gh` cannot infer the repository
@@ -1183,6 +1184,7 @@ jobs:
           done
 
           gh release upload "${GITHUB_REF_NAME}" appcast-out/*.xml --clobber
+          echo "generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload beta appcast artifact for the website repo
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -1190,3 +1192,15 @@ jobs:
           name: sparkle-appcast-beta
           path: appcast-out/*
           if-no-files-found: ignore
+
+      # Same site hand-off as release.yml, beta channel. Non-blocking; the
+      # site workflow is manually re-runnable (workflow_dispatch).
+      - name: Publish beta feeds to mcpproxy.app
+        if: steps.appcast.outputs.generated == 'true'
+        continue-on-error: true
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
+        with:
+          token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
+          repository: smart-mcp-proxy/mcpproxy.app-website
+          event-type: publish-appcast
+          client-payload: '{"version": "${{ github.ref_name }}", "channel": "beta"}'

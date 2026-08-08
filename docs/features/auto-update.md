@@ -238,11 +238,18 @@ updater will fight over the same install.
 ### What the website repository must serve
 
 The shipped `Info.plist` sets `SUFeedURL` to `https://mcpproxy.app/appcast.xml`,
-and this repository cannot publish there. The release pipeline instead attaches
-the feeds to the GitHub release **and** exports them as workflow artifacts for
-the website repo to pick up:
+and this repository cannot publish there directly. Publishing is automated as a
+hand-off: after uploading the signed feeds as release assets, `release.yml`
+(stable) and `prerelease.yml` (beta) fire a `publish-appcast`
+repository dispatch (via `MARKETING_SITE_DISPATCH_TOKEN`, same pattern as the
+existing marketing version bump) at the website repo, whose
+`publish-appcast.yml` workflow downloads the feeds from the public release,
+verifies them (XML + RSS + `sparkle:edSignature`), and commits them into
+`public/` for Cloudflare Pages. Manual backfill: run that workflow via
+`workflow_dispatch` with a tag + channel. The feeds are also exported as
+workflow artifacts for inspection:
 
-| Workflow artifact | Files | Must be served at |
+| Workflow artifact | Files | Served at |
 |---|---|---|
 | `sparkle-appcast` (from `release.yml`) | `appcast-arm64.xml`, `appcast-amd64.xml` | `https://mcpproxy.app/appcast-arm64.xml`, `https://mcpproxy.app/appcast-amd64.xml` |
 | `sparkle-appcast-beta` (from `prerelease.yml`) | `appcast-beta-arm64.xml`, `appcast-beta-amd64.xml` | `https://mcpproxy.app/appcast-beta-arm64.xml`, `https://mcpproxy.app/appcast-beta-amd64.xml` |
