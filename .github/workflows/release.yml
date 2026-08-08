@@ -728,12 +728,19 @@ jobs:
           # `mcpproxy update` permanently guidance-only — the exact failure
           # FR-020 exists to prevent. `go version -m` reads the recorded build
           # settings, so this works for cross-compiled targets too.
-          if go version -m "${TARBALL_STAGE}/${CLEAN_BINARY}" | grep -q "updatecheck.buildChannel=tarball"; then
-            echo "✅ Archive core carries the tarball install-channel marker"
-          else
-            echo "❌ Archive core is missing the tarball install-channel marker"
-            exit 1
-          fi
+          # Capture first, match second: this step runs under `bash -eo pipefail`,
+          # where `go version -m … | grep -q …` can report the pipeline as failed
+          # when grep exits on the first match and go takes SIGPIPE.
+          STAMP_INFO="$(go version -m "${TARBALL_STAGE}/${CLEAN_BINARY}" || true)"
+          case "$STAMP_INFO" in
+            *updatecheck.buildChannel=tarball*)
+              echo "✅ Archive core carries the tarball install-channel marker"
+              ;;
+            *)
+              echo "❌ Archive core is missing the tarball install-channel marker"
+              exit 1
+              ;;
+          esac
 
       - name: Build Linux .deb and .rpm packages
         if: matrix.goos == 'linux' && matrix.edition != 'server'
