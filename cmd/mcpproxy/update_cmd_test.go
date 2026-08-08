@@ -344,6 +344,52 @@ func TestUpdateCommand_RefusesAppBundlePaths(t *testing.T) {
 	}
 }
 
+// FR-020: `--self` lets a user assert ownership of an install mcpproxy could
+// not identify, and the requirement attaches "with a clear warning" to that
+// override. The warning goes to stderr so it never contaminates `-o json`.
+// A positively identified tarball install is not an assertion and must stay
+// silent.
+func TestUpdateCommand_SelfOverrideWarnsOnUnknownChannel(t *testing.T) {
+	tests := []struct {
+		name     string
+		channel  string
+		self     bool
+		wantWarn bool
+	}{
+		{name: "unknown with --self warns", channel: updatecheck.ChannelUnknown, self: true, wantWarn: true},
+		{name: "tarball does not warn", channel: updatecheck.ChannelTarball, wantWarn: false},
+		{name: "tarball with --self does not warn", channel: updatecheck.ChannelTarball, self: true, wantWarn: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeReleaseSource{latest: fixtureRelease("v0.60.0", false)}
+			runner, out, errOut := newTestRunner(t, tt.channel, updateFlags{self: tt.self}, src)
+			applied := false
+			runner.selfUpdateFn = func(_ *updatecheck.GitHubRelease) error {
+				applied = true
+				return nil
+			}
+
+			if err := runner.run(); err != nil {
+				t.Fatalf("run() error = %v", err)
+			}
+			if !applied {
+				t.Fatalf("expected the self-update branch to run for channel %q (self=%v)", tt.channel, tt.self)
+			}
+
+			warned := strings.Contains(errOut.String(), "WARNING: --self")
+			if warned != tt.wantWarn {
+				t.Errorf("stderr warning = %v, want %v (stderr: %q)", warned, tt.wantWarn, errOut.String())
+			}
+			// The warning must never leak into the machine-readable report.
+			if strings.Contains(out.String(), "WARNING") {
+				t.Errorf("the JSON report must stay free of the warning: %s", out.String())
+			}
+		})
+	}
+}
+
 // Even if the decision table were bypassed, selfUpdate itself refuses bundle
 // paths (defence in depth for FR-022).
 func TestSelfUpdate_RefusesBundlePathDirectly(t *testing.T) {

@@ -335,6 +335,19 @@ func (r *updateRunner) run() error {
 
 	switch action {
 	case actionSelfUpdate:
+		// FR-020: --self is the user asserting ownership of a binary mcpproxy
+		// could NOT positively identify. Say plainly what that assertion means
+		// before acting on it — an AUR/MacPorts/Nix-style layout is writable
+		// and still owned by a package manager whose bookkeeping this would
+		// silently invalidate. Positively identified tarball installs get no
+		// warning; there is nothing uncertain about them.
+		if channel == updatecheck.ChannelUnknown {
+			fmt.Fprintf(r.errOut,
+				"WARNING: --self: mcpproxy could not identify how %s was installed and is replacing it "+
+					"because you asserted you manage it yourself. If a package manager owns this path, "+
+					"its bookkeeping will no longer match what is on disk.\n",
+				r.execPath)
+		}
 		apply := r.selfUpdateFn
 		if apply == nil {
 			apply = r.selfUpdate
