@@ -1588,6 +1588,13 @@ jobs:
       - name: Generate and publish the appcast
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job deliberately does not check the repo out (it only needs the
+          # enclosure artifacts), so `gh` has no git remote to infer the
+          # repository from — it does NOT read GITHUB_REPOSITORY. Without
+          # GH_REPO the final `gh release upload` fails with "could not
+          # determine what repo to use". Every other `gh release upload` in this
+          # workflow lives in a job that ran actions/checkout.
+          GH_REPO: ${{ github.repository }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           # Keep in step with Package.resolved (Sparkle 2.9.3).
           SPARKLE_VERSION: "2.9.3"

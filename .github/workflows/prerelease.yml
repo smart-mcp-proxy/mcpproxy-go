@@ -1059,6 +1059,10 @@ jobs:
       - name: Generate and publish the beta appcast
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No actions/checkout in this job, so `gh` cannot infer the repository
+          # from a git remote — and it does not read GITHUB_REPOSITORY. See the
+          # same note in release.yml's sparkle-appcast job.
+          GH_REPO: ${{ github.repository }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           # Keep in step with Package.resolved (Sparkle 2.9.3).
           SPARKLE_VERSION: "2.9.3"
