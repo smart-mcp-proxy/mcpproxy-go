@@ -727,8 +727,15 @@ jobs:
             exit 0
           fi
 
-          if [ -z "${SWIFT_APP_PATH:-}" ] || [ ! -d "${SWIFT_APP_PATH}" ]; then
-            echo "❌ SWIFT_APP_PATH is not a bundle: '${SWIFT_APP_PATH:-<unset>}'"
+          # The enclosure must ship the SAME bundle users run: the DMG staging
+          # copy that create-dmg.sh signed (core + certs + Developer ID deep
+          # signature) and exported. SWIFT_APP_PATH is the raw swift-build
+          # output — no core, not notarization-signed — and must never be
+          # zipped as an update (it failed notarization and would install a
+          # coreless app).
+          APP_SRC="signed-app-${{ matrix.goarch }}/mcpproxy.app"
+          if [ ! -d "${APP_SRC}" ]; then
+            echo "❌ signed bundle export missing: ${APP_SRC} (create-dmg.sh exports it)"
             exit 1
           fi
 
@@ -736,7 +743,7 @@ jobs:
           ENCLOSURE="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.app.zip"
           NOTARIZE_ZIP="sparkle-notarize-${{ matrix.goarch }}.zip"
 
-          ditto -c -k --sequesterRsrc --keepParent "${SWIFT_APP_PATH}" "${NOTARIZE_ZIP}"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_SRC}" "${NOTARIZE_ZIP}"
 
           SUBMISSION_OUTPUT=$(xcrun notarytool submit "${NOTARIZE_ZIP}" \
             --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
@@ -751,16 +758,16 @@ jobs:
             exit 1
           fi
 
-          xcrun stapler staple "${SWIFT_APP_PATH}"
-          xcrun stapler validate "${SWIFT_APP_PATH}"
+          xcrun stapler staple "${APP_SRC}"
+          xcrun stapler validate "${APP_SRC}"
 
-          ditto -c -k --sequesterRsrc --keepParent "${SWIFT_APP_PATH}" "sparkle-enclosure/${ENCLOSURE}"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_SRC}" "sparkle-enclosure/${ENCLOSURE}"
           rm -f "${NOTARIZE_ZIP}"
 
           VERIFY_DIR=$(mktemp -d)
           ditto -x -k "sparkle-enclosure/${ENCLOSURE}" "${VERIFY_DIR}"
-          codesign --verify --deep --strict --verbose=2 "${VERIFY_DIR}/MCPProxy.app"
-          xcrun stapler validate "${VERIFY_DIR}/MCPProxy.app"
+          codesign --verify --deep --strict --verbose=2 "${VERIFY_DIR}/mcpproxy.app"
+          xcrun stapler validate "${VERIFY_DIR}/mcpproxy.app"
           rm -rf "${VERIFY_DIR}"
 
           echo "✅ Sparkle enclosure ready: ${ENCLOSURE}"
