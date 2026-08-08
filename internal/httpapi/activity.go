@@ -88,8 +88,9 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.RequestID = requestID
 	}
 
-	// Include call_tool_* internal tool calls (default: exclude successful ones)
-	// Set include_call_tool=true to show all internal tool calls including successful call_tool_*
+	// Include call_tool_* internal tool calls (default: exclude the ones a
+	// tool_call record already covers — successful and concurrency-rejected).
+	// Set include_call_tool=true to show every internal tool call.
 	if q.Get("include_call_tool") == "true" {
 		filter.ExcludeCallToolSuccess = false
 	}

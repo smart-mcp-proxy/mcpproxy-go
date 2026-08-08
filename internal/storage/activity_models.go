@@ -187,9 +187,11 @@ type ActivityFilter struct {
 	AgentName string // Filter by agent token name in metadata
 	AuthType  string // Filter by auth type: "admin" or "agent"
 
-	// ExcludeCallToolSuccess filters out successful call_tool_* internal tool calls.
-	// These appear as duplicates since the actual upstream tool call is also logged.
-	// Failed call_tool_* calls are still shown (no corresponding tool_call entry).
+	// ExcludeCallToolSuccess filters out call_tool_* internal tool calls that are
+	// already represented by a tool_call record: successful ones (the upstream
+	// call is logged) and rejected ones (the concurrency limiter logged the shed,
+	// spec 093). Failed call_tool_* calls are still shown — they have no
+	// corresponding tool_call entry.
 	// Default: true (to avoid duplicate entries in UI/CLI)
 	ExcludeCallToolSuccess bool
 }
@@ -293,12 +295,17 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		return false
 	}
 
-	// Exclude successful call_tool_* internal tool calls to avoid duplicates
-	// These have a corresponding tool_call entry that shows the actual upstream call.
-	// Failed call_tool_* calls are shown since they have no corresponding tool_call.
+	// Exclude call_tool_* internal tool calls that are already represented by a
+	// canonical tool_call entry, so one dispatch is never counted twice.
+	//
+	// A SUCCESSFUL call_tool_* has the upstream's own tool_call record; a
+	// REJECTED one has the record the concurrency limiter wrote at the shed
+	// (spec 093 FR-012), which every origin produces — the variant handler
+	// merely adds a second, MCP-flavoured row on top of it. Failed call_tool_*
+	// calls stay visible: they have no corresponding tool_call.
 	if f.ExcludeCallToolSuccess {
 		if record.Type == ActivityTypeInternalToolCall &&
-			record.Status == "success" &&
+			(record.Status == ActivityStatusSuccess || record.Status == ActivityStatusRejected) &&
 			strings.HasPrefix(record.ToolName, "call_tool_") {
 			return false
 		}
