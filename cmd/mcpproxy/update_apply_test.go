@@ -229,6 +229,95 @@ func TestApplyNewBinary_OverwritesStaleBackup(t *testing.T) {
 	}
 }
 
+// The pair of renames in applyNewBinary is not atomic: a crash between them
+// leaves the target path empty with target.old holding the only copy of the
+// binary. A retry must put it back, not delete it (FR-021).
+func TestApplyNewBinary_RecoversFromAnInterruptedSwap(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new")
+
+	// The exact on-disk state after a crash between the two renames.
+	if err := os.WriteFile(target+".old", []byte("old"), 0o750); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+	if err := os.WriteFile(staged, []byte("new"), 0o600); err != nil {
+		t.Fatalf("write staged: %v", err)
+	}
+
+	if err := applyNewBinary(target, staged, func(path string) error {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if string(content) != "new" {
+			t.Errorf("verification saw %q, want the new binary", string(content))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("applyNewBinary: %v", err)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("target must exist: %v", err)
+	}
+	if string(got) != "new" {
+		t.Errorf("target content = %q, want new", string(got))
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Mode().Perm() != 0o750 {
+		t.Errorf("mode = %o, want the recovered binary's 0750", fi.Mode().Perm())
+	}
+	if _, err := os.Stat(target + ".old"); !os.IsNotExist(err) {
+		t.Errorf("backup must be gone once the new binary verified")
+	}
+}
+
+// The same interrupted state, but this attempt cannot proceed either. The
+// previous binary must survive: it is the only one there is.
+func TestApplyNewBinary_InterruptedSwapKeepsTheOnlyBinary(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new") // deliberately never created
+
+	if err := os.WriteFile(target+".old", []byte("old"), 0o755); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	if err := applyNewBinary(target, staged, nil); err == nil {
+		t.Fatal("expected an error: there is no staged binary to install")
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("the previous binary must have been restored: %v", err)
+	}
+	if string(got) != "old" {
+		t.Errorf("target content = %q, want the restored old binary", string(got))
+	}
+}
+
+func TestApplyNewBinary_MissingTargetAndBackupIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new")
+	if err := os.WriteFile(staged, []byte("new"), 0o600); err != nil {
+		t.Fatalf("write staged: %v", err)
+	}
+
+	err := applyNewBinary(target, staged, nil)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("error = %v, want a refusal to install over nothing", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Error("nothing may be installed where there was no binary to update")
+	}
+}
+
 func TestEnsureTargetWritable(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "mcpproxy")
@@ -272,5 +361,47 @@ func TestVerifyInstalledVersion(t *testing.T) {
 	}
 	if err := verifyInstalledVersion(broken, "v1.2.3"); err == nil {
 		t.Error("a binary that cannot run must fail verification")
+	}
+}
+
+// A substring test would accept 0.54.10 as proof that 0.54.1 was installed.
+func TestVerifyInstalledVersion_RejectsAVersionPrefix(t *testing.T) {
+	requirePOSIXShell(t)
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake")
+	if err := os.WriteFile(bin,
+		[]byte("#!/bin/sh\necho \"MCPProxy 0.54.10 (personal) darwin/arm64\"\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := verifyInstalledVersion(bin, "v0.54.1"); err == nil {
+		t.Error("0.54.10 must not satisfy a request for 0.54.1")
+	}
+	if err := verifyInstalledVersion(bin, "v0.54.10"); err != nil {
+		t.Errorf("the exact version should verify: %v", err)
+	}
+}
+
+func TestReportsVersion(t *testing.T) {
+	const line = "MCPProxy 0.54.10 (personal) darwin/arm64"
+
+	for _, tc := range []struct {
+		output, want string
+		match        bool
+	}{
+		{line, "v0.54.10", true},
+		{line, "0.54.10", true},
+		{line, "v0.54.1", false},
+		{line, "0.54.100", false},
+		{line, "", false},
+		{"MCPProxy v1.0.0-rc.2 (personal)", "v1.0.0-rc.2", true},
+		{"MCPProxy v1.0.0-rc.2 (personal)", "v1.0.0-rc.20", false},
+		// Parentheses around a bare version must not defeat the token match.
+		{"mcpproxy (1.2.3)", "v1.2.3", true},
+	} {
+		if got := reportsVersion(tc.output, tc.want); got != tc.match {
+			t.Errorf("reportsVersion(%q, %q) = %v, want %v", tc.output, tc.want, got, tc.match)
+		}
 	}
 }

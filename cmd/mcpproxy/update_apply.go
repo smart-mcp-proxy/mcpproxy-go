@@ -204,7 +204,19 @@ func ensureTargetWritable(target string) error {
 // binary runs. The previous binary is restored on any failure and only removed
 // once verification passed. Callers must pass an already-resolved (symlink
 // free) target so a symlinked launcher keeps pointing at the file we replace.
+//
+// The two renames are individually atomic but the pair is not, so there is a
+// window in which the target path is empty and target.old holds the ONLY copy
+// of the binary. A crash in that window must be survivable: the first thing
+// this function does is recover from it (restoreInterruptedSwap), and a
+// leftover backup is never removed while the target is absent.
 func applyNewBinary(target, staged string, verify func(path string) error) (err error) {
+	backup := target + ".old"
+
+	if recoverErr := restoreInterruptedSwap(target, backup); recoverErr != nil {
+		return recoverErr
+	}
+
 	mode := os.FileMode(0o755)
 	if fi, statErr := os.Stat(target); statErr == nil {
 		mode = fi.Mode().Perm()
@@ -213,8 +225,8 @@ func applyNewBinary(target, staged string, verify func(path string) error) (err 
 		return fmt.Errorf("preserve file mode %o: %w", mode, chmodErr)
 	}
 
-	backup := target + ".old"
-	// A leftover .old from an interrupted run must not block the rename.
+	// The target is present (restoreInterruptedSwap guarantees it), so a
+	// leftover .old is genuinely expendable and must not block the rename.
 	_ = os.Remove(backup)
 
 	if renameErr := os.Rename(target, backup); renameErr != nil {
@@ -252,6 +264,53 @@ func applyNewBinary(target, staged string, verify func(path string) error) (err 
 	return nil
 }
 
+// restoreInterruptedSwap puts the world back together after a crash between
+// the two renames in applyNewBinary.
+//
+// The dangerous state is "target missing, backup present": the backup is then
+// the only copy of the binary, and removing it — which the swap used to do
+// before it had even looked at the target — destroys the install. So the
+// backup is moved back FIRST, and a missing target with no backup is an error
+// rather than something to plough on through.
+func restoreInterruptedSwap(target, backup string) error {
+	targetExists, err := regularFileExists(target)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", target, err)
+	}
+	if targetExists {
+		return nil
+	}
+
+	backupExists, err := regularFileExists(backup)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", backup, err)
+	}
+	if !backupExists {
+		return fmt.Errorf("%s does not exist and there is no %s to restore from; "+
+			"reinstall mcpproxy rather than letting an update invent a binary", target, backup)
+	}
+
+	if renameErr := os.Rename(backup, target); renameErr != nil {
+		return fmt.Errorf("a previous update was interrupted: %s is the only copy of the binary "+
+			"and it could not be moved back to %s: %w", backup, target, renameErr)
+	}
+	fmt.Fprintf(os.Stderr,
+		"note: a previous update left %s missing; restored it from %s before continuing\n",
+		target, backup)
+	return nil
+}
+
+func regularFileExists(path string) (bool, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return fi.Mode().IsRegular(), nil
+}
+
 // verifyInstalledVersion runs `<path> --version` and requires the output to
 // mention wantVersion. FR-021: "success" is the new binary executing and
 // reporting the expected version, not merely a rename returning nil.
@@ -266,8 +325,28 @@ func verifyInstalledVersion(path, wantVersion string) error {
 			filepath.Base(path), err, strings.TrimSpace(string(out)))
 	}
 	got := strings.TrimSpace(string(out))
-	if !strings.Contains(got, strings.TrimPrefix(wantVersion, "v")) {
+	if !reportsVersion(got, wantVersion) {
 		return fmt.Errorf("installed binary reports %q, expected version %s", got, wantVersion)
 	}
 	return nil
+}
+
+// reportsVersion reports whether output announces exactly wantVersion.
+//
+// Whole tokens, not a substring: `mcpproxy --version` prints
+// "MCPProxy 0.54.10 (personal) darwin/arm64", and a substring test would let
+// that output satisfy a request for 0.54.1 — an update that silently installed
+// the wrong release would pass verification.
+func reportsVersion(output, wantVersion string) bool {
+	want := strings.TrimPrefix(strings.TrimSpace(wantVersion), "v")
+	if want == "" {
+		return false
+	}
+	for _, field := range strings.Fields(output) {
+		token := strings.TrimPrefix(strings.Trim(field, "(),;\"'"), "v")
+		if token == want {
+			return true
+		}
+	}
+	return false
 }
