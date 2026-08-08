@@ -284,6 +284,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
+        // Spec 092 FR-003: has the bundle on disk been replaced under us?
+        // Checked once at launch (a drag-install over a running app that the
+        // user never activates afterwards is still an upgrade that must not
+        // leave the old version serving) and every 5 minutes thereafter, plus
+        // on every activation — see applicationDidBecomeActive.
+        refreshReplacedBundleVersion()
+        Timer.publish(every: 300, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshReplacedBundleVersion() }
+            }
+            .store(in: &cancellables)
+
         // Listen for start requests from the core status banner
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleStartCore),
@@ -572,6 +585,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.setupMainMenu()
         }
+        // Spec 092 FR-003. Activation is the natural moment to look: a
+        // drag-install is normally followed within seconds by the user
+        // returning to the app.
+        MainActor.assumeIsolated { refreshReplacedBundleVersion() }
     }
 
     // NSWindowDelegate — hide from Dock when the last managed window closes.
@@ -1135,6 +1152,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(updateNote)
         }
 
+        // Spec 092 FR-003: the app on disk is newer than the one running — a
+        // drag-install landed underneath us. Offered, never forced.
+        if let replacement = appState.replacedBundleVersion {
+            let relaunch = NSMenuItem(
+                title: "MCPProxy was updated to v\(replacement) — Relaunch",
+                action: #selector(relaunchIntoReplacedBundle), keyEquivalent: ""
+            )
+            relaunch.target = self
+            relaunch.toolTip = "Stops the core, starts the newly installed app, and quits this one."
+            menu.addItem(relaunch)
+        }
+
+        // Spec 092 FR-002: an older core is running that the tray is not
+        // allowed to stop on its own. Activating this item IS the consent.
+        if let stale = appState.staleCorePrompt {
+            let restart = NSMenuItem(
+                title: stale.menuTitle,
+                action: #selector(restartStaleCore), keyEquivalent: ""
+            )
+            restart.target = self
+            restart.toolTip = stale.pid == nil
+                ? "This core cannot be stopped from here — shows how to stop it by hand."
+                : "Stops the old core (PID \(stale.pid!)) and starts the bundled one."
+            menu.addItem(restart)
+        }
+
         menu.addItem(.separator())
 
         // Stop / Start
@@ -1241,6 +1284,101 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Handler for the `.startCore` notification posted by the core status banner.
     @objc private func handleStartCore() {
         startCoreAction()
+    }
+
+    // MARK: - Spec 092 Phase 0: superseding stale versions (#957)
+
+    /// Re-read the app bundle from disk and publish whether it has been
+    /// replaced by a newer version (FR-003).
+    ///
+    /// Cheap (one small plist read) and idempotent, which is what lets it run
+    /// on both triggers: every activation — the drag-install is usually
+    /// followed immediately by clicking the menu bar — and a slow timer for the
+    /// user who never activates the app at all.
+    @MainActor
+    private func refreshReplacedBundleVersion() {
+        let replacement = BundleUpdateWatcher.replacementVersion()
+        guard appState.replacedBundleVersion != replacement else { return }
+        if let replacement {
+            NSLog("[MCPProxy] The app bundle on disk is v%@ — this process is v%@",
+                  replacement, BundledCore.appVersion() ?? "unknown")
+            AppLifecycle.shared.note("app bundle on disk replaced by v\(replacement)")
+        }
+        appState.replacedBundleVersion = replacement
+    }
+
+    /// FR-003: stop the core we manage, launch the newly installed bundle, and
+    /// get out of its way.
+    ///
+    /// `open -n` rather than `open`: without it macOS activates THIS process —
+    /// the stale one — which is exactly the reported symptom. Terminating comes
+    /// last and only after the core is down, so the new instance does not race
+    /// us for the socket and the BBolt lock.
+    @objc private func relaunchIntoReplacedBundle() {
+        let bundlePath = Bundle.main.bundleURL.path
+        Task { [weak self] in
+            guard let self else { return }
+            AppLifecycle.shared.note("relaunching into the replaced bundle at \(bundlePath)")
+            await self.coreManager?.shutdown()
+
+            await MainActor.run {
+                let launcher = Process()
+                launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                launcher.arguments = ["-n", bundlePath]
+                do {
+                    try launcher.run()
+                } catch {
+                    NSLog("[MCPProxy] Could not launch %@: %@", bundlePath, error.localizedDescription)
+                    self.presentAlert(
+                        title: "Could not start the new version",
+                        message: "Open \(bundlePath) manually to finish the upgrade.\n\n"
+                            + error.localizedDescription
+                    )
+                    return
+                }
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    /// FR-002: the user consented to stopping a core the tray did not start.
+    ///
+    /// When there is no pid to act on — a core too old to report one — the
+    /// action must still do something honest, so it explains how to stop the
+    /// core by hand rather than failing silently.
+    @objc private func restartStaleCore() {
+        guard let prompt = appState.staleCorePrompt else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let acted = await self.coreManager?.supersedeWithConsent() ?? false
+            guard !acted else { return }
+            await MainActor.run { self.presentStaleCoreInstructions(prompt) }
+        }
+    }
+
+    @MainActor
+    private func presentStaleCoreInstructions(_ prompt: StaleCorePrompt) {
+        let pidHint = prompt.pid.map { "\n\nIts process id is \($0)." } ?? ""
+        presentAlert(
+            title: "Stop the old core to finish upgrading",
+            message: "MCPProxy v\(prompt.runningVersion) is still running and this app "
+                + "bundles v\(prompt.bundledVersion). MCPProxy could not stop that process "
+                + "automatically — it was started outside the app (a terminal, launchd, or "
+                + "`brew services`), so stopping it is up to whoever started it."
+                + pidHint
+                + "\n\nQuit it there, then choose “Start MCPProxy Core” from this menu."
+        )
+    }
+
+    @MainActor
+    private func presentAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func handleAttentionAction(_ sender: NSMenuItem) {
