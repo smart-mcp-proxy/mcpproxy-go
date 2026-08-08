@@ -200,6 +200,31 @@ final class UpdateServiceFeedTests: XCTestCase {
         XCTAssertEqual(service.lastErrorMessage, "the update is improperly signed")
     }
 
+    /// FR-016 / the "update feed unreachable" edge case. Nothing publishes the
+    /// appcast at its Info.plist URL yet (see the activation checklist in
+    /// docs/features/auto-update.md), so a 404 is the state most installs are
+    /// in: it must read as "no update from the feed" and hand the menu to the
+    /// legacy browser path, not as an error that eats the offer.
+    func testAnUnreachableFeedFallsBackToBrowserGuidance() {
+        let (service, _) = makeService()
+        service.setCoreReportedVersion("0.55.0")
+        service.feedUpdater(didFailWith:
+            "The update feed could not be loaded (404).")
+
+        XCTAssertEqual(service.menuEntries, [.browserGuidance(version: "0.55.0")])
+        XCTAssertNotNil(service.lastErrorMessage, "the reason stays available for the log")
+    }
+
+    func testAFeedFailureDoesNotStrandAPreviousOffer() {
+        // A transient failure after a successful check must not leave a
+        // one-click item pointing at an update the feed can no longer serve.
+        let (service, _) = makeService()
+        service.feedUpdater(didFindVersion: "0.55.0")
+        service.feedUpdaterDidNotFindUpdate()
+        service.feedUpdater(didFailWith: "connection lost")
+        XCTAssertEqual(service.menuEntries, [])
+    }
+
     // MARK: - FR-012
 
     func testInstallHookStopsTheManagedCoreSynchronously() {
