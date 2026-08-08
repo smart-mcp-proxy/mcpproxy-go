@@ -7,6 +7,12 @@
 // deadline that is shared across tiers (FR-004): waiting for a per-server slot
 // and then for a global slot must never grant two full queue timeouts.
 //
+// A Limiter owns OCCUPANCY (how many calls are running, who is queued, whether
+// the scope is retired) and nothing else. It never stores the limits themselves:
+// those live in the registry's immutable published generation, and every
+// admission decision is made against the values handed to it, so one admission
+// can never combine one scope's new cap with another scope's old one (FR-021).
+//
 // Implementation note: the queue is a hand-rolled FIFO waiter list guarded by
 // one mutex rather than golang.org/x/sync/semaphore. A semaphore's capacity is
 // fixed at construction, but FR-021 requires occupancy to be *shared across
@@ -21,11 +27,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Limits is one scope's configured concurrency settings, already resolved from
-// the config tri-states.
+// the config tri-states. A Limits value is IMMUTABLE once published: a reload
+// publishes a new value, it never edits one in place.
 type Limits struct {
 	// Max is the maximum number of concurrently running calls. <= 0 means the
 	// scope does not limit anything (occupancy is still tracked so a later
@@ -66,8 +74,24 @@ type Limiter struct {
 	scope  Scope
 	server string
 
+	// limitsFn returns the limits currently published for this scope. It is the
+	// ONLY way the limiter learns a cap, and it must never take a lock: it is
+	// called while holding l.mu (registry instances resolve it from one atomic
+	// generation load). Note where it is and is not used — the admission
+	// DECISION never calls it, it uses the values passed to acquire so that the
+	// caps, the queue budget and the reported rejection all come from the single
+	// generation that admission resolved (FR-021). Handing a freed slot to a
+	// queued waiter does call it, deliberately: a waiter must be admitted under
+	// the newest published cap, and that decision involves this scope alone, so
+	// there is no cross-scope value to mix.
+	limitsFn func() Limits
+
+	// held is the fixed-limits cell backing a STANDALONE limiter (New): it is
+	// what setLimits swaps. Registry scopes leave it nil — their limits belong
+	// to the published generation and are never edited in place.
+	held *atomic.Pointer[Limits]
+
 	mu      sync.Mutex
-	limits  Limits
 	running int
 	waiters *list.List // of *waiter, FIFO
 	retired bool
@@ -79,29 +103,38 @@ type Limiter struct {
 	waiterWoke func()
 }
 
-// New builds a limiter for a scope. server is the upstream name for
-// ScopeServer and must be empty for ScopeGlobal (a global rejection must never
-// blame a server, FR-010).
+// New builds a STANDALONE limiter with fixed limits. Registry-owned scopes use
+// newPublished instead, so their limits always come from the current generation.
+// server is the upstream name for ScopeServer and must be empty for ScopeGlobal
+// (a global rejection must never blame a server, FR-010).
 func New(scope Scope, server string, limits Limits) *Limiter {
+	var held atomic.Pointer[Limits]
+	held.Store(&limits)
+	l := newPublished(scope, server, func() Limits { return *held.Load() })
+	l.held = &held
+	return l
+}
+
+// newPublished builds a limiter whose limits are resolved from the registry's
+// published generation on every read.
+func newPublished(scope Scope, server string, limitsFn func() Limits) *Limiter {
 	if scope == ScopeGlobal {
 		server = ""
 	}
 	return &Limiter{
-		scope:   scope,
-		server:  server,
-		limits:  limits,
-		waiters: list.New(),
+		scope:    scope,
+		server:   server,
+		limitsFn: limitsFn,
+		waiters:  list.New(),
 	}
 }
 
-// Limits returns the currently published limits for this scope.
+// Limits returns the limits currently published for this scope.
 func (l *Limiter) Limits() Limits {
-	if l == nil {
+	if l == nil || l.limitsFn == nil {
 		return Limits{}
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.limits
+	return l.limitsFn()
 }
 
 // Stats returns the current occupancy and queue depth.
@@ -114,17 +147,27 @@ func (l *Limiter) Stats() Stats {
 	return Stats{Running: l.running, Queued: l.waiters.Len()}
 }
 
-// SetLimits publishes a new generation of limits for this scope (FR-021).
-// Running calls are never interrupted but keep counting against the new cap,
-// so lowering the cap admits nothing until occupancy drains; raising it admits
-// eligible queued calls immediately. Queued calls keep their original absolute
-// deadline.
-func (l *Limiter) SetLimits(limits Limits) {
+// setLimits republishes a STANDALONE limiter's limits and re-evaluates the
+// queue against them. Registry scopes are not updated this way — their limits
+// change by publishing a new generation, after which the registry calls regrant.
+func (l *Limiter) setLimits(limits Limits) {
+	if l == nil || l.held == nil {
+		return
+	}
+	l.held.Store(&limits)
+	l.regrant()
+}
+
+// regrant re-evaluates the wait queue against the CURRENTLY published limits.
+// The registry calls this on every scope right after publishing a generation,
+// which is what makes "a raise admits eligible waiters immediately" true while
+// "a lowered cap admits nothing until occupancy drains" stays true — the same
+// comparison decides both.
+func (l *Limiter) regrant() {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
-	l.limits = limits
 	l.grantLocked()
 	l.mu.Unlock()
 }
@@ -162,10 +205,13 @@ func (l *Limiter) Retired() bool {
 	return l.retired
 }
 
-// Acquire admits one call into the scope, waiting in the bounded FIFO queue if
-// the cap is reached. queueDeadline is the ABSOLUTE deadline for the whole
-// admission (shared across tiers, FR-004); the zero time means "wait until the
-// caller's context ends".
+// Acquire admits one call into the scope under this limiter's currently
+// published limits, waiting in the bounded FIFO queue if the cap is reached.
+// queueDeadline is the ABSOLUTE deadline for the whole admission (shared across
+// tiers, FR-004); the zero time means "wait until the caller's context ends".
+//
+// The registry does NOT use this entry point: a two-tier admission must resolve
+// both scopes from one generation, which is what acquire takes as an argument.
 //
 // It returns an idempotent release closure bound to this instance, or:
 //   - *LimitError{Reason: queue_full} when there is no pending capacity,
@@ -180,13 +226,12 @@ func (l *Limiter) Acquire(ctx context.Context, queueDeadline time.Time) (func(),
 	return l.acquire(ctx, l.Limits(), queueDeadline)
 }
 
-// acquire is Acquire with the REPORTED limits supplied by the caller. The
-// registry passes the values it published in the generation this admission was
-// resolved from, so a rejection never describes itself with one scope's new cap
-// and another's old queue deadline (FR-021). The admission DECISION still reads
-// the instance's live limits under its own lock: a cap lowered a microsecond
-// ago must bind immediately, and a cap raised a microsecond ago must admit.
-func (l *Limiter) acquire(ctx context.Context, reportLimits Limits, queueDeadline time.Time) (func(), error) {
+// acquire admits one call under the limits GIVEN to it. Those values decide
+// everything the admission observes — whether there is capacity, whether there
+// is pending queue capacity, and what a rejection reports — so an admission is
+// governed end-to-end by the one generation it resolved, never by a value that
+// changed underneath it (FR-021).
+func (l *Limiter) acquire(ctx context.Context, limits Limits, queueDeadline time.Time) (func(), error) {
 	if l == nil {
 		return noopRelease, nil
 	}
@@ -197,15 +242,15 @@ func (l *Limiter) acquire(ctx context.Context, reportLimits Limits, queueDeadlin
 		return nil, l.unavailableError()
 	}
 	// Fast path: unlimited scope, or free capacity.
-	if l.limits.Max <= 0 || l.running < l.limits.Max {
+	if limits.Max <= 0 || l.running < limits.Max {
 		l.running++
 		l.mu.Unlock()
 		return l.releaseFunc(), nil
 	}
 	// Saturated: is there pending capacity?
-	if l.waiters.Len() >= l.limits.QueueSize {
+	if l.waiters.Len() >= limits.QueueSize {
 		l.mu.Unlock()
-		return nil, l.limitError(ReasonQueueFull, reportLimits)
+		return nil, l.limitError(ReasonQueueFull, limits)
 	}
 	w := &waiter{ch: make(chan struct{})}
 	w.el = l.waiters.PushBack(w)
@@ -243,7 +288,7 @@ func (l *Limiter) acquire(ctx context.Context, reportLimits Limits, queueDeadlin
 	case <-timerC:
 		// A grant that raced the deadline wins: abandon returns nil and the
 		// caller keeps the slot rather than losing already-granted capacity.
-		if err := l.abandon(w, l.limitError(ReasonQueueTimeout, reportLimits), true); err != nil {
+		if err := l.abandon(w, l.limitError(ReasonQueueTimeout, limits), true); err != nil {
 			return nil, err
 		}
 		return l.releaseFunc(), nil
@@ -325,9 +370,12 @@ func (l *Limiter) releaseLocked() {
 	l.grantLocked()
 }
 
-// grantLocked hands free capacity to the head of the FIFO queue.
+// grantLocked hands free capacity to the head of the FIFO queue, under the
+// limits published RIGHT NOW — a waiter must be admitted against the current
+// generation, not against the one it arrived under.
 func (l *Limiter) grantLocked() {
-	for l.waiters.Len() > 0 && (l.limits.Max <= 0 || l.running < l.limits.Max) {
+	limits := l.Limits()
+	for l.waiters.Len() > 0 && (limits.Max <= 0 || l.running < limits.Max) {
 		e := l.waiters.Front()
 		w, _ := e.Value.(*waiter)
 		l.waiters.Remove(e)

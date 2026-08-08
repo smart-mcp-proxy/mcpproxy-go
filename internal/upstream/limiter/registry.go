@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+// defaultQueueBudget is the wait budget used when a scope caps concurrency but
+// publishes no queue_timeout. The config layer already defaults an active scope
+// to 30s, so this only guards limits published directly (API, tests): a queued
+// call must never wait without a deadline, which is the one way a saturated
+// scope could park a caller indefinitely.
+const defaultQueueBudget = 30 * time.Second
+
 // Registry owns the live limiter instances: one per configured upstream server
 // plus the proxy-wide aggregate. Readers take a whole GENERATION through one
 // atomic pointer (no lock on the hot path); writers (config apply / hot reload)
@@ -18,27 +25,33 @@ import (
 //     new settings with another scope's old ones, nor a new cap with a queue
 //     deadline derived from an older generation. Everything an admission needs
 //     — both limiter instances, both scopes' limits, and the resolved wait
-//     budget — is therefore resolved from ONE generation load.
+//     budget — is resolved from ONE generation load, and the limits themselves
+//     live only in generations. Publishing therefore cannot disturb an
+//     admission already in flight: the new generation is stored first and the
+//     wait queues are re-evaluated against it afterwards.
 //
-//   - FR-021, shared occupancy: hot reload MUTATES the existing instance
-//     (SetLimits) instead of swapping in a new one, and an instance exists for
-//     every eligible scope even when that scope currently caps nothing. An
-//     unlimited scope still counts its running calls, so enabling a cap later
-//     sees the calls already in flight instead of starting from zero and
-//     admitting a second full cap's worth on top of them.
+//   - FR-021, shared occupancy: limiter instances SURVIVE a reload (only the
+//     limits are republished), and an instance exists for every eligible scope
+//     even when that scope currently caps nothing. An unlimited scope still
+//     counts its running calls, so enabling a cap later sees the calls already
+//     in flight instead of starting from zero and admitting a second cap's
+//     worth on top of them.
 //
 //   - FR-009, no admit-after-disable: retiring a server TOMBSTONES its entry
-//     rather than deleting it, so a call that snapshotted its client before the
-//     state change is refused at admission instead of sailing through an absent
-//     limiter. Outstanding holds keep draining into the retired instance; a
-//     server re-added while they drain gets a fresh instance, so its capacity is
-//     never double-counted against the tombstone.
+//     and the tombstone is never removed. Absence of a scope means "unlimited",
+//     so absence must never be able to follow retirement — a caller that
+//     resolved its client before the server was disabled can reach admission at
+//     any later time, and it has to be refused, not waved through. Outstanding
+//     holds drain into the retired instance; a server re-added under the same
+//     name replaces the tombstone with a fresh instance, so the map holds at
+//     most one entry per distinct server name the process has ever configured.
 type Registry struct {
 	mu sync.Mutex
 
-	// Live state, mutated under mu only and snapshotted into each generation.
+	// Live instances, mutated under mu only and snapshotted into each
+	// generation. Includes retired tombstones.
 	global  *Limiter
-	servers map[string]*Limiter // includes retired tombstones
+	servers map[string]*Limiter
 
 	gen atomic.Pointer[generation]
 }
@@ -101,19 +114,7 @@ func (r *Registry) SetGlobal(limits Limits) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.setGlobalLocked(limits)
-	r.publishLocked()
-}
-
-// setGlobalLocked updates (or creates) the global instance. The instance is
-// created even when the limits are disabled: an unlimited global scope still
-// tracks occupancy so a later hot-enable sees the in-flight calls (FR-021).
-func (r *Registry) setGlobalLocked(limits Limits) {
-	if r.global == nil {
-		r.global = New(ScopeGlobal, "", limits)
-		return
-	}
-	r.global.SetLimits(limits)
+	r.publishLocked(limits, r.serverLimitsLocked(map[string]Limits{}))
 }
 
 // SetServer publishes one server's limits and returns the live instance.
@@ -123,26 +124,9 @@ func (r *Registry) SetServer(name string, limits Limits) *Limiter {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	lim := r.setServerLocked(name, limits)
-	r.publishLocked()
+	lim := r.ensureServerLocked(name)
+	r.publishLocked(r.globalLimitsLocked(), r.serverLimitsLocked(map[string]Limits{name: limits}))
 	return lim
-}
-
-// setServerLocked updates (or creates) one server's instance. Like the global
-// scope, a server with no cap still gets an instance so its occupancy is known
-// when a cap is enabled later. A RETIRED instance is replaced rather than
-// revived: its outstanding holds belong to it alone (FR-009).
-func (r *Registry) setServerLocked(name string, limits Limits) *Limiter {
-	if r.servers == nil {
-		r.servers = make(map[string]*Limiter)
-	}
-	if cur := r.servers[name]; cur != nil && !cur.Retired() {
-		cur.SetLimits(limits)
-		return cur
-	}
-	fresh := New(ScopeServer, name, limits)
-	r.servers[name] = fresh
-	return fresh
 }
 
 // RetireServer tombstones a server's limiter: queued calls fail immediately
@@ -156,7 +140,70 @@ func (r *Registry) RetireServer(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.retireServerLocked(name)
-	r.publishLocked()
+	r.publishLocked(r.globalLimitsLocked(), r.serverLimitsLocked(nil))
+}
+
+// Apply publishes one atomic generation of limits for every scope (FR-021):
+// the global aggregate plus the resolved per-server limits. Servers missing
+// from the map are retired (their tombstone stays, see the type comment).
+func (r *Registry) Apply(global Limits, servers map[string]Limits) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for name := range r.servers {
+		if _, ok := servers[name]; !ok {
+			r.retireServerLocked(name)
+		}
+	}
+	for name := range servers {
+		r.ensureServerLocked(name)
+	}
+
+	r.publishLocked(global, servers)
+}
+
+// ensureGlobalLocked creates the global instance if it does not exist yet. The
+// instance exists even when the scope caps nothing: an unlimited scope is still
+// an occupancy tracker (FR-021).
+func (r *Registry) ensureGlobalLocked() {
+	if r.global != nil {
+		return
+	}
+	r.global = newPublished(ScopeGlobal, "", func() Limits {
+		gen := r.gen.Load()
+		if gen == nil {
+			return Limits{}
+		}
+		return gen.globalLimits
+	})
+}
+
+// ensureServerLocked creates a server's instance if it has none, or replaces a
+// RETIRED one with a fresh instance: the tombstone's outstanding holds belong
+// to it alone, so a re-added server never inherits them (FR-009).
+func (r *Registry) ensureServerLocked(name string) *Limiter {
+	if r.servers == nil {
+		r.servers = make(map[string]*Limiter)
+	}
+	if cur := r.servers[name]; cur != nil && !cur.Retired() {
+		return cur
+	}
+	fresh := newPublished(ScopeServer, name, func() Limits {
+		gen := r.gen.Load()
+		if gen == nil {
+			return Limits{}
+		}
+		scope := gen.servers[name]
+		if scope == nil {
+			return Limits{}
+		}
+		return scope.limits
+	})
+	r.servers[name] = fresh
+	return fresh
 }
 
 func (r *Registry) retireServerLocked(name string) {
@@ -167,56 +214,66 @@ func (r *Registry) retireServerLocked(name string) {
 	cur.Retire()
 }
 
-// Apply publishes one atomic generation of limits for every scope (FR-021):
-// the global aggregate plus the resolved per-server limits. Servers missing
-// from the map are retired.
-//
-// Tombstones that have finished draining are dropped here rather than kept
-// forever: a call still holding a pre-retirement client snapshot across a whole
-// reload cycle is caught by the dispatch layer's own liveness checks, so the
-// map stays bounded by the config plus the names retired since the last reload.
-func (r *Registry) Apply(global Limits, servers map[string]Limits) {
-	if r == nil {
-		return
+// globalLimitsLocked returns the limits currently published for the global
+// scope, so a single-scope update can republish the rest unchanged.
+func (r *Registry) globalLimitsLocked() Limits {
+	gen := r.gen.Load()
+	if gen == nil {
+		return Limits{}
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.setGlobalLocked(global)
-
-	for name, lim := range r.servers {
-		if _, ok := servers[name]; ok {
-			continue
-		}
-		r.retireServerLocked(name)
-		if st := lim.Stats(); st.Running == 0 && st.Queued == 0 {
-			delete(r.servers, name)
-		}
-	}
-	for name, limits := range servers {
-		r.setServerLocked(name, limits)
-	}
-
-	r.publishLocked()
+	return gen.globalLimits
 }
 
-// publishLocked snapshots the live instances into one immutable generation and
-// stores it. Callers must hold r.mu. The wait budget is baked in here so an
-// admission cannot pair a new cap with a stale deadline.
-func (r *Registry) publishLocked() {
-	gen := &generation{global: r.global, servers: make(map[string]*serverScope, len(r.servers))}
-	if r.global != nil {
-		gen.globalLimits = r.global.Limits()
+// serverLimitsLocked returns the currently published per-server limits with
+// `overrides` applied, so a single-scope update carries every other scope
+// forward untouched into the new generation.
+func (r *Registry) serverLimitsLocked(overrides map[string]Limits) map[string]Limits {
+	out := make(map[string]Limits, len(r.servers))
+	if gen := r.gen.Load(); gen != nil {
+		for name, scope := range gen.servers {
+			out[name] = scope.limits
+		}
 	}
+	for name := range r.servers {
+		if _, ok := out[name]; !ok {
+			out[name] = Limits{}
+		}
+	}
+	for name, limits := range overrides {
+		out[name] = limits
+	}
+	return out
+}
+
+// publishLocked snapshots the live instances plus the given limits into one
+// immutable generation, stores it, and only THEN re-evaluates every wait queue
+// against it. Callers must hold r.mu.
+//
+// The order matters in both directions. Storing first means no admission can
+// ever see a limiter whose cap has moved out from under the generation it
+// resolved — there is no per-instance limits state to move. Re-granting after
+// means a raise admits eligible waiters immediately and a lowered cap admits
+// nothing until occupancy drains, which is FR-021's "takes effect within one
+// reload cycle" in both directions.
+func (r *Registry) publishLocked(global Limits, servers map[string]Limits) {
+	r.ensureGlobalLocked()
+
+	gen := &generation{global: r.global, globalLimits: global, servers: make(map[string]*serverScope, len(r.servers))}
 	for name, lim := range r.servers {
-		limits := lim.Limits()
+		limits := servers[name] // absent from the new config = retired, no limits
 		gen.servers[name] = &serverScope{
 			lim:    lim,
 			limits: limits,
-			budget: queueBudget(limits, gen.globalLimits),
+			budget: queueBudget(limits, global),
 		}
 	}
 	r.gen.Store(gen)
+
+	// Re-evaluate the queues against what was just published.
+	r.global.regrant()
+	for _, lim := range r.servers {
+		lim.regrant()
+	}
 }
 
 // QueueBudget reports the wait budget an admission for this server would get
@@ -242,11 +299,17 @@ func (r *Registry) QueueBudget(server string) time.Duration {
 // queue_timeout among the scopes that actually limit it (FR-004 — one absolute
 // deadline spanning the per-server and global admission steps combined, never
 // one budget per step). 0 means no limiter applies, so there is nothing to wait
-// for.
+// for; a scope that DOES limit always yields a positive budget, so a queued
+// call can never sit without a deadline.
 func queueBudget(server, global Limits) time.Duration {
 	budget := time.Duration(0)
+	limited := false
 	consider := func(l Limits) {
-		if !l.Enabled() || l.QueueTimeout <= 0 {
+		if !l.Enabled() {
+			return
+		}
+		limited = true
+		if l.QueueTimeout <= 0 {
 			return
 		}
 		if budget == 0 || l.QueueTimeout < budget {
@@ -255,14 +318,18 @@ func queueBudget(server, global Limits) time.Duration {
 	}
 	consider(server)
 	consider(global)
+	if limited && budget == 0 {
+		return defaultQueueBudget
+	}
 	return budget
 }
 
 // Acquire admits a call through both tiers of ONE published generation: the
-// same generation supplies both limiters, both scopes' reported limits and the
-// single absolute queue deadline (FR-004, FR-021). The per-server slot is taken
-// first so a slow upstream's queue does not pin global capacity while waiting
-// (FR-002); on a global rejection the per-server slot is released again.
+// same generation supplies both limiters, both scopes' limits — which are what
+// the admission decision itself is made against — and the single absolute queue
+// deadline (FR-004, FR-021). The per-server slot is taken first so a slow
+// upstream's queue does not pin global capacity while waiting (FR-002); on a
+// global rejection the per-server slot is released again.
 //
 // The returned release closure releases both tiers and is safe to call more
 // than once.
@@ -270,7 +337,14 @@ func (r *Registry) Acquire(ctx context.Context, server string) (func(), error) {
 	if r == nil {
 		return noopRelease, nil
 	}
-	gen := r.gen.Load()
+	return r.acquireIn(r.gen.Load(), ctx, server)
+}
+
+// acquireIn is Acquire against an explicitly chosen generation. Production
+// always passes the current one; taking it as a parameter is what makes "one
+// generation governs one admission" testable, by letting a test hold a
+// generation across a reload.
+func (r *Registry) acquireIn(gen *generation, ctx context.Context, server string) (func(), error) {
 	if gen == nil {
 		return noopRelease, nil
 	}

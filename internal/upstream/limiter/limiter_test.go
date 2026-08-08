@@ -306,7 +306,7 @@ func TestHotSwapLowerCapDoesNotGrantNewCapacity(t *testing.T) {
 
 	// Lower the cap while 4 calls are running: occupancy is shared across
 	// generations (FR-021), so no new admission may happen until it drains.
-	l.SetLimits(Limits{Max: 1, QueueSize: 8, QueueTimeout: 10 * time.Second})
+	l.setLimits(Limits{Max: 1, QueueSize: 8, QueueTimeout: 10 * time.Second})
 
 	admitted := make(chan struct{})
 	go func() {
@@ -356,7 +356,7 @@ func TestHotSwapRaiseAdmitsQueuedImmediately(t *testing.T) {
 	}
 	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 2 })
 
-	l.SetLimits(Limits{Max: 3, QueueSize: 8, QueueTimeout: 10 * time.Second})
+	l.setLimits(Limits{Max: 3, QueueSize: 8, QueueTimeout: 10 * time.Second})
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -490,7 +490,7 @@ func TestConcurrentAcquireReleaseUnderSwap(t *testing.T) {
 				return
 			default:
 			}
-			l.SetLimits(Limits{Max: caps[i%len(caps)], QueueSize: 32, QueueTimeout: 5 * time.Second})
+			l.setLimits(Limits{Max: caps[i%len(caps)], QueueSize: 32, QueueTimeout: 5 * time.Second})
 			i++
 			time.Sleep(time.Millisecond)
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -257,6 +258,12 @@ func TestAcquireObservesOneGeneration(t *testing.T) {
 		}
 	}()
 
+	// Occupancy is shared across generations, so however the caps move, the
+	// number of calls running at once can never exceed the largest cap ever
+	// published. An admission that mixed a stale cap with live occupancy would
+	// break this.
+	var running, peak int64
+
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
 		wg.Add(1)
@@ -275,11 +282,22 @@ func TestAcquireObservesOneGeneration(t *testing.T) {
 				}
 				return
 			}
+			cur := atomic.AddInt64(&running, 1)
+			for {
+				old := atomic.LoadInt64(&peak)
+				if cur <= old || atomic.CompareAndSwapInt64(&peak, old, cur) {
+					break
+				}
+			}
 			time.Sleep(time.Millisecond)
+			atomic.AddInt64(&running, -1)
 			rel()
 		}()
 	}
 	wg.Wait()
+	if peak > 4 {
+		t.Fatalf("peak concurrency = %d, want <= 4 (the largest cap ever published)", peak)
+	}
 	close(stop)
 	applyWG.Wait()
 	readerWG.Wait()
@@ -432,4 +450,114 @@ func TestRegistryDisabledScopeKeepsInstanceForOccupancySharing(t *testing.T) {
 	}
 	rel2()
 	rel()
+}
+
+// TestAdmissionIsGovernedByTheGenerationItResolved is the FR-021 atomicity
+// regression test, and it reproduces the exact hang the old code allowed.
+//
+// Limits used to live on the limiter instance and Apply mutated them BEFORE
+// publishing the generation. An admission that had already resolved an
+// UNCAPPED generation — budget 0, because nothing limits it — then made its
+// decision against the freshly mutated cap, found the scope saturated, and
+// parked in the queue with NO deadline. It could only be released by the
+// caller's context, which for an agent call may never end.
+func TestAdmissionIsGovernedByTheGenerationItResolved(t *testing.T) {
+	r := NewRegistry()
+	r.Apply(Limits{}, map[string]Limits{"s": {}})
+
+	uncapped := r.gen.Load()
+	if got := uncapped.servers["s"].budget; got != 0 {
+		t.Fatalf("an uncapped generation must have no wait budget, got %v", got)
+	}
+
+	// Occupy the scope, so a CAPPED generation would have to queue the call below.
+	busy, err := r.Acquire(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("unlimited acquire: %v", err)
+	}
+	defer busy()
+
+	// Reload to a cap of 1 while the call above still holds the scope.
+	r.Apply(Limits{}, map[string]Limits{"s": {Max: 1, QueueSize: 4, QueueTimeout: 30 * time.Second}})
+
+	done := make(chan error, 1)
+	go func() {
+		release, aerr := r.acquireIn(uncapped, context.Background(), "s")
+		if aerr == nil {
+			release()
+		}
+		done <- aerr
+	}()
+
+	select {
+	case aerr := <-done:
+		if aerr != nil {
+			t.Fatalf("an admission resolved against an uncapped generation must be admitted: %v", aerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("admission queued against a cap its generation never published (it would wait with no deadline)")
+	}
+}
+
+// TestCappedGenerationAlwaysPublishesAWaitBudget closes the other half of the
+// same hazard: whatever the caps came from, a scope that CAN queue always has a
+// deadline to queue against, so no admission can wait indefinitely.
+func TestCappedGenerationAlwaysPublishesAWaitBudget(t *testing.T) {
+	r := NewRegistry()
+
+	// Per-server cap with no queue_timeout published.
+	r.Apply(Limits{}, map[string]Limits{"s": {Max: 1, QueueSize: 1}})
+	if got := r.QueueBudget("s"); got != defaultQueueBudget {
+		t.Fatalf("QueueBudget = %v, want the %v fallback", got, defaultQueueBudget)
+	}
+
+	// Global-only cap, including for a server with no scope of its own.
+	r.Apply(Limits{Max: 1, QueueSize: 1}, map[string]Limits{"s": {}})
+	if got := r.QueueBudget("s"); got != defaultQueueBudget {
+		t.Fatalf("QueueBudget with a global cap = %v, want the %v fallback", got, defaultQueueBudget)
+	}
+	if got := r.QueueBudget("never-configured"); got != defaultQueueBudget {
+		t.Fatalf("QueueBudget for an unconfigured server = %v, want the %v fallback", got, defaultQueueBudget)
+	}
+
+	// Nothing capped anywhere: there is nothing to wait for.
+	r.Apply(Limits{}, map[string]Limits{"s": {}})
+	if got := r.QueueBudget("s"); got != 0 {
+		t.Fatalf("QueueBudget with no caps = %v, want 0", got)
+	}
+}
+
+// TestSnapshotHolderCannotAdmitAfterRetirement is the FR-009 tombstone-lifetime
+// test. Absence of a scope means "unlimited", so absence must never follow
+// retirement: a caller that resolved its client (and its scope) before the
+// server was disabled can reach admission arbitrarily later, and pruning the
+// drained tombstone in the meantime turned its refusal into a free pass.
+func TestSnapshotHolderCannotAdmitAfterRetirement(t *testing.T) {
+	r := NewRegistry()
+	r.Apply(Limits{}, map[string]Limits{"s": {Max: 2, QueueSize: 2, QueueTimeout: time.Second}})
+
+	// The caller resolves its scope here, then stalls (in production: between
+	// the managed client's IsConnected check and acquireAdmission).
+	snapshot := r.gen.Load()
+
+	r.RetireServer("s")
+	// Reload cycles that used to prune the drained tombstone.
+	for i := 0; i < 3; i++ {
+		r.Apply(Limits{}, map[string]Limits{})
+	}
+
+	// The stalled caller finally admits — against the generation it resolved...
+	if _, err := r.acquireIn(snapshot, context.Background(), "s"); !errors.Is(err, ErrServerUnavailable) {
+		t.Fatalf("snapshot-holding admission after retirement: %v, want ErrServerUnavailable", err)
+	}
+	// ...and a fresh caller against the current one.
+	if _, err := r.Acquire(context.Background(), "s"); !errors.Is(err, ErrServerUnavailable) {
+		t.Fatalf("admission after retirement: %v, want ErrServerUnavailable", err)
+	}
+	if r.gen.Load().servers["s"] == nil {
+		t.Fatal("the tombstone must survive every reload: absence would read as unlimited")
+	}
+	if _, ok := r.ServerStats()["s"]; ok {
+		t.Fatal("a tombstone must not report occupancy")
+	}
 }
