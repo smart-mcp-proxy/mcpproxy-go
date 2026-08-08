@@ -6505,6 +6505,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Shed by a concurrency limit (Retry-After header carries the
+            wait hint)
         "500":
           content:
             application/json:
