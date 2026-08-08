@@ -253,6 +253,48 @@ channel falls back to the release-page guidance.
 
 ## Updating MCPProxy
 
+### `mcpproxy update` (all channels)
+
+`mcpproxy update` branches on the detected install channel (Spec 092 US3) so
+you never have to remember which one you are on:
+
+| Channel | What the command does |
+|---------|----------------------|
+| `homebrew` / `deb` / `rpm` / `go-install` | Prints the exact upgrade command and exits. Nothing is modified — the package manager owns the install. |
+| `docker` / `windows-installer` | Prints channel-appropriate guidance. |
+| `dmg` (macOS app bundle) | Points at the menu bar app (MCPProxy menu → Check for Updates). The app bundle and its staged core copy are never modified. |
+| `tarball` | Performs a verified self-update (see below). |
+| `unknown` | Guidance only. Pass `--self` to assert that you manage the binary yourself; writability alone is not ownership. |
+
+```bash
+mcpproxy update --check                     # current / latest / channel, no side effects
+mcpproxy update                             # do the right thing for this install
+mcpproxy update -o json                     # machine-readable report
+mcpproxy update --self                      # assert a self-managed install on `unknown`
+mcpproxy update --version v0.54.0 --force   # deliberate downgrade (both flags required)
+```
+
+**Self-update safety rules** (FR-021/FR-022):
+
+- The release archive's SHA-256 is always checked against the release's
+  `checksums.txt`, and `checksums.txt` itself is verified against its cosign
+  signature bundle with the signing identity pinned to this repository's
+  release workflow. Verification currently shells out to a locally installed
+  [cosign](https://docs.sigstore.dev/cosign/installation/); if cosign is not on
+  `PATH` the update **aborts** — `--allow-unverified-signature` is the explicit
+  (and loudly warned) opt-out that falls back to checksum-only verification.
+- The swap is a rename inside the target directory, the file mode is
+  preserved, and a symlinked launcher has its destination replaced rather than
+  the symlink.
+- The previous binary is kept as `<binary>.old` until the new one runs and
+  reports the expected version; on any failure it is restored.
+- A non-writable target fails with a message naming the path and its owner.
+  MCPProxy never escalates privileges.
+- A version equal to or older than the running one requires **both**
+  `--version <tag>` and `--force`.
+- An already-running core keeps executing the old binary; the swap takes
+  effect the next time it starts.
+
 ### Homebrew (macOS/Linux)
 
 ```bash

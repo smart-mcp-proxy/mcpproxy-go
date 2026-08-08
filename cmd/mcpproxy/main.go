@@ -212,6 +212,7 @@ func main() {
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
 	rootCmd.AddCommand(GetVersionCommand())
+	rootCmd.AddCommand(GetUpdateCommand())
 
 	// Server-edition-only commands (e.g. `credential`). No-op in personal edition.
 	registerServerEditionCommands(rootCmd)
