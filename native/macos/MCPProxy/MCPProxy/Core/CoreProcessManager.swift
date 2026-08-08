@@ -1135,6 +1135,17 @@ actor CoreProcessManager {
     /// A core we only attached to. Signal it, wait for it to actually go, then
     /// take ownership and start the bundled one.
     private func stopCoreByPIDAndRespawn(pid: Int32) async {
+        // Ask whether we CAN stop it before dropping a connection to a core
+        // that — old as it is — is working. A pid we cannot identify (it died
+        // and was recycled, or another user owns the process) means there is no
+        // safe stop mechanism, which FR-002 answers with instructions, not with
+        // an error and a severed connection.
+        guard CoreProcessIdentity.isMCPProxyCore(pid: pid) else {
+            NSLog("[MCPProxy] Cannot identify PID %d as an mcpproxy core — offering instructions", pid)
+            await offerInstructionsInstead()
+            return
+        }
+
         await tearDownConnection()
 
         guard await stopCore(pid: pid) else {
@@ -1152,6 +1163,17 @@ actor CoreProcessManager {
         }
         beginSocketEvidence()
         await launchWithRetries()
+    }
+
+    /// Downgrade the offer to "here is how to do it yourself" (FR-002), keeping
+    /// the connection to the old core intact. Silent when there is nothing left
+    /// to describe.
+    private func offerInstructionsInstead() async {
+        guard let report = latestVersionReport, let bundled = respawnVersion() else { return }
+        let prompt = StaleCorePrompt(
+            runningVersion: report.runningVersion, bundledVersion: bundled, pid: nil
+        )
+        await MainActor.run { appState.staleCorePrompt = prompt }
     }
 
     /// SIGTERM, then SIGKILL, then confirm the socket is free.

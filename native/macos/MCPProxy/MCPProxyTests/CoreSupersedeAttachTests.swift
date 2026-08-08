@@ -115,8 +115,9 @@ final class CoreSupersedeAttachTests: XCTestCase {
 
     /// The automatic branch resolves to `stopAndRespawn`, and the pid it is
     /// handed belongs to the test runner. The tray must recognise that it is
-    /// not an mcpproxy process and refuse — surfacing an error instead of
-    /// signalling something it does not own.
+    /// not an mcpproxy process, refuse to signal it, and fall back to the
+    /// instructions branch — WITHOUT severing a connection to a core that,
+    /// old as it is, is working.
     func testAutomaticSupersedeRefusesAPIDThatIsNotACore() async throws {
         let foreignPID = ProcessInfo.processInfo.processIdentifier
         let appState = try await attach(
@@ -126,10 +127,14 @@ final class CoreSupersedeAttachTests: XCTestCase {
         // Still alive: the guard fired before any signal.
         XCTAssertTrue(CoreProcessIdentity.isRunning(pid: foreignPID))
 
-        let state = await MainActor.run { appState.coreState }
-        guard case .error = state else {
-            return XCTFail("a refused supersede must surface, not fail silently (got \(state))")
-        }
+        let connected = await MainActor.run { appState.coreState }
+        XCTAssertEqual(connected, .connected,
+                       "a refused kill must not cost the user their working connection")
+
+        let prompt = await MainActor.run { appState.staleCorePrompt }
+        XCTAssertEqual(prompt?.runningVersion, "0.53.0")
+        XCTAssertNil(prompt?.pid, "with no safe stop mechanism the item can only instruct")
+
         let attempted = await manager?.didAttemptSupersede
         XCTAssertEqual(attempted, true,
                        "the budget is consumed even on refusal — FR-005 forbids retry loops")
