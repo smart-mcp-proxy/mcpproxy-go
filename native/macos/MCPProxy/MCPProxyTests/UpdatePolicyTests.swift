@@ -115,6 +115,31 @@ final class UpdatePolicyTests: XCTestCase {
         XCTAssertTrue(policy.nudgesSuppressed)
     }
 
+    // MARK: - Never pre-download
+
+    func testNoPolicyEverAllowsSparkleToPreDownload() {
+        // Enabling background downloads switches Sparkle to the driver that
+        // arms a silent install-on-quit, and NOTHING can refuse that install
+        // once armed — not `willInstallUpdateOnQuit:` ("Sparkle will always
+        // attempt to install the update when the app terminates") and not the
+        // postpone hook, which that path never reaches. The bundle would be
+        // replaced without anyone confirming the managed core is down.
+        let policies: [EffectiveUpdatePolicy] = [
+            .permissive,
+            .awaitingCore,
+            resolve(core: .legacyDefault),
+            resolve(core: CoreUpdatePolicy(enabled: true, channel: "rc", nudgesSuppressed: false)),
+            resolve(core: CoreUpdatePolicy(enabled: false, channel: "stable", nudgesSuppressed: false)),
+            resolve(core: .legacyDefault, env: ["CI": "true"]),
+            resolve(core: .legacyDefault, env: ["MCPPROXY_DISABLE_AUTO_UPDATE": "true"])
+        ]
+        for policy in policies {
+            XCTAssertFalse(policy.automaticDownloadsAllowed,
+                           "pre-downloading buys a faster click and costs the ability to "
+                           + "refuse an install: \(policy)")
+        }
+    }
+
     // MARK: - Channels (FR-014)
 
     func testStableChannelAcceptsOnlyTheDefaultSparkleChannel() {

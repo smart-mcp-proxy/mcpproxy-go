@@ -51,15 +51,19 @@ inside `MCPProxy.app`.
 2. When something newer exists, the tray menu grows one gentle line:
    **"Update 0.55.0 — ready to restart?"**. No popup, no dock bounce, no
    interruption — the menu item *is* the notification.
-3. Clicking it runs the whole thing: **verify** → stop the managed core →
-   replace the installed app → relaunch on the new version.
+3. Clicking it runs the whole thing: download → **verify** → stop the managed
+   core → replace the installed app → relaunch on the new version.
 
-The download happens during step 1, not step 3: the background check downloads
-and verifies the enclosure ahead of time, so activating the menu item has
-nothing left to wait for. Sparkle then asks for one confirmation
-("Install and Relaunch") before it replaces the bundle — its public API has no
-way to install an already-downloaded update without it. So the honest count is
-**two clicks, no waiting**: ours, and Sparkle's.
+Honest click count: **two**. Ours, and Sparkle's own "Install and Relaunch"
+confirmation, which its public API gives no way to skip.
+
+Background checks deliberately do **not** pre-download, even though that would
+make the second click instant. In Sparkle the pre-download flag also selects
+the update driver, and the pre-downloading one arms a silent *install-on-quit*:
+the bundle gets replaced by an external tool once MCPProxy exits, on a path
+where no delegate can call it off. That would replace the app underneath a core
+nobody had confirmed was stopped — the bug this feature exists to fix. A slower
+click is the better trade.
 
 ### Verification (two independent checks)
 

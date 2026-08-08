@@ -115,21 +115,21 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
     /// Whether Sparkle has the update downloaded and is only waiting to be told
     /// to install it.
     ///
+    /// True only for a RESUMED session — the user started a check, then
+    /// dismissed Sparkle's window while the download stayed on disk. Scheduled
+    /// checks never pre-download; see `apply(policy:)` for why that is off.
+    ///
     /// FR-010 asks for one click doing download → verify → swap → relaunch.
     /// Sparkle's PUBLIC API cannot deliver a literal single click on top of
     /// `SPUStandardUserDriver`: there is no "install the update you are holding"
     /// method on `SPUUpdater` (see SPUUpdater.h — the only entry points are the
     /// three check methods), so the menu item has to resume the session with
-    /// `checkForUpdates()`, and the standard driver then shows its confirmation.
-    ///
-    /// What we can do is make sure that confirmation is the LAST step rather
-    /// than the first: with `automaticallyDownloadsUpdates` on, the scheduled
-    /// check downloads and verifies in the background, so activating the menu
-    /// item lands directly on "Install and Relaunch" with nothing left to wait
-    /// for. Honest click count: ONE on our menu item, plus ONE on Sparkle's
-    /// install confirmation. Removing the second one needs a custom
-    /// `SPUUserDriver` implementation, which replaces every piece of update UI
-    /// Sparkle ships and is out of scope here.
+    /// `checkForUpdates()`, and the standard driver then shows its
+    /// confirmation. Honest click count: ONE on our menu item, plus ONE on
+    /// Sparkle's install confirmation, with the download in between. Removing
+    /// the second click needs a custom `SPUUserDriver` implementation, which
+    /// replaces every piece of update UI Sparkle ships and is out of scope
+    /// here; removing the download needs the on-quit installer we refuse to arm.
     private(set) var updateIsReadyToInstall: Bool = false
 
     var isAvailable: Bool { controller != nil }
@@ -188,12 +188,32 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
         // FR-015: the kill switch governs the SCHEDULED cycle. `check(userInitiated:)`
         // deliberately does not consult it.
         updater.automaticallyChecksForUpdates = policy.automaticChecksAllowed
-        // FR-010: pre-download so the one click that follows is an install and
-        // not a download. Tied to the same switch — an install that downloads
-        // ~40 MB unasked is exactly what the kill switch is for. Sparkle only
-        // honours this where the host allows automatic updates; when it does
-        // not, the flow degrades to download-on-click, which is what it was.
-        updater.automaticallyDownloadsUpdates = policy.automaticChecksAllowed && updater.allowsAutomaticUpdates
+
+        // ALWAYS false, and not a preference we are willing to expose.
+        //
+        // Turning it on looks like a free win — the scheduled check
+        // pre-downloads, so FR-010's click has nothing left to wait for — but
+        // it also switches Sparkle from SPUScheduledUpdateDriver to
+        // SPUAutomaticUpdateDriver (SPUUpdater.m: the driver is chosen on this
+        // flag alone), and that driver ARMS a silent install-on-quit: it hands
+        // the update to the external installer tool, which replaces the bundle
+        // once this process exits.
+        //
+        // Nothing can call that off afterwards. `willInstallUpdateOnQuit:` is
+        // not a veto — its own documentation says "In either case Sparkle will
+        // always attempt to install the update when the app terminates" — and
+        // `shouldPostponeRelaunchForUpdate:`, the hook that CAN refuse, lives
+        // in SPUInstallerDriver.installWithToolAndRelaunch:, which the on-quit
+        // path never calls. So the bundle would be replaced without anyone
+        // having confirmed the managed core is down, which is issue #957.
+        //
+        // The price is that FR-010's click downloads before it installs. That
+        // is a slower click; the alternative is an install we cannot refuse.
+        //
+        // Assigned unconditionally rather than left alone: the flag is backed
+        // by a user default Sparkle's own permission prompt can write, so not
+        // setting it is not the same as it being off.
+        updater.automaticallyDownloadsUpdates = policy.automaticDownloadsAllowed
         // Changing the channel set mid-session needs a cycle reset for the next
         // scheduled check to use it (`allowedChannelsForUpdater:` is consulted
         // per check, but the schedule is not).
@@ -281,15 +301,49 @@ extension SparkleFeedUpdater: SPUUpdaterDelegate {
         return true
     }
 
-    /// Belt and braces for the paths that never reach the postpone hook
-    /// (install-on-quit, a resumed session that already postponed once). The
-    /// stop is idempotent, and neither of these can refuse anything.
+    /// Tripwire. This is only ever called by `SPUAutomaticUpdateDriver`, which
+    /// `apply(policy:)` makes sure is never constructed — so reaching it means
+    /// something turned `automaticallyDownloadsUpdates` back on and a silent
+    /// install-on-quit has ALREADY been armed by the external installer tool.
+    ///
+    /// Neither return value can call that off ("In either case Sparkle will
+    /// always attempt to install the update when the app terminates"), so this
+    /// declines to take control and says so loudly rather than pretending to
+    /// have handled it. `false` at least leaves Sparkle's normal cycle running,
+    /// so the update can still be presented through the path that can be
+    /// refused.
+    func updater(
+        _ updater: SPUUpdater,
+        willInstallUpdateOnQuit item: SUAppcastItem,
+        immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
+    ) -> Bool {
+        NSLog("[MCPProxy] WARNING: Sparkle armed a silent install-on-quit for %@. "
+              + "This path cannot be vetoed and bypasses the managed-core stop.",
+              item.displayVersionString)
+        observer?.feedUpdater(didFailWith:
+            "An update was staged to install when MCPProxy quits, bypassing the usual "
+            + "shutdown of the core. Quit the core before quitting MCPProxy.")
+        return false
+    }
+
+    /// Belt and braces for the paths that never reach the postpone hook. Both
+    /// of these are `void` — Sparkle is telling us, not asking — so a stop that
+    /// fails here cannot stop anything; the most it can do is be visible
+    /// instead of silent. The hook that CAN refuse is the postpone one above,
+    /// and with the automatic driver disabled every install goes through it.
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
-        observer?.feedUpdaterWillInstallUpdate()
+        reportUnvetoableStop(from: "willInstallUpdate")
     }
 
     func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
-        observer?.feedUpdaterWillInstallUpdate()
+        reportUnvetoableStop(from: "updaterWillRelaunchApplication")
+    }
+
+    private func reportUnvetoableStop(from hook: String) {
+        guard let observer else { return }
+        guard !observer.feedUpdaterWillInstallUpdate() else { return }
+        NSLog("[MCPProxy] WARNING: the managed core is still running at %@, which cannot "
+              + "refuse the install. The bundle may be replaced under it.", hook)
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {

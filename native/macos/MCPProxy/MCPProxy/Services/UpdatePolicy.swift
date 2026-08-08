@@ -97,6 +97,21 @@ struct EffectiveUpdatePolicy: Equatable {
     /// they are on.
     let disabledReason: String
 
+    /// Whether the feed updater may download an update before the user asks
+    /// for it.
+    ///
+    /// Always false, for every policy — deliberately not a setting. In Sparkle
+    /// this single flag also selects the update driver, and the pre-downloading
+    /// one arms a silent install-on-quit that no delegate can refuse, so the
+    /// bundle would be replaced without anyone having confirmed the managed
+    /// core is down. The full reasoning, with the Sparkle source references, is
+    /// on `SparkleFeedUpdater.apply(policy:)`.
+    ///
+    /// It lives here, as a property rather than a literal at the call site, so
+    /// the decision has one name and one test — the Sparkle class itself cannot
+    /// be instantiated outside a real .app bundle.
+    var automaticDownloadsAllowed: Bool { false }
+
     /// Automatic checks on, nothing suppressed, stable channel.
     static let permissive = EffectiveUpdatePolicy(
         automaticChecksAllowed: true,
