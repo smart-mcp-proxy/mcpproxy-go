@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
@@ -61,23 +60,13 @@ func (mc *Client) acquireAdmission(ctx context.Context, toolName string) (func()
 	if serverCfg != nil {
 		serverName = serverCfg.Name
 	}
-	if !adm.registry.Active(serverName) {
-		return noopRelease, nil
-	}
 
-	// One absolute deadline for the whole admission: the smallest positive
-	// queue_timeout among the scopes that actually limit this call.
-	var deadline time.Time
-	globalCfg := mc.GetGlobalConfig()
-	if globalCfg == nil {
-		globalCfg = &config.Config{}
-	}
-	if budget := globalCfg.ResolveQueueBudget(serverCfg); budget > 0 {
-		deadline = time.Now().Add(budget)
-	}
-
+	// The registry resolves everything this admission needs — both limiter
+	// tiers and the ONE absolute queue deadline spanning them (FR-004) — from a
+	// single published generation, so no value here can come from a different
+	// generation than the caps it is applied to (FR-021).
 	start := time.Now()
-	release, err := adm.registry.Acquire(ctx, serverName, deadline)
+	release, err := adm.registry.Acquire(ctx, serverName)
 	if err != nil {
 		mc.reportRejection(ctx, adm, serverName, toolName, time.Since(start), err)
 		return nil, err

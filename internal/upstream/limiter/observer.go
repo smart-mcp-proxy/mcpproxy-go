@@ -39,13 +39,3 @@ type Rejection struct {
 // Observer receives every shed call. Implementations must not block: they run
 // on the caller's goroutine at the moment of rejection.
 type Observer func(ctx context.Context, rej Rejection)
-
-// Active reports whether any limiter instance currently exists for this server
-// or proxy-wide. It is the zero-config fast path (FR-006): with no limits
-// configured the admission seam does no work at all beyond this check.
-func (r *Registry) Active(server string) bool {
-	if r == nil {
-		return false
-	}
-	return r.Global() != nil || r.Server(server) != nil
-}

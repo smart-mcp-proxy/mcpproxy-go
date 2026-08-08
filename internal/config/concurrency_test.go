@@ -131,58 +131,6 @@ func TestResolveServerConcurrencyNilServer(t *testing.T) {
 	}
 }
 
-// TestResolveQueueBudget covers FR-004: one absolute deadline spans both tiers,
-// so the budget is the smallest positive queue timeout among the ENABLED scopes.
-func TestResolveQueueBudget(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  Config
-		srv  *ServerConfig
-		want time.Duration
-	}{
-		{"no limits → no budget", Config{}, &ServerConfig{Name: "s"}, 0},
-		{
-			"server only",
-			Config{ServerConcurrencyDefaults: &ConcurrencyDefaults{MaxConcurrentRequests: intPtr(2), QueueTimeout: durPtr(4 * time.Second)}},
-			&ServerConfig{Name: "s"},
-			4 * time.Second,
-		},
-		{
-			"global only",
-			Config{MaxConcurrentRequests: intPtr(2), QueueTimeout: durPtr(7 * time.Second)},
-			&ServerConfig{Name: "s"},
-			7 * time.Second,
-		},
-		{
-			"both enabled → smallest wins",
-			Config{
-				MaxConcurrentRequests:     intPtr(2),
-				QueueTimeout:              durPtr(20 * time.Second),
-				ServerConcurrencyDefaults: &ConcurrencyDefaults{MaxConcurrentRequests: intPtr(2), QueueTimeout: durPtr(4 * time.Second)},
-			},
-			&ServerConfig{Name: "s"},
-			4 * time.Second,
-		},
-		{
-			"disabled server scope does not contribute",
-			Config{
-				MaxConcurrentRequests:     intPtr(2),
-				QueueTimeout:              durPtr(20 * time.Second),
-				ServerConcurrencyDefaults: &ConcurrencyDefaults{MaxConcurrentRequests: intPtr(2), QueueTimeout: durPtr(4 * time.Second)},
-			},
-			&ServerConfig{Name: "s", MaxConcurrentRequests: intPtr(0)},
-			20 * time.Second,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.cfg.ResolveQueueBudget(tc.srv); got != tc.want {
-				t.Fatalf("ResolveQueueBudget = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestValidateConcurrency covers FR-023: per resolved scope, reject negatives
 // and a positive queue size whose limit resolves to disabled — with an error
 // naming the offending scope and field.

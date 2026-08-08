@@ -109,29 +109,6 @@ func (c *Config) ResolveServerConcurrency(sc *ServerConfig) ResolvedConcurrency 
 	return resolveConcurrency(srvMax, defMax, srvQueue, defQueue, srvTimeout, defTimeout)
 }
 
-// ResolveQueueBudget returns the total wait budget for a call to sc: the
-// smallest positive queue_timeout among the ENABLED scopes. FR-004 requires one
-// absolute deadline spanning the per-server and global admission steps
-// combined, so taking the minimum keeps both scopes' contracts. Returns 0 when
-// no limiter applies (nothing to wait for).
-func (c *Config) ResolveQueueBudget(sc *ServerConfig) time.Duration {
-	if c == nil {
-		return 0
-	}
-	budget := time.Duration(0)
-	consider := func(r ResolvedConcurrency) {
-		if !r.Enabled() || r.QueueTimeout <= 0 {
-			return
-		}
-		if budget == 0 || r.QueueTimeout < budget {
-			budget = r.QueueTimeout
-		}
-	}
-	consider(c.ResolveServerConcurrency(sc))
-	consider(c.ResolveGlobalConcurrency())
-	return budget
-}
-
 // validateConcurrencyScope implements FR-023 for one resolved scope: negative
 // values are rejected, and a positive queue size is rejected when the scope's
 // concurrency limit resolves to disabled/unlimited. scopeLabel names the scope

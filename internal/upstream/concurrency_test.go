@@ -233,9 +233,11 @@ func TestApplyConcurrencyLimits_GlobalAndDisabledServers(t *testing.T) {
 	assert.Nil(t, m.Limiters().Server("quar"), "a quarantined server must not own a limiter")
 }
 
-// TestZeroConfig_NoLimitersAllocated is the FR-006 guard: with no limits in the
-// config, nothing is allocated and admission is a passthrough.
-func TestZeroConfig_NoLimitersAllocated(t *testing.T) {
+// TestZeroConfig_AdmissionIsPassthroughButCounted is the FR-006 guard paired
+// with FR-021's shared occupancy. With no limits configured nothing is capped,
+// queued or rejected — but the scopes still COUNT their running calls, because
+// a cap enabled by a later hot reload has to see the calls already in flight.
+func TestZeroConfig_AdmissionIsPassthroughButCounted(t *testing.T) {
 	t.Setenv("CI", "")
 
 	sc := &config.ServerConfig{Name: "plain", URL: "http://127.0.0.1:1", Protocol: "http", Enabled: true}
@@ -243,7 +245,64 @@ func TestZeroConfig_NoLimitersAllocated(t *testing.T) {
 	m := NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 
-	assert.Nil(t, m.Limiters().Global())
-	assert.Nil(t, m.Limiters().Server("plain"))
-	assert.False(t, m.Limiters().Active("plain"))
+	assert.Equal(t, 0, m.Limiters().Global().Limits().Max, "no global cap must be published")
+	plain := m.Limiters().Server("plain")
+	require.NotNil(t, plain)
+	assert.Equal(t, 0, plain.Limits().Max, "no per-server cap must be published")
+
+	release, err := m.Limiters().Acquire(context.Background(), "plain")
+	require.NoError(t, err, "an unlimited scope never sheds")
+	assert.Equal(t, 1, plain.Stats().Running, "occupancy is tracked even with no cap")
+	assert.Equal(t, 0, plain.Stats().Queued, "an unlimited scope never queues")
+	release()
+	assert.Equal(t, 0, plain.Stats().Running)
+}
+
+// TestHotEnableSeesGrandfatheredCalls is the FR-021 regression test for the
+// shared-occupancy rule at the point it is easiest to get wrong: enabling a cap
+// on a scope that was previously UNLIMITED. Before the fix the new limiter
+// started at running==0 while unlimited calls were still in flight, so the cap
+// was exceeded by exactly the grandfathered count for as long as they ran.
+func TestHotEnableSeesGrandfatheredCalls(t *testing.T) {
+	t.Setenv("CI", "")
+
+	sc := &config.ServerConfig{Name: "late", URL: "http://127.0.0.1:1", Protocol: "http", Enabled: true}
+	cfg := &config.Config{Servers: []*config.ServerConfig{sc}}
+	m := NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { m.shutdownCancel() })
+
+	// Three unlimited calls in flight.
+	const inFlight = 3
+	releases := make([]func(), 0, inFlight)
+	for i := 0; i < inFlight; i++ {
+		release, err := m.Limiters().Acquire(context.Background(), "late")
+		require.NoError(t, err)
+		releases = append(releases, release)
+	}
+
+	// Operator hot-enables a cap BELOW the number already running.
+	capped := &config.ServerConfig{
+		Name: "late", URL: "http://127.0.0.1:1", Protocol: "http", Enabled: true,
+		MaxConcurrentRequests: intPtr(2),
+		QueueSize:             intPtr(0),
+		QueueTimeout:          durPtrConc(30 * time.Second),
+	}
+	m.SetGlobalConfig(&config.Config{Servers: []*config.ServerConfig{capped}})
+
+	lim := m.Limiters().Server("late")
+	require.NotNil(t, lim)
+	assert.Equal(t, inFlight, lim.Stats().Running,
+		"the newly enabled cap must inherit the grandfathered occupancy")
+
+	_, err := m.Limiters().Acquire(context.Background(), "late")
+	require.Error(t, err, "no new admission until occupancy drains below the new cap")
+	assert.True(t, errors.Is(err, limiter.ErrQueueFull))
+
+	// Drain to one below the cap; the next call is admitted again.
+	releases[0]()
+	releases[1]()
+	release, err := m.Limiters().Acquire(context.Background(), "late")
+	require.NoError(t, err, "admission resumes once occupancy drops below the cap")
+	release()
+	releases[2]()
 }

@@ -401,6 +401,56 @@ func TestRetireFailsQueuedAndFutureAcquires(t *testing.T) {
 	}
 }
 
+// TestGrantRacingRetireIsObservedByTheWaiter pins the FR-009 interleaving that
+// Retire alone cannot cover: a waiter that was GRANTED a slot is already off the
+// waiter list, so Retire never sees it. Without the post-wake re-check it would
+// wake up, find no retirement flag of its own, and run a call against a server
+// that has just been disabled — while holding a slot in the retired instance.
+//
+// The waiterWoke hook makes the interleaving exact rather than probabilistic:
+// the grant has happened, the waiter is parked between the wake and the
+// re-check, and retirement lands in that window.
+func TestGrantRacingRetireIsObservedByTheWaiter(t *testing.T) {
+	l := New(ScopeServer, "srv", Limits{Max: 1, QueueSize: 4, QueueTimeout: time.Hour})
+
+	woke := make(chan struct{})
+	proceed := make(chan struct{})
+	l.waiterWoke = func() {
+		close(woke)
+		<-proceed
+	}
+
+	rel, err := l.Acquire(context.Background(), deadlineIn(time.Hour))
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, aerr := l.Acquire(context.Background(), deadlineIn(time.Hour))
+		errCh <- aerr
+	}()
+	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 1 })
+
+	rel()  // grants the queued waiter and closes its channel
+	<-woke // the waiter is now parked between the grant and the re-check
+	l.Retire()
+	close(proceed)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrServerUnavailable) {
+			t.Fatalf("waiter granted just before retirement: %v, want ErrServerUnavailable", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter never returned after retirement")
+	}
+
+	if got := l.Stats().Running; got != 0 {
+		t.Fatalf("Running = %d, want 0 — a slot granted before retirement must be handed back", got)
+	}
+}
+
 func TestReleaseIsIdempotentAndBoundToInstance(t *testing.T) {
 	l := New(ScopeServer, "srv", Limits{Max: 1, QueueSize: 1, QueueTimeout: time.Second})
 	rel, err := l.Acquire(context.Background(), deadlineIn(time.Second))

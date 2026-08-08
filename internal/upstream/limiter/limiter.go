@@ -71,6 +71,12 @@ type Limiter struct {
 	running int
 	waiters *list.List // of *waiter, FIFO
 	retired bool
+
+	// waiterWoke runs on a granted waiter's goroutine between its channel
+	// closing and the post-wake re-check below. It exists so a test can land a
+	// Retire() precisely inside that window (the grant-vs-retire interleaving
+	// FR-009 turns on); nil everywhere else.
+	waiterWoke func()
 }
 
 // New builds a limiter for a scope. server is the upstream name for
@@ -171,6 +177,19 @@ func (l *Limiter) Acquire(ctx context.Context, queueDeadline time.Time) (func(),
 	if l == nil {
 		return noopRelease, nil
 	}
+	return l.acquire(ctx, l.Limits(), queueDeadline)
+}
+
+// acquire is Acquire with the REPORTED limits supplied by the caller. The
+// registry passes the values it published in the generation this admission was
+// resolved from, so a rejection never describes itself with one scope's new cap
+// and another's old queue deadline (FR-021). The admission DECISION still reads
+// the instance's live limits under its own lock: a cap lowered a microsecond
+// ago must bind immediately, and a cap raised a microsecond ago must admit.
+func (l *Limiter) acquire(ctx context.Context, reportLimits Limits, queueDeadline time.Time) (func(), error) {
+	if l == nil {
+		return noopRelease, nil
+	}
 
 	l.mu.Lock()
 	if l.retired {
@@ -185,13 +204,11 @@ func (l *Limiter) Acquire(ctx context.Context, queueDeadline time.Time) (func(),
 	}
 	// Saturated: is there pending capacity?
 	if l.waiters.Len() >= l.limits.QueueSize {
-		limits := l.limits
 		l.mu.Unlock()
-		return nil, l.limitError(ReasonQueueFull, limits)
+		return nil, l.limitError(ReasonQueueFull, reportLimits)
 	}
 	w := &waiter{ch: make(chan struct{})}
 	w.el = l.waiters.PushBack(w)
-	limits := l.limits
 	l.mu.Unlock()
 
 	var timerC <-chan time.Time
@@ -203,9 +220,20 @@ func (l *Limiter) Acquire(ctx context.Context, queueDeadline time.Time) (func(),
 
 	select {
 	case <-w.ch:
-		// Granted or retired — both close the channel.
+		// Granted or retired — both close the channel. The re-check runs under
+		// the limiter's own lock, which is what makes grant-vs-retire atomic
+		// (FR-009): Retire flips l.retired under that same lock, so a waiter
+		// granted a slot moments before retirement observes the retirement here
+		// and hands the slot straight back instead of running against a server
+		// that is no longer admitting work.
+		if l.waiterWoke != nil {
+			l.waiterWoke()
+		}
 		l.mu.Lock()
-		retired := w.retired
+		retired := w.retired || l.retired
+		if retired && w.granted {
+			l.releaseLocked()
+		}
 		l.mu.Unlock()
 		if retired {
 			return nil, l.unavailableError()
@@ -215,7 +243,7 @@ func (l *Limiter) Acquire(ctx context.Context, queueDeadline time.Time) (func(),
 	case <-timerC:
 		// A grant that raced the deadline wins: abandon returns nil and the
 		// caller keeps the slot rather than losing already-granted capacity.
-		if err := l.abandon(w, l.limitError(ReasonQueueTimeout, limits), true); err != nil {
+		if err := l.abandon(w, l.limitError(ReasonQueueTimeout, reportLimits), true); err != nil {
 			return nil, err
 		}
 		return l.releaseFunc(), nil
@@ -236,7 +264,12 @@ func (l *Limiter) Acquire(ctx context.Context, queueDeadline time.Time) (func(),
 func (l *Limiter) abandon(w *waiter, reportErr error, grantWins bool) error {
 	l.mu.Lock()
 	switch {
-	case w.retired:
+	case w.retired || l.retired:
+		// Same atomicity rule as the wake path: a slot granted just before
+		// retirement is given back rather than honoured.
+		if w.granted {
+			l.releaseLocked()
+		}
 		l.mu.Unlock()
 		return l.unavailableError()
 	case w.granted && grantWins:

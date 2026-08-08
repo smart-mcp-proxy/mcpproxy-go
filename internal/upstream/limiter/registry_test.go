@@ -19,7 +19,7 @@ func TestRegistryZeroConfigIsNoOp(t *testing.T) {
 		t.Fatal("unconfigured global scope must have no limiter instance")
 	}
 
-	release, err := r.Acquire(context.Background(), "anything", deadlineIn(time.Millisecond))
+	release, err := r.Acquire(context.Background(), "anything")
 	if err != nil {
 		t.Fatalf("zero-config Acquire: %v", err)
 	}
@@ -141,12 +141,163 @@ func TestRetiredHoldsDoNotDoubleCountAgainstReAddedServer(t *testing.T) {
 	}
 }
 
+// TestAdmissionAfterRetireIsRefused is the FR-009 admit-after-disable guard at
+// the REGISTRY level. Deleting the entry on retirement made a later admission
+// see "no limiter for this server" and pass straight through; the tombstone
+// makes it fail with the server-unavailable semantics instead.
+func TestAdmissionAfterRetireIsRefused(t *testing.T) {
+	r := NewRegistry()
+	r.Apply(Limits{Max: 8, QueueSize: 8, QueueTimeout: time.Second},
+		map[string]Limits{"s": {Max: 2, QueueSize: 2, QueueTimeout: time.Second}})
+
+	r.RetireServer("s")
+
+	_, err := r.Acquire(context.Background(), "s")
+	if !errors.Is(err, ErrServerUnavailable) {
+		t.Fatalf("admission after retirement: %v, want ErrServerUnavailable", err)
+	}
+	if r.Server("s") != nil {
+		t.Fatal("a retired server must not expose a live limiter")
+	}
+	if _, ok := r.ServerStats()["s"]; ok {
+		t.Fatal("a retired server must not report occupancy")
+	}
+	// The global tier must not have taken a slot for the refused call.
+	if got := r.Global().Stats().Running; got != 0 {
+		t.Fatalf("global Running = %d, want 0", got)
+	}
+}
+
+// TestUnconfiguredScopesStillCountOccupancy is the FR-021 shared-occupancy
+// guard: a scope with no cap is still an occupancy tracker, so hot-enabling a
+// cap admits nothing until the grandfathered calls drain.
+func TestUnconfiguredScopesStillCountOccupancy(t *testing.T) {
+	r := NewRegistry()
+	r.Apply(Limits{}, map[string]Limits{"s": {}})
+
+	rel1, err := r.Acquire(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("unlimited acquire: %v", err)
+	}
+	rel2, err := r.Acquire(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("unlimited acquire: %v", err)
+	}
+	if got := r.Server("s").Stats().Running; got != 2 {
+		t.Fatalf("Running = %d, want 2 (an unlimited scope still counts)", got)
+	}
+	if got := r.Global().Stats().Running; got != 2 {
+		t.Fatalf("global Running = %d, want 2", got)
+	}
+
+	// Cap enabled below the live occupancy.
+	r.Apply(Limits{}, map[string]Limits{"s": {Max: 1, QueueSize: 0, QueueTimeout: time.Second}})
+	if _, err := r.Acquire(context.Background(), "s"); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("admission over a freshly enabled cap: %v, want ErrQueueFull", err)
+	}
+
+	rel1()
+	rel2()
+	rel3, err := r.Acquire(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("acquire after drain: %v", err)
+	}
+	rel3()
+}
+
+// TestAcquireObservesOneGeneration is the FR-021 atomic-publication guard. Every
+// generation ties its cap to a queue timeout of cap × 10ms, so a rejection that
+// reports limit N with a Retry-After other than N × 10ms proves the admission
+// combined values from two different publications (or a cap from one generation
+// with a queue deadline from another).
+func TestAcquireObservesOneGeneration(t *testing.T) {
+	r := NewRegistry()
+	publish := func(n int) {
+		limits := Limits{Max: n, QueueSize: 2, QueueTimeout: time.Duration(n) * 10 * time.Millisecond}
+		r.Apply(limits, map[string]Limits{"a": limits})
+	}
+	publish(1)
+
+	stop := make(chan struct{})
+	var applyWG sync.WaitGroup
+	applyWG.Add(1)
+	go func() {
+		defer applyWG.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			publish(1 + i%4)
+		}
+	}()
+
+	// A published generation is internally consistent by construction: both
+	// scopes' limits and the wait budget always come from the same publish.
+	// This is the property Acquire relies on by loading the generation once.
+	var readerWG sync.WaitGroup
+	readerWG.Add(1)
+	go func() {
+		defer readerWG.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			gen := r.gen.Load()
+			scope := gen.servers["a"]
+			if scope.limits.Max != gen.globalLimits.Max ||
+				scope.budget != time.Duration(scope.limits.Max)*10*time.Millisecond {
+				t.Errorf("generation mixes publications: global=%+v server=%+v budget=%v",
+					gen.globalLimits, scope.limits, scope.budget)
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rel, err := r.Acquire(context.Background(), "a")
+			if err != nil {
+				var le *LimitError
+				if !errors.As(err, &le) {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if want := time.Duration(le.Limit) * 10 * time.Millisecond; le.RetryAfter != want {
+					t.Errorf("mixed generation: limit %d reported with Retry-After %v, want %v",
+						le.Limit, le.RetryAfter, want)
+				}
+				return
+			}
+			time.Sleep(time.Millisecond)
+			rel()
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	applyWG.Wait()
+	readerWG.Wait()
+
+	if st := r.Server("a").Stats(); st.Running != 0 || st.Queued != 0 {
+		t.Fatalf("server stats after drain = %+v", st)
+	}
+	if st := r.Global().Stats(); st.Running != 0 || st.Queued != 0 {
+		t.Fatalf("global stats after drain = %+v", st)
+	}
+}
+
 func TestRegistryAcquireAcquiresServerBeforeGlobal(t *testing.T) {
 	r := NewRegistry()
 	r.Apply(Limits{Max: 1, QueueSize: 0, QueueTimeout: time.Second},
 		map[string]Limits{"a": {Max: 1, QueueSize: 4, QueueTimeout: time.Second}})
 
-	rel, err := r.Acquire(context.Background(), "a", deadlineIn(time.Second))
+	rel, err := r.Acquire(context.Background(), "a")
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -170,13 +321,13 @@ func TestRegistryAcquireReleasesServerSlotWhenGlobalSheds(t *testing.T) {
 	r.Apply(Limits{Max: 1, QueueSize: 0, QueueTimeout: time.Second},
 		map[string]Limits{"a": {Max: 4, QueueSize: 4, QueueTimeout: time.Second}, "b": {Max: 4, QueueSize: 4, QueueTimeout: time.Second}})
 
-	relA, err := r.Acquire(context.Background(), "a", deadlineIn(time.Second))
+	relA, err := r.Acquire(context.Background(), "a")
 	if err != nil {
 		t.Fatalf("acquire a: %v", err)
 	}
 	defer relA()
 
-	_, err = r.Acquire(context.Background(), "b", deadlineIn(time.Second))
+	_, err = r.Acquire(context.Background(), "b")
 	if !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("expected global shed, got %v", err)
 	}
@@ -233,7 +384,7 @@ func TestRegistryConcurrentApplyAndAcquire(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rel, err := r.Acquire(context.Background(), "a", deadlineIn(5*time.Second))
+			rel, err := r.Acquire(context.Background(), "a")
 			if err != nil {
 				if !errors.Is(err, ErrQueueFull) && !errors.Is(err, ErrQueueTimeout) {
 					t.Errorf("unexpected error: %v", err)
