@@ -64,11 +64,41 @@ final class UpdateMenuStateTests: XCTestCase {
                        "FR-017: no competing nudge for the same or lower version")
     }
 
-    func testANewerLegacyVersionIsOfferedAlongsideTheInstallableOne() {
+    func testANewerLegacyVersionStillDoesNotEarnASecondItem() {
         // The feed lags behind GitHub (the appcast job has not run yet). Both
-        // facts are true and neither may masquerade as the other.
+        // facts are true, but FR-017 allows exactly one item and the feed owns
+        // it: what it offers is real and installable in one click, and the next
+        // check picks the newer version up.
         XCTAssertEqual(entries(feed: "0.55.0", legacy: "0.56.0"),
-                       [.oneClick(version: "0.55.0"), .browserGuidance(version: "0.56.0")])
+                       [.oneClick(version: "0.55.0")])
+    }
+
+    func testIncomparableVersionsStillProduceASingleFeedOwnedItem() {
+        XCTAssertEqual(entries(feed: "0.55.0", legacy: "nightly-build"),
+                       [.oneClick(version: "0.55.0")])
+    }
+
+    /// The whole resolver matrix, asserting the invariant rather than each
+    /// cell: at most one offer, and it is the feed's whenever the feed has one.
+    func testTheResolverNeverRendersTwoOffers() {
+        let versions: [String?] = [nil, "0.54.1", "0.55.0", "0.56.0", "0.55.0-rc.10", "garbage"]
+        for feed in versions {
+            for legacy in versions {
+                for blocked in [nil, blockedFixture] {
+                    let result = entries(feed: feed, legacy: legacy, blocked: blocked)
+                    let offers = result.filter { if case .blocked = $0 { return false } else { return true } }
+                    XCTAssertLessThanOrEqual(offers.count, 1,
+                                             "feed=\(feed ?? "nil") legacy=\(legacy ?? "nil") "
+                                             + "blocked=\(blocked != nil) produced \(result)")
+                    if let feed, let only = offers.first {
+                        let expected: UpdateMenuEntry = blocked == nil
+                            ? .oneClick(version: feed)
+                            : .browserGuidance(version: feed)
+                        XCTAssertEqual(only, expected, "the feed must own the slot")
+                    }
+                }
+            }
+        }
     }
 
     func testPrereleaseOrderingUsesSemVerPrecedence() {

@@ -12,13 +12,17 @@
 // download page — and a feed that lagged behind GitHub could offer a one-click
 // install of an older version than the browser item advertised.
 //
-// The rules, from FR-017:
-//   · feed offer present → the feed owns the item; the legacy result must not
-//     surface a competing nudge for the SAME OR LOWER version;
-//   · legacy result only (feed unreachable, or the feed does not carry that
-//     version) → present as browser-download guidance, never as a one-click
-//     action it cannot perform;
-//   · equal versions from both sources → exactly one item.
+// The rules, from FR-017 — "EXACTLY ONE source of truth owns the update menu
+// item at any time":
+//   · feed offer present → the feed owns the slot, whatever the legacy check
+//     says. Not just for the same-or-lower version: rendering a one-click item
+//     AND a browser item because GitHub is a release ahead is two items, which
+//     is the thing the requirement forbids, and it asks the user to choose
+//     between an install they can do and a download they cannot verify;
+//   · legacy result only (feed unreachable, or the feed carries nothing) →
+//     browser-download guidance, never a one-click action it cannot perform;
+//   · nothing installable in place (FR-016) → the feed's offer degrades to
+//     guidance, still one item.
 //
 // Pure, so the whole matrix is a table test.
 
@@ -73,39 +77,17 @@ enum UpdateMenuState {
         // the browser path the blocked message already points at.
         let canInstall = blocked == nil
 
-        switch (feedVersion, legacyVersion) {
-        case (nil, nil):
-            break
-
-        case let (.some(feed), nil):
-            entries.append(canInstall ? .oneClick(version: feed) : .browserGuidance(version: feed))
-
-        case let (nil, .some(legacy)):
+        if let feed = feedVersion {
+            // The feed owns the slot whenever it has an offer — higher, lower
+            // or incomparable to what the legacy check found. A feed that lags
+            // behind GitHub still installs something real in one click, and the
+            // next scheduled check picks the newer version up; two competing
+            // items would not.
+            entries.append(canInstall
+                ? .oneClick(version: feed)
+                : .browserGuidance(version: feed))
+        } else if let legacy = legacyVersion {
             entries.append(.browserGuidance(version: legacy))
-
-        case let (.some(feed), .some(legacy)):
-            // Same version from both sources → one item, owned by the feed.
-            // A legacy version that is merely LOWER is also swallowed: the feed
-            // already offers at least as much.
-            let order = SemanticVersion.compare(legacy, feed)
-            if let order, order > 0 {
-                // The feed is behind what GitHub publishes. The one-click item
-                // stays (it is real and installable), and the newer version is
-                // offered as guidance — never as a one-click action the feed
-                // cannot perform.
-                if canInstall { entries.append(.oneClick(version: feed)) }
-                entries.append(.browserGuidance(version: legacy))
-            } else if order == nil, normalized(legacy) != normalized(feed) {
-                // Incomparable and not textually identical: say nothing clever.
-                // Prefer the source that can actually install.
-                entries.append(canInstall
-                    ? .oneClick(version: feed)
-                    : .browserGuidance(version: feed))
-            } else {
-                entries.append(canInstall
-                    ? .oneClick(version: feed)
-                    : .browserGuidance(version: feed))
-            }
         }
 
         return entries
