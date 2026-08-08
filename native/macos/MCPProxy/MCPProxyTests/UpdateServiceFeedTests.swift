@@ -21,6 +21,12 @@ final class StubFeedUpdater: FeedUpdating {
 
     func apply(policy: EffectiveUpdatePolicy) { appliedPolicies.append(policy) }
     func check(userInitiated: Bool) { checks.append(userInitiated) }
+
+    /// Forget the setup traffic so a test asserts only what it provoked.
+    func resetRecordings() {
+        appliedPolicies.removeAll()
+        checks.removeAll()
+    }
 }
 
 @MainActor
@@ -36,10 +42,13 @@ final class UpdateServiceFeedTests: XCTestCase {
         legacyCounter = LegacyCheckCounter()
     }
 
+    /// A service whose core policy has already arrived, which is the state
+    /// every test below except the FR-015 startup ones is about.
     private func makeService(
         env: [String: String] = [:],
         bundlePath: String = "/Applications/MCPProxy.app",
-        feed: StubFeedUpdater? = StubFeedUpdater()
+        feed: StubFeedUpdater? = StubFeedUpdater(),
+        corePolicy: CoreUpdatePolicy? = .legacyDefault
     ) -> (UpdateService, StubFeedUpdater?) {
         let counter = legacyCounter
         let service = UpdateService(
@@ -48,7 +57,42 @@ final class UpdateServiceFeedTests: XCTestCase {
             feedUpdater: feed,
             legacyCheck: { counter.count += 1 }
         )
+        if let corePolicy {
+            service.applyCorePolicy(corePolicy)
+            feed?.resetRecordings()
+        }
         return (service, feed)
+    }
+
+    // MARK: - FR-015: nothing unattended before the policy arrives
+
+    func testNoUnattendedCheckRunsBeforeTheCoreReportsItsPolicy() {
+        let (service, feed) = makeService(corePolicy: nil)
+        service.checkForUpdatesInBackground()
+        XCTAssertEqual(feed?.checks, [],
+                       "the launch check rides on the core's version, which Combine "
+                       + "delivers before the policy — checking here checks under a "
+                       + "policy the user may have switched off")
+        XCTAssertEqual(legacyCounter.count, 0)
+        XCTAssertFalse(service.policy.automaticChecksAllowed)
+    }
+
+    func testAUserInitiatedCheckStillWorksBeforeThePolicyArrives() {
+        let (service, feed) = makeService(corePolicy: nil)
+        service.checkForUpdates()
+        XCTAssertEqual(feed?.checks, [true],
+                       "FR-015: someone standing at the menu is not an unattended check")
+    }
+
+    func testTheCheckResumesOnceThePolicyArrives() {
+        let (service, feed) = makeService(corePolicy: nil)
+        service.checkForUpdatesInBackground()
+        XCTAssertEqual(feed?.checks, [])
+
+        service.applyCorePolicy(.legacyDefault)
+        service.checkForUpdatesInBackground()
+        XCTAssertEqual(feed?.checks, [false])
+        XCTAssertEqual(legacyCounter.count, 1)
     }
 
     // MARK: - FR-015: gating
@@ -161,16 +205,25 @@ final class UpdateServiceFeedTests: XCTestCase {
     func testInstallHookStopsTheManagedCoreSynchronously() {
         let (service, _) = makeService()
         var stopped = 0
-        service.stopManagedCore = { stopped += 1 }
-        service.feedUpdaterWillInstallUpdate()
+        service.stopManagedCore = { stopped += 1; return true }
+        XCTAssertTrue(service.feedUpdaterWillInstallUpdate())
         XCTAssertEqual(stopped, 1,
                        "the core must be down BEFORE the delegate call returns — Sparkle "
-                       + "replaces the bundle the moment it does")
+                       + "proceeds with the install the moment it does")
     }
 
     func testInstallHookIsSafeWithoutACore() {
         let (service, _) = makeService()
-        service.feedUpdaterWillInstallUpdate()   // must not trap
+        XCTAssertTrue(service.feedUpdaterWillInstallUpdate(),
+                      "no core to stop is a stopped core; the update must not be blocked "
+                      + "by the absence of the thing it was going to shut down")
+    }
+
+    func testAnUnstoppableCoreVetoesTheInstall() {
+        let (service, _) = makeService()
+        service.stopManagedCore = { false }
+        XCTAssertFalse(service.feedUpdaterWillInstallUpdate(),
+                       "replacing the bundle under a live core is issue #957 happening again")
     }
 
     // MARK: - FR-010 through the real menu

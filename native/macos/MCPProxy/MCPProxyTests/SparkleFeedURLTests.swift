@@ -23,6 +23,33 @@ final class SparkleFeedURLTests: XCTestCase {
         )
     }
 
+    /// Both channels × both architectures. The RC row is the one that was
+    /// wrong: `prerelease.yml` publishes `appcast-beta-<arch>.xml`, so an RC
+    /// client asking for `appcast-<arch>.xml` reads the stable feed — which by
+    /// FR-014's design never carries an RC — and is never offered anything.
+    func testTheChannelSelectsTheFeedFile() {
+        let cases: [(UpdateChannel, String, String)] = [
+            (.stable, "arm64", "https://mcpproxy.app/appcast-arm64.xml"),
+            (.stable, "amd64", "https://mcpproxy.app/appcast-amd64.xml"),
+            (.rc, "arm64", "https://mcpproxy.app/appcast-beta-arm64.xml"),
+            (.rc, "amd64", "https://mcpproxy.app/appcast-beta-amd64.xml")
+        ]
+        for (channel, arch, expected) in cases {
+            XCTAssertEqual(
+                SparkleFeedURL.archSpecific("https://mcpproxy.app/appcast.xml",
+                                            arch: arch, channel: channel),
+                expected,
+                "\(channel) / \(arch)"
+            )
+        }
+    }
+
+    /// The file names are half a contract with the two release workflows.
+    func testFileNamesMatchWhatTheWorkflowsGenerate() {
+        XCTAssertEqual(SparkleFeedURL.fileName(channel: .stable, arch: "arm64"), "appcast-arm64.xml")
+        XCTAssertEqual(SparkleFeedURL.fileName(channel: .rc, arch: "amd64"), "appcast-beta-amd64.xml")
+    }
+
     func testNestedPathsKeepTheirDirectory() {
         XCTAssertEqual(
             SparkleFeedURL.archSpecific(

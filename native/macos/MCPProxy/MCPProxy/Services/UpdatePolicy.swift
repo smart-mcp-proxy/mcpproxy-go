@@ -63,6 +63,18 @@ struct CoreUpdatePolicy: Codable, Equatable {
         case channel
         case nudgesSuppressed = "nudges_suppressed"
     }
+
+    /// What a core that predates Spec 092 means when it reports no
+    /// `update_policy` at all: the behaviour those builds already had.
+    ///
+    /// Stamped by the tray at the moment it has actually TALKED to such a core
+    /// (`CoreProcessManager.connectToCore`), which is the only place that can
+    /// tell "an old core said nothing" apart from "we have not asked yet".
+    /// Without that distinction the absent field and the absent core look the
+    /// same, and FR-015's "not inferred from missing data" is unenforceable.
+    static let legacyDefault = CoreUpdatePolicy(
+        enabled: true, channel: "stable", nudgesSuppressed: false
+    )
 }
 
 // MARK: - The resolved answer
@@ -85,15 +97,28 @@ struct EffectiveUpdatePolicy: Equatable {
     /// they are on.
     let disabledReason: String
 
-    /// The policy in force before a core has been reached, and for cores older
-    /// than Spec 092 that report no `update_policy` at all. Permissive, because
-    /// that is the behaviour those builds already had — silently disabling
-    /// updates on a version skew would be a worse failure than checking once.
+    /// Automatic checks on, nothing suppressed, stable channel.
     static let permissive = EffectiveUpdatePolicy(
         automaticChecksAllowed: true,
         nudgesSuppressed: false,
         channel: .stable,
         disabledReason: ""
+    )
+
+    /// The policy in force before any core has been reached.
+    ///
+    /// Restrictive on purpose. The tray publishes the core's version and the
+    /// core's update policy from the same `/api/v1/info` response, and Combine
+    /// delivers the version first — so a permissive default let the launch
+    /// check fire on the OLD policy, checking for updates for a user who had
+    /// switched them off. Nothing unattended runs until the contract arrives;
+    /// a user-initiated "Check for Updates" is unaffected (FR-015), and the
+    /// wait is one round trip to a socket on the same machine.
+    static let awaitingCore = EffectiveUpdatePolicy(
+        automaticChecksAllowed: false,
+        nudgesSuppressed: false,
+        channel: .stable,
+        disabledReason: "no core has reported its update policy yet"
     )
 }
 
@@ -146,12 +171,15 @@ enum UpdatePolicyResolver {
         }
 
         guard let core else {
-            // No core yet, or a pre-092 core. Keep the previous behaviour.
+            // Nobody has told us anything yet. Not "permissive by default" —
+            // see EffectiveUpdatePolicy.awaitingCore. A core that predates
+            // Spec 092 is NOT this case: the tray stamps
+            // CoreUpdatePolicy.legacyDefault for it on connect.
             return EffectiveUpdatePolicy(
-                automaticChecksAllowed: true,
+                automaticChecksAllowed: false,
                 nudgesSuppressed: false,
                 channel: channel,
-                disabledReason: ""
+                disabledReason: EffectiveUpdatePolicy.awaitingCore.disabledReason
             )
         }
 

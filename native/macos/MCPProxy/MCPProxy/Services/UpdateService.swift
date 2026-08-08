@@ -60,9 +60,10 @@ final class UpdateService: ObservableObject {
     private var feedUpdater: (any FeedUpdating)?
 
     /// Stops the tray-managed core synchronously before the bundle is replaced
-    /// (FR-012). Set by the app delegate, which is the only thing that knows
-    /// the managed process. Nil in tests and before the core starts.
-    var stopManagedCore: (() -> Void)?
+    /// (FR-012), returning whether it is CONFIRMED down. Set by the app
+    /// delegate, which is the only thing that knows the managed process. Nil in
+    /// tests and before the core starts.
+    var stopManagedCore: (() -> Bool)?
 
     /// GitHub API endpoint for latest release.
     private let githubReleaseURL = "https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest"
@@ -175,14 +176,30 @@ final class UpdateService: ObservableObject {
         }
     }
 
-    /// FR-010: activating the one-click item. Sparkle already has the update in
-    /// hand from the gentle-reminder check; `check(userInitiated:)` surfaces its
-    /// own UI and drives download → verify → replace → relaunch.
+    /// FR-010: activating the one-click item.
+    ///
+    /// `check(userInitiated:)` RESUMES the session Sparkle already has open for
+    /// the update it found during the gentle-reminder check, and drives
+    /// download → verify → replace → relaunch from wherever that session got to.
+    ///
+    /// Click count, honestly: one here, plus one on Sparkle's own confirmation.
+    /// `SPUUpdater`'s public surface has no "install the update you are already
+    /// holding" method (only the three check entry points), so the standard
+    /// user driver's prompt cannot be skipped without writing a bespoke
+    /// `SPUUserDriver` — a replacement for every piece of update UI Sparkle
+    /// ships. What the pre-download in `SparkleFeedUpdater.apply(policy:)` buys
+    /// is that the second click installs immediately instead of starting a
+    /// download: see `updateIsReadyToInstall`.
     func installFeedUpdate() {
         guard let feedUpdater, feedUpdater.isAvailable else {
             openDownloadPage()
             return
         }
+        AppLifecycle.shared.note(
+            feedUpdater.updateIsReadyToInstall
+                ? "installing the pre-downloaded update"
+                : "resuming the update session (nothing downloaded yet)"
+        )
         feedUpdater.check(userInitiated: true)
     }
 
@@ -378,10 +395,20 @@ extension UpdateService: FeedUpdaterObserver {
         }
     }
 
-    /// FR-012. Synchronous by contract: Sparkle replaces the bundle the moment
-    /// this returns, so the core has to already be down.
-    func feedUpdaterWillInstallUpdate() {
+    /// FR-012. Synchronous by contract: Sparkle proceeds with the install the
+    /// moment this returns, so the core has to already be down.
+    ///
+    /// No core to stop is a stopped core: the tray runs without one, and an
+    /// update must not be blocked by the absence of the thing it was going to
+    /// shut down.
+    @discardableResult
+    func feedUpdaterWillInstallUpdate() -> Bool {
         AppLifecycle.shared.note("stopping the managed core before the update is installed")
-        stopManagedCore?()
+        guard let stopManagedCore else { return true }
+        let stopped = stopManagedCore()
+        if !stopped {
+            AppLifecycle.shared.note("the managed core could not be stopped — update postponed")
+        }
+        return stopped
     }
 }

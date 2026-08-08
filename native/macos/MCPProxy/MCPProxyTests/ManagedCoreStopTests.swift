@@ -25,12 +25,14 @@ final class ManagedCoreStopTests: XCTestCase {
         pid: Int32?,
         process: FakeProcess,
         isCore: Bool = true,
+        identityChecks: (() -> Bool)? = nil,
+        survivesSIGKILL: Bool = false,
         gracePeriod: TimeInterval = ManagedCoreStop.defaultGracePeriod
     ) -> ManagedCoreStopOutcome {
         ManagedCoreStop.stop(
             pid: pid,
             gracePeriod: gracePeriod,
-            isCore: { _ in isCore },
+            isCore: { _ in identityChecks?() ?? isCore },
             isRunning: { _ in
                 if process.received.contains(SIGTERM) {
                     process.polls += 1
@@ -40,7 +42,7 @@ final class ManagedCoreStopTests: XCTestCase {
             },
             send: { _, sig in
                 process.received.append(sig)
-                if sig == SIGKILL { process.alive = false }
+                if sig == SIGKILL && !survivesSIGKILL { process.alive = false }
             },
             wait: { _ in }   // no real sleeping in tests
         )
@@ -102,5 +104,45 @@ final class ManagedCoreStopTests: XCTestCase {
         // which is what guarantees the main thread is never held indefinitely.
         let proc = FakeProcess(diesOnSIGTERMAfter: 1_000_000)
         XCTAssertEqual(stop(pid: 4242, process: proc, gracePeriod: 0), .killed)
+    }
+
+    // MARK: - The exit after SIGKILL is confirmed, not assumed
+
+    func testAProcessThatOutlivesSIGKILLReportsFailureRatherThanSuccess() {
+        // SIGKILL is not instantaneous, and the caller uses this answer to
+        // decide whether the app bundle may be replaced. Claiming "killed"
+        // without looking is how a live core ends up running from a deleted
+        // inode — issue #957 itself.
+        let proc = FakeProcess(diesOnSIGTERMAfter: 1_000_000)
+        let outcome = stop(pid: 4242, process: proc, survivesSIGKILL: true)
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(proc.received, [SIGTERM, SIGKILL])
+        XCTAssertFalse(outcome.coreIsDown, "the install must not proceed")
+    }
+
+    func testOnlyAConfirmedStopClearsTheBundleSwap() {
+        XCTAssertTrue(ManagedCoreStopOutcome.notRunning.coreIsDown)
+        XCTAssertTrue(ManagedCoreStopOutcome.terminated.coreIsDown)
+        XCTAssertTrue(ManagedCoreStopOutcome.killed.coreIsDown)
+        XCTAssertFalse(ManagedCoreStopOutcome.failed.coreIsDown)
+        XCTAssertFalse(ManagedCoreStopOutcome.refused.coreIsDown,
+                       "an unidentifiable pid is a stop that ended in a question mark")
+    }
+
+    // MARK: - PID reuse across the grace period
+
+    func testIdentityIsProvenAgainImmediatelyBeforeSIGKILL() {
+        // The core exits during the (seconds-long) SIGTERM grace period and its
+        // pid is handed to something else. The second identity check is the
+        // only thing standing between that stranger and a SIGKILL.
+        let proc = FakeProcess(diesOnSIGTERMAfter: 1_000_000)
+        var checks = 0
+        let outcome = stop(pid: 4242, process: proc, identityChecks: {
+            checks += 1
+            return checks == 1   // ours at the start, someone else's by SIGKILL time
+        })
+        XCTAssertEqual(outcome, .refused)
+        XCTAssertEqual(proc.received, [SIGTERM], "SIGKILL must not reach a recycled pid")
+        XCTAssertEqual(checks, 2, "the identity must be re-proven, not inherited")
     }
 }

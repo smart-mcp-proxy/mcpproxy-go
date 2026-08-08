@@ -26,11 +26,30 @@ enum ManagedCoreStopOutcome: Equatable {
     case notRunning
     /// SIGTERM was enough.
     case terminated
-    /// SIGTERM was ignored for the whole grace period; SIGKILL was sent.
+    /// SIGTERM was ignored for the whole grace period; SIGKILL was sent AND the
+    /// process was then confirmed gone.
     case killed
     /// The pid does not (any longer) belong to an mcpproxy process. Nothing was
     /// signalled — see the type header.
     case refused
+    /// The process was still there after SIGKILL and the confirmation wait. The
+    /// caller MUST NOT let the bundle be replaced under it.
+    case failed
+
+    /// Whether the core is CONFIRMED down — the only basis on which the bundle
+    /// may be replaced.
+    ///
+    /// `refused` is not confirmation. It means the pid is alive but could not
+    /// be identified as an mcpproxy process, and `CoreProcessIdentity` cannot
+    /// tell "the pid was recycled by something unrelated" apart from "the
+    /// process belongs to a user whose executable path we may not read". A stop
+    /// that ends in a question mark is a stop that failed.
+    var coreIsDown: Bool {
+        switch self {
+        case .notRunning, .terminated, .killed: return true
+        case .refused, .failed: return false
+        }
+    }
 }
 
 enum ManagedCoreStop {
@@ -43,6 +62,15 @@ enum ManagedCoreStop {
     /// the main thread inside a Sparkle callback, so it cannot grow.
     static let defaultGracePeriod: TimeInterval = 5.0
 
+    /// How long to wait for the process to actually disappear after SIGKILL.
+    ///
+    /// SIGKILL is not instantaneous — the kernel still has to tear the process
+    /// down, and a core blocked in an uninterruptible syscall can outlive the
+    /// signal. Returning "killed" the microsecond after sending it is a claim
+    /// nobody checked, and the caller uses that claim to decide whether the app
+    /// bundle may be replaced.
+    static let defaultKillGracePeriod: TimeInterval = 2.0
+
     /// Poll interval while waiting for the process to disappear.
     static let pollInterval: TimeInterval = 0.05
 
@@ -54,6 +82,7 @@ enum ManagedCoreStop {
     static func stop(
         pid: Int32?,
         gracePeriod: TimeInterval = defaultGracePeriod,
+        killGracePeriod: TimeInterval = defaultKillGracePeriod,
         isCore: (Int32) -> Bool = CoreProcessIdentity.isMCPProxyCore,
         isRunning: (Int32) -> Bool = CoreProcessIdentity.isRunning,
         send: (Int32, Int32) -> Void = { pid, sig in _ = kill(pid, sig) },
@@ -68,19 +97,39 @@ enum ManagedCoreStop {
 
         send(pid, SIGTERM)
 
-        var waited: TimeInterval = 0
-        while waited < gracePeriod {
-            if !isRunning(pid) { return .terminated }
-            wait(pollInterval)
-            waited += pollInterval
+        if waitForExit(pid: pid, budget: gracePeriod, isRunning: isRunning, wait: wait) {
+            return .terminated
         }
-
-        if !isRunning(pid) { return .terminated }
 
         // Still there. The bundle is about to be replaced underneath it; a core
         // running from a deleted inode is the #957 failure mode this whole spec
         // exists to end, so it does not get to survive the swap.
+        //
+        // The identity is re-checked HERE and not only at the top: the grace
+        // period is seconds long, and a core that exited during it can have had
+        // its pid handed to something else. SIGTERM to a stranger is rude;
+        // SIGKILL to a stranger is unrecoverable.
+        guard isCore(pid) else { return .refused }
+
         send(pid, SIGKILL)
-        return .killed
+        return waitForExit(pid: pid, budget: killGracePeriod, isRunning: isRunning, wait: wait)
+            ? .killed
+            : .failed
+    }
+
+    /// Poll until `pid` is gone or the budget runs out. Returns whether it went.
+    private static func waitForExit(
+        pid: Int32,
+        budget: TimeInterval,
+        isRunning: (Int32) -> Bool,
+        wait: (TimeInterval) -> Void
+    ) -> Bool {
+        var waited: TimeInterval = 0
+        while waited < budget {
+            if !isRunning(pid) { return true }
+            wait(pollInterval)
+            waited += pollInterval
+        }
+        return !isRunning(pid)
     }
 }

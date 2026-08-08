@@ -1196,6 +1196,14 @@ actor CoreProcessManager {
         }
 
         if await waitFor(seconds: 5.0, until: { !CoreProcessIdentity.isRunning(pid: pid) }) == false {
+            // Five seconds have passed since the check above. A core that
+            // exited during them can have had its pid recycled, and SIGKILL is
+            // the one rung of this ladder the recipient cannot survive — so the
+            // identity is proven again immediately before it, not inherited.
+            guard CoreProcessIdentity.isMCPProxyCore(pid: pid) else {
+                NSLog("[MCPProxy] PID %d is no longer an mcpproxy process — not sending SIGKILL", pid)
+                return false
+            }
             NSLog("[MCPProxy] PID %d ignored SIGTERM — SIGKILL", pid)
             _ = kill(pid, SIGKILL)
             guard await waitFor(seconds: 3.0, until: { !CoreProcessIdentity.isRunning(pid: pid) }) else {
@@ -1550,12 +1558,23 @@ actor CoreProcessManager {
         }
 
         await MainActor.run {
-            appState.version = info.version
-            appState.webUIBaseURL = webUIBase
             // Spec 092 FR-015: the explicit policy contract. Assigned on every
             // connect (including reconnects), which is how a config hot-reload
             // on the core side reaches the tray.
-            appState.coreUpdatePolicy = info.updatePolicy
+            //
+            // A pre-092 core reports no `update_policy`; that is a different
+            // fact from "no core has answered yet", and only this line can tell
+            // them apart. Stamping the legacy default here is what keeps those
+            // cores on their old behaviour while the tray stays quiet until it
+            // has actually heard from one.
+            //
+            // BEFORE `version`, and that order is load-bearing: @Published
+            // fires its subscribers synchronously from willSet, and the launch
+            // update check hangs off `$version`. Assigning version first ran
+            // that check under whatever policy preceded this response.
+            appState.coreUpdatePolicy = info.updatePolicy ?? .legacyDefault
+            appState.version = info.version
+            appState.webUIBaseURL = webUIBase
             if let update = info.update, update.available, let latest = update.latestVersion {
                 appState.updateAvailable = latest.hasPrefix("v") ? String(latest.dropFirst()) : latest
             }

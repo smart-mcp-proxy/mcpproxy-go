@@ -47,6 +47,17 @@ protocol FeedUpdating: AnyObject {
     /// Run a check. `userInitiated` bypasses the policy's automatic-check gate
     /// and lets Sparkle show its own progress UI.
     func check(userInitiated: Bool)
+
+    /// Whether an update is already downloaded and waiting to be installed, so
+    /// activating the menu item costs a confirmation rather than a download
+    /// (FR-010). See `SparkleFeedUpdater.updateIsReadyToInstall`.
+    var updateIsReadyToInstall: Bool { get }
+}
+
+extension FeedUpdating {
+    /// Most implementations (the test stub, the no-Sparkle fallback) never
+    /// pre-download anything.
+    var updateIsReadyToInstall: Bool { false }
 }
 
 /// Callbacks from the updater. Delivered on the main thread.
@@ -63,7 +74,12 @@ protocol FeedUpdaterObserver: AnyObject {
     /// FR-012: the bundle is about to be replaced. MUST stop the tray-managed
     /// core before returning — this call is synchronous and the installer runs
     /// as soon as it comes back.
-    func feedUpdaterWillInstallUpdate()
+    ///
+    /// Returns whether the core is CONFIRMED down. `false` means the swap must
+    /// not go ahead: a core still executing from the bundle that is about to be
+    /// replaced is issue #957 itself.
+    @discardableResult
+    func feedUpdaterWillInstallUpdate() -> Bool
 }
 
 // MARK: - Sparkle implementation
@@ -95,6 +111,26 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
     /// FR-010's menu item is supposed to stay there, gently, until it is
     /// installed.
     private(set) var offeredVersion: String?
+
+    /// Whether Sparkle has the update downloaded and is only waiting to be told
+    /// to install it.
+    ///
+    /// FR-010 asks for one click doing download → verify → swap → relaunch.
+    /// Sparkle's PUBLIC API cannot deliver a literal single click on top of
+    /// `SPUStandardUserDriver`: there is no "install the update you are holding"
+    /// method on `SPUUpdater` (see SPUUpdater.h — the only entry points are the
+    /// three check methods), so the menu item has to resume the session with
+    /// `checkForUpdates()`, and the standard driver then shows its confirmation.
+    ///
+    /// What we can do is make sure that confirmation is the LAST step rather
+    /// than the first: with `automaticallyDownloadsUpdates` on, the scheduled
+    /// check downloads and verifies in the background, so activating the menu
+    /// item lands directly on "Install and Relaunch" with nothing left to wait
+    /// for. Honest click count: ONE on our menu item, plus ONE on Sparkle's
+    /// install confirmation. Removing the second one needs a custom
+    /// `SPUUserDriver` implementation, which replaces every piece of update UI
+    /// Sparkle ships and is out of scope here.
+    private(set) var updateIsReadyToInstall: Bool = false
 
     var isAvailable: Bool { controller != nil }
 
@@ -152,6 +188,12 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
         // FR-015: the kill switch governs the SCHEDULED cycle. `check(userInitiated:)`
         // deliberately does not consult it.
         updater.automaticallyChecksForUpdates = policy.automaticChecksAllowed
+        // FR-010: pre-download so the one click that follows is an install and
+        // not a download. Tied to the same switch — an install that downloads
+        // ~40 MB unasked is exactly what the kill switch is for. Sparkle only
+        // honours this where the host allows automatic updates; when it does
+        // not, the flow degrades to download-on-click, which is what it was.
+        updater.automaticallyDownloadsUpdates = policy.automaticChecksAllowed && updater.allowsAutomaticUpdates
         // Changing the channel set mid-session needs a cycle reset for the next
         // scheduled check to use it (`allowedChannelsForUpdater:` is consulted
         // per check, but the schedule is not).
@@ -181,8 +223,11 @@ extension SparkleFeedUpdater: SPUUpdaterDelegate {
     func feedURLString(for updater: SPUUpdater) -> String? {
         guard let configured = hostBundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
               !configured.isEmpty else { return nil }
+        // The channel is part of the file name, not only of the item tags: the
+        // two pipelines publish two sets of files (FR-014), so an RC client
+        // that asked for the stable feed would be told there is no update.
         let resolved = SparkleFeedURL.archSpecific(
-            configured, arch: UpdateService.hostArchToken()
+            configured, arch: UpdateService.hostArchToken(), channel: policy.channel
         )
         return resolved == configured ? nil : resolved
     }
@@ -202,18 +247,43 @@ extension SparkleFeedUpdater: SPUUpdaterDelegate {
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         offeredVersion = nil
+        updateIsReadyToInstall = false
         onMain { [weak self] in self?.observer?.feedUpdaterDidNotFindUpdate() }
     }
 
-    /// FR-012 — the hook that matters.
+    /// FR-012 — the hook that matters, and the only one that can say no.
     ///
-    /// "Called immediately before installing the specified update": the last
-    /// point at which the old bundle is still the one on disk. Synchronous, so
-    /// the core is down before the swap rather than racing it. Chosen over
-    /// `shouldPostponeRelaunchForUpdate:` (too late — the bundle is already
-    /// replaced) and over `updaterWillRelaunchApplication:` (also too late,
-    /// though it is kept below as a belt-and-braces second stop, which is
-    /// harmless because the stop is idempotent).
+    /// Despite the name, Sparkle calls this at the TOP of
+    /// `-[SPUInstallerDriver installWithToolAndRelaunch:displayingUserInterface:]`,
+    /// before the installer is contacted and therefore before the bundle is
+    /// touched (verified against Sparkle 2.9.3's SPUInstallerDriver.m). That
+    /// makes it the last point at which the update can still be called off,
+    /// which `willInstallUpdate:` — a `void` notification — cannot do.
+    ///
+    /// Returning `true` without ever invoking `installHandler` leaves the
+    /// update downloaded and uninstalled: the menu item stays, the running
+    /// version keeps working, and the next attempt starts from a clean state.
+    /// That is the right answer when the core will not die, because replacing
+    /// the bundle under a live core is issue #957 happening again.
+    func updater(
+        _ updater: SPUUpdater,
+        shouldPostponeRelaunchForUpdate item: SUAppcastItem,
+        untilInvokingBlock installHandler: @escaping () -> Void
+    ) -> Bool {
+        guard let observer else { return false }
+        if observer.feedUpdaterWillInstallUpdate() {
+            return false   // core is down; let Sparkle carry straight on
+        }
+        observer.feedUpdater(didFailWith:
+            "The update was not installed: the MCPProxy core is still running and could not "
+            + "be stopped. Quit it and try again.")
+        NSLog("[MCPProxy] Postponing the update: the managed core could not be confirmed stopped")
+        return true
+    }
+
+    /// Belt and braces for the paths that never reach the postpone hook
+    /// (install-on-quit, a resumed session that already postponed once). The
+    /// stop is idempotent, and neither of these can refuse anything.
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
         observer?.feedUpdaterWillInstallUpdate()
     }
@@ -265,13 +335,16 @@ extension SparkleFeedUpdater: SPUStandardUserDriverDelegate {
         false
     }
 
-    /// Sparkle tells us whether IT will show the update. When it will not, the
-    /// menu item is the only thing the user will ever see, so publish it.
+    /// Sparkle tells us whether IT will show the update, and at what stage the
+    /// update session is. The stage is what makes FR-010's click cheap: at
+    /// `.downloaded` or `.installing` the bytes are already on disk and
+    /// verified, so resuming the session goes straight to the install prompt.
     func standardUserDriverWillHandleShowingUpdate(
         _ handleShowingUpdate: Bool,
         forUpdate update: SUAppcastItem,
         state: SPUUserUpdateState
     ) {
+        updateIsReadyToInstall = state.stage == .downloaded || state.stage == .installing
         guard !handleShowingUpdate else { return }
         let version = update.displayVersionString
         offeredVersion = version

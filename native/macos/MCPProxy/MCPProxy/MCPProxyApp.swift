@@ -273,13 +273,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // it manages. Installed before the feed updater starts, because a
         // Sparkle session resumed from a previous launch can reach the install
         // hook almost immediately.
+        // The Bool it returns is not advisory: `false` makes Sparkle postpone
+        // the installation rather than replace the bundle under a live core.
         updateService.stopManagedCore = { [weak self] in
-            guard let self else { return }
+            guard let self else { return true }
             let pid = self.coreManager?.managedProcess?.processIdentifier
             let outcome = ManagedCoreStop.stop(pid: pid)
             NSLog("[MCPProxy] Pre-update core stop: pid=%d outcome=%@",
                   pid ?? -1, String(describing: outcome))
             AppLifecycle.shared.note("pre-update core stop: \(outcome)")
+            return outcome.coreIsDown
         }
 
         // Spec 092 FR-015: every tray-side check is governed by the policy the

@@ -20,11 +20,27 @@ final class UpdatePolicyTests: XCTestCase {
 
     // MARK: - No core yet
 
-    func testNoCorePolicyKeepsThePreviousPermissiveBehaviour() {
+    func testNoCorePolicyBlocksUnattendedChecksUntilOneArrives() {
         let policy = resolve()
+        XCTAssertFalse(policy.automaticChecksAllowed,
+                       "FR-015: the policy is a contract, not an inference from missing "
+                       + "data. Checking before it arrives is checking under a policy the "
+                       + "user may have switched off")
+        XCTAssertFalse(policy.disabledReason.isEmpty, "the wait must be loggable")
+        XCTAssertFalse(policy.nudgesSuppressed,
+                       "nothing has been found yet, so there is nothing to suppress")
+        XCTAssertEqual(policy.channel, .stable)
+        XCTAssertEqual(policy, EffectiveUpdatePolicy.awaitingCore)
+    }
+
+    func testAPre092CoreKeepsItsPreviousPermissiveBehaviour() {
+        // The tray stamps this the moment it reaches a core that reports no
+        // update_policy, which is how "an old core said nothing" stays
+        // distinguishable from "we have not asked yet".
+        let policy = resolve(core: .legacyDefault)
         XCTAssertTrue(policy.automaticChecksAllowed,
-                      "a core that predates 092 reports nothing; disabling updates on a "
-                      + "version skew would be a worse failure than checking once")
+                      "disabling updates on a version skew would be a worse failure than "
+                      + "checking once")
         XCTAssertFalse(policy.nudgesSuppressed)
         XCTAssertEqual(policy.channel, .stable)
     }
@@ -54,7 +70,8 @@ final class UpdatePolicyTests: XCTestCase {
         // The core compares against exactly "true"; the tray must not be more
         // eager than the process it mirrors.
         for value in ["1", "yes", "TRUE ", ""] {
-            let policy = resolve(env: ["MCPPROXY_DISABLE_AUTO_UPDATE": value])
+            let policy = resolve(core: .legacyDefault,
+                                 env: ["MCPPROXY_DISABLE_AUTO_UPDATE": value])
             XCTAssertTrue(policy.automaticChecksAllowed,
                           "\"\(value)\" must not disable updates")
         }
@@ -73,7 +90,7 @@ final class UpdatePolicyTests: XCTestCase {
     }
 
     func testNonCIValuesDoNotSuppress() {
-        let policy = resolve(env: ["CI": "false"])
+        let policy = resolve(core: .legacyDefault, env: ["CI": "false"])
         XCTAssertTrue(policy.automaticChecksAllowed)
         XCTAssertFalse(policy.nudgesSuppressed)
     }
