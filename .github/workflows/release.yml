@@ -1670,6 +1670,18 @@ jobs:
             grep -q 'sparkle:edSignature' "${f}" || { echo "❌ ${f} has no EdDSA signature"; exit 1; }
           done
 
+          # Channel policy: RC users update to the next RC OR the next stable,
+          # whichever is newer; stable users only ever see stables. A stable
+          # release therefore also refreshes the BETA feeds with its (untagged,
+          # visible-to-every-channel) item — otherwise RC users would sit on
+          # their last RC forever once the cycle ends. SemVer precedence in the
+          # tray orders X.Y.Z above X.Y.Z-rc.N, so the stable always wins.
+          for ARCH in arm64 amd64; do
+            if [ -f "appcast-out/appcast-${ARCH}.xml" ]; then
+              cp "appcast-out/appcast-${ARCH}.xml" "appcast-out/appcast-beta-${ARCH}.xml"
+            fi
+          done
+
           gh release upload "${GITHUB_REF_NAME}" appcast-out/*.xml --clobber
           echo "generated=true" >> "$GITHUB_OUTPUT"
 
@@ -1694,6 +1706,18 @@ jobs:
           repository: smart-mcp-proxy/mcpproxy.app-website
           event-type: publish-appcast
           client-payload: '{"version": "${{ github.ref_name }}", "channel": "stable"}'
+
+      # Second dispatch: the same stable release also refreshes the beta feeds
+      # (see the channel-policy comment above).
+      - name: Publish stable item to the beta feeds
+        if: steps.appcast.outputs.generated == 'true'
+        continue-on-error: true
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
+        with:
+          token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
+          repository: smart-mcp-proxy/mcpproxy.app-website
+          event-type: publish-appcast
+          client-payload: '{"version": "${{ github.ref_name }}", "channel": "beta"}'
 
   provenance:
     needs: [release]

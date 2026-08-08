@@ -249,14 +249,44 @@ extension SparkleFeedUpdater: SPUUpdaterDelegate {
         let resolved = SparkleFeedURL.archSpecific(
             configured, arch: UpdateService.hostArchToken(), channel: policy.channel
         )
+        NSLog("[MCPProxy] Sparkle check: channel=%@ feed=%@",
+              policy.channel.rawValue, resolved == configured ? "(Info.plist default)" : resolved)
         return resolved == configured ? nil : resolved
+    }
+
+    /// Diagnostic seam: one line per loaded appcast saying what Sparkle SAW.
+    /// Without it, "no update" is indistinguishable from "wrong feed",
+    /// "filtered channel", and "version comparison surprise" — which cost a
+    /// live debugging session on the v0.54.0-rc.3 rehearsal.
+    func updater(_ updater: SPUUpdater, didFinishLoading appcast: SUAppcast) {
+        let items = appcast.items.map { item in
+            "\(item.displayVersionString)(v=\(item.versionString),ch=\(item.channel ?? "default"))"
+        }.joined(separator: ", ")
+        NSLog("[MCPProxy] Sparkle loaded appcast: %d item(s): %@", appcast.items.count, items)
     }
 
     /// FR-014: stable users must never be offered RCs. An empty set means
     /// "default channel only", which is exactly the stable feed; RC users also
     /// accept the `beta` channel the prerelease pipeline tags.
     func allowedChannels(for updater: SPUUpdater) -> Set<String> {
-        policy.channel.allowedSparkleChannels
+        let allowed = policy.channel.allowedSparkleChannels
+        NSLog("[MCPProxy] Sparkle allowedChannels consulted: channel=%@ -> %@",
+              policy.channel.rawValue, allowed.isEmpty ? "(default only)" : allowed.sorted().joined(separator: ","))
+        return allowed
+    }
+
+    /// FR-006 — Sparkle MUST compare versions by SemVer 2.0 precedence.
+    ///
+    /// `SUStandardVersionComparator` treats the whole prerelease suffix as
+    /// noise: it reports 0.54.0-rc.2, 0.54.0-rc.3 AND plain 0.54.0 as EQUAL
+    /// (verified against Sparkle 2.9.3 directly). Every RC→RC and RC→stable
+    /// update is therefore invisible to it — "You're up to date" on a feed
+    /// that plainly carries a newer item, found live on the v0.54.0-rc.3
+    /// dress rehearsal. The shared SemanticVersion util already implements
+    /// the correct precedence (rc.2 < rc.3 < stable); this delegate is the
+    /// missing plumbing that hands it to Sparkle.
+    func versionComparator(for updater: SPUUpdater) -> SUVersionComparison? {
+        SemVerSparkleComparator.shared
     }
 
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
@@ -403,6 +433,25 @@ extension SparkleFeedUpdater: SPUStandardUserDriverDelegate {
         let version = update.displayVersionString
         offeredVersion = version
         observer?.feedUpdater(didFindVersion: version)
+    }
+}
+
+/// SUVersionComparison backed by the shared SemVer 2.0 util (FR-006).
+///
+/// Malformed versions fall back to Sparkle's own comparator rather than
+/// guessing: `SemanticVersion.compare` returns nil for anything that is not a
+/// version, and a fabricated "equal" there is precisely the bug this class
+/// exists to fix.
+final class SemVerSparkleComparator: NSObject, SUVersionComparison {
+    static let shared = SemVerSparkleComparator()
+
+    func compareVersion(_ versionA: String, toVersion versionB: String) -> ComparisonResult {
+        if let cmp = SemanticVersion.compare(versionA, versionB) {
+            return cmp < 0 ? .orderedAscending : cmp > 0 ? .orderedDescending : .orderedSame
+        }
+        NSLog("[MCPProxy] Sparkle version compare fell back to the standard comparator: %@ vs %@",
+              versionA, versionB)
+        return SUStandardVersionComparator.default.compareVersion(versionA, toVersion: versionB)
     }
 }
 
