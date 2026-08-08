@@ -34,6 +34,7 @@ type StatusInfo struct {
 	SocketPath        string                   `json:"socket_path,omitempty"`
 	ConfigPath        string                   `json:"config_path,omitempty"`
 	Version           string                   `json:"version,omitempty"`
+	LaunchedBy        string                   `json:"launched_by,omitempty"` // Spec 092 FR-001a; empty = user-launched/unknown or older daemon
 	Update            *StatusUpdateInfo        `json:"update,omitempty"`
 	ServerEditionInfo *ServerEditionStatusInfo `json:"server_edition,omitempty"`
 }
@@ -223,6 +224,12 @@ func collectStatusFromDaemon(cfg *config.Config, client *cliclient.Client, socke
 		}
 		if url, ok := infoData["web_ui_url"].(string); ok {
 			info.WebUIURL = url
+		}
+		// Spec 092 FR-001a: durable launch provenance of the running core.
+		// Older daemons omit the field entirely — rendered as absent, not as
+		// "user-launched", because we cannot tell the two apart.
+		if v, ok := infoData["launched_by"].(string); ok {
+			info.LaunchedBy = v
 		}
 		info.Update = extractStatusUpdate(infoData)
 	}
@@ -480,6 +487,14 @@ func printStatusTable(info *StatusInfo) {
 
 	if info.Version != "" {
 		fmt.Printf("  %-12s %s%s\n", "Version:", info.Version, statusVersionSuffix(info.Update))
+	}
+
+	// Spec 092 FR-001a. Only rendered when the core asserted a marker: an
+	// empty value means user-launched/unknown (or a pre-092 daemon), and
+	// printing "unknown" for the ordinary `mcpproxy serve` case would be
+	// noise on every status call.
+	if info.LaunchedBy != "" {
+		fmt.Printf("  %-12s %s\n", "Launched by:", info.LaunchedBy)
 	}
 
 	fmt.Printf("  %-12s %s\n", "Listen:", info.ListenAddr)

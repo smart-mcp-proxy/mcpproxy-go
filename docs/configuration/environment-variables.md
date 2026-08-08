@@ -133,10 +133,18 @@ The tray application doesn't read the config file directly. It launches the core
 | `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates (core + tray) | `false` |
 | `MCPPROXY_UPDATE_APP_BUNDLE` | Enable app bundle updates (macOS tray) | `false` |
 
+`CI=true` (or `CI=1`) additionally suppresses every update nudge and the tray's
+unattended checks — a non-interactive run has nobody to nudge. Machine-readable
+fields keep reporting the facts, and a user-initiated "Check for Updates" still
+runs.
+
 Update checking can also be controlled from the config file via the
 `update_check` block (`enabled`, `channel`) — see
 [Version Updates](/features/version-updates). When both are set, the
-environment variables **win** over the config keys.
+environment variables **win** over the config keys. The resolved answer is
+published to the macOS tray as `update_policy` in `GET /api/v1/info`; the
+one-click updater, the per-channel behaviour matrix and the release
+infrastructure are documented in [Auto-Update](/features/auto-update).
 
 ### Setting Tray Variables on macOS
 

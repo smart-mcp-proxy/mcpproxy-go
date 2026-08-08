@@ -34,7 +34,10 @@ extension NSStatusItem: TrayMenuHost {}
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     let appState = AppState()
     let notificationService = NotificationService()
-    let updateService = UpdateService()
+    /// Owns everything the tray knows about updates (Spec 092 FR-017). A `var`
+    /// so a test can substitute a service built around a fixture bundle and a
+    /// stub feed updater; production never reassigns it.
+    var updateService = UpdateService()
     var coreManager: CoreProcessManager?
 
     private var statusItem: NSStatusItem?
@@ -121,10 +124,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `applicationDidFinishLaunching`, which installs the status item as the
     /// host and leaves the data source resolving to the live core client.
     @MainActor
-    convenience init(glanceDataSource: GlanceDataSource, menuHost: TrayMenuHost) {
+    convenience init(
+        glanceDataSource: GlanceDataSource,
+        menuHost: TrayMenuHost,
+        updateService: UpdateService? = nil
+    ) {
         self.init()
         self.injectedGlanceDataSource = glanceDataSource
         self.menuHost = menuHost
+        if let updateService { self.updateService = updateService }
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -261,9 +269,39 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
-        // Auto-check GitHub for a newer release as soon as the core reports its version,
-        // and again every hour. This avoids relying solely on the core's 4h cache, which
-        // can lag behind freshly published releases.
+        // Spec 092 FR-012: give the updater a synchronous way to stop the core
+        // it manages. Installed before the feed updater starts, because a
+        // Sparkle session resumed from a previous launch can reach the install
+        // hook almost immediately.
+        // The Bool it returns is not advisory: `false` makes Sparkle postpone
+        // the installation rather than replace the bundle under a live core.
+        updateService.stopManagedCore = { [weak self] in
+            guard let self else { return true }
+            let pid = self.coreManager?.managedProcess?.processIdentifier
+            let outcome = ManagedCoreStop.stop(pid: pid)
+            NSLog("[MCPProxy] Pre-update core stop: pid=%d outcome=%@",
+                  pid ?? -1, String(describing: outcome))
+            AppLifecycle.shared.note("pre-update core stop: \(outcome)")
+            return outcome.coreIsDown
+        }
+
+        // Spec 092 FR-015: every tray-side check is governed by the policy the
+        // core publishes. Applied before the first check is scheduled.
+        appState.$coreUpdatePolicy
+            .removeDuplicates()
+            .sink { [weak self] policy in
+                self?.updateService.applyCorePolicy(policy)
+            }
+            .store(in: &cancellables)
+
+        // Spec 092 FR-010: start the feed updater. It gates its own scheduled
+        // cycle on the policy above and reports back through UpdateService.
+        updateService.startFeedUpdater()
+
+        // Auto-check for a newer release as soon as the core reports its version,
+        // and again every hour. Both are UNATTENDED checks, so they go through
+        // the policy-gated entry point (FR-015) — unlike the menu's "Check for
+        // Updates", which is always allowed.
         appState.$version
             .removeDuplicates()
             .filter { !$0.isEmpty }
@@ -271,7 +309,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .sink { [weak self] version in
                 guard let self else { return }
                 self.updateService.currentVersion = version
-                self.updateService.checkForUpdates()
+                self.updateService.checkForUpdatesInBackground()
             }
             .store(in: &cancellables)
 
@@ -280,7 +318,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .sink { [weak self] _ in
                 guard let self, !self.appState.version.isEmpty else { return }
                 self.updateService.currentVersion = self.appState.version
-                self.updateService.checkForUpdates()
+                self.updateService.checkForUpdatesInBackground()
+            }
+            .store(in: &cancellables)
+
+        // Spec 092 FR-003: has the bundle on disk been replaced under us?
+        // Checked once at launch (a drag-install over a running app that the
+        // user never activates afterwards is still an upgrade that must not
+        // leave the old version serving) and every 5 minutes thereafter, plus
+        // on every activation — see applicationDidBecomeActive.
+        refreshReplacedBundleVersion()
+        Timer.publish(every: 300, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshReplacedBundleVersion() }
             }
             .store(in: &cancellables)
 
@@ -572,6 +623,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.setupMainMenu()
         }
+        // Spec 092 FR-003. Activation is the natural moment to look: a
+        // drag-install is normally followed within seconds by the user
+        // returning to the app.
+        MainActor.assumeIsolated { refreshReplacedBundleVersion() }
     }
 
     // NSWindowDelegate — hide from Dock when the last managed window closes.
@@ -703,6 +758,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let bundledBinary = resolveBundledCoreBinary() {
                 await SymlinkService.updateSymlinkIfNeeded(bundledBinary: bundledBinary)
             }
+        }
+
+        // Spec 092 FR-030: bring the legacy staged core copy up to date if it
+        // is provably older than the bundled one. Detached because it can cost
+        // two subprocesses and a ~30 MB copy, and nothing in the startup path
+        // depends on it — this tray resolves the bundled core first (see
+        // StagedCoreBinary's header for the full path analysis).
+        Task.detached(priority: .utility) {
+            StagedCoreBinary.refreshIfStale()
         }
 
         let manager = CoreProcessManager(
@@ -1114,25 +1178,71 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         checkUpdates.isEnabled = updateService.canCheckForUpdates
         menu.addItem(checkUpdates)
 
-        // Show update from either appState (from core /api/v1/info) or UpdateService (direct
-        // GitHub check). Prefer whichever source advertises the newer version so a stale
-        // core cache never masks a freshly-published release.
-        let updateVersion: String? = {
-            switch (appState.updateAvailable, updateService.latestVersion) {
-            case let (.some(a), .some(b)):
-                return UpdateService.compareSemver(a, b) >= 0 ? a : b
-            case let (.some(a), .none):
-                return a
-            case let (.none, .some(b)):
-                return b
-            case (.none, .none):
-                return nil
+        // Spec 092 FR-017: exactly one source of truth owns the update item.
+        // The core's cached result (`appState.updateAvailable`) is merged into
+        // the service's legacy version first, so the resolver sees ONE legacy
+        // input and one feed input — the two used to be rendered independently,
+        // which is how a single release produced two competing menu items.
+        updateService.setCoreReportedVersion(appState.updateAvailable)
+        for entry in updateService.menuEntries {
+            switch entry {
+            case .oneClick(let version):
+                // FR-010's exact shape: gentle, and honest about what happens.
+                let item = NSMenuItem(
+                    title: "Update \(version) — ready to restart?",
+                    action: #selector(installFeedUpdate), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = "Downloads and verifies the update, stops the core, "
+                    + "replaces MCPProxy and relaunches it."
+                menu.addItem(item)
+
+            case .browserGuidance(let version):
+                let item = NSMenuItem(
+                    title: "Update available: v\(version) — Download",
+                    action: #selector(openDownloadPage), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = "Opens the download page. This version cannot be installed "
+                    + "from here."
+                menu.addItem(item)
+
+            case .blocked(let reason):
+                // FR-016: never silent. The title says it, the action explains.
+                let item = NSMenuItem(
+                    title: reason.menuTitle,
+                    action: #selector(showUpdateBlockedReason), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = reason.explanation
+                menu.addItem(item)
             }
-        }()
-        if let available = updateVersion {
-            let updateNote = NSMenuItem(title: "Update available: v\(available)", action: #selector(openDownloadPage), keyEquivalent: "")
-            updateNote.target = self
-            menu.addItem(updateNote)
+        }
+
+        // Spec 092 FR-003: the app on disk is newer than the one running — a
+        // drag-install landed underneath us. Offered, never forced.
+        if let replacement = appState.replacedBundleVersion {
+            let relaunch = NSMenuItem(
+                title: "MCPProxy was updated to v\(replacement) — Relaunch",
+                action: #selector(relaunchIntoReplacedBundle), keyEquivalent: ""
+            )
+            relaunch.target = self
+            relaunch.toolTip = "Stops the core, starts the newly installed app, and quits this one."
+            menu.addItem(relaunch)
+        }
+
+        // Spec 092 FR-002: an older core is running that the tray is not
+        // allowed to stop on its own. Activating this item IS the consent.
+        if let stale = appState.staleCorePrompt {
+            let restart = NSMenuItem(
+                title: stale.menuTitle,
+                action: #selector(restartStaleCore), keyEquivalent: ""
+            )
+            restart.target = self
+            restart.toolTip = stale.pid == nil
+                ? "This core cannot be stopped from here — shows how to stop it by hand."
+                : "Stops the old core (PID \(stale.pid!)) and starts the bundled one."
+            menu.addItem(restart)
         }
 
         menu.addItem(.separator())
@@ -1241,6 +1351,101 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Handler for the `.startCore` notification posted by the core status banner.
     @objc private func handleStartCore() {
         startCoreAction()
+    }
+
+    // MARK: - Spec 092 Phase 0: superseding stale versions (#957)
+
+    /// Re-read the app bundle from disk and publish whether it has been
+    /// replaced by a newer version (FR-003).
+    ///
+    /// Cheap (one small plist read) and idempotent, which is what lets it run
+    /// on both triggers: every activation — the drag-install is usually
+    /// followed immediately by clicking the menu bar — and a slow timer for the
+    /// user who never activates the app at all.
+    @MainActor
+    private func refreshReplacedBundleVersion() {
+        let replacement = BundleUpdateWatcher.replacementVersion()
+        guard appState.replacedBundleVersion != replacement else { return }
+        if let replacement {
+            NSLog("[MCPProxy] The app bundle on disk is v%@ — this process is v%@",
+                  replacement, BundledCore.appVersion() ?? "unknown")
+            AppLifecycle.shared.note("app bundle on disk replaced by v\(replacement)")
+        }
+        appState.replacedBundleVersion = replacement
+    }
+
+    /// FR-003: stop the core we manage, launch the newly installed bundle, and
+    /// get out of its way.
+    ///
+    /// `open -n` rather than `open`: without it macOS activates THIS process —
+    /// the stale one — which is exactly the reported symptom. Terminating comes
+    /// last and only after the core is down, so the new instance does not race
+    /// us for the socket and the BBolt lock.
+    @objc private func relaunchIntoReplacedBundle() {
+        let bundlePath = Bundle.main.bundleURL.path
+        Task { [weak self] in
+            guard let self else { return }
+            AppLifecycle.shared.note("relaunching into the replaced bundle at \(bundlePath)")
+            await self.coreManager?.shutdown()
+
+            await MainActor.run {
+                let launcher = Process()
+                launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                launcher.arguments = ["-n", bundlePath]
+                do {
+                    try launcher.run()
+                } catch {
+                    NSLog("[MCPProxy] Could not launch %@: %@", bundlePath, error.localizedDescription)
+                    self.presentAlert(
+                        title: "Could not start the new version",
+                        message: "Open \(bundlePath) manually to finish the upgrade.\n\n"
+                            + error.localizedDescription
+                    )
+                    return
+                }
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    /// FR-002: the user consented to stopping a core the tray did not start.
+    ///
+    /// When there is no pid to act on — a core too old to report one — the
+    /// action must still do something honest, so it explains how to stop the
+    /// core by hand rather than failing silently.
+    @objc private func restartStaleCore() {
+        guard let prompt = appState.staleCorePrompt else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let acted = await self.coreManager?.supersedeWithConsent() ?? false
+            guard !acted else { return }
+            await MainActor.run { self.presentStaleCoreInstructions(prompt) }
+        }
+    }
+
+    @MainActor
+    private func presentStaleCoreInstructions(_ prompt: StaleCorePrompt) {
+        let pidHint = prompt.pid.map { "\n\nIts process id is \($0)." } ?? ""
+        presentAlert(
+            title: "Stop the old core to finish upgrading",
+            message: "MCPProxy v\(prompt.runningVersion) is still running and this app "
+                + "bundles v\(prompt.bundledVersion). MCPProxy could not stop that process "
+                + "automatically — it was started outside the app (a terminal, launchd, or "
+                + "`brew services`), so stopping it is up to whoever started it."
+                + pidHint
+                + "\n\nQuit it there, then choose “Start MCPProxy Core” from this menu."
+        )
+    }
+
+    @MainActor
+    private func presentAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func handleAttentionAction(_ sender: NSMenuItem) {
@@ -1390,6 +1595,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func openDownloadPage() {
         updateService.openDownloadPage()
+    }
+
+    /// Spec 092 FR-010: one click — download, verify, replace, relaunch.
+    @objc private func installFeedUpdate() {
+        updateService.installFeedUpdate()
+    }
+
+    /// Spec 092 FR-016: say why an in-place update is impossible, and what to
+    /// do instead. The alternative — an update item that quietly does nothing —
+    /// is the failure mode the requirement names.
+    @MainActor
+    @objc private func showUpdateBlockedReason() {
+        guard let reason = updateService.blockedReason else { return }
+        presentAlert(title: reason.menuTitle, message: reason.message)
     }
 
     @objc private func quitApp() {

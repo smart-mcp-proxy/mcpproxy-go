@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
@@ -158,6 +160,12 @@ type ServerController interface {
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
 	RefreshVersionInfo() *updatecheck.VersionInfo
+	// UpdatePolicy reports the effective update policy (Spec 092 FR-015).
+	// Separate from GetVersionInfo because that one returns nil BOTH when
+	// checking is disabled and when no result exists yet — the tray must be
+	// able to tell those apart before deciding whether it may run its own
+	// feed check.
+	UpdatePolicy() updatecheck.Policy
 
 	// Activity logging (RFC-003)
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
@@ -1106,6 +1114,7 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 // @Description Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
 // @Description This endpoint is designed for tray-core communication and version checking
 // @Description Use refresh=true query parameter to force an immediate update check against GitHub
+// @Description The launched_by field reports durable launch provenance ("tray", "installer", or "" for user-launched/unknown)
 // @Tags status
 // @Produce json
 // @Param refresh query boolean false "Force immediate update check against GitHub"
@@ -1148,6 +1157,23 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 			"http":   listenAddr,
 			"socket": getSocketPath(), // Returns socket path if enabled, empty otherwise
 		},
+		// Spec 092 FR-001a: durable launch provenance. A tray that attaches to
+		// an already-running core (possibly started by an *earlier* tray that
+		// no longer exists) reads this to decide whether it owns the process
+		// and may supersede it, instead of relying on in-memory ownership that
+		// dies with the launching tray. "" means user/unknown → consent
+		// required (FR-002).
+		"launched_by": launchedByFn(),
+		// Spec 092 FR-002: the core's own PID. An attached tray has no Process
+		// handle and the core exposes no shutdown endpoint, so this is the only
+		// stop mechanism available to it — and the difference between a consent
+		// action that works and one that can only print instructions.
+		"pid": pidFn(),
+		// Spec 092 FR-015: the effective update policy, ALWAYS present. The
+		// `update` object below is absent both when checking is disabled and
+		// when no check has produced a result yet, so it cannot be used to
+		// infer permission; this field states it.
+		"update_policy": s.controller.UpdatePolicy(),
 	}
 	if versionInfo != nil {
 		response["update"] = versionInfo.ToAPIResponse()
@@ -1195,6 +1221,17 @@ func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) str
 
 // buildVersion is set during build using -ldflags
 var buildVersion = "development"
+
+// launchedByFn resolves this process's launch provenance for /api/v1/info
+// (Spec 092 FR-001a). Indirected through a variable so handler tests can
+// exercise every provenance value without mutating the process-wide capture
+// in internal/launch.
+var launchedByFn = launch.LaunchedBy
+
+// pidFn reports this core process's OS pid for /api/v1/info (Spec 092 FR-002).
+// Indirected for the same reason as launchedByFn: a handler test must be able
+// to assert the wiring without depending on the test binary's own pid.
+var pidFn = os.Getpid
 
 // editionValue identifies the MCPProxy edition (personal or server).
 var editionValue = "personal"

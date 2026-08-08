@@ -1177,4 +1177,39 @@ type InfoResponse struct {
 	ListenAddr string        `json:"listen_addr"`      // Listen address (e.g., "127.0.0.1:8080")
 	Endpoints  InfoEndpoints `json:"endpoints"`        // Available API endpoints
 	Update     *UpdateInfo   `json:"update,omitempty"` // Update information (if available)
+	// LaunchedBy is the durable launch provenance of the running core (Spec
+	// 092 FR-001a): "tray" when a tray spawned it, "installer" when the macOS
+	// PKG postinstall did, "" when user-launched or unknown. Always present
+	// (possibly empty) so a tray can distinguish "old core, not mine" from
+	// "old core I may supersede".
+	LaunchedBy string `json:"launched_by"`
+	// PID is the operating-system process id of the running core (Spec 092
+	// FR-002). A tray that merely ATTACHED to a core holds no Process handle
+	// for it, so without this there is no mechanism at all to stop a stale
+	// core — the consent action would have nothing to act on and could only
+	// print instructions. Paired with LaunchedBy it is what lets a newer tray
+	// supersede a core an older tray started.
+	PID int `json:"pid"`
+	// UpdatePolicy is the effective, hot-reloadable update policy (Spec 092
+	// FR-015). Always present: the `update` object above is omitted both when
+	// update checking is disabled AND when no check has produced a result
+	// yet, so its absence cannot tell a client whether it is allowed to run
+	// its own (e.g. Sparkle feed) check. This field states the answer.
+	UpdatePolicy UpdatePolicy `json:"update_policy"`
+}
+
+// UpdatePolicy is the effective update policy reported by GET /api/v1/info
+// (Spec 092 FR-015). Mirrors updatecheck.Policy; duplicated here because the
+// contracts package is the single source the OpenAPI spec and the frontend
+// types are generated from.
+type UpdatePolicy struct {
+	// Enabled is the effective automatic-check kill switch: update_check.enabled
+	// with MCPPROXY_DISABLE_AUTO_UPDATE=true winning over it. A user-initiated
+	// "Check for Updates" stays available regardless.
+	Enabled bool `json:"enabled"`
+	// Channel is the tracked release channel: "stable" or "rc".
+	Channel string `json:"channel"`
+	// NudgesSuppressed asks UI surfaces to stay quiet (CI / non-interactive)
+	// while machine-readable fields keep reporting the facts.
+	NudgesSuppressed bool `json:"nudges_suppressed"`
 }

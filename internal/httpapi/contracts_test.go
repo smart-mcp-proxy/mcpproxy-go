@@ -339,6 +339,10 @@ func (m *MockServerController) RefreshVersionInfo() *updatecheck.VersionInfo {
 	return nil
 }
 
+func (m *MockServerController) UpdatePolicy() updatecheck.Policy {
+	return updatecheck.Policy{Enabled: true, Channel: updatecheck.PolicyChannelStable}
+}
+
 // Tool discovery
 func (m *MockServerController) DiscoverServerTools(_ context.Context, _ string) error {
 	return nil

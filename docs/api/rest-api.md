@@ -892,6 +892,13 @@ Get application info, version, and update availability.
       "http": "127.0.0.1:8080",
       "socket": "/Users/user/.mcpproxy/mcpproxy.sock"
     },
+    "launched_by": "tray",
+    "pid": 4711,
+    "update_policy": {
+      "enabled": true,
+      "channel": "stable",
+      "nudges_suppressed": false
+    },
     "update": {
       "available": true,
       "latest_version": "v1.3.0",
@@ -914,6 +921,12 @@ Get application info, version, and update availability.
 | `listen_addr` | string | Server listen address |
 | `endpoints.http` | string | HTTP API endpoint address |
 | `endpoints.socket` | string | Unix socket path (empty if disabled) |
+| `launched_by` | string | Durable launch provenance of the running core (Spec 092 FR-001a): `tray` when a tray spawned it, `installer` when the macOS PKG postinstall did, `""` when user-launched or unknown. Always present. A tray uses this to decide whether it may stop and respawn a stale core it did not itself start — an empty value means consent is required. |
+| `pid` | integer | OS process id of the running core (Spec 092 FR-002). A tray that only *attached* to a core holds no process handle for it and the core exposes no shutdown endpoint, so this is the mechanism behind the consent-gated "restart the stale core" action. |
+| `update_policy` | object | Effective, hot-reloadable update policy (Spec 092 FR-015). **Always present**, including every field, because the `update` object below is absent both when checking is disabled *and* when no check has produced a result yet — its absence cannot tell a client whether it is allowed to check. |
+| `update_policy.enabled` | boolean | Whether **automatic** update checks are allowed: `update_check.enabled`, with `MCPPROXY_DISABLE_AUTO_UPDATE=true` winning over it. A *user-initiated* "Check for Updates" stays available even when this is `false`. The macOS tray gates its Sparkle feed checks on this field. |
+| `update_policy.channel` | string | Tracked release channel: `stable` or `rc` (`update_check.channel`, with `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` forcing `rc`). The tray maps `rc` onto the Sparkle `beta` feed channel. |
+| `update_policy.nudges_suppressed` | boolean | The core runs in a CI / non-interactive context: UI surfaces must stay quiet while machine-readable fields keep reporting the facts. |
 | `update` | object | Update information (may be null if not checked yet; omitted entirely when update checking is disabled via `update_check.enabled: false` or `MCPPROXY_DISABLE_AUTO_UPDATE=true`) |
 | `update.available` | boolean | Whether a newer version is available |
 | `update.latest_version` | string | Latest version available on GitHub |

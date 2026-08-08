@@ -23,10 +23,19 @@ import (
 // would build fine and stamp nothing (this exact bug shipped as a P1 with the
 // httpapi.buildVersion stamp in the v0.47.0 rc builds).
 //
-// The release.yml/prerelease.yml matrix builds intentionally do NOT stamp it:
-// one binary there feeds the tarball, Homebrew, and DMG artifacts, so any
-// single value would be wrong for some consumers; those installs rely on the
-// runtime heuristics below.
+// Marker strength (Spec 092 FR-020). Every marker except "tarball" is
+// absolute: docker and windows-installer identify a single-purpose artifact
+// that cannot be redistributed through another channel. "tarball" is
+// deliberately WEAK — the release pipeline's .tar.gz/.zip archive is also the
+// substrate Homebrew extracts into its Cellar — so a positive runtime
+// heuristic (Homebrew prefix, container, package-manager path, .app bundle)
+// overrides it and it only applies where the detector would otherwise answer
+// "unknown". See detect().
+//
+// Before Spec 092 the release matrix stamped nothing at all, which left
+// ChannelTarball defined but unreachable; FR-020 requires a positively
+// identified tarball install before `mcpproxy update` may ever self-replace a
+// binary, so release.yml now stamps the archive build (and only that build).
 var buildChannel = ""
 
 // Install channel identifiers (Spec 079 FR-008 / key entity "Install channel").
@@ -127,12 +136,22 @@ func DetectChannel(ldflagsVersion string) string {
 }
 
 func (d *channelDetector) detect() string {
-	// (0) Build-time marker wins over every heuristic (FR-008).
+	// (0) Build-time marker wins over every heuristic (FR-008) — with one
+	// deliberate exception. An unrecognized marker never guesses.
 	if d.marker != "" {
-		if knownChannels[d.marker] {
+		if !knownChannels[d.marker] {
+			return ChannelUnknown
+		}
+		// Spec 092 FR-020: the tarball marker is a weak "this is an official
+		// release archive" signal, not proof of how the binary was installed.
+		// Homebrew installs the very same .tar.gz into its Cellar, and a
+		// future pipeline change could reuse the archive binary for another
+		// package. Fall through so any positive heuristic below wins; the
+		// marker is re-applied at (6) only when nothing else matched, which
+		// is precisely "extracted archive, not owned by a package manager".
+		if d.marker != ChannelTarball {
 			return d.marker
 		}
-		return ChannelUnknown
 	}
 
 	path := d.resolvedExecPath()
@@ -212,7 +231,17 @@ func (d *channelDetector) detect() string {
 		return ChannelGoInstall
 	}
 
-	// (6) No reliable signal — generic guidance only.
+	// (6) Nothing else matched. A tarball-stamped binary here is an official
+	// release archive extracted to a location no package manager owns — the
+	// positive identification FR-020 requires before `mcpproxy update` may
+	// self-replace it. Note the linux /usr/bin/mcpproxy branch above is
+	// terminal on purpose: a stamped binary sitting in a package manager's
+	// directory degrades to unknown (guidance only) rather than reaching here.
+	if d.marker == ChannelTarball {
+		return ChannelTarball
+	}
+
+	// (7) No reliable signal — generic guidance only.
 	return ChannelUnknown
 }
 

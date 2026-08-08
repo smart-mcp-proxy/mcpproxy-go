@@ -404,4 +404,25 @@ export interface InfoResponse {
     socket: string;
   };
   update?: UpdateInfo;
+  // Spec 092 FR-001a: durable launch provenance of the running core —
+  // "tray", "installer", or "" (user-launched / unknown).
+  launched_by: string;
+  // Spec 092 FR-002: OS process id of the running core, so a tray that only
+  // attached to it still has a mechanism to stop a stale one.
+  pid: number;
+  // Spec 092 FR-015: effective update policy. Always present — the optional
+  // "update" object above is absent both when checking is disabled and when
+  // no check has run yet, so it cannot be used to infer permission.
+  update_policy: UpdatePolicy;
+}
+
+// Spec 092 FR-015: the effective, hot-reloadable update policy.
+export interface UpdatePolicy {
+  // Automatic checks allowed? (update_check.enabled, overridden by
+  // MCPPROXY_DISABLE_AUTO_UPDATE=true). A user-initiated check stays allowed.
+  enabled: boolean;
+  // Tracked release channel: "stable" or "rc".
+  channel: string;
+  // UI surfaces must stay quiet (CI / non-interactive context).
+  nudges_suppressed: boolean;
 }

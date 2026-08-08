@@ -321,6 +321,9 @@ func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset i
 }
 func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo     { return nil }
 func (m *baseController) RefreshVersionInfo() *updatecheck.VersionInfo { return nil }
+func (m *baseController) UpdatePolicy() updatecheck.Policy {
+	return updatecheck.UnavailablePolicy()
+}
 func (m *baseController) DiscoverServerTools(_ context.Context, _ string) error {
 	return nil
 }
