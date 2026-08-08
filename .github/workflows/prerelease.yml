@@ -226,12 +226,13 @@ jobs:
           # Create clean core binary for archive
           #
           # NOTE (Spec 092 FR-014/FR-020): unlike release.yml, the RC archive is
-          # deliberately NOT stamped with updatecheck.buildChannel=tarball yet.
-          # A tarball-stamped binary makes `mcpproxy update` self-update, which
-          # requires the release to carry checksums.txt + its cosign bundle —
-          # artifacts this prerelease pipeline does not publish today. Stamp this
-          # build in the same change that adds signed checksum manifests here, so
-          # RC tarball users never get a self-update path that cannot verify.
+          # deliberately NOT stamped with updatecheck.buildChannel=tarball. The
+          # verification half of that prerequisite is now met — the release job
+          # below publishes checksums.txt and its cosign bundle, so an RC IS
+          # installable by a stable tarball user who opted into prereleases —
+          # but stamping the RC archive itself is a separate decision about
+          # whether a binary extracted from a prerelease should self-update, and
+          # it is not made here.
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
           # Build tray binary for macOS
@@ -854,6 +855,12 @@ jobs:
     needs: [build, qa-gate]
     runs-on: ubuntu-latest
     environment: staging
+    permissions:
+      contents: write
+      # Spec 092 FR-014: cosign keyless signing takes its identity from the
+      # GitHub Actions OIDC token. release.yml grants this at the workflow
+      # level; here only this job needs it.
+      id-token: write
     # Only create releases for tag pushes, not branch pushes
     if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc.') || contains(github.ref, '-next.'))
 
@@ -931,6 +938,20 @@ jobs:
               cp "$installer_file" "release-files/$filename"
             fi
           done
+
+      # Spec 092 FR-014: RC artifacts must be covered by a signed checksum
+      # manifest, exactly as stable ones are. Without it `mcpproxy update`
+      # refuses every RC — it will not install an artifact it cannot verify —
+      # so a user who opted into the prerelease channel had no update path at
+      # all. Same shape as release.yml's step, including the self-reference
+      # guard so a re-run cannot make checksums.txt list itself.
+      - name: Generate checksums
+        run: |
+          cd release-files
+          find . -maxdepth 1 -type f ! -name 'checksums.txt' ! -name 'checksums.txt.cosign.bundle' -printf '%P\n' \
+            | sort | xargs -r sha256sum > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
 
       - name: List files for upload
         run: |
@@ -1013,6 +1034,40 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign checksums (keyless)
+        # Same recipe as release.yml, with the identity naming THIS workflow.
+        # `mcpproxy update` pins both (cmd/mcpproxy/update_cmd.go:
+        # cosignIdentityRegexp) and pins the ref to a tag, so a branch run can
+        # never sign something the CLI would install.
+        #
+        # To verify after download:
+        #   cosign verify-blob \
+        #     --bundle checksums.txt.cosign.bundle \
+        #     --certificate-identity-regexp "^https://github.com/smart-mcp-proxy/mcpproxy-go/.github/workflows/prerelease.yml@refs/tags/v" \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        #     checksums.txt
+        run: |
+          set -euo pipefail
+          # Guarded like the other new jobs: a fork or a run without OIDC has no
+          # identity to sign with, and an unsigned RC is better than a failed
+          # one — `mcpproxy update` refuses it and says why.
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::notice::No OIDC token available — RC checksums are published unsigned."
+            exit 0
+          fi
+          cosign sign-blob \
+            --yes \
+            --bundle release-files/checksums.txt.cosign.bundle \
+            release-files/checksums.txt
+          gh release upload "${{ github.ref_name }}" \
+            release-files/checksums.txt.cosign.bundle \
+            --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload pending notarizations
         if: hashFiles('pending-notarizations/*.pending') != ''
         run: |
@@ -1041,9 +1096,8 @@ jobs:
   # hosts appcast-beta-<arch>.xml, the files are attached to the RC release and
   # exported as the `sparkle-appcast-beta` artifact.
   #
-  # NOT YET DONE (FR-014's other half): this pipeline still publishes no
-  # checksums.txt and no cosign bundle, so RC tarballs remain guidance-only for
-  # `mcpproxy update` — see the note in the tarball-stamp block above.
+  # FR-014's other half — signed checksums for RC artifacts — is handled in the
+  # `release` job above (Generate checksums / Sign checksums).
   sparkle-appcast:
     needs: [release]
     runs-on: macos-15

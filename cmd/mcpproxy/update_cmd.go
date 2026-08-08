@@ -37,12 +37,16 @@ const (
 )
 
 // Cosign identity pinning for checksums.txt (FR-021). These mirror the verify
-// recipe documented in .github/workflows/release.yml next to the signing step:
-// releases are only ever cut from a tag, so the ref is pinned too — a
-// workflow_dispatch run on a branch must not be able to sign an artifact this
-// command will install.
+// recipe documented next to the signing step in each workflow: releases are
+// only ever cut from a tag, so the ref is pinned too — a workflow_dispatch run
+// on a branch must not be able to sign an artifact this command will install.
+//
+// Two workflows, because RCs are cut by a separate pipeline (FR-014) and a
+// user on the prerelease channel must be able to verify what it publishes.
+// Both are tag-gated and both live in this repository, so accepting the second
+// one widens the trusted set by nothing a tag push could not already do.
 const (
-	cosignIdentityRegexp = `^https://github\.com/smart-mcp-proxy/mcpproxy-go/\.github/workflows/release\.yml@refs/tags/v`
+	cosignIdentityRegexp = `^https://github\.com/smart-mcp-proxy/mcpproxy-go/\.github/workflows/(release|prerelease)\.yml@refs/tags/v`
 	cosignOIDCIssuer     = "https://token.actions.githubusercontent.com"
 )
 
