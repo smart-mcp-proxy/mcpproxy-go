@@ -57,7 +57,7 @@ mcpproxy activity list [flags]
 | `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
 | `--tool` | | | Filter by tool name |
-| `--status` | | | Filter by status: `success`, `error`, `blocked`, `rejected` (shed by a concurrency limit, see [Concurrency Limits](../configuration.md#concurrency-limits--request-queueing)) |
+| `--status` | | | Filter by status: `success`, `error`, `blocked`, `rejected` (shed by a concurrency limit, see [Concurrency Limits](../configuration/config-file.md#concurrency-limits--request-queueing)) |
 | `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
 | `--request-id` | | | Filter by HTTP request ID for log correlation |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |

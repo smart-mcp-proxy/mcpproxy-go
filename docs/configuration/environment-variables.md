@@ -63,6 +63,18 @@ These variables control browser behavior for OAuth flows:
 | `CI` | CI environment detection (disables browser) | - |
 | `BROWSER` | Custom browser executable for OAuth | System default |
 
+### Concurrency Limits
+
+These override the **global aggregate** limiter only — the per-server default
+set and per-server overrides are file/API-configured. See
+[Concurrency Limits & Request Queueing](./config-file.md#concurrency-limits--request-queueing).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_MAX_CONCURRENT_REQUESTS` | Proxy-wide cap on upstream tool calls running at once. `0` disables the global limiter | `0` (off) |
+| `MCPPROXY_QUEUE_SIZE` | How many calls may wait for a global slot. `0` = shed immediately at the cap | `0` |
+| `MCPPROXY_QUEUE_TIMEOUT` | How long a call may wait before being shed, e.g. `30s` | `30s` when the limiter is active |
+
 ### Core Server Examples
 
 ```bash
@@ -116,6 +128,9 @@ The tray application doesn't read the config file directly. It launches the core
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MCPPROXY_MAX_CONCURRENT_REQUESTS` | Global aggregate cap on concurrent upstream tool calls (`0` = no global limiter) | `0` |
+| `MCPPROXY_QUEUE_SIZE` | Global limiter's bounded queue size | `0` |
+| `MCPPROXY_QUEUE_TIMEOUT` | Global limiter's absolute queue deadline (e.g. `30s`) | `30s` |
 | `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable automatic update checks (core + tray) | `false` |
 | `MCPPROXY_UPDATE_NOTIFY_ONLY` | Only notify about updates, don't auto-install (tray) | `false` |
 | `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates (core + tray) | `false` |
