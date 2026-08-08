@@ -275,6 +275,26 @@ Only the **global aggregate** scope has environment overrides
 `MCPPROXY_QUEUE_TIMEOUT`); the default set and per-server overrides are
 file/API-configured.
 
+**What is limited, and what is not.** Limits apply to *upstream tool calls* from
+every in-process origin — the `call_tool_*` variants, direct-routing mode, the
+REST `POST /api/v1/tools/call` endpoint, sandboxed `code_execution` scripts and
+activity replay. Local tool search, coalesced tool listings and health probes
+are never throttled: they are lightweight and must not be able to queue behind a
+saturated upstream. The separate-process CLI debug client is out of scope.
+
+**Observability.** Saturation is visible on the Prometheus surface:
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `mcpproxy_tool_calls_rejected_total` | counter | `server`, `reason`, `scope` | Calls shed by a limit. `reason` = `queue_full` \| `queue_timeout`; `scope` = `server` \| `global`. `server` is the call's target even for a global shed. |
+| `mcpproxy_concurrency_active` | gauge | `scope`, `server` | Calls currently holding a slot. |
+| `mcpproxy_concurrency_queue_depth` | gauge | `scope`, `server` | Calls currently waiting for a slot. |
+
+Gauges are sampled every 10s; the counter is exact. The same sheds also appear
+in the activity log (`status: rejected`), including the ones from
+`code_execution` and replay — the rejection is recorded at the limiter, below
+the MCP dispatch layer, so no origin can bypass it.
+
 ### Debug & Development
 
 ```json

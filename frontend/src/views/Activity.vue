@@ -72,6 +72,16 @@
         <div class="stat-title">Blocked</div>
         <div class="stat-value text-2xl text-warning">{{ summary.blocked_count }}</div>
       </button>
+      <button
+        type="button"
+        data-test="kpi-card-rejected"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'rejected' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filterStatus === 'rejected'"
+        @click="filterStatus = filterStatus === 'rejected' ? '' : 'rejected'"
+      >
+        <div class="stat-title">Rejected</div>
+        <div class="stat-value text-2xl text-info">{{ summary.rejected_count }}</div>
+      </button>
     </div>
 
     <!-- Filters -->
@@ -146,6 +156,7 @@
               <option value="success">Success</option>
               <option value="error">Error</option>
               <option value="blocked">Blocked</option>
+              <option value="rejected">Rejected</option>
             </select>
           </div>
 
@@ -1210,7 +1221,8 @@ const formatStatus = (status: string): string => {
   const statusLabels: Record<string, string> = {
     'success': 'Success',
     'error': 'Error',
-    'blocked': 'Blocked'
+    'blocked': 'Blocked',
+    'rejected': 'Rejected'
   }
   return statusLabels[status] || status
 }
@@ -1219,7 +1231,9 @@ const getStatusBadgeClass = (status: string): string => {
   const statusClasses: Record<string, string> = {
     'success': 'badge-success',
     'error': 'badge-error',
-    'blocked': 'badge-warning'
+    'blocked': 'badge-warning',
+    // Spec 093: shed by a concurrency limit (backpressure, not an upstream fault).
+    'rejected': 'badge-info'
   }
   return statusClasses[status] || 'badge-ghost'
 }

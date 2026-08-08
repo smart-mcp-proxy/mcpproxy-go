@@ -74,6 +74,39 @@ func (e *LimitError) Error() string {
 	}
 }
 
+// RetryAdvice is the closing sentence of every shed message. Agents read
+// tool-call error text; telling them the failure is transient is what turns a
+// rejection into a retry instead of an abandoned task (FR-010).
+const RetryAdvice = "Retry in a few seconds."
+
+// UserMessage renders the caller-facing explanation of a shed (FR-010). It is
+// the single rendering of that text: the MCP isError result, the REST 429 body
+// and the activity record all use it, so an operator never sees two different
+// descriptions of the same rejection.
+//
+// The global branch NEVER names a server: the proxy-wide limiter shed the call
+// because the whole instance is saturated, and blaming the upstream the call
+// happened to target would send an operator debugging the wrong thing.
+func (e *LimitError) UserMessage() string {
+	if e.Reason == ReasonServerUnavailable {
+		return e.Error()
+	}
+
+	cause := "its wait queue is full"
+	if e.Reason == ReasonQueueTimeout {
+		cause = "the call waited longer than the configured queue timeout"
+	}
+
+	if e.Scope == ScopeGlobal {
+		return fmt.Sprintf(
+			"mcpproxy is busy: the proxy-wide concurrency limit of %d simultaneous tool calls is saturated and %s. %s",
+			e.Limit, cause, RetryAdvice)
+	}
+	return fmt.Sprintf(
+		"Server %q is busy: it is already running its maximum of %d simultaneous tool calls and %s. %s",
+		e.Server, e.Limit, cause, RetryAdvice)
+}
+
 // Is makes errors.Is(err, ErrQueueFull|ErrQueueTimeout|ErrServerUnavailable)
 // work against the typed error.
 func (e *LimitError) Is(target error) bool {

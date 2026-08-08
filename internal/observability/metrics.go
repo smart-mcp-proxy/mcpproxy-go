@@ -46,6 +46,11 @@ type MetricsManager struct {
 
 	// Quarantine event metrics (MCP-32)
 	quarantineEvents *prometheus.CounterVec
+
+	// Concurrency limiter metrics (spec 093, FR-013)
+	toolCallsRejected *prometheus.CounterVec
+	concurrencyQueued *prometheus.GaugeVec
+	concurrencyActive *prometheus.GaugeVec
 }
 
 // NewMetricsManager creates a new metrics manager
@@ -234,6 +239,31 @@ func (mm *MetricsManager) initMetrics() {
 		},
 		[]string{"scope", "action"},
 	)
+
+	// Concurrency limiter metrics (spec 093, FR-013)
+	mm.toolCallsRejected = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_tool_calls_rejected_total",
+			Help: "Total number of tool calls shed by a concurrency limit",
+		},
+		[]string{"server", "reason", "scope"},
+	)
+
+	mm.concurrencyQueued = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "mcpproxy_concurrency_queue_depth",
+			Help: "Tool calls currently waiting for a concurrency slot",
+		},
+		[]string{"scope", "server"},
+	)
+
+	mm.concurrencyActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "mcpproxy_concurrency_active",
+			Help: "Tool calls currently holding a concurrency slot",
+		},
+		[]string{"scope", "server"},
+	)
 }
 
 // registerMetrics registers all metrics with the registry
@@ -264,6 +294,10 @@ func (mm *MetricsManager) registerMetrics() {
 		mm.oauthRefreshDuration,
 		// Quarantine event metrics (MCP-32)
 		mm.quarantineEvents,
+		// Concurrency limiter metrics (spec 093)
+		mm.toolCallsRejected,
+		mm.concurrencyQueued,
+		mm.concurrencyActive,
 	)
 
 	// Also register Go runtime metrics
@@ -421,4 +455,38 @@ func (mm *MetricsManager) RecordOAuthRefreshDuration(server, result string, dura
 // quarantined, lifted, pending, changed, approved).
 func (mm *MetricsManager) RecordQuarantineEvent(scope, action string) {
 	mm.quarantineEvents.WithLabelValues(scope, action).Inc()
+}
+
+// RecordToolCallRejected counts one call shed by a concurrency limiter (spec
+// 093 FR-013). reason is queue_full | queue_timeout; scope is server | global.
+// server is the call's TARGET even for a global shed — a rejection an operator
+// cannot attribute to a workload is not actionable.
+func (mm *MetricsManager) RecordToolCallRejected(server, reason, scope string) {
+	if mm == nil || mm.toolCallsRejected == nil {
+		return
+	}
+	mm.toolCallsRejected.WithLabelValues(server, reason, scope).Inc()
+}
+
+// SetConcurrencyDepth publishes one scope's live occupancy: how many calls are
+// running and how many are waiting for a slot (spec 093 FR-013). Sampled
+// periodically rather than written on every acquire/release — the gauges exist
+// to show sustained saturation, and per-call writes would put a metrics
+// mutex on the hot path.
+func (mm *MetricsManager) SetConcurrencyDepth(scope, server string, running, queued int) {
+	if mm == nil || mm.concurrencyQueued == nil {
+		return
+	}
+	mm.concurrencyActive.WithLabelValues(scope, server).Set(float64(running))
+	mm.concurrencyQueued.WithLabelValues(scope, server).Set(float64(queued))
+}
+
+// ResetConcurrencyDepth drops every concurrency gauge series. Called before a
+// fresh sample so a server that has been removed stops reporting a stale depth.
+func (mm *MetricsManager) ResetConcurrencyDepth() {
+	if mm == nil || mm.concurrencyQueued == nil {
+		return
+	}
+	mm.concurrencyActive.Reset()
+	mm.concurrencyQueued.Reset()
 }

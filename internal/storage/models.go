@@ -170,6 +170,14 @@ type UpstreamRecord struct {
 	// persisted so the override survives a restart and a SaveConfiguration
 	// rebuild of the JSON server list.
 	ToonOutput string `json:"toon_output,omitempty"`
+	// Spec 093: per-server concurrency-limit overrides, persisted for the same
+	// reason as the interval overrides above — SaveConfiguration rebuilds the
+	// JSON server list from these records, so a REST/UI-set limit would be
+	// wiped on the next save without them. Tri-state: nil = inherit the
+	// per-server default set, 0 = opt out, positive = override.
+	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
+	QueueSize             *int             `json:"queue_size,omitempty"`
+	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

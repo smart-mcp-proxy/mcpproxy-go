@@ -40,7 +40,7 @@ type ActivityRecord struct {
 	Arguments         map[string]interface{} `json:"arguments,omitempty" swaggertype:"object"` // Tool call arguments
 	Response          string                 `json:"response,omitempty"`                       // Tool response (potentially truncated)
 	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // True if response was truncated
-	Status            string                 `json:"status"`                                   // Result status: "success", "error", "blocked"
+	Status            string                 `json:"status"`                                   // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`                  // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`                    // Execution duration in milliseconds
 	Timestamp         time.Time              `json:"timestamp"`                                // When activity occurred
@@ -88,15 +88,20 @@ type ActivitySSEEvent struct {
 
 // ActivitySummaryResponse is the response for GET /api/v1/activity/summary
 type ActivitySummaryResponse struct {
-	Period       string              `json:"period"`                // Time period (1h, 24h, 7d, 30d)
-	TotalCount   int                 `json:"total_count"`           // Total activity count
-	SuccessCount int                 `json:"success_count"`         // Count of successful activities
-	ErrorCount   int                 `json:"error_count"`           // Count of error activities
-	BlockedCount int                 `json:"blocked_count"`         // Count of blocked activities
-	TopServers   []ActivityTopServer `json:"top_servers,omitempty"` // Top servers by activity count
-	TopTools     []ActivityTopTool   `json:"top_tools,omitempty"`   // Top tools by activity count
-	StartTime    string              `json:"start_time"`            // Start of the period (RFC3339)
-	EndTime      string              `json:"end_time"`              // End of the period (RFC3339)
+	Period       string `json:"period"`        // Time period (1h, 24h, 7d, 30d)
+	TotalCount   int    `json:"total_count"`   // Total activity count
+	SuccessCount int    `json:"success_count"` // Count of successful activities
+	ErrorCount   int    `json:"error_count"`   // Count of error activities
+	BlockedCount int    `json:"blocked_count"` // Count of blocked activities
+	// RejectedCount is the number of calls shed by a concurrency limiter before
+	// they reached an upstream (spec 093). Counted separately from errors: it is
+	// proxy backpressure, not an upstream fault, and it is the signal an
+	// operator right-sizes max_concurrent_requests against.
+	RejectedCount int                 `json:"rejected_count"`
+	TopServers    []ActivityTopServer `json:"top_servers,omitempty"` // Top servers by activity count
+	TopTools      []ActivityTopTool   `json:"top_tools,omitempty"`   // Top tools by activity count
+	StartTime     string              `json:"start_time"`            // Start of the period (RFC3339)
+	EndTime       string              `json:"end_time"`              // End of the period (RFC3339)
 }
 
 // ActivityTopServer represents a server's activity count in the summary

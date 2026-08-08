@@ -493,6 +493,29 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }
 
+// EmitActivityToolCallRejected emits an event when a concurrency limiter shed a
+// tool call (spec 093 FR-012). This is the ORIGIN-INDEPENDENT rejection seam:
+// it is invoked from the limiter observer inside the managed client, so a shed
+// is recorded identically whether the call came from an MCP tool-call variant,
+// the REST endpoint, a sandboxed code-execution script or an activity replay.
+//
+// reason is queue_full | queue_timeout; scope is server | global.
+func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, requestID, reason, scope, message string, limit int, retryAfterMs, waitedMs int64) {
+	payload := map[string]any{
+		"server_name":    serverName,
+		"tool_name":      toolName,
+		"source":         source,
+		"request_id":     requestID,
+		"reason":         reason,
+		"scope":          scope,
+		"message":        message,
+		"limit":          limit,
+		"retry_after_ms": retryAfterMs,
+		"duration_ms":    waitedMs,
+	}
+	r.publishEvent(newEvent(EventTypeActivityToolCallRejected, payload))
+}
+
 // EmitActivityPolicyDecision emits an event when a policy blocks a tool call.
 //
 // requestID is the dispatch's correlation id, and it is what lets a consumer

@@ -2172,6 +2172,36 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	if err != nil {
+		// Spec 093 FR-010/FR-011: a concurrency-limiter shed is not an upstream
+		// failure. It answers with a retry-friendly isError result (never a
+		// protocol error), preserves its typed identity for the REST 429 mapping,
+		// and is NOT recorded here — the limiter's origin-independent seam already
+		// wrote the "rejected" activity record (FR-012), so emitting an "error"
+		// record too would double-count the same call.
+		if limitErr, isShed := asShed(err); isShed {
+			shedMsg := shedMessage(limitErr)
+			toolCallRecord.Error = shedMsg
+			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+				p.logger.Warn("Failed to record shed tool call", zap.Error(storeErr))
+			}
+			p.logger.Info("Tool call shed by concurrency limiter",
+				zap.String("server", serverName),
+				zap.String("tool", actualToolName),
+				zap.String("scope", string(limitErr.Scope)),
+				zap.String("reason", string(limitErr.Reason)),
+				zap.Int("limit", limitErr.Limit))
+			recordShed(ctx, limitErr)
+
+			var shedIntentMap map[string]interface{}
+			if intent != nil {
+				shedIntentMap = intent.ToMap()
+			}
+			internalToolName := "call_tool_" + intent.OperationType
+			p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, storage.ActivityStatusRejected, shedMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, nil, shedIntentMap, "")
+
+			return shedToolResult(limitErr), nil
+		}
+
 		// Record error in tool call history
 		toolCallRecord.Error = err.Error()
 
@@ -2612,6 +2642,19 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	contentTrust := contracts.ContentTrustForTool(toolCallRecord.Annotations)
 
 	if err != nil {
+		// Spec 093 FR-010: same shed semantics on the legacy path — a retry-
+		// friendly isError result, typed identity preserved for REST, and no
+		// duplicate activity record (the limiter seam already wrote "rejected").
+		if limitErr, isShed := asShed(err); isShed {
+			shedMsg := shedMessage(limitErr)
+			toolCallRecord.Error = shedMsg
+			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+				p.logger.Warn("Failed to record shed tool call", zap.Error(storeErr))
+			}
+			recordShed(ctx, limitErr)
+			return shedToolResult(limitErr), nil
+		}
+
 		// Record error in tool call history
 		toolCallRecord.Error = err.Error()
 
@@ -5356,6 +5399,13 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
 	toolName := request.Params.Name
 
+	// Spec 093 FR-011: the REST surface must answer a concurrency-limiter shed
+	// with 429 + Retry-After, but the handlers below can only answer with an
+	// isError RESULT (the MCP contract). Install a capture box so the typed
+	// *limiter.LimitError survives to the HTTP layer instead of being flattened
+	// into a string by the IsError branch at the bottom of this function.
+	ctx, shed := withShedCapture(ctx)
+
 	// Route to the appropriate handler based on tool name
 	var result *mcp.CallToolResult
 	var err error
@@ -5396,6 +5446,11 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 
 	// Extract the actual result content from the MCP response
 	if result.IsError {
+		// A shed keeps its typed identity so the HTTP layer can map it to 429 +
+		// Retry-After (FR-011). The message is still the agent-readable one.
+		if limitErr := shed.take(); limitErr != nil {
+			return nil, &shedDispatchError{limitErr: limitErr, message: shedMessage(limitErr)}
+		}
 		if len(result.Content) > 0 {
 			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
 				return nil, fmt.Errorf("%s", textContent.Text)

@@ -55,6 +55,7 @@ type ToolUsage struct {
 	Calls          int64     `json:"calls"`
 	Errors         int64     `json:"errors"`
 	Blocked        int64     `json:"blocked"`
+	Rejected       int64     `json:"rejected"` // spec 093: shed by a concurrency limit, never executed
 	ReqBytesSum    int64     `json:"req_bytes_sum"`
 	RespBytesSum   int64     `json:"resp_bytes_sum"`
 	SizedReqCalls  int64     `json:"sized_req_calls"`  // calls with RequestBytes>0
@@ -178,9 +179,15 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 		return
 	}
 	switch {
+	case rec.Type == storage.ActivityTypeToolCall && rec.Status == storage.ActivityStatusRejected:
+		// Spec 093: shed by a concurrency limit. Like a policy block it never
+		// executed, so it must not inflate Calls, latency percentiles, byte
+		// averages or the executed-call timeline.
+		a.applyRejected(rec)
+		return
 	case rec.Type == storage.ActivityTypeToolCall:
 		// folded below
-	case rec.Type == storage.ActivityTypePolicyDecision && rec.Status == "blocked":
+	case rec.Type == storage.ActivityTypePolicyDecision && rec.Status == storage.ActivityStatusBlocked:
 		a.applyBlocked(rec)
 		return
 	default:
@@ -221,6 +228,17 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 func (a *UsageAggregate) applyBlocked(rec *storage.ActivityRecord) {
 	tu := a.tool(rec.ServerName, rec.ToolName)
 	tu.Blocked++
+	if rec.Timestamp.After(tu.LastUsed) {
+		tu.LastUsed = rec.Timestamp
+	}
+}
+
+// applyRejected folds a concurrency-limiter shed into the per-tool Rejected
+// counter (spec 093 FR-012). Same shape as applyBlocked: the tool never ran, so
+// nothing but Rejected and LastUsed moves.
+func (a *UsageAggregate) applyRejected(rec *storage.ActivityRecord) {
+	tu := a.tool(rec.ServerName, rec.ToolName)
+	tu.Rejected++
 	if rec.Timestamp.After(tu.LastUsed) {
 		tu.LastUsed = rec.Timestamp
 	}

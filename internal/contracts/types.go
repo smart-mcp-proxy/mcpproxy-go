@@ -383,6 +383,7 @@ type UsageToolStat struct {
 	Errors         int64     `json:"errors"`
 	ErrorRate      float64   `json:"error_rate"`
 	Blocked        int64     `json:"blocked"`
+	Rejected       int64     `json:"rejected"` // spec 093: shed by a concurrency limit; never executed, so excluded from calls/latency
 	TotalRespBytes int64     `json:"total_resp_bytes"`
 	AvgRespBytes   *int64    `json:"avg_resp_bytes"` // null when sized_calls == 0 (only legacy 0-byte calls)
 	TotalReqBytes  int64     `json:"total_req_bytes"`

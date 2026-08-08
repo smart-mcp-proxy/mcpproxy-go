@@ -94,6 +94,28 @@ export interface HealthStatus {
 
 `)
 
+	// Activity status vocabulary - generated from internal/storage/activity_models.go
+	// (ValidActivityStatuses). Closed set: every consumer switches on it, so a new
+	// status has to be added in Go and regenerated here.
+	sb.WriteString(`// Activity status vocabulary - generated from internal/storage/activity_models.go
+export const ActivityStatusSuccess = 'success' as const;
+export const ActivityStatusError = 'error' as const;
+export const ActivityStatusBlocked = 'blocked' as const;
+/** Spec 093: shed by a concurrency limit before reaching the upstream. */
+export const ActivityStatusRejected = 'rejected' as const;
+export type ActivityStatusValue =
+  | typeof ActivityStatusSuccess
+  | typeof ActivityStatusError
+  | typeof ActivityStatusBlocked
+  | typeof ActivityStatusRejected;
+
+/** Machine-readable cause of a spec-093 rejection (activity metadata rejection_reason). */
+export type RejectionReason = 'queue_full' | 'queue_timeout';
+/** Limiter tier that shed the call (activity metadata rejection_scope). */
+export type RejectionScope = 'server' | 'global';
+
+`)
+
 	// Server types
 	sb.WriteString(`export interface Server {
   id: string;

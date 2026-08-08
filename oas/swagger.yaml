@@ -1229,7 +1229,7 @@ components:
         source:
           $ref: '#/components/schemas/contracts.ActivitySource'
         status:
-          description: 'Result status: "success", "error", "blocked"'
+          description: 'Result status: "success", "error", "blocked", "rejected"'
           type: string
         timestamp:
           description: When activity occurred
@@ -1264,6 +1264,13 @@ components:
         period:
           description: Time period (1h, 24h, 7d, 30d)
           type: string
+        rejected_count:
+          description: |-
+            RejectedCount is the number of calls shed by a concurrency limiter before
+            they reached an upstream (spec 093). Counted separately from errors: it is
+            proxy backpressure, not an upstream fault, and it is the signal an
+            operator right-sizes max_concurrent_requests against.
+          type: integer
         start_time:
           description: Start of the period (RFC3339)
           type: string
@@ -2616,6 +2623,10 @@ components:
           type: integer
         p95_ms:
           type: integer
+        rejected:
+          description: 'spec 093: shed by a concurrency limit; never executed, so
+            excluded from calls/latency'
+          type: integer
         server:
           type: string
         sized_calls:
@@ -3140,6 +3151,7 @@ paths:
           - success
           - error
           - blocked
+          - rejected
           type: string
       - description: Filter by intent operation type (Spec 018)
         in: query
@@ -3518,6 +3530,7 @@ paths:
           - success
           - error
           - blocked
+          - rejected
           type: string
       - description: Top-N tools by sort key; remainder folded into 'other' (default
           20)
@@ -6530,6 +6543,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (invalid payload or missing tool name)
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Shed by a concurrency limit (Retry-After header carries the
+            wait hint)
         "500":
           content:
             application/json:

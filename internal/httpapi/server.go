@@ -36,6 +36,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
 const (
@@ -4333,6 +4334,7 @@ func deepMergeJSON(base, patch map[string]interface{}) {
 // @Param request body object{tool_name=string,arguments=object} true "Tool call request with tool name and arguments"
 // @Success 200 {object} contracts.SuccessResponse "Tool call result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
+// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit (Retry-After header carries the wait hint)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
 // @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
@@ -4363,6 +4365,20 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
 	if err != nil {
+		// Spec 093 FR-011: a concurrency-limiter shed is backpressure, not a
+		// server fault — answer 429 with a Retry-After derived from the shedding
+		// scope's effective queue_timeout so a client can back off correctly.
+		var limitErr *limiter.LimitError
+		if errors.As(err, &limitErr) &&
+			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
+			s.logger.Warnw("Tool call shed by concurrency limiter",
+				"tool", request.ToolName,
+				"scope", string(limitErr.Scope),
+				"reason", string(limitErr.Reason))
+			s.writeError(w, r, http.StatusTooManyRequests, limitErr.UserMessage())
+			return
+		}
 		s.logger.Error("Failed to call tool", "tool", request.ToolName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to call tool: %v", err))
 		return

@@ -54,6 +54,47 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeCredentialBroker),
 }
 
+// Activity status vocabulary. Activity status is a CLOSED vocabulary: every
+// consumer (filters, summaries, usage aggregation, exports, Web UI badges)
+// switches on these values, so a new status has to be threaded through all of
+// them — see spec 093 FR-012.
+const (
+	// ActivityStatusSuccess is a call the upstream answered normally.
+	ActivityStatusSuccess = "success"
+	// ActivityStatusError is a call that failed (transport, upstream error, or
+	// an isError:true answer).
+	ActivityStatusError = "error"
+	// ActivityStatusBlocked is a call a policy prevented from running.
+	ActivityStatusBlocked = "blocked"
+	// ActivityStatusRejected is a call shed by a concurrency limiter before it
+	// ever reached the upstream (spec 093). Distinct from "error" on purpose:
+	// nothing went wrong upstream, the proxy applied backpressure. The record's
+	// metadata carries rejection_reason (queue_full | queue_timeout) and
+	// rejection_scope (server | global).
+	ActivityStatusRejected = "rejected"
+)
+
+// ValidActivityStatuses is the closed status vocabulary, for filter validation
+// and API documentation.
+var ValidActivityStatuses = []string{
+	ActivityStatusSuccess,
+	ActivityStatusError,
+	ActivityStatusBlocked,
+	ActivityStatusRejected,
+}
+
+// Metadata keys carried by an ActivityStatusRejected record (spec 093 FR-012).
+const (
+	// MetadataKeyRejectionReason is "queue_full" or "queue_timeout".
+	MetadataKeyRejectionReason = "rejection_reason"
+	// MetadataKeyRejectionScope is "server" or "global".
+	MetadataKeyRejectionScope = "rejection_scope"
+	// MetadataKeyRejectionLimit is the cap that was in force in that scope.
+	MetadataKeyRejectionLimit = "rejection_limit"
+	// MetadataKeyRejectionRetryAfterMs is the Retry-After hint in milliseconds.
+	MetadataKeyRejectionRetryAfterMs = "rejection_retry_after_ms"
+)
+
 // ActivitySource indicates how the activity was triggered
 type ActivitySource string
 
@@ -78,7 +119,7 @@ type ActivityRecord struct {
 	Arguments         map[string]interface{} `json:"arguments,omitempty"`          // Tool call arguments
 	Response          string                 `json:"response,omitempty"`           // Tool response (potentially truncated)
 	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // True if response was truncated
-	Status            string                 `json:"status"`                       // Result status: "success", "error", "blocked"
+	Status            string                 `json:"status"`                       // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`      // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`        // Execution duration in milliseconds
 	Timestamp         time.Time              `json:"timestamp"`                    // When activity occurred
@@ -124,7 +165,7 @@ type ActivityFilter struct {
 	Server     string    // Filter by server name
 	Tool       string    // Filter by tool name
 	SessionID  string    // Filter by MCP transport session
-	Status     string    // Filter by status (success/error/blocked)
+	Status     string    // Filter by status (success/error/blocked/rejected)
 	StartTime  time.Time // Activities after this time
 	EndTime    time.Time // Activities before this time
 	Limit      int       // Max records to return (default 50, max 100)

@@ -357,6 +357,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// signals of a reconnect storm without noticeably delaying the result.
 	rt.scanNotify = newScanNotifyDebouncer(rt, 750*time.Millisecond)
 
+	// Spec 093 FR-012/FR-013: origin-independent shed seam. Installed here (not
+	// in the MCP dispatch layer) so code_execution and activity replay are
+	// covered by construction.
+	rt.installRejectionObserver()
+
 	return rt, nil
 }
 
@@ -1220,9 +1225,18 @@ func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*
 		return nil, fmt.Errorf("server not found: %s", originalCall.ServerName)
 	}
 
-	// Call the tool with modified arguments
-	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.CallToolTimeout.Duration())
-	defer cancel()
+	// Call the tool with modified arguments.
+	//
+	// Spec 093 FR-005: NO execution-timeout context is created here. Replay used
+	// to wrap the call in a CallToolTimeout context before dispatch, which meant
+	// time spent waiting in a concurrency-limiter queue was subtracted from the
+	// call's execution budget — a replay that queued for 20s would get 20s less
+	// upstream time than the same call made from an agent. The execution timeout
+	// is applied by core.Client.CallTool AFTER admission, so passing a plain
+	// context gives replay the same post-admission budget as every other origin.
+	// Cancellation still works: the caller's context governs the queue wait, and
+	// the deeper timeout governs execution.
+	ctx := context.Background()
 
 	startTime := time.Now()
 	result, callErr := client.CallTool(ctx, originalCall.ToolName, callArgs)

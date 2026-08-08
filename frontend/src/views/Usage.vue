@@ -20,6 +20,7 @@
         <option value="success">Success</option>
         <option value="error">Errors</option>
         <option value="blocked">Blocked</option>
+        <option value="rejected">Rejected</option>
       </select>
 
       <select v-model="sort" class="select select-sm select-bordered" data-test="usage-sort" @change="reload">
