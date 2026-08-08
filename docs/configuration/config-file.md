@@ -196,34 +196,6 @@ Full reference — validation rules, metrics, and which origins are limited —
 lives in [`docs/configuration.md`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
 in the repository.
 
-### Concurrency Limits & Request Queueing
-
-Optional, opt-in protection for upstream servers against bursts of concurrent
-tool calls (multi-user or agent-fan-out deployments). All values are
-hot-reloadable. Everything is off by default — with no limits configured,
-behavior is unchanged.
-
-Three scopes, each carrying the same three settings (`max_concurrent_requests`,
-`queue_size`, `queue_timeout`):
-
-| Scope | Where | Meaning |
-|-------|-------|---------|
-| Global aggregate | top-level keys | One proxy-wide cap across all servers. `max_concurrent_requests: 0` (default) disables it. |
-| Per-server defaults | `server_concurrency_defaults` object | Blanket values inherited by every server that does not override them. |
-| Per-server overrides | fields on each `mcpServers` entry | Tri-state per setting: omit = inherit the defaults; explicit `0` = disable that setting for this server; positive = override. |
-
-A server's effective concurrency is bounded by **both** its resolved per-server
-limit and the global limiter. Excess calls wait in a bounded FIFO queue
-(`queue_size`); when the queue is full or a queued call exceeds `queue_timeout`
-(one absolute deadline, default 30s where a limiter is active), the call is
-shed: MCP callers get a retryable `isError` tool result, the REST API returns
-`429` with `Retry-After`, and the activity log records status `rejected`.
-A useful starting point for fragile stdio servers is `max_concurrent_requests: 5`.
-
-Full semantics (occupancy accounting across reloads, validation rules, metrics)
-are documented in the repo's
-[configuration reference](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md).
-
 ### MCP Servers
 
 See [Upstream Servers](/configuration/upstream-servers) for detailed server configuration.

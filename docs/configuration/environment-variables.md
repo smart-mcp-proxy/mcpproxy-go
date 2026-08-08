@@ -128,9 +128,6 @@ The tray application doesn't read the config file directly. It launches the core
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCPPROXY_MAX_CONCURRENT_REQUESTS` | Global aggregate cap on concurrent upstream tool calls (`0` = no global limiter) | `0` |
-| `MCPPROXY_QUEUE_SIZE` | Global limiter's bounded queue size | `0` |
-| `MCPPROXY_QUEUE_TIMEOUT` | Global limiter's absolute queue deadline (e.g. `30s`) | `30s` |
 | `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable automatic update checks (core + tray) | `false` |
 | `MCPPROXY_UPDATE_NOTIFY_ONLY` | Only notify about updates, don't auto-install (tray) | `false` |
 | `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates (core + tray) | `false` |
