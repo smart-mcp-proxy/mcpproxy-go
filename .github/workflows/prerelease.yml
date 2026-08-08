@@ -193,6 +193,13 @@ jobs:
           # Defensive CGO flags to ensure proper deployment target
           CGO_CFLAGS: "-mmacosx-version-min=13.0"
           CGO_LDFLAGS: "-mmacosx-version-min=13.0"
+          # Spec 092 FR-011/FR-014: pin the Sparkle EdDSA PUBLIC key so RC builds
+          # can consume the beta feed. Same secret as the stable pipeline — one
+          # keypair, two channels; the CHANNEL is what separates them, not the key.
+          # No secret ⇒ scripts/build-swift-app.sh leaves the placeholder and the
+          # updater stays off.
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
+          SPARKLE_FEED_URL: ${{ vars.SPARKLE_FEED_URL }}
         run: |
           # For prerelease, determine version differently
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
@@ -698,6 +705,73 @@ jobs:
 
           echo "✅ Notarization and stapling complete"
 
+      # Spec 092 FR-014 — RC builds get the same enclosure the stable pipeline
+      # produces. See the identical step in release.yml for why `ditto -c -k
+      # --sequesterRsrc --keepParent` and why the .app is notarized and stapled
+      # separately from the PKG. Signing step order is untouched.
+      #
+      # Only TAGGED RCs produce an enclosure: this workflow also runs on pushes to
+      # `next`, and a branch build has no release to attach a feed to.
+      - name: Build Sparkle enclosure (macOS)
+        if: matrix.goos == 'darwin' && startsWith(github.ref, 'refs/tags/')
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p sparkle-enclosure
+
+          if [ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
+            echo "ℹ️  SPARKLE_ED_PRIVATE_KEY is not configured — skipping the Sparkle enclosure."
+            exit 0
+          fi
+
+          if [ -z "${SWIFT_APP_PATH:-}" ] || [ ! -d "${SWIFT_APP_PATH}" ]; then
+            echo "❌ SWIFT_APP_PATH is not a bundle: '${SWIFT_APP_PATH:-<unset>}'"
+            exit 1
+          fi
+
+          VERSION=${GITHUB_REF#refs/tags/}
+          ENCLOSURE="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.app.zip"
+          NOTARIZE_ZIP="sparkle-notarize-${{ matrix.goarch }}.zip"
+
+          ditto -c -k --sequesterRsrc --keepParent "${SWIFT_APP_PATH}" "${NOTARIZE_ZIP}"
+
+          SUBMISSION_OUTPUT=$(xcrun notarytool submit "${NOTARIZE_ZIP}" \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_APP_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --wait \
+            --output-format json)
+          STATUS=$(echo "${SUBMISSION_OUTPUT}" | jq -r '.status // empty')
+          if [ "${STATUS}" != "Accepted" ]; then
+            echo "❌ App-bundle notarization did not succeed"
+            echo "Response: ${SUBMISSION_OUTPUT}"
+            exit 1
+          fi
+
+          xcrun stapler staple "${SWIFT_APP_PATH}"
+          xcrun stapler validate "${SWIFT_APP_PATH}"
+
+          ditto -c -k --sequesterRsrc --keepParent "${SWIFT_APP_PATH}" "sparkle-enclosure/${ENCLOSURE}"
+          rm -f "${NOTARIZE_ZIP}"
+
+          VERIFY_DIR=$(mktemp -d)
+          ditto -x -k "sparkle-enclosure/${ENCLOSURE}" "${VERIFY_DIR}"
+          codesign --verify --deep --strict --verbose=2 "${VERIFY_DIR}/MCPProxy.app"
+          xcrun stapler validate "${VERIFY_DIR}/MCPProxy.app"
+          rm -rf "${VERIFY_DIR}"
+
+          echo "✅ Sparkle enclosure ready: ${ENCLOSURE}"
+
+      - name: Upload Sparkle enclosure artifact
+        if: matrix.goos == 'darwin' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sparkle-enclosure-${{ matrix.goarch }}
+          path: sparkle-enclosure/*
+          if-no-files-found: ignore
+
       - name: Cleanup isolated keychain (macOS)
         if: matrix.goos == 'darwin' && always()
         run: |
@@ -951,3 +1025,110 @@ jobs:
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Spec 092 FR-014 — the RC (beta) update feed.
+  #
+  # Same shape as release.yml's `sparkle-appcast`, with one difference that IS
+  # the requirement: `--channel beta`. Sparkle only offers a channel-tagged item
+  # to a client that lists that channel in `allowedChannelsForUpdater:`, and the
+  # tray lists "beta" only when the core reports update_policy.channel == "rc"
+  # (see UpdateChannel.allowedSparkleChannels). That is what keeps stable users
+  # from ever being offered an RC.
+  #
+  # TODO(maintainer decision #1 / #8): the beta feed needs its own stable URL —
+  # the GitHub `releases/latest/download/...` shortcut resolves to the newest
+  # NON-prerelease release, so it cannot serve this feed. Until the website repo
+  # hosts appcast-beta-<arch>.xml, the files are attached to the RC release and
+  # exported as the `sparkle-appcast-beta` artifact.
+  #
+  # NOT YET DONE (FR-014's other half): this pipeline still publishes no
+  # checksums.txt and no cosign bundle, so RC tarballs remain guidance-only for
+  # `mcpproxy update` — see the note in the tarball-stamp block above.
+  sparkle-appcast:
+    needs: [release]
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Download Sparkle enclosures
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: sparkle-enclosure-*
+          path: enclosures
+
+      - name: Generate and publish the beta appcast
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          # Keep in step with Package.resolved (Sparkle 2.9.3).
+          SPARKLE_VERSION: "2.9.3"
+        run: |
+          set -euo pipefail
+
+          mkdir -p appcast-out
+
+          if [ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
+            echo "::notice::SPARKLE_ED_PRIVATE_KEY is not configured — no beta appcast generated."
+            exit 0
+          fi
+          if [ -z "$(find enclosures -name '*.app.zip' -print -quit 2>/dev/null)" ]; then
+            echo "::notice::No Sparkle enclosures were produced — no beta appcast generated."
+            exit 0
+          fi
+
+          curl -fsSL -o sparkle-tools.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          mkdir -p sparkle-tools
+          tar xf sparkle-tools.tar.xz -C sparkle-tools
+          GENERATE_APPCAST=$(find sparkle-tools -name generate_appcast -type f -perm +111 | head -1)
+          if [ -z "${GENERATE_APPCAST}" ]; then
+            echo "❌ generate_appcast not found in the Sparkle ${SPARKLE_VERSION} tarball"
+            exit 1
+          fi
+
+          PREFIX="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/"
+
+          for ARCH in arm64 amd64; do
+            SRC=$(find enclosures -name "*-darwin-${ARCH}.app.zip" | head -1)
+            if [ -z "${SRC}" ]; then
+              echo "::warning::No ${ARCH} enclosure — skipping its beta feed."
+              continue
+            fi
+            WORK="appcast-work-${ARCH}"
+            rm -rf "${WORK}"
+            mkdir -p "${WORK}"
+            cp "${SRC}" "${WORK}/"
+
+            echo "=== Generating appcast-beta-${ARCH}.xml from $(basename "${SRC}") ==="
+            echo "${SPARKLE_ED_PRIVATE_KEY}" | "${GENERATE_APPCAST}" \
+              --ed-key-file - \
+              --channel beta \
+              --download-url-prefix "${PREFIX}" \
+              --link "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+              -o "appcast-out/appcast-beta-${ARCH}.xml" \
+              "${WORK}"
+          done
+
+          if [ -z "$(ls -A appcast-out 2>/dev/null)" ]; then
+            echo "❌ generate_appcast produced no feeds"
+            exit 1
+          fi
+
+          for f in appcast-out/*.xml; do
+            echo "--- ${f} ---"
+            cat "${f}"
+            grep -q 'sparkle:edSignature' "${f}" || { echo "❌ ${f} has no EdDSA signature"; exit 1; }
+            # The channel tag is the whole point of this job: without it every
+            # stable user would be offered an RC (FR-014).
+            grep -q '<sparkle:channel>beta</sparkle:channel>' "${f}" \
+              || { echo "❌ ${f} is not tagged as the beta channel"; exit 1; }
+          done
+
+          gh release upload "${GITHUB_REF_NAME}" appcast-out/*.xml --clobber
+
+      - name: Upload beta appcast artifact for the website repo
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sparkle-appcast-beta
+          path: appcast-out/*
+          if-no-files-found: ignore
