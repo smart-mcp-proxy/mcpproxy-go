@@ -74,6 +74,7 @@ const sidebars = {
         'features/tool-scanner',
         'features/search-discovery',
         'features/version-updates',
+        'features/auto-update',
       ],
     },
     {
