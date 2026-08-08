@@ -1264,7 +1264,16 @@ actor CoreProcessManager {
             }
         }
 
-        // 3. Managed binary in Application Support
+        // 3. The LEGACY staged copy in Application Support, written by the old
+        //    Go tray (`cmd/mcpproxy-tray`'s ensureManagedCoreBinary).
+        //
+        //    Spec 092 FR-030: it is checked AFTER the bundled core above, so it
+        //    can never shadow it — this branch is reachable only for a build
+        //    with no bundled core at all, where there is nothing to shadow. It
+        //    stays in the list because that dev/legacy case still needs a core.
+        //    The staleness of the file itself is handled separately, by
+        //    `StagedCoreBinary.refreshIfStale()`; see that file's header for the
+        //    full path analysis and for why it refreshes rather than deletes.
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let managedPath = "\(home)/Library/Application Support/mcpproxy/bin/mcpproxy"
         if fm.isExecutableFile(atPath: managedPath) {

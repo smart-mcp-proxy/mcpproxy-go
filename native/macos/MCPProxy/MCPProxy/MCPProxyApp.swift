@@ -722,6 +722,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
+        // Spec 092 FR-030: bring the legacy staged core copy up to date if it
+        // is provably older than the bundled one. Detached because it can cost
+        // two subprocesses and a ~30 MB copy, and nothing in the startup path
+        // depends on it — this tray resolves the bundled core first (see
+        // StagedCoreBinary's header for the full path analysis).
+        Task.detached(priority: .utility) {
+            StagedCoreBinary.refreshIfStale()
+        }
+
         let manager = CoreProcessManager(
             appState: appState,
             notificationService: notificationService,
