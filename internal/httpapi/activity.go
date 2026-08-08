@@ -88,8 +88,9 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.RequestID = requestID
 	}
 
-	// Include call_tool_* internal tool calls (default: exclude successful ones)
-	// Set include_call_tool=true to show all internal tool calls including successful call_tool_*
+	// Include call_tool_* internal tool calls (default: exclude the ones a
+	// tool_call record already covers — successful and concurrency-rejected).
+	// Set include_call_tool=true to show every internal tool call.
 	if q.Get("include_call_tool") == "true" {
 		filter.ExcludeCallToolSuccess = false
 	}
@@ -131,7 +132,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param tool query string false "Filter by tool name"
 // @Param session_id query string false "Filter by MCP transport session ID"
 // @Param work_session_id query string false "Filter by work session (one client, one project, across reconnects)"
-// @Param status query string false "Filter by status" Enums(success, error, blocked)
+// @Param status query string false "Filter by status" Enums(success, error, blocked, rejected)
 // @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
 // @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
 // @Param include_call_tool query bool false "Include successful call_tool_* internal tool calls (default: false, excluded to avoid duplicates)"
@@ -634,19 +635,24 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Calculate summary statistics
-	var totalCount, successCount, errorCount, blockedCount int
+	var totalCount, successCount, errorCount, blockedCount, rejectedCount int
 	serverCounts := make(map[string]int)
 	toolCounts := make(map[string]int)
 
 	for _, a := range activities {
 		totalCount++
 		switch a.Status {
-		case "success":
+		case storage.ActivityStatusSuccess:
 			successCount++
-		case "error":
+		case storage.ActivityStatusError:
 			errorCount++
-		case "blocked":
+		case storage.ActivityStatusBlocked:
 			blockedCount++
+		case storage.ActivityStatusRejected:
+			// Spec 093: shed by a concurrency limit — proxy backpressure, kept
+			// out of the error bucket so a saturated limiter does not read as an
+			// upstream outage.
+			rejectedCount++
 		}
 
 		// Count by server
@@ -668,15 +674,16 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	topTools := buildTopTools(toolCounts, 5)
 
 	response := contracts.ActivitySummaryResponse{
-		Period:       period,
-		TotalCount:   totalCount,
-		SuccessCount: successCount,
-		ErrorCount:   errorCount,
-		BlockedCount: blockedCount,
-		TopServers:   topServers,
-		TopTools:     topTools,
-		StartTime:    startTime.Format(time.RFC3339),
-		EndTime:      endTime.Format(time.RFC3339),
+		Period:        period,
+		TotalCount:    totalCount,
+		SuccessCount:  successCount,
+		ErrorCount:    errorCount,
+		BlockedCount:  blockedCount,
+		RejectedCount: rejectedCount,
+		TopServers:    topServers,
+		TopTools:      topTools,
+		StartTime:     startTime.Format(time.RFC3339),
+		EndTime:       endTime.Format(time.RFC3339),
 	}
 
 	s.writeSuccess(w, response)
@@ -775,7 +782,7 @@ type usageParams struct {
 	window string // "24h" | "7d" | "all"
 	server string
 	tool   string
-	status string // "" | "success" | "error" | "blocked"
+	status string // "" | "success" | "error" | "blocked" | "rejected"
 	top    int
 	sort   string // "calls" | "resp_bytes" | "error_rate" | "p95"
 }
@@ -831,9 +838,12 @@ func parseUsageParams(r *http.Request) (usageParams, error) {
 
 	if p.status != "" {
 		switch p.status {
-		case "success", "error", "blocked":
+		// Spec 093: "rejected" (shed by a concurrency limit) is part of the
+		// activity status vocabulary, so the usage filter must accept it —
+		// usageMatchesStatus already knows how to answer it.
+		case "success", "error", "blocked", "rejected":
 		default:
-			return p, fmt.Errorf("invalid status %q (expected success, error, or blocked)", p.status)
+			return p, fmt.Errorf("invalid status %q (expected success, error, blocked, or rejected)", p.status)
 		}
 	}
 
@@ -857,7 +867,7 @@ func parseUsageParams(r *http.Request) (usageParams, error) {
 // @Param window query string false "Time window for timeline + tool-list membership" Enums(24h, 7d, all)
 // @Param server query string false "Filter to one server"
 // @Param tool query string false "Filter to one tool"
-// @Param status query string false "Filter to tools with activity of this status" Enums(success, error, blocked)
+// @Param status query string false "Filter to tools with activity of this status" Enums(success, error, blocked, rejected)
 // @Param top query int false "Top-N tools by sort key; remainder folded into 'other' (default 20)"
 // @Param sort query string false "Ranking key for the per-tool list" Enums(calls, resp_bytes, error_rate, p95)
 // @Success 200 {object} contracts.APIResponse{data=contracts.UsageAggregateResponse}
@@ -990,6 +1000,8 @@ func usageMatchesStatus(tu *internalRuntime.ToolUsage, status string) bool {
 		return tu.Errors > 0
 	case "blocked":
 		return tu.Blocked > 0
+	case "rejected":
+		return tu.Rejected > 0
 	case "success":
 		return tu.Calls-tu.Errors > 0
 	default:
@@ -1006,6 +1018,7 @@ func usageToolStat(tu *internalRuntime.ToolUsage) contracts.UsageToolStat {
 		Errors:         tu.Errors,
 		ErrorRate:      tu.ErrorRate(),
 		Blocked:        tu.Blocked,
+		Rejected:       tu.Rejected,
 		TotalRespBytes: tu.RespBytesSum,
 		TotalReqBytes:  tu.ReqBytesSum,
 		SizedCalls:     tu.SizedRespCalls,

@@ -23,14 +23,18 @@ const typeIcons: Record<string, string> = {
 const statusLabels: Record<string, string> = {
   'success': 'Success',
   'error': 'Error',
-  'blocked': 'Blocked'
+  'blocked': 'Blocked',
+  // Spec 093: shed by a concurrency limit before reaching the upstream.
+  'rejected': 'Rejected'
 }
 
 // Status badge CSS classes (DaisyUI)
 const statusClasses: Record<string, string> = {
   'success': 'badge-success',
   'error': 'badge-error',
-  'blocked': 'badge-warning'
+  'blocked': 'badge-warning',
+  // Distinct from both error (upstream fault) and blocked (policy): backpressure.
+  'rejected': 'badge-info'
 }
 
 // Intent operation type icons

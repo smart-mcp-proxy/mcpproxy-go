@@ -89,6 +89,16 @@ type Server struct {
 	// and omitted when empty — clients that pre-date this treat them as absent.
 	SourceRegistryID         string `json:"source_registry_id,omitempty"`
 	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty"`
+	// Spec 093 (GH #955) — per-server concurrency overrides, scope (c) of
+	// FR-020. Each setting is tri-state: nil (omitted) means "inherit
+	// server_concurrency_defaults", 0 disables that setting for this server,
+	// positive overrides it. Surfaced on the GET path so a caller can read back
+	// what it set; PATCH/POST accept them via AddServerRequest. The effective
+	// concurrency for a server is additionally bounded by the global aggregate
+	// limiter, which is NOT an inheritance source for these fields.
+	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
+	QueueSize             *int             `json:"queue_size,omitempty"`
+	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty" swaggertype:"string"`
 }
 
 // Diagnostic is the REST-API representation of a classified server failure.
@@ -383,6 +393,7 @@ type UsageToolStat struct {
 	Errors         int64     `json:"errors"`
 	ErrorRate      float64   `json:"error_rate"`
 	Blocked        int64     `json:"blocked"`
+	Rejected       int64     `json:"rejected"` // spec 093: shed by a concurrency limit; never executed, so excluded from calls/latency
 	TotalRespBytes int64     `json:"total_resp_bytes"`
 	AvgRespBytes   *int64    `json:"avg_resp_bytes"` // null when sized_calls == 0 (only legacy 0-byte calls)
 	TotalReqBytes  int64     `json:"total_req_bytes"`

@@ -511,6 +511,7 @@ export interface UsageToolStat {
   errors: number
   error_rate: number
   blocked: number
+  rejected: number                // Spec 093: shed by a concurrency limit; never executed
   total_resp_bytes: number
   avg_resp_bytes: number | null   // null when only legacy 0-byte calls exist
   total_req_bytes: number
@@ -548,7 +549,7 @@ export interface UsageAggregateResponse {
 
 export type UsageWindow = '24h' | '7d' | 'all'
 export type UsageSort = 'calls' | 'resp_bytes' | 'error_rate' | 'p95'
-export type UsageStatus = 'success' | 'error' | 'blocked'
+export type UsageStatus = 'success' | 'error' | 'blocked' | 'rejected'
 
 export interface ToolCallRecord {
   id: string
@@ -726,7 +727,17 @@ export type ActivityType =
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 
-export type ActivityStatus = 'success' | 'error' | 'blocked'
+/**
+ * Closed activity-status vocabulary. 'rejected' (Spec 093) means the call was
+ * shed by a concurrency limit before it reached the upstream — proxy
+ * backpressure, not an upstream failure.
+ */
+export type ActivityStatus = 'success' | 'error' | 'blocked' | 'rejected'
+
+/** Spec 093: machine-readable cause of a rejection (activity metadata). */
+export type RejectionReason = 'queue_full' | 'queue_timeout'
+/** Spec 093: which limiter tier shed the call (activity metadata). */
+export type RejectionScope = 'server' | 'global'
 
 export interface ActivityRecord {
   id: string
@@ -780,6 +791,7 @@ export interface ActivitySummaryResponse {
   success_count: number
   error_count: number
   blocked_count: number
+  rejected_count: number
   top_servers?: ActivityTopServer[]
   top_tools?: ActivityTopTool[]
   start_time: string

@@ -111,3 +111,31 @@ func TestApplyMetricEvent_IgnoresUnrelatedAndMalformed(t *testing.T) {
 	applyMetricEvent(mm, runtime.Event{Type: runtime.EventTypeServersChanged, Payload: map[string]any{"stats": "not-a-struct"}})
 	applyMetricEvent(mm, runtime.Event{Type: runtime.EventTypeActivityQuarantineChange, Payload: nil})
 }
+
+// TestRecordRejectionMetric_CountsSynchronously is the FR-013 counting
+// contract. The counter is incremented by the limiter's own observer, not by an
+// event-bus subscriber: publishEvent drops events once a subscriber's channel
+// fills, which under a burst of sheds would lose exactly the increments that
+// make the burst visible.
+func TestRecordRejectionMetric_CountsSynchronously(t *testing.T) {
+	mm := observability.NewMetricsManager(zap.NewNop().Sugar())
+	sink := recordRejectionMetric(mm)
+
+	sink("analytics-db", "queue_full", "server")
+	sink("analytics-db", "queue_full", "server")
+	sink("analytics-db", "", "") // malformed labels must still count
+
+	reg := mm.Registry()
+	assert.InDelta(t, 2.0, metricValue(t, reg, "mcpproxy_tool_calls_rejected_total",
+		map[string]string{"server": "analytics-db", "reason": "queue_full", "scope": "server"}), 1e-9)
+	assert.InDelta(t, 1.0, metricValue(t, reg, "mcpproxy_tool_calls_rejected_total",
+		map[string]string{"server": "analytics-db", "reason": "unknown", "scope": "unknown"}), 1e-9)
+
+	// The bus must NOT also count the shed, or every rejection is counted twice.
+	applyMetricEvent(mm, runtime.Event{
+		Type:    runtime.EventTypeActivityToolCallRejected,
+		Payload: map[string]any{"server_name": "analytics-db", "reason": "queue_full", "scope": "server"},
+	})
+	assert.InDelta(t, 2.0, metricValue(t, reg, "mcpproxy_tool_calls_rejected_total",
+		map[string]string{"server": "analytics-db", "reason": "queue_full", "scope": "server"}), 1e-9)
+}

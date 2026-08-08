@@ -138,6 +138,26 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "tool_discovery_interval")
 	}
 
+	// Concurrency limits (spec 093 / GH #955 — hot-reloadable, FR-021). The
+	// limiter registry re-publishes one generation from the new snapshot on
+	// apply; occupancy is shared across generations, so running calls are never
+	// interrupted. These clauses cover the GLOBAL aggregate limiter and the
+	// per-server default set — per-server overrides are already covered by the
+	// Servers DeepEqual above. Without them a lone limit edit computes empty
+	// ChangedFields and is swallowed as "no changes detected".
+	if !reflect.DeepEqual(oldCfg.MaxConcurrentRequests, newCfg.MaxConcurrentRequests) {
+		result.ChangedFields = append(result.ChangedFields, "max_concurrent_requests")
+	}
+	if !reflect.DeepEqual(oldCfg.QueueSize, newCfg.QueueSize) {
+		result.ChangedFields = append(result.ChangedFields, "queue_size")
+	}
+	if !reflect.DeepEqual(oldCfg.QueueTimeout, newCfg.QueueTimeout) {
+		result.ChangedFields = append(result.ChangedFields, "queue_timeout")
+	}
+	if !reflect.DeepEqual(oldCfg.ServerConcurrencyDefaults, newCfg.ServerConcurrencyDefaults) {
+		result.ChangedFields = append(result.ChangedFields, "server_concurrency_defaults")
+	}
+
 	// Logging configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
 		result.ChangedFields = append(result.ChangedFields, "logging")

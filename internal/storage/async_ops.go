@@ -207,6 +207,9 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		ToolDiscoveryInterval:    serverConfig.ToolDiscoveryInterval,
 		InitTimeout:              serverConfig.InitTimeout,
 		ToonOutput:               serverConfig.ToonOutput,
+		MaxConcurrentRequests:    serverConfig.MaxConcurrentRequests,
+		QueueSize:                serverConfig.QueueSize,
+		QueueTimeout:             serverConfig.QueueTimeout,
 	}
 	return am.db.SaveUpstream(record)
 }

@@ -1,5 +1,19 @@
 components:
   schemas:
+    config.ConcurrencyDefaults:
+      description: |-
+        ServerConcurrencyDefaults is scope (b) of FR-020: the blanket per-server
+        default set inherited by every server that does not override a setting.
+        Absent (the default) = no per-server limiting unless a server configures
+        it explicitly. File/API-configured only — no env scheme (FR-022).
+      properties:
+        max_concurrent_requests:
+          type: integer
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
+      type: object
     config.Config:
       properties:
         activity_cleanup_interval_min:
@@ -122,6 +136,19 @@ components:
           type: string
         logging:
           $ref: '#/components/schemas/config.LogConfig'
+        max_concurrent_requests:
+          description: |-
+            Concurrency limits (spec 093, GH #955). Scope (a) of FR-020: the GLOBAL
+            AGGREGATE limiter — one proxy-wide cap on concurrently running upstream
+            tool calls, with its own bounded wait queue. Tri-state pointers: absent =
+            the limiter does not exist (default, zero behavior change); an explicit 0
+            max also disables it; positive = that cap. This scope is NEVER a
+            per-server inheritance source — per-server values come from
+            ServerConcurrencyDefaults / the per-server overrides — but a server's
+            effective concurrency is bounded by BOTH its own limiter and this one.
+            Resolved by ResolveGlobalConcurrency; hot-reloadable; overridable via
+            MCPPROXY_MAX_CONCURRENT_REQUESTS / _QUEUE_SIZE / _QUEUE_TIMEOUT (FR-022).
+          type: integer
         max_result_size_chars:
           description: Advertised on every tool as `_meta.anthropic/maxResultSizeChars`;
             raises Claude Code's inline-response ceiling from 50k to up to 500k chars.
@@ -164,6 +191,10 @@ components:
             explicit false to opt out of both. Per-server SkipQuarantine still
             applies for the tool-level check on individual servers.
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         read_only_mode:
           type: boolean
         registries:
@@ -215,6 +246,8 @@ components:
           $ref: '#/components/schemas/config.SecurityConfig'
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
+        server_concurrency_defaults:
+          $ref: '#/components/schemas/config.ConcurrencyDefaults'
         telemetry:
           $ref: '#/components/schemas/config.TelemetryConfig'
         tls:
@@ -892,6 +925,17 @@ components:
             mcpproxy starts the process AND connects via network. Stdio servers ignore
             this field. Zero or unset → 30s default.
           type: string
+        max_concurrent_requests:
+          description: |-
+            Per-server concurrency overrides — scope (c) of FR-020 (spec 093, #955).
+            Tri-state per setting, exactly like HealthCheckInterval: absent = inherit
+            the per-server default set (server_concurrency_defaults), explicit 0 =
+            disable that setting for this server (0 max = no per-server limiter at
+            all; 0 queue_size = no pending capacity, shed immediately at the cap),
+            positive = override. The global aggregate limiter is never inherited from
+            here — it applies on top, so effective concurrency is min(per-server,
+            global). Resolved by Config.ResolveServerConcurrency.
+          type: integer
         name:
           type: string
         oauth:
@@ -902,6 +946,10 @@ components:
         quarantined:
           description: Security quarantine status
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         reconnect_on_use:
           description: Attempt reconnection when a tool call targets a disconnected
             server
@@ -1181,7 +1229,7 @@ components:
         source:
           $ref: '#/components/schemas/contracts.ActivitySource'
         status:
-          description: 'Result status: "success", "error", "blocked"'
+          description: 'Result status: "success", "error", "blocked", "rejected"'
           type: string
         timestamp:
           description: When activity occurred
@@ -1216,6 +1264,13 @@ components:
         period:
           description: Time period (1h, 24h, 7d, 30d)
           type: string
+        rejected_count:
+          description: |-
+            RejectedCount is the number of calls shed by a concurrency limiter before
+            they reached an upstream (spec 093). Counted separately from errors: it is
+            proxy backpressure, not an upstream fault, and it is the signal an
+            operator right-sizes max_concurrent_requests against.
+          type: integer
         start_time:
           description: Start of the period (RFC3339)
           type: string
@@ -2209,6 +2264,16 @@ components:
           type: string
         last_retry_time:
           type: string
+        max_concurrent_requests:
+          description: |-
+            Spec 093 (GH #955) — per-server concurrency overrides, scope (c) of
+            FR-020. Each setting is tri-state: nil (omitted) means "inherit
+            server_concurrency_defaults", 0 disables that setting for this server,
+            positive overrides it. Surfaced on the GET path so a caller can read back
+            what it set; PATCH/POST accept them via AddServerRequest. The effective
+            concurrency for a server is additionally bounded by the global aggregate
+            limiter, which is NOT an inheritance source for these fields.
+          type: integer
         name:
           type: string
         oauth:
@@ -2222,6 +2287,10 @@ components:
           $ref: '#/components/schemas/contracts.QuarantineStats'
         quarantined:
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         reconnect_count:
           type: integer
         reconnect_on_use:
@@ -2610,6 +2679,10 @@ components:
           type: integer
         p95_ms:
           type: integer
+        rejected:
+          description: 'spec 093: shed by a concurrency limit; never executed, so
+            excluded from calls/latency'
+          type: integer
         server:
           type: string
         sized_calls:
@@ -2681,12 +2754,26 @@ components:
           type: string
         isolation:
           $ref: '#/components/schemas/httpapi.IsolationRequest'
+        max_concurrent_requests:
+          description: |-
+            MaxConcurrentRequests / QueueSize / QueueTimeout are the per-server
+            concurrency overrides (spec 093 / GH #955, FR-020 scope (c)). Each is
+            tri-state: a nil pointer means "leave unchanged" on PATCH and "inherit
+            server_concurrency_defaults" on create; an explicit 0 disables that
+            setting for this server; a positive value overrides it. Do NOT collapse
+            them to plain values — an omitted field would then silently reset a
+            configured limit.
+          type: integer
         name:
           type: string
         protocol:
           type: string
         quarantined:
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         reconnect_on_use:
           type: boolean
         trust_mode:
@@ -3134,6 +3221,7 @@ paths:
           - success
           - error
           - blocked
+          - rejected
           type: string
       - description: Filter by intent operation type (Spec 018)
         in: query
@@ -3512,6 +3600,7 @@ paths:
           - success
           - error
           - blocked
+          - rejected
           type: string
       - description: Top-N tools by sort key; remainder folded into 'other' (default
           20)
@@ -6459,6 +6548,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Method not allowed
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Shed by a concurrency limit (Retry-After header carries the
+            wait hint)
         "500":
           content:
             application/json:
@@ -6525,6 +6621,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (invalid payload or missing tool name)
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Shed by a concurrency limit (Retry-After header carries the
+            wait hint)
         "500":
           content:
             application/json:

@@ -240,6 +240,28 @@ func TestActivityUsage_Filters(t *testing.T) {
 	})
 }
 
+// TestActivityUsage_RejectedStatusFilter is the spec-093 (#955) regression: the
+// aggregate learned to count "rejected" (shed by a concurrency limit) and
+// usageMatchesStatus learned to answer it, but the query validator still had a
+// three-value whitelist — so ?status=rejected 400'd and the matcher branch was
+// unreachable.
+func TestActivityUsage_RejectedStatusFilter(t *testing.T) {
+	now := time.Now().UTC()
+	snap := buildUsageSnapshot(
+		toolCall("github", "ok", "success", 10, 100, 5, now),
+		toolCall("fragile-db", "query", "success", 10, 100, 5, now),
+		toolCall("fragile-db", "query", storage.ActivityStatusRejected, 0, 0, 0, now),
+	)
+	ctrl := &mockUsageController{apiKey: "test-key", snap: snap}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	w, data := doUsageRequest(t, srv, "?status=rejected")
+	require.Equal(t, http.StatusOK, w.Code, "rejected must be an accepted status filter")
+	require.Len(t, data.Tools, 1)
+	assert.Equal(t, "query", data.Tools[0].Tool)
+	assert.Equal(t, "fragile-db", data.Tools[0].Server)
+}
+
 func TestActivityUsage_EmptyState(t *testing.T) {
 	// nil snapshot (service not ready) and empty snapshot both yield a clean 200.
 	for name, snap := range map[string]*internalRuntime.UsageAggregate{

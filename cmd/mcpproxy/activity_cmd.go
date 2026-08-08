@@ -105,7 +105,9 @@ func (f *ActivityFilter) Validate() error {
 
 	// Validate status
 	if f.Status != "" {
-		validStatuses := []string{"success", "error", "blocked"}
+		// Spec 093 added "rejected" (shed by a concurrency limit) to the closed
+		// activity status vocabulary; the CLI filter must accept it.
+		validStatuses := []string{"success", "error", "blocked", "rejected"}
 		valid := false
 		for _, s := range validStatuses {
 			if f.Status == s {
@@ -735,7 +737,7 @@ func init() {
 	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
-	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked")
+	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")
 	activityListCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityListCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter records after this time (RFC3339)")
 	activityListCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter records before this time (RFC3339)")
@@ -772,7 +774,7 @@ func init() {
 	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
 	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
-	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status")
+	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")
 	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
@@ -1208,8 +1210,11 @@ func formatToolCallEvent(event map[string]interface{}, timestamp string) string 
 	if errMsg != "" {
 		line += " " + errMsg
 	}
-	if status == "blocked" {
+	switch status {
+	case "blocked":
 		line += " BLOCKED"
+	case "rejected":
+		line += " REJECTED (concurrency limit)"
 	}
 	return line
 }
@@ -1308,6 +1313,9 @@ func formatStatusIcon(status string) string {
 		return "\u2717" // X
 	case "blocked":
 		return "\u2298" // circle with slash
+	case "rejected":
+		// Spec 093: shed by a concurrency limit — backpressure, not a failure.
+		return "\u23f8" // pause
 	default:
 		return "?"
 	}

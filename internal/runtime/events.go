@@ -28,6 +28,12 @@ const (
 	EventTypeActivityToolCallStarted EventType = "activity.tool_call.started"
 	// EventTypeActivityToolCallCompleted is emitted when a tool execution finishes.
 	EventTypeActivityToolCallCompleted EventType = "activity.tool_call.completed"
+	// EventTypeActivityToolCallRejected is emitted when a concurrency limiter
+	// sheds a tool call before it reaches the upstream (spec 093 FR-012). It is
+	// published from the limiter's origin-independent seam, so it also covers
+	// the dispatch paths that never pass through the MCP layer (sandboxed code
+	// execution, activity replay).
+	EventTypeActivityToolCallRejected EventType = "activity.tool_call.rejected"
 	// EventTypeActivityPolicyDecision is emitted when a policy blocks a tool call.
 	EventTypeActivityPolicyDecision EventType = "activity.policy_decision"
 	// EventTypeActivityQuarantineChange is emitted when a server's quarantine state changes.

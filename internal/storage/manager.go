@@ -133,6 +133,9 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		ToolDiscoveryInterval:    serverConfig.ToolDiscoveryInterval,
 		InitTimeout:              serverConfig.InitTimeout,
 		ToonOutput:               serverConfig.ToonOutput,
+		MaxConcurrentRequests:    serverConfig.MaxConcurrentRequests,
+		QueueSize:                serverConfig.QueueSize,
+		QueueTimeout:             serverConfig.QueueTimeout,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -176,6 +179,9 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
 		InitTimeout:              record.InitTimeout,
 		ToonOutput:               record.ToonOutput,
+		MaxConcurrentRequests:    record.MaxConcurrentRequests,
+		QueueSize:                record.QueueSize,
+		QueueTimeout:             record.QueueTimeout,
 	}, nil
 }
 
@@ -219,6 +225,9 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
 			InitTimeout:              record.InitTimeout,
 			ToonOutput:               record.ToonOutput,
+			MaxConcurrentRequests:    record.MaxConcurrentRequests,
+			QueueSize:                record.QueueSize,
+			QueueTimeout:             record.QueueTimeout,
 		})
 	}
 

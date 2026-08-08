@@ -173,6 +173,26 @@ type Config struct {
 	CallToolTimeout    Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
 	MaxResultSizeChars int      `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"` // Advertised on every tool as `_meta.anthropic/maxResultSizeChars`; raises Claude Code's inline-response ceiling from 50k to up to 500k chars. Set to 0 to disable.
 
+	// Concurrency limits (spec 093, GH #955). Scope (a) of FR-020: the GLOBAL
+	// AGGREGATE limiter — one proxy-wide cap on concurrently running upstream
+	// tool calls, with its own bounded wait queue. Tri-state pointers: absent =
+	// the limiter does not exist (default, zero behavior change); an explicit 0
+	// max also disables it; positive = that cap. This scope is NEVER a
+	// per-server inheritance source — per-server values come from
+	// ServerConcurrencyDefaults / the per-server overrides — but a server's
+	// effective concurrency is bounded by BOTH its own limiter and this one.
+	// Resolved by ResolveGlobalConcurrency; hot-reloadable; overridable via
+	// MCPPROXY_MAX_CONCURRENT_REQUESTS / _QUEUE_SIZE / _QUEUE_TIMEOUT (FR-022).
+	MaxConcurrentRequests *int      `json:"max_concurrent_requests,omitempty" mapstructure:"max-concurrent-requests"`
+	QueueSize             *int      `json:"queue_size,omitempty" mapstructure:"queue-size"`
+	QueueTimeout          *Duration `json:"queue_timeout,omitempty" mapstructure:"queue-timeout" swaggertype:"string"`
+
+	// ServerConcurrencyDefaults is scope (b) of FR-020: the blanket per-server
+	// default set inherited by every server that does not override a setting.
+	// Absent (the default) = no per-server limiting unless a server configures
+	// it explicitly. File/API-configured only — no env scheme (FR-022).
+	ServerConcurrencyDefaults *ConcurrencyDefaults `json:"server_concurrency_defaults,omitempty" mapstructure:"server-concurrency-defaults"`
+
 	// ToonOutput selects the TOON encoding mode for call_tool_* result text
 	// blocks (spec 084): "off" (default — responses byte-identical to
 	// pre-feature behavior), "adaptive" (encode only tabular-uniform payloads
@@ -528,6 +548,18 @@ type ServerConfig struct {
 	// this for upstreams that do legitimate first-run warmup (e.g. caching many
 	// channels/users) before responding to `initialize`.
 	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init_timeout" swaggertype:"string"`
+
+	// Per-server concurrency overrides — scope (c) of FR-020 (spec 093, #955).
+	// Tri-state per setting, exactly like HealthCheckInterval: absent = inherit
+	// the per-server default set (server_concurrency_defaults), explicit 0 =
+	// disable that setting for this server (0 max = no per-server limiter at
+	// all; 0 queue_size = no pending capacity, shed immediately at the cap),
+	// positive = override. The global aggregate limiter is never inherited from
+	// here — it applies on top, so effective concurrency is min(per-server,
+	// global). Resolved by Config.ResolveServerConcurrency.
+	MaxConcurrentRequests *int      `json:"max_concurrent_requests,omitempty" mapstructure:"max_concurrent_requests"`
+	QueueSize             *int      `json:"queue_size,omitempty" mapstructure:"queue_size"`
+	QueueTimeout          *Duration `json:"queue_timeout,omitempty" mapstructure:"queue_timeout" swaggertype:"string"`
 
 	// ToonOutput overrides the global toon_output mode for this server's
 	// tools (spec 084, FR-001). Plain string, not a pointer: ""/absent =
@@ -1988,6 +2020,9 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	if e := validateIntervalBound("tool_discovery_interval", c.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
 		errors = append(errors, *e)
 	}
+
+	// Concurrency limits, all three scopes after resolution (spec 093, FR-023).
+	errors = append(errors, c.validateConcurrency()...)
 
 	// Validate code execution configuration (0 means use default)
 	if c.CodeExecutionTimeoutMs != 0 && (c.CodeExecutionTimeoutMs < 1 || c.CodeExecutionTimeoutMs > 600000) {

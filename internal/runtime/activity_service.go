@@ -391,14 +391,19 @@ func (s *ActivityService) Stop() {
 	s.stopped = true
 	started := s.started
 	s.startMu.Unlock()
-	if !started {
-		return
-	}
+
 	// Main loop exit (closes done AFTER the shutdown flush). All workersWG.Add
 	// calls happen before done closes — the loop goroutines are registered at
 	// the top of Start and detection goroutines are only spawned from the event
 	// loop — so Wait below cannot race an Add.
-	<-s.done
+	if started {
+		<-s.done
+	}
+	// Waited unconditionally: writes admitted through enterWrite run on OTHER
+	// goroutines (a shed records its activity row inline, spec 093 FR-012) and
+	// exist whether or not the event loop was ever started. Any such writer that
+	// passed the stopped check above is already registered here; one arriving
+	// later is turned away, so this returns only when the DB has no writer left.
 	s.workersWG.Wait()
 }
 
@@ -407,6 +412,10 @@ func (s *ActivityService) handleEvent(evt Event) {
 	switch evt.Type {
 	case EventTypeActivityToolCallCompleted:
 		s.handleToolCallCompleted(evt)
+	case EventTypeActivityToolCallRejected:
+		// Persisted synchronously by RecordToolCallRejected at the rejection
+		// site (spec 093 FR-012): the bus copy exists only for live subscribers,
+		// and handling it here too would write the row twice.
 	case EventTypeActivityPolicyDecision:
 		s.handlePolicyDecision(evt)
 	case EventTypeActivityQuarantineChange:
@@ -436,6 +445,97 @@ func (s *ActivityService) handleEvent(evt Event) {
 		s.handleSecurityScanSettled(evt)
 	default:
 		// Ignore other event types
+	}
+}
+
+// enterWrite admits a BBolt write that runs on a caller's goroutine rather than
+// on one of this service's own loops. It reports false once shutdown has begun.
+//
+// The stopped check and the workersWG.Add MUST happen under the same lock Stop
+// takes, and in that order: Stop marks stopped under startMu and only then
+// waits on workersWG, so a writer that got in first is registered before the
+// wait starts, and one that arrives later sees stopped and never touches the
+// DB. Checking and registering separately would leave exactly the window where
+// Stop returns — and the DB closes — with a write in flight.
+//
+// Callers must defer workersWG.Done() when this returns true.
+func (s *ActivityService) enterWrite() bool {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.stopped {
+		return false
+	}
+	s.workersWG.Add(1)
+	return true
+}
+
+// RecordToolCallRejected persists a concurrency-limiter shed as a tool_call
+// record with the dedicated "rejected" status (spec 093 FR-012). It is a
+// separate path from handleToolCallCompleted because a shed has no upstream
+// response, no token metrics and no intent envelope — only the rejection
+// metadata an operator needs to right-size the limits.
+//
+// It runs SYNCHRONOUSLY on the rejecting goroutine rather than on the activity
+// event loop: the event bus drops events for a subscriber that falls behind,
+// and a shed burst is exactly when it does. The cost is one BBolt write on an
+// error path that is already returning without calling the upstream.
+//
+// Spec 080 FR-010: because the write lives on someone else's goroutine, it must
+// join the same shutdown barrier as every other BBolt writer this service owns.
+// enterWrite registers it in workersWG under the lock Stop coordinates with, so
+// a write either happens entirely before Stop returns or does not happen at all
+// — it can never straddle the DB close.
+func (s *ActivityService) RecordToolCallRejected(evt Event) {
+	if s == nil || s.storage == nil {
+		return
+	}
+	if !s.enterWrite() {
+		return
+	}
+	defer s.workersWG.Done()
+
+	serverName := getStringPayload(evt.Payload, "server_name")
+	toolName := getStringPayload(evt.Payload, "tool_name")
+	source := getStringPayload(evt.Payload, "source")
+
+	activitySource := storage.ActivitySourceMCP
+	if source != "" {
+		activitySource = storage.ActivitySource(source)
+	}
+
+	metadata := map[string]interface{}{
+		storage.MetadataKeyRejectionReason: getStringPayload(evt.Payload, "reason"),
+		storage.MetadataKeyRejectionScope:  getStringPayload(evt.Payload, "scope"),
+	}
+	if limit := getInt64Payload(evt.Payload, "limit"); limit > 0 {
+		metadata[storage.MetadataKeyRejectionLimit] = limit
+	}
+	if retryAfter := getInt64Payload(evt.Payload, "retry_after_ms"); retryAfter > 0 {
+		metadata[storage.MetadataKeyRejectionRetryAfterMs] = retryAfter
+	}
+
+	record := &storage.ActivityRecord{
+		Type:         storage.ActivityTypeToolCall,
+		Source:       activitySource,
+		ServerName:   serverName,
+		ToolName:     toolName,
+		Status:       storage.ActivityStatusRejected,
+		ErrorMessage: getStringPayload(evt.Payload, "message"),
+		DurationMs:   getInt64Payload(evt.Payload, "duration_ms"),
+		Timestamp:    evt.Timestamp,
+		RequestID:    getStringPayload(evt.Payload, "request_id"),
+		Metadata:     metadata,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save rejected activity record",
+			zap.Error(err),
+			zap.String("server_name", serverName),
+			zap.String("tool_name", toolName))
+		return
+	}
+	if s.usage != nil {
+		s.usage.Apply(record)
 	}
 }
 

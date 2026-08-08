@@ -554,3 +554,72 @@ func TestDetectConfigChanges_TrustedHosts(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "trusted_hosts")
 	})
 }
+
+// TestDetectConfigChanges_ConcurrencyLimits (spec 093, FR-021): the global
+// aggregate limiter fields and the per-server default set must be reported as
+// hot-reloadable changes, otherwise a lone limit edit falls through as
+// "no changes detected" and the limiter registry is never re-applied.
+// Per-server overrides ride the Servers DeepEqual clause.
+func TestDetectConfigChanges_ConcurrencyLimits(t *testing.T) {
+	mk := func(mutate func(*config.Config)) *config.Config {
+		c := &config.Config{Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{}}
+		if mutate != nil {
+			mutate(c)
+		}
+		return c
+	}
+	intp := func(v int) *int { return &v }
+	durp := func(d time.Duration) *config.Duration { v := config.Duration(d); return &v }
+
+	t.Run("max_concurrent_requests change detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(func(c *config.Config) { c.MaxConcurrentRequests = intp(10) }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "max_concurrent_requests")
+		assert.False(t, result.RequiresRestart, "concurrency limits are hot-reloadable")
+	})
+
+	t.Run("queue_size change detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(func(c *config.Config) { c.MaxConcurrentRequests = intp(10); c.QueueSize = intp(1) }),
+			mk(func(c *config.Config) { c.MaxConcurrentRequests = intp(10); c.QueueSize = intp(5) }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "queue_size")
+	})
+
+	t.Run("queue_timeout change detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(func(c *config.Config) { c.QueueTimeout = durp(30 * time.Second) }),
+			mk(func(c *config.Config) { c.QueueTimeout = durp(5 * time.Second) }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "queue_timeout")
+	})
+
+	t.Run("server_concurrency_defaults change detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(func(c *config.Config) {
+				c.ServerConcurrencyDefaults = &config.ConcurrencyDefaults{MaxConcurrentRequests: intp(5)}
+			}))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "server_concurrency_defaults")
+	})
+
+	t.Run("unchanged limits not reported", func(t *testing.T) {
+		build := func() *config.Config {
+			return mk(func(c *config.Config) {
+				c.MaxConcurrentRequests = intp(10)
+				c.QueueSize = intp(5)
+				c.QueueTimeout = durp(30 * time.Second)
+				c.ServerConcurrencyDefaults = &config.ConcurrencyDefaults{MaxConcurrentRequests: intp(5)}
+			})
+		}
+		result := DetectConfigChanges(build(), build())
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "max_concurrent_requests")
+		assert.NotContains(t, result.ChangedFields, "queue_size")
+		assert.NotContains(t, result.ChangedFields, "queue_timeout")
+		assert.NotContains(t, result.ChangedFields, "server_concurrency_defaults")
+	})
+}

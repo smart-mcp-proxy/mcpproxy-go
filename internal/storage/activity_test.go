@@ -963,3 +963,56 @@ func TestAggregateToolUsage(t *testing.T) {
 		assert.False(t, ok, "never-used tools must be absent from the map")
 	})
 }
+
+// TestActivityFilter_OneRejectedRowPerShed is the spec-093 de-duplication
+// contract. A shed dispatched through an MCP tool-call variant writes two
+// records: the canonical tool_call rejection the limiter logs for EVERY origin,
+// and an internal_tool_call rejection the variant handler adds. The default
+// filter used by listings and by the activity summary must surface exactly one
+// of them, or a saturated proxy reads as twice as saturated as it is.
+func TestActivityFilter_OneRejectedRowPerShed(t *testing.T) {
+	ts := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	canonical := &ActivityRecord{
+		Type:       ActivityTypeToolCall,
+		ServerName: "analytics-db",
+		ToolName:   "query",
+		Status:     ActivityStatusRejected,
+		Timestamp:  ts,
+	}
+	variantEcho := &ActivityRecord{
+		Type:       ActivityTypeInternalToolCall,
+		ServerName: "analytics-db",
+		ToolName:   "call_tool_read",
+		Status:     ActivityStatusRejected,
+		Timestamp:  ts,
+	}
+	failedVariant := &ActivityRecord{
+		Type:       ActivityTypeInternalToolCall,
+		ServerName: "analytics-db",
+		ToolName:   "call_tool_read",
+		Status:     ActivityStatusError,
+		Timestamp:  ts,
+	}
+
+	def := DefaultActivityFilter()
+	assert.True(t, def.Matches(canonical), "the limiter's rejected row is the canonical one")
+	assert.False(t, def.Matches(variantEcho),
+		"the variant handler's rejected echo duplicates the canonical row and must be hidden by default")
+	assert.True(t, def.Matches(failedVariant),
+		"a failed call_tool_* has no corresponding tool_call and must stay visible")
+
+	// The code_execution and replay origins never reach the variant handler, so
+	// their shed produces the canonical row only — still exactly one.
+	rejected := 0
+	for _, rec := range []*ActivityRecord{canonical, variantEcho} {
+		if def.Matches(rec) && rec.Status == ActivityStatusRejected {
+			rejected++
+		}
+	}
+	assert.Equal(t, 1, rejected, "exactly one rejected row per shed")
+
+	// Opting in still shows both, so nothing is lost from storage.
+	all := DefaultActivityFilter()
+	all.ExcludeCallToolSuccess = false
+	assert.True(t, all.Matches(variantEcho), "include_call_tool=true must still show the variant echo")
+}

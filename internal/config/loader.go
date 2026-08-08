@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -687,5 +688,34 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// value is validated by cfg.Validate() right after these overrides apply.
 	if value := os.Getenv("MCPPROXY_TOOL_RESPONSE_MODE"); value != "" {
 		cfg.ToolResponseMode = value
+	}
+
+	// Override the GLOBAL aggregate concurrency limiter from environment
+	// (spec 093 FR-022, GH #955). Only this scope has an env scheme: the
+	// per-server default set and per-server overrides are file/API-configured.
+	// An explicit 0 is meaningful (it disables the limiter), so the value is
+	// materialized as a pointer; malformed values are warned about and ignored
+	// so a typo cannot silently reshape the proxy's admission behavior.
+	if value := os.Getenv("MCPPROXY_MAX_CONCURRENT_REQUESTS"); value != "" {
+		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+			cfg.MaxConcurrentRequests = &n
+		} else {
+			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_MAX_CONCURRENT_REQUESTS=%q (want a non-negative integer)\n", value)
+		}
+	}
+	if value := os.Getenv("MCPPROXY_QUEUE_SIZE"); value != "" {
+		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+			cfg.QueueSize = &n
+		} else {
+			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_QUEUE_SIZE=%q (want a non-negative integer)\n", value)
+		}
+	}
+	if value := os.Getenv("MCPPROXY_QUEUE_TIMEOUT"); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
+			qt := Duration(d)
+			cfg.QueueTimeout = &qt
+		} else {
+			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_QUEUE_TIMEOUT=%q (want a duration such as \"30s\")\n", value)
+		}
 	}
 }

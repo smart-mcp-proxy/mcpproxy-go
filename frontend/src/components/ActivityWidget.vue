@@ -143,7 +143,9 @@ const getStatusBadgeClass = (status: string): string => {
   const statusClasses: Record<string, string> = {
     'success': 'badge-success',
     'error': 'badge-error',
-    'blocked': 'badge-warning'
+    'blocked': 'badge-warning',
+    // Spec 093: shed by a concurrency limit (backpressure, not an upstream fault).
+    'rejected': 'badge-info'
   }
   return statusClasses[status] || 'badge-ghost'
 }

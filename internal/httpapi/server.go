@@ -38,6 +38,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
 const (
@@ -104,7 +105,7 @@ type ServerController interface {
 	GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error)
 	GetToolCallByID(id string) (*contracts.ToolCallRecord, error)
 	GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error)
-	ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error)
+	ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error)
 	GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error)
 
 	// Session management. status filters on session status ("active" /
@@ -1508,6 +1509,16 @@ type AddServerRequest struct {
 	// pointer means "leave unchanged" on PATCH; a present value is applied.
 	// Mirrors config.ServerConfig.InitTimeout's *Duration tri-state.
 	InitTimeout *config.Duration `json:"init_timeout,omitempty" swaggertype:"string"`
+	// MaxConcurrentRequests / QueueSize / QueueTimeout are the per-server
+	// concurrency overrides (spec 093 / GH #955, FR-020 scope (c)). Each is
+	// tri-state: a nil pointer means "leave unchanged" on PATCH and "inherit
+	// server_concurrency_defaults" on create; an explicit 0 disables that
+	// setting for this server; a positive value overrides it. Do NOT collapse
+	// them to plain values — an omitted field would then silently reset a
+	// configured limit.
+	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
+	QueueSize             *int             `json:"queue_size,omitempty"`
+	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty" swaggertype:"string"`
 	// Isolation carries per-server Docker isolation overrides (image,
 	// network_mode, extra_args, working_dir, enabled). A nil pointer
 	// means "do not touch isolation config"; an empty-but-present
@@ -1679,6 +1690,18 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// MCP-3322: carry the per-server init_timeout override through on create.
 	if req.InitTimeout != nil {
 		serverConfig.InitTimeout = req.InitTimeout
+	}
+	// Spec 093: carry the per-server concurrency overrides through on create.
+	// Tri-state pointers — only set when the caller actually provided them, so
+	// an omitted field still inherits server_concurrency_defaults.
+	if req.MaxConcurrentRequests != nil {
+		serverConfig.MaxConcurrentRequests = req.MaxConcurrentRequests
+	}
+	if req.QueueSize != nil {
+		serverConfig.QueueSize = req.QueueSize
+	}
+	if req.QueueTimeout != nil {
+		serverConfig.QueueTimeout = req.QueueTimeout
 	}
 	// Carry the per-server Docker isolation override through on create. The
 	// AddServerRequest has always declared (and documented) an Isolation
@@ -1938,6 +1961,27 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.InitTimeout = existingSrv.InitTimeout
+	}
+	// Spec 093: the per-server concurrency overrides are tri-state pointers —
+	// preserve the existing values when the request omits them so an unrelated
+	// PATCH cannot wipe a configured limit.
+	if req.MaxConcurrentRequests != nil {
+		updates.MaxConcurrentRequests = req.MaxConcurrentRequests
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.MaxConcurrentRequests = existingSrv.MaxConcurrentRequests
+	}
+	if req.QueueSize != nil {
+		updates.QueueSize = req.QueueSize
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.QueueSize = existingSrv.QueueSize
+	}
+	if req.QueueTimeout != nil {
+		updates.QueueTimeout = req.QueueTimeout
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.QueueTimeout = existingSrv.QueueTimeout
 	}
 	if req.Isolation != nil {
 		updates.Isolation = req.Isolation.toConfig()
@@ -4010,6 +4054,7 @@ func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.T
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
+// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
@@ -4033,9 +4078,26 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Replay the tool call with modified arguments
-	newToolCall, err := s.controller.ReplayToolCall(id, request.Arguments)
+	// Replay the tool call with modified arguments. The request context travels
+	// with it so a client that disconnects while the replay waits for a
+	// concurrency slot releases that slot immediately (spec 093 FR-005).
+	newToolCall, err := s.controller.ReplayToolCall(r.Context(), id, request.Arguments)
 	if err != nil {
+		// Spec 093 FR-011: a replay shed by a concurrency limit is backpressure,
+		// answered like any other shed tool call — 429 + Retry-After, not a 500
+		// and certainly not the 200 success:true it used to produce when the
+		// rejection was flattened into the record's error field.
+		var limitErr *limiter.LimitError
+		if errors.As(err, &limitErr) &&
+			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
+			s.logger.Warnw("Tool call replay shed by concurrency limiter",
+				"id", id,
+				"scope", string(limitErr.Scope),
+				"reason", string(limitErr.Reason))
+			s.writeError(w, r, http.StatusTooManyRequests, limitErr.UserMessage())
+			return
+		}
 		s.logger.Error("Failed to replay tool call", "id", id, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to replay tool call: %v", err))
 		return
@@ -4370,6 +4432,7 @@ func deepMergeJSON(base, patch map[string]interface{}) {
 // @Param request body object{tool_name=string,arguments=object} true "Tool call request with tool name and arguments"
 // @Success 200 {object} contracts.SuccessResponse "Tool call result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
+// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit (Retry-After header carries the wait hint)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
 // @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
@@ -4393,13 +4456,30 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set request source to CLI for REST API tool calls (typically from CLI)
-	// This allows activity logging to distinguish between MCP protocol and CLI calls
-	ctx := reqcontext.WithRequestSource(r.Context(), reqcontext.SourceCLI)
+	// Attribute the call to the surface that actually made it. This endpoint is
+	// shared by the CLI, the Web UI and the tray, so hard-coding CLI here
+	// overwrote the REST source the middleware had already established and
+	// logged every Web-UI tool call — and every shed of one — as if it came from
+	// the CLI. The surface header the clients already send is the discriminator.
+	ctx := reqcontext.WithRequestSource(r.Context(), toolCallRequestSource(r))
 
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
 	if err != nil {
+		// Spec 093 FR-011: a concurrency-limiter shed is backpressure, not a
+		// server fault — answer 429 with a Retry-After derived from the shedding
+		// scope's effective queue_timeout so a client can back off correctly.
+		var limitErr *limiter.LimitError
+		if errors.As(err, &limitErr) &&
+			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
+			s.logger.Warnw("Tool call shed by concurrency limiter",
+				"tool", request.ToolName,
+				"scope", string(limitErr.Scope),
+				"reason", string(limitErr.Reason))
+			s.writeError(w, r, http.StatusTooManyRequests, limitErr.UserMessage())
+			return
+		}
 		s.logger.Error("Failed to call tool", "tool", request.ToolName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to call tool: %v", err))
 		return

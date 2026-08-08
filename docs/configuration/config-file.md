@@ -135,6 +135,67 @@ They only widen in one direction — they cannot re-enable checking that the
 config disabled. See [Version Updates](/features/version-updates) for where
 updates are surfaced.
 
+### Concurrency Limits & Request Queueing
+
+Caps how many upstream tool calls may run at once, so a burst cannot overwhelm a
+fragile upstream. **Off by default** — with no keys set there is no limiting, no
+queueing and no new errors.
+
+Three separately named scopes carry the same three settings:
+
+| Scope | Where | What it caps |
+|-------|-------|--------------|
+| Global aggregate | top-level `max_concurrent_requests` / `queue_size` / `queue_timeout` | All upstream tool calls across the whole proxy |
+| Per-server defaults | `server_concurrency_defaults` object | Blanket per-server values, inherited by servers that do not override them |
+| Per-server override | the same three keys on an `mcpServers[]` entry | That one server |
+
+```json
+{
+  "max_concurrent_requests": 50,
+  "queue_size": 100,
+  "queue_timeout": "30s",
+
+  "server_concurrency_defaults": {
+    "max_concurrent_requests": 5,
+    "queue_size": 10
+  },
+
+  "mcpServers": [
+    { "name": "fragile-db", "command": "db-mcp", "max_concurrent_requests": 1, "queue_size": 2 },
+    { "name": "fast-api", "url": "https://api.example.com/mcp", "max_concurrent_requests": 0 }
+  ]
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `max_concurrent_requests` | integer | unset (off) | Upstream tool calls allowed to run at once in this scope. `0` or unset = no limiter for this scope |
+| `queue_size` | integer | `0` | How many calls may wait for a slot. `0` = shed immediately at the cap |
+| `queue_timeout` | duration | `"30s"` when a limiter is active | How long a call may wait before being shed |
+
+**Tri-state per-server semantics.** Each per-server key is independent: **absent**
+inherits from `server_concurrency_defaults`, **`0`** disables that setting for
+this server (`max_concurrent_requests: 0` opts the server out of per-server
+limiting entirely), and a **positive** value overrides the default.
+
+The global limiter is never an inheritance source — it applies on top, so a
+server's effective concurrency is **min(per-server limit, global limit)**.
+`queue_timeout` is one total wait budget across both tiers, not one per tier,
+and queue waiting never eats into the call's execution timeout.
+
+**Shedding.** A shed call gets a readable, retry-friendly error: an error tool
+result for MCP calls, HTTP 429 with `Retry-After` for the REST tool-call
+endpoint, and an activity record with the `rejected` status carrying the reason
+(`queue_full` or `queue_timeout`) and scope (`server` or `global`). All limits
+are hot-reloadable.
+
+For stdio upstreams, start at `5` rather than `1`: the transport multiplexes and
+most SDK servers use a small worker pool.
+
+Full reference — validation rules, metrics, and which origins are limited —
+lives in [`docs/configuration.md`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
+in the repository.
+
 ### MCP Servers
 
 See [Upstream Servers](/configuration/upstream-servers) for detailed server configuration.

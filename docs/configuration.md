@@ -180,6 +180,137 @@ the proxy.
 > the Web UI / macOS app is planned; for now set per-server overrides via the
 > Raw JSON editor or the REST API.
 
+### Concurrency Limits & Request Queueing
+
+Multi-user or multi-agent deployments can overwhelm a fragile upstream (a
+database-backed stdio server, a rate-limited API) with simultaneous tool calls.
+MCPProxy can cap how many upstream tool calls run at once and park the excess in
+a bounded FIFO queue, shedding predictably when that queue is full
+(GitHub [#955](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/955)).
+
+**Everything is off by default** — with no keys set, behavior is exactly as
+before: no limiting, no queueing, no new errors.
+
+There are **three separately named scopes**, each carrying the same three
+settings:
+
+| Scope | Where | What it caps |
+|-------|-------|--------------|
+| Global aggregate limiter | top-level `max_concurrent_requests` / `queue_size` / `queue_timeout` | All upstream tool calls across the whole proxy |
+| Per-server default set | `server_concurrency_defaults` object | Blanket per-server values, inherited by every server that does not override them |
+| Per-server override | the same three keys on an `mcpServers[]` entry | That one server |
+
+```json
+{
+  "max_concurrent_requests": 50,
+  "queue_size": 100,
+  "queue_timeout": "30s",
+
+  "server_concurrency_defaults": {
+    "max_concurrent_requests": 5,
+    "queue_size": 10,
+    "queue_timeout": "30s"
+  },
+
+  "mcpServers": [
+    { "name": "fragile-db", "command": "db-mcp", "max_concurrent_requests": 1, "queue_size": 2 },
+    { "name": "fast-api", "url": "https://api.example.com/mcp", "max_concurrent_requests": 0 }
+  ]
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_concurrent_requests` | integer | unset (off) | Maximum upstream tool calls running at once in this scope. `0` (or unset) = no limiter for this scope. |
+| `queue_size` | integer | `0` | How many calls may wait for a slot. `0` = no pending capacity: a call arriving at the cap is shed immediately. |
+| `queue_timeout` | duration | `"30s"` when a limiter is active | How long a call may wait in the queue before being shed. |
+
+**Tri-state per-server semantics.** Each per-server key is independently
+tri-state:
+
+- **absent** — inherit the value from `server_concurrency_defaults`;
+- **`0`** — disable that setting for this server. `max_concurrent_requests: 0`
+  opts the server out of per-server limiting entirely (even when the default set
+  configures one); `queue_size: 0` keeps the cap but removes the queue, so
+  excess calls are shed instantly;
+- **positive** — override the default for this server.
+
+The global aggregate limiter is **never** an inheritance source for a server.
+It applies *on top*: a server's effective concurrency is
+**min(resolved per-server limit, global limit)**. Waiting for a per-server slot
+does not consume global capacity — the per-server slot is taken first.
+
+**One deadline, not two.** `queue_timeout` is a total wait budget, not a
+per-tier one: a call waiting for a per-server slot and then a global slot shares
+a single absolute deadline (the smallest configured timeout among the active
+scopes). Queue waiting never consumes the call's execution timeout — the
+execution budget starts after admission.
+
+**Recommended starting point for stdio upstreams: `5`.** stdio does not mean
+serial: the MCP stdio transport multiplexes by JSON-RPC id and common SDK
+servers process calls through a small worker pool, so `5` mirrors typical
+upstream capacity. Drop to `1` only for a server you know is single-threaded or
+backed by a fragile store.
+
+**Shedding.** A shed call is reported as a readable, retry-friendly error rather
+than a dropped connection: MCP tool calls get an error tool result, the REST
+tool-call endpoint returns `429` with `Retry-After`, and the activity log
+records the call with a `rejected` status carrying the reason (`queue_full` or
+`queue_timeout`) and scope (`server` or `global`).
+
+**Hot reload.** All limits are hot-reloadable — edit the config file and the new
+values govern subsequent admissions without a restart. Running calls are never
+interrupted, but they keep counting against the new caps: after lowering a cap,
+nothing new is admitted until occupancy drains below it. Raising a cap admits
+waiting calls immediately; queued calls keep their original deadline.
+
+**Validation.** Negative values are rejected, as is a positive `queue_size` in a
+scope whose `max_concurrent_requests` resolves to disabled (a queue in front of
+no limiter can never admit anything). Errors name the offending scope and field.
+The exception is the documented opt-out above: an explicit per-server
+`max_concurrent_requests: 0` is valid even when the default set defines a queue.
+
+Only the **global aggregate** scope has environment overrides
+(`MCPPROXY_MAX_CONCURRENT_REQUESTS`, `MCPPROXY_QUEUE_SIZE`,
+`MCPPROXY_QUEUE_TIMEOUT`); the default set and per-server overrides are
+file/API-configured.
+
+**Per-server limits over REST.** `POST /api/v1/servers` and
+`PATCH /api/v1/servers/{name}` accept `max_concurrent_requests`, `queue_size`
+and `queue_timeout` alongside the other per-server fields, and
+`GET /api/v1/servers` echoes them back. All three keep tri-state semantics on
+PATCH: omitting a key leaves the stored value alone, and an explicit `0` is the
+documented opt-out — it is applied, not treated as "unset".
+
+```bash
+curl -X PATCH http://127.0.0.1:8080/api/v1/servers/fragile-db \
+  -H "X-API-Key: $MCPPROXY_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"max_concurrent_requests": 1, "queue_size": 2, "queue_timeout": "10s"}'
+```
+
+**What is limited, and what is not.** Limits apply to *upstream tool calls* from
+every in-process origin — the `call_tool_*` variants, direct-routing mode, the
+REST `POST /api/v1/tools/call` endpoint, sandboxed `code_execution` scripts and
+activity replay. Local tool search, coalesced tool listings and health probes
+are never throttled: they are lightweight and must not be able to queue behind a
+saturated upstream. The separate-process CLI debug client is out of scope.
+
+**Observability.** Saturation is visible on the Prometheus surface:
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `mcpproxy_tool_calls_rejected_total` | counter | `server`, `reason`, `scope` | Calls shed by a limit. `reason` = `queue_full` \| `queue_timeout`; `scope` = `server` \| `global`. `server` is the call's target even for a global shed. |
+| `mcpproxy_concurrency_active` | gauge | `scope`, `server` | Calls currently holding a slot. |
+| `mcpproxy_concurrency_queue_depth` | gauge | `scope`, `server` | Calls currently waiting for a slot. |
+
+Gauges are sampled every 10s; the counter is exact — it is incremented at the
+rejection itself, not derived from the internal event stream, so a burst of
+sheds cannot lose increments. The same sheds also appear in the activity log
+(`status: rejected`) — written on the same synchronous path, and exactly one row
+per shed — including the ones from `code_execution` and replay: the rejection is
+recorded at the limiter, below the MCP dispatch layer, so no origin can bypass
+it and none can double-report it.
+
 ### Debug & Development
 
 ```json
@@ -237,6 +368,9 @@ the proxy.
 | `health_check_interval` | duration | No | Per-server override for the global [`health_check_interval`](#discovery--health-checks). `"0s"` disables the liveness probe for this server only. Range: `5s`–`1h`. Omit to inherit the global value. |
 | `tool_discovery_interval` | duration | No | Per-server override for the global [`tool_discovery_interval`](#discovery--health-checks). Overrides the global/default cadence for this server only; `"0s"` disables the periodic tool-discovery sweep for this server (connect-time and reactive `list_changed` discovery still run). Range: `30s`–`24h`. Omit to inherit the global value. |
 | `init_timeout` | duration | No | Per-server override for the global [`init_timeout`](#search--tool-limits) — the MCP `initialize` handshake deadline. Raise it for an upstream that warms up (caches/indexes data) before responding to `initialize` (e.g. `"120s"`, `"3m"`); without it such a server is killed mid-startup and, with `docker run --rm`, retries forever. Range: `1s`–`30m`. Omit to inherit the global value (30s default). Settable via the `upstream_servers` tool and `mcpproxy upstream patch --init-timeout`. |
+| `max_concurrent_requests` | integer | No | Per-server cap on concurrently running upstream tool calls (see [Concurrency Limits & Request Queueing](#concurrency-limits--request-queueing)). Omit to inherit `server_concurrency_defaults`; `0` opts this server out of per-server limiting; positive = that cap. The global limiter still applies on top. |
+| `queue_size` | integer | No | How many calls may wait for this server's slot. Omit to inherit the default set; `0` = no pending capacity (shed immediately at the cap). |
+| `queue_timeout` | duration | No | How long a call may wait for this server's slot (e.g. `"10s"`). Omit to inherit the default set (30s when a limiter is active). |
 | `oauth` | object | No | OAuth configuration (see [OAuth Configuration](#oauth-configuration)) |
 | `isolation` | object | No | Per-server Docker isolation settings (see [Docker Isolation](#docker-isolation)) |
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
@@ -1307,6 +1441,9 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
 | `MCPPROXY_DATA` | `data_dir` | Override data directory |
 | `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |
+| `MCPPROXY_MAX_CONCURRENT_REQUESTS` | `max_concurrent_requests` | Global aggregate cap on concurrent upstream tool calls (`0` disables it). See [Concurrency Limits](#concurrency-limits--request-queueing) |
+| `MCPPROXY_QUEUE_SIZE` | `queue_size` | Global aggregate wait-queue length (`0` = shed at the cap) |
+| `MCPPROXY_QUEUE_TIMEOUT` | `queue_timeout` | Global aggregate queue wait budget, e.g. `30s` |
 | `MCPPROXY_DISABLE_OAUTH` | - | Disable OAuth for testing |
 | `HEADLESS` | - | Run in headless mode |
 

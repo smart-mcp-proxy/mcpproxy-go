@@ -277,7 +277,7 @@ func (m *baseController) GetToolCallByID(id string) (*contracts.ToolCallRecord, 
 func (m *baseController) GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error) {
 	return nil, nil
 }
-func (m *baseController) ReplayToolCall(id string, args map[string]interface{}) (*contracts.ToolCallRecord, error) {
+func (m *baseController) ReplayToolCall(_ context.Context, id string, args map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	return nil, nil
 }
 func (m *baseController) ValidateConfig(cfg *config.Config) ([]config.ValidationError, error) {

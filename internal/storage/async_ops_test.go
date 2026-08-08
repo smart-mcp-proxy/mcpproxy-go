@@ -361,6 +361,12 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// UpstreamRecord so a REST/UI-set override survives a restart and a
 		// SaveConfiguration rebuild of the JSON server list.
 		"ToonOutput": true,
+		// Spec 093: per-server concurrency-limit overrides; round-tripped
+		// through UpstreamRecord so a REST/UI-set limit survives a restart and a
+		// SaveConfiguration rebuild of the JSON server list.
+		"MaxConcurrentRequests": true,
+		"QueueSize":             true,
+		"QueueTimeout":          true,
 		// Issue #937: unexported parse-time bit recording whether the JSON
 		// document carried a "quarantined" key. It describes the DOCUMENT that
 		// was parsed, not the server, so it is deliberately NOT persisted — a

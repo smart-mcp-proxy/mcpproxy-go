@@ -28,6 +28,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -41,6 +42,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
 // Status captures high-level state for API consumers.
@@ -125,6 +127,13 @@ type Runtime struct {
 	previousShutdown  string
 	managementService interface{}      // Initialized later to avoid import cycle
 	activityService   *ActivityService // Activity logging service
+
+	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
+	// site (spec 093 FR-013). Installed by the observability bridge. It is
+	// deliberately not driven off the event bus: the bus drops events when a
+	// subscriber falls behind, and a rejection burst — the one moment the
+	// counter matters — is exactly when that happens.
+	rejectionMetric atomic.Pointer[RejectionMetricSink]
 
 	// workSessions derives a unit of USER WORK from the churn of transport
 	// sessions underneath it (Spec 082).
@@ -356,6 +365,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// into one settled event per server. 750ms bridges the rapid lifecycle
 	// signals of a reconnect storm without noticeably delaying the result.
 	rt.scanNotify = newScanNotifyDebouncer(rt, 750*time.Millisecond)
+
+	// Spec 093 FR-012/FR-013: origin-independent shed seam. Installed here (not
+	// in the MCP dispatch layer) so code_execution and activity replay are
+	// covered by construction.
+	rt.installRejectionObserver()
 
 	return rt, nil
 }
@@ -1175,20 +1189,37 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 	return contractCalls, nil
 }
 
-// ReplayToolCall replays a tool call with modified arguments
-func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
+// ReplayToolCall replays a tool call with modified arguments.
+//
+// ctx is the CALLER's context (the HTTP request's). It governs the whole
+// replay, including the wait for a concurrency slot: a client that disconnects
+// mid-queue releases the slot immediately instead of leaving a call queued for
+// a caller that is gone (FR-005).
+func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
+	// Spec 093 FR-008: snapshot the collaborators under the lock and release it
+	// before anything that can block. Replay dispatches through the same
+	// admission seam as every other origin, so holding r.mu across the call
+	// would let one queued replay stall ApplyConfig and every other writer for
+	// the whole queue-plus-execution duration.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	storageManager := r.storageManager
+	upstreamManager := r.upstreamManager
+	cfgPath := r.cfgPath
+	r.mu.RUnlock()
+
+	if storageManager == nil || upstreamManager == nil {
+		return nil, fmt.Errorf("runtime is not ready to replay tool calls")
+	}
 
 	// Get the original tool call using the same pattern as GetToolCallByID
 	var originalCall *storage.ToolCallRecord
-	identities, err := r.storageManager.ListServerIdentities()
+	identities, err := storageManager.ListServerIdentities()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list server identities: %w", err)
 	}
 
 	for _, identity := range identities {
-		calls, err := r.storageManager.GetServerToolCalls(identity.ID, 1000)
+		calls, err := storageManager.GetServerToolCalls(identity.ID, 1000)
 		if err != nil {
 			continue
 		}
@@ -1215,14 +1246,29 @@ func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*
 	}
 
 	// Get the upstream client
-	client, ok := r.upstreamManager.GetClient(originalCall.ServerName)
+	client, ok := upstreamManager.GetClient(originalCall.ServerName)
 	if !ok || client == nil {
 		return nil, fmt.Errorf("server not found: %s", originalCall.ServerName)
 	}
 
-	// Call the tool with modified arguments
-	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.CallToolTimeout.Duration())
-	defer cancel()
+	// Call the tool with modified arguments.
+	//
+	// Spec 093 FR-005: NO execution-timeout context is created here. Replay used
+	// to wrap the call in a CallToolTimeout context before dispatch, which meant
+	// time spent waiting in a concurrency-limiter queue was subtracted from the
+	// call's execution budget — a replay that queued for 20s would get 20s less
+	// upstream time than the same call made from an agent. The execution timeout
+	// is applied by core.Client.CallTool AFTER admission, so passing the caller's
+	// context gives replay the same post-admission budget as every other origin.
+	// Cancellation still works: the caller's context governs the queue wait, and
+	// the deeper timeout governs execution.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Spec 093 FR-012/P3: replay never crossed an external surface, so its sheds
+	// are attributed to the internal origin rather than to whichever surface
+	// asked for the replay.
+	ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceInternal)
 
 	startTime := time.Now()
 	result, callErr := client.CallTool(ctx, originalCall.ToolName, callArgs)
@@ -1237,7 +1283,7 @@ func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*
 		Arguments:  callArgs,
 		Duration:   duration.Nanoseconds(),
 		Timestamp:  time.Now(),
-		ConfigPath: r.cfgPath,
+		ConfigPath: cfgPath,
 	}
 
 	if callErr != nil {
@@ -1247,8 +1293,21 @@ func (r *Runtime) ReplayToolCall(id string, arguments map[string]interface{}) (*
 	}
 
 	// Store the new tool call
-	if err := r.storageManager.RecordToolCall(newCall); err != nil {
+	if err := storageManager.RecordToolCall(newCall); err != nil {
 		r.logger.Warn("Failed to record replayed tool call", zap.Error(err))
+	}
+
+	// Spec 093 FR-011: a shed is backpressure, not a completed replay. Flattening
+	// it into the record's Error field and returning nil made the REST endpoint
+	// answer 200 success:true for a call that never ran; the typed identity is
+	// returned instead so the handler can map it to 429 + Retry-After. Other
+	// upstream errors keep the existing "replay ran, the tool failed" contract.
+	if callErr != nil {
+		var limitErr *limiter.LimitError
+		if errors.As(callErr, &limitErr) &&
+			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+			return nil, callErr
+		}
 	}
 
 	// Convert to contract type

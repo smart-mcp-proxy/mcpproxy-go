@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
@@ -19,17 +20,50 @@ func (s *Server) runMetricsBridge(ctx context.Context, mm *observability.Metrics
 	}
 	events := s.runtime.SubscribeEvents()
 	defer s.runtime.UnsubscribeEvents(events)
+
+	// Spec 093 FR-013: rejections are counted at the rejection site, not from
+	// the (lossy) event bus.
+	s.runtime.SetRejectionMetricSink(recordRejectionMetric(mm))
+	defer s.runtime.SetRejectionMetricSink(nil)
+
 	s.logger.Info("Observability metrics bridge started")
+
+	// Spec 093 FR-013: queue depth is a level, not an event, so it is sampled
+	// rather than written on every acquire/release — the gauges exist to show
+	// SUSTAINED saturation, and per-call writes would drag a metrics mutex onto
+	// the tool-call hot path.
+	depthTicker := time.NewTicker(concurrencyDepthSampleInterval)
+	defer depthTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-depthTicker.C:
+			s.sampleConcurrencyDepth(mm)
 		case evt, ok := <-events:
 			if !ok {
 				return
 			}
 			applyMetricEvent(mm, evt)
 		}
+	}
+}
+
+// concurrencyDepthSampleInterval is how often the limiter gauges are refreshed.
+const concurrencyDepthSampleInterval = 10 * time.Second
+
+// sampleConcurrencyDepth publishes the live occupancy of every limiter scope.
+// Series are reset first so a removed server stops reporting a stale depth.
+func (s *Server) sampleConcurrencyDepth(mm *observability.MetricsManager) {
+	if s.runtime == nil {
+		return
+	}
+	global, servers := s.runtime.ConcurrencyStats()
+	mm.ResetConcurrencyDepth()
+	mm.SetConcurrencyDepth("global", "", global.Running, global.Queued)
+	for name, st := range servers {
+		mm.SetConcurrencyDepth("server", name, st.Running, st.Queued)
 	}
 }
 
@@ -60,5 +94,24 @@ func applyMetricEvent(mm *observability.MetricsManager, evt runtime.Event) {
 			action = "unknown"
 		}
 		mm.RecordQuarantineEvent("tool", action)
+
+	}
+}
+
+// recordRejectionMetric counts one shed. It is installed as the runtime's
+// synchronous rejection sink rather than driven off the event bus (spec 093
+// FR-013): publishEvent drops events for a subscriber that falls behind, so a
+// burst of sheds — the only load where the counter is interesting — is exactly
+// when bus-driven counting would lose increments. The sink still sees every
+// origin, because it hangs off the limiter's own observer.
+func recordRejectionMetric(mm *observability.MetricsManager) runtime.RejectionMetricSink {
+	return func(server, reason, scope string) {
+		if reason == "" {
+			reason = "unknown"
+		}
+		if scope == "" {
+			scope = "unknown"
+		}
+		mm.RecordToolCallRejected(server, reason, scope)
 	}
 }

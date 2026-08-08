@@ -47,6 +47,23 @@ export interface HealthStatus {
   action?: HealthAction;
 }
 
+// Activity status vocabulary - generated from internal/storage/activity_models.go
+export const ActivityStatusSuccess = 'success' as const;
+export const ActivityStatusError = 'error' as const;
+export const ActivityStatusBlocked = 'blocked' as const;
+/** Spec 093: shed by a concurrency limit before reaching the upstream. */
+export const ActivityStatusRejected = 'rejected' as const;
+export type ActivityStatusValue =
+  | typeof ActivityStatusSuccess
+  | typeof ActivityStatusError
+  | typeof ActivityStatusBlocked
+  | typeof ActivityStatusRejected;
+
+/** Machine-readable cause of a spec-093 rejection (activity metadata rejection_reason). */
+export type RejectionReason = 'queue_full' | 'queue_timeout';
+/** Limiter tier that shed the call (activity metadata rejection_scope). */
+export type RejectionScope = 'server' | 'global';
+
 export interface Server {
   id: string;
   name: string;
@@ -80,6 +97,13 @@ export interface Server {
   health?: HealthStatus; // Unified health status calculated by the backend
   trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: manual)
   security_scan?: SecurityScanSummary; // Latest scan summary (spec 086); ABSENT when no scan has ever run
+  // Spec 093 (#955) per-server concurrency overrides. Tri-state: absent =
+  // inherit server_concurrency_defaults, 0 = disabled for this server,
+  // positive = override. Effective concurrency is additionally bounded by the
+  // proxy-wide (global) limiter.
+  max_concurrent_requests?: number;
+  queue_size?: number;
+  queue_timeout?: string; // Go duration string, e.g. '30s'
 }
 
 export interface SecurityScanSummary {

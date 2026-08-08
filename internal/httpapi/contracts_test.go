@@ -243,7 +243,7 @@ func (m *MockServerController) GetToolCallByID(_ string) (*contracts.ToolCallRec
 func (m *MockServerController) GetServerToolCalls(_ string, _ int) ([]*contracts.ToolCallRecord, error) {
 	return []*contracts.ToolCallRecord{}, nil
 }
-func (m *MockServerController) ReplayToolCall(_ string, _ map[string]interface{}) (*contracts.ToolCallRecord, error) {
+func (m *MockServerController) ReplayToolCall(_ context.Context, _ string, _ map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	return &contracts.ToolCallRecord{
 		ID:         "replayed-call-123",
 		ServerName: "test-server",

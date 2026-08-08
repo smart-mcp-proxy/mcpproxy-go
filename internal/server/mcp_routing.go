@@ -221,6 +221,14 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		directContentTrust := contracts.ContentTrustForTool(annotations)
 
 		if err != nil {
+			// Spec 093 FR-010: direct-routing mode sheds like every other
+			// dispatch path — retry-friendly isError result, typed identity kept
+			// for the REST 429 mapping, and no duplicate activity record (the
+			// limiter seam already wrote the "rejected" one).
+			if limitErr, isShed := asShed(err); isShed {
+				recordShed(ctx, limitErr)
+				return shedToolResult(limitErr), nil
+			}
 			// Emit error activity
 			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil)
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
