@@ -247,6 +247,10 @@ func renderActivity(m model, maxHeight int) string {
 				statusStyle = unhealthyStyle
 			case "blocked":
 				statusStyle = degradedStyle
+			case "rejected":
+				// Spec 093: shed by a concurrency limit — backpressure, so it
+				// renders degraded rather than as an upstream failure.
+				statusStyle = degradedStyle
 			default:
 				statusStyle = BaseStyle
 			}

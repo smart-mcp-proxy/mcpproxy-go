@@ -57,7 +57,7 @@ mcpproxy activity list [flags]
 | `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
 | `--tool` | | | Filter by tool name |
-| `--status` | | | Filter by status: `success`, `error`, `blocked` |
+| `--status` | | | Filter by status: `success`, `error`, `blocked`, `rejected` (shed by a concurrency limit, see [Concurrency Limits](../configuration.md#concurrency-limits--request-queueing)) |
 | `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
 | `--request-id` | | | Filter by HTTP request ID for log correlation |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |
@@ -377,6 +377,7 @@ database:query           15 calls
   "success_count": 142,
   "error_count": 5,
   "blocked_count": 3,
+  "rejected_count": 0,
   "success_rate": 0.947,
   "top_servers": [
     {"name": "github", "count": 75},

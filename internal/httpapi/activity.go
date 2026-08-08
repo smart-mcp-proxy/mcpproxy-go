@@ -781,7 +781,7 @@ type usageParams struct {
 	window string // "24h" | "7d" | "all"
 	server string
 	tool   string
-	status string // "" | "success" | "error" | "blocked"
+	status string // "" | "success" | "error" | "blocked" | "rejected"
 	top    int
 	sort   string // "calls" | "resp_bytes" | "error_rate" | "p95"
 }
@@ -837,9 +837,12 @@ func parseUsageParams(r *http.Request) (usageParams, error) {
 
 	if p.status != "" {
 		switch p.status {
-		case "success", "error", "blocked":
+		// Spec 093: "rejected" (shed by a concurrency limit) is part of the
+		// activity status vocabulary, so the usage filter must accept it —
+		// usageMatchesStatus already knows how to answer it.
+		case "success", "error", "blocked", "rejected":
 		default:
-			return p, fmt.Errorf("invalid status %q (expected success, error, or blocked)", p.status)
+			return p, fmt.Errorf("invalid status %q (expected success, error, blocked, or rejected)", p.status)
 		}
 	}
 
