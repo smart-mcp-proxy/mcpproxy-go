@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
@@ -126,6 +128,16 @@ type Manager struct {
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
+
+	// limiters owns the spec-093 concurrency limiter instances (one per upstream
+	// plus the proxy-wide aggregate). Created once and never replaced — hot
+	// reload republishes limits INTO it so occupancy is shared across
+	// generations (FR-021).
+	limiters *limiter.Registry
+	// rejectObserver is the origin-independent shed seam (FR-012/FR-013),
+	// installed by the runtime. Stored as an atomic pointer because it is set
+	// after construction while clients may already exist.
+	rejectObserver atomic.Pointer[limiter.Observer]
 }
 
 func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
@@ -180,8 +192,12 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		shutdownCtx:     shutdownCtx,
 		shutdownCancel:  shutdownCancel,
 		storageMgr:      storageMgr,
+		limiters:        limiter.NewRegistry(),
 	}
 	manager.globalConfig.Store(globalConfig)
+	// Spec 093: publish the initial limit generation. With no limits configured
+	// this allocates nothing and every admission is a passthrough (FR-006).
+	manager.applyConcurrencyLimits(globalConfig)
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
 	tokenManager := oauth.GetTokenStoreManager()
@@ -298,6 +314,12 @@ func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 func (m *Manager) SetGlobalConfig(globalConfig *config.Config) {
 	m.globalConfig.Store(globalConfig)
 
+	// Spec 093 FR-021: republish one atomic generation of concurrency limits
+	// (global + per-server) into the SAME limiter instances, so running calls
+	// keep counting against the new caps and queued calls keep their original
+	// deadlines.
+	m.applyConcurrencyLimits(globalConfig)
+
 	m.mu.RLock()
 	clients := make([]*managed.Client, 0, len(m.clients))
 	for _, client := range m.clients {
@@ -374,6 +396,9 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			// Use thread-safe setter to avoid race with GetServerState()
 			m.mu.Unlock()
 			existingClient.SetConfig(serverConfig)
+			// Spec 093: the per-server limits may have changed even though the
+			// transport config did not.
+			m.applyServerConcurrency(serverConfig)
 			return nil
 		}
 	}
@@ -409,6 +434,10 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		client.SetToolDiscoveryCallback(m.toolDiscoveryCallback)
 	}
 
+	// Spec 093: install admission control before the client becomes reachable,
+	// so no dispatch can ever see a client without its limiter wiring.
+	client.SetAdmissionControl(m.limiters, m.currentRejectObserver())
+
 	m.clients[id] = client
 	m.logger.Info("Added upstream server configuration",
 		zap.String("id", id),
@@ -416,6 +445,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 	// IMPORTANT: Release lock before disconnecting to prevent deadlock
 	m.mu.Unlock()
+
+	// Spec 093: publish this server's limits (or retire them when the server is
+	// disabled/quarantined, FR-009). Done off the lock — Retire wakes queued
+	// callers.
+	m.applyServerConcurrency(serverConfig)
 
 	// Disconnect old client outside lock to avoid blocking other operations
 	if clientToDisconnect != nil {
@@ -514,6 +548,17 @@ func (m *Manager) RemoveServer(id string) {
 		delete(m.clients, id)
 	}
 	m.mu.Unlock()
+
+	// Spec 093 FR-009: tombstone the limiter first so queued calls fail
+	// immediately with the server-unavailable semantics instead of waiting out
+	// their queue deadline against a server that no longer exists.
+	name := id
+	if exists && client != nil {
+		if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
+			name = cfg.Name
+		}
+	}
+	m.retireServerConcurrency(name)
 
 	// Disconnect outside the lock to avoid blocking other operations
 	if exists {
@@ -1138,12 +1183,13 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		zap.String("server_name", serverName),
 		zap.String("actual_tool_name", actualToolName))
 
+	// Spec 093 FR-008: resolve the target client under the manager lock and
+	// RELEASE it before anything that can block — the reconnect-on-use attempt,
+	// limiter admission inside the managed client, and the upstream call
+	// itself. Holding m.mu.RLock across a queued call would make a saturated
+	// upstream stall every server add/remove/disable and every config reload.
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	m.logger.Debug("CallTool: acquired read lock, searching for client",
-		zap.String("server_name", serverName),
-		zap.Int("total_clients", len(m.clients)))
+	clientCount := len(m.clients)
 
 	// Find the client for this server
 	var targetClient *managed.Client
@@ -1153,6 +1199,11 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 			break
 		}
 	}
+	m.mu.RUnlock()
+
+	m.logger.Debug("CallTool: resolved client under read lock",
+		zap.String("server_name", serverName),
+		zap.Int("total_clients", clientCount))
 
 	if targetClient == nil {
 		m.logger.Error("CallTool: no client found",
@@ -1187,17 +1238,12 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 				zap.String("tool", actualToolName),
 				zap.String("state", state.String()))
 
-			// Release the read lock during reconnection — Connect acquires mc.mu
-			// and we must not hold m.mu.RLock while blocking on a potentially
-			// slow network operation.
-			m.mu.RUnlock()
-
+			// No manager lock is held here (FR-008): the client was snapshotted
+			// above and released, so a slow reconnect cannot block server
+			// management.
 			reconnectCtx, reconnectCancel := context.WithTimeout(ctx, 15*time.Second)
 			reconnectErr := targetClient.TryReconnectSync(reconnectCtx)
 			reconnectCancel()
-
-			// Re-acquire the read lock
-			m.mu.RLock()
 
 			if reconnectErr != nil {
 				m.logger.Warn("reconnect_on_use: reconnect failed, falling through to error",
@@ -1246,6 +1292,16 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		zap.Error(err),
 		zap.Bool("has_result", result != nil))
 	if err != nil {
+		// Spec 093 FR-011: a limiter rejection is a typed identity that must
+		// survive end-to-end (MCP isError text, REST 429 + Retry-After). Return
+		// it verbatim — its message is already caller-ready and the string
+		// enrichment below would both mangle it and mis-classify it (a
+		// queue-full shed is not an upstream rate limit).
+		var limitErr *limiter.LimitError
+		if errors.As(err, &limitErr) {
+			return nil, err
+		}
+
 		// Enrich errors at source with server context
 		errStr := err.Error()
 

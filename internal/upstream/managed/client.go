@@ -99,6 +99,13 @@ type Client struct {
 	// calculator so the UI shows a proactive Sign-in CTA instead of "Ready". A
 	// successful call or a fresh Connect clears it. MCP-2084.
 	oauthCallRequired atomic.Bool
+
+	// admission carries the spec-093 concurrency limiter registry and the
+	// rejection observer installed by the manager. Nil (the default) means no
+	// admission control at all — the zero-config behaviour (FR-006). Swapped
+	// atomically so a hot reload can republish the wiring without a lock; see
+	// admission.go.
+	admission atomic.Pointer[admissionControl]
 }
 
 // livenessProber is the minimal core-client surface the health loop needs: a
@@ -641,6 +648,16 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
+
+	// Spec 093 FR-003/FR-005: admission control sits here, above
+	// coreClient.CallTool (which is where the call_tool_timeout context is
+	// created), so queue waiting never consumes the execution budget and every
+	// in-process dispatch path is bounded by the same limits.
+	releaseSlot, err := mc.acquireAdmission(ctx, toolName)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSlot()
 
 	result, err := mc.coreClient.CallTool(ctx, toolName, args)
 	if err != nil {

@@ -37,3 +37,38 @@ func durPtrHC(d time.Duration) *config.Duration {
 	cd := config.Duration(d)
 	return &cd
 }
+
+// TestSetGlobalConfig_QueueBudgetHotReload extends the same hot-reload contract
+// to the spec-093 concurrency limits: the wait budget a running client applies
+// to the NEXT admission is re-resolved from the swapped global config, and it is
+// always the smallest positive queue_timeout among the enabled scopes (FR-004,
+// FR-021).
+func TestSetGlobalConfig_QueueBudgetHotReload(t *testing.T) {
+	mc := newTestClientForHealth(t)
+	sc := &config.ServerConfig{
+		Name:                  "flap-server",
+		Enabled:               true,
+		MaxConcurrentRequests: intPtrAdm(2),
+		QueueTimeout:          durPtrHC(20 * time.Second),
+	}
+	mc.SetConfig(sc)
+
+	// Boot: only the per-server scope limits, so its timeout is the budget.
+	mc.SetGlobalConfig(&config.Config{Servers: []*config.ServerConfig{sc}})
+	assert.Equal(t, 20*time.Second, mc.GetGlobalConfig().ResolveQueueBudget(mc.GetConfig()))
+
+	// Operator adds a stricter global aggregate limiter: the shared absolute
+	// deadline must follow the smaller of the two.
+	mc.SetGlobalConfig(&config.Config{
+		MaxConcurrentRequests: intPtrAdm(50),
+		QueueTimeout:          durPtrHC(3 * time.Second),
+		Servers:               []*config.ServerConfig{sc},
+	})
+	assert.Equal(t, 3*time.Second, mc.GetGlobalConfig().ResolveQueueBudget(mc.GetConfig()))
+
+	// Disabling both limiters leaves nothing to wait for.
+	off := &config.ServerConfig{Name: "flap-server", Enabled: true, MaxConcurrentRequests: intPtrAdm(0)}
+	mc.SetConfig(off)
+	mc.SetGlobalConfig(&config.Config{Servers: []*config.ServerConfig{off}})
+	assert.Equal(t, time.Duration(0), mc.GetGlobalConfig().ResolveQueueBudget(mc.GetConfig()))
+}
