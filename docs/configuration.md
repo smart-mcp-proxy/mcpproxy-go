@@ -275,6 +275,19 @@ Only the **global aggregate** scope has environment overrides
 `MCPPROXY_QUEUE_TIMEOUT`); the default set and per-server overrides are
 file/API-configured.
 
+**Per-server limits over REST.** `POST /api/v1/servers` and
+`PATCH /api/v1/servers/{name}` accept `max_concurrent_requests`, `queue_size`
+and `queue_timeout` alongside the other per-server fields, and
+`GET /api/v1/servers` echoes them back. All three keep tri-state semantics on
+PATCH: omitting a key leaves the stored value alone, and an explicit `0` is the
+documented opt-out — it is applied, not treated as "unset".
+
+```bash
+curl -X PATCH http://127.0.0.1:8080/api/v1/servers/fragile-db \
+  -H "X-API-Key: $MCPPROXY_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"max_concurrent_requests": 1, "queue_size": 2, "queue_timeout": "10s"}'
+```
+
 **What is limited, and what is not.** Limits apply to *upstream tool calls* from
 every in-process origin — the `call_tool_*` variants, direct-routing mode, the
 REST `POST /api/v1/tools/call` endpoint, sandboxed `code_execution` scripts and

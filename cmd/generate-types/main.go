@@ -150,6 +150,13 @@ export type RejectionScope = 'server' | 'global';
   health?: HealthStatus; // Unified health status calculated by the backend
   trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: manual)
   security_scan?: SecurityScanSummary; // Latest scan summary (spec 086); ABSENT when no scan has ever run
+  // Spec 093 (#955) per-server concurrency overrides. Tri-state: absent =
+  // inherit server_concurrency_defaults, 0 = disabled for this server,
+  // positive = override. Effective concurrency is additionally bounded by the
+  // proxy-wide (global) limiter.
+  max_concurrent_requests?: number;
+  queue_size?: number;
+  queue_timeout?: string; // Go duration string, e.g. '30s'
 }
 
 export interface SecurityScanSummary {

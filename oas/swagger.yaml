@@ -2245,6 +2245,16 @@ components:
           type: string
         last_retry_time:
           type: string
+        max_concurrent_requests:
+          description: |-
+            Spec 093 (GH #955) — per-server concurrency overrides, scope (c) of
+            FR-020. Each setting is tri-state: nil (omitted) means "inherit
+            server_concurrency_defaults", 0 disables that setting for this server,
+            positive overrides it. Surfaced on the GET path so a caller can read back
+            what it set; PATCH/POST accept them via AddServerRequest. The effective
+            concurrency for a server is additionally bounded by the global aggregate
+            limiter, which is NOT an inheritance source for these fields.
+          type: integer
         name:
           type: string
         oauth:
@@ -2258,6 +2268,10 @@ components:
           $ref: '#/components/schemas/contracts.QuarantineStats'
         quarantined:
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         reconnect_count:
           type: integer
         reconnect_on_use:
@@ -2698,12 +2712,26 @@ components:
           type: string
         isolation:
           $ref: '#/components/schemas/httpapi.IsolationRequest'
+        max_concurrent_requests:
+          description: |-
+            MaxConcurrentRequests / QueueSize / QueueTimeout are the per-server
+            concurrency overrides (spec 093 / GH #955, FR-020 scope (c)). Each is
+            tri-state: a nil pointer means "leave unchanged" on PATCH and "inherit
+            server_concurrency_defaults" on create; an explicit 0 disables that
+            setting for this server; a positive value overrides it. Do NOT collapse
+            them to plain values — an omitted field would then silently reset a
+            configured limit.
+          type: integer
         name:
           type: string
         protocol:
           type: string
         quarantined:
           type: boolean
+        queue_size:
+          type: integer
+        queue_timeout:
+          type: string
         reconnect_on_use:
           type: boolean
         trust_mode:

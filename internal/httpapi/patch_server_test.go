@@ -844,3 +844,119 @@ func TestHandleConvertConfigToSecret_ServerNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, w.Code, "body=%s", w.Body.String())
 	require.Contains(t, w.Body.String(), `missing`)
 }
+
+// TestHandlePatchServer_ConcurrencyOverrides verifies the spec-093 per-server
+// concurrency limits are settable over REST (FR-020 scope (c) is documented as
+// file/API-configured) with tri-state nil-preserve semantics: an explicit value
+// (including 0, the documented per-server opt-out) is applied, and an omitted
+// field never wipes a configured limit.
+func TestHandlePatchServer_ConcurrencyOverrides(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	intPtr := func(v int) *int { return &v }
+	durPtr := func(d time.Duration) *config.Duration { v := config.Duration(d); return &v }
+
+	newServer := func() *config.ServerConfig {
+		return &config.ServerConfig{Name: "db", Protocol: "stdio", Command: "docker", Enabled: true}
+	}
+
+	patch := func(t *testing.T, existing *config.ServerConfig, body string) *config.ServerConfig {
+		t.Helper()
+		mockCtrl := &mockPatchServerController{apiKey: "test-key", existingServer: existing}
+		srv := NewServer(mockCtrl, logger, nil)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/db", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates, "UpdateServer should have been called")
+		return mockCtrl.capturedUpdates
+	}
+
+	t.Run("explicit values set the pointers", func(t *testing.T) {
+		updates := patch(t, newServer(), `{"max_concurrent_requests":5,"queue_size":10,"queue_timeout":"45s"}`)
+		require.NotNil(t, updates.MaxConcurrentRequests)
+		assert.Equal(t, 5, *updates.MaxConcurrentRequests)
+		require.NotNil(t, updates.QueueSize)
+		assert.Equal(t, 10, *updates.QueueSize)
+		require.NotNil(t, updates.QueueTimeout)
+		assert.Equal(t, 45*time.Second, updates.QueueTimeout.Duration())
+	})
+
+	t.Run("explicit zero is a real opt-out, not an omission", func(t *testing.T) {
+		existing := newServer()
+		existing.MaxConcurrentRequests = intPtr(5)
+		updates := patch(t, existing, `{"max_concurrent_requests":0}`)
+		require.NotNil(t, updates.MaxConcurrentRequests)
+		assert.Equal(t, 0, *updates.MaxConcurrentRequests)
+	})
+
+	t.Run("omitting preserves a prior value", func(t *testing.T) {
+		existing := newServer()
+		existing.MaxConcurrentRequests = intPtr(5)
+		existing.QueueSize = intPtr(10)
+		existing.QueueTimeout = durPtr(45 * time.Second)
+		updates := patch(t, existing, `{"args":["new-arg"]}`)
+		require.NotNil(t, updates.MaxConcurrentRequests)
+		assert.Equal(t, 5, *updates.MaxConcurrentRequests)
+		require.NotNil(t, updates.QueueSize)
+		assert.Equal(t, 10, *updates.QueueSize)
+		require.NotNil(t, updates.QueueTimeout)
+		assert.Equal(t, 45*time.Second, updates.QueueTimeout.Duration())
+	})
+
+	t.Run("omitting preserves nil existing", func(t *testing.T) {
+		updates := patch(t, newServer(), `{"args":["new-arg"]}`)
+		assert.Nil(t, updates.MaxConcurrentRequests)
+		assert.Nil(t, updates.QueueSize)
+		assert.Nil(t, updates.QueueTimeout)
+	})
+}
+
+// TestHandleGetServers_ExposesConcurrencyOverrides verifies the GET payload
+// surfaces the per-server limits so a caller can read back what it PATCHed.
+func TestHandleGetServers_ExposesConcurrencyOverrides(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		allServers: []map[string]interface{}{
+			{
+				"id":                      "db",
+				"name":                    "db",
+				"enabled":                 true,
+				"quarantined":             false,
+				"max_concurrent_requests": 5,
+				"queue_size":              10,
+				"queue_timeout":           "45s",
+			},
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var resp struct {
+		Data struct {
+			Servers []struct {
+				Name                  string `json:"name"`
+				MaxConcurrentRequests *int   `json:"max_concurrent_requests"`
+				QueueSize             *int   `json:"queue_size"`
+				QueueTimeout          string `json:"queue_timeout"`
+			} `json:"servers"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Servers, 1)
+	require.NotNil(t, resp.Data.Servers[0].MaxConcurrentRequests, "max_concurrent_requests must appear in the GET payload")
+	assert.Equal(t, 5, *resp.Data.Servers[0].MaxConcurrentRequests)
+	require.NotNil(t, resp.Data.Servers[0].QueueSize)
+	assert.Equal(t, 10, *resp.Data.Servers[0].QueueSize)
+	assert.Equal(t, "45s", resp.Data.Servers[0].QueueTimeout,
+		"queue_timeout must appear in the GET payload as a duration string")
+}

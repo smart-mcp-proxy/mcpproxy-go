@@ -1472,6 +1472,16 @@ type AddServerRequest struct {
 	// pointer means "leave unchanged" on PATCH; a present value is applied.
 	// Mirrors config.ServerConfig.InitTimeout's *Duration tri-state.
 	InitTimeout *config.Duration `json:"init_timeout,omitempty" swaggertype:"string"`
+	// MaxConcurrentRequests / QueueSize / QueueTimeout are the per-server
+	// concurrency overrides (spec 093 / GH #955, FR-020 scope (c)). Each is
+	// tri-state: a nil pointer means "leave unchanged" on PATCH and "inherit
+	// server_concurrency_defaults" on create; an explicit 0 disables that
+	// setting for this server; a positive value overrides it. Do NOT collapse
+	// them to plain values — an omitted field would then silently reset a
+	// configured limit.
+	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
+	QueueSize             *int             `json:"queue_size,omitempty"`
+	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty" swaggertype:"string"`
 	// Isolation carries per-server Docker isolation overrides (image,
 	// network_mode, extra_args, working_dir, enabled). A nil pointer
 	// means "do not touch isolation config"; an empty-but-present
@@ -1643,6 +1653,18 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// MCP-3322: carry the per-server init_timeout override through on create.
 	if req.InitTimeout != nil {
 		serverConfig.InitTimeout = req.InitTimeout
+	}
+	// Spec 093: carry the per-server concurrency overrides through on create.
+	// Tri-state pointers — only set when the caller actually provided them, so
+	// an omitted field still inherits server_concurrency_defaults.
+	if req.MaxConcurrentRequests != nil {
+		serverConfig.MaxConcurrentRequests = req.MaxConcurrentRequests
+	}
+	if req.QueueSize != nil {
+		serverConfig.QueueSize = req.QueueSize
+	}
+	if req.QueueTimeout != nil {
+		serverConfig.QueueTimeout = req.QueueTimeout
 	}
 	// Carry the per-server Docker isolation override through on create. The
 	// AddServerRequest has always declared (and documented) an Isolation
@@ -1902,6 +1924,27 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.InitTimeout = existingSrv.InitTimeout
+	}
+	// Spec 093: the per-server concurrency overrides are tri-state pointers —
+	// preserve the existing values when the request omits them so an unrelated
+	// PATCH cannot wipe a configured limit.
+	if req.MaxConcurrentRequests != nil {
+		updates.MaxConcurrentRequests = req.MaxConcurrentRequests
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.MaxConcurrentRequests = existingSrv.MaxConcurrentRequests
+	}
+	if req.QueueSize != nil {
+		updates.QueueSize = req.QueueSize
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.QueueSize = existingSrv.QueueSize
+	}
+	if req.QueueTimeout != nil {
+		updates.QueueTimeout = req.QueueTimeout
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.QueueTimeout = existingSrv.QueueTimeout
 	}
 	if req.Isolation != nil {
 		updates.Isolation = req.Isolation.toConfig()

@@ -42,6 +42,11 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		// MCP-3322: surface the per-server init_timeout override so callers can
 		// read back a configured handshake deadline.
 		InitTimeout: cfg.InitTimeout,
+		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
+		// caller that PATCHed a limit can read it back.
+		MaxConcurrentRequests: cfg.MaxConcurrentRequests,
+		QueueSize:             cfg.QueueSize,
+		QueueTimeout:          cfg.QueueTimeout,
 	}
 
 	// Convert OAuth config if present
@@ -157,6 +162,25 @@ func ConvertUpstreamStatsToServerStats(stats map[string]interface{}) ServerStats
 	return serverStats
 }
 
+// genericInt coerces a value from a generic map into an int. Generic server
+// maps reach this converter both straight from Go structs (int) and from JSON
+// round-trips (float64), so both encodings must be accepted. The bool result
+// distinguishes "key absent or not numeric" from a legitimate 0 — which matters
+// for the tri-state concurrency overrides, where 0 means "disabled" and absent
+// means "inherit" (spec 093 FR-020).
+func genericInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
 // ConvertGenericServersToTyped converts []map[string]interface{} to []Server
 func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Server {
 	servers := make([]Server, 0, len(genericServers))
@@ -203,6 +227,21 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			if d, err := time.ParseDuration(initTimeout); err == nil {
 				v := config.Duration(d)
 				server.InitTimeout = &v
+			}
+		}
+		// Spec 093: per-server concurrency overrides are tri-state, so only set
+		// the pointer when the key is actually present. Generic maps come from
+		// JSON, where every number decodes as float64.
+		if v, ok := genericInt(generic["max_concurrent_requests"]); ok {
+			server.MaxConcurrentRequests = &v
+		}
+		if v, ok := genericInt(generic["queue_size"]); ok {
+			server.QueueSize = &v
+		}
+		if queueTimeout, ok := generic["queue_timeout"].(string); ok && queueTimeout != "" {
+			if d, err := time.ParseDuration(queueTimeout); err == nil {
+				v := config.Duration(d)
+				server.QueueTimeout = &v
 			}
 		}
 		if connected, ok := generic["connected"].(bool); ok {
