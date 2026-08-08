@@ -611,3 +611,54 @@ func TestReportsVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestAcquireUpdateLock_SecondHolderIsRefused(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "mcpproxy")
+
+	release, err := acquireUpdateLock(target)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	// flock/LockFileEx conflict even between two opens in the same process,
+	// so this stands in for a concurrent `mcpproxy update` invocation.
+	if _, err := acquireUpdateLock(target); !errors.Is(err, errUpdateInProgress) {
+		t.Fatalf("second acquire: want errUpdateInProgress, got %v", err)
+	}
+
+	release()
+	release2, err := acquireUpdateLock(target)
+	if err != nil {
+		t.Fatalf("re-acquire after release: %v", err)
+	}
+	release2()
+}
+
+func TestApplyNewBinary_RefusedWhileAnotherSwapHoldsTheLock(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, "staged")
+	if err := os.WriteFile(target, []byte("current"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.WriteFile(staged, []byte("new"), 0o600); err != nil {
+		t.Fatalf("write staged: %v", err)
+	}
+
+	release, err := acquireUpdateLock(target)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+
+	if err := applyNewBinary(target, staged, nil); !errors.Is(err, errUpdateInProgress) {
+		t.Fatalf("applyNewBinary under a held lock: want errUpdateInProgress, got %v", err)
+	}
+	// The refused attempt must not have touched anything.
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("read target: %v", readErr)
+	}
+	if string(got) != "current" {
+		t.Fatalf("target changed by refused swap: %q", got)
+	}
+}

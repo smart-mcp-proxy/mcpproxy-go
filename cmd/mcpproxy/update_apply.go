@@ -228,6 +228,16 @@ func applyNewBinary(target, staged string, verify func(path string) error) (err 
 	backup := target + ".old"
 	sentinel := target + swapSentinelSuffix
 
+	// The whole recover-and-swap sequence runs under an exclusive per-target
+	// lock: a concurrent invocation reading a sibling's sentinel/backup state
+	// mid-swap would misclassify it and could delete the only known-good
+	// backup. Crash-safe (the kernel releases it with the process).
+	release, lockErr := acquireUpdateLock(target)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
+
 	if recoverErr := recoverInterruptedSwap(target, backup, sentinel, verify); recoverErr != nil {
 		return recoverErr
 	}
