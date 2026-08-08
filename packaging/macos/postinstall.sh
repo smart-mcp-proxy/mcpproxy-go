@@ -104,8 +104,25 @@ run_as_user() {
     fi
 }
 
+# Scope every process operation to the installing user.
+#
+# postinstall runs as root, and `pgrep -f` / `pkill -f` as root match EVERY
+# user's processes. On a shared or multi-session Mac that turned "upgrade my
+# copy" into "quit everybody's tray" — including sessions that are not being
+# upgraded and whose owner is not at the keyboard. `-U <uid>` restricts the
+# match to the console user resolved above; without a uid (CI imaging, no real
+# user) there is nobody else's session to protect.
+#
+# A plain string rather than an array: macOS ships bash 3.2, where expanding an
+# empty array under `set -u` is itself an error.
+PGREP_SCOPE=""
+if [ -n "$REAL_UID" ] && [ "$REAL_UID" != "0" ]; then
+    PGREP_SCOPE="-U $REAL_UID"
+fi
+
+# shellcheck disable=SC2086  # PGREP_SCOPE is empty or "-U <numeric uid>"
 app_is_running() {
-    /usr/bin/pgrep -f "$APP_EXEC_PATTERN" >/dev/null 2>&1
+    /usr/bin/pgrep $PGREP_SCOPE -f "$APP_EXEC_PATTERN" >/dev/null 2>&1
 }
 
 # Wait up to $1 tenths of a second for the app to disappear. Returns 0 if it
@@ -135,14 +152,16 @@ quit_running_instance() {
     fi
 
     echo "postinstall: MCPProxy did not quit in time — sending SIGTERM" >&2
-    /usr/bin/pkill -f "$APP_EXEC_PATTERN" || true
+    # shellcheck disable=SC2086
+    /usr/bin/pkill $PGREP_SCOPE -f "$APP_EXEC_PATTERN" || true
     if wait_for_exit "$SIGTERM_TENTHS"; then
         echo "postinstall: the old instance terminated"
         return 0
     fi
 
     echo "postinstall: MCPProxy ignored SIGTERM — sending SIGKILL" >&2
-    /usr/bin/pkill -9 -f "$APP_EXEC_PATTERN" || true
+    # shellcheck disable=SC2086
+    /usr/bin/pkill $PGREP_SCOPE -9 -f "$APP_EXEC_PATTERN" || true
     # Never fail the install over this. A survivor is handled by the new tray's
     # stale-core supersede rather than by aborting an upgrade that has already
     # copied the bundle.
