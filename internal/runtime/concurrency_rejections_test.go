@@ -5,6 +5,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,6 +89,67 @@ func TestRejectedRecordIsWrittenOnceOffTheBus(t *testing.T) {
 	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
 	require.NoError(t, err)
 	assert.Len(t, records, 1, "the bus copy must not persist a duplicate rejected row")
+}
+
+// TestStopWaitsForInflightRejectionWrites is the Spec 080 FR-010 barrier for the
+// synchronous rejection writer. The write runs on the rejecting caller's
+// goroutine, so unless it joins the same wait group Stop drains, Stop can return
+// — and Runtime.Close can resolve the shutdown marker and close BBolt — with a
+// write still in flight.
+func TestStopWaitsForInflightRejectionWrites(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+
+	// A writer admitted through the barrier before Stop begins must be waited on.
+	entered := make(chan struct{})
+	var finished atomic.Bool
+	go func() {
+		if !svc.enterWrite() {
+			close(entered)
+			return
+		}
+		close(entered)
+		time.Sleep(150 * time.Millisecond)
+		finished.Store(true)
+		svc.workersWG.Done()
+	}()
+	<-entered
+
+	svc.Stop()
+	assert.True(t, finished.Load(),
+		"Stop returned while a registered activity write was still in flight")
+
+	// Once Stop has returned, the DB may close at any moment: further rejections
+	// must be turned away rather than written.
+	countRejected := func() int {
+		records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+		require.NoError(t, err)
+		return len(records)
+	}
+	before := countRejected()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.RecordToolCallRejected(Event{
+				Type:      EventTypeActivityToolCallRejected,
+				Timestamp: time.Now().UTC(),
+				Payload: map[string]any{
+					"server_name": "db",
+					"tool_name":   "query",
+					"reason":      "queue_full",
+					"scope":       "server",
+				},
+			})
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, before, countRejected(), "no activity write may land after Stop returns")
 }
 
 // toInt64 normalises a JSON-round-tripped number (float64) or a native int64.
