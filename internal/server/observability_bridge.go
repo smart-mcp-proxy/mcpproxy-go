@@ -20,6 +20,12 @@ func (s *Server) runMetricsBridge(ctx context.Context, mm *observability.Metrics
 	}
 	events := s.runtime.SubscribeEvents()
 	defer s.runtime.UnsubscribeEvents(events)
+
+	// Spec 093 FR-013: rejections are counted at the rejection site, not from
+	// the (lossy) event bus.
+	s.runtime.SetRejectionMetricSink(recordRejectionMetric(mm))
+	defer s.runtime.SetRejectionMetricSink(nil)
+
 	s.logger.Info("Observability metrics bridge started")
 
 	// Spec 093 FR-013: queue depth is a level, not an event, so it is sampled
@@ -89,13 +95,17 @@ func applyMetricEvent(mm *observability.MetricsManager, evt runtime.Event) {
 		}
 		mm.RecordQuarantineEvent("tool", action)
 
-	case runtime.EventTypeActivityToolCallRejected:
-		// Spec 093 FR-013. Driven off the event bus, so it counts sheds from
-		// every origin — including code_execution and activity replay, which
-		// never traverse the MCP dispatch layer.
-		server, _ := evt.Payload["server_name"].(string)
-		reason, _ := evt.Payload["reason"].(string)
-		scope, _ := evt.Payload["scope"].(string)
+	}
+}
+
+// recordRejectionMetric counts one shed. It is installed as the runtime's
+// synchronous rejection sink rather than driven off the event bus (spec 093
+// FR-013): publishEvent drops events for a subscriber that falls behind, so a
+// burst of sheds — the only load where the counter is interesting — is exactly
+// when bus-driven counting would lose increments. The sink still sees every
+// origin, because it hangs off the limiter's own observer.
+func recordRejectionMetric(mm *observability.MetricsManager) runtime.RejectionMetricSink {
+	return func(server, reason, scope string) {
 		if reason == "" {
 			reason = "unknown"
 		}

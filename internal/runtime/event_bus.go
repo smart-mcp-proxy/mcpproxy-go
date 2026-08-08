@@ -500,6 +500,12 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 // the REST endpoint, a sandboxed code-execution script or an activity replay.
 //
 // reason is queue_full | queue_timeout; scope is server | global.
+// Unlike every other activity emission, the RECORD is written synchronously
+// here rather than by the activity service's bus subscriber: publishEvent drops
+// events for any subscriber whose channel is full, and a burst of sheds is
+// precisely the load that fills it. The bus copy is still published, but only
+// so live subscribers (SSE, tray) see the rejection — the durable row no longer
+// depends on it.
 func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, requestID, reason, scope, message string, limit int, retryAfterMs, waitedMs int64) {
 	payload := map[string]any{
 		"server_name":    serverName,
@@ -513,7 +519,9 @@ func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, req
 		"retry_after_ms": retryAfterMs,
 		"duration_ms":    waitedMs,
 	}
-	r.publishEvent(newEvent(EventTypeActivityToolCallRejected, payload))
+	evt := newEvent(EventTypeActivityToolCallRejected, payload)
+	r.activityService.RecordToolCallRejected(evt)
+	r.publishEvent(evt)
 }
 
 // EmitActivityPolicyDecision emits an event when a policy blocks a tool call.

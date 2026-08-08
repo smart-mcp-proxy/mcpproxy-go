@@ -303,10 +303,13 @@ saturated upstream. The separate-process CLI debug client is out of scope.
 | `mcpproxy_concurrency_active` | gauge | `scope`, `server` | Calls currently holding a slot. |
 | `mcpproxy_concurrency_queue_depth` | gauge | `scope`, `server` | Calls currently waiting for a slot. |
 
-Gauges are sampled every 10s; the counter is exact. The same sheds also appear
-in the activity log (`status: rejected`), including the ones from
-`code_execution` and replay — the rejection is recorded at the limiter, below
-the MCP dispatch layer, so no origin can bypass it.
+Gauges are sampled every 10s; the counter is exact — it is incremented at the
+rejection itself, not derived from the internal event stream, so a burst of
+sheds cannot lose increments. The same sheds also appear in the activity log
+(`status: rejected`) — written on the same synchronous path, and exactly one row
+per shed — including the ones from `code_execution` and replay: the rejection is
+recorded at the limiter, below the MCP dispatch layer, so no origin can bypass
+it and none can double-report it.
 
 ### Debug & Development
 

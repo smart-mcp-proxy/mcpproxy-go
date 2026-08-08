@@ -128,6 +128,13 @@ type Runtime struct {
 	managementService interface{}      // Initialized later to avoid import cycle
 	activityService   *ActivityService // Activity logging service
 
+	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
+	// site (spec 093 FR-013). Installed by the observability bridge. It is
+	// deliberately not driven off the event bus: the bus drops events when a
+	// subscriber falls behind, and a rejection burst — the one moment the
+	// counter matters — is exactly when that happens.
+	rejectionMetric atomic.Pointer[RejectionMetricSink]
+
 	// workSessions derives a unit of USER WORK from the churn of transport
 	// sessions underneath it (Spec 082).
 	workSessions *WorkSessionTracker

@@ -25,7 +25,7 @@ func TestHandleToolCallRejected_PersistsRejectedRecord(t *testing.T) {
 
 	svc := NewActivityService(store, zap.NewNop())
 
-	svc.handleEvent(Event{
+	svc.RecordToolCallRejected(Event{
 		Type:      EventTypeActivityToolCallRejected,
 		Timestamp: time.Now().UTC(),
 		Payload: map[string]any{
@@ -60,6 +60,33 @@ func TestHandleToolCallRejected_PersistsRejectedRecord(t *testing.T) {
 	assert.Equal(t, "server", rec.Metadata[storage.MetadataKeyRejectionScope])
 	assert.EqualValues(t, 2, toInt64(rec.Metadata[storage.MetadataKeyRejectionLimit]))
 	assert.EqualValues(t, 30000, toInt64(rec.Metadata[storage.MetadataKeyRejectionRetryAfterMs]))
+}
+
+// TestRejectedRecordIsWrittenOnceOffTheBus guards the non-lossy path: the row is
+// written at the rejection site, and the event-bus copy — which exists only so
+// live subscribers see the shed — must not write a second one.
+func TestRejectedRecordIsWrittenOnceOffTheBus(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	evt := Event{
+		Type:      EventTypeActivityToolCallRejected,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "db",
+			"tool_name":   "query",
+			"reason":      "queue_full",
+			"scope":       "server",
+		},
+	}
+
+	svc.RecordToolCallRejected(evt)
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	assert.Len(t, records, 1, "the bus copy must not persist a duplicate rejected row")
 }
 
 // toInt64 normalises a JSON-round-tripped number (float64) or a native int64.

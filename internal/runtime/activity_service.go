@@ -408,7 +408,9 @@ func (s *ActivityService) handleEvent(evt Event) {
 	case EventTypeActivityToolCallCompleted:
 		s.handleToolCallCompleted(evt)
 	case EventTypeActivityToolCallRejected:
-		s.handleToolCallRejected(evt)
+		// Persisted synchronously by RecordToolCallRejected at the rejection
+		// site (spec 093 FR-012): the bus copy exists only for live subscribers,
+		// and handling it here too would write the row twice.
 	case EventTypeActivityPolicyDecision:
 		s.handlePolicyDecision(evt)
 	case EventTypeActivityQuarantineChange:
@@ -441,12 +443,29 @@ func (s *ActivityService) handleEvent(evt Event) {
 	}
 }
 
-// handleToolCallRejected persists a concurrency-limiter shed as a tool_call
+// RecordToolCallRejected persists a concurrency-limiter shed as a tool_call
 // record with the dedicated "rejected" status (spec 093 FR-012). It is a
-// separate handler from handleToolCallCompleted because a shed has no upstream
+// separate path from handleToolCallCompleted because a shed has no upstream
 // response, no token metrics and no intent envelope — only the rejection
-// metadata a operator needs to right-size the limits.
-func (s *ActivityService) handleToolCallRejected(evt Event) {
+// metadata an operator needs to right-size the limits.
+//
+// It runs SYNCHRONOUSLY on the rejecting goroutine rather than on the activity
+// event loop: the event bus drops events for a subscriber that falls behind,
+// and a shed burst is exactly when it does. The cost is one BBolt write on an
+// error path that is already returning without calling the upstream.
+func (s *ActivityService) RecordToolCallRejected(evt Event) {
+	if s == nil || s.storage == nil {
+		return
+	}
+	// Spec 080 FR-010: never write after shutdown began — Stop cannot wait for a
+	// writer that lives on someone else's goroutine.
+	s.startMu.Lock()
+	stopped := s.stopped
+	s.startMu.Unlock()
+	if stopped {
+		return
+	}
+
 	serverName := getStringPayload(evt.Payload, "server_name")
 	toolName := getStringPayload(evt.Payload, "tool_name")
 	source := getStringPayload(evt.Payload, "source")
