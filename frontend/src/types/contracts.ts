@@ -380,4 +380,7 @@ export interface InfoResponse {
     socket: string;
   };
   update?: UpdateInfo;
+  // Spec 092 FR-001a: durable launch provenance of the running core —
+  // "tray", "installer", or "" (user-launched / unknown).
+  launched_by: string;
 }

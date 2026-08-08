@@ -23,6 +23,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
@@ -1105,6 +1106,7 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 // @Description Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
 // @Description This endpoint is designed for tray-core communication and version checking
 // @Description Use refresh=true query parameter to force an immediate update check against GitHub
+// @Description The launched_by field reports durable launch provenance ("tray", "installer", or "" for user-launched/unknown)
 // @Tags status
 // @Produce json
 // @Param refresh query boolean false "Force immediate update check against GitHub"
@@ -1147,6 +1149,13 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 			"http":   listenAddr,
 			"socket": getSocketPath(), // Returns socket path if enabled, empty otherwise
 		},
+		// Spec 092 FR-001a: durable launch provenance. A tray that attaches to
+		// an already-running core (possibly started by an *earlier* tray that
+		// no longer exists) reads this to decide whether it owns the process
+		// and may supersede it, instead of relying on in-memory ownership that
+		// dies with the launching tray. "" means user/unknown → consent
+		// required (FR-002).
+		"launched_by": launchedByFn(),
 	}
 	if versionInfo != nil {
 		response["update"] = versionInfo.ToAPIResponse()
@@ -1194,6 +1203,12 @@ func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) str
 
 // buildVersion is set during build using -ldflags
 var buildVersion = "development"
+
+// launchedByFn resolves this process's launch provenance for /api/v1/info
+// (Spec 092 FR-001a). Indirected through a variable so handler tests can
+// exercise every provenance value without mutating the process-wide capture
+// in internal/launch.
+var launchedByFn = launch.LaunchedBy
 
 // editionValue identifies the MCPProxy edition (personal or server).
 var editionValue = "personal"

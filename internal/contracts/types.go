@@ -1166,4 +1166,10 @@ type InfoResponse struct {
 	ListenAddr string        `json:"listen_addr"`      // Listen address (e.g., "127.0.0.1:8080")
 	Endpoints  InfoEndpoints `json:"endpoints"`        // Available API endpoints
 	Update     *UpdateInfo   `json:"update,omitempty"` // Update information (if available)
+	// LaunchedBy is the durable launch provenance of the running core (Spec
+	// 092 FR-001a): "tray" when a tray spawned it, "installer" when the macOS
+	// PKG postinstall did, "" when user-launched or unknown. Always present
+	// (possibly empty) so a tray can distinguish "old core, not mine" from
+	// "old core I may supersede".
+	LaunchedBy string `json:"launched_by"`
 }

@@ -1665,6 +1665,14 @@ components:
       properties:
         endpoints:
           $ref: '#/components/schemas/contracts.InfoEndpoints'
+        launched_by:
+          description: |-
+            LaunchedBy is the durable launch provenance of the running core (Spec
+            092 FR-001a): "tray" when a tray spawned it, "installer" when the macOS
+            PKG postinstall did, "" when user-launched or unknown. Always present
+            (possibly empty) so a tray can distinguish "old core, not mine" from
+            "old core I may supersede".
+          type: string
         listen_addr:
           description: Listen address (e.g., "127.0.0.1:8080")
           type: string
@@ -4253,6 +4261,7 @@ paths:
         Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
         This endpoint is designed for tray-core communication and version checking
         Use refresh=true query parameter to force an immediate update check against GitHub
+        The launched_by field reports durable launch provenance ("tray", "installer", or "" for user-launched/unknown)
       parameters:
       - description: Force immediate update check against GitHub
         in: query
