@@ -14,7 +14,7 @@ over, so MCPProxy only ever replaces what it owns and prints the exact command
 for everything else.
 
 Related: [Version Updates](/features/version-updates) (how the *check* works),
-[Prerelease Builds](/prerelease-builds) (the RC channel).
+[Prerelease Builds](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/prerelease-builds.md) (the RC channel).
 
 :::warning macOS one-click is built but not switched on
 The updater ships in every macOS build and does nothing until a maintainer
@@ -167,7 +167,7 @@ channels:
   offers a tagged item only to clients that ask for that channel. The tray asks
   for `beta` only when the core reports `update_policy.channel == "rc"`.
 
-See [Prerelease Builds](/prerelease-builds) for how to get on the RC channel.
+See [Prerelease Builds](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/prerelease-builds.md) for how to get on the RC channel.
 
 ## Release infrastructure
 
