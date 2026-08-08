@@ -499,31 +499,70 @@ func TestAdmissionIsGovernedByTheGenerationItResolved(t *testing.T) {
 	}
 }
 
-// TestCappedGenerationAlwaysPublishesAWaitBudget closes the other half of the
-// same hazard: whatever the caps came from, a scope that CAN queue always has a
-// deadline to queue against, so no admission can wait indefinitely.
-func TestCappedGenerationAlwaysPublishesAWaitBudget(t *testing.T) {
+// TestQueueBudgetResolvesEachScopeIndependently is the FR-004 budget rule. Each
+// ACTIVE scope contributes its own effective timeout — its configured value, or
+// the fallback when it caps concurrency without naming one — and the shared
+// deadline is the smallest of them.
+//
+// Applying the fallback only at the end instead made a capped scope with no
+// timeout of its own contribute NOTHING whenever the other scope named one, so
+// a server capped with no timeout next to a global 60s inherited 60s.
+func TestQueueBudgetResolvesEachScopeIndependently(t *testing.T) {
+	cases := []struct {
+		name   string
+		server Limits
+		global Limits
+		want   time.Duration
+	}{
+		{"nothing capped", Limits{}, Limits{}, 0},
+		{"server only", Limits{Max: 1, QueueTimeout: 4 * time.Second}, Limits{}, 4 * time.Second},
+		{"global only", Limits{}, Limits{Max: 1, QueueTimeout: 7 * time.Second}, 7 * time.Second},
+		{"both named, smallest wins", Limits{Max: 1, QueueTimeout: 20 * time.Second}, Limits{Max: 1, QueueTimeout: 4 * time.Second}, 4 * time.Second},
+		{"server capped without a timeout", Limits{Max: 1}, Limits{}, defaultQueueBudget},
+		{"global capped without a timeout", Limits{}, Limits{Max: 1}, defaultQueueBudget},
+		{"server fallback beats a larger global", Limits{Max: 1}, Limits{Max: 1, QueueTimeout: 60 * time.Second}, defaultQueueBudget},
+		{"global fallback beats a larger server", Limits{Max: 1, QueueTimeout: 60 * time.Second}, Limits{Max: 1}, defaultQueueBudget},
+		{"named value smaller than the fallback wins", Limits{Max: 1, QueueTimeout: 5 * time.Second}, Limits{Max: 1}, 5 * time.Second},
+		{"an uncapped scope contributes nothing", Limits{QueueTimeout: time.Second}, Limits{Max: 1, QueueTimeout: 9 * time.Second}, 9 * time.Second},
+		{"both capped without timeouts", Limits{Max: 1}, Limits{Max: 2}, defaultQueueBudget},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := queueBudget(tc.server, tc.global); got != tc.want {
+				t.Fatalf("queueBudget(%+v, %+v) = %v, want %v", tc.server, tc.global, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShedReportsTheScopesEffectiveTimeout covers the other half: the
+// Retry-After a shed advertises is the shedding scope's EFFECTIVE timeout, so a
+// scope capped without a named timeout reports the fallback it actually makes
+// callers wait rather than 0 (which the REST surface would render as 1 second).
+func TestShedReportsTheScopesEffectiveTimeout(t *testing.T) {
 	r := NewRegistry()
+	r.Apply(Limits{Max: 1, QueueTimeout: 60 * time.Second}, map[string]Limits{"s": {Max: 1}})
 
-	// Per-server cap with no queue_timeout published.
-	r.Apply(Limits{}, map[string]Limits{"s": {Max: 1, QueueSize: 1}})
 	if got := r.QueueBudget("s"); got != defaultQueueBudget {
-		t.Fatalf("QueueBudget = %v, want the %v fallback", got, defaultQueueBudget)
+		t.Fatalf("QueueBudget = %v, want the %v fallback (the server scope caps without a timeout)", got, defaultQueueBudget)
 	}
 
-	// Global-only cap, including for a server with no scope of its own.
-	r.Apply(Limits{Max: 1, QueueSize: 1}, map[string]Limits{"s": {}})
-	if got := r.QueueBudget("s"); got != defaultQueueBudget {
-		t.Fatalf("QueueBudget with a global cap = %v, want the %v fallback", got, defaultQueueBudget)
+	held, err := r.Acquire(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
 	}
-	if got := r.QueueBudget("never-configured"); got != defaultQueueBudget {
-		t.Fatalf("QueueBudget for an unconfigured server = %v, want the %v fallback", got, defaultQueueBudget)
-	}
+	defer held()
 
-	// Nothing capped anywhere: there is nothing to wait for.
-	r.Apply(Limits{}, map[string]Limits{"s": {}})
-	if got := r.QueueBudget("s"); got != 0 {
-		t.Fatalf("QueueBudget with no caps = %v, want 0", got)
+	_, err = r.Acquire(context.Background(), "s")
+	var le *LimitError
+	if !errors.As(err, &le) {
+		t.Fatalf("expected a shed, got %v", err)
+	}
+	if le.Scope != ScopeServer {
+		t.Fatalf("scope = %s, want server", le.Scope)
+	}
+	if le.RetryAfter != defaultQueueBudget {
+		t.Fatalf("RetryAfter = %v, want the %v the scope actually makes callers wait", le.RetryAfter, defaultQueueBudget)
 	}
 }
 

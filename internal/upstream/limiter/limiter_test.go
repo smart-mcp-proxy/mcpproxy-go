@@ -532,3 +532,113 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	t.Fatalf("condition not met within %v", timeout)
 }
+
+// TestRaisedCapGoesToTheWaiterNotANewcomer pins FIFO across a cap raise.
+//
+// Publishing a raise is necessarily two steps — store the new generation, then
+// re-grant the queue — and the fast path used to admit on free capacity without
+// looking at the queue at all. A call arriving in that window therefore took
+// the slot the raise had just created, in front of a waiter that had been in
+// line for the whole reload.
+//
+// The window is reproduced exactly: the limits are swapped WITHOUT re-granting
+// (which is the state between the two publish steps), and the cap is raised by
+// only one, so there is exactly one new slot and it can go to only one of them.
+func TestRaisedCapGoesToTheWaiterNotANewcomer(t *testing.T) {
+	l := New(ScopeServer, "srv", Limits{Max: 1, QueueSize: 4, QueueTimeout: time.Hour})
+
+	held, err := l.Acquire(context.Background(), deadlineIn(time.Hour))
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer held()
+
+	waiterErr := make(chan error, 1)
+	waiterAdmitted := make(chan struct{})
+	go func() {
+		release, aerr := l.Acquire(context.Background(), deadlineIn(time.Hour))
+		if aerr == nil {
+			close(waiterAdmitted)
+			release()
+		}
+		waiterErr <- aerr
+	}()
+	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 1 })
+
+	// The raise lands, the re-grant has not run yet: one new slot, one waiter,
+	// and a newcomer racing for it. queue_size 0 makes the newcomer's outcome
+	// unambiguous — it either takes the slot or is shed.
+	raised := Limits{Max: 2, QueueSize: 0, QueueTimeout: time.Hour}
+	l.held.Store(&raised)
+
+	_, newcomerErr := l.acquire(context.Background(), raised, deadlineIn(time.Hour))
+	if !errors.Is(newcomerErr, ErrQueueFull) {
+		t.Fatalf("newcomer took the slot the raise created: err = %v, want ErrQueueFull", newcomerErr)
+	}
+
+	select {
+	case <-waiterAdmitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued call must get the first slot a raise creates (FIFO)")
+	}
+	if aerr := <-waiterErr; aerr != nil {
+		t.Fatalf("queued call: %v", aerr)
+	}
+}
+
+// TestFastPathDoesNotOvertakeAQueue is the same rule in steady state: while
+// anyone is queued, an arriving call joins the back of the line even if its own
+// generation would let it run.
+func TestFastPathDoesNotOvertakeAQueue(t *testing.T) {
+	l := New(ScopeServer, "srv", Limits{Max: 1, QueueSize: 4, QueueTimeout: time.Hour})
+
+	held, err := l.Acquire(context.Background(), deadlineIn(time.Hour))
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	first := make(chan error, 1)
+	go func() {
+		release, aerr := l.Acquire(context.Background(), deadlineIn(time.Hour))
+		if aerr == nil {
+			release()
+		}
+		first <- aerr
+	}()
+	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 1 })
+
+	// A stale generation with a bigger cap must not let this call jump the queue.
+	second := make(chan error, 1)
+	go func() {
+		release, aerr := l.acquire(context.Background(), Limits{Max: 5, QueueSize: 4, QueueTimeout: time.Hour}, deadlineIn(time.Hour))
+		if aerr == nil {
+			release()
+		}
+		second <- aerr
+	}()
+	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 2 })
+
+	if got := l.Stats().Running; got != 1 {
+		t.Fatalf("Running = %d, want 1 — a permissive generation must not overtake the queue", got)
+	}
+
+	held()
+	for i := 0; i < 2; i++ {
+		select {
+		case aerr := <-first:
+			if aerr != nil {
+				t.Fatalf("queued call: %v", aerr)
+			}
+			first = nil
+		case aerr := <-second:
+			if first != nil {
+				t.Fatal("the second caller was served before the first (FIFO violated)")
+			}
+			if aerr != nil {
+				t.Fatalf("second queued call: %v", aerr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("queued calls did not drain")
+		}
+	}
+}

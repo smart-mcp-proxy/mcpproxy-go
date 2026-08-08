@@ -241,8 +241,19 @@ func (l *Limiter) acquire(ctx context.Context, limits Limits, queueDeadline time
 		l.mu.Unlock()
 		return nil, l.unavailableError()
 	}
-	// Fast path: unlimited scope, or free capacity.
-	if limits.Max <= 0 || l.running < limits.Max {
+	// Hand capacity to the calls already in line BEFORE considering this one.
+	// A cap raise creates free capacity, and publishing it is necessarily two
+	// steps (store the generation, then re-grant); without this, a call arriving
+	// in between would see the free slot on the fast path and take it in front
+	// of a waiter who has been queued for the whole reload. Draining first also
+	// means the checks below judge capacity that is genuinely spare.
+	l.grantLocked()
+
+	// Fast path: unlimited scope, or free capacity — but never past a queue.
+	// Jumping the line is what FIFO forbids (FR-004), and it is reachable
+	// whenever this admission's generation is more permissive than the one the
+	// waiters were last measured against.
+	if l.waiters.Len() == 0 && (limits.Max <= 0 || l.running < limits.Max) {
 		l.running++
 		l.mu.Unlock()
 		return l.releaseFunc(), nil
@@ -335,13 +346,18 @@ func (l *Limiter) abandon(w *waiter, reportErr error, grantWins bool) error {
 	}
 }
 
+// limitError describes a shed produced by THIS scope. RetryAfter is the scope's
+// EFFECTIVE queue timeout, not its raw configured value: a scope that caps
+// concurrency without naming a timeout still makes callers wait the fallback,
+// and reporting 0 would hand the REST surface a Retry-After that undersells the
+// wait by a factor of thirty.
 func (l *Limiter) limitError(reason Reason, limits Limits) *LimitError {
 	return &LimitError{
 		Scope:      l.scope,
 		Reason:     reason,
 		Server:     l.server,
 		Limit:      limits.Max,
-		RetryAfter: limits.QueueTimeout,
+		RetryAfter: effectiveQueueTimeout(limits),
 	}
 }
 
@@ -374,6 +390,9 @@ func (l *Limiter) releaseLocked() {
 // limits published RIGHT NOW — a waiter must be admitted against the current
 // generation, not against the one it arrived under.
 func (l *Limiter) grantLocked() {
+	if l.waiters.Len() == 0 {
+		return // nothing to grant; keeps the uncontended path free of a limits read
+	}
 	limits := l.Limits()
 	for l.waiters.Len() > 0 && (limits.Max <= 0 || l.running < limits.Max) {
 		e := l.waiters.Front()

@@ -295,7 +295,25 @@ func (r *Registry) QueueBudget(server string) time.Duration {
 	return queueBudget(Limits{}, gen.globalLimits)
 }
 
-// queueBudget is the total wait budget for one call: the smallest positive
+// effectiveQueueTimeout is one scope's wait budget: its configured
+// queue_timeout, or the fallback when it caps concurrency without naming one. A
+// scope that caps nothing has no budget — it never makes a call wait.
+//
+// Resolving this PER SCOPE matters. Folding the fallback in at the end instead
+// let a capped scope with no timeout of its own contribute nothing whenever the
+// other scope named one, so a server capped with no timeout alongside a global
+// 60s inherited 60s rather than its own 30s.
+func effectiveQueueTimeout(l Limits) time.Duration {
+	if !l.Enabled() {
+		return 0
+	}
+	if l.QueueTimeout > 0 {
+		return l.QueueTimeout
+	}
+	return defaultQueueBudget
+}
+
+// queueBudget is the total wait budget for one call: the smallest effective
 // queue_timeout among the scopes that actually limit it (FR-004 — one absolute
 // deadline spanning the per-server and global admission steps combined, never
 // one budget per step). 0 means no limiter applies, so there is nothing to wait
@@ -303,23 +321,13 @@ func (r *Registry) QueueBudget(server string) time.Duration {
 // call can never sit without a deadline.
 func queueBudget(server, global Limits) time.Duration {
 	budget := time.Duration(0)
-	limited := false
-	consider := func(l Limits) {
-		if !l.Enabled() {
-			return
+	for _, timeout := range [...]time.Duration{effectiveQueueTimeout(server), effectiveQueueTimeout(global)} {
+		if timeout <= 0 {
+			continue
 		}
-		limited = true
-		if l.QueueTimeout <= 0 {
-			return
+		if budget == 0 || timeout < budget {
+			budget = timeout
 		}
-		if budget == 0 || l.QueueTimeout < budget {
-			budget = l.QueueTimeout
-		}
-	}
-	consider(server)
-	consider(global)
-	if limited && budget == 0 {
-		return defaultQueueBudget
 	}
 	return budget
 }
