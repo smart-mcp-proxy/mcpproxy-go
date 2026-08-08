@@ -31,6 +31,12 @@ const (
 	// verifyExecTimeout bounds the post-swap `<new binary> --version` probe
 	// (FR-021: success means the new binary actually runs).
 	verifyExecTimeout = 30 * time.Second
+
+	// swapSentinelSuffix names the file that marks a binary swap as in
+	// progress. Present only between "about to move the current binary aside"
+	// and "the replacement verified", so finding one means a swap died
+	// halfway. See applyNewBinary.
+	swapSentinelSuffix = ".updating"
 )
 
 // parseChecksums parses a sha256sum-format manifest ("<hex>  <name>" or
@@ -205,15 +211,24 @@ func ensureTargetWritable(target string) error {
 // once verification passed. Callers must pass an already-resolved (symlink
 // free) target so a symlinked launcher keeps pointing at the file we replace.
 //
-// The two renames are individually atomic but the pair is not, so there is a
-// window in which the target path is empty and target.old holds the ONLY copy
-// of the binary. A crash in that window must be survivable: the first thing
-// this function does is recover from it (restoreInterruptedSwap), and a
-// leftover backup is never removed while the target is absent.
+// The two renames are individually atomic but the sequence is not, so a crash
+// can land in one of two windows, and the two look different on disk:
+//
+//	between the renames  → target absent, backup holds the only copy;
+//	after the renames    → target holds an UNVERIFIED binary, backup holds the
+//	                       last known-good one.
+//
+// The second is the dangerous one, because on disk it is indistinguishable
+// from a finished update — and a retry that mistakes it for one deletes the
+// backup, which is the last known-good binary there is. So the swap writes a
+// sentinel next to the target for exactly as long as it is in progress, and
+// recovery reads it to tell the two states apart. Nothing removes the backup
+// while the sentinel exists.
 func applyNewBinary(target, staged string, verify func(path string) error) (err error) {
 	backup := target + ".old"
+	sentinel := target + swapSentinelSuffix
 
-	if recoverErr := restoreInterruptedSwap(target, backup); recoverErr != nil {
+	if recoverErr := recoverInterruptedSwap(target, backup, sentinel, verify); recoverErr != nil {
 		return recoverErr
 	}
 
@@ -225,9 +240,19 @@ func applyNewBinary(target, staged string, verify func(path string) error) (err 
 		return fmt.Errorf("preserve file mode %o: %w", mode, chmodErr)
 	}
 
-	// The target is present (restoreInterruptedSwap guarantees it), so a
-	// leftover .old is genuinely expendable and must not block the rename.
+	// The target is present and known-good (recoverInterruptedSwap guarantees
+	// both), so a leftover .old is genuinely expendable. Done BEFORE the
+	// sentinel goes down, so "sentinel exists" never coincides with a backup
+	// being deleted.
 	_ = os.Remove(backup)
+
+	if sentinelErr := writeSwapSentinel(sentinel, staged); sentinelErr != nil {
+		return sentinelErr
+	}
+	// Removed on every path this function RETURNS by — success or handled
+	// failure — because each of those ends with the filesystem consistent. Only
+	// a crash leaves it behind, which is exactly what it is for.
+	defer func() { _ = os.Remove(sentinel) }()
 
 	if renameErr := os.Rename(target, backup); renameErr != nil {
 		return fmt.Errorf("move current binary aside: %w", renameErr)
@@ -264,39 +289,136 @@ func applyNewBinary(target, staged string, verify func(path string) error) (err 
 	return nil
 }
 
-// restoreInterruptedSwap puts the world back together after a crash between
-// the two renames in applyNewBinary.
+// writeSwapSentinel marks the target as mid-swap.
 //
-// The dangerous state is "target missing, backup present": the backup is then
-// the only copy of the binary, and removing it — which the swap used to do
-// before it had even looked at the target — destroys the install. So the
-// backup is moved back FIRST, and a missing target with no backup is an error
-// rather than something to plough on through.
-func restoreInterruptedSwap(target, backup string) error {
+// Best-effort durability: the content is fsynced, but the directory entry is
+// not, so a power cut can still lose the file. That is the same guarantee the
+// renames themselves have, and the failure it would reintroduce is the one
+// that existed before the sentinel — not a new one.
+func writeSwapSentinel(sentinel, staged string) error {
+	f, err := os.OpenFile(sentinel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- derived from the caller-resolved target path
+	if err != nil {
+		return fmt.Errorf("mark the update in progress (%s): %w", sentinel, err)
+	}
+	fmt.Fprintf(f, "mcpproxy is replacing this binary with %s (pid %d, %s).\n"+
+		"If this file is still here, the update did not finish; mcpproxy will\n"+
+		"repair it on the next run. Do not delete the .old file by hand.\n",
+		staged, os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+	if syncErr := f.Sync(); syncErr != nil {
+		f.Close()
+		return fmt.Errorf("flush %s: %w", sentinel, syncErr)
+	}
+	return f.Close()
+}
+
+// recoverInterruptedSwap puts the world back together after a crash inside
+// applyNewBinary, and is the reason the sentinel exists.
+//
+// With the sentinel present, target and backup between them say exactly how
+// far the interrupted swap got:
+//
+//	neither          → nothing to recover from and nothing to install onto
+//	backup only      → crashed between the renames; the backup is the only copy
+//	target only      → crashed before the first rename; the target is original
+//	target + backup  → crashed after the second rename; the target was NEVER
+//	                   verified and the backup is the last known-good binary
+//
+// Only the last case needs a judgement, and it is made by running the caller's
+// verification against what is at the target: it either proves itself or the
+// known-good binary goes back. Without a verifier there is no way to prove it,
+// so the known-good binary wins by default.
+func recoverInterruptedSwap(target, backup, sentinel string, verify func(path string) error) error {
+	interrupted, err := regularFileExists(sentinel)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", sentinel, err)
+	}
 	targetExists, err := regularFileExists(target)
 	if err != nil {
 		return fmt.Errorf("inspect %s: %w", target, err)
 	}
-	if targetExists {
-		return nil
-	}
-
 	backupExists, err := regularFileExists(backup)
 	if err != nil {
 		return fmt.Errorf("inspect %s: %w", backup, err)
 	}
-	if !backupExists {
-		return fmt.Errorf("%s does not exist and there is no %s to restore from; "+
-			"reinstall mcpproxy rather than letting an update invent a binary", target, backup)
+
+	if !interrupted {
+		switch {
+		case targetExists:
+			return nil
+		case backupExists:
+			// No sentinel, no target: a swap interrupted by a build that
+			// predates the sentinel. The backup is still the only copy.
+			return restoreKnownGood(target, backup, "a previous update was interrupted")
+		default:
+			return fmt.Errorf("%s does not exist and there is no %s to restore from; "+
+				"reinstall mcpproxy rather than letting an update invent a binary", target, backup)
+		}
 	}
 
-	if renameErr := os.Rename(backup, target); renameErr != nil {
-		return fmt.Errorf("a previous update was interrupted: %s is the only copy of the binary "+
-			"and it could not be moved back to %s: %w", backup, target, renameErr)
+	clearSentinel := func() {
+		if rmErr := os.Remove(sentinel); rmErr != nil {
+			fmt.Fprintf(os.Stderr, "note: could not remove %s: %v\n", sentinel, rmErr)
+		}
 	}
+
+	switch {
+	case !targetExists && !backupExists:
+		return fmt.Errorf("an update of %s was interrupted and neither the binary nor %s is there; "+
+			"reinstall mcpproxy", target, backup)
+
+	case !targetExists:
+		if restoreErr := restoreKnownGood(target, backup,
+			"an update was interrupted between replacing the binary and putting the new one in place"); restoreErr != nil {
+			return restoreErr
+		}
+		clearSentinel()
+		return nil
+
+	case !backupExists:
+		// The swap never got as far as moving anything: what is at the target
+		// is the binary that was there all along.
+		clearSentinel()
+		return nil
+	}
+
+	// Both present. What is at the target came from an update that never
+	// finished proving itself.
+	if verify == nil {
+		if restoreErr := restoreKnownGood(target, backup,
+			"an update was interrupted before the new binary could be verified, and this run cannot verify it either"); restoreErr != nil {
+			return restoreErr
+		}
+		clearSentinel()
+		return nil
+	}
+	if verifyErr := verify(target); verifyErr != nil {
+		if restoreErr := restoreKnownGood(target, backup, fmt.Sprintf(
+			"an update was interrupted and left an unusable binary at %s (%v)", target, verifyErr)); restoreErr != nil {
+			return restoreErr
+		}
+		clearSentinel()
+		return nil
+	}
+
+	// It verifies: the interrupted run had in fact succeeded and only died
+	// before tidying up. The backup has served its purpose.
 	fmt.Fprintf(os.Stderr,
-		"note: a previous update left %s missing; restored it from %s before continuing\n",
-		target, backup)
+		"note: a previous update of %s had completed; cleaning up after it\n", target)
+	if rmErr := os.Remove(backup); rmErr != nil {
+		fmt.Fprintf(os.Stderr, "note: could not remove %s: %v\n", backup, rmErr)
+	}
+	clearSentinel()
+	return nil
+}
+
+// restoreKnownGood moves backup back over target. os.Rename replaces an
+// existing target, which is what discards an unverified binary.
+func restoreKnownGood(target, backup, why string) error {
+	if renameErr := os.Rename(backup, target); renameErr != nil {
+		return fmt.Errorf("%s: %s holds the last known-good binary and it could not be moved "+
+			"back to %s: %w", why, backup, target, renameErr)
+	}
+	fmt.Fprintf(os.Stderr, "note: %s; restored %s from %s\n", why, target, backup)
 	return nil
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,6 +299,211 @@ func TestApplyNewBinary_InterruptedSwapKeepsTheOnlyBinary(t *testing.T) {
 	}
 	if string(got) != "old" {
 		t.Errorf("target content = %q, want the restored old binary", string(got))
+	}
+}
+
+// The other crash window: staged->target succeeded but verification never
+// ran, so the target holds an UNVERIFIED binary and .old holds the last
+// known-good one. On disk that is indistinguishable from a finished update
+// unless the sentinel says otherwise — and mistaking it for one deletes the
+// only known-good binary there is.
+//
+// Here the interrupted binary proves itself, so the retry may clean up.
+func TestApplyNewBinary_RecoveryKeepsAVerifiedInterruptedSwap(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new")
+
+	writeAll(t, map[string]string{
+		target:                      "interrupted-new",
+		target + ".old":             "old",
+		target + swapSentinelSuffix: "swap in progress",
+		staged:                      "new",
+	})
+
+	var verified []string
+	if err := applyNewBinary(target, staged, func(path string) error {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		verified = append(verified, string(content))
+		return nil
+	}); err != nil {
+		t.Fatalf("applyNewBinary: %v", err)
+	}
+
+	if len(verified) == 0 || verified[0] != "interrupted-new" {
+		t.Errorf("recovery must verify what the interrupted swap left behind, saw %v", verified)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Errorf("target content = %q, want the freshly staged binary", string(got))
+	}
+	if _, err := os.Stat(target + ".old"); !os.IsNotExist(err) {
+		t.Error("the backup must be gone once the update completed")
+	}
+	assertNoSentinel(t, target)
+}
+
+// Same interrupted state, but what the crash left at the target does not run.
+// The known-good binary must come back and the unverified one must go.
+func TestApplyNewBinary_RecoveryRestoresOverAnUnverifiableInterruptedSwap(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new")
+
+	writeAll(t, map[string]string{
+		target:                      "unverified",
+		target + ".old":             "old",
+		target + swapSentinelSuffix: "swap in progress",
+		staged:                      "new",
+	})
+
+	// Rejects only what the interrupted run left behind.
+	verify := func(path string) error {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if string(content) == "unverified" {
+			return errors.New("does not run")
+		}
+		return nil
+	}
+	if err := applyNewBinary(target, staged, verify); err != nil {
+		t.Fatalf("applyNewBinary: %v", err)
+	}
+
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Errorf("target content = %q, want the freshly staged binary", string(got))
+	}
+	if _, err := os.Stat(target + ".old"); !os.IsNotExist(err) {
+		t.Error("the backup must be gone once the update completed")
+	}
+	assertNoSentinel(t, target)
+}
+
+// The case the regression was really about: the retry cannot install anything,
+// so the run must end on the last known-good binary rather than on the
+// unverified one the crash left behind.
+func TestApplyNewBinary_RecoveryNeverLeavesTheUnverifiedBinaryInstalled(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new") // deliberately never created
+
+	writeAll(t, map[string]string{
+		target:                      "unverified",
+		target + ".old":             "old",
+		target + swapSentinelSuffix: "swap in progress",
+	})
+
+	err := applyNewBinary(target, staged, func(path string) error {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if string(content) == "unverified" {
+			return errors.New("does not run")
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected an error: there is no staged binary to install")
+	}
+
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("the known-good binary must have been restored: %v", readErr)
+	}
+	if string(got) != "old" {
+		t.Errorf("target content = %q, want the restored known-good binary", string(got))
+	}
+	assertNoSentinel(t, target)
+}
+
+// Without a verifier there is no way to prove the interrupted binary, so the
+// known-good one wins by default.
+func TestApplyNewBinary_RecoveryPrefersTheKnownGoodWhenItCannotVerify(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new")
+
+	writeAll(t, map[string]string{
+		target:                      "unverified",
+		target + ".old":             "old",
+		target + swapSentinelSuffix: "swap in progress",
+		staged:                      "new",
+	})
+
+	if err := applyNewBinary(target, staged, nil); err != nil {
+		t.Fatalf("applyNewBinary: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Errorf("target content = %q, want the freshly staged binary", string(got))
+	}
+	assertNoSentinel(t, target)
+}
+
+// A crash before the first rename: the target is the binary that was always
+// there, and there is nothing to undo.
+func TestApplyNewBinary_RecoveryAcceptsATargetWithNoBackup(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new")
+
+	writeAll(t, map[string]string{
+		target:                      "old",
+		target + swapSentinelSuffix: "swap in progress",
+		staged:                      "new",
+	})
+
+	if err := applyNewBinary(target, staged, nil); err != nil {
+		t.Fatalf("applyNewBinary: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Errorf("target content = %q, want new", string(got))
+	}
+	assertNoSentinel(t, target)
+}
+
+// The sentinel has to be on disk for the whole window it describes, or the
+// recovery above can never fire.
+func TestApplyNewBinary_SentinelExistsForTheDurationOfTheSwap(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "mcpproxy")
+	staged := filepath.Join(dir, ".mcpproxy.new")
+
+	writeAll(t, map[string]string{target: "old", staged: "new"})
+
+	sawSentinel := false
+	if err := applyNewBinary(target, staged, func(string) error {
+		// Verification runs after both renames — the exact moment a crash
+		// would leave an unverified binary installed.
+		_, statErr := os.Stat(target + swapSentinelSuffix)
+		sawSentinel = statErr == nil
+		return nil
+	}); err != nil {
+		t.Fatalf("applyNewBinary: %v", err)
+	}
+	if !sawSentinel {
+		t.Error("the swap must be marked in progress while the new binary is unverified")
+	}
+	assertNoSentinel(t, target)
+}
+
+func writeAll(t *testing.T, files map[string]string) {
+	t.Helper()
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil { // #nosec G306 -- test fixture standing in for an executable
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+}
+
+func assertNoSentinel(t *testing.T, target string) {
+	t.Helper()
+	if _, err := os.Stat(target + swapSentinelSuffix); !os.IsNotExist(err) {
+		t.Errorf("%s must not survive a completed run", target+swapSentinelSuffix)
 	}
 }
 
