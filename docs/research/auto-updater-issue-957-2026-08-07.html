@@ -1,0 +1,347 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-updater for MCPProxy — decision report (#957)</title>
+<style>
+  :root {
+    --paper: #f6f7f8;
+    --card: #ffffff;
+    --ink: #1b1e23;
+    --muted: #5b6470;
+    --line: #dde1e6;
+    --accent: #0b5fbe;
+    --accent-soft: #e7effa;
+    --good: #177245;
+    --good-soft: #e6f3ec;
+    --warn: #a8630a;
+    --warn-soft: #f9f0e2;
+    --risk: #b3372e;
+    --risk-soft: #f9e9e7;
+    --code-bg: #eef0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #15181c;
+      --card: #1d2127;
+      --ink: #e6e9ed;
+      --muted: #98a1ad;
+      --line: #323841;
+      --accent: #5b9be0;
+      --accent-soft: #1d2b3d;
+      --good: #52b788;
+      --good-soft: #1c2e26;
+      --warn: #dfa04e;
+      --warn-soft: #332916;
+      --risk: #e0776c;
+      --risk-soft: #362020;
+      --code-bg: #262b32;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #15181c; --card: #1d2127; --ink: #e6e9ed; --muted: #98a1ad;
+    --line: #323841; --accent: #5b9be0; --accent-soft: #1d2b3d;
+    --good: #52b788; --good-soft: #1c2e26; --warn: #dfa04e; --warn-soft: #332916;
+    --risk: #e0776c; --risk-soft: #362020; --code-bg: #262b32;
+  }
+  :root[data-theme="light"] {
+    --paper: #f6f7f8; --card: #ffffff; --ink: #1b1e23; --muted: #5b6470;
+    --line: #dde1e6; --accent: #0b5fbe; --accent-soft: #e7effa;
+    --good: #177245; --good-soft: #e6f3ec; --warn: #a8630a; --warn-soft: #f9f0e2;
+    --risk: #b3372e; --risk-soft: #f9e9e7; --code-bg: #eef0f3;
+  }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  .eyebrow {
+    font: 600 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: 34px; line-height: 1.15; font-weight: 750; letter-spacing: -.02em;
+    margin: 0 0 10px; text-wrap: balance;
+  }
+  .meta { color: var(--muted); font-size: 14px; margin: 0 0 34px; }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover, .meta a:focus-visible { text-decoration: underline; }
+  h2 {
+    font-size: 21px; font-weight: 700; letter-spacing: -.01em;
+    margin: 52px 0 6px; text-wrap: balance;
+  }
+  h2 .sec {
+    font: 600 12px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--muted); letter-spacing: .1em; display: block; margin-bottom: 6px;
+  }
+  h3 { font-size: 16.5px; font-weight: 700; margin: 26px 0 8px; }
+  p { margin: 10px 0; max-width: 72ch; }
+  .lede { font-size: 17.5px; color: var(--ink); }
+  code, .path {
+    font: 13.2px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    background: var(--code-bg); border-radius: 4px; padding: 1.5px 5px;
+  }
+  .verdict {
+    background: var(--card); border: 1px solid var(--line);
+    border-left: 4px solid var(--accent); border-radius: 8px;
+    padding: 20px 24px; margin: 0 0 8px;
+  }
+  .verdict .eyebrow { margin-bottom: 8px; }
+  .verdict p { margin: 6px 0; }
+  .facts { display: grid; gap: 10px; margin: 18px 0; padding: 0; list-style: none; }
+  .facts li {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 16px; font-size: 14.5px;
+  }
+  .facts .ev { display: block; margin-top: 5px; color: var(--muted); font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .tablewrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  th, td { text-align: left; padding: 10px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+  thead th { border-top: none; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  .chip {
+    display: inline-block; font: 600 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: .05em; border-radius: 99px; padding: 5px 10px; white-space: nowrap;
+  }
+  .chip.good { background: var(--good-soft); color: var(--good); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+  .chip.risk { background: var(--risk-soft); color: var(--risk); }
+  .chip.acc  { background: var(--accent-soft); color: var(--accent); }
+  .option {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 22px 24px; margin: 18px 0;
+  }
+  .option.pick { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .option header { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; }
+  .option h3 { margin: 0; max-width: 60ch; }
+  .option .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .option .desc { color: var(--muted); font-size: 14.5px; margin-top: 10px; }
+  .pc { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 14px; }
+  @media (max-width: 640px) { .pc { grid-template-columns: 1fr; } }
+  .pc h4 { margin: 0 0 6px; font: 600 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
+  .pc .pro h4 { color: var(--good); } .pc .con h4 { color: var(--risk); }
+  .pc ul { margin: 0; padding-left: 18px; font-size: 14px; }
+  .pc li { margin: 5px 0; }
+  ol.phases { counter-reset: ph; list-style: none; margin: 18px 0; padding: 0; display: grid; gap: 14px; }
+  ol.phases > li {
+    counter-increment: ph; background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px 22px 18px 62px; position: relative;
+  }
+  ol.phases > li::before {
+    content: "P" counter(ph, decimal); position: absolute; left: 18px; top: 20px;
+    font: 700 13px/1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent);
+    background: var(--accent-soft); border-radius: 6px; padding: 6px 7px;
+  }
+  ol.phases > li:first-child::before { content: "P0"; }
+  ol.phases > li:nth-child(2)::before { content: "P1"; }
+  ol.phases > li:nth-child(3)::before { content: "P2"; }
+  ol.phases > li:nth-child(4)::before { content: "P3"; }
+  ol.phases h3 { margin: 0 0 8px; }
+  ol.phases ul { margin: 8px 0 0; padding-left: 18px; font-size: 14.5px; }
+  ol.phases li li { margin: 6px 0; }
+  ol.decisions { margin: 18px 0; padding-left: 22px; font-size: 15px; }
+  ol.decisions li { margin: 10px 0; max-width: 75ch; }
+  .appendix td { font-size: 13.5px; }
+  .foot { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+<main>
+  <p class="eyebrow">MCPProxy · Engineering decision report</p>
+  <h1>One-click auto-updater for macOS + <code>mcpproxy update</code> CLI</h1>
+  <p class="meta">
+    Issue <a href="https://github.com/smart-mcp-proxy/mcpproxy-go/issues/957">#957 — old version app still running after upgrade</a>
+    · 2026-08-07 · 21-agent research workflow, 14 load-bearing claims adversarially verified against the code
+  </p>
+
+  <div class="verdict">
+    <p class="eyebrow">Recommendation</p>
+    <p class="lede"><strong>Option A — finish the Sparkle 2 integration that is already half-shipped</strong>, with the stale-process fix (Option D) folded in as Phase 0.</p>
+    <p>Sparkle 2.9.3 is <em>already declared in Package.swift, dynamically linked into the tray binary, and bundled + signed into <code>Contents/Frameworks</code></em> — it has just never been imported. The Info.plist already carries <code>SUFeedURL=https://mcpproxy.app/appcast.xml</code> (nonexistent) and a placeholder EdDSA key. Spec 037 FR-014/FR-015 already wrote the design. The remaining work is mostly deterministic CI plumbing, not novel security-critical runtime code.</p>
+    <p><strong>Critically, Sparkle alone does not fix #957</strong> — its relaunch callbacks don't cover install-on-quit or manual DMG drag-installs (Sparkle Discussion #2572). The actual bug fix is a version-mismatch supersede check in the tray, which ships first and works for every upgrade path.</p>
+  </div>
+
+  <h2><span class="sec">01</span>What exists today (verified)</h2>
+  <p>Three parallel update-awareness paths, zero install automation:</p>
+  <ul class="facts">
+    <li><strong>Core:</strong> <code>internal/updatecheck</code> (Spec 079) polls GitHub daily, detects the install channel (dmg / homebrew / deb / rpm / docker / go-install / windows-installer / tarball) and surfaces guidance via <code>/api/v1/info</code>, <code>status</code>, <code>doctor</code>, Web UI, and tray. The DMG channel deliberately gets no command — only “Download the latest DMG from…”.
+      <span class="ev">internal/updatecheck/channel.go:129-217 · guidance.go:12-25, 58-59 — CONFIRMED</span></li>
+    <li><strong>Tray:</strong> Sparkle 2.9.3 is declared, linked (<code>@rpath/Sparkle.framework</code> per otool), bundled and signed by both build scripts — but no Swift file ever <code>import Sparkle</code>s. <code>checkWithSparkle()</code> is a stub that falls through to a raw GitHub API check. The menu already has the exact slots: “Check for Updates” and a conditional “Update available: vX” that just opens the browser.
+      <span class="ev">Package.swift:8 · UpdateService.swift:49,132-139 · MCPProxyApp.swift:1112-1115, 1132-1136 — CONFIRMED</span></li>
+    <li><strong>Sparkle infra is half-plumbed but dead:</strong> Info.plist has <code>SUFeedURL=https://mcpproxy.app/appcast.xml</code>, <code>SUPublicEDKey=SPARKLE_PUBLIC_KEY_PLACEHOLDER</code>, <code>SUEnableAutomaticChecks=true</code>. No appcast.xml exists in the repo, the release workflow, or the website repo. No EdDSA keys were ever generated.
+      <span class="ev">native/macos/MCPProxy/MCPProxy/Info.plist:35-42 — CONFIRMED</span></li>
+    <li><strong>Release pipeline already publishes trust artifacts:</strong> checksums.txt + keyless cosign bundle + SLSA v1 provenance. Gotcha: the bare per-arch DMG is signed but <em>not notarized</em>; only the PKG-wrapping <code>-installer.dmg</code> is notarized + stapled. A Sparkle enclosure needs a notarized, stapled, symlink-preserving <code>.app</code> zip — a new CI asset.
+      <span class="ev">.github/workflows/release.yml — CONFIRMED</span></li>
+    <li><strong>No <code>mcpproxy update</code> subcommand exists.</strong> The legacy Go tray (tarball-only now) has a real binary self-updater (<code>inconshreveable/go-update</code>) that refuses to run inside .app bundles.
+      <span class="ev">cmd/mcpproxy/ · internal/tray/tray.go — CONFIRMED</span></li>
+  </ul>
+
+  <h2><span class="sec">02</span>Root cause of #957</h2>
+  <p><strong>Nothing in any upgrade path stops or restarts the running processes.</strong> The user drags the new MCPProxy.app over the old one (or runs the PKG); macOS replaces the bundle on disk, but the old tray and its old core keep running from deleted inodes. The PKG postinstall launches with <code>open -a</code> — self-documented as “activates rather than duplicating” — so it <em>foregrounds the stale old-version instance</em>. There is zero bundle-replacement or version-mismatch detection in the Swift tray.</p>
+  <p>The tray’s lifecycle actively works against upgrades: on start it attaches to <em>any</em> core answering <code>~/.mcpproxy/mcpproxy.sock</code> with no version comparison, and the core enforces single-instance via the bbolt flock on <code>config.db</code> (loser exits code 3) and TCP port conflict (exit 2) — so a new-version core can’t even start while the old one runs. <span class="ev" style="display:inline; font: 12.5px ui-monospace, Menlo, monospace; color: var(--muted);">postinstall.sh:27,62-75 · CoreProcessManager.swift:248-319,462-475 — CONFIRMED (one nuance: a busy Unix socket alone doesn’t stop the core; the DB flock and port do)</span></p>
+
+  <h2><span class="sec">03</span>Options</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Option</th><th>Delivers one-click UX</th><th>Effort</th><th>Risk</th></tr></thead>
+    <tbody>
+      <tr><td>A · Finish Sparkle 2</td><td>Yes — full download → verify → swap → relaunch</td><td><span class="chip acc">L</span></td><td><span class="chip warn">Medium</span></td></tr>
+      <tr><td>B · Custom Swift updater</td><td>Yes</td><td><span class="chip risk">XL</span></td><td><span class="chip risk">High</span></td></tr>
+      <tr><td>C · Go-core-driven self-update</td><td>Yes</td><td><span class="chip risk">XL</span></td><td><span class="chip risk">Highest</span></td></tr>
+      <tr><td>D · Fix #957 only, no downloader</td><td>No — browser download stays</td><td><span class="chip good">S/M</span></td><td><span class="chip good">Low</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="option pick">
+    <header>
+      <h3>Option A — Finish the Sparkle 2 integration + channel-gated CLI</h3>
+      <div class="chips"><span class="chip acc">RECOMMENDED</span><span class="chip acc">Effort L</span><span class="chip warn">Risk Medium</span></div>
+    </header>
+    <p class="desc">Wire <code>SPUStandardUpdaterController</code> programmatically in UpdateService.swift with the “gentle reminders” pattern for menu-bar apps: the menu item “Update 0.54.1 — ready to restart?” triggers one click → download, EdDSA + Apple-signature verify, bundle swap, relaunch. Add EdDSA keys, CI-generated appcast, and a notarized + stapled .app zip enclosure. Fix #957 belt-and-suspenders: delegate hooks stop the Go core before the swap, and an unconditional startup version-mismatch check supersedes any stale core. Separately: <code>mcpproxy update</code> that self-replaces only on tarball/unknown channels and prints the package-manager command elsewhere.</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>Sparkle handles the genuinely hard macOS parts free: quarantine release (Ventura 13.1+ Gatekeeper regression that kills naive custom updaters), App Translocation detection, privileged copy, atomic swap, EdDSA pinning, delta updates.</li>
+        <li>Least new code: framework already linked/bundled/signed; menu slot, update state, and core lifecycle ownership all exist.</li>
+        <li>Spec 037 FR-014/FR-015 already specifies exactly this flow — design work is done.</li>
+        <li>Ecosystem-standard for menu-bar apps (iTerm2 et al.); maintained through 2026; no sandbox/XPC work needed.</li>
+        <li>The startup version-mismatch check fixes #957 for <em>all</em> upgrade paths, not just the one-click path.</li>
+        <li>CLI reuses existing checksums.txt + cosign bundle + SLSA provenance — zero new CI for CLI verification.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li>The bulk of the cost is CI/release plumbing: EdDSA key secret, appcast generation and stable hosting, a new stapled .app zip asset.</li>
+        <li>Appcast URL becomes forever-infrastructure (Info.plist already points at the nonexistent mcpproxy.app/appcast.xml).</li>
+        <li>Sparkle silently no-ops when the app runs translocated/read-only — must surface via delegate.</li>
+        <li>Two update brains (Sparkle feed + internal/updatecheck) must not double-nudge; CI=true suppression must carry over.</li>
+        <li><code>import Sparkle</code> under plain <code>swift build</code> (no Xcode) needs a quick prototype — it already links, but the import path is unproven.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="option">
+    <header><h3>Option B — Custom Swift updater (no Sparkle)</h3>
+      <div class="chips"><span class="chip risk">Effort XL</span><span class="chip risk">Risk High</span></div></header>
+    <p class="desc">Download the notarized artifact, verify sha256 against cosign-verified checksums.txt + <code>codesign --verify --deep</code> + <code>spctl -a</code>, strip quarantine, atomic-rename-swap, relaunch via a detached helper. One signing system (cosign) instead of two.</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>No appcast, EdDSA key, or hosted infra — GitHub Releases + cosign is the whole supply chain.</li>
+        <li>Could drop the 5&nbsp;MB dead-weight Sparkle.framework from the bundle.</li>
+        <li>Uniform verification across tray and CLI; full control over core-shutdown choreography.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li>Re-implements what Sparkle hardened over 20 years: quarantine release, translocation, privileged copy, per-inode signature caching (Killed: 9), rollback.</li>
+        <li>The relaunch helper (survive deletion of the bundle it was spawned from) is subtle and macOS-version-sensitive.</li>
+        <li>Most novel security-critical Swift code to maintain; a bug bricks installs. Still needs the same notarized-artifact CI work as A.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="option">
+    <header><h3>Option C — Go-core-driven self-update (core swaps the bundle)</h3>
+      <div class="chips"><span class="chip risk">Effort XL</span><span class="chip risk">Risk Highest</span></div></header>
+    <p class="desc">All update logic in Go (go-selfupdate + minio/selfupdate, cosign-verified); the tray menu calls a new <code>POST /api/v1/update/apply</code>; the core swaps /Applications/MCPProxy.app and asks the tray to relaunch.</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>Single implementation for CLI, tray, and later Windows/Linux; better testing story in Go.</li>
+        <li>Mature Go libraries for the binary-replace primitive; no Sparkle/appcast/EdDSA.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li>Architecturally inverted: the core replaces its own parent bundle while both processes run from it — the exact deleted-inode tangle behind #957, with more moving parts.</li>
+        <li>Go selfupdate libraries are single-binary oriented; whole-bundle swap with nested signatures is entirely custom (bundle seal breaks → Killed: 9 per Apple DTS).</li>
+        <li>Reverses the working tray-owns-core lifecycle; a failed swap can leave no surviving process to show an error.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="option">
+    <header><h3>Option D — Minimal: fix #957 only, keep browser-download UX</h3>
+      <div class="chips"><span class="chip good">Effort S/M</span><span class="chip good">Risk Low</span></div></header>
+    <p class="desc">Stale-process supersede in the tray + postinstall.sh fix + tarball-only CLI self-update. The “Update available” menu item keeps opening the browser.</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>Smallest, fastest change; directly closes the reported bug for every upgrade path.</li>
+        <li>No new CI, keys, or infrastructure; no security-critical download/swap code.</li>
+        <li>Every piece is a prerequisite of Option A anyway — zero throwaway work.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li>Does not deliver the requested one-click UX; users still download and drag DMGs.</li>
+        <li>Sparkle stays linked, bundled, signed, and dead in every release.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <h2><span class="sec">04</span>Implementation plan (recommended path)</h2>
+  <ol class="phases">
+    <li>
+      <h3>Fix #957 — ships independently, in the very next release</h3>
+      <ul>
+        <li><strong>Stale-core supersede</strong> (<span class="path">CoreProcessManager.swift</span>): compare the attached/managed core’s reported version against the bundled core’s version. Tray-managed + older → terminate (existing SIGTERM→SIGKILL) and respawn from <span class="path">Contents/Resources/bin</span>. Externally-attached → don’t kill; show “Old core vX still running — restart into vY” (open decision below). Run at attach time and on every version report.</li>
+        <li><strong>Stale-tray detection</strong>: on <code>didBecomeActive</code> + low-frequency timer, stat the on-disk bundle version vs the running version; on mismatch show “MCPProxy was updated to vY — Relaunch” (stops core, detached <code>open -n</code>). This closes the drag-install deleted-inode case directly.</li>
+        <li><strong><span class="path">packaging/macos/postinstall.sh</span></strong>: quit the running instance by bundle id (osascript → wait → pkill fallback) before launching the fresh bundle, instead of <code>open -a</code> foregrounding the stale one.</li>
+        <li>XCTest for the supersede state machine (fixture-driven, per 090 pattern); manual QA via mcpproxy-ui-test on a real old-DMG → new-DMG upgrade.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Sparkle one-click updater — the requested UX</h3>
+      <ul>
+        <li><strong>Keys</strong>: <code>generate_keys</code> once → public key into Info.plist <code>SUPublicEDKey</code>; private key → GitHub secret <code>SPARKLE_ED_PRIVATE_KEY</code>. Lock the SUFeedURL now (forever URL — open decision).</li>
+        <li><strong>Swift</strong>: <code>import Sparkle</code>; programmatic <code>SPUStandardUpdaterController</code>; prototype the import under plain <code>swift build</code> first (fallback: vendor the framework from the release tarball). Gentle-reminders user-driver delegate feeds the published update state instead of Sparkle’s window; honor CI=true and <code>MCPPROXY_DISABLE_AUTO_UPDATE</code>. Updater delegate stops the managed core before the swap (prototype <code>shouldPostponeRelaunchForUpdate</code> vs synchronous stop). Surface translocation/read-only failures. Phase 0’s startup check stays permanently as the suspenders.</li>
+        <li><strong>Menu</strong>: repurpose the existing “Update available: vX” slot (<span class="path">MCPProxyApp.swift:1132-1136</span>) into “Update 0.54.1 — ready to restart?” → <code>checkForUpdates()</code>. Menu-repaint plumbing already exists.</li>
+        <li><strong>CI</strong> (<span class="path">release.yml</span>): notarize + staple the .app itself; <code>ditto -c -k --sequesterRsrc --keepParent</code> zip (symlink-preserving or the signature breaks) as a release asset in checksums.txt; new appcast job runs <code>generate_appcast --ed-key-file … --download-url-prefix …</code> (delta updates free); map <code>v*-rc.*</code> to a Sparkle beta channel per docs/prerelease-builds.md; keep nested-first codesign order.</li>
+        <li><strong>Homebrew cask</strong>: set <code>auto_updates true</code> so brew doesn’t fight Sparkle.</li>
+      </ul>
+    </li>
+    <li>
+      <h3><code>mcpproxy update</code> CLI — the uv/deno pattern</h3>
+      <ul>
+        <li>New <span class="path">cmd/mcpproxy/update_cmd.go</span> branching on the existing channel detection: <strong>homebrew/deb/rpm/go-install</strong> → print the existing one-liner, never self-replace. <strong>docker/windows-installer</strong> → guidance. <strong>dmg</strong> → “Use the tray: Check for Updates” (later: trigger via socket). <strong>tarball/unknown-writable</strong> → real self-update: resolve via <span class="path">internal/updatecheck/github.go</span>, verify cosign bundle offline (identity pinned to the release workflow + GitHub OIDC issuer), sha256-match, apply via minio/selfupdate (write-temp + rename, never in-place — macOS per-inode kill-9). Refuse downgrades without <code>--force</code>; never auto-sudo; never touch anything inside MCPProxy.app.</li>
+        <li>Table-driven unit tests per channel branch (mock GitHub, CI="" pinning); e2e smoke against a faked release server.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Cleanup &amp; rollout</h3>
+      <ul>
+        <li>Have the tray refresh/remove the legacy staged core at <span class="path">~/Library/Application Support/mcpproxy/bin/</span> (stale copies shadow for legacy-tray users).</li>
+        <li>docs/features/auto-update.md (channel matrix), configuration.md env vars, Spec 037 FR-014/015 marked implemented.</li>
+        <li>First Sparkle-capable release N publishes the appcast; one-click activates for N→N+1. Test end-to-end with a genuine notarized older build, not a dev build.</li>
+      </ul>
+    </li>
+  </ol>
+
+  <h2><span class="sec">05</span>Open decisions (maintainer input needed)</h2>
+  <ol class="decisions">
+    <li><strong>Appcast hosting</strong>: <code>mcpproxy.app/appcast.xml</code> via the website repo (matches the URL already baked into shipped Info.plists — strong argument) vs GitHub Pages vs a mutable release asset. The URL is forever.</li>
+    <li><strong>Externally-attached cores</strong> (brew-services / CLI-started): may the tray kill/restart one during a one-click update, should the core grow a shutdown/restart socket endpoint, or is one-click limited to tray-managed cores (the sketch’s default)?</li>
+    <li><strong>Graceful drain</strong>: finish in-flight MCP requests before shutdown during update (Spec 037’s own open question), and with what timeout — or is SIGTERM→SIGKILL acceptable?</li>
+    <li><strong>Enclosure arch</strong>: per-arch zips (CI builds per-arch today) vs the universal binary build-macos-tray.sh already supports (simpler feed, larger download).</li>
+    <li><strong>CLI verification dep</strong>: sigstore-go (heavy dep tree vs the “avoid new dependencies” rule) vs adding a minisign signature in CI (tiny dep, native minio/selfupdate support) vs shelling out to user-installed cosign.</li>
+    <li><strong>Bare DMG notarization</strong>: start notarizing/stapling the drag-and-drop DMG too (Gatekeeper quality issue independent of Sparkle), or drop it for installer-DMG + app-zip only?</li>
+    <li><strong>Windows scope</strong>: defer entirely to the MSI channel, or support tarball-on-Windows via the rename-to-.old trick?</li>
+    <li><strong>Prerelease mapping</strong>: <code>--prerelease</code> and the Sparkle beta channel both track <code>next</code>/<code>v*-rc.*</code>, with docs/prerelease-builds.md staying the single source of truth?</li>
+    <li><strong>Sparkle XPC services</strong>: strip from the bundle (unsandboxed app, saves size) or leave stock for easier upgrades?</li>
+  </ol>
+
+  <h2><span class="sec">06</span>Verification appendix</h2>
+  <p>14 load-bearing codebase claims were adversarially re-verified by independent agents instructed to refute them: <strong>13 CONFIRMED, 1 PARTIAL</strong>. The PARTIAL: single-instance enforcement is via the config.db flock (exit 3) and TCP port conflict (exit 2) — a busy Unix socket alone does <em>not</em> stop the core (it logs a warning and continues TCP-only); the net effect claimed (new core can’t run alongside old) still holds. External-research claims (Sparkle behavior, Gatekeeper regression, library maturity) rest on primary sources: Sparkle docs/discussions #2572, Apple dev-forums thread 730314, library repos.</p>
+  <div class="tablewrap"><table class="appendix">
+    <thead><tr><th>Claim (abridged)</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td style="white-space:normal">Channel detection: build-time <code>-X</code> marker then path heuristics; release matrix builds intentionally unstamped</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Checker cadence 24h, backoff 8×, env kill-switch wins over config</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">DMG channel has no programmatic update path in the core</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Sparkle declared + linked + bundled + signed, never imported</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">UpdateService’s <code>checkWithSparkle()</code> is a stub falling through to GitHub API</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Info.plist SUFeedURL/SUPublicEDKey placeholders; no appcast anywhere</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Menu already has “Check for Updates” + “Update available: vX” slots wired to repaint</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Bundle layout: tray at Contents/MacOS, core at Contents/Resources/bin, Sparkle at Contents/Frameworks, hardened runtime</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Core-binary resolution order; only the legacy Go tray stages to Application Support (size+mtime freshness only)</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Tray spawns core directly (no launchd daemon); login item relaunches tray</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Attach-first lifecycle with no version comparison — stale cores survive upgrades</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Single-instance enforcement is socket+flock+port</td><td><span class="chip warn">PARTIAL</span></td></tr>
+      <tr><td style="white-space:normal">#957 root cause: nothing stops old processes; postinstall <code>open -a</code> foregrounds the stale instance</td><td><span class="chip good">CONFIRMED</span></td></tr>
+      <tr><td style="white-space:normal">Tray quit kills managed core only; external cores just disconnect and keep running</td><td><span class="chip good">CONFIRMED</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <p class="foot">Method: multi-agent workflow (2 codebase investigators, 3 external researchers, 14 adversarial verifiers, 2 synthesists · 1.2M tokens). Companion report: request queueing / concurrency limits for issue #955.</p>
+</main>

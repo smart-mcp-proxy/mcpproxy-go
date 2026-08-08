@@ -3155,6 +3155,11 @@ func (s *Server) RefreshVersionInfo() *updatecheck.VersionInfo {
 	return s.runtime.RefreshVersionInfo()
 }
 
+// UpdatePolicy returns the effective update policy (Spec 092 FR-015).
+func (s *Server) UpdatePolicy() updatecheck.Policy {
+	return s.runtime.UpdatePolicy()
+}
+
 // Activity logging methods (RFC-003)
 
 // ListActivities returns activity records matching the filter.

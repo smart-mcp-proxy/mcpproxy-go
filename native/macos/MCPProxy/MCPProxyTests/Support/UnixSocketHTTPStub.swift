@@ -348,21 +348,35 @@ extension UnixSocketHTTPStub {
     /// `web_ui_url` points at 127.0.0.1:1, a port nothing can be listening on,
     /// so the SSE client (which is deliberately TCP-only) fails fast and retries
     /// in the background instead of reaching a real core on :8080.
+    /// - Parameters:
+    ///   - version: what `/api/v1/info` reports as the running core's version.
+    ///     The default is deliberately unparseable-as-a-release ("0.0.0-test")
+    ///     and every existing test relies on the supersede check declining to
+    ///     act on it.
+    ///   - launchedBy: Spec 092 FR-001a provenance. Nil omits the field
+    ///     entirely, which is what a pre-092 core looks like on the wire.
+    ///   - pid: Spec 092 FR-002 pid. Nil omits the field.
     static func healthyCore(
         at socketPath: String? = nil,
-        ready: ReadyBehaviour = ReadyBehaviour()
+        ready: ReadyBehaviour = ReadyBehaviour(),
+        version: String = "0.0.0-test",
+        launchedBy: String? = nil,
+        pid: Int32? = nil
     ) -> UnixSocketHTTPStub {
         UnixSocketHTTPStub(at: socketPath) { _, path in
             switch path {
             case "/ready":
                 return ready.current
             case "/api/v1/info":
+                var extras = ""
+                if let launchedBy { extras += ",\"launched_by\":\"\(launchedBy)\"" }
+                if let pid { extras += ",\"pid\":\(pid)" }
                 return .json("""
                 {"success":true,"data":{
-                  "version":"0.0.0-test",
+                  "version":"\(version)",
                   "web_ui_url":"http://127.0.0.1:1/ui/?apikey=test-api-key",
                   "listen_addr":"127.0.0.1:1",
-                  "endpoints":{"http":"http://127.0.0.1:1","socket":"unix"}
+                  "endpoints":{"http":"http://127.0.0.1:1","socket":"unix"}\(extras)
                 }}
                 """)
             default:

@@ -86,7 +86,7 @@ go test -tags server ./internal/serveredition/... -race   # server edition
 ./mcpproxy-tray                                           # tray (auto-starts core)
 ```
 
-**CLI management** — `mcpproxy upstream|tools|activity|token|telemetry|feedback|doctor …`. Output: `-o json|yaml`, `MCPPROXY_OUTPUT=json`, `--help-json` (machine-readable for agents). References: [docs/cli-management-commands.md](docs/cli-management-commands.md) · [docs/cli/activity-commands.md](docs/cli/activity-commands.md) · [docs/features/agent-tokens.md](docs/features/agent-tokens.md) · [docs/cli-output-formatting.md](docs/cli-output-formatting.md).
+**CLI management** — `mcpproxy upstream|tools|activity|token|telemetry|feedback|doctor|update …` (`update` is channel-aware: guidance for package-manager installs, verified self-update only on tarball). Output: `-o json|yaml`, `MCPPROXY_OUTPUT=json`, `--help-json` (machine-readable for agents). References: [docs/cli-management-commands.md](docs/cli-management-commands.md) · [docs/cli/activity-commands.md](docs/cli/activity-commands.md) · [docs/features/agent-tokens.md](docs/features/agent-tokens.md) · [docs/cli-output-formatting.md](docs/cli-output-formatting.md).
 
 **Verifying Web-UI changes** (Playwright sweep + HTML report) — required when touching `frontend/src/`: [docs/development/web-ui-verification.md](docs/development/web-ui-verification.md).
 
