@@ -92,7 +92,11 @@ struct SemanticVersion: Equatable, Comparable, CustomStringConvertible {
 
         var prerelease: [String] = []
         if let prereleaseText {
-            guard isValidDotSeparatedIdentifiers(prereleaseText, numericMayHaveLeadingZeros: true) else {
+            // §9 bans leading zeros in a NUMERIC prerelease identifier, and the
+            // ban is load-bearing here: "rc.01" and "rc.1" would otherwise be
+            // two spellings of one version, and whichever way they compared,
+            // one of them would be wrong. Malformed means no decision (FR-006).
+            guard isValidDotSeparatedIdentifiers(prereleaseText, numericMayHaveLeadingZeros: false) else {
                 return nil
             }
             prerelease = prereleaseText.split(separator: ".").map(String.init)
@@ -103,9 +107,9 @@ struct SemanticVersion: Equatable, Comparable, CustomStringConvertible {
     }
 
     /// Every identifier must be non-empty and made of ASCII alphanumerics and
-    /// hyphens. `numericMayHaveLeadingZeros` relaxes §9's ban on `01`, which no
-    /// producer in this project emits and which would only ever turn a
-    /// comparable version into an incomparable one.
+    /// hyphens. `numericMayHaveLeadingZeros` is true only for build metadata,
+    /// where §10 places no such restriction and precedence does not depend on
+    /// it anyway; prerelease identifiers are held to §9.
     private static func isValidDotSeparatedIdentifiers(
         _ text: String, numericMayHaveLeadingZeros: Bool
     ) -> Bool {
@@ -152,20 +156,18 @@ struct SemanticVersion: Equatable, Comparable, CustomStringConvertible {
             let b = rhs.prerelease[index]
             if a == b { continue }
 
-            let aNumber = Int(a).flatMap { a.allSatisfy(\.isNumber) ? $0 : nil }
-            let bNumber = Int(b).flatMap { b.allSatisfy(\.isNumber) ? $0 : nil }
-
-            switch (aNumber, bNumber) {
-            case let (.some(x), .some(y)):
+            switch (isNumericIdentifier(a), isNumericIdentifier(b)) {
+            case (true, true):
                 // §11.4.1 — NUMERICALLY. This is the rc.10 vs rc.2 case: as
                 // strings "10" < "2", as numbers 10 > 2.
-                if x != y { return x < y ? -1 : 1 }
-            case (.some, .none):
+                let order = compareNumericIdentifiers(a, b)
+                if order != 0 { return order }
+            case (true, false):
                 // §11.4.3: numeric identifiers always have lower precedence.
                 return -1
-            case (.none, .some):
+            case (false, true):
                 return 1
-            case (.none, .none):
+            case (false, false):
                 // §11.4.2: ASCII sort order.
                 return a < b ? -1 : 1
             }
@@ -177,6 +179,28 @@ struct SemanticVersion: Equatable, Comparable, CustomStringConvertible {
             return lhs.prerelease.count < rhs.prerelease.count ? -1 : 1
         }
         return 0
+    }
+
+    /// A §9 numeric identifier: ASCII digits only.
+    private static func isNumericIdentifier(_ identifier: String) -> Bool {
+        !identifier.isEmpty && identifier.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    /// Compare two numeric identifiers of ARBITRARY length.
+    ///
+    /// Not `Int(_:)`: a prerelease identifier is a digit string with no upper
+    /// bound, and coercing it to a bounded integer either overflows to nil (so
+    /// two huge identifiers fall through to an ASCII comparison that orders
+    /// "10000000000000000000" below "9") or silently truncates. Leading zeros
+    /// are rejected at parse time, so length-then-lexicographic IS the numeric
+    /// order; they are stripped here anyway so the function is correct on its
+    /// own terms.
+    private static func compareNumericIdentifiers(_ lhs: String, _ rhs: String) -> Int {
+        let a = Substring(lhs).drop(while: { $0 == "0" })
+        let b = Substring(rhs).drop(while: { $0 == "0" })
+        if a.count != b.count { return a.count < b.count ? -1 : 1 }
+        if a == b { return 0 }
+        return a.lexicographicallyPrecedes(b) ? -1 : 1
     }
 
     /// Compare two version STRINGS. Returns nil when either side is not a

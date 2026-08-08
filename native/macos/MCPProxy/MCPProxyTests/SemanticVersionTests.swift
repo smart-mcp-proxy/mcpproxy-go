@@ -120,6 +120,49 @@ final class SemanticVersionTests: XCTestCase {
         }
     }
 
+    // MARK: - §9: numeric prerelease identifiers may not have leading zeros
+
+    func testLeadingZeroNumericPrereleaseIdentifiersAreMalformed() {
+        // Accepting "rc.01" would make it a second spelling of "rc.1", and
+        // whichever way the two compared, one answer would be wrong. FR-006
+        // says malformed means no decision, so parsing must refuse.
+        for raw in ["1.0.0-rc.01", "1.0.0-01", "1.0.0-0123", "1.0.0-rc.1.007"] {
+            XCTAssertNil(SemanticVersion.parse(raw), "\(raw) is not a SemVer version")
+            XCTAssertNil(SemanticVersion.compare(raw, "1.0.0-rc.1"),
+                         "\(raw) must produce no decision, not a guess")
+        }
+    }
+
+    func testASingleZeroIdentifierIsStillValid() {
+        // §9 bans leading zeros, not the number zero.
+        XCTAssertNotNil(SemanticVersion.parse("1.0.0-rc.0"))
+        XCTAssertEqual(SemanticVersion.compare("1.0.0-rc.0", "1.0.0-rc.1"), -1)
+        // Alphanumeric identifiers are unaffected: "0abc" is not numeric.
+        XCTAssertNotNil(SemanticVersion.parse("1.0.0-0abc"))
+        // Build metadata is exempt (§10) and never affects precedence.
+        XCTAssertEqual(SemanticVersion.compare("1.0.0+007", "1.0.0+8"), 0)
+    }
+
+    // MARK: - §11.4.1: numeric identifiers are unbounded
+
+    func testHugeNumericIdentifiersCompareNumerically() {
+        // Beyond Int64. Coercing to a bounded integer overflows to nil, and the
+        // fallback ASCII comparison would order "10000000000000000000000" below
+        // "9999999999999999999999" — a downgrade offered as an update.
+        XCTAssertEqual(
+            SemanticVersion.compare("1.0.0-rc.9999999999999999999999",
+                                    "1.0.0-rc.10000000000000000000000"), -1)
+        XCTAssertEqual(
+            SemanticVersion.compare("1.0.0-rc.10000000000000000000000",
+                                    "1.0.0-rc.9999999999999999999999"), 1)
+        XCTAssertEqual(
+            SemanticVersion.compare("1.0.0-rc.99999999999999999999999",
+                                    "1.0.0-rc.99999999999999999999999"), 0)
+        // A huge numeric identifier still ranks below an alphanumeric one.
+        XCTAssertEqual(
+            SemanticVersion.compare("1.0.0-99999999999999999999999", "1.0.0-alpha"), -1)
+    }
+
     // MARK: - Comparable conformance agrees with compare()
 
     func testComparableConformanceMatchesCompare() {
