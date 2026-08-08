@@ -247,6 +247,20 @@ else
     codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$TEMP_DIR/$APP_BUNDLE"
 fi
 
+# Export the fully staged, fully signed bundle for the Sparkle enclosure
+# (Spec 092). SWIFT_APP_PATH is only the raw swift-build output: it has no
+# core binary, no certs, and not this final Developer ID signature — zipping
+# it produced an enclosure that failed notarization AND would have installed
+# an app without a core. The DMG staging copy here is the ONLY bundle in the
+# pipeline that is byte-for-byte what users run, so it is what updates must
+# ship. Symlink-free ditto copy preserves the signature.
+SIGNED_APP_EXPORT="signed-app-${ARCH}"
+rm -rf "${SIGNED_APP_EXPORT}"
+mkdir -p "${SIGNED_APP_EXPORT}"
+ditto "$TEMP_DIR/$APP_BUNDLE" "${SIGNED_APP_EXPORT}/${APP_BUNDLE}"
+codesign --verify --deep --strict "${SIGNED_APP_EXPORT}/${APP_BUNDLE}"
+echo "✅ Signed bundle exported for Sparkle enclosure: ${SIGNED_APP_EXPORT}/${APP_BUNDLE}"
+
 # Create Applications symlink
 ln -s /Applications "$TEMP_DIR/Applications"
 

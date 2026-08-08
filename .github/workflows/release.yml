@@ -1028,8 +1028,15 @@ jobs:
             exit 0
           fi
 
-          if [ -z "${SWIFT_APP_PATH:-}" ] || [ ! -d "${SWIFT_APP_PATH}" ]; then
-            echo "❌ SWIFT_APP_PATH is not a bundle: '${SWIFT_APP_PATH:-<unset>}'"
+          # The enclosure must ship the SAME bundle users run: the DMG staging
+          # copy that create-dmg.sh signed (core + certs + Developer ID deep
+          # signature) and exported. SWIFT_APP_PATH is the raw swift-build
+          # output — no core, not notarization-signed — and must never be
+          # zipped as an update (it failed notarization and would install a
+          # coreless app).
+          APP_SRC="signed-app-${{ matrix.goarch }}/mcpproxy.app"
+          if [ ! -d "${APP_SRC}" ]; then
+            echo "❌ signed bundle export missing: ${APP_SRC} (create-dmg.sh exports it)"
             exit 1
           fi
 
@@ -1037,8 +1044,8 @@ jobs:
           ENCLOSURE="mcpproxy-${VERSION#v}-darwin-${{ matrix.goarch }}.app.zip"
           NOTARIZE_ZIP="sparkle-notarize-${{ matrix.goarch }}.zip"
 
-          echo "=== Archiving ${SWIFT_APP_PATH} for notarization ==="
-          ditto -c -k --sequesterRsrc --keepParent "${SWIFT_APP_PATH}" "${NOTARIZE_ZIP}"
+          echo "=== Archiving ${APP_SRC} for notarization ==="
+          ditto -c -k --sequesterRsrc --keepParent "${APP_SRC}" "${NOTARIZE_ZIP}"
 
           echo "=== Submitting the app bundle for notarization ==="
           SUBMISSION_OUTPUT=$(xcrun notarytool submit "${NOTARIZE_ZIP}" \
@@ -1057,11 +1064,11 @@ jobs:
 
           # Staple the BUNDLE, then re-archive it: the ticket must travel inside
           # the .app the user ends up running.
-          xcrun stapler staple "${SWIFT_APP_PATH}"
-          xcrun stapler validate "${SWIFT_APP_PATH}"
+          xcrun stapler staple "${APP_SRC}"
+          xcrun stapler validate "${APP_SRC}"
 
           echo "=== Creating the stapled enclosure ==="
-          ditto -c -k --sequesterRsrc --keepParent "${SWIFT_APP_PATH}" "sparkle-enclosure/${ENCLOSURE}"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_SRC}" "sparkle-enclosure/${ENCLOSURE}"
           rm -f "${NOTARIZE_ZIP}"
 
           # Prove the archive round-trips with its signature intact before it
@@ -1069,8 +1076,8 @@ jobs:
           # the user's machine otherwise.
           VERIFY_DIR=$(mktemp -d)
           ditto -x -k "sparkle-enclosure/${ENCLOSURE}" "${VERIFY_DIR}"
-          codesign --verify --deep --strict --verbose=2 "${VERIFY_DIR}/MCPProxy.app"
-          xcrun stapler validate "${VERIFY_DIR}/MCPProxy.app"
+          codesign --verify --deep --strict --verbose=2 "${VERIFY_DIR}/mcpproxy.app"
+          xcrun stapler validate "${VERIFY_DIR}/mcpproxy.app"
           spctl -a -t exec -vv "${VERIFY_DIR}/MCPProxy.app"
           rm -rf "${VERIFY_DIR}"
 
