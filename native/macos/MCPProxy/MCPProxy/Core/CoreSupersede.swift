@@ -82,7 +82,11 @@ struct StaleCorePrompt: Equatable {
     let pid: Int32?
 
     var menuTitle: String {
-        "Old core v\(runningVersion) running — Restart into v\(bundledVersion)"
+        // Core versions already carry their "v" prefix ("v0.54.0-rc.2");
+        // strip before re-prefixing or the label reads "vv0.54.0-rc.2".
+        let running = runningVersion.hasPrefix("v") ? String(runningVersion.dropFirst()) : runningVersion
+        let bundled = bundledVersion.hasPrefix("v") ? String(bundledVersion.dropFirst()) : bundledVersion
+        return "Old core v\(running) running — Restart into v\(bundled)"
     }
 }
 

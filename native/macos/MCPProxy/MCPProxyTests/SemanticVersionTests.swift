@@ -175,3 +175,33 @@ final class SemanticVersionTests: XCTestCase {
         XCTAssertFalse(SemanticVersion.parse("0.54.0")!.isPrerelease)
     }
 }
+
+// MARK: - Sparkle bridge (FR-006)
+
+/// SUStandardVersionComparator reports 0.54.0-rc.2, 0.54.0-rc.3 and 0.54.0 as
+/// EQUAL — which made every RC→RC and RC→stable update invisible ("You're up
+/// to date", live on the v0.54.0-rc.3 rehearsal). These pin the bridge that
+/// hands Sparkle the SemVer comparator instead.
+final class SemVerSparkleComparatorTests: XCTestCase {
+    private let comparator = SemVerSparkleComparator.shared
+
+    func testRcToNextRcIsAnUpdate() {
+        XCTAssertEqual(comparator.compareVersion("0.54.0-rc.2", toVersion: "0.54.0-rc.3"), .orderedAscending)
+    }
+
+    func testRcToStableIsAnUpdate() {
+        XCTAssertEqual(comparator.compareVersion("0.54.0-rc.3", toVersion: "0.54.0"), .orderedAscending)
+    }
+
+    func testStableNeverDowngradesToRc() {
+        XCTAssertEqual(comparator.compareVersion("0.54.0", toVersion: "0.54.0-rc.9"), .orderedDescending)
+    }
+
+    func testNumericPrereleaseIdentifiersCompareNumerically() {
+        XCTAssertEqual(comparator.compareVersion("0.54.0-rc.2", toVersion: "0.54.0-rc.10"), .orderedAscending)
+    }
+
+    func testEqualVersionsAreEqual() {
+        XCTAssertEqual(comparator.compareVersion("0.54.0-rc.2", toVersion: "0.54.0-rc.2"), .orderedSame)
+    }
+}
