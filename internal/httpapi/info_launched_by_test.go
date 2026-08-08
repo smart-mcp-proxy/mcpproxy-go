@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,4 +64,38 @@ func TestInfoEndpointReportsLaunchedBy(t *testing.T) {
 func TestInfoEndpointLaunchedByDefaultsToProcessCapture(t *testing.T) {
 	assert.Equal(t, launch.LaunchedBy(), launchedByFn(),
 		"launchedByFn must default to the internal/launch process capture")
+}
+
+// Spec 092 FR-002: the core reports its own pid so an ATTACHED tray — which
+// holds no Process handle and has no shutdown endpoint to call — still has a
+// mechanism to stop a stale core once the user consents.
+func TestInfoEndpointReportsPID(t *testing.T) {
+	prev := pidFn
+	pidFn = func() int { return 4242 }
+	t.Cleanup(func() { pidFn = prev })
+
+	logger := zaptest.NewLogger(t).Sugar()
+	server := NewServer(&MockServerController{}, logger, nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var response contracts.APIResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	data, ok := response.Data.(map[string]interface{})
+	require.True(t, ok, "response data should be a map")
+
+	require.Contains(t, data, "pid", "info response must always carry pid")
+	// JSON numbers decode as float64 through interface{}.
+	assert.InDelta(t, 4242, data["pid"], 0.0)
+}
+
+// The default wiring is the process's real pid — a tray that kills what this
+// reports must be killing the core, not a constant.
+func TestInfoEndpointPIDDefaultsToProcessID(t *testing.T) {
+	assert.Equal(t, os.Getpid(), pidFn(),
+		"pidFn must default to this process's pid")
 }

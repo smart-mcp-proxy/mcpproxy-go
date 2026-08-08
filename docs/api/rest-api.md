@@ -893,6 +893,7 @@ Get application info, version, and update availability.
       "socket": "/Users/user/.mcpproxy/mcpproxy.sock"
     },
     "launched_by": "tray",
+    "pid": 4711,
     "update": {
       "available": true,
       "latest_version": "v1.3.0",
@@ -916,6 +917,7 @@ Get application info, version, and update availability.
 | `endpoints.http` | string | HTTP API endpoint address |
 | `endpoints.socket` | string | Unix socket path (empty if disabled) |
 | `launched_by` | string | Durable launch provenance of the running core (Spec 092 FR-001a): `tray` when a tray spawned it, `installer` when the macOS PKG postinstall did, `""` when user-launched or unknown. Always present. A tray uses this to decide whether it may stop and respawn a stale core it did not itself start — an empty value means consent is required. |
+| `pid` | integer | OS process id of the running core (Spec 092 FR-002). A tray that only *attached* to a core holds no process handle for it and the core exposes no shutdown endpoint, so this is the mechanism behind the consent-gated "restart the stale core" action. |
 | `update` | object | Update information (may be null if not checked yet; omitted entirely when update checking is disabled via `update_check.enabled: false` or `MCPPROXY_DISABLE_AUTO_UPDATE=true`) |
 | `update.available` | boolean | Whether a newer version is available |
 | `update.latest_version` | string | Latest version available on GitHub |

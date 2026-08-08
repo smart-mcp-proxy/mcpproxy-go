@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1156,6 +1157,11 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 		// dies with the launching tray. "" means user/unknown → consent
 		// required (FR-002).
 		"launched_by": launchedByFn(),
+		// Spec 092 FR-002: the core's own PID. An attached tray has no Process
+		// handle and the core exposes no shutdown endpoint, so this is the only
+		// stop mechanism available to it — and the difference between a consent
+		// action that works and one that can only print instructions.
+		"pid": pidFn(),
 	}
 	if versionInfo != nil {
 		response["update"] = versionInfo.ToAPIResponse()
@@ -1209,6 +1215,11 @@ var buildVersion = "development"
 // exercise every provenance value without mutating the process-wide capture
 // in internal/launch.
 var launchedByFn = launch.LaunchedBy
+
+// pidFn reports this core process's OS pid for /api/v1/info (Spec 092 FR-002).
+// Indirected for the same reason as launchedByFn: a handler test must be able
+// to assert the wiring without depending on the test binary's own pid.
+var pidFn = os.Getpid
 
 // editionValue identifies the MCPProxy edition (personal or server).
 var editionValue = "personal"

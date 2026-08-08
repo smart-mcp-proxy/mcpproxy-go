@@ -1172,4 +1172,11 @@ type InfoResponse struct {
 	// (possibly empty) so a tray can distinguish "old core, not mine" from
 	// "old core I may supersede".
 	LaunchedBy string `json:"launched_by"`
+	// PID is the operating-system process id of the running core (Spec 092
+	// FR-002). A tray that merely ATTACHED to a core holds no Process handle
+	// for it, so without this there is no mechanism at all to stop a stale
+	// core — the consent action would have nothing to act on and could only
+	// print instructions. Paired with LaunchedBy it is what lets a newer tray
+	// supersede a core an older tray started.
+	PID int `json:"pid"`
 }
