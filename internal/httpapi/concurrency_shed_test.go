@@ -16,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
@@ -180,4 +181,30 @@ func TestRetryAfterSeconds(t *testing.T) {
 	assert.Equal(t, 1, retryAfterSeconds(10*time.Millisecond))
 	assert.Equal(t, 2, retryAfterSeconds(1100*time.Millisecond))
 	assert.Equal(t, 30, retryAfterSeconds(30*time.Second))
+}
+
+// TestToolCallRequestSource is the P3 origin-attribution fix. POST
+// /api/v1/tools/call is shared by the CLI, the Web UI and the tray, and it used
+// to stamp every one of them as CLI — overwriting the REST source the
+// middleware had set, so a Web-UI tool call (and any shed of one) was logged
+// against the wrong origin.
+func TestToolCallRequestSource(t *testing.T) {
+	cases := []struct {
+		header string
+		want   reqcontext.RequestSource
+	}{
+		{"cli/v0.52.0", reqcontext.SourceCLI},
+		{"CLI/dev", reqcontext.SourceCLI},
+		{"webui/web", reqcontext.SourceRESTAPI},
+		{"tray/v0.52.0", reqcontext.SourceRESTAPI},
+		{"", reqcontext.SourceRESTAPI},
+		{"clipper/1.0", reqcontext.SourceRESTAPI},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tools/call", strings.NewReader("{}"))
+		if tc.header != "" {
+			req.Header.Set(XMCPProxyClientHeader, tc.header)
+		}
+		assert.Equal(t, tc.want, toolCallRequestSource(req), "header %q", tc.header)
+	}
 }

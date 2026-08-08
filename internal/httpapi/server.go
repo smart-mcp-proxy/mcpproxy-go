@@ -4419,9 +4419,12 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set request source to CLI for REST API tool calls (typically from CLI)
-	// This allows activity logging to distinguish between MCP protocol and CLI calls
-	ctx := reqcontext.WithRequestSource(r.Context(), reqcontext.SourceCLI)
+	// Attribute the call to the surface that actually made it. This endpoint is
+	// shared by the CLI, the Web UI and the tray, so hard-coding CLI here
+	// overwrote the REST source the middleware had already established and
+	// logged every Web-UI tool call — and every shed of one — as if it came from
+	// the CLI. The surface header the clients already send is the discriminator.
+	ctx := reqcontext.WithRequestSource(r.Context(), toolCallRequestSource(r))
 
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)

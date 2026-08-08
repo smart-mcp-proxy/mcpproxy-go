@@ -2,8 +2,25 @@ package httpapi
 
 import (
 	"math"
+	"net/http"
+	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
+
+// toolCallRequestSource classifies who made a REST tool call, so the activity
+// record — and the "rejected" record a shed produces (spec 093 FR-012) — names
+// the real origin. POST /api/v1/tools/call is shared by the CLI, the Web UI and
+// the tray; the surface header those clients already send ("cli/<version>",
+// "webui/web", "tray/<version>") is what tells them apart. Anything that does
+// not identify itself as the CLI is plain REST.
+func toolCallRequestSource(r *http.Request) reqcontext.RequestSource {
+	if strings.HasPrefix(strings.ToLower(r.Header.Get(XMCPProxyClientHeader)), "cli/") {
+		return reqcontext.SourceCLI
+	}
+	return reqcontext.SourceRESTAPI
+}
 
 // defaultRetryAfterSeconds is the hint used when the shedding scope reported no
 // queue_timeout (a `queue_size: 0` scope sheds instantly and has no wait

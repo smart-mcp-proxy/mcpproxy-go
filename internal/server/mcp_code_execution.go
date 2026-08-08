@@ -11,6 +11,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 
@@ -443,6 +444,13 @@ type upstreamToolCaller struct {
 // CallTool implements jsruntime.ToolCaller interface
 func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (interface{}, error) {
 	startTime := time.Now()
+
+	// Spec 093 FR-012: a call issued by a sandboxed script is an INTERNAL origin,
+	// whatever surface asked for the code_execution around it. Without this the
+	// context still carries the outer MCP (or REST) source, so a shed inside a
+	// script was attributed to the client that started the script rather than to
+	// the script itself.
+	ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceInternal)
 
 	u.logger.Debug("calling upstream tool from JavaScript",
 		zap.String("execution_id", u.executionID),

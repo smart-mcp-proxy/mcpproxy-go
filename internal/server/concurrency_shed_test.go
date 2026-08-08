@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
@@ -165,4 +166,60 @@ func TestCodeExecutionToolCaller_IsSubjectToAdmission(t *testing.T) {
 	require.Error(t, callErr)
 	assert.True(t, errors.Is(callErr, limiter.ErrQueueFull),
 		"code_execution must be bounded by the same limiter, got: %v", callErr)
+}
+
+// TestCodeExecutionToolCaller_ShedIsAttributedInternally is the P3
+// origin-attribution fix. A script's upstream call inherited the context of
+// whatever surface started the code_execution, so a shed inside a sandboxed
+// script was recorded against the outer MCP client instead of the script.
+func TestCodeExecutionToolCaller_ShedIsAttributedInternally(t *testing.T) {
+	t.Setenv("CI", "")
+
+	serverCfg := &config.ServerConfig{
+		Name:                  "db",
+		URL:                   "http://127.0.0.1:1",
+		Protocol:              "http",
+		Enabled:               true,
+		MaxConcurrentRequests: shedIntPtr(1),
+		QueueSize:             shedIntPtr(0),
+		QueueTimeout:          shedDurPtr(30 * time.Second),
+	}
+	cfg := &config.Config{Servers: []*config.ServerConfig{serverCfg}}
+
+	um := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	require.NoError(t, um.AddServerConfig("db", serverCfg))
+	client, ok := um.GetClient("db")
+	require.True(t, ok)
+	client.StateManager.TransitionTo(types.StateConnecting)
+	client.StateManager.TransitionTo(types.StateReady)
+
+	sources := make(chan reqcontext.RequestSource, 4)
+	um.SetRejectionObserver(func(ctx context.Context, _ limiter.Rejection) {
+		sources <- reqcontext.GetRequestSource(ctx)
+	})
+
+	lim := um.Limiters().Server("db")
+	require.NotNil(t, lim)
+	release, err := lim.Acquire(context.Background(), time.Time{})
+	require.NoError(t, err)
+	defer release()
+
+	caller := &upstreamToolCaller{
+		upstreamManager: um,
+		logger:          zap.NewNop(),
+		executionID:     "exec-origin",
+	}
+
+	// The outer surface is MCP; the script's own call must not inherit it.
+	outer := reqcontext.WithRequestSource(context.Background(), reqcontext.SourceMCP)
+	_, callErr := caller.CallTool(outer, "db", "query", map[string]interface{}{})
+	require.Error(t, callErr)
+
+	select {
+	case got := <-sources:
+		assert.Equal(t, reqcontext.SourceInternal, got,
+			"a shed inside a sandboxed script must be attributed to the script, not to the surface that started it")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shed never reached the rejection observer")
+	}
 }
