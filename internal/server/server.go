@@ -3086,9 +3086,11 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 	return s.runtime.GetServerToolCalls(serverName, limit)
 }
 
-// ReplayToolCall replays a tool call with modified arguments
-func (s *Server) ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
-	return s.runtime.ReplayToolCall(id, arguments)
+// ReplayToolCall replays a tool call with modified arguments. ctx is the
+// caller's request context: it governs the concurrency-limiter queue wait as
+// well as the upstream call (spec 093 FR-005).
+func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
+	return s.runtime.ReplayToolCall(ctx, id, arguments)
 }
 
 // GetToolCallsBySession retrieves tool calls filtered by session ID

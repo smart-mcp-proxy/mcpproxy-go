@@ -174,3 +174,62 @@ func TestReplayToolCall_CreatesNoExecutionTimeoutBeforeDispatch(t *testing.T) {
 	assert.False(t, foundTimeout,
 		"ReplayToolCall must not create an execution deadline before dispatch: queue wait would eat the execution budget (FR-005)")
 }
+
+// TestReplayToolCall_ReleasesRuntimeLockBeforeDispatch is the FR-008 structural
+// guard for the same function. Replay held r.mu.RLock for its whole duration,
+// so once replay started queueing behind a concurrency limit it also blocked
+// ApplyConfig and every other writer for the queue-plus-execution duration.
+// The lock must be released before the dispatch, not deferred past it.
+func TestReplayToolCall_ReleasesRuntimeLockBeforeDispatch(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "runtime.go", nil, parser.ParseComments)
+	require.NoError(t, err)
+
+	var body *ast.BlockStmt
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "ReplayToolCall" || fn.Body == nil {
+			return true
+		}
+		body = fn.Body
+		return false
+	})
+	require.NotNil(t, body, "ReplayToolCall not found in runtime.go")
+
+	isMuCall := func(call *ast.CallExpr, method string) bool {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != method {
+			return false
+		}
+		inner, ok := sel.X.(*ast.SelectorExpr)
+		return ok && inner.Sel.Name == "mu"
+	}
+
+	var unlockPos, callPos token.Pos
+	var deferredUnlock bool
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.DeferStmt:
+			if isMuCall(node.Call, "RUnlock") || isMuCall(node.Call, "Unlock") {
+				deferredUnlock = true
+			}
+		case *ast.CallExpr:
+			if isMuCall(node, "RUnlock") && !unlockPos.IsValid() {
+				unlockPos = node.Pos()
+			}
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "CallTool" {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "client" {
+					callPos = node.Pos()
+				}
+			}
+		}
+		return true
+	})
+
+	assert.False(t, deferredUnlock,
+		"ReplayToolCall must not defer the runtime lock past the upstream call (FR-008)")
+	require.True(t, unlockPos.IsValid(), "ReplayToolCall must release the runtime read lock explicitly")
+	require.True(t, callPos.IsValid(), "ReplayToolCall must dispatch through the managed client")
+	assert.Less(t, int(unlockPos), int(callPos),
+		"the runtime lock must be released BEFORE dispatch, so a queued replay cannot stall config reload (FR-008)")
+}
