@@ -11,6 +11,12 @@ keywords: [updates, version, upgrade, notifications]
 
 MCPProxy includes built-in update checking to help you stay current with the latest features and security fixes.
 
+:::tip Installing the update
+This page covers how MCPProxy *notices* a new version. For actually applying
+one — the macOS one-click updater, `mcpproxy update`, the per-channel behaviour
+matrix and the kill switches — see [Auto-Update](/features/auto-update).
+:::
+
 ## How It Works
 
 MCPProxy automatically checks for new versions by querying GitHub Releases:
