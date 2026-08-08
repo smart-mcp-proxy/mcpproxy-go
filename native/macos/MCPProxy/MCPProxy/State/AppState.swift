@@ -217,6 +217,17 @@ final class AppState: ObservableObject {
     @Published var updateAvailable: String? = nil
     @Published var autoStartEnabled: Bool = false
 
+    /// Spec 092 FR-002 — an older core is running that the tray is NOT allowed
+    /// to stop on its own. Nil in the steady state; when set, the menu offers
+    /// the restart as an explicit user action. Published rather than derived so
+    /// the decision is made once, by `CoreSupersede`, and merely rendered here.
+    @Published var staleCorePrompt: StaleCorePrompt? = nil
+
+    /// Spec 092 FR-003 — the app bundle ON DISK is a newer version than the one
+    /// running (a drag-install upgrade over a running app). Nil in the steady
+    /// state; when set, the menu offers a relaunch.
+    @Published var replacedBundleVersion: String? = nil
+
     /// Base URL for the Web UI, populated from /api/v1/info on connect.
     /// Falls back to localhost:8080 until the actual URL is fetched.
     @Published var webUIBaseURL: String = "http://127.0.0.1:8080"

@@ -193,6 +193,31 @@ actor CoreProcessManager {
     /// the ladder without waiting a real minute per rung.
     private let socketWaitTimeout: TimeInterval
 
+    // MARK: Stale-core supersede (Spec 092 FR-001/FR-002, issue #957)
+
+    /// What the connected core last said about itself. Captured in
+    /// `connectToCore()` — the one place a version report arrives — and read by
+    /// the supersede evaluation that runs immediately after each connect.
+    private var latestVersionReport: CoreVersionReport?
+
+    /// "Which version would a restart get us?" Injectable so the state machine
+    /// can be driven from a test without an app bundle or a subprocess.
+    private let respawnVersionProvider: @Sendable () -> String?
+
+    /// Resolved answer, memoised. The double optional distinguishes "not asked
+    /// yet" from "asked, and there is no bundled core" — the provider shells
+    /// out to the bundled binary, and re-running that on every reconnect would
+    /// spawn a process per attempt.
+    private var cachedRespawnVersion: String??
+
+    /// Whether this manager has already acted on a stale core.
+    ///
+    /// FR-005 forbids restart loops, and one attempt is the honest budget: if
+    /// the core that comes back still reports an old version, the assumption
+    /// behind the whole mechanism ("the bundled binary is what starts") is
+    /// wrong, and killing it again cannot discover that.
+    private var supersedeAttempted: Bool = false
+
     // MARK: - Initialization
 
     /// - Parameters:
@@ -212,7 +237,8 @@ actor CoreProcessManager {
         refreshInterval: TimeInterval = 30.0,
         probeTimeout: TimeInterval = 5.0,
         unresponsiveCoreTimeout: TimeInterval = 60.0,
-        socketWaitTimeout: TimeInterval = 60.0
+        socketWaitTimeout: TimeInterval = 60.0,
+        respawnVersionProvider: @escaping @Sendable () -> String? = { BundledCore.respawnVersion() }
     ) {
         self.appState = appState
         self.notificationService = notificationService
@@ -221,6 +247,7 @@ actor CoreProcessManager {
         self.probeTimeout = probeTimeout
         self.unresponsiveCoreTimeout = unresponsiveCoreTimeout
         self.socketWaitTimeout = socketWaitTimeout
+        self.respawnVersionProvider = respawnVersionProvider
 
         // `~/.mcpproxy/mcpproxy.sock`, or wherever this instance has been
         // relocated to (GH #936).
@@ -632,7 +659,12 @@ actor CoreProcessManager {
         apiClient = nil
         probeClient = nil
         consecutiveProbeFailures = 0
-        await MainActor.run { appState.apiClient = nil }
+        await MainActor.run {
+            appState.apiClient = nil
+            // An offer to restart a core we are no longer watching is worse
+            // than no offer: clicking it would act on a pid nobody rechecked.
+            appState.staleCorePrompt = nil
+        }
 
         let ownsCore = await MainActor.run { appState.ownership.shouldTerminateOnShutdown }
         guard ownsCore else {
@@ -711,6 +743,9 @@ actor CoreProcessManager {
             await refreshState()
             startSSEStream()
             startPeriodicRefresh()
+            // Spec 092 FR-001: the #957 case. The core we just attached to may
+            // be an OLD one that an earlier tray started and nobody stopped.
+            await evaluateSupersede()
         } catch {
             await transitionState(
                 to: .error(.general("Failed to connect to external core: \(error.localizedDescription)"))
@@ -746,6 +781,11 @@ actor CoreProcessManager {
         await refreshState()
         startSSEStream()
         startPeriodicRefresh()
+        // A launch can still land on a core we did not start: `waitForSocket`
+        // is satisfied by whichever core owns the socket. And a spawn that
+        // resolved to something other than the bundled binary reports an old
+        // version too. Both are supersede cases, so the check runs here as well.
+        await evaluateSupersede()
     }
 
     /// Terminate and REAP a process we launched, and return only once it is
@@ -980,6 +1020,208 @@ actor CoreProcessManager {
                 }
             }
         }
+    }
+
+    // MARK: - Stale-core supersede (Spec 092 FR-001/FR-001a/FR-002, issue #957)
+
+    /// Stage the version report `evaluateSupersede()` reasons over.
+    ///
+    /// The seam exists because the alternative — reaching the decision through
+    /// a real connect — needs a core on a socket answering `/api/v1/info`, and
+    /// the whole point of the state machine is the cases where that core is the
+    /// WRONG version. Production sets this in `connectToCore()` only.
+    func stageVersionReport(_ report: CoreVersionReport?) {
+        latestVersionReport = report
+    }
+
+    /// Whether a supersede has already been attempted. Readable so a test can
+    /// assert the idempotency budget was consumed (or not).
+    var didAttemptSupersede: Bool { supersedeAttempted }
+
+    /// The version a restart would bring, resolved once.
+    private func respawnVersion() -> String? {
+        if let cached = cachedRespawnVersion { return cached }
+        let resolved = respawnVersionProvider()
+        cachedRespawnVersion = .some(resolved)
+        return resolved
+    }
+
+    /// Act on the core's version report: supersede it, offer to, or do nothing.
+    ///
+    /// Called after EVERY successful connect — attach, launch, reconnect — which
+    /// is precisely "at attach time and whenever a version report arrives"
+    /// (FR-001), because `/api/v1/info` is only read there.
+    ///
+    /// Caller MUST hold the connection gate: the automatic branches relaunch a
+    /// core, and `launchWithRetries()` requires it.
+    ///
+    /// Internal rather than private so the state machine can be driven from a
+    /// test that has already staged a report and a gate.
+    func evaluateSupersede() async {
+        guard !superseded, !shutdownRequested else { return }
+        guard let report = latestVersionReport else { return }
+
+        let bundled = respawnVersion()
+        let ownership = await MainActor.run { appState.ownership }
+        let decision = CoreSupersede.decide(
+            report: report,
+            respawnVersion: bundled,
+            ownership: ownership,
+            alreadyAttempted: supersedeAttempted
+        )
+
+        // Publish (or clear) the consent prompt before acting: an automatic
+        // branch must not leave a stale offer in the menu, and a `.none`
+        // verdict must retract one that no longer applies.
+        let prompt = CoreSupersede.prompt(for: decision, report: report, respawnVersion: bundled)
+        await MainActor.run { appState.staleCorePrompt = prompt }
+
+        switch decision.action {
+        case .none:
+            NSLog("[MCPProxy] Supersede check: no action (%@)", decision.reason)
+
+        case .askForConsent:
+            NSLog("[MCPProxy] Supersede check: offering a restart (%@)", decision.reason)
+
+        case .restartManaged:
+            NSLog("[MCPProxy] Superseding stale core (%@)", decision.reason)
+            supersedeAttempted = true
+            await restartManagedCoreForSupersede()
+
+        case .stopAndRespawn(let pid):
+            NSLog("[MCPProxy] Superseding stale core PID %d (%@)", pid, decision.reason)
+            supersedeAttempted = true
+            await stopCoreByPIDAndRespawn(pid: pid)
+        }
+    }
+
+    /// The user clicked the consent item (FR-002). Returns false when there is
+    /// nothing to act on — no prompt, or a prompt with no pid — so the caller
+    /// can present instructions instead of silently doing nothing.
+    func supersedeWithConsent() async -> Bool {
+        guard !superseded, !shutdownRequested else { return false }
+        guard let prompt = await MainActor.run(body: { appState.staleCorePrompt }),
+              let pid = prompt.pid else { return false }
+
+        // Unlike the automatic branches, this one arrives from the menu without
+        // the gate.
+        guard beginConnectionWork() else {
+            NSLog("[MCPProxy] Consent restart declined: a connection attempt is already running")
+            return false
+        }
+        defer { endConnectionWork() }
+
+        supersedeAttempted = true
+        await MainActor.run { appState.staleCorePrompt = nil }
+        await stopCoreByPIDAndRespawn(pid: pid)
+        return true
+    }
+
+    /// A core we hold a Process handle for: the managed path is strictly better
+    /// than a signal — it carries the launch generation, so the exit callback
+    /// cannot be mistaken for a crash and drive a competing relaunch.
+    private func restartManagedCoreForSupersede() async {
+        await tearDownConnection()
+        await terminateManagedProcess(reason: "superseding stale core")
+        guard !superseded, !shutdownRequested else { return }
+        await MainActor.run {
+            appState.isStopped = false
+            appState.ownership = .trayManaged
+        }
+        beginSocketEvidence()
+        await launchWithRetries()
+    }
+
+    /// A core we only attached to. Signal it, wait for it to actually go, then
+    /// take ownership and start the bundled one.
+    private func stopCoreByPIDAndRespawn(pid: Int32) async {
+        await tearDownConnection()
+
+        guard await stopCore(pid: pid) else {
+            await transitionState(to: .error(.general(
+                "Could not stop the old core (PID \(pid)). Quit it manually, then use Retry."
+            )))
+            return
+        }
+        guard !superseded, !shutdownRequested else { return }
+
+        await MainActor.run {
+            appState.isStopped = false
+            appState.ownership = .trayManaged
+            appState.staleCorePrompt = nil
+        }
+        beginSocketEvidence()
+        await launchWithRetries()
+    }
+
+    /// SIGTERM, then SIGKILL, then confirm the socket is free.
+    ///
+    /// The identity check is re-run HERE rather than trusted from the
+    /// `/api/v1/info` read: pids are recycled, and between the report and this
+    /// signal the core may have died and had its number handed to something
+    /// else. Signalling that would be an unbounded mistake.
+    private func stopCore(pid: Int32) async -> Bool {
+        guard CoreProcessIdentity.isMCPProxyCore(pid: pid) else {
+            NSLog("[MCPProxy] Refusing to signal PID %d — it is not an mcpproxy process", pid)
+            return false
+        }
+
+        NSLog("[MCPProxy] Stopping stale core PID %d (SIGTERM)", pid)
+        AppLifecycle.shared.recordCoreTerminated(pid: pid, reason: "superseded by a newer tray")
+        if kill(pid, SIGTERM) != 0 && errno != ESRCH {
+            NSLog("[MCPProxy] SIGTERM to PID %d failed (errno %d)", pid, errno)
+            return false
+        }
+
+        if await waitFor(seconds: 5.0, until: { !CoreProcessIdentity.isRunning(pid: pid) }) == false {
+            NSLog("[MCPProxy] PID %d ignored SIGTERM — SIGKILL", pid)
+            _ = kill(pid, SIGKILL)
+            guard await waitFor(seconds: 3.0, until: { !CoreProcessIdentity.isRunning(pid: pid) }) else {
+                return false
+            }
+        }
+
+        // The process is gone; the socket it owned may take a moment to stop
+        // accepting. Launching before then trips `preflightLaunch`'s "a core is
+        // already running" check and turns a successful supersede into an error.
+        let socket = socketPath
+        _ = await waitFor(seconds: 5.0, until: {
+            SocketTransport.probeSocket(path: socket) != .connectable
+        })
+        return true
+    }
+
+    /// Poll `condition` until it holds or the budget runs out. Returns whether
+    /// it held.
+    private func waitFor(seconds: TimeInterval, until condition: @Sendable () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() { return true }
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                return condition()
+            }
+        }
+        return condition()
+    }
+
+    /// Drop everything bound to the core we are about to stop. Without this the
+    /// SSE stream and the refresh tick keep running against a dying core and
+    /// race the relaunch.
+    private func tearDownConnection() async {
+        sseTask?.cancel()
+        sseTask = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        if let sseClient {
+            await sseClient.disconnect()
+        }
+        sseClient = nil
+        apiClient = nil
+        probeClient = nil
+        consecutiveProbeFailures = 0
+        await MainActor.run { appState.apiClient = nil }
     }
 
     // MARK: - Private: Error Handling
@@ -1244,6 +1486,16 @@ actor CoreProcessManager {
         NSLog("[MCPProxy] connectToCore: calling /api/v1/info...")
         let info = try await client.info()
         NSLog("[MCPProxy] connectToCore: got version=%@", info.version)
+
+        // Spec 092 FR-001a: the version report the supersede check reasons over.
+        // Recorded, not acted on — acting here would restart a core from inside
+        // the function every connect path awaits. `evaluateSupersede()` runs at
+        // the end of those paths instead.
+        latestVersionReport = CoreVersionReport(
+            runningVersion: info.version,
+            launchedBy: info.launchedBy ?? "",
+            pid: info.pid
+        )
 
         // Extract API key from web_ui_url (e.g. "http://127.0.0.1:8080/ui/?apikey=abc123")
         if let urlComponents = URLComponents(string: info.webUiUrl),
@@ -1852,6 +2104,10 @@ actor CoreProcessManager {
                     await refreshState()
                     startSSEStream()
                     startPeriodicRefresh()
+                    // A reconnect can land on a DIFFERENT core than the one we
+                    // lost (the socket is whoever owns it now), so the version
+                    // report is fresh evidence and gets the same check.
+                    await evaluateSupersede()
                     return
                 } catch {
                     // Fall through to relaunch

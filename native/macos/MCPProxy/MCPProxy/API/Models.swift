@@ -794,12 +794,25 @@ struct InfoResponse: Codable, Equatable {
     let endpoints: InfoEndpoints
     let update: UpdateInfo?
 
+    /// Spec 092 FR-001a — durable launch provenance: "tray"/"installer" when a
+    /// tray process started this core, "" when the user did. Optional in the
+    /// model, not in the contract: a core from before this field existed omits
+    /// it, and an older core is precisely the one the supersede logic has to
+    /// reason about, so decoding must not fail on its absence.
+    let launchedBy: String?
+
+    /// Spec 092 FR-002 — the core's own pid. Nil from a core too old to report
+    /// one, which downgrades the supersede action to "show instructions".
+    let pid: Int32?
+
     enum CodingKeys: String, CodingKey {
         case version
         case webUiUrl = "web_ui_url"
         case listenAddr = "listen_addr"
         case endpoints
         case update
+        case launchedBy = "launched_by"
+        case pid
     }
 }
 

@@ -684,6 +684,28 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(info.endpoints.http, "http://127.0.0.1:8080")
         XCTAssertEqual(info.endpoints.socket, "~/.mcpproxy/mcpproxy.sock")
         XCTAssertNil(info.update)
+        // Spec 092: a core from before FR-001a/FR-002 sends neither field, and
+        // an OLD core is exactly the one the supersede check must reason about
+        // — so their absence must not fail decoding.
+        XCTAssertNil(info.launchedBy)
+        XCTAssertNil(info.pid)
+    }
+
+    /// Spec 092 FR-001a/FR-002: durable provenance and the core's pid.
+    func testDecodeInfoResponseWithLaunchProvenanceAndPID() throws {
+        let json = """
+        {
+            "version": "v0.54.0",
+            "web_ui_url": "http://127.0.0.1:8080/ui/",
+            "listen_addr": "127.0.0.1:8080",
+            "endpoints": { "http": "http://127.0.0.1:8080", "socket": "s" },
+            "launched_by": "tray",
+            "pid": 4711
+        }
+        """
+        let info = try decode(InfoResponse.self, from: json)
+        XCTAssertEqual(info.launchedBy, "tray")
+        XCTAssertEqual(info.pid, 4711)
     }
 
     func testDecodeInfoResponseWithUpdateAvailable() throws {
