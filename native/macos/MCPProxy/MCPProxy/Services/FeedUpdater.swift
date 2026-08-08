@@ -86,6 +86,9 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
     private var policy: EffectiveUpdatePolicy = .permissive
     private(set) var unavailableReason: String?
 
+    /// The bundle Sparkle reads its configuration from. Captured at `start`.
+    private var hostBundle: Bundle = .main
+
     /// The last version the feed offered. Kept by us rather than read back out
     /// of Sparkle, because Sparkle's update *session* ends when the user
     /// dismisses the window while the update itself remains available — and
@@ -107,6 +110,7 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
     ///   exercised; production passes `Bundle.main`.
     func start(bundle: Bundle = .main, policy: EffectiveUpdatePolicy) {
         self.policy = policy
+        self.hostBundle = bundle
 
         // Sparkle reads SUFeedURL / SUPublicEDKey from the host bundle. Running
         // from `.build/debug/MCPProxy` there is no host bundle to read, and the
@@ -169,6 +173,19 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
 // MARK: - SPUUpdaterDelegate
 
 extension SparkleFeedUpdater: SPUUpdaterDelegate {
+
+    /// FR-013 / decision-report open item #4: ask for the feed that matches
+    /// this machine's architecture. Returning nil means "use Info.plist", which
+    /// is what happens for any operator-set feed URL that is not the default
+    /// name — see `SparkleFeedURL`.
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        guard let configured = hostBundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+              !configured.isEmpty else { return nil }
+        let resolved = SparkleFeedURL.archSpecific(
+            configured, arch: UpdateService.hostArchToken()
+        )
+        return resolved == configured ? nil : resolved
+    }
 
     /// FR-014: stable users must never be offered RCs. An empty set means
     /// "default channel only", which is exactly the stable feed; RC users also
