@@ -107,8 +107,8 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// IdleTimeout are baked into http.Server when it is constructed in
 	// startCustomHTTPServer, so changing one only takes effect on a rebind.
 	// Compare the RESOLVED values, not the pointers: writing a key out at its
-	// built-in default ("120s" read / "0s" write / "180s" idle) is not a real
-	// change and must not force a pointless restart.
+	// built-in default ("120s" read / "120s" write / "180s" idle) is not a
+	// real change and must not force a pointless restart.
 	if httpTimeoutFields := changedHTTPTimeoutFields(oldCfg, newCfg); len(httpTimeoutFields) > 0 {
 		result.ChangedFields = append(result.ChangedFields, httpTimeoutFields...)
 		result.RequiresRestart = true

@@ -126,7 +126,7 @@ tool* may run.
 |-------|------|---------|-------------|
 | `http_read_timeout` | duration | `"120s"` | Deadline for reading the entire request (headers + body). `"0s"` = no timeout. Range: `1s`–`24h`. |
 | `http_write_timeout` | duration | `"120s"` | Wall-clock cap on writing the entire response, counted from when the request headers were read. **Governs non-streaming endpoints only** (REST API, Web UI, health) — the MCP endpoints and the SSE `/events` stream are exempt by design (see below, [#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)). `"0s"` disables it globally. Range: `1s`–`24h`. |
-| `http_idle_timeout` | duration | `"180s"` | Keep-alive timeout for idle persistent connections. `"0s"` = no timeout. Range: `1s`–`24h`. |
+| `http_idle_timeout` | duration | `"180s"` | Keep-alive timeout for idle persistent connections. `"0s"` removes the dedicated idle deadline, but Go's `net/http` then falls back to the read timeout — idle is fully unbounded only when `http_read_timeout` is also `"0s"`. Range: `1s`–`24h`. |
 
 Notes:
 

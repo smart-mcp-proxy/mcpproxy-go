@@ -63,6 +63,9 @@ func TestHTTPServerTimeouts(t *testing.T) {
 			idle:  time.Hour,
 		},
 		{
+			// All three zero: read/write deadlines are genuinely off, and with
+			// ReadTimeout also 0 the net/http IdleTimeout→ReadTimeout fallback
+			// resolves to "no idle deadline" too.
 			name: "explicit zeros disable every deadline",
 			cfg: &config.Config{
 				HTTPReadTimeout:  durPtrFor(t, "0s"),
@@ -71,6 +74,19 @@ func TestHTTPServerTimeouts(t *testing.T) {
 			},
 			read:  0,
 			write: 0,
+			idle:  0,
+		},
+		{
+			// Idle zero alone still RESOLVES to 0 (that is what lands in
+			// http.Server.IdleTimeout), but net/http then falls back to
+			// ReadTimeout at runtime — documented on ResolveHTTPIdleTimeout.
+			// This case pins the resolver contract, not the net/http fallback.
+			name: "idle zero alone resolves to zero (net/http falls back to read timeout)",
+			cfg: &config.Config{
+				HTTPIdleTimeout: durPtrFor(t, "0s"),
+			},
+			read:  120 * time.Second,
+			write: 120 * time.Second,
 			idle:  0,
 		},
 	}

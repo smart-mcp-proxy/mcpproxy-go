@@ -118,7 +118,9 @@ components:
         http_idle_timeout:
           description: |-
             HTTPIdleTimeout caps how long an idle keep-alive connection is kept open.
-            Unset = 180s; "0s" disables it (falls back to ReadTimeout). Needs restart.
+            Unset = 180s. "0s" removes the dedicated idle deadline, but net/http then
+            falls back to ReadTimeout — idle is fully unbounded only when
+            http_read_timeout is also "0s". Requires a restart.
           type: string
         http_read_timeout:
           description: |-

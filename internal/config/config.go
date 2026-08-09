@@ -123,7 +123,10 @@ func (c *Config) ResolveHTTPWriteTimeout() time.Duration {
 }
 
 // ResolveHTTPIdleTimeout resolves http.Server.IdleTimeout: unset → 180s,
-// 0 → disabled, positive → that value (GH #965).
+// 0 → no idle deadline of its own, positive → that value (GH #965). NOTE:
+// net/http falls back to ReadTimeout when IdleTimeout is zero, so an explicit
+// "0s" here fully disables the idle deadline only when http_read_timeout is
+// also 0 — otherwise idle connections are reaped after the read timeout.
 func (c *Config) ResolveHTTPIdleTimeout() time.Duration {
 	return resolveHTTPTimeout(c.HTTPIdleTimeout, defaultHTTPIdleTimeout)
 }
@@ -312,7 +315,9 @@ type Config struct {
 	// disables it globally. MCP and SSE /events routes are exempt by design.
 	HTTPWriteTimeout *Duration `json:"http_write_timeout,omitempty" mapstructure:"http-write-timeout" swaggertype:"string"`
 	// HTTPIdleTimeout caps how long an idle keep-alive connection is kept open.
-	// Unset = 180s; "0s" disables it (falls back to ReadTimeout). Needs restart.
+	// Unset = 180s. "0s" removes the dedicated idle deadline, but net/http then
+	// falls back to ReadTimeout — idle is fully unbounded only when
+	// http_read_timeout is also "0s". Requires a restart.
 	HTTPIdleTimeout *Duration `json:"http_idle_timeout,omitempty" mapstructure:"http-idle-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering

@@ -123,6 +123,14 @@ type Client struct {
 	// review).
 	connectionEpoch atomic.Int64
 
+	// epochMu serializes the probe goroutine's final epoch-check-and-SetError
+	// with Connect's epoch-bump-and-Ready transition. Without it a reconnect
+	// could complete between the probe's check and its SetError, letting a
+	// stale verdict evict the new session (GH #965 review, round 2). Never
+	// held while calling anything that can block; state-change callbacks fire
+	// asynchronously, so nesting StateManager calls under it is safe.
+	epochMu sync.Mutex
+
 	// admission carries the spec-093 concurrency limiter registry and the
 	// rejection observer installed by the manager. Nil (the default) means no
 	// admission control at all — the zero-config behaviour (FR-006). Swapped
@@ -320,21 +328,25 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("Core client Connect returned successfully",
 		zap.String("server", mc.GetConfig().Name))
 
+	// Open a new connection generation, then expose Ready — in that order and
+	// under epochMu, paired with the probe goroutine's verdict block. Detached
+	// goroutines that captured the previous epoch (the ambiguous-call liveness
+	// probe) see the mismatch and drop their verdict rather than applying it to
+	// a session they never observed; bumping BEFORE Ready under the mutex means
+	// there is no window where the new session is visible with the old epoch
+	// (GH #965 review, round 2).
+	mc.epochMu.Lock()
+	mc.connectionEpoch.Add(1)
 	// Transition to ready state only if not already ready
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)
 	}
+	mc.epochMu.Unlock()
 
 	// Wipe any consecutive-failure debt accumulated before reconnect so the
 	// new session starts at zero. Without this, a server that flapped, then
 	// recovered, would carry stale counts into the next health-check window.
 	mc.resetHealthCheckFailures()
-
-	// Open a new connection generation. Detached goroutines that captured the
-	// previous epoch (the ambiguous-call liveness probe) will see the mismatch
-	// and drop their verdict rather than applying it to a session they never
-	// observed (GH #965 review).
-	mc.connectionEpoch.Add(1)
 
 	// A fresh connection (e.g. a post-sign-in reconnect that now carries a token)
 	// starts clean: clear any stale call-time OAuth-required flag so the Sign-in
@@ -870,16 +882,6 @@ func (mc *Client) probeAfterAmbiguousCallError(cause error) {
 			return
 		}
 
-		// The state may have moved on while the probe was in flight (disconnect,
-		// or a full reconnect that opened a new connection generation) — this
-		// verdict describes a session nobody is using any more.
-		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
-			mc.logger.Debug("Liveness probe after canceled tool call failed, but the connection it observed is gone; skipping",
-				zap.String("server", mc.GetConfig().Name),
-				zap.Error(err))
-			return
-		}
-
 		// Only hard transport evidence evicts. Transient failures are the
 		// background health loop's business — it counts consecutive misses
 		// instead of acting on one. consecutiveHealthFailures is deliberately
@@ -888,6 +890,21 @@ func (mc *Client) probeAfterAmbiguousCallError(cause error) {
 			mc.logger.Info("Liveness probe after canceled tool call failed transiently; leaving state to the background health loop",
 				zap.String("server", mc.GetConfig().Name),
 				zap.NamedError("call_error", cause),
+				zap.Error(err))
+			return
+		}
+
+		// The state may have moved on while the probe was in flight (disconnect,
+		// or a full reconnect that opened a new connection generation) — this
+		// verdict describes a session nobody is using any more. epochMu pairs
+		// this check-and-SetError with Connect's bump-and-Ready so a reconnect
+		// cannot complete between the check and the verdict (GH #965 review,
+		// round 2).
+		mc.epochMu.Lock()
+		defer mc.epochMu.Unlock()
+		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+			mc.logger.Debug("Liveness probe after canceled tool call failed, but the connection it observed is gone; skipping",
+				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
 			return
 		}

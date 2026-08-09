@@ -72,7 +72,7 @@ default" — omit the key for that). Valid range: `1s`–`24h`, or `0s`.
 |--------|------|---------|-------------|
 | `http_read_timeout` | duration | `"120s"` | Deadline for reading the whole request (headers + body) |
 | `http_write_timeout` | duration | `"120s"` | Wall-clock cap on writing the whole response, counted from when the request headers were read. Governs **non-streaming endpoints only** (REST API, Web UI, health); MCP endpoints and SSE `/events` are exempt by design. `"0s"` disables it globally ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) |
-| `http_idle_timeout` | duration | `"180s"` | Keep-alive timeout for idle persistent connections |
+| `http_idle_timeout` | duration | `"180s"` | Keep-alive timeout for idle persistent connections (`"0s"` falls back to the read timeout; unbounded only if that is also `"0s"`) |
 
 - **Streaming routes are exempt from `http_write_timeout`.** The MCP endpoints (`/mcp*`, plus the legacy `/v1/tool_code` and `/v1/tool-code` aliases) and `/events` clear their own per-request write deadline (and, being body-less GETs, their read deadline), so a slow tool call or a long-lived SSE stream is never truncated. You do not need to disable the deadline to run long tool calls.
 - **Restart required.** These are baked into the HTTP server when it binds, so a change is reported as restart-required, not hot-reloaded.
