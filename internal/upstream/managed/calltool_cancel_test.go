@@ -243,6 +243,42 @@ func TestCallTool_StaleProbeAfterReconnectDoesNotEvict(t *testing.T) {
 		"a probe failure from a superseded connection generation must not evict the new session")
 }
 
+// TestCallTool_StaleProbeAfterDisconnectDoesNotResurrectError covers the
+// Disconnect side of the same detached-goroutine race (GH #965 review, round
+// 4): the client is deliberately disconnected while the probe is in flight.
+// Disconnect bumps the connection epoch before resetting the state machine, so
+// the stale hard-failure verdict must be dropped — it must not flip the fresh
+// Disconnected state back to Error (which would also burn a retry and emit a
+// bogus notification).
+func TestCallTool_StaleProbeAfterDisconnectDoesNotResurrectError(t *testing.T) {
+	mc, _ := newTestClientForCallTool(t, wrappedCanceled())
+	prober := newRecordingProber(errors.New("dial tcp 127.0.0.1:443: connect: connection refused"))
+	prober.block = make(chan struct{})
+	mc.healthProbe = prober
+
+	_, err := mc.CallTool(context.Background(), "search", nil)
+	require.Error(t, err)
+
+	require.Eventually(t, func() bool {
+		return prober.pingCount() == 1
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// Simulate managed Disconnect's teardown ordering (the real method needs a
+	// live core client): close the generation under epochMu, then reset state.
+	mc.epochMu.Lock()
+	mc.connectionEpoch.Add(1)
+	mc.epochMu.Unlock()
+	mc.StateManager.Reset()
+
+	close(prober.block)
+	prober.waitForPing(t)
+
+	require.Never(t, func() bool {
+		return mc.StateManager.GetState() == types.StateError
+	}, 300*time.Millisecond, 10*time.Millisecond,
+		"a stale probe verdict must not resurrect Error on a disconnected client")
+}
+
 // TestCallTool_HardConnectionErrorStillEvictsImmediately keeps the existing
 // behavior for hard evidence: connection refused is not ambiguous, so the
 // server is marked Error right away with no probe round-trip.

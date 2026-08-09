@@ -721,9 +721,11 @@ func applyTLSEnvOverrides(cfg *Config) {
 
 	// Override the HTTP server's request deadlines from environment (GH #965)
 	// — the escape hatch for operators who cannot edit the config file. An
-	// explicit "0s" is meaningful (it disables the deadline), so the value is
-	// materialized as a pointer; malformed values are warned about and ignored
-	// so a typo cannot silently reintroduce a response-truncating deadline.
+	// explicit "0s" is meaningful (it disables the deadline — except idle,
+	// where net/http falls back to the read timeout; see
+	// ResolveHTTPIdleTimeout), so the value is materialized as a pointer;
+	// malformed values are warned about and ignored so a typo cannot silently
+	// reintroduce a response-truncating deadline.
 	if value := os.Getenv("MCPPROXY_HTTP_READ_TIMEOUT"); value != "" {
 		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
 			rt := Duration(d)

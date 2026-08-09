@@ -421,6 +421,16 @@ func (mc *Client) Disconnect() error {
 		mc.logger.Error("Core client disconnect failed", zap.Error(err))
 	}
 
+	// Close this connection generation BEFORE resetting state, serialized with
+	// the ambiguous-call probe's verdict block. An in-flight probe either
+	// finishes its verdict first (its SetError is overridden by the Reset
+	// below) or observes the bumped epoch and drops the verdict — it can never
+	// flip the freshly Disconnected state back to Error (GH #965 review,
+	// round 4).
+	mc.epochMu.Lock()
+	mc.connectionEpoch.Add(1)
+	mc.epochMu.Unlock()
+
 	// Reset state
 	mc.StateManager.Reset()
 

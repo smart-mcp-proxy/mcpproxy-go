@@ -9,7 +9,9 @@ import (
 
 // TestResolveHTTPTimeouts covers the tri-state contract of the three global
 // HTTP server timeouts (GH #965): nil = built-in default, a pointer to 0 =
-// DISABLED (net/http zero value = no deadline), positive = that value.
+// DISABLED (net/http zero value = no deadline — except IdleTimeout, where
+// net/http falls back to ReadTimeout; the resolver still returns the literal
+// 0, see ResolveHTTPIdleTimeout), positive = that value.
 //
 // Note the deliberate asymmetry with ResolveInitTimeout: there a zero maps back
 // to the default, because a connect handshake must always have a ceiling. Here
