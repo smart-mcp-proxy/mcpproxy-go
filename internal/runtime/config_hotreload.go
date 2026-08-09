@@ -20,6 +20,25 @@ type ConfigApplyResult struct {
 	ValidationErrors   []config.ValidationError `json:"validation_errors,omitempty"`
 }
 
+// changedHTTPTimeoutFields returns the names of the HTTP server deadline keys
+// whose RESOLVED value differs between the two configs (GH #965). Resolving
+// first is what makes `nil` and an explicitly-written built-in default compare
+// equal, so a config rewrite that materializes the defaults does not report a
+// restart-required change.
+func changedHTTPTimeoutFields(oldCfg, newCfg *config.Config) []string {
+	var changed []string
+	if oldCfg.ResolveHTTPReadTimeout() != newCfg.ResolveHTTPReadTimeout() {
+		changed = append(changed, "http_read_timeout")
+	}
+	if oldCfg.ResolveHTTPWriteTimeout() != newCfg.ResolveHTTPWriteTimeout() {
+		changed = append(changed, "http_write_timeout")
+	}
+	if oldCfg.ResolveHTTPIdleTimeout() != newCfg.ResolveHTTPIdleTimeout() {
+		changed = append(changed, "http_idle_timeout")
+	}
+	return changed
+}
+
 // DetectConfigChanges compares old and new configurations to determine what changed
 // and whether a restart is required
 func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
@@ -82,6 +101,20 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 			result.RestartReason = "TLS configuration changed - requires HTTP server restart"
 			return result
 		}
+	}
+
+	// 5. HTTP server request deadlines (GH #965). ReadTimeout/WriteTimeout/
+	// IdleTimeout are baked into http.Server when it is constructed in
+	// startCustomHTTPServer, so changing one only takes effect on a rebind.
+	// Compare the RESOLVED values, not the pointers: writing a key out at its
+	// built-in default ("120s" read / "0s" write / "180s" idle) is not a real
+	// change and must not force a pointless restart.
+	if httpTimeoutFields := changedHTTPTimeoutFields(oldCfg, newCfg); len(httpTimeoutFields) > 0 {
+		result.ChangedFields = append(result.ChangedFields, httpTimeoutFields...)
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		result.RestartReason = "HTTP server timeouts changed - requires restart"
+		return result
 	}
 
 	// Track hot-reloadable changes

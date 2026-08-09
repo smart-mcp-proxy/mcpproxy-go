@@ -2083,6 +2083,20 @@ func (s *Server) registerHTTPHandlers(mux *http.ServeMux, httpAPIServer http.Han
 	}
 }
 
+// httpServerTimeouts resolves the Read/Write/Idle deadlines applied to the
+// main http.Server (GH #965). Extracted as a pure function so the policy is
+// unit-testable without binding a socket. A nil config yields the built-in
+// defaults — notably a ZERO write deadline, so a slow tool call or a long-lived
+// SSE /events stream is never truncated mid-response. ReadHeaderTimeout is NOT
+// configurable and stays at 60s: it is the deadline that actually defends
+// against slowloris, and nothing legitimate needs it relaxed.
+func httpServerTimeouts(cfg *config.Config) (read, write, idle time.Duration) {
+	if cfg == nil {
+		cfg = &config.Config{} // all-nil pointers → the built-in defaults
+	}
+	return cfg.ResolveHTTPReadTimeout(), cfg.ResolveHTTPWriteTimeout(), cfg.ResolveHTTPIdleTimeout()
+}
+
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
 	cfg := s.runtime.Config()
 	if cfg == nil {
@@ -2480,15 +2494,19 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		muxListener.listeners = append(muxListener.listeners, trayListener)
 	}
 
+	// GH #965: the request deadlines are configurable, and the write deadline
+	// defaults to 0 (disabled) so slow tool calls and SSE streams survive.
+	readTimeout, writeTimeout, idleTimeout := httpServerTimeouts(cfg)
+
 	s.mu.Lock()
 	s.httpServer = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           mux,
-		ReadHeaderTimeout: 60 * time.Second,  // Increased for better client compatibility
-		ReadTimeout:       120 * time.Second, // Full request read timeout
-		WriteTimeout:      120 * time.Second, // Response write timeout
-		IdleTimeout:       180 * time.Second, // Keep-alive timeout for persistent connections
-		MaxHeaderBytes:    1 << 20,           // 1MB max header size
+		ReadHeaderTimeout: 60 * time.Second, // Slowloris guard — deliberately not configurable
+		ReadTimeout:       readTimeout,      // Full request read timeout (http_read_timeout)
+		WriteTimeout:      writeTimeout,     // Response write timeout (http_write_timeout; 0 = none)
+		IdleTimeout:       idleTimeout,      // Keep-alive timeout for persistent connections (http_idle_timeout)
+		MaxHeaderBytes:    1 << 20,          // 1MB max header size
 		// Enable connection state tracking for better debugging
 		ConnState: s.logConnectionState,
 		// Tag connections with their source (TCP vs Tray)
@@ -2536,9 +2554,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		zap.String("address", actualAddr),
 		zap.String("requested_address", cfg.Listen),
 		zap.Strings("endpoints", allEndpoints),
-		zap.Duration("read_timeout", 120*time.Second),
-		zap.Duration("write_timeout", 120*time.Second),
-		zap.Duration("idle_timeout", 180*time.Second),
+		zap.Duration("read_timeout", readTimeout),
+		zap.Duration("write_timeout", writeTimeout),
+		zap.Duration("idle_timeout", idleTimeout),
 		zap.String("features", "connection_tracking,graceful_shutdown,enhanced_logging,dual_listener"),
 	)
 

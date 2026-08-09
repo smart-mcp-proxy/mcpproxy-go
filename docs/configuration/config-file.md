@@ -29,6 +29,9 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "enable_socket": true,
   "health_check_interval": "30s",
   "tool_discovery_interval": "5m",
+  "http_read_timeout": "120s",
+  "http_write_timeout": "0s",
+  "http_idle_timeout": "180s",
   "tools_limit": 15,
   "tool_response_limit": 20000,
   "enable_code_execution": false,
@@ -58,6 +61,23 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on a loopback listener. Needed when running behind a reverse proxy — see [Reverse Proxy Deployment](/operations/reverse-proxy) |
 | `require_mcp_auth` | boolean | `false` | Require an API key on the `/mcp` endpoint (off by default for client compatibility). Enable when exposing MCPProxy beyond localhost |
 | `enable_socket` | boolean | `true` | Enable Unix socket/named pipe for local communication |
+
+### HTTP Server Timeouts
+
+Deadlines applied to MCPProxy's own HTTP listener (REST API, `/mcp`, `/events`).
+Each accepts a duration string; **`"0s"` means "no timeout"** (not "use the
+default" — omit the key for that). Valid range: `1s`–`24h`, or `0s`.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `http_read_timeout` | duration | `"120s"` | Deadline for reading the whole request (headers + body) |
+| `http_write_timeout` | duration | `"0s"` (disabled) | Wall-clock cap on writing the whole response, counted from when the request headers were read. Disabled by default: a write deadline truncates any tool call slower than it and silently kills long-lived SSE `/events` streams ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) |
+| `http_idle_timeout` | duration | `"180s"` | Keep-alive timeout for idle persistent connections |
+
+- **Restart required.** These are baked into the HTTP server when it binds, so a change is reported as restart-required, not hot-reloaded.
+- **Slowloris protection is unaffected** — the 60s request-header read deadline is hardcoded and not configurable.
+- **Long tool calls need two settings.** `call_tool_timeout` (default `2m`) separately caps tool execution; raise it too when you expect tool calls longer than two minutes.
+- Environment overrides: `MCPPROXY_HTTP_READ_TIMEOUT`, `MCPPROXY_HTTP_WRITE_TIMEOUT`, `MCPPROXY_HTTP_IDLE_TIMEOUT`.
 
 ### Feature Flags
 
@@ -203,6 +223,8 @@ See [Upstream Servers](/configuration/upstream-servers) for detailed server conf
 ## Hot Reload
 
 MCPProxy watches the configuration file for changes and automatically reloads when modifications are detected. No restart is required for most configuration changes.
+
+Exceptions that require a restart include `listen`, `data_dir`, `api_key`, the TLS block, and the three `http_*_timeout` options.
 
 ## Environment Variable Overrides
 

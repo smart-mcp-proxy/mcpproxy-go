@@ -67,7 +67,60 @@ const (
 	// `initialize` handshake when no per-server or global override is set
 	// (MCP-3322 / GH #760). It preserves the historical ~30s behaviour.
 	defaultInitTimeout = 30 * time.Second
+
+	// Built-in defaults for the HTTP server's request deadlines (GH #965).
+	// Like the intervals above they live here (not in DefaultConfig) so an
+	// unset key resolves to the built-in behaviour and existing configs are
+	// unchanged.
+	defaultHTTPReadTimeout = 120 * time.Second
+	// defaultHTTPWriteTimeout is 0 — no write deadline — ON PURPOSE (GH #965).
+	// A write deadline is a wall-clock cap on the ENTIRE response, counted from
+	// the moment the request headers were read, so the previous hardcoded 120s
+	// truncated any tool call slower than that and silently killed long-lived
+	// SSE /events streams. Slowloris protection is provided instead by the
+	// hardcoded 60s ReadHeaderTimeout, which is the deadline that actually
+	// defends against a malicious slow client.
+	defaultHTTPWriteTimeout = time.Duration(0)
+	defaultHTTPIdleTimeout  = 180 * time.Second
 )
+
+// resolveHTTPTimeout applies the tri-state contract shared by the three HTTP
+// server deadlines (GH #965): nil = the built-in default, a pointer to 0 =
+// DISABLED (net/http's zero value means "no deadline"), a positive value = that
+// value. A negative value falls back to the default — validation rejects those
+// anyway, this only keeps a hand-edited file from producing a nonsense deadline.
+//
+// Note the deliberate asymmetry with ResolveInitTimeout, where 0 maps back to
+// the default: a connect handshake must always have a ceiling, whereas "no
+// response deadline at all" is a legitimate — and here default — HTTP setting.
+func resolveHTTPTimeout(v *Duration, def time.Duration) time.Duration {
+	if v == nil {
+		return def
+	}
+	if d := v.Duration(); d >= 0 {
+		return d
+	}
+	return def
+}
+
+// ResolveHTTPReadTimeout resolves http.Server.ReadTimeout: unset → 120s,
+// 0 → disabled, positive → that value (GH #965).
+func (c *Config) ResolveHTTPReadTimeout() time.Duration {
+	return resolveHTTPTimeout(c.HTTPReadTimeout, defaultHTTPReadTimeout)
+}
+
+// ResolveHTTPWriteTimeout resolves http.Server.WriteTimeout: unset → 0
+// (disabled — see defaultHTTPWriteTimeout), 0 → disabled, positive → that
+// value (GH #965).
+func (c *Config) ResolveHTTPWriteTimeout() time.Duration {
+	return resolveHTTPTimeout(c.HTTPWriteTimeout, defaultHTTPWriteTimeout)
+}
+
+// ResolveHTTPIdleTimeout resolves http.Server.IdleTimeout: unset → 180s,
+// 0 → disabled, positive → that value (GH #965).
+func (c *Config) ResolveHTTPIdleTimeout() time.Duration {
+	return resolveHTTPTimeout(c.HTTPIdleTimeout, defaultHTTPIdleTimeout)
+}
 
 // resolveInterval applies the per-server → global → default precedence for an
 // optional *Duration. A non-nil pointer wins at each level, including a pointer
@@ -226,6 +279,26 @@ type Config struct {
 	// first-run warmup (cache/index build) before answering `initialize` can
 	// raise this so they are not killed mid-startup.
 	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init-timeout" swaggertype:"string"`
+
+	// HTTP server request deadlines (GH #965). *Duration tri-state: nil =
+	// inherit the built-in default; a pointer to 0s = DISABLED (no deadline);
+	// a positive value = that deadline. Validated to {0} ∪ [1s, 24h].
+	//
+	// Unlike init_timeout, an explicit 0 here is a SUPPORTED value, not a
+	// synonym for the default: net/http treats a zero deadline as "no timeout",
+	// and that is exactly what long-running tool calls and the SSE /events
+	// stream need. HTTPWriteTimeout therefore DEFAULTS to 0 — the previous
+	// hardcoded 120s write deadline truncated any response slower than that.
+	// Slowloris protection remains via the hardcoded 60s ReadHeaderTimeout.
+	//
+	// These are baked into http.Server at bind time, so changing any of them
+	// REQUIRES A RESTART (DetectConfigChanges reports it as such). Resolved by
+	// ResolveHTTPReadTimeout / ResolveHTTPWriteTimeout / ResolveHTTPIdleTimeout.
+	// Note that call_tool_timeout separately caps tool execution (default 2m):
+	// raise it too when allowing tool calls longer than two minutes.
+	HTTPReadTimeout  *Duration `json:"http_read_timeout,omitempty" mapstructure:"http-read-timeout" swaggertype:"string"`
+	HTTPWriteTimeout *Duration `json:"http_write_timeout,omitempty" mapstructure:"http-write-timeout" swaggertype:"string"`
+	HTTPIdleTimeout  *Duration `json:"http_idle_timeout,omitempty" mapstructure:"http-idle-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -2018,6 +2091,18 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		errors = append(errors, *e)
 	}
 	if e := validateIntervalBound("tool_discovery_interval", c.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+
+	// HTTP server request deadlines (GH #965). {0} ∪ [1s, 24h]; 0 means
+	// "no deadline", which validateIntervalBound already accepts.
+	if e := validateIntervalBound("http_read_timeout", c.HTTPReadTimeout, time.Second, 24*time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+	if e := validateIntervalBound("http_write_timeout", c.HTTPWriteTimeout, time.Second, 24*time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+	if e := validateIntervalBound("http_idle_timeout", c.HTTPIdleTimeout, time.Second, 24*time.Hour); e != nil {
 		errors = append(errors, *e)
 	}
 

@@ -75,6 +75,24 @@ set and per-server overrides are file/API-configured. See
 | `MCPPROXY_QUEUE_SIZE` | How many calls may wait for a global slot. `0` = shed immediately at the cap | `0` |
 | `MCPPROXY_QUEUE_TIMEOUT` | How long a call may wait before being shed, e.g. `30s` | `30s` when the limiter is active |
 
+### HTTP Server Timeouts
+
+Deadlines on MCPProxy's own HTTP listener (REST API, `/mcp`, `/events`). Each
+takes a duration string; **`0s` means "no timeout"** (unset means "use the
+default"). Valid range: `1s`–`24h`, or `0s`. Malformed values are ignored with a
+warning on stderr. Changing any of these requires a restart. See
+[HTTP Server Timeouts](./config-file.md#http-server-timeouts).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_HTTP_READ_TIMEOUT` | Deadline for reading the whole request (headers + body) | `120s` |
+| `MCPPROXY_HTTP_WRITE_TIMEOUT` | Wall-clock cap on writing the whole response. Disabled by default so slow tool calls and SSE `/events` streams are not truncated ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) | `0s` (off) |
+| `MCPPROXY_HTTP_IDLE_TIMEOUT` | Keep-alive timeout for idle persistent connections | `180s` |
+
+The 60s request-header read deadline (slowloris protection) is hardcoded and not
+configurable. `call_tool_timeout` (default `2m`) separately caps tool execution —
+raise it too when you expect tool calls longer than two minutes.
+
 ### Core Server Examples
 
 ```bash

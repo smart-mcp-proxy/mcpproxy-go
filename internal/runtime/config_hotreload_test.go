@@ -623,3 +623,63 @@ func TestDetectConfigChanges_ConcurrencyLimits(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "server_concurrency_defaults")
 	})
 }
+
+// TestDetectConfigChanges_HTTPTimeouts (GH #965): the three global HTTP server
+// timeouts are baked into http.Server at bind time, so a change is
+// restart-required — and the comparison is on the RESOLVED values, so writing
+// out a key at its built-in default ("120s" read / "0s" write / "180s" idle) is
+// correctly reported as "no change" instead of forcing a pointless restart.
+func TestDetectConfigChanges_HTTPTimeouts(t *testing.T) {
+	mk := func(mutate func(*config.Config)) *config.Config {
+		c := &config.Config{Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{}}
+		if mutate != nil {
+			mutate(c)
+		}
+		return c
+	}
+	durp := func(d time.Duration) *config.Duration { v := config.Duration(d); return &v }
+
+	t.Run("http_write_timeout nil→30s requires restart", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(func(c *config.Config) { c.HTTPWriteTimeout = durp(30 * time.Second) }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "http_write_timeout")
+		assert.True(t, result.RequiresRestart)
+		assert.False(t, result.AppliedImmediately)
+		assert.Contains(t, result.RestartReason, "HTTP server timeouts")
+	})
+
+	t.Run("http_read_timeout nil→30s requires restart", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(func(c *config.Config) { c.HTTPReadTimeout = durp(30 * time.Second) }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "http_read_timeout")
+		assert.True(t, result.RequiresRestart)
+	})
+
+	t.Run("http_idle_timeout nil→30s requires restart", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(func(c *config.Config) { c.HTTPIdleTimeout = durp(30 * time.Second) }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "http_idle_timeout")
+		assert.True(t, result.RequiresRestart)
+	})
+
+	t.Run("nil→explicit built-in defaults is not a change", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(func(c *config.Config) {
+				c.HTTPReadTimeout = durp(120 * time.Second)
+				c.HTTPWriteTimeout = durp(0)
+				c.HTTPIdleTimeout = durp(180 * time.Second)
+			}))
+		require.True(t, result.Success)
+		assert.False(t, result.RequiresRestart, "writing out the defaults must not force a restart")
+		assert.NotContains(t, result.ChangedFields, "http_read_timeout")
+		assert.NotContains(t, result.ChangedFields, "http_write_timeout")
+		assert.NotContains(t, result.ChangedFields, "http_idle_timeout")
+	})
+}
