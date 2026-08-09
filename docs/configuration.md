@@ -108,6 +108,36 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
 | `init_timeout` | duration | `"30s"` | Deadline for an upstream's MCP `initialize` handshake (e.g. `"30s"`, `"120s"`, `"3m"`). Raise this for servers that do legitimate first-run warmup — building a cache/index or prefetching — before they answer `initialize`, so they are not killed mid-startup. Global default; can be overridden per server (see [Server Fields](#server-fields)). Range: `1s`–`30m`; `"0s"`/unset uses the 30s default. |
 
+### HTTP Server Timeouts
+
+Deadlines applied to mcpproxy's own HTTP listener (REST API, `/mcp`, `/events`).
+These are separate from `call_tool_timeout`, which caps how long an *upstream
+tool* may run.
+
+```json
+{
+  "http_read_timeout": "120s",
+  "http_write_timeout": "120s",
+  "http_idle_timeout": "180s"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `http_read_timeout` | duration | `"120s"` | Deadline for reading the entire request (headers + body). `"0s"` = no timeout. Range: `1s`–`24h`. |
+| `http_write_timeout` | duration | `"120s"` | Wall-clock cap on writing the entire response, counted from when the request headers were read. **Governs non-streaming endpoints only** (REST API, Web UI, health) — the MCP endpoints and the SSE `/events` stream are exempt by design (see below, [#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)). `"0s"` disables it globally. Range: `1s`–`24h`. |
+| `http_idle_timeout` | duration | `"180s"` | Keep-alive timeout for idle persistent connections. `"0s"` removes the dedicated idle deadline, but Go's `net/http` then falls back to the read timeout — idle is fully unbounded only when `http_read_timeout` is also `"0s"`. Range: `1s`–`24h`. |
+
+Notes:
+
+- **Streaming routes are exempt from `http_write_timeout`.** A write deadline caps the whole response, so it would truncate any tool call slower than it and silently kill long-lived SSE streams. The MCP endpoints (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, plus the legacy `/v1/tool_code` and `/v1/tool-code` aliases) and `/events` therefore clear their own per-request write deadline (and, being body-less GETs, their read deadline). Everything else keeps the configured deadline, which is what protects a non-loopback deployment from slow readers. You do **not** need to disable `http_write_timeout` to run long tool calls ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)).
+- **`"0s"` means "no timeout"**, not "use the default" — unlike `init_timeout`. Omit the key entirely to get the built-in default. Setting `http_write_timeout` to `"0s"` removes the deadline from *every* endpoint, including REST/UI/health. Exception: `http_idle_timeout: "0s"` alone does not unbound idle connections — Go's `net/http` falls back to the read timeout (see the field row above).
+- **A restart is required.** These values are baked into the HTTP server when it binds, so a config edit is reported as restart-required rather than hot-reloaded.
+- **Slowloris protection is unaffected**: the 60s request-header read deadline is hardcoded and not configurable.
+- **Long tool calls need `call_tool_timeout`.** It (default `"2m"`) separately caps tool execution. To allow tool calls longer than two minutes, raise `call_tool_timeout` — the MCP routes' write-deadline exemption alone is not enough.
+
+Environment overrides: `MCPPROXY_HTTP_READ_TIMEOUT`, `MCPPROXY_HTTP_WRITE_TIMEOUT`, `MCPPROXY_HTTP_IDLE_TIMEOUT`.
+
 ### TOON Output (Adaptive Result Encoding)
 
 ```json

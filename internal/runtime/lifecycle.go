@@ -1301,6 +1301,21 @@ func (r *Runtime) ReloadConfiguration() error {
 		r.mu.Unlock()
 	}
 
+	// GH #965 review: an external file edit is applied silently even when it
+	// touches a restart-required field (listen, TLS, the HTTP server timeouts,
+	// …) — the snapshot and the API then report the new value while the running
+	// server keeps the old one. The API path surfaces this via
+	// ConfigApplyResult; the disk path had no channel at all, so at least make
+	// it loud in the log. Log-only on purpose: auto-restarting on a file save
+	// would be far more surprising than a stale deadline.
+	if oldSnapshot != nil && oldSnapshot.Config != nil && newSnapshot != nil && newSnapshot.Config != nil {
+		if result := DetectConfigChanges(oldSnapshot.Config, newSnapshot.Config); result.RequiresRestart {
+			r.logger.Warn("Config file change includes restart-required fields; the running server keeps the old values until restart",
+				zap.Strings("changed_fields", result.ChangedFields),
+				zap.String("reason", result.RestartReason))
+		}
+	}
+
 	// Propagate the reloaded global config to the upstream manager and every
 	// running managed client (parity with ApplyConfig, spec 074): health-check
 	// loops and Docker-recovery decisions re-resolve values like

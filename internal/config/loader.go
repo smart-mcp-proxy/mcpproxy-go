@@ -718,4 +718,36 @@ func applyTLSEnvOverrides(cfg *Config) {
 			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_QUEUE_TIMEOUT=%q (want a duration such as \"30s\")\n", value)
 		}
 	}
+
+	// Override the HTTP server's request deadlines from environment (GH #965)
+	// — the escape hatch for operators who cannot edit the config file. An
+	// explicit "0s" is meaningful (it disables the deadline — except idle,
+	// where net/http falls back to the read timeout; see
+	// ResolveHTTPIdleTimeout), so the value is materialized as a pointer;
+	// malformed values are warned about and ignored so a typo cannot silently
+	// reintroduce a response-truncating deadline.
+	if value := os.Getenv("MCPPROXY_HTTP_READ_TIMEOUT"); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
+			rt := Duration(d)
+			cfg.HTTPReadTimeout = &rt
+		} else {
+			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_READ_TIMEOUT=%q (want a duration such as \"120s\", or \"0s\" to disable)\n", value)
+		}
+	}
+	if value := os.Getenv("MCPPROXY_HTTP_WRITE_TIMEOUT"); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
+			wt := Duration(d)
+			cfg.HTTPWriteTimeout = &wt
+		} else {
+			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_WRITE_TIMEOUT=%q (want a duration such as \"300s\", or \"0s\" to disable)\n", value)
+		}
+	}
+	if value := os.Getenv("MCPPROXY_HTTP_IDLE_TIMEOUT"); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
+			it := Duration(d)
+			cfg.HTTPIdleTimeout = &it
+		} else {
+			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_IDLE_TIMEOUT=%q (want a duration such as \"180s\"; \"0s\" falls back to the read timeout)\n", value)
+		}
+	}
 }

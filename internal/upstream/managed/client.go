@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -85,6 +86,18 @@ type Client struct {
 	// and trigger Error immediately. See recordHealthCheckFailure().
 	consecutiveHealthFailures int
 
+	// toolInvoker is the tools/call surface CallTool dispatches through. In
+	// production it is the coreClient; the narrow interface lets tests inject a
+	// fake outcome so the call-path error classification (GH #965) is testable
+	// without a live upstream. When nil it falls back to coreClient
+	// (hand-constructed clients in tests).
+	toolInvoker toolCaller
+
+	// ambiguousProbeInFlight gates the async liveness probe fired after an
+	// ambiguous tools/call cancellation (GH #965) so a burst of canceled calls
+	// results in at most one probe against the upstream.
+	ambiguousProbeInFlight atomic.Bool
+
 	// healthProbe is the liveness surface the background health loop uses. In
 	// production it is the coreClient (a lightweight MCP `ping`, spec 074); the
 	// narrow interface means the health path provably cannot fall back to a
@@ -100,6 +113,26 @@ type Client struct {
 	// successful call or a fresh Connect clears it. MCP-2084.
 	oauthCallRequired atomic.Bool
 
+	// connectionEpoch is bumped on every successful connect. It identifies the
+	// current connection generation so detached goroutines (the ambiguous-call
+	// liveness probe) can tell whether the session they observed is still the
+	// live one: coreClient is created once and never replaced, so pointer
+	// identity proves nothing, and a disconnect+reconnect leaves the state
+	// machine back at Ready — indistinguishable from "never left". A stale
+	// verdict must not be applied to a brand-new healthy session (GH #965
+	// review).
+	connectionEpoch atomic.Int64
+
+	// epochMu serializes the probe goroutine's final epoch-check-and-SetError
+	// with Connect's epoch bump. Without it a reconnect could complete between
+	// the probe's staleness check and its SetError, letting a stale verdict
+	// evict the new session (GH #965 review, rounds 2-3). Lock invariant:
+	// epochMu is never held across code that can run foreign callbacks —
+	// TransitionTo invokes its state-change callback SYNCHRONOUSLY and so must
+	// stay outside; SetError dispatches its callback in a goroutine, so the
+	// probe may call it under epochMu.
+	epochMu sync.Mutex
+
 	// admission carries the spec-093 concurrency limiter registry and the
 	// rejection observer installed by the manager. Nil (the default) means no
 	// admission control at all — the zero-config behaviour (FR-006). Swapped
@@ -113,6 +146,16 @@ type Client struct {
 type livenessProber interface {
 	Ping(ctx context.Context) error
 }
+
+// toolCaller is the minimal core-client surface CallTool needs. Mirrors
+// livenessProber: production wires the coreClient, tests inject a fake.
+type toolCaller interface {
+	CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error)
+}
+
+// ambiguousProbeTimeout bounds the liveness probe fired after an ambiguous
+// tools/call cancellation. Matches the background health-check probe budget.
+const ambiguousProbeTimeout = 5 * time.Second
 
 // healthCheckFailureThreshold is the number of consecutive transient
 // health-check failures we tolerate before marking the server Error.
@@ -139,6 +182,7 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		storage:        storage,
 		stopMonitoring: make(chan struct{}),
 		healthProbe:    coreClient,
+		toolInvoker:    coreClient,
 	}
 	mc.cfg.Store(serverConfig)
 	mc.globalConfig.Store(globalConfig)
@@ -286,6 +330,19 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("Core client Connect returned successfully",
 		zap.String("server", mc.GetConfig().Name))
 
+	// Open a new connection generation BEFORE exposing Ready. The bump is
+	// serialized under epochMu with the ambiguous-call probe's verdict block:
+	// once it lands, any stale probe (old epoch) drops its verdict, so the new
+	// session can never be evicted by a probe that observed the previous one.
+	// A stale verdict that wins the mutex first can only mark the still
+	// pre-Ready state, which the TransitionTo below immediately overrides.
+	// TransitionTo deliberately stays OUTSIDE the critical section — it invokes
+	// the state-change callback synchronously (types.go), and epochMu must
+	// never be held across foreign code (GH #965 review, rounds 2-3).
+	mc.epochMu.Lock()
+	mc.connectionEpoch.Add(1)
+	mc.epochMu.Unlock()
+
 	// Transition to ready state only if not already ready
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)
@@ -359,10 +416,23 @@ func (mc *Client) Disconnect() error {
 	// Stop background monitoring
 	mc.stopBackgroundMonitoring()
 
-	// Disconnect core client
-	if err := mc.coreClient.Disconnect(); err != nil {
-		mc.logger.Error("Core client disconnect failed", zap.Error(err))
+	// Disconnect core client. Nil only for hand-constructed test clients —
+	// the same fallback contract as toolInvoker/healthProbe.
+	if mc.coreClient != nil {
+		if err := mc.coreClient.Disconnect(); err != nil {
+			mc.logger.Error("Core client disconnect failed", zap.Error(err))
+		}
 	}
+
+	// Close this connection generation BEFORE resetting state, serialized with
+	// the ambiguous-call probe's verdict block. An in-flight probe either
+	// finishes its verdict first (its SetError is overridden by the Reset
+	// below) or observes the bumped epoch and drops the verdict — it can never
+	// flip the freshly Disconnected state back to Error (GH #965 review,
+	// round 4).
+	mc.epochMu.Lock()
+	mc.connectionEpoch.Add(1)
+	mc.epochMu.Unlock()
 
 	// Reset state
 	mc.StateManager.Reset()
@@ -659,12 +729,48 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 	}
 	defer releaseSlot()
 
-	result, err := mc.coreClient.CallTool(ctx, toolName, args)
+	invoker := mc.toolInvoker
+	if invoker == nil {
+		invoker = mc.coreClient
+	}
+
+	result, err := invoker.CallTool(ctx, toolName, args)
 	if err != nil {
 		mc.recordCallToolOAuthSignal(toolName, err)
-		// Check if it's a connection error and update state
-		if mc.isConnectionError(err) {
-			// Use different log levels based on error type
+		// GH #965: a canceled or timed-out CALL is not a dead SERVER. SetError
+		// flips the whole upstream to Error and burns a retry, evicting it for
+		// every other client — so only hard evidence of a broken transport may
+		// take that path. Classify, most-specific first.
+		switch {
+		case ctx.Err() != nil:
+			// The caller itself went away (HTTP client disconnect, per-request
+			// deadline). Call-scoped by definition — never touch server state.
+			mc.logger.Warn("Tool call canceled/deadline by caller; not marking server unhealthy",
+				zap.String("server", mc.GetConfig().Name),
+				zap.String("tool", toolName),
+				zap.Error(ctx.Err()))
+
+		case !mc.isConnectionError(err):
+			// Log non-connection errors at error level
+			mc.logger.Error("Tool call failed",
+				zap.String("server", mc.GetConfig().Name),
+				zap.String("tool", toolName),
+				zap.Error(err))
+
+		case isAmbiguousCancellationError(err):
+			// Cancellation surfaced from inside the transport while our caller
+			// context is still live (mcp-go internals, an HTTP client timeout,
+			// or remote error text). It could be a dead server or just a dropped
+			// request — probe asynchronously instead of evicting on a guess.
+			mc.logger.Warn("Tool call failed with an ambiguous cancellation; probing server liveness before marking it unhealthy",
+				zap.String("server", mc.GetConfig().Name),
+				zap.String("tool", toolName),
+				zap.Error(err))
+			mc.probeAfterAmbiguousCallError(err)
+
+		default:
+			// Hard evidence (connection refused/reset, broken pipe, dial i/o
+			// timeout…): the transport is genuinely broken — existing behavior.
 			if mc.isNormalReconnectionError(err) {
 				mc.logger.Warn("Tool call failed due to connection loss, will attempt reconnection",
 					zap.String("server", mc.GetConfig().Name),
@@ -678,12 +784,6 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 					zap.Error(err))
 			}
 			mc.StateManager.SetError(err)
-		} else {
-			// Log non-connection errors at error level
-			mc.logger.Error("Tool call failed",
-				zap.String("server", mc.GetConfig().Name),
-				zap.String("tool", toolName),
-				zap.Error(err))
 		}
 		return nil, err
 	}
@@ -716,6 +816,123 @@ func (mc *Client) recordCallToolOAuthSignal(toolName string, err error) {
 			zap.String("server", mc.GetConfig().Name),
 			zap.String("tool", toolName))
 	}
+}
+
+// isAmbiguousCancellationError reports whether a tools/call error is a
+// cancellation/deadline signal rather than hard evidence that the transport is
+// broken (GH #965).
+//
+// These arrive with a live caller context — mcp-go cancelling internally, the
+// HTTP client's own timeout firing, or the remote echoing cancellation text —
+// so they say nothing definitive about the server's health. isConnectionError
+// matches them by substring today, which is what evicted the whole upstream on
+// a single client disconnect. It is deliberately NOT modified: ListTools, the
+// health loop and reconnect all rely on its current matching.
+func isAmbiguousCancellationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	errStr := err.Error()
+	// "cancelled" (British) is how mcp-go's sse.go spells it; the plain-text
+	// forms cover errors whose chain was stripped before reaching us.
+	for _, marker := range []string{"context canceled", "context cancelled", "context deadline exceeded"} {
+		if containsString(errStr, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// probeAfterAmbiguousCallError fires one bounded liveness probe after an
+// ambiguous tools/call cancellation (GH #965) and classifies the outcome:
+//
+//   - healthy probe → the call was merely canceled; the server is left untouched.
+//   - transient probe failure (deadline exceeded on the ping, momentary
+//     overload, or a non-connection error such as an upstream without `ping`)
+//     → nothing happens here. A busy upstream is precisely what produces slow
+//     calls and ambiguous cancellations, so a single missed 5s ping is not
+//     eviction-grade evidence; the background health loop owns transient
+//     failures and its healthCheckFailureThreshold consecutive-miss budget.
+//   - hard probe failure (connection refused/reset, broken pipe, no such
+//     host…) on the SAME connection generation → Error, as before.
+//
+// Runs asynchronously so the tool call returns immediately, and is gated to a
+// single in-flight probe so a burst of canceled calls cannot stampede the
+// upstream. The connection epoch captured before launching guards against a
+// disconnect+reconnect completing mid-probe: a verdict about a superseded
+// session is dropped rather than applied to the fresh one.
+func (mc *Client) probeAfterAmbiguousCallError(cause error) {
+	if !mc.ambiguousProbeInFlight.CompareAndSwap(false, true) {
+		return
+	}
+
+	epoch := mc.connectionEpoch.Load()
+
+	go func() {
+		defer mc.ambiguousProbeInFlight.Store(false)
+
+		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+			return
+		}
+
+		prober := mc.healthProbe
+		if prober == nil {
+			if mc.coreClient == nil {
+				return
+			}
+			prober = mc.coreClient
+		}
+
+		// Derived from Background: the caller context that produced the
+		// ambiguous error is very likely already dead.
+		ctx, cancel := context.WithTimeout(context.Background(), ambiguousProbeTimeout)
+		defer cancel()
+
+		err := prober.Ping(ctx)
+		if err == nil {
+			mc.logger.Debug("Liveness probe after canceled tool call succeeded; server left untouched",
+				zap.String("server", mc.GetConfig().Name),
+				zap.NamedError("call_error", cause))
+			return
+		}
+
+		// Only hard transport evidence evicts. Transient failures are the
+		// background health loop's business — it counts consecutive misses
+		// instead of acting on one. consecutiveHealthFailures is deliberately
+		// NOT touched here: it is only synchronized for the monitor goroutine.
+		if !mc.isConnectionError(err) || isTransientHealthCheckError(err) {
+			mc.logger.Info("Liveness probe after canceled tool call failed transiently; leaving state to the background health loop",
+				zap.String("server", mc.GetConfig().Name),
+				zap.NamedError("call_error", cause),
+				zap.Error(err))
+			return
+		}
+
+		// The state may have moved on while the probe was in flight (disconnect,
+		// or a full reconnect that opened a new connection generation) — this
+		// verdict describes a session nobody is using any more. epochMu pairs
+		// this check-and-SetError with Connect's bump-and-Ready so a reconnect
+		// cannot complete between the check and the verdict (GH #965 review,
+		// round 2).
+		mc.epochMu.Lock()
+		defer mc.epochMu.Unlock()
+		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+			mc.logger.Debug("Liveness probe after canceled tool call failed, but the connection it observed is gone; skipping",
+				zap.String("server", mc.GetConfig().Name),
+				zap.Error(err))
+			return
+		}
+
+		mc.logger.Warn("Liveness probe after canceled tool call failed with hard connection evidence; marking server unhealthy",
+			zap.String("server", mc.GetConfig().Name),
+			zap.NamedError("call_error", cause),
+			zap.Error(err))
+		mc.StateManager.SetError(err)
+	}()
 }
 
 func (mc *Client) cancelInFlightListTools() {

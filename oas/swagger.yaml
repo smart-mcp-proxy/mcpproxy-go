@@ -115,6 +115,24 @@ components:
             so an unset key behaves exactly as before this feature (SC-005). Validated
             in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
           type: string
+        http_idle_timeout:
+          description: |-
+            HTTPIdleTimeout caps how long an idle keep-alive connection is kept open.
+            Unset = 180s. "0s" removes the dedicated idle deadline, but net/http then
+            falls back to ReadTimeout — idle is fully unbounded only when
+            http_read_timeout is also "0s". Requires a restart.
+          type: string
+        http_read_timeout:
+          description: |-
+            HTTPReadTimeout caps how long reading a whole request (headers + body)
+            may take. Unset = 120s; "0s" disables it. Requires a restart.
+          type: string
+        http_write_timeout:
+          description: |-
+            HTTPWriteTimeout caps how long producing a whole response may take on
+            non-streaming endpoints (REST, Web UI, health). Unset = 120s; "0s"
+            disables it globally. MCP and SSE /events routes are exempt by design.
+          type: string
         init_timeout:
           description: |-
             InitTimeout is the global default deadline for an upstream's MCP
