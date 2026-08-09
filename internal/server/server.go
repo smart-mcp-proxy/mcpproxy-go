@@ -2063,7 +2063,9 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 // enabled so a disabled deployment keeps /metrics unrouted (404).
 func (s *Server) registerHTTPHandlers(mux *http.ServeMux, httpAPIServer http.Handler) {
 	mux.Handle("/api/", httpAPIServer)
-	mux.Handle("/events", httpAPIServer)
+	// /events is a long-lived SSE stream: it must escape http.Server.WriteTimeout
+	// (and, being a GET, ReadTimeout) or the connection dies mid-stream (GH #965).
+	mux.Handle("/events", s.streamingNoDeadline(httpAPIServer))
 
 	// Mount health endpoints directly on main mux at root level
 	healthEndpoints := []string{"/healthz", "/readyz", "/livez", "/ready", "/health"}
@@ -2086,15 +2088,54 @@ func (s *Server) registerHTTPHandlers(mux *http.ServeMux, httpAPIServer http.Han
 // httpServerTimeouts resolves the Read/Write/Idle deadlines applied to the
 // main http.Server (GH #965). Extracted as a pure function so the policy is
 // unit-testable without binding a socket. A nil config yields the built-in
-// defaults — notably a ZERO write deadline, so a slow tool call or a long-lived
-// SSE /events stream is never truncated mid-response. ReadHeaderTimeout is NOT
-// configurable and stays at 60s: it is the deadline that actually defends
-// against slowloris, and nothing legitimate needs it relaxed.
+// defaults (120s read / 120s write / 180s idle). The write deadline is a
+// wall-clock cap on a whole response, so the streaming routes opt out of it
+// per-request via streamingNoDeadline rather than the process disabling it
+// globally. ReadHeaderTimeout is NOT configurable and stays at 60s: it is the
+// deadline that actually defends against slowloris, and nothing legitimate
+// needs it relaxed.
 func httpServerTimeouts(cfg *config.Config) (read, write, idle time.Duration) {
 	if cfg == nil {
 		cfg = &config.Config{} // all-nil pointers → the built-in defaults
 	}
 	return cfg.ResolveHTTPReadTimeout(), cfg.ResolveHTTPWriteTimeout(), cfg.ResolveHTTPIdleTimeout()
+}
+
+// streamingNoDeadline clears the per-request write deadline (and, for
+// body-less GET/HEAD streams, the read deadline) inherited from
+// http.Server.WriteTimeout/ReadTimeout, so long tool calls and long-lived SSE
+// streams are never truncated mid-response (GH #965).
+//
+// Only the streaming routes are wrapped — the MCP endpoints and /events. Every
+// other route (REST, Web UI, health, /metrics) keeps the configured write
+// deadline, which is what protects a non-loopback deployment from slow readers.
+// The read deadline is cleared for GET/HEAD only: those have no request body,
+// whereas a POST must keep its read deadline so a slow-body upload stays
+// bounded.
+//
+// This must be the OUTERMOST wrapper on a route: http.NewResponseController
+// unwraps only ResponseWriters that implement Unwrap() http.ResponseWriter, so
+// running it before any logging/auth wrappers guarantees it reaches the real
+// connection. A controller error (e.g. http.ErrNotSupported behind a
+// non-cooperating ResponseWriter) is logged at Debug and otherwise ignored:
+// failing to relax a deadline must never fail the request.
+func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+			s.logger.Debug("Could not clear the write deadline for a streaming route",
+				zap.String("path", r.URL.Path),
+				zap.Error(err))
+		}
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if err := rc.SetReadDeadline(time.Time{}); err != nil {
+				s.logger.Debug("Could not clear the read deadline for a streaming route",
+					zap.String("path", r.URL.Path),
+					zap.Error(err))
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
@@ -2203,10 +2244,13 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 	// Standard MCP endpoint according to the specification
 	// Wrap with auth middleware to inject AuthContext for agent token scope enforcement.
-	// hostValidationMiddleware (outermost) replaces mcp-go's DNS-rebinding
+	// hostValidationMiddleware (outermost security wrapper) replaces mcp-go's DNS-rebinding
 	// protection — disabled on every StreamableHTTPServer below — adding the
 	// trusted_hosts allowlist for reverse-proxy deployments (GH #898).
-	mcpHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(streamableServer)))
+	//
+	// streamingNoDeadline is the OUTERMOST wrapper on every MCP route so a tool
+	// call slower than http.Server.WriteTimeout is not truncated (GH #965).
+	mcpHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(streamableServer))))
 	mux.Handle("/mcp", mcpHandler)
 	mux.Handle("/mcp/", mcpHandler) // Handle trailing slash
 
@@ -2215,21 +2259,21 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
 	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
 		server.WithDisableLocalhostProtection(true))
-	directHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(directStreamable)))
+	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(directStreamable))))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
 	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
 		server.WithDisableLocalhostProtection(true))
-	codeExecHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable)))
+	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable))))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
 	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		server.WithDisableLocalhostProtection(true))
-	callToolHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(callToolStreamable)))
+	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(callToolStreamable))))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
 
@@ -2238,7 +2282,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// so that agent-token scope can compose downstream with the profile scope.
 	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		server.WithDisableLocalhostProtection(true))
-	profileHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable))))
+	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable)))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
@@ -2494,8 +2538,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		muxListener.listeners = append(muxListener.listeners, trayListener)
 	}
 
-	// GH #965: the request deadlines are configurable, and the write deadline
-	// defaults to 0 (disabled) so slow tool calls and SSE streams survive.
+	// GH #965: the request deadlines are configurable. The write deadline keeps
+	// its 120s default for ordinary endpoints; the streaming routes (MCP,
+	// /events) clear it per-request via streamingNoDeadline so slow tool calls
+	// and SSE streams survive without weakening the rest of the surface.
 	readTimeout, writeTimeout, idleTimeout := httpServerTimeouts(cfg)
 
 	s.mu.Lock()
@@ -2504,7 +2550,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		Handler:           mux,
 		ReadHeaderTimeout: 60 * time.Second, // Slowloris guard — deliberately not configurable
 		ReadTimeout:       readTimeout,      // Full request read timeout (http_read_timeout)
-		WriteTimeout:      writeTimeout,     // Response write timeout (http_write_timeout; 0 = none)
+		WriteTimeout:      writeTimeout,     // Response write timeout (http_write_timeout; 0 = none; streaming routes opt out)
 		IdleTimeout:       idleTimeout,      // Keep-alive timeout for persistent connections (http_idle_timeout)
 		MaxHeaderBytes:    1 << 20,          // 1MB max header size
 		// Enable connection state tracking for better debugging

@@ -73,14 +73,19 @@ const (
 	// unset key resolves to the built-in behaviour and existing configs are
 	// unchanged.
 	defaultHTTPReadTimeout = 120 * time.Second
-	// defaultHTTPWriteTimeout is 0 — no write deadline — ON PURPOSE (GH #965).
-	// A write deadline is a wall-clock cap on the ENTIRE response, counted from
-	// the moment the request headers were read, so the previous hardcoded 120s
-	// truncated any tool call slower than that and silently killed long-lived
-	// SSE /events streams. Slowloris protection is provided instead by the
-	// hardcoded 60s ReadHeaderTimeout, which is the deadline that actually
-	// defends against a malicious slow client.
-	defaultHTTPWriteTimeout = time.Duration(0)
+	// defaultHTTPWriteTimeout stays at 120s (GH #965). A write deadline is a
+	// wall-clock cap on the ENTIRE response counted from the moment the request
+	// headers were read, so it must NOT apply to long tool calls or event
+	// streams — but it is real slow-reader protection for everything else, and
+	// dropping it globally would strip that protection from REST, Web UI and
+	// health endpoints on non-loopback deployments.
+	//
+	// The streaming routes are exempted per-request instead: the MCP endpoints
+	// (/mcp*, plus the legacy /v1/tool_code and /v1/tool-code aliases) and the
+	// SSE /events stream clear their own write deadline via
+	// http.ResponseController, so this default never truncates them. Setting the
+	// key to "0s" still disables the deadline globally.
+	defaultHTTPWriteTimeout = 120 * time.Second
 	defaultHTTPIdleTimeout  = 180 * time.Second
 )
 
@@ -92,7 +97,7 @@ const (
 //
 // Note the deliberate asymmetry with ResolveInitTimeout, where 0 maps back to
 // the default: a connect handshake must always have a ceiling, whereas "no
-// response deadline at all" is a legitimate — and here default — HTTP setting.
+// response deadline at all" is a legitimate HTTP setting an operator may want.
 func resolveHTTPTimeout(v *Duration, def time.Duration) time.Duration {
 	if v == nil {
 		return def
@@ -109,9 +114,10 @@ func (c *Config) ResolveHTTPReadTimeout() time.Duration {
 	return resolveHTTPTimeout(c.HTTPReadTimeout, defaultHTTPReadTimeout)
 }
 
-// ResolveHTTPWriteTimeout resolves http.Server.WriteTimeout: unset → 0
-// (disabled — see defaultHTTPWriteTimeout), 0 → disabled, positive → that
-// value (GH #965).
+// ResolveHTTPWriteTimeout resolves http.Server.WriteTimeout: unset → 120s,
+// 0 → disabled, positive → that value (GH #965). Streaming routes (MCP + SSE
+// /events) clear the resulting deadline per-request, so this value only
+// governs non-streaming endpoints — see defaultHTTPWriteTimeout.
 func (c *Config) ResolveHTTPWriteTimeout() time.Duration {
 	return resolveHTTPTimeout(c.HTTPWriteTimeout, defaultHTTPWriteTimeout)
 }
@@ -285,20 +291,29 @@ type Config struct {
 	// a positive value = that deadline. Validated to {0} ∪ [1s, 24h].
 	//
 	// Unlike init_timeout, an explicit 0 here is a SUPPORTED value, not a
-	// synonym for the default: net/http treats a zero deadline as "no timeout",
-	// and that is exactly what long-running tool calls and the SSE /events
-	// stream need. HTTPWriteTimeout therefore DEFAULTS to 0 — the previous
-	// hardcoded 120s write deadline truncated any response slower than that.
-	// Slowloris protection remains via the hardcoded 60s ReadHeaderTimeout.
+	// synonym for the default: net/http treats a zero deadline as "no timeout".
+	// Long-running tool calls and the SSE /events stream do not need that
+	// escape hatch, though — the MCP endpoints (/mcp*, plus the legacy
+	// /v1/tool_code and /v1/tool-code aliases) and /events clear their own
+	// per-request write deadline via http.ResponseController, so the write
+	// default only governs non-streaming endpoints (REST, Web UI, health).
 	//
 	// These are baked into http.Server at bind time, so changing any of them
 	// REQUIRES A RESTART (DetectConfigChanges reports it as such). Resolved by
 	// ResolveHTTPReadTimeout / ResolveHTTPWriteTimeout / ResolveHTTPIdleTimeout.
 	// Note that call_tool_timeout separately caps tool execution (default 2m):
 	// raise it too when allowing tool calls longer than two minutes.
-	HTTPReadTimeout  *Duration `json:"http_read_timeout,omitempty" mapstructure:"http-read-timeout" swaggertype:"string"`
+
+	// HTTPReadTimeout caps how long reading a whole request (headers + body)
+	// may take. Unset = 120s; "0s" disables it. Requires a restart.
+	HTTPReadTimeout *Duration `json:"http_read_timeout,omitempty" mapstructure:"http-read-timeout" swaggertype:"string"`
+	// HTTPWriteTimeout caps how long producing a whole response may take on
+	// non-streaming endpoints (REST, Web UI, health). Unset = 120s; "0s"
+	// disables it globally. MCP and SSE /events routes are exempt by design.
 	HTTPWriteTimeout *Duration `json:"http_write_timeout,omitempty" mapstructure:"http-write-timeout" swaggertype:"string"`
-	HTTPIdleTimeout  *Duration `json:"http_idle_timeout,omitempty" mapstructure:"http-idle-timeout" swaggertype:"string"`
+	// HTTPIdleTimeout caps how long an idle keep-alive connection is kept open.
+	// Unset = 180s; "0s" disables it (falls back to ReadTimeout). Needs restart.
+	HTTPIdleTimeout *Duration `json:"http_idle_timeout,omitempty" mapstructure:"http-idle-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`

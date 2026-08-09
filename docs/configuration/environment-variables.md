@@ -86,7 +86,7 @@ warning on stderr. Changing any of these requires a restart. See
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_HTTP_READ_TIMEOUT` | Deadline for reading the whole request (headers + body) | `120s` |
-| `MCPPROXY_HTTP_WRITE_TIMEOUT` | Wall-clock cap on writing the whole response. Disabled by default so slow tool calls and SSE `/events` streams are not truncated ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) | `0s` (off) |
+| `MCPPROXY_HTTP_WRITE_TIMEOUT` | Wall-clock cap on writing the whole response for non-streaming endpoints (REST, Web UI, health). MCP endpoints and SSE `/events` are exempt by design, so slow tool calls and event streams are never truncated; `0s` disables it globally ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) | `120s` |
 | `MCPPROXY_HTTP_IDLE_TIMEOUT` | Keep-alive timeout for idle persistent connections | `180s` |
 
 The 60s request-header read deadline (slowloris protection) is hardcoded and not

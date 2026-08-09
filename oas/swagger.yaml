@@ -116,27 +116,20 @@ components:
             in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
           type: string
         http_idle_timeout:
+          description: |-
+            HTTPIdleTimeout caps how long an idle keep-alive connection is kept open.
+            Unset = 180s; "0s" disables it (falls back to ReadTimeout). Needs restart.
           type: string
         http_read_timeout:
           description: |-
-            HTTP server request deadlines (GH #965). *Duration tri-state: nil =
-            inherit the built-in default; a pointer to 0s = DISABLED (no deadline);
-            a positive value = that deadline. Validated to {0} ∪ [1s, 24h].
-
-            Unlike init_timeout, an explicit 0 here is a SUPPORTED value, not a
-            synonym for the default: net/http treats a zero deadline as "no timeout",
-            and that is exactly what long-running tool calls and the SSE /events
-            stream need. HTTPWriteTimeout therefore DEFAULTS to 0 — the previous
-            hardcoded 120s write deadline truncated any response slower than that.
-            Slowloris protection remains via the hardcoded 60s ReadHeaderTimeout.
-
-            These are baked into http.Server at bind time, so changing any of them
-            REQUIRES A RESTART (DetectConfigChanges reports it as such). Resolved by
-            ResolveHTTPReadTimeout / ResolveHTTPWriteTimeout / ResolveHTTPIdleTimeout.
-            Note that call_tool_timeout separately caps tool execution (default 2m):
-            raise it too when allowing tool calls longer than two minutes.
+            HTTPReadTimeout caps how long reading a whole request (headers + body)
+            may take. Unset = 120s; "0s" disables it. Requires a restart.
           type: string
         http_write_timeout:
+          description: |-
+            HTTPWriteTimeout caps how long producing a whole response may take on
+            non-streaming endpoints (REST, Web UI, health). Unset = 120s; "0s"
+            disables it globally. MCP and SSE /events routes are exempt by design.
           type: string
         init_timeout:
           description: |-

@@ -13,8 +13,7 @@ import (
 //
 // Note the deliberate asymmetry with ResolveInitTimeout: there a zero maps back
 // to the default, because a connect handshake must always have a ceiling. Here
-// zero is a first-class, documented, SUPPORTED value — it is in fact the
-// built-in default for the write deadline.
+// zero is a first-class, documented, SUPPORTED value for all three keys.
 func TestResolveHTTPTimeouts(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -23,10 +22,10 @@ func TestResolveHTTPTimeouts(t *testing.T) {
 		write time.Duration
 		idle  time.Duration
 	}{
-		{"unset → built-in defaults", nil, 120 * time.Second, 0, 180 * time.Second},
+		{"unset → built-in defaults", nil, 120 * time.Second, 120 * time.Second, 180 * time.Second},
 		{"explicit 0 → disabled (no timeout)", durPtr(0), 0, 0, 0},
 		{"positive → that value", durPtr(15 * time.Minute), 15 * time.Minute, 15 * time.Minute, 15 * time.Minute},
-		{"negative → built-in default", durPtr(-5 * time.Second), 120 * time.Second, 0, 180 * time.Second},
+		{"negative → built-in default", durPtr(-5 * time.Second), 120 * time.Second, 120 * time.Second, 180 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,14 +42,20 @@ func TestResolveHTTPTimeouts(t *testing.T) {
 	}
 }
 
-// TestResolveHTTPWriteTimeoutDefaultIsDisabled pins the behaviour change at the
-// heart of GH #965: the write deadline used to be a hardcoded 120s, which
-// truncated any tool-call response taking longer and silently killed long-lived
-// SSE /events streams. The default is now 0 (disabled); slowloris protection is
-// still provided by the hardcoded 60s ReadHeaderTimeout.
-func TestResolveHTTPWriteTimeoutDefaultIsDisabled(t *testing.T) {
-	if got := DefaultConfig().ResolveHTTPWriteTimeout(); got != 0 {
-		t.Fatalf("default write timeout = %v, want 0 (disabled)", got)
+// TestResolveHTTPWriteTimeoutDefaults pins the write deadline's contract after
+// the GH #965 fix: the default STAYS at 120s so REST/Web-UI/health endpoints
+// keep their slow-reader protection, and the streaming routes (MCP + SSE
+// /events) escape it per-request via http.ResponseController rather than by
+// disabling it for the whole process. An explicit "0s" still disables it
+// globally for operators who want that.
+func TestResolveHTTPWriteTimeoutDefaults(t *testing.T) {
+	if got := DefaultConfig().ResolveHTTPWriteTimeout(); got != 120*time.Second {
+		t.Fatalf("default write timeout = %v, want 120s", got)
+	}
+	explicitZero := DefaultConfig()
+	explicitZero.HTTPWriteTimeout = durPtr(0)
+	if got := explicitZero.ResolveHTTPWriteTimeout(); got != 0 {
+		t.Fatalf("explicit 0s write timeout = %v, want 0 (disabled)", got)
 	}
 	// An unset key must stay unset in the struct — defaults live only in the
 	// resolvers (same precedent as health_check_interval).

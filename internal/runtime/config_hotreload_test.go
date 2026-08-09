@@ -627,7 +627,7 @@ func TestDetectConfigChanges_ConcurrencyLimits(t *testing.T) {
 // TestDetectConfigChanges_HTTPTimeouts (GH #965): the three global HTTP server
 // timeouts are baked into http.Server at bind time, so a change is
 // restart-required — and the comparison is on the RESOLVED values, so writing
-// out a key at its built-in default ("120s" read / "0s" write / "180s" idle) is
+// out a key at its built-in default ("120s" read / "120s" write / "180s" idle) is
 // correctly reported as "no change" instead of forcing a pointless restart.
 func TestDetectConfigChanges_HTTPTimeouts(t *testing.T) {
 	mk := func(mutate func(*config.Config)) *config.Config {
@@ -673,7 +673,7 @@ func TestDetectConfigChanges_HTTPTimeouts(t *testing.T) {
 			mk(nil),
 			mk(func(c *config.Config) {
 				c.HTTPReadTimeout = durp(120 * time.Second)
-				c.HTTPWriteTimeout = durp(0)
+				c.HTTPWriteTimeout = durp(120 * time.Second)
 				c.HTTPIdleTimeout = durp(180 * time.Second)
 			}))
 		require.True(t, result.Success)

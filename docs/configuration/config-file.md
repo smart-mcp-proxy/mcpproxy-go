@@ -30,7 +30,7 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "health_check_interval": "30s",
   "tool_discovery_interval": "5m",
   "http_read_timeout": "120s",
-  "http_write_timeout": "0s",
+  "http_write_timeout": "120s",
   "http_idle_timeout": "180s",
   "tools_limit": 15,
   "tool_response_limit": 20000,
@@ -71,12 +71,13 @@ default" — omit the key for that). Valid range: `1s`–`24h`, or `0s`.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `http_read_timeout` | duration | `"120s"` | Deadline for reading the whole request (headers + body) |
-| `http_write_timeout` | duration | `"0s"` (disabled) | Wall-clock cap on writing the whole response, counted from when the request headers were read. Disabled by default: a write deadline truncates any tool call slower than it and silently kills long-lived SSE `/events` streams ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) |
+| `http_write_timeout` | duration | `"120s"` | Wall-clock cap on writing the whole response, counted from when the request headers were read. Governs **non-streaming endpoints only** (REST API, Web UI, health); MCP endpoints and SSE `/events` are exempt by design. `"0s"` disables it globally ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) |
 | `http_idle_timeout` | duration | `"180s"` | Keep-alive timeout for idle persistent connections |
 
+- **Streaming routes are exempt from `http_write_timeout`.** The MCP endpoints (`/mcp*`, plus the legacy `/v1/tool_code` and `/v1/tool-code` aliases) and `/events` clear their own per-request write deadline (and, being body-less GETs, their read deadline), so a slow tool call or a long-lived SSE stream is never truncated. You do not need to disable the deadline to run long tool calls.
 - **Restart required.** These are baked into the HTTP server when it binds, so a change is reported as restart-required, not hot-reloaded.
 - **Slowloris protection is unaffected** — the 60s request-header read deadline is hardcoded and not configurable.
-- **Long tool calls need two settings.** `call_tool_timeout` (default `2m`) separately caps tool execution; raise it too when you expect tool calls longer than two minutes.
+- **Long tool calls need `call_tool_timeout`.** It (default `2m`) separately caps tool execution; raise it when you expect tool calls longer than two minutes.
 - Environment overrides: `MCPPROXY_HTTP_READ_TIMEOUT`, `MCPPROXY_HTTP_WRITE_TIMEOUT`, `MCPPROXY_HTTP_IDLE_TIMEOUT`.
 
 ### Feature Flags

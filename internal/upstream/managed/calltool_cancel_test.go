@@ -170,6 +170,79 @@ func TestCallTool_AmbiguousCancellationEvictsWhenProbeFails(t *testing.T) {
 	assert.Equal(t, 1, prober.pingCount())
 }
 
+// TestCallTool_AmbiguousCancellation_TransientProbeFailureDoesNotEvict is the
+// Codex round-2 finding: a busy upstream is exactly what produces slow calls and
+// ambiguous cancellations, so it must not be evicted just because it also missed
+// the 5s liveness ping. Transient probe failures are handed back to the
+// background health loop, which owns the consecutive-failure threshold.
+func TestCallTool_AmbiguousCancellation_TransientProbeFailureDoesNotEvict(t *testing.T) {
+	mc, _ := newTestClientForCallTool(t, wrappedCanceled())
+	prober := newRecordingProber(errors.New("context deadline exceeded"))
+	mc.healthProbe = prober
+
+	_, err := mc.CallTool(context.Background(), "search", nil)
+	require.Error(t, err)
+
+	prober.waitForPing(t)
+
+	require.Never(t, func() bool {
+		return mc.StateManager.GetState() != types.StateReady
+	}, 300*time.Millisecond, 10*time.Millisecond,
+		"a transient probe failure must be left to the background health loop, not evict the server")
+	assert.Equal(t, 1, prober.pingCount())
+}
+
+// TestCallTool_AmbiguousCancellation_NonConnectionProbeErrorDoesNotEvict covers
+// a probe that fails for a reason that is not transport evidence at all (e.g.
+// an upstream that does not implement MCP `ping`). That is not proof the server
+// is gone, so the state machine is left alone.
+func TestCallTool_AmbiguousCancellation_NonConnectionProbeErrorDoesNotEvict(t *testing.T) {
+	mc, _ := newTestClientForCallTool(t, wrappedCanceled())
+	prober := newRecordingProber(errors.New("ping not supported"))
+	mc.healthProbe = prober
+
+	_, err := mc.CallTool(context.Background(), "search", nil)
+	require.Error(t, err)
+
+	prober.waitForPing(t)
+
+	require.Never(t, func() bool {
+		return mc.StateManager.GetState() != types.StateReady
+	}, 300*time.Millisecond, 10*time.Millisecond,
+		"a non-connection probe error must not evict the upstream")
+	assert.Equal(t, 1, prober.pingCount())
+}
+
+// TestCallTool_StaleProbeAfterReconnectDoesNotEvict covers the detached-goroutine
+// race: the server disconnects and reconnects while the probe is still in
+// flight, so the probe's verdict describes a session that no longer exists.
+// IsConnected() alone cannot tell (the new session is Ready too) — the
+// connection epoch is what makes the stale result detectable.
+func TestCallTool_StaleProbeAfterReconnectDoesNotEvict(t *testing.T) {
+	mc, _ := newTestClientForCallTool(t, wrappedCanceled())
+	prober := newRecordingProber(errors.New("dial tcp 127.0.0.1:443: connect: connection refused"))
+	prober.block = make(chan struct{})
+	mc.healthProbe = prober
+
+	_, err := mc.CallTool(context.Background(), "search", nil)
+	require.Error(t, err)
+
+	// Wait until the probe is genuinely in flight, then simulate a full
+	// disconnect/reconnect cycle completing underneath it.
+	require.Eventually(t, func() bool {
+		return prober.pingCount() == 1
+	}, 2*time.Second, 5*time.Millisecond)
+	mc.connectionEpoch.Add(1)
+
+	close(prober.block)
+	prober.waitForPing(t)
+
+	require.Never(t, func() bool {
+		return mc.StateManager.GetState() != types.StateReady
+	}, 300*time.Millisecond, 10*time.Millisecond,
+		"a probe failure from a superseded connection generation must not evict the new session")
+}
+
 // TestCallTool_HardConnectionErrorStillEvictsImmediately keeps the existing
 // behavior for hard evidence: connection refused is not ambiguous, so the
 // server is marked Error right away with no probe round-trip.

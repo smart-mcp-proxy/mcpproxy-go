@@ -113,6 +113,16 @@ type Client struct {
 	// successful call or a fresh Connect clears it. MCP-2084.
 	oauthCallRequired atomic.Bool
 
+	// connectionEpoch is bumped on every successful connect. It identifies the
+	// current connection generation so detached goroutines (the ambiguous-call
+	// liveness probe) can tell whether the session they observed is still the
+	// live one: coreClient is created once and never replaced, so pointer
+	// identity proves nothing, and a disconnect+reconnect leaves the state
+	// machine back at Ready — indistinguishable from "never left". A stale
+	// verdict must not be applied to a brand-new healthy session (GH #965
+	// review).
+	connectionEpoch atomic.Int64
+
 	// admission carries the spec-093 concurrency limiter registry and the
 	// rejection observer installed by the manager. Nil (the default) means no
 	// admission control at all — the zero-config behaviour (FR-006). Swapped
@@ -319,6 +329,12 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// new session starts at zero. Without this, a server that flapped, then
 	// recovered, would carry stale counts into the next health-check window.
 	mc.resetHealthCheckFailures()
+
+	// Open a new connection generation. Detached goroutines that captured the
+	// previous epoch (the ambiguous-call liveness probe) will see the mismatch
+	// and drop their verdict rather than applying it to a session they never
+	// observed (GH #965 review).
+	mc.connectionEpoch.Add(1)
 
 	// A fresh connection (e.g. a post-sign-in reconnect that now carries a token)
 	// starts clean: clear any stale call-time OAuth-required flag so the Sign-in
@@ -802,22 +818,34 @@ func isAmbiguousCancellationError(err error) bool {
 }
 
 // probeAfterAmbiguousCallError fires one bounded liveness probe after an
-// ambiguous tools/call cancellation (GH #965). A healthy probe means the call
-// was merely canceled and the server stays as-is; a failing probe is the hard
-// evidence needed to mark the server Error.
+// ambiguous tools/call cancellation (GH #965) and classifies the outcome:
+//
+//   - healthy probe → the call was merely canceled; the server is left untouched.
+//   - transient probe failure (deadline exceeded on the ping, momentary
+//     overload, or a non-connection error such as an upstream without `ping`)
+//     → nothing happens here. A busy upstream is precisely what produces slow
+//     calls and ambiguous cancellations, so a single missed 5s ping is not
+//     eviction-grade evidence; the background health loop owns transient
+//     failures and its healthCheckFailureThreshold consecutive-miss budget.
+//   - hard probe failure (connection refused/reset, broken pipe, no such
+//     host…) on the SAME connection generation → Error, as before.
 //
 // Runs asynchronously so the tool call returns immediately, and is gated to a
 // single in-flight probe so a burst of canceled calls cannot stampede the
-// upstream.
+// upstream. The connection epoch captured before launching guards against a
+// disconnect+reconnect completing mid-probe: a verdict about a superseded
+// session is dropped rather than applied to the fresh one.
 func (mc *Client) probeAfterAmbiguousCallError(cause error) {
 	if !mc.ambiguousProbeInFlight.CompareAndSwap(false, true) {
 		return
 	}
 
+	epoch := mc.connectionEpoch.Load()
+
 	go func() {
 		defer mc.ambiguousProbeInFlight.Store(false)
 
-		if !mc.IsConnected() {
+		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
 			return
 		}
 
@@ -843,15 +871,28 @@ func (mc *Client) probeAfterAmbiguousCallError(cause error) {
 		}
 
 		// The state may have moved on while the probe was in flight (disconnect,
-		// reconnect, another failure) — don't stomp on it.
-		if !mc.IsConnected() {
-			mc.logger.Debug("Liveness probe after canceled tool call failed, but server is no longer connected; skipping",
+		// or a full reconnect that opened a new connection generation) — this
+		// verdict describes a session nobody is using any more.
+		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+			mc.logger.Debug("Liveness probe after canceled tool call failed, but the connection it observed is gone; skipping",
 				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
 			return
 		}
 
-		mc.logger.Warn("Liveness probe after canceled tool call failed; marking server unhealthy",
+		// Only hard transport evidence evicts. Transient failures are the
+		// background health loop's business — it counts consecutive misses
+		// instead of acting on one. consecutiveHealthFailures is deliberately
+		// NOT touched here: it is only synchronized for the monitor goroutine.
+		if !mc.isConnectionError(err) || isTransientHealthCheckError(err) {
+			mc.logger.Info("Liveness probe after canceled tool call failed transiently; leaving state to the background health loop",
+				zap.String("server", mc.GetConfig().Name),
+				zap.NamedError("call_error", cause),
+				zap.Error(err))
+			return
+		}
+
+		mc.logger.Warn("Liveness probe after canceled tool call failed with hard connection evidence; marking server unhealthy",
 			zap.String("server", mc.GetConfig().Name),
 			zap.NamedError("call_error", cause),
 			zap.Error(err))
