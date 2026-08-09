@@ -416,9 +416,12 @@ func (mc *Client) Disconnect() error {
 	// Stop background monitoring
 	mc.stopBackgroundMonitoring()
 
-	// Disconnect core client
-	if err := mc.coreClient.Disconnect(); err != nil {
-		mc.logger.Error("Core client disconnect failed", zap.Error(err))
+	// Disconnect core client. Nil only for hand-constructed test clients —
+	// the same fallback contract as toolInvoker/healthProbe.
+	if mc.coreClient != nil {
+		if err := mc.coreClient.Disconnect(); err != nil {
+			mc.logger.Error("Core client disconnect failed", zap.Error(err))
+		}
 	}
 
 	// Close this connection generation BEFORE resetting state, serialized with

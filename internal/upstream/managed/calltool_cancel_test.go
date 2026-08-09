@@ -245,11 +245,19 @@ func TestCallTool_StaleProbeAfterReconnectDoesNotEvict(t *testing.T) {
 
 // TestCallTool_StaleProbeAfterDisconnectDoesNotResurrectError covers the
 // Disconnect side of the same detached-goroutine race (GH #965 review, round
-// 4): the client is deliberately disconnected while the probe is in flight.
-// Disconnect bumps the connection epoch before resetting the state machine, so
-// the stale hard-failure verdict must be dropped — it must not flip the fresh
-// Disconnected state back to Error (which would also burn a retry and emit a
-// bogus notification).
+// 4): the client is deliberately disconnected — through the REAL Disconnect —
+// while the probe is in flight. The stale hard-failure verdict must be
+// dropped: it must not flip the fresh Disconnected state back to Error (which
+// would also burn a retry and emit a bogus notification).
+//
+// Coverage note: in this orchestration Disconnect completes before the verdict
+// runs, so the probe skips via IsConnected() as well as via the epoch — the
+// epoch bump in Disconnect specifically closes the sub-microsecond window
+// where Reset lands between the probe's in-mutex staleness check and its
+// SetError. That interleaving cannot be exercised deterministically from
+// outside precisely because epochMu (the fix) serializes it; the epoch-guard
+// mutation is instead killed by TestCallTool_StaleProbeAfterReconnectDoesNotEvict,
+// where the session ends Ready and the epoch is the only discriminator.
 func TestCallTool_StaleProbeAfterDisconnectDoesNotResurrectError(t *testing.T) {
 	mc, _ := newTestClientForCallTool(t, wrappedCanceled())
 	prober := newRecordingProber(errors.New("dial tcp 127.0.0.1:443: connect: connection refused"))
@@ -263,12 +271,11 @@ func TestCallTool_StaleProbeAfterDisconnectDoesNotResurrectError(t *testing.T) {
 		return prober.pingCount() == 1
 	}, 2*time.Second, 5*time.Millisecond)
 
-	// Simulate managed Disconnect's teardown ordering (the real method needs a
-	// live core client): close the generation under epochMu, then reset state.
-	mc.epochMu.Lock()
-	mc.connectionEpoch.Add(1)
-	mc.epochMu.Unlock()
-	mc.StateManager.Reset()
+	// Tear down through the REAL Disconnect while the probe is still in
+	// flight — this is what must bump the epoch before resetting state. (The
+	// probe holds no locks while blocked in Ping, so this cannot deadlock.)
+	require.NoError(t, mc.Disconnect())
+	require.Equal(t, types.StateDisconnected, mc.StateManager.GetState())
 
 	close(prober.block)
 	prober.waitForPing(t)
