@@ -91,7 +91,9 @@ const (
 
 // resolveHTTPTimeout applies the tri-state contract shared by the three HTTP
 // server deadlines (GH #965): nil = the built-in default, a pointer to 0 =
-// DISABLED (net/http's zero value means "no deadline"), a positive value = that
+// DISABLED (net/http's zero value means "no deadline" — except IdleTimeout,
+// where net/http falls back to ReadTimeout; see ResolveHTTPIdleTimeout), a
+// positive value = that
 // value. A negative value falls back to the default — validation rejects those
 // anyway, this only keeps a hand-edited file from producing a nonsense deadline.
 //
@@ -290,8 +292,9 @@ type Config struct {
 	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init-timeout" swaggertype:"string"`
 
 	// HTTP server request deadlines (GH #965). *Duration tri-state: nil =
-	// inherit the built-in default; a pointer to 0s = DISABLED (no deadline);
-	// a positive value = that deadline. Validated to {0} ∪ [1s, 24h].
+	// inherit the built-in default; a pointer to 0s = DISABLED (no deadline —
+	// with the idle-timeout caveat noted on HTTPIdleTimeout); a positive value
+	// = that deadline. Validated to {0} ∪ [1s, 24h].
 	//
 	// Unlike init_timeout, an explicit 0 here is a SUPPORTED value, not a
 	// synonym for the default: net/http treats a zero deadline as "no timeout".

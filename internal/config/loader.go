@@ -745,7 +745,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 			it := Duration(d)
 			cfg.HTTPIdleTimeout = &it
 		} else {
-			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_IDLE_TIMEOUT=%q (want a duration such as \"180s\", or \"0s\" to disable)\n", value)
+			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_IDLE_TIMEOUT=%q (want a duration such as \"180s\"; \"0s\" falls back to the read timeout)\n", value)
 		}
 	}
 }

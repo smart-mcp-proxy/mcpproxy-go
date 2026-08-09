@@ -66,7 +66,8 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 
 Deadlines applied to MCPProxy's own HTTP listener (REST API, `/mcp`, `/events`).
 Each accepts a duration string; **`"0s"` means "no timeout"** (not "use the
-default" — omit the key for that). Valid range: `1s`–`24h`, or `0s`.
+default" — omit the key for that; for `http_idle_timeout`, `"0s"` falls back to
+the read timeout — see its row). Valid range: `1s`–`24h`, or `0s`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|

@@ -79,7 +79,8 @@ set and per-server overrides are file/API-configured. See
 
 Deadlines on MCPProxy's own HTTP listener (REST API, `/mcp`, `/events`). Each
 takes a duration string; **`0s` means "no timeout"** (unset means "use the
-default"). Valid range: `1s`–`24h`, or `0s`. Malformed values are ignored with a
+default"; for the idle timeout, `0s` falls back to the read timeout — see its
+row). Valid range: `1s`–`24h`, or `0s`. Malformed values are ignored with a
 warning on stderr. Changing any of these requires a restart. See
 [HTTP Server Timeouts](./config-file.md#http-server-timeouts).
 

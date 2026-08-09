@@ -124,11 +124,13 @@ type Client struct {
 	connectionEpoch atomic.Int64
 
 	// epochMu serializes the probe goroutine's final epoch-check-and-SetError
-	// with Connect's epoch-bump-and-Ready transition. Without it a reconnect
-	// could complete between the probe's check and its SetError, letting a
-	// stale verdict evict the new session (GH #965 review, round 2). Never
-	// held while calling anything that can block; state-change callbacks fire
-	// asynchronously, so nesting StateManager calls under it is safe.
+	// with Connect's epoch bump. Without it a reconnect could complete between
+	// the probe's staleness check and its SetError, letting a stale verdict
+	// evict the new session (GH #965 review, rounds 2-3). Lock invariant:
+	// epochMu is never held across code that can run foreign callbacks —
+	// TransitionTo invokes its state-change callback SYNCHRONOUSLY and so must
+	// stay outside; SetError dispatches its callback in a goroutine, so the
+	// probe may call it under epochMu.
 	epochMu sync.Mutex
 
 	// admission carries the spec-093 concurrency limiter registry and the
@@ -328,20 +330,23 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("Core client Connect returned successfully",
 		zap.String("server", mc.GetConfig().Name))
 
-	// Open a new connection generation, then expose Ready — in that order and
-	// under epochMu, paired with the probe goroutine's verdict block. Detached
-	// goroutines that captured the previous epoch (the ambiguous-call liveness
-	// probe) see the mismatch and drop their verdict rather than applying it to
-	// a session they never observed; bumping BEFORE Ready under the mutex means
-	// there is no window where the new session is visible with the old epoch
-	// (GH #965 review, round 2).
+	// Open a new connection generation BEFORE exposing Ready. The bump is
+	// serialized under epochMu with the ambiguous-call probe's verdict block:
+	// once it lands, any stale probe (old epoch) drops its verdict, so the new
+	// session can never be evicted by a probe that observed the previous one.
+	// A stale verdict that wins the mutex first can only mark the still
+	// pre-Ready state, which the TransitionTo below immediately overrides.
+	// TransitionTo deliberately stays OUTSIDE the critical section — it invokes
+	// the state-change callback synchronously (types.go), and epochMu must
+	// never be held across foreign code (GH #965 review, rounds 2-3).
 	mc.epochMu.Lock()
 	mc.connectionEpoch.Add(1)
+	mc.epochMu.Unlock()
+
 	// Transition to ready state only if not already ready
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)
 	}
-	mc.epochMu.Unlock()
 
 	// Wipe any consecutive-failure debt accumulated before reconnect so the
 	// new session starts at zero. Without this, a server that flapped, then
