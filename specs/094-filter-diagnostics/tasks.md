@@ -32,8 +32,8 @@ Every task in this phase edits test files only and MUST be observed failing (or 
 
 ## Phase 5: Registrations (FR-009)
 
-- [ ] T011 Update `internal/server/mcp_menu_surface_test.go` FIRST (controlled delta, RED): keep the pre-feature registration golden frozen; widen assertions to permit exactly the three default filter params + description changes on all three registrations; add a deep-compare test that the helper-produced filter parameter schemas are identical across the three registrations; assert every registration description contains the literal caveat sentence adopted for FR-009 — fixed here as: `Filter diagnostics describe this call's candidate window, not the whole catalog.` — and the token `filter_diagnostics`. Observe RED.
-- [ ] T012 Implement `retrieveToolsAnnotationFilterOptions()` in `internal/server/mcp.go` (beside `retrieveToolsDetailOption`); use it in the default registration and BOTH routing builders in `internal/server/mcp_routing.go` (replacing their duplicated definitions); update all three descriptions with the FR-009 mention + the exact caveat sentence from T011. T011 GREEN.
+- [x] T011 Update `internal/server/mcp_menu_surface_test.go` FIRST (controlled delta, RED): keep the pre-feature registration golden frozen; widen assertions to permit exactly the three default filter params + description changes on all three registrations; add a deep-compare test that the helper-produced filter parameter schemas are identical across the three registrations; assert every registration description contains the literal caveat sentence adopted for FR-009 — fixed here as: `Filter diagnostics describe this call's candidate window, not the whole catalog.` — and the token `filter_diagnostics`. Observe RED.
+- [x] T012 Implement `retrieveToolsAnnotationFilterOptions()` in `internal/server/mcp.go` (beside `retrieveToolsDetailOption`); use it in the default registration and BOTH routing builders in `internal/server/mcp_routing.go` (replacing their duplicated definitions); update all three descriptions with the FR-009 mention + the exact caveat sentence from T011. T011 GREEN.
 
 ## Phase 6: Gates & live verification
 

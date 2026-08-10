@@ -799,11 +799,41 @@ func retrieveToolsDetailOption() mcp.ToolOption {
 	)
 }
 
+// retrieveToolsAnnotationFilterOptions returns the annotation-based safety
+// filters (Spec 035 F4) shared by every retrieve_tools registration — the
+// default server and both routing-mode builders — so the schema cannot drift
+// between surfaces. Spec 094 FR-009: the two routing builders used to declare
+// these independently and the default registration omitted them entirely, so
+// agents on the default surface could not discover filters the handler had
+// always honored. That gap is how the field report's confusion started.
+func retrieveToolsAnnotationFilterOptions() []mcp.ToolOption {
+	return []mcp.ToolOption{
+		mcp.WithBoolean("read_only_only",
+			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
+		),
+		mcp.WithBoolean("exclude_destructive",
+			mcp.Description("Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations."),
+		),
+		mcp.WithBoolean("exclude_open_world",
+			mcp.Description("Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools."),
+		),
+	}
+}
+
+// retrieveToolsDiagnosticsNote is appended verbatim to all three
+// retrieve_tools descriptions (Spec 094 FR-009). The closing sentence is the
+// load-bearing one: the counts describe the ranked window THIS call searched,
+// so an agent must not read them as a statement about the whole catalog.
+const retrieveToolsDiagnosticsNote = " ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. " +
+	"When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts " +
+	"(split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. " +
+	"Filter diagnostics describe this call's candidate window, not the whole catalog."
+
 // registerTools registers all proxy tools with the MCP server
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
-	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers."),
+	retrieveToolsOpts := []mcp.ToolOption{
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers." + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -831,7 +861,9 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.Description("Set true to also surface tools that exist but are currently locked by config, user, or quarantine (default: false). Returns a 'disabled' list (name/server/description/status) plus a 'remediation' map; callable results are unaffected and listed first."),
 		),
 		retrieveToolsDetailOption(),
-	)
+	}
+	retrieveToolsOpts = append(retrieveToolsOpts, retrieveToolsAnnotationFilterOptions()...)
+	retrieveToolsTool := mcp.NewTool("retrieve_tools", retrieveToolsOpts...)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
 	// describe_tool — Spec 085 (US2, FR-011): the progressive-disclosure second
