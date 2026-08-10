@@ -6,7 +6,7 @@
 
 ## Content Quality
 
-- [x] No implementation details (languages, frameworks, APIs)
+- [x] No implementation details (languages, frameworks, APIs) — *with documented deviation, see Notes*
 - [x] Focused on user value and business needs
 - [x] Written for non-technical stakeholders
 - [x] All mandatory sections completed
@@ -34,4 +34,6 @@
 - Field names (`filter_diagnostics`, `matched_before_filters`, parameter names like `read_only_only`) appear in the spec because they ARE the user-facing contract of this API feature, not implementation detail — same convention as specs 049/085.
 - Filter-semantics fidelity (read-only-implies-non-destructive edge case) is stated as an observable-behavior constraint, not as code guidance.
 - Revised after cross-model (Codex) spec review round 1 (2026-08-10), which returned NEEDS_CHANGES with 8 required changes; all applied: `omitted_servers` deferred (scope + stale-quarantine-index leak + unbounded size), normative JSON shape added (FR-003), candidate-window semantics replace the raw-`limit` claim, "cause precedence" replaces "dominant cause" (FR-006), FR-007 protects all fields non-exhaustively, all three registrations enumerated with the default-schema parameter gap closed (FR-009), FR-010 clarified to the `/mcp` code-execution routing response, SC-003 replaced with an exact serialized-byte bound.
-- Checklist re-validated against the revised spec; all items pass.
+- Revised again after review round 2: normative example reordered to match the alphabetical-ordering promise; SC-003 rebuilt as a reachable fixture with an ASCII-only suggestion so the 500-byte bound is exact; out-of-scope hits corrected to "entirely invisible" (they are NOT part of the locked-tools flow).
+- **Documented deviation on "no implementation details"**: this feature IS an API response contract, so the spec necessarily names response/parameter fields, the three tool registrations, and test-level guarantees (golden/byte-identity) — the same convention as specs 049/085. FR-008's "no extra index queries / no persistence" is a user-facing performance promise stated in system-boundary terms, not a design mandate. Items are checked with this deviation on record rather than pretending the spec is implementation-blind.
+- Checklist re-validated against the round-2 revision; all items pass with the documented deviation above.
