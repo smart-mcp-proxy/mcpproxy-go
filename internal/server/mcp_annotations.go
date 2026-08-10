@@ -151,10 +151,36 @@ func filterByAnnotations(tools []annotatedSearchResult, readOnlyOnly, excludeDes
 
 // shouldExclude returns true if a tool should be excluded based on its annotations and active filters.
 func shouldExclude(annotations *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) bool {
+	_, _, excluded := excludeReason(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+	return excluded
+}
+
+// Filter parameter names, used as the diagnostics map keys (Spec 094 FR-003)
+// and interpolated literally into the suggestion string (FR-006).
+const (
+	filterKeyReadOnlyOnly     = "read_only_only"
+	filterKeyExcludeDestruct  = "exclude_destructive"
+	filterKeyExcludeOpenWorld = "exclude_open_world"
+)
+
+// excludeReason decides whether a tool is excluded and, when it is, which
+// filter is responsible and why (Spec 094 FR-004). It is the single source of
+// truth for the filter semantics — shouldExclude delegates to it, so the
+// diagnostics can never describe a different filter than the one that ran.
+//
+// Filters are evaluated read-only → destructive → open-world and the FIRST one
+// that excludes the tool owns the omission, which keeps per-filter counts
+// summable (no double counting). `explicit` distinguishes an omission caused by
+// an explicitly unsafe hint (remediation: none, the filter is working) from one
+// caused by absent/unset annotations (remediation: fix upstream metadata).
+func excludeReason(annotations *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) (filterKey string, explicit, excluded bool) {
 	if readOnlyOnly {
 		// Must have explicit readOnlyHint=true to pass
-		if annotations == nil || annotations.ReadOnlyHint == nil || !*annotations.ReadOnlyHint {
-			return true
+		if annotations == nil || annotations.ReadOnlyHint == nil {
+			return filterKeyReadOnlyOnly, false, true
+		}
+		if !*annotations.ReadOnlyHint {
+			return filterKeyReadOnlyOnly, true, true
 		}
 	}
 
@@ -164,18 +190,24 @@ func shouldExclude(annotations *config.ToolAnnotations, readOnlyOnly, excludeDes
 		// so treat destructiveHint as false when readOnlyHint is explicitly true.
 		isReadOnly := annotations != nil && annotations.ReadOnlyHint != nil && *annotations.ReadOnlyHint
 		if !isReadOnly {
-			if annotations == nil || annotations.DestructiveHint == nil || *annotations.DestructiveHint {
-				return true
+			if annotations == nil || annotations.DestructiveHint == nil {
+				return filterKeyExcludeDestruct, false, true
+			}
+			if *annotations.DestructiveHint {
+				return filterKeyExcludeDestruct, true, true
 			}
 		}
 	}
 
 	if excludeOpenWorld {
 		// Exclude if openWorldHint is true or nil (default is true per spec)
-		if annotations == nil || annotations.OpenWorldHint == nil || *annotations.OpenWorldHint {
-			return true
+		if annotations == nil || annotations.OpenWorldHint == nil {
+			return filterKeyExcludeOpenWorld, false, true
+		}
+		if *annotations.OpenWorldHint {
+			return filterKeyExcludeOpenWorld, true, true
 		}
 	}
 
-	return false
+	return "", false, false
 }

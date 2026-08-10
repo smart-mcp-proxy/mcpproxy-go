@@ -9,8 +9,8 @@
 
 ## Phase 2: Foundational — attribution seam (blocking)
 
-- [ ] T001 Write the frozen-oracle parity test in `internal/server/mcp_annotations_test.go`: copy the CURRENT `shouldExclude` body verbatim into the test as `legacyShouldExcludeOracle`; table-drive all 224 cases (27 non-nil hint combos + nil-annotations, × 8 filter combos) asserting `excludeReason` returns (`excluded` == oracle, correct first-failure `filterKey` per read-only→destructive→open-world order incl. the read-only shortcut, correct `explicit` class per data-model.md). Observe RED (does not compile: `excludeReason` absent).
-- [ ] T002 Implement `excludeReason(...)` in `internal/server/mcp_annotations.go` and reimplement `shouldExclude` as a delegation to it. T001 + all existing annotation tests GREEN.
+- [x] T001 Write the frozen-oracle parity test in `internal/server/mcp_annotations_test.go`: copy the CURRENT `shouldExclude` body verbatim into the test as `legacyShouldExcludeOracle`; table-drive all 224 cases (27 non-nil hint combos + nil-annotations, × 8 filter combos) asserting `excludeReason` returns (`excluded` == oracle, correct first-failure `filterKey` per read-only→destructive→open-world order incl. the read-only shortcut, correct `explicit` class per data-model.md). Observe RED (does not compile: `excludeReason` absent).
+- [x] T002 Implement `excludeReason(...)` in `internal/server/mcp_annotations.go` and reimplement `shouldExclude` as a delegation to it. T001 + all existing annotation tests GREEN.
 
 ## Phase 3a: Characterization (expected GREEN) — freeze pre-feature behavior
 
