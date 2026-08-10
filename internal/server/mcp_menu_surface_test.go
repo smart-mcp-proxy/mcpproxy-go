@@ -163,48 +163,67 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 	}
 }
 
-// assertRetrieveToolsDelta: params delta is exactly {+detail}; every
-// pre-feature parameter is preserved unchanged; the description on the
-// retrieve_tools-mode surfaces is updated per FR-014 to reference compact
-// signatures + describe_tool.
+// Spec 094 FR-009 widens the controlled delta by exactly two things: the
+// default registration gains the three annotation-filter parameters it never
+// exposed (the discoverability gap the field report started from), and all
+// three descriptions gain the diagnostics mention plus one fixed caveat
+// sentence. Nothing else about the surface may move.
+
+// spec094FilterParams are the annotation-filter parameters every
+// retrieve_tools registration must now expose, from one shared helper.
+var spec094FilterParams = []string{"exclude_destructive", "exclude_open_world", "read_only_only"}
+
+// spec094WindowCaveat is the verbatim sentence every retrieve_tools
+// description must carry: diagnostics describe ONE call's candidate window,
+// not the whole catalog, so an agent never reads the counts as index-wide.
+const spec094WindowCaveat = "Filter diagnostics describe this call's candidate window, not the whole catalog."
+
+// addedRetrieveToolsParams is the exact allowed parameter delta per surface.
+// code_execution keeps no additions: describe_tool is absent there in v1 (so
+// no `detail`, spec 085 FR-011), and it already declared the filters.
+var addedRetrieveToolsParams = map[string][]string{
+	"default_server":      {"detail", "exclude_destructive", "exclude_open_world", "read_only_only"},
+	"call_tool_mode":      {"detail"},
+	"code_execution_mode": {},
+}
+
+// assertRetrieveToolsDelta: the parameter delta is exactly the surface's
+// entry in addedRetrieveToolsParams, every pre-feature parameter is preserved
+// unchanged, and the description carries the spec-094 diagnostics mention (all
+// surfaces) plus the spec-085 signatures/describe_tool text (retrieve_tools
+// surfaces only).
 func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
-
-	if surface == "code_execution_mode" {
-		// Spec §Out-of-scope / FR-011: the code_execution surface keeps its
-		// CURRENT shape in v1 — no describe_tool there, hence no detail param
-		// and no compact serialization. Byte-identical to pre-feature.
-		assert.Equal(t, preM, curM,
-			"surface %s: code_execution retrieve_tools must be byte-identical to pre-feature (no detail param — describe_tool is absent on this surface in v1)", surface)
-		return
-	}
 
 	preProps, curProps := schemaProps(preM), schemaProps(curM)
 	require.NotNil(t, curProps, "surface %s: retrieve_tools lost its inputSchema", surface)
 
-	// Exactly one added param: detail (enum compact|full, optional — FR-005).
+	var added []string
 	for p := range curProps {
 		if _, ok := preProps[p]; !ok {
-			assert.Equal(t, "detail", p,
-				"surface %s: the only added retrieve_tools parameter is 'detail' (SC-003)", surface)
+			added = append(added, p)
 		}
 	}
-	detail, ok := curProps["detail"].(map[string]interface{})
-	require.True(t, ok, "surface %s: retrieve_tools must gain the 'detail' parameter (FR-005)", surface)
-	assert.ElementsMatch(t, []interface{}{"compact", "full"}, detail["enum"],
-		"surface %s: detail enum is {compact, full}", surface)
+	sort.Strings(added)
+	if added == nil {
+		added = []string{}
+	}
+	assert.Equal(t, addedRetrieveToolsParams[surface], added,
+		"surface %s: exact retrieve_tools parameter delta (SC-003 / FR-009)", surface)
 
-	// All pre-feature params preserved byte-equal.
+	// All pre-feature params preserved byte-equal — including the filter
+	// params the routing surfaces already had, which must survive the move to
+	// the shared helper untouched.
 	for p, preSchema := range preProps {
 		assert.Equal(t, preSchema, curProps[p],
 			"surface %s: pre-feature retrieve_tools parameter %q must be preserved unchanged (SC-003)", surface, p)
 	}
 
-	// 'detail' must stay optional: the required list is unchanged.
+	// Added params stay optional: the required list is unchanged.
 	preSchema, _ := preM["inputSchema"].(map[string]interface{})
 	curSchema, _ := curM["inputSchema"].(map[string]interface{})
 	assert.Equal(t, preSchema["required"], curSchema["required"],
-		"surface %s: retrieve_tools required params unchanged (detail is optional)", surface)
+		"surface %s: retrieve_tools required params unchanged", surface)
 
 	// Annotations unchanged.
 	assert.Equal(t, preM["annotations"], curM["annotations"],
@@ -212,14 +231,73 @@ func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[strin
 
 	preDesc, _ := preM["description"].(string)
 	curDesc, _ := curM["description"].(string)
-	// FR-014: updated description referencing signatures + describe_tool.
-	// (code_execution_mode returned above: its whole definition is pre-feature.)
 	assert.NotEqual(t, preDesc, curDesc,
-		"surface %s: retrieve_tools description must be updated (FR-014)", surface)
+		"surface %s: retrieve_tools description must be updated", surface)
+	assert.Contains(t, curDesc, "filter_diagnostics",
+		"surface %s: retrieve_tools description must name the diagnostics block (FR-009)", surface)
+	assert.Contains(t, curDesc, spec094WindowCaveat,
+		"surface %s: retrieve_tools description must carry the candidate-window caveat verbatim (FR-009)", surface)
+
+	if surface == "code_execution_mode" {
+		// Spec 085 §Out-of-scope / FR-011: no describe_tool on this surface, so
+		// no detail param and no compact-signature prose.
+		assert.NotContains(t, curProps, "detail",
+			"surface %s: code_execution retrieve_tools must not expose detail (spec 085 FR-011)", surface)
+		return
+	}
+
+	detail, ok := curProps["detail"].(map[string]interface{})
+	require.True(t, ok, "surface %s: retrieve_tools must carry the 'detail' parameter (spec 085 FR-005)", surface)
+	assert.ElementsMatch(t, []interface{}{"compact", "full"}, detail["enum"],
+		"surface %s: detail enum is {compact, full}", surface)
+
+	// Spec 085 FR-014: description references signatures + describe_tool.
 	assert.Contains(t, curDesc, "describe_tool",
-		"surface %s: retrieve_tools description must reference describe_tool (FR-014)", surface)
+		"surface %s: retrieve_tools description must reference describe_tool (spec 085 FR-014)", surface)
 	assert.Contains(t, strings.ToLower(curDesc), "signature",
-		"surface %s: retrieve_tools description must reference compact signatures (FR-014)", surface)
+		"surface %s: retrieve_tools description must reference compact signatures (spec 085 FR-014)", surface)
+}
+
+// FR-009: the three registrations are built independently, which is exactly
+// how the default one drifted into omitting the filter parameters. They must
+// now come from one shared helper — asserted by deep-comparing the produced
+// schemas rather than by trusting the call sites.
+func TestMenuSurface_AnnotationFilterParamsShared(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	cur := currentSurface(t, proxy)
+
+	surfaces := []string{"default_server", "call_tool_mode", "code_execution_mode"}
+	var reference map[string]interface{}
+	referenceSurface := ""
+
+	for _, surface := range surfaces {
+		raw, ok := cur[surface]["retrieve_tools"]
+		require.True(t, ok, "surface %s: retrieve_tools must be registered", surface)
+		tool := asMap(t, raw)
+		props := schemaProps(tool)
+		require.NotNil(t, props, "surface %s: retrieve_tools lost its inputSchema", surface)
+
+		got := map[string]interface{}{}
+		for _, name := range spec094FilterParams {
+			schema, present := props[name]
+			require.True(t, present,
+				"surface %s: retrieve_tools must expose the %q filter (FR-009)", surface, name)
+			got[name] = schema
+		}
+		if reference == nil {
+			reference, referenceSurface = got, surface
+			continue
+		}
+		assert.Equal(t, reference, got,
+			"surface %s: annotation-filter schemas must be identical to %s — they come from one shared helper",
+			surface, referenceSurface)
+
+		desc, _ := tool["description"].(string)
+		assert.Contains(t, desc, "filter_diagnostics",
+			"surface %s: description must name the diagnostics block (FR-009)", surface)
+		assert.Contains(t, desc, spec094WindowCaveat,
+			"surface %s: description must carry the candidate-window caveat verbatim (FR-009)", surface)
+	}
 }
 
 // assertCallToolVariantDelta: only the tool description and the 'args'

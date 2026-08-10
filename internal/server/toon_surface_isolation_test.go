@@ -74,6 +74,37 @@ func TestSurfaceIsolation_RetrieveTools(t *testing.T) {
 	assert.Zero(t, *calls, "retrieve_tools must never invoke the TOON encoder")
 }
 
+// Spec 094: the filter_diagnostics block is part of the retrieve_tools
+// payload, so it inherits the FR-013 isolation guarantee — present and
+// byte-identical under every toon_output value, encoder never touched. The
+// fixture's tools carry no annotations (no runtime state view is wired), so
+// read_only_only withholds all of them.
+func TestSurfaceIsolation_RetrieveToolsFilterDiagnostics(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedDiscoveryFixture(t, proxy)
+	calls := installToonEncodeRecorder(t)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]interface{}{
+		"query": "repo issue helper", "limit": float64(10), "read_only_only": true,
+	}
+
+	blocks := map[string]string{}
+	for _, mode := range toonModes {
+		proxy.config.ToonOutput = mode
+		result, err := proxy.handleRetrieveTools(context.Background(), req)
+		require.NoError(t, err, "mode=%s", mode)
+		raw := result.Content[0].(mcp.TextContent).Text
+		block, ok := extractTopLevelJSONValue(t, raw, "filter_diagnostics")
+		require.True(t, ok, "mode=%s: retrieve_tools must carry filter_diagnostics when filters omit tools", mode)
+		blocks[mode] = block
+	}
+
+	assert.Equal(t, blocks["off"], blocks["adaptive"], "filter_diagnostics must be byte-identical in adaptive mode")
+	assert.Equal(t, blocks["off"], blocks["always"], "filter_diagnostics must be byte-identical in always mode")
+	assert.Zero(t, *calls, "retrieve_tools must never invoke the TOON encoder")
+}
+
 // TestSurfaceIsolation_CodeExecution (FR-014): the code_execution result
 // envelope is byte-identical under every toon_output value — its JSON-object
 // output would otherwise be a prime always-mode target — and the encoder is

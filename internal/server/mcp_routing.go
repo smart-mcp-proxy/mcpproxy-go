@@ -326,12 +326,13 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 	tools = append(tools, p.buildCodeExecutionTool()...)
 
 	// retrieve_tools for discovery — instructs to use code_execution (NOT call_tool_*)
-	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
-			"Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. "+
-			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. "+
-			"Use natural language to describe what you want to accomplish. "+
-			"Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools)."),
+	codeExecRetrieveOpts := []mcp.ToolOption{
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. " +
+			"Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. " +
+			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. " +
+			"Use natural language to describe what you want to accomplish. " +
+			"Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools)." +
+			retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -343,15 +344,6 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of tools to return (default: configured tools_limit, max: 100)"),
 		),
-		mcp.WithBoolean("read_only_only",
-			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
-		),
-		mcp.WithBoolean("exclude_destructive",
-			mcp.Description("Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations."),
-		),
-		mcp.WithBoolean("exclude_open_world",
-			mcp.Description("Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools."),
-		),
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
@@ -360,7 +352,9 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		// so a compact response would reference an unavailable second stage;
 		// this mode's retrieve_tools always serializes FULL (enforced in
 		// handleRetrieveToolsWithMode) and does not expose the detail param.
-	)
+	}
+	codeExecRetrieveOpts = append(codeExecRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
+	retrieveToolsTool := mcp.NewTool("retrieve_tools", codeExecRetrieveOpts...)
 	tools = append(tools, p.setProfileServerTool())
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
@@ -382,15 +376,15 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 	tools := make([]mcpserver.ServerTool, 0, 8)
 
 	// retrieve_tools — instructs to use call_tool_read/write/destructive
-	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
-			"WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results "+
-			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. "+
-			"Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, "+
-			"and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). "+
-			"Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. "+
-			"Use annotation filters to self-restrict discovery scope. "+
-			"Use natural language to describe what you want to accomplish."),
+	callToolRetrieveOpts := []mcp.ToolOption{
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. " +
+			"WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results " +
+			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. " +
+			"Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, " +
+			"and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). " +
+			"Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. " +
+			"Use natural language to describe what you want to accomplish." +
+			retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -411,22 +405,14 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		mcp.WithString("explain_tool",
 			mcp.Description("When debug=true, explain why a specific tool was ranked low (format: 'server:tool')"),
 		),
-		mcp.WithBoolean("read_only_only",
-			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
-		),
-		mcp.WithBoolean("exclude_destructive",
-			mcp.Description("Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations."),
-		),
-		mcp.WithBoolean("exclude_open_world",
-			mcp.Description("Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools."),
-		),
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
 		retrieveToolsDetailOption(),
-	)
+	}
+	callToolRetrieveOpts = append(callToolRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
 	tools = append(tools, mcpserver.ServerTool{
-		Tool:    retrieveToolsTool,
+		Tool:    mcp.NewTool("retrieve_tools", callToolRetrieveOpts...),
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools),
 	})
 

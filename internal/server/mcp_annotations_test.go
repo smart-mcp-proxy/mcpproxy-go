@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -386,6 +387,195 @@ func TestAnnotationFiltering_NoFiltersPassAll(t *testing.T) {
 	filtered := filterByAnnotations(tools, false, false, false)
 
 	assert.Len(t, filtered, 3)
+}
+
+// --- Spec 094 T001: excludeReason parity against a FROZEN oracle ---
+//
+// shouldExclude now delegates to excludeReason, so comparing the two live
+// functions would be circular. legacyShouldExcludeOracle is the verbatim body
+// of shouldExclude as it stood before the spec-094 attribution refactor
+// (internal/server/mcp_annotations.go:153-181 at 8ed4e4689) — an independent
+// oracle that catches semantic drift the delegation cannot.
+//
+// Filter semantics are FROZEN by the spec: this file must never be "fixed" to
+// match a changed implementation.
+func legacyShouldExcludeOracle(annotations *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) bool {
+	if readOnlyOnly {
+		// Must have explicit readOnlyHint=true to pass
+		if annotations == nil || annotations.ReadOnlyHint == nil || !*annotations.ReadOnlyHint {
+			return true
+		}
+	}
+
+	if excludeDestructive {
+		// Exclude if destructiveHint is true or nil (default is true per spec).
+		// However, a tool with readOnlyHint=true is inherently non-destructive,
+		// so treat destructiveHint as false when readOnlyHint is explicitly true.
+		isReadOnly := annotations != nil && annotations.ReadOnlyHint != nil && *annotations.ReadOnlyHint
+		if !isReadOnly {
+			if annotations == nil || annotations.DestructiveHint == nil || *annotations.DestructiveHint {
+				return true
+			}
+		}
+	}
+
+	if excludeOpenWorld {
+		// Exclude if openWorldHint is true or nil (default is true per spec)
+		if annotations == nil || annotations.OpenWorldHint == nil || *annotations.OpenWorldHint {
+			return true
+		}
+	}
+
+	return false
+}
+
+// expectedAttribution derives the first-failure filter key and reason class
+// straight from spec 094 FR-004 / data-model.md, independently of both the
+// implementation and the oracle above.
+func expectedAttribution(a *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) (filterKey string, explicit, excluded bool) {
+	hint := func(p *bool) (set, val bool) {
+		if a == nil || p == nil {
+			return false, false
+		}
+		return true, *p
+	}
+	var roPtr, destPtr, owPtr *bool
+	if a != nil {
+		roPtr, destPtr, owPtr = a.ReadOnlyHint, a.DestructiveHint, a.OpenWorldHint
+	}
+	roSet, roVal := hint(roPtr)
+	destSet, destVal := hint(destPtr)
+	owSet, owVal := hint(owPtr)
+
+	if readOnlyOnly {
+		switch {
+		case !roSet:
+			return "read_only_only", false, true
+		case !roVal:
+			return "read_only_only", true, true
+		}
+	}
+
+	explicitlyReadOnly := roSet && roVal
+	if excludeDestructive && !explicitlyReadOnly {
+		switch {
+		case !destSet:
+			return "exclude_destructive", false, true
+		case destVal:
+			return "exclude_destructive", true, true
+		}
+	}
+
+	if excludeOpenWorld {
+		switch {
+		case !owSet:
+			return "exclude_open_world", false, true
+		case owVal:
+			return "exclude_open_world", true, true
+		}
+	}
+
+	return "", false, false
+}
+
+// hintStates enumerates the three possible states of one annotation hint.
+var hintStates = []struct {
+	label string
+	value *bool
+}{
+	{"unset", nil},
+	{"true", boolPtr(true)},
+	{"false", boolPtr(false)},
+}
+
+// TestExcludeReason_ParityWithFrozenOracle exhausts the full domain: 27
+// non-nil hint combinations + the nil-annotations state, times the 8 filter
+// combinations = 224 cases. Every case asserts all three outputs.
+func TestExcludeReason_ParityWithFrozenOracle(t *testing.T) {
+	type annState struct {
+		label       string
+		annotations *config.ToolAnnotations
+	}
+	states := []annState{{"nil-annotations", nil}}
+	for _, ro := range hintStates {
+		for _, dest := range hintStates {
+			for _, ow := range hintStates {
+				states = append(states, annState{
+					label: "readOnly=" + ro.label + "/destructive=" + dest.label + "/openWorld=" + ow.label,
+					annotations: &config.ToolAnnotations{
+						ReadOnlyHint:    ro.value,
+						DestructiveHint: dest.value,
+						OpenWorldHint:   ow.value,
+					},
+				})
+			}
+		}
+	}
+	require.Len(t, states, 28, "28 annotation states: 3^3 hint combos + nil annotations")
+
+	filterCombos := []struct {
+		readOnlyOnly, excludeDestructive, excludeOpenWorld bool
+	}{
+		{false, false, false},
+		{true, false, false},
+		{false, true, false},
+		{false, false, true},
+		{true, true, false},
+		{true, false, true},
+		{false, true, true},
+		{true, true, true},
+	}
+
+	cases := 0
+	for _, st := range states {
+		for _, fc := range filterCombos {
+			cases++
+			name := fmt.Sprintf("%s|ro=%t,xd=%t,xow=%t", st.label, fc.readOnlyOnly, fc.excludeDestructive, fc.excludeOpenWorld)
+			t.Run(name, func(t *testing.T) {
+				gotKey, gotExplicit, gotExcluded := excludeReason(st.annotations, fc.readOnlyOnly, fc.excludeDestructive, fc.excludeOpenWorld)
+
+				wantExcluded := legacyShouldExcludeOracle(st.annotations, fc.readOnlyOnly, fc.excludeDestructive, fc.excludeOpenWorld)
+				assert.Equal(t, wantExcluded, gotExcluded, "excluded must match the frozen pre-refactor oracle")
+
+				// shouldExclude delegates, so it must agree with the oracle too.
+				assert.Equal(t, wantExcluded, shouldExclude(st.annotations, fc.readOnlyOnly, fc.excludeDestructive, fc.excludeOpenWorld),
+					"shouldExclude must stay semantically frozen")
+
+				wantKey, wantExplicit, wantExcludedAttr := expectedAttribution(st.annotations, fc.readOnlyOnly, fc.excludeDestructive, fc.excludeOpenWorld)
+				require.Equal(t, wantExcludedAttr, wantExcluded, "test oracles disagree — fix the test, not the code")
+				assert.Equal(t, wantKey, gotKey, "first-failure filter key (read-only -> destructive -> open-world)")
+				assert.Equal(t, wantExplicit, gotExplicit, "reason class (missing vs explicit)")
+
+				if !gotExcluded {
+					assert.Empty(t, gotKey, "a kept tool has no responsible filter")
+					assert.False(t, gotExplicit, "a kept tool has no reason class")
+				}
+			})
+		}
+	}
+	assert.Equal(t, 224, cases, "exhaustive domain is 28 annotation states x 8 filter combos")
+}
+
+// The read-only shortcut is the subtlest frozen semantic: an explicitly
+// read-only tool passes exclude_destructive even with destructiveHint=true,
+// so it can only ever be attributed to read_only_only or exclude_open_world.
+func TestExcludeReason_ReadOnlyShortcutAttribution(t *testing.T) {
+	readOnlyDestructive := &config.ToolAnnotations{
+		ReadOnlyHint:    boolPtr(true),
+		DestructiveHint: boolPtr(true),
+	}
+
+	key, explicit, excluded := excludeReason(readOnlyDestructive, false, true, false)
+	assert.False(t, excluded, "explicit readOnlyHint=true passes exclude_destructive (frozen shortcut)")
+	assert.Empty(t, key)
+	assert.False(t, explicit)
+
+	// With open-world unset it falls through to the open-world filter, never
+	// to exclude_destructive.
+	key, explicit, excluded = excludeReason(readOnlyDestructive, false, true, true)
+	assert.True(t, excluded)
+	assert.Equal(t, "exclude_open_world", key)
+	assert.False(t, explicit, "openWorldHint unset is a missing-annotation omission")
 }
 
 // TestBuildSessionRiskResponse_WarningOmittedByDefault verifies that the prose

@@ -793,3 +793,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) | — | — |
 | [090-tray-glance-v2](./specs/090-tray-glance-v2/) | `shipped` | 35/35 (100%) |
 | [091-connect-client-form](./specs/091-connect-client-form/) | `shipped` | 26/26 (100%) |
+| [092-auto-updater](./specs/092-auto-updater/) | — | — |
+| [093-concurrency-limits](./specs/093-concurrency-limits/) | — | — |
+| [094-filter-diagnostics](./specs/094-filter-diagnostics/) | `shipped` | 14/14 (100%) |

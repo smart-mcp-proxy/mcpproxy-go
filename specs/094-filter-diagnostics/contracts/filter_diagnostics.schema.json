@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcpproxy/spec-094/filter_diagnostics",
+  "title": "retrieve_tools filter_diagnostics block (Spec 094, FR-003)",
+  "description": "Present in a retrieve_tools response only when at least one annotation filter is active AND omitted at least one candidate tool. Absent otherwise (byte-identical legacy response).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["matched_before_filters", "omitted_total", "omitted_by_filter", "suggestion"],
+  "properties": {
+    "matched_before_filters": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Size of the effective candidate window that entered annotation filtering (post-search-normalization, post-visibility, no backfill)."
+    },
+    "omitted_total": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Total tools omitted by annotation filters. Invariant: equals the sum of all reason counts, and matched_before_filters - omitted_total equals the response's total."
+    },
+    "omitted_by_filter": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "One entry per ACTIVE filter that omitted >=1 tool. Inactive filters and active zero-count filters never appear. Serialized in alphabetical key order.",
+      "properties": {
+        "exclude_destructive": { "$ref": "#/$defs/reasonCounts" },
+        "exclude_open_world": { "$ref": "#/$defs/reasonCounts" },
+        "read_only_only": { "$ref": "#/$defs/reasonCounts" }
+      }
+    },
+    "suggestion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[a-zA-Z0-9 .,:;()'_-]+$",
+      "description": "Exactly one actionable string, selected by missing-cause precedence (FR-006); names only the responsible filter(s); JSON-safe ASCII subset."
+    }
+  },
+  "$defs": {
+    "reasonCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["missing_annotation", "explicit"],
+      "anyOf": [
+        { "properties": { "missing_annotation": { "minimum": 1 } } },
+        { "properties": { "explicit": { "minimum": 1 } } }
+      ],
+      "properties": {
+        "missing_annotation": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Omissions where annotations were absent/unresolvable or the decisive hint was unset."
+        },
+        "explicit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Omissions where the decisive hint was explicitly unsafe (readOnlyHint=false, destructiveHint=true, openWorldHint=true)."
+        }
+      }
+    }
+  }
+}
