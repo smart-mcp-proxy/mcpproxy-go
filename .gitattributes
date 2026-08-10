@@ -13,6 +13,12 @@ bench/arms/testdata/*.txt text eol=lf
 # the test's \n-trim and fail the comparison.
 internal/server/testdata/*.golden.json text eol=lf
 
+# Spec 094 pre-feature response goldens (SC-002 byte-identity): the * above
+# does not cross into subdirectories, so pin the spec094/ captures too —
+# without this Windows checks out CRLF and all six TestSpec094Goldens
+# comparisons fail with a trailing \r.
+internal/server/testdata/**/*.golden.json text eol=lf
+
 # Self-contained verification/QA reports embed base64 PNG screenshots, so a
 # single file is multiple MB of "HTML". They are point-in-time artifacts, not
 # source. Mark them linguist-generated so GitHub's language stats reflect the
