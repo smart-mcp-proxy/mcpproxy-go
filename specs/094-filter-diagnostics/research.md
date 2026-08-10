@@ -20,8 +20,8 @@ Verified semantics of `shouldExclude` (`internal/server/mcp_annotations.go:153-1
 
 Evaluation order inside `shouldExclude` is read-only → destructive → open-world; the spec's first-failure attribution adopts the same order. The read-only-implies-non-destructive shortcut (`mcp_annotations.go:164-172`) must be visible in the counts (a tool excluded only because `read_only_only` was requested is attributed to `read_only_only` even if it would also fail `exclude_destructive` — first-failure handles this naturally).
 
-- **Decision**: extract `excludeReason` and make `shouldExclude` delegate to it; add an exhaustive property test (3 hint values³ × 2 annotations-nil × filter-combos⁷ = 486 cases) asserting `excluded == shouldExclude(...)`.
-- **Rationale**: parity by construction — the counts describe what the filter actually did (spec Edge Cases; SC-004 keeps all existing tests green).
+- **Decision**: extract `excludeReason` and make `shouldExclude` delegate to it. Because delegation makes a live parity comparison circular, the test uses an **independent frozen oracle**: the pre-refactor `shouldExclude` body copied verbatim into the test file, plus an explicit truth table for first-failure filter and reason class. Exhaustive domain: (3³ = 27 non-nil hint combinations + 1 nil-annotations state) × 8 filter combinations = **224 cases**, asserting all three outputs (`excluded`, `filterKey`, `explicit`).
+- **Rationale**: the frozen oracle detects semantic regressions delegation alone cannot; the counts describe what the filter actually did (spec Edge Cases; SC-004 keeps all existing tests green).
 
 ## R3 — Response assembly & byte-identity risk
 
@@ -39,7 +39,7 @@ Verified: default registration (`mcp.go:805-834`) lacks the three filter params;
 ## R5 — Serialization determinism & size bound
 
 - Go `encoding/json` sorts map keys alphabetically → FR-003's ordering promise is the encoder's native behavior; no custom marshaler needed. (Memory check: the `json-methods-promote-to-embedders` trap doesn't apply — new standalone struct, no methods on shared/embedded types.)
-- Worst reachable fixture (all three filters nonzero, matched=100, omitted=100, 200-char suggestion from the JSON-safe charset) serializes to 468–474 bytes (independently verified by the round-4 reviewer) — under the 500-byte SC-003 bound.
+- Worst reachable fixture (all three filters nonzero, matched=100, omitted=100, 200-char suggestion from the JSON-safe charset) serializes to **463 bytes** — under the 500-byte SC-003 bound (the round-4 reviewer's 468–474 estimate used a conservative all-3-digit-counts allowance; both are safely under the bound).
 
 ## R6 — What this feature must NOT interact with
 

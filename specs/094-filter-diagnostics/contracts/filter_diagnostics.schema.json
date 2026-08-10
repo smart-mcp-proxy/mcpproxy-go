@@ -43,6 +43,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["missing_annotation", "explicit"],
+      "anyOf": [
+        { "properties": { "missing_annotation": { "minimum": 1 } } },
+        { "properties": { "explicit": { "minimum": 1 } } }
+      ],
       "properties": {
         "missing_annotation": {
           "type": "integer",

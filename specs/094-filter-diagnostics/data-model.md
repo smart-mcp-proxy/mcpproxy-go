@@ -59,15 +59,16 @@ func filterByAnnotationsWithDiagnostics(tools []annotatedSearchResult, readOnlyO
 ## Suggestion selection (FR-006)
 
 ```
-responsible := keys of OmittedByFilter (alphabetical, joined ", ")
+responsible := keys of OmittedByFilter (alphabetical, joined ", ")   // named ONCE per template
 if Σ MissingAnnotation >= 1:
-    "Some tools matched but were omitted because their upstream annotations are missing
-     or unset for <responsible>. Check or publish upstream tool annotations, or retry
-     without <responsible> to inspect the omitted tools."          (≤200 chars, constant template)
+    "Tools matched but lack upstream annotations required by " + responsible +
+    "; publish annotations or retry without these filters."
 else:
-    "All omitted tools are explicitly marked unsafe for <responsible>. Retry without
-     <responsible> to inspect them."                               (≤200 chars, constant template)
+    "Omitted tools are explicitly marked unsafe for " + responsible +
+    "; retry without these filters to inspect them."
 ```
+
+Worst case (all three filter names, 55 chars): missing-template = 55 + 108 = 163 chars; explicit-template = 55 + 94 = 149 chars — both ≤200. A table-driven test iterates **all 7 non-empty filter subsets × both templates** asserting length ≤200, charset conformance, and that no unrelated filter name appears.
 
 ## State transitions
 

@@ -9,7 +9,7 @@ When annotation-based safety filters (`read_only_only`, `exclude_destructive`, `
 
 ## Technical Context
 
-**Language/Version**: Go 1.24 (module toolchain; repo builds with local Go 1.25)
+**Language/Version**: Go 1.25 (go.mod declares 1.25.5)
 **Primary Dependencies**: existing only — `mark3labs/mcp-go` (tool registration), stdlib `encoding/json`. No new dependencies.
 **Storage**: N/A (no persistence; diagnostics computed per call from in-memory candidate set)
 **Testing**: `go test ./internal/server/...` (unit + handler tests, table-driven), golden byte-identity assertions, `go test -race`
@@ -52,22 +52,40 @@ specs/094-filter-diagnostics/
 
 ```text
 internal/server/
-├── mcp_annotations.go        # MODIFY: excludeReason() extracted; shouldExclude() delegates to it
-│                             #         (parity by construction); filterByAnnotationsWithDiagnostics()
+├── mcp_annotations.go        # MODIFY: excludeReason() extracted; shouldExclude() delegates to it;
+│                             #         filterByAnnotationsWithDiagnostics(); suggestion constants
 ├── mcp.go                    # MODIFY: handler wires diagnostics into the response map;
-│                             #         default retrieve_tools registration gains the 3 filter params;
-│                             #         default description mentions filter_diagnostics + window caveat
-├── mcp_routing.go            # MODIFY: both routing-mode retrieve_tools descriptions mention the block
-├── mcp_annotations_test.go   # MODIFY: excludeReason ↔ shouldExclude parity property test
-└── mcp_filter_diagnostics_test.go  # NEW: condition tests, counts, suggestion selection,
-                                    #      SC-003 size fixture + charset assertion, absence golden
+│                             #         retrieveToolsAnnotationFilterOptions() helper; default
+│                             #         registration gains the 3 filter params; default description
+│                             #         mentions filter_diagnostics + window caveat
+├── mcp_routing.go            # MODIFY: both routing builders use the shared helper; descriptions updated
+├── mcp_annotations_test.go   # MODIFY: 224-case truth-table test with a FROZEN pre-refactor oracle
+│                             #         (verbatim copy in the test) asserting excluded/filterKey/explicit
+├── mcp_menu_surface_test.go  # MODIFY: keep pre-feature golden frozen; widen the controlled-delta
+│                             #         assertions to permit the 3 default filter params + description
+│                             #         changes on all three registrations; ADD a deep-compare test that
+│                             #         the helper-produced filter schemas are identical across
+│                             #         registrations and every description mentions filter_diagnostics
+│                             #         + the candidate-window caveat
+├── toon_surface_isolation_test.go  # MODIFY: add a diagnostics-active case (filters + omissions) so the
+│                                   #         new block is covered by the TOON byte-comparison
+└── mcp_filter_diagnostics_test.go  # NEW: see Test matrix below
 ```
+
+### Test matrix (mcp_filter_diagnostics_test.go)
+
+- **Presence/absence conditions (FR-001)** with raw-byte checks in BOTH full and compact modes: (a) no filters; (b) filters active, zero omissions; (c) filters active with omissions — and for (c), deleting only the `filter_diagnostics` key must reproduce the pre-feature filtered response bytes.
+- **Raw-JSON shape test (FR-003)**: exact serialized bytes of a fixture — alphabetical map order, zero-count active filters absent, both reason fields present.
+- **Counts & invariants**: sum invariant, first-failure attribution incl. the read-only shortcut, missing-vs-explicit split.
+- **Suggestion selection (FR-006)**: precedence; all 7 filter subsets × 2 templates: ≤200 chars, charset, no unrelated filter names.
+- **SC-003**: maximal fixture (matched=100, omitted=100, three nonzero filters, 200-char suggestion) ≤500 bytes; real constants conform to charset.
+- **Interactions**: diagnostics via `handleRetrieveToolsForMode(RoutingModeCodeExecution)` (full-mode output); identical block full vs compact; locked-only hits → NO diagnostics; locked hit + annotation-filtered callable hit → both `notice` and diagnostics (repeat with `include_disabled=true` → `disabled`/`remediation` coexist); profile/agent-scope exclusions do NOT contribute to `matched_before_filters`.
 
 **Structure Decision**: All changes live in `internal/server/` beside the code they extend; no new packages. The diagnostics type lives in `mcp_annotations.go` next to the filter it observes.
 
 ## Design decisions (Phase 1 digest)
 
-1. **Parity by construction, not by discipline**: `shouldExclude` (existing, semantics frozen) is reimplemented as a thin wrapper over a new `excludeReason(annotations, ro, xd, xow) (filterKey string, explicit bool, excluded bool)` which returns the first-failing filter and its reason class. Existing annotation-filter tests plus a new exhaustive property test (all hint-combos × filter-combos) pin the equivalence, so counts can never drift from what the filter actually did (spec Edge Cases).
+1. **Parity with a frozen oracle**: `shouldExclude` (existing, semantics frozen) is reimplemented as a thin wrapper over a new `excludeReason(annotations, ro, xd, xow) (filterKey string, explicit bool, excluded bool)`. Since delegation makes live comparison circular, the parity test embeds the pre-refactor `shouldExclude` body verbatim as an independent oracle, plus an explicit truth table for `filterKey`/`explicit`, over all 224 cases (28 annotation states × 8 filter combos). Existing annotation-filter tests stay green untouched (SC-004).
 2. **Response wiring**: inside the existing `annotationFilterActive` branch in `handleRetrieveTools`, replace the `filterByAnnotations` call with `filterByAnnotationsWithDiagnostics`, which returns `(filtered, *filterDiagnostics)`. Attach `response["filter_diagnostics"]` only when `diag.OmittedTotal >= 1` (FR-001). All three surfaces share this one handler, so FR-010 comes free; the code-execution mode's forced-full path is untouched.
 3. **Deterministic serialization**: `omitted_by_filter` is a `map[string]reasonCounts`; Go's `encoding/json` sorts map keys alphabetically — exactly the FR-003 ordering promise. Struct field order handles the rest.
 4. **Suggestion constants**: two `const` template strings (missing-annotation precedence / explicit-only), filter names joined literally (e.g. `read_only_only, exclude_open_world`). Charset `[a-zA-Z0-9 .,:;()'_-]` enforced by a test over the real constants with maximal filter-name interpolation (FR-006/SC-003).

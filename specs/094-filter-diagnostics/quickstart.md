@@ -13,9 +13,12 @@ Use an isolated instance (never the real ~/.mcpproxy; see reference_isolated_dev
 
 ```bash
 go build -o /tmp/mcpproxy-094/mcpproxy ./cmd/mcpproxy
-# scratch config with one upstream whose tools lack annotations, e.g. the
-# @modelcontextprotocol/server-everything test server (its tools publish no
-# readOnlyHint), listen 127.0.0.1:18972
+# Use a CONTROLLED unannotated fixture — do NOT rely on public servers'
+# annotation behavior (the Everything server's echo tool now explicitly
+# declares readOnlyHint:true). The repo's test fixtures include stdio MCP
+# fixture servers; a 20-line node/python script that serves two tools WITHOUT
+# any annotations block is sufficient. Config: listen 127.0.0.1:18972, one
+# stdio upstream running the fixture.
 /tmp/mcpproxy-094/mcpproxy serve --config /tmp/mcpproxy-094/config.json \
   --data-dir /tmp/mcpproxy-094/data --log-dir /tmp/mcpproxy-094/logs
 ```
