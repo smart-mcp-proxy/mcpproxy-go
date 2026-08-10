@@ -28,7 +28,7 @@ Every task in this phase edits test files only and MUST be observed failing (or 
 
 ## Phase 4: GREEN — implementation
 
-- [ ] T010 Implement in `internal/server/mcp_annotations.go`: `reasonCounts` + `filterDiagnostics` structs (data-model.md JSON tags exact), the two suggestion `const` templates, and `filterByAnnotationsWithDiagnostics(...)` (map entry inserted only on a filter's first omission; suggestion by missing-cause precedence with responsible names joined once, alphabetical). Then wire the handler in `internal/server/mcp.go`: in `handleRetrieveToolsWithMode`'s `annotationFilterActive` branch, call `filterByAnnotationsWithDiagnostics`, retain `diag` in a local, and attach `response["filter_diagnostics"] = diag` AFTER the response map is constructed, iff `diag.OmittedTotal >= 1`. T003–T009 all GREEN; goldens byte-identical.
+- [x] T010 Implement in `internal/server/mcp_annotations.go`: `reasonCounts` + `filterDiagnostics` structs (data-model.md JSON tags exact), the two suggestion `const` templates, and `filterByAnnotationsWithDiagnostics(...)` (map entry inserted only on a filter's first omission; suggestion by missing-cause precedence with responsible names joined once, alphabetical). Then wire the handler in `internal/server/mcp.go`: in `handleRetrieveToolsWithMode`'s `annotationFilterActive` branch, call `filterByAnnotationsWithDiagnostics`, retain `diag` in a local, and attach `response["filter_diagnostics"] = diag` AFTER the response map is constructed, iff `diag.OmittedTotal >= 1`. T003–T009 all GREEN; goldens byte-identical.
 
 ## Phase 5: Registrations (FR-009)
 

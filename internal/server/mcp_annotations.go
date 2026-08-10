@@ -1,6 +1,9 @@
 package server
 
 import (
+	"sort"
+	"strings"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 )
@@ -147,6 +150,99 @@ func filterByAnnotations(tools []annotatedSearchResult, readOnlyOnly, excludeDes
 		filtered = append(filtered, tool)
 	}
 	return filtered
+}
+
+// reasonCounts splits one filter's omissions by remediation class (Spec 094
+// FR-004): missing annotations mean "fix the upstream server", an explicitly
+// unsafe hint means "the filter is doing its job". Neither field is omitempty
+// — a zero is information, not noise.
+type reasonCounts struct {
+	MissingAnnotation int `json:"missing_annotation"`
+	Explicit          int `json:"explicit"`
+}
+
+// filterDiagnostics is the normative FR-003 block. The handler attaches it to
+// a retrieve_tools response only when at least one annotation filter was
+// active AND omitted at least one tool, so the happy path stays byte-identical
+// to the pre-feature response.
+//
+// Counts and one suggestion string, never identities (FR-005): the block is
+// therefore leak-proof even for a quarantined tool lingering in a stale index,
+// and has a bounded serialized size.
+type filterDiagnostics struct {
+	MatchedBeforeFilters int                     `json:"matched_before_filters"`
+	OmittedTotal         int                     `json:"omitted_total"`
+	OmittedByFilter      map[string]reasonCounts `json:"omitted_by_filter"`
+	Suggestion           string                  `json:"suggestion"`
+}
+
+// Suggestion templates (FR-006). Compile-time constants over the JSON-safe
+// ASCII subset [a-zA-Z0-9 .,:;()'_-] — no quotes, backslashes or
+// HTML-significant characters — so JSON encoding never expands them and the
+// SC-003 size bound is exact arithmetic rather than an estimate.
+const (
+	suggestMissingPrefix  = "Tools matched but lack upstream annotations required by "
+	suggestMissingSuffix  = "; publish annotations or retry without these filters."
+	suggestExplicitPrefix = "Omitted tools are explicitly marked unsafe for "
+	suggestExplicitSuffix = "; retry without these filters to inspect them."
+)
+
+// filterSuggestion renders the single actionable line. anyMissing selects by
+// cause precedence: one unannotated omission anywhere is worth reporting as a
+// fixable upstream gap, because that is the remediation the operator can act
+// on. responsible must already be sorted; each name appears exactly once.
+func filterSuggestion(responsible []string, anyMissing bool) string {
+	names := strings.Join(responsible, ", ")
+	if anyMissing {
+		return suggestMissingPrefix + names + suggestMissingSuffix
+	}
+	return suggestExplicitPrefix + names + suggestExplicitSuffix
+}
+
+// filterByAnnotationsWithDiagnostics filters exactly like filterByAnnotations
+// and additionally reports what it withheld (Spec 094). Diagnostics are
+// derived from the candidate window this call already produced — no extra
+// index queries, no upstream calls (FR-008).
+//
+// diag is always non-nil; the handler decides whether to attach it.
+func filterByAnnotationsWithDiagnostics(tools []annotatedSearchResult, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) (kept []annotatedSearchResult, diag *filterDiagnostics) {
+	diag = &filterDiagnostics{
+		MatchedBeforeFilters: len(tools),
+		OmittedByFilter:      map[string]reasonCounts{},
+	}
+
+	for _, tool := range tools {
+		filterKey, explicit, excluded := excludeReason(tool.annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+		if !excluded {
+			kept = append(kept, tool)
+			continue
+		}
+		// An entry appears only once a filter has actually omitted something,
+		// which is what keeps active-but-idle filters out of the map (FR-003).
+		counts := diag.OmittedByFilter[filterKey]
+		if explicit {
+			counts.Explicit++
+		} else {
+			counts.MissingAnnotation++
+		}
+		diag.OmittedByFilter[filterKey] = counts
+		diag.OmittedTotal++
+	}
+
+	responsible := make([]string, 0, len(diag.OmittedByFilter))
+	anyMissing := false
+	for key, counts := range diag.OmittedByFilter {
+		responsible = append(responsible, key)
+		if counts.MissingAnnotation > 0 {
+			anyMissing = true
+		}
+	}
+	sort.Strings(responsible)
+	if len(responsible) > 0 {
+		diag.Suggestion = filterSuggestion(responsible, anyMissing)
+	}
+
+	return kept, diag
 }
 
 // shouldExclude returns true if a tool should be excluded based on its annotations and active filters.

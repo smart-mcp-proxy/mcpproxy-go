@@ -568,7 +568,8 @@ func TestFilterDiagnostics_WindowUsesNormalizedLimit(t *testing.T) {
 
 			assert.Equal(t, 5, diag.MatchedBeforeFilters,
 				"matched_before_filters is the post-normalization window (20), not the caller's %v", limit)
-			assert.Equal(t, 4, diag.OmittedTotal)
+			// read_only_only alone keeps the two explicitly read-only tools.
+			assert.Equal(t, 3, diag.OmittedTotal)
 		})
 	}
 }
@@ -599,8 +600,8 @@ func TestFilterDiagnostics_NoBackfillForVisibilityDrops(t *testing.T) {
 
 	assert.Equal(t, 5, resp.FilterDiagnostics.MatchedBeforeFilters,
 		"the locked hit is dropped before annotation filtering and must not be counted")
-	assert.Equal(t, 4, resp.FilterDiagnostics.OmittedTotal)
-	assert.Equal(t, 1, resp.Total)
+	assert.Equal(t, 3, resp.FilterDiagnostics.OmittedTotal)
+	assert.Equal(t, 2, resp.Total)
 }
 
 // FR-004 / Edge Cases: a tool whose annotations cannot be resolved is treated

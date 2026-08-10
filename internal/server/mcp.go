@@ -1560,7 +1560,12 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	// Spec 035 F4: Resolve annotations for each result and apply annotation-based filtering
 	// before building the MCP tool response. This allows agents to self-restrict discovery.
+	//
+	// Spec 094: the same pass records WHY each candidate was withheld, so a
+	// caller can tell "no such tool" from "withheld by a filter, and here is
+	// the remediation". filterDiag stays nil unless a filter was active.
 	annotationFilterActive := readOnlyOnly || excludeDestructive || excludeOpenWorld
+	var filterDiag *filterDiagnostics
 	if annotationFilterActive {
 		var annotatedResults []annotatedSearchResult
 		for i, result := range results {
@@ -1584,7 +1589,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			})
 		}
 
-		filtered := filterByAnnotations(annotatedResults, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+		filtered, diag := filterByAnnotationsWithDiagnostics(annotatedResults, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+		filterDiag = diag
 		var filteredResults []*config.SearchResult
 		for _, ar := range filtered {
 			filteredResults = append(filteredResults, results[ar.resultIndex])
@@ -1646,6 +1652,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		"query":              query,
 		"total":              len(results),
 		"usage_instructions": usageInstructions,
+	}
+
+	// Spec 094 (FR-001): explain the annotation filters only when they actually
+	// withheld something. On the happy path — no filters, or filters that
+	// omitted nothing — the key is absent and the response stays byte-identical
+	// to the pre-feature one.
+	if filterDiag != nil && filterDiag.OmittedTotal >= 1 {
+		response["filter_diagnostics"] = filterDiag
 	}
 
 	// Spec 085 (FR-009): compact responses carry one deterministic hint line
