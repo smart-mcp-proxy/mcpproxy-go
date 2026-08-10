@@ -1,7 +1,7 @@
 # Tasks: retrieve_tools Filter Diagnostics
 
 **Input**: Design documents from `/specs/094-filter-diagnostics/` (spec.md + plan.md Codex-APPROVED)
-**Tests**: REQUIRED — constitution principle V (TDD). Every RED task lands (and is observed failing) before its GREEN task. The branch still has pre-feature behavior until T008 — Phase 3 exploits that to capture frozen response goldens.
+**Tests**: REQUIRED — constitution principle V (TDD). Every RED task lands (and is observed failing) before its GREEN task. The branch still has pre-feature behavior until T010 — Phase 3 exploits that to capture frozen response goldens.
 
 ## Phase 1: Setup
 
