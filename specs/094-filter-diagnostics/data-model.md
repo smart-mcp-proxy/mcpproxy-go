@@ -68,7 +68,7 @@ else:
     "; retry without these filters to inspect them."
 ```
 
-Worst case (all three filter names, 55 chars): missing-template = 55 + 108 = 163 chars; explicit-template = 55 + 94 = 149 chars — both ≤200. A table-driven test iterates **all 7 non-empty filter subsets × both templates** asserting length ≤200, charset conformance, and that no unrelated filter name appears.
+Worst case (all three filter names joined = 55 chars): missing-template = 55 + 109 fixed = **164** chars; explicit-template = 55 + 93 fixed = **148** chars — both ≤200. A table-driven test iterates **all 7 non-empty filter subsets × both templates** asserting length ≤200, charset conformance, and that no unrelated filter name appears.
 
 ## State transitions
 

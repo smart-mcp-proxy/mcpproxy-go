@@ -11,14 +11,28 @@ go test -race ./internal/server/
 
 Use an isolated instance (never the real ~/.mcpproxy; see reference_isolated_dev_instance):
 
+Use the repo's `tests/echo-rugpull-server` fixture — its `echo`/`get_time` tools publish NO annotations block (verified in `tests/echo-rugpull-server/index.js`), exactly the field scenario. Do NOT use `cmd/mcpfixture` (explicitly annotated) or public servers like Everything (its echo tool now declares `readOnlyHint: true`).
+
 ```bash
+mkdir -p /tmp/mcpproxy-094/{data,logs}
 go build -o /tmp/mcpproxy-094/mcpproxy ./cmd/mcpproxy
-# Use a CONTROLLED unannotated fixture — do NOT rely on public servers'
-# annotation behavior (the Everything server's echo tool now explicitly
-# declares readOnlyHint:true). The repo's test fixtures include stdio MCP
-# fixture servers; a 20-line node/python script that serves two tools WITHOUT
-# any annotations block is sufficient. Config: listen 127.0.0.1:18972, one
-# stdio upstream running the fixture.
+(cd tests/echo-rugpull-server && npm install --silent)   # if node_modules absent
+cat > /tmp/mcpproxy-094/config.json <<EOF
+{
+  "listen": "127.0.0.1:18972",
+  "enable_socket": false,
+  "mcpServers": [
+    {
+      "name": "echo-fixture",
+      "protocol": "stdio",
+      "command": "node",
+      "args": ["$PWD/tests/echo-rugpull-server/index.js"],
+      "enabled": true,
+      "quarantined": false
+    }
+  ]
+}
+EOF
 /tmp/mcpproxy-094/mcpproxy serve --config /tmp/mcpproxy-094/config.json \
   --data-dir /tmp/mcpproxy-094/data --log-dir /tmp/mcpproxy-094/logs
 ```
