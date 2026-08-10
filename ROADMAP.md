@@ -795,4 +795,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [091-connect-client-form](./specs/091-connect-client-form/) | `shipped` | 26/26 (100%) |
 | [092-auto-updater](./specs/092-auto-updater/) | — | — |
 | [093-concurrency-limits](./specs/093-concurrency-limits/) | — | — |
-| [094-filter-diagnostics](./specs/094-filter-diagnostics/) | `in-flight` | 3/14 (21%) |
+| [094-filter-diagnostics](./specs/094-filter-diagnostics/) | `in-flight` | 9/14 (64%) |
