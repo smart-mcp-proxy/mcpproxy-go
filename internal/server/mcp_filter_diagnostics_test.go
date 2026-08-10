@@ -172,9 +172,12 @@ func spec094Conditions() []diagCondition {
 	}
 }
 
-// diagModes maps a serialization mode to the `detail` argument that selects it.
-var diagModes = map[string]string{"full": "full", "compact": "compact"}
+// diagSerializationModes are the two `detail` values a response can be
+// rendered under; the diagnostics block must be identical in both.
+var diagSerializationModes = []string{"full", "compact"}
 
+// withDetail copies args with an explicit `detail` override, so a table entry
+// can be reused across serialization modes without mutation.
 func withDetail(args map[string]interface{}, detail string) map[string]interface{} {
 	out := make(map[string]interface{}, len(args)+1)
 	for k, v := range args {
@@ -325,10 +328,10 @@ func TestSpec094Goldens(t *testing.T) {
 
 	for _, cond := range spec094Conditions() {
 		cond := cond
-		for _, mode := range []string{"full", "compact"} {
+		for _, mode := range diagSerializationModes {
 			mode := mode
 			t.Run(cond.name+"/"+mode, func(t *testing.T) {
-				got := callRetrieveRaw(t, proxy, withDetail(cond.args, diagModes[mode]))
+				got := callRetrieveRaw(t, proxy, withDetail(cond.args, mode))
 
 				if cond.omits {
 					// (c): everything OUTSIDE the diagnostics block is frozen.
@@ -423,7 +426,7 @@ func TestFilterDiagnostics_AbsentOnHappyPath(t *testing.T) {
 	}
 	for _, hc := range happy {
 		hc := hc
-		for _, mode := range []string{"full", "compact"} {
+		for _, mode := range diagSerializationModes {
 			mode := mode
 			t.Run(hc.name+"/"+mode, func(t *testing.T) {
 				raw := callRetrieveRaw(t, proxy, withDetail(hc.args, mode))
@@ -446,7 +449,7 @@ func TestFilterDiagnostics_PresentAndModeIdentical(t *testing.T) {
 	}
 
 	blocks := map[string]string{}
-	for _, mode := range []string{"full", "compact"} {
+	for _, mode := range diagSerializationModes {
 		raw := callRetrieveRaw(t, proxy, withDetail(args, mode))
 		block, ok := extractTopLevelJSONValue(t, raw, "filter_diagnostics")
 		require.True(t, ok, "mode %s: filter_diagnostics must be present (FR-001)", mode)
@@ -519,7 +522,7 @@ func TestFilterDiagnostics_ZeroCountActiveFilterAbsent(t *testing.T) {
 func TestFilterDiagnostics_CountInvariants(t *testing.T) {
 	proxy, _ := newFilterDiagnosticsProxy(t)
 
-	for _, mode := range []string{"full", "compact"} {
+	for _, mode := range diagSerializationModes {
 		mode := mode
 		t.Run(mode, func(t *testing.T) {
 			raw := callRetrieveRaw(t, proxy, map[string]interface{}{
@@ -805,7 +808,7 @@ func TestFilterDiagnostics_LockedOnlyHitsProduceNoDiagnostics(t *testing.T) {
 	proxy, _ := newFilterDiagnosticsProxy(t)
 	seedLockedTool(t, proxy, "locked_item", "lockedonlyterm locked item")
 
-	for _, mode := range []string{"full", "compact"} {
+	for _, mode := range diagSerializationModes {
 		mode := mode
 		t.Run(mode, func(t *testing.T) {
 			raw := callRetrieveRaw(t, proxy, map[string]interface{}{

@@ -456,7 +456,8 @@ func expectedAttribution(a *config.ToolAnnotations, readOnlyOnly, excludeDestruc
 		}
 	}
 
-	if excludeDestructive && !(roSet && roVal) {
+	explicitlyReadOnly := roSet && roVal
+	if excludeDestructive && !explicitlyReadOnly {
 		switch {
 		case !destSet:
 			return "exclude_destructive", false, true
