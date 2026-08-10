@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -496,6 +498,61 @@ func TestFilterDiagnostics_NormativeJSONShape(t *testing.T) {
 		"serialized bytes must match the FR-003 normative shape exactly")
 }
 
+// sortedJSONKeys returns the member names of a JSON object, sorted.
+func sortedJSONKeys(t *testing.T, obj map[string]json.RawMessage) []string {
+	t.Helper()
+	keys := make([]string, 0, len(obj))
+	for key := range obj {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// FR-003/FR-005 on the wire. The fixture test above proves the TYPE
+// serializes correctly, but it cannot catch a handler that attaches something
+// richer than that type, and every decoder in this file ignores unknown
+// fields — so a block carrying tool names, servers, descriptions or schemas
+// would slip past all of them. Pin the exact member set of a real handler
+// response, then the exact bytes.
+func TestFilterDiagnostics_LiveBlockCarriesNothingElse(t *testing.T) {
+	proxy, _ := newFilterDiagnosticsProxy(t)
+
+	raw := callRetrieveRaw(t, proxy, map[string]interface{}{
+		"query": diagQueryAll, "limit": float64(20),
+		"read_only_only": true, "exclude_open_world": true,
+	})
+	block, ok := extractTopLevelJSONValue(t, raw, "filter_diagnostics")
+	require.True(t, ok, "filter_diagnostics must be present (FR-001)")
+
+	var members map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(block), &members))
+	assert.Equal(t,
+		[]string{"matched_before_filters", "omitted_by_filter", "omitted_total", "suggestion"},
+		sortedJSONKeys(t, members),
+		"counts and one string, nothing that could identify a tool or server (FR-005)")
+
+	var byFilter map[string]map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(members["omitted_by_filter"], &byFilter))
+	require.NotEmpty(t, byFilter, "fixture sanity: filters withheld tools")
+	for filterKey, entry := range byFilter {
+		assert.Equal(t, []string{"explicit", "missing_annotation"}, sortedJSONKeys(t, entry),
+			"entry %q carries exactly the two reason counts", filterKey)
+	}
+
+	// Whole-block byte comparison. The fixture fully determines every count, so
+	// this catches an added member, a reordered field and a drifted suggestion
+	// in one assertion.
+	assert.Equal(t,
+		`{"matched_before_filters":5,"omitted_total":4,"omitted_by_filter":`+
+			`{"exclude_open_world":{"missing_annotation":0,"explicit":1},`+
+			`"read_only_only":{"missing_annotation":2,"explicit":1}},`+
+			`"suggestion":"Tools matched but lack upstream annotations required by exclude_open_world, read_only_only; `+
+			`publish annotations or retry without these filters."}`,
+		block,
+		"the live block must serialize exactly as FR-003 specifies")
+}
+
 // FR-003: an ACTIVE filter that omitted nothing must not appear in the map.
 // exclude_destructive is active here but can never fire: read_only_only
 // evaluates first and claims every non-read-only tool, and the read-only ones
@@ -577,34 +634,97 @@ func TestFilterDiagnostics_WindowUsesNormalizedLimit(t *testing.T) {
 	}
 }
 
+// toolNames returns the response's tool ids in the order they were ranked.
+func toolNames(t *testing.T, resp diagResponse) []string {
+	t.Helper()
+	out := make([]string, 0, len(resp.Tools))
+	for _, entry := range resp.Tools {
+		name, ok := entry["name"].(string)
+		if !ok {
+			name, ok = entry["id"].(string)
+		}
+		require.True(t, ok, "tool entry carries neither name nor id: %v", entry)
+		out = append(out, name)
+	}
+	return out
+}
+
 // Hits removed by the visibility step never enter the window, and nothing is
-// pulled up to replace them (no backfill). A user-disabled tool that matches
-// the query must therefore leave matched_before_filters untouched — it belongs
-// to the existing locked-tools flow, not to these diagnostics.
+// pulled up to replace them (no backfill).
+//
+// This only means anything when the window is SMALLER than the match set: with
+// a window big enough to hold every hit there is no rank-4 candidate to pull
+// up, so a backfilling implementation would look identical. The fixture
+// therefore indexes six matching tools and asks for three, locks the
+// top-ranked one, and asserts the freed slot stays empty.
 func TestFilterDiagnostics_NoBackfillForVisibilityDrops(t *testing.T) {
 	proxy, _ := newFilterDiagnosticsProxy(t)
 
+	// Six matching tools of strictly increasing length. BM25 length
+	// normalization then gives six distinct scores, so the ranked window is
+	// unambiguous and stable across calls. They live on "plain" (absent from
+	// the state view), so every one of them is unannotated.
+	const backfillQuery = "backfillterm"
+	padding := ""
+	for i := 0; i < 6; i++ {
+		name := fmt.Sprintf("backfill_%d", i)
+		require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+			Name: "plain:" + name, ServerName: "plain",
+			Description: strings.TrimSpace(backfillQuery + " " + padding),
+			ParamsJSON:  `{"type":"object"}`,
+			Hash:        "hash-plain:" + name,
+		}))
+		padding += fmt.Sprintf("pad%d ", i)
+	}
+
+	retrieve := func(t *testing.T, args map[string]interface{}) diagResponse {
+		t.Helper()
+		return decodeDiagResponse(t, callRetrieveRaw(t, proxy, args))
+	}
+
+	everything := retrieve(t, map[string]interface{}{"query": backfillQuery, "limit": float64(20)})
+	require.Equal(t, 6, everything.Total, "fixture sanity: six tools match the query")
+
+	window := retrieve(t, map[string]interface{}{"query": backfillQuery, "limit": float64(3)})
+	require.Equal(t, 3, window.Total, "fixture sanity: the window must be smaller than the match set")
+	inWindow := toolNames(t, window)
+
+	beyondWindow := []string{}
+	for _, name := range toolNames(t, everything) {
+		if !slices.Contains(inWindow, name) {
+			beyondWindow = append(beyondWindow, name)
+		}
+	}
+	require.Len(t, beyondWindow, 3, "fixture sanity: three lower-ranked hits exist to backfill FROM")
+
+	// Lock the top-ranked in-window hit. It is dropped by the visibility step
+	// before annotation filtering ever runs.
+	_, lockedTool, ok := splitServerTool(inWindow[0])
+	require.True(t, ok, "unexpected tool id %q", inWindow[0])
 	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
-		ServerName: "annot", ToolName: "locked_item",
+		ServerName: "plain", ToolName: lockedTool,
 		Status: storage.ToolApprovalStatusApproved, Disabled: true,
 	}))
-	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
-		Name: "annot:locked_item", ServerName: "annot",
-		Description: diagQueryAll + " locked item",
-		ParamsJSON:  `{"type":"object"}`,
-		Hash:        "hash-annot:locked_item",
-	}))
 
-	raw := callRetrieveRaw(t, proxy, map[string]interface{}{
-		"query": diagQueryAll, "limit": float64(20), "read_only_only": true,
+	t.Run("no lower-ranked hit replaces the dropped one", func(t *testing.T) {
+		got := retrieve(t, map[string]interface{}{"query": backfillQuery, "limit": float64(3)})
+		assert.Equal(t, 2, got.Total, "the window shrank from 3 to 2 and must not be refilled")
+		assert.ElementsMatch(t, inWindow[1:], toolNames(t, got),
+			"exactly the surviving in-window hits, in the same ranking")
+		for _, name := range beyondWindow {
+			assert.NotContains(t, toolNames(t, got), name,
+				"rank-4+ hit %s must never be pulled up into the freed slot", name)
+		}
 	})
-	resp := decodeDiagResponse(t, raw)
-	require.NotNil(t, resp.FilterDiagnostics)
 
-	assert.Equal(t, 5, resp.FilterDiagnostics.MatchedBeforeFilters,
-		"the locked hit is dropped before annotation filtering and must not be counted")
-	assert.Equal(t, 3, resp.FilterDiagnostics.OmittedTotal)
-	assert.Equal(t, 2, resp.Total)
+	t.Run("matched_before_filters reports the shrunken window", func(t *testing.T) {
+		diag := requireDiag(t, callRetrieveRaw(t, proxy, map[string]interface{}{
+			"query": backfillQuery, "limit": float64(3), "read_only_only": true,
+		}))
+		assert.Equal(t, 2, diag.MatchedBeforeFilters,
+			"the window is what SURVIVED visibility (2), not the search cap (3) and not the match set (6)")
+		assert.Equal(t, 2, diag.OmittedTotal, "both survivors are unannotated, so both are withheld")
+	})
 }
 
 // FR-004 / Edge Cases: a tool whose annotations cannot be resolved is treated
