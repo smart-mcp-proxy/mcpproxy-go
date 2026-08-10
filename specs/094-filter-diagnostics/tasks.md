@@ -37,7 +37,7 @@ Every task in this phase edits test files only and MUST be observed failing (or 
 
 ## Phase 6: Gates & live verification
 
-- [ ] T013 Execute quickstart.md live scenario end-to-end on an isolated instance (port 18972, scratch dirs, PID cleanup) and record the four observed responses for the PR description. Grep `read_only_only` under `docs/` — if any page documents retrieve_tools parameters, update it to mention `filter_diagnostics`.
+- [x] T013 Execute quickstart.md live scenario end-to-end on an isolated instance (port 18972, scratch dirs, PID cleanup) and record the four observed responses for the PR description. Grep `read_only_only` under `docs/` — if any page documents retrieve_tools parameters, update it to mention `filter_diagnostics`.
 - [ ] T014 FINAL gate (after every prior task, including any T013 doc edits): `go test -race ./internal/server/...`, full `go test -race ./internal/...`, and `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...`. Fix findings; re-run until clean.
 
 ## Dependencies
