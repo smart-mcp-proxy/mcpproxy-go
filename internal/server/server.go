@@ -479,6 +479,7 @@ func (s *Server) listenForRoutingModeRefresh() {
 			if s.mcpProxy != nil {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
+				s.mcpProxy.RefreshPrompts()
 			}
 			// Spec 086 stage 3 (FR-011): a scan-mode server is quarantined on add
 			// and must have its baseline scan triggered so the settle handler can
