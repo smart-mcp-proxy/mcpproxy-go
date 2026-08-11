@@ -41,9 +41,10 @@ search path — prompts are few and cheap enough to aggregate in full.
 
 ### Per-server config
 
-`internal/config/config.go`: add `ExposePrompts *bool` to `ServerConfig`,
-following the same tri-state pointer convention already used for
-`AutoApproveToolChanges`:
+`internal/config/config.go`: add `ExposePrompts *bool` to `ServerConfig`
+(`type ServerConfig struct` at line 209), following the same tri-state
+pointer convention already used by `IsolationConfig.Enabled *bool` (line
+~266, with its `IsEnabled()` nil-safe accessor) elsewhere in this file:
 
 ```go
 ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
@@ -58,34 +59,51 @@ ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompt
 
 ### Upstream client layer
 
+Note: `internal/upstream/cli/client.go` is only used by the `mcpproxy auth`
+CLI command and the tray app, not by the runtime aggregation path — it is
+out of scope here. The runtime path is `Manager` → `managed.Client` →
+`core.Client`.
+
 - `internal/upstream/core/client.go`: add
-  `ListPrompts(ctx context.Context) ([]mcp.Prompt, error)` and
-  `GetPrompt(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error)`,
-  thin wrappers around the underlying mark3labs `mcp-go` client's
-  `ListPrompts`/`GetPrompt` RPCs — same shape as the existing
-  `ListTools`/`CallTool` in this file.
-- `internal/upstream/cli/client.go`: thin passthroughs to the core client
-  (mirrors existing `ListTools`/`CallTool` wrappers).
+  `ListPrompts(ctx context.Context) ([]mcp.Prompt, error)` (mirrors
+  `ListTools`: checks connection, returns `nil, nil` if
+  `serverInfo.Capabilities.Prompts == nil` **or** `c.config.ExposePrompts != nil && !*c.config.ExposePrompts`
+  — both checks live here so `Manager.ListPrompts` needs no special-casing
+  beyond the per-client error skip it already mirrors from `DiscoverTools` —
+  otherwise calls the mark3labs client's `ListPrompts(ctx, mcp.ListPromptsRequest{})`,
+  returns `result.Prompts`) and
+  `GetPrompt(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error)`
+  (mirrors `CallTool`: checks connection, builds
+  `mcp.GetPromptRequest{Params: mcp.GetPromptParams{Name: name, Arguments: args}}`,
+  calls the mark3labs client's `GetPrompt`, returns the result).
+- `internal/upstream/managed/client.go`: add `ListPrompts`/`GetPrompt` on
+  `managed.Client`, mirroring the simple connectivity-check-then-delegate
+  shape of `managed.Client.CallTool` (not the leader-election/coalescing
+  shape of `managed.Client.ListTools` — prompts are only refreshed on
+  `servers.changed`, not per-request, so no coalescing is needed).
 
 ### Manager aggregation layer
 
 `internal/upstream/manager.go`:
 
-- `Manager.ListPrompts(ctx) ([]PromptMetadata, error)` iterates `m.clients`;
-  for each client whose `Capabilities.Prompts != nil` **and** whose config's
-  `ExposePrompts` is not explicitly `false`, calls its `ListPrompts`. On a
-  per-client error, log a warning and skip that client —
-  the rest of the aggregation proceeds (mirrors `DiscoverTools` resilience).
-  Each returned prompt name is formatted as `serverName__promptName` via a
-  new `FormatDirectPromptName(serverName, promptName string) string` helper
-  in `mcp_routing.go`, reusing the existing `DirectModeToolSeparator = "__"`
-  constant (same convention as `FormatDirectToolName`).
-- `Manager.GetPrompt(ctx, prefixedName string, args map[string]string) (*mcp.GetPromptResult, error)`
-  parses the prefix via a new `ParsePromptName(prefixedName string) (serverName, promptName string, ok bool)`
-  helper (mirrors `ParseDirectToolName`), resolves the owning client by name
-  (same lookup pattern as `Manager.CallTool`), and forwards the call. Errors
-  (unknown prefix, no matching client, upstream error) propagate unchanged to
-  the caller — no swallowing.
+- `Manager.ListPrompts(ctx context.Context) ([]mcp.Prompt, error)` iterates
+  `m.clients` (same enabled/quarantined/connected snapshot pattern as
+  `DiscoverTools`) and calls each client's `ListPrompts` (which already
+  returns `nil, nil` for capability-less or opted-out servers, per above). On
+  a per-client error, log a warning and skip that client — the rest of the
+  aggregation proceeds (mirrors `DiscoverTools` resilience). Each returned
+  prompt's `Name` is rewritten in place to
+  `serverName:promptName` (colon) — the same internal-registry convention
+  `Manager.CallTool` already uses for `"server:tool"`, entirely self-contained
+  within the `upstream` package (no dependency on the `server` package's `__`
+  convention).
+- `Manager.GetPrompt(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error)`
+  takes a colon-qualified `"serverName:promptName"`, parses it via
+  `strings.SplitN(name, ":", 2)` (identical to `Manager.CallTool`), resolves
+  the owning client by name (same lookup pattern as `Manager.CallTool`), and
+  forwards to `targetClient.GetPrompt(ctx, promptName, args)` with the
+  unqualified prompt name. Errors (bad format, no matching client, upstream
+  error) propagate unchanged to the caller — no swallowing.
 
 ### Server wiring
 
@@ -93,13 +111,25 @@ ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompt
 
 - `registerPrompts()` is unchanged — still registers the 2 built-ins.
 - New `RefreshPrompts()` on `MCPProxyServer`: early-returns if
-  `!p.config.EnablePrompts`. Otherwise builds the built-in `ServerPrompt`
-  entries plus one `ServerPrompt` per aggregated upstream prompt (handler
-  closure calls `p.upstreamManager.GetPrompt(ctx, prefixedName, request.Params.Arguments)`),
-  then calls `p.server.SetPrompts(all...)` to atomically replace the full
+  `!p.config.EnablePrompts`. Otherwise calls `p.upstreamManager.ListPrompts(ctx)`;
+  for each colon-qualified `mcp.Prompt` returned, splits it back into
+  `serverName`/`promptName` (the same inline `strings.SplitN(name, ":", 2)`
+  pattern already used elsewhere in this package, e.g.
+  `internal/server/mcp.go:1856`), builds a **display** copy of the prompt
+  with `Name` rewritten to the client-facing `serverName__promptName` via a
+  new one-line `FormatDirectPromptName` helper (a thin, readably-named
+  wrapper around the existing `FormatDirectToolName` — same `__` separator,
+  no duplicated logic), and pairs it with a `ServerPrompt.Handler` closure
+  that captures the *original* colon-qualified name and calls
+  `p.upstreamManager.GetPrompt(ctx, "serverName:promptName", request.Params.Arguments)`.
+  The mcp-go library dispatches incoming `prompts/get` requests to this
+  handler by matching the registered (client-facing, `__`) name, so no
+  reverse-parsing of the `__` name is ever needed — the closure already
+  knows which server it belongs to. Built-ins are added to the same slice
+  unchanged, then `p.server.SetPrompts(all...)` atomically replaces the full
   prompt set — same pattern as `RefreshDirectModeTools`'s use of `SetTools`.
 - Hook `RefreshPrompts()` into the existing `EventTypeServersChanged` branch
-  in `listenForRoutingModeRefresh` (`internal/server/server.go:471-490`),
+  in `listenForRoutingModeRefresh` (`internal/server/server.go:379-386`),
   alongside `RefreshDirectModeTools()` / `RefreshCodeExecModeTools()`. No
   separate manual call at startup is needed — upstream servers connect
   asynchronously and `servers.changed` fires once they do, matching the
@@ -108,41 +138,71 @@ ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompt
 ## Data flow
 
 1. Upstream server connects → `EventTypeServersChanged` fires →
-   `RefreshPrompts()` calls `Manager.ListPrompts` → `SetPrompts` on `p.server`.
+   `RefreshPrompts()` calls `Manager.ListPrompts` (colon-qualified names) →
+   builds display copies (`__`-qualified) with bound handler closures →
+   `SetPrompts` on `p.server`.
 2. Client sends `prompts/list` → mcp-go's built-in handler returns the
    current `s.prompts` map (built-ins + aggregated, kept in sync by step 1).
-3. Client sends `prompts/get` with a prefixed name → the per-prompt handler
-   closure calls `Manager.GetPrompt` → resolves server → forwards → returns
-   the upstream's `GetPromptResult` unchanged. Built-in prompt names are
-   unprefixed and never collide with an aggregated name (which is always
-   prefixed by a unique server name).
+3. Client sends `prompts/get` with a `__`-qualified name → mcp-go dispatches
+   to that prompt's bound handler closure → calls `Manager.GetPrompt` with
+   the closure's captured colon-qualified name → resolves server → forwards
+   → returns the upstream's `GetPromptResult` unchanged. Built-in prompt
+   names are unprefixed and never collide with an aggregated name (which is
+   always prefixed by a unique server name).
 
 ## Error handling
 
 - `Manager.ListPrompts`: per-server failure → log warning, skip that server,
   continue with the rest.
-- `Manager.GetPrompt`: unknown prefix / unknown server / upstream error → all
+- `Manager.GetPrompt`: malformed name / unknown server / upstream error → all
   propagate as a normal MCP error to the client, same as `CallTool` today.
-- No collision handling required: the `__` prefix is always the connecting
-  server's (unique) name.
+- No collision handling required: the qualifying prefix (colon internally,
+  `__` for display) is always the connecting server's (unique) name.
 
 ## Testing
 
-- `internal/upstream/manager_test.go`: aggregation across multiple fake
-  clients (one with prompts, one without the capability, one erroring on
-  `ListPrompts`, one with `ExposePrompts: false` despite advertising the
-  capability) — assert correct prefixing, that the erroring client is
-  skipped without affecting the others, and that the opted-out client's
-  prompts never appear. Plus `GetPrompt` resolution tests (valid prefix,
-  unknown server, unknown prompt).
-- Table tests for `FormatDirectPromptName` / `ParsePromptName` (pure
-  functions), alongside the existing `mcp_routing_test.go` tests for the
-  tool-name equivalents.
-- `internal/server`: new `RefreshPrompts` test verifying built-ins are always
-  present and aggregated prompts appear/disappear as a fake upstream
-  manager's prompt set changes — first prompts test coverage in this
-  package.
+`Manager`, `managed.Client`, and `core.Client` are concrete types with no
+mock-friendly interface boundary in this codebase today (confirmed: neither
+`ListTools`/`CallTool` nor `DiscoverTools` have interface-based unit tests —
+coverage there comes from real-but-disconnected `httptest` servers, e.g.
+`internal/upstream/client_test.go`, or from the e2e suite). This feature
+follows the same real-server approach rather than introducing mocks:
+
+- `internal/upstream/core/client_test.go` (new): spin up a real
+  `mcpserver.NewTestStreamableHTTPServer` backed by an `mcpserver.MCPServer`
+  with `mcpserver.WithPromptCapabilities(true)` and 1-2 `AddPrompt`-registered
+  prompts; connect a `core.Client` to it (`MCPPROXY_DISABLE_OAUTH=true`,
+  mirroring `TestClient_Connect_WorkingTransports`); assert `ListPrompts`
+  returns them and `GetPrompt` returns the expected `GetPromptResult`. A
+  second case points at a test server with no prompt capability and asserts
+  `ListPrompts` returns `nil, nil`. A third case sets
+  `ExposePrompts: BoolPtr(false)` on the same capable server and asserts
+  `ListPrompts` returns `nil, nil` without the test server ever being asked
+  (verified via a call counter in the test server's list-prompts handler).
+- `internal/upstream/manager_test.go` (new): using `Manager.AddServerConfig`
+  + `Manager.ConnectAll` against two real test servers (one with prompts, one
+  without) plus one server config pointed at a closed port (never connects),
+  assert `Manager.ListPrompts` returns the capable server's prompts with
+  colon-qualified names and silently omits the disconnected one. Separately,
+  test `Manager.GetPrompt` resolution errors (malformed name with no colon,
+  unknown server name) without needing any connected client, plus one
+  success case against the real connected server.
+- `internal/server/mcp_routing_test.go`: table tests for the new
+  `FormatDirectPromptName` helper (pure function), alongside existing tests
+  for `FormatDirectToolName`.
+- `internal/server`: extract the aggregation-to-`ServerPrompt` step of
+  `RefreshPrompts` into a pure helper,
+  `buildAggregatedServerPrompts(builtins []mcpserver.ServerPrompt, upstreamPrompts []mcp.Prompt, getPrompt func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error)) []mcpserver.ServerPrompt`,
+  so it can be unit-tested with a fake `getPrompt` func — no real server or
+  manager needed. Table tests assert: built-ins pass through unchanged;
+  colon-qualified upstream prompts get `__`-renamed; each aggregated
+  prompt's handler calls `getPrompt` with the original colon-qualified name
+  and forwards its result/error unchanged. `RefreshPrompts()` itself (the
+  thin glue that calls `Manager.ListPrompts` and `SetPrompts`) is not
+  separately unit-tested, consistent with its siblings
+  `RefreshDirectModeTools`/`RefreshCodeExecModeTools`, neither of which have
+  dedicated tests today.
 - `internal/config/config_test.go`: round-trip `ExposePrompts` (nil / true /
-  false) through marshal-unmarshal, mirroring the existing
-  `AutoApproveToolChanges` round-trip test.
+  false) through JSON marshal-unmarshal on a `ServerConfig` value, asserting
+  the pointer value survives the round trip in all three states.
 - `go test ./internal/... -race` per repo convention.
