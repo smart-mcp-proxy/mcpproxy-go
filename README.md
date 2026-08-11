@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.smart-mcp-proxy%2Fmcpproxy-go.svg)](https://mcptoplist.com/server/io.github.smart-mcp-proxy%2Fmcpproxy-go)
+
 <p align="center">
   <a href="https://mcpproxy.app" target="_blank" rel="noopener">
     <img src="docs/social.png" alt="MCPProxy — Supercharge AI Agents, Safely · One safe endpoint in front of every MCP server" width="100%" />
