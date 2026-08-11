@@ -18,9 +18,10 @@ upstream tools (direct routing mode).
 - `prompts/get` resolves a (possibly prefixed) prompt name to its owning
   upstream server and forwards the request, returning the upstream's
   `GetPromptResult` unchanged.
-- Behavior is gated by the existing `enable_prompts` config flag (no new
-  config surface — the issue's own "opt-in per-server flag" alternative is
-  explicitly not pursued).
+- Behavior is gated by the existing global `enable_prompts` config flag, plus
+  a new per-server `expose_prompts` override (tri-state; nil inherits the
+  default-aggregate behavior) so a server can be excluded individually even
+  though it advertises the capability.
 
 ## Non-goals
 
@@ -28,14 +29,32 @@ upstream tools (direct routing mode).
   routing-mode MCP server instances. Today only the default `retrieve_tools`
   server (`p.server`) has `WithPromptCapabilities` wired up at all; the other
   three don't support prompts and this issue does not change that.
-- A per-server opt-in flag for prompt exposure (issue's alternative,
-  deliberately deferred).
+- A way to force-expose prompts for a server that doesn't advertise
+  `Capabilities.Prompts` — the per-server flag can only opt a server *out*,
+  not fabricate a capability it doesn't have.
 
 ## Architecture
 
 Mirrors the existing tools-aggregation pattern (specifically direct-mode
 tools, `internal/server/mcp_routing.go`), not the `retrieve_tools` BM25
 search path — prompts are few and cheap enough to aggregate in full.
+
+### Per-server config
+
+`internal/config/config.go`: add `ExposePrompts *bool` to `ServerConfig`,
+following the same tri-state pointer convention already used for
+`AutoApproveToolChanges`:
+
+```go
+ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+```
+
+- `nil` (unset, the default) → inherit the default-aggregate behavior: this
+  server's prompts are included if it advertises `Capabilities.Prompts`.
+- `false` → excluded from aggregation regardless of advertised capability.
+- `true` → explicit no-op today (same effect as `nil` when the capability is
+  present); reserved so a future global default flip doesn't require a config
+  migration.
 
 ### Upstream client layer
 
@@ -53,8 +72,9 @@ search path — prompts are few and cheap enough to aggregate in full.
 `internal/upstream/manager.go`:
 
 - `Manager.ListPrompts(ctx) ([]PromptMetadata, error)` iterates `m.clients`;
-  for each client whose `Capabilities.Prompts != nil`, calls its
-  `ListPrompts`. On a per-client error, log a warning and skip that client —
+  for each client whose `Capabilities.Prompts != nil` **and** whose config's
+  `ExposePrompts` is not explicitly `false`, calls its `ListPrompts`. On a
+  per-client error, log a warning and skip that client —
   the rest of the aggregation proceeds (mirrors `DiscoverTools` resilience).
   Each returned prompt name is formatted as `serverName__promptName` via a
   new `FormatDirectPromptName(serverName, promptName string) string` helper
@@ -110,9 +130,11 @@ search path — prompts are few and cheap enough to aggregate in full.
 
 - `internal/upstream/manager_test.go`: aggregation across multiple fake
   clients (one with prompts, one without the capability, one erroring on
-  `ListPrompts`) — assert correct prefixing and that the erroring client is
-  skipped without affecting the others. Plus `GetPrompt` resolution tests
-  (valid prefix, unknown server, unknown prompt).
+  `ListPrompts`, one with `ExposePrompts: false` despite advertising the
+  capability) — assert correct prefixing, that the erroring client is
+  skipped without affecting the others, and that the opted-out client's
+  prompts never appear. Plus `GetPrompt` resolution tests (valid prefix,
+  unknown server, unknown prompt).
 - Table tests for `FormatDirectPromptName` / `ParsePromptName` (pure
   functions), alongside the existing `mcp_routing_test.go` tests for the
   tool-name equivalents.
@@ -120,4 +142,7 @@ search path — prompts are few and cheap enough to aggregate in full.
   present and aggregated prompts appear/disappear as a fake upstream
   manager's prompt set changes — first prompts test coverage in this
   package.
+- `internal/config/config_test.go`: round-trip `ExposePrompts` (nil / true /
+  false) through marshal-unmarshal, mirroring the existing
+  `AutoApproveToolChanges` round-trip test.
 - `go test ./internal/... -race` per repo convention.
