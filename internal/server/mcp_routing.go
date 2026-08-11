@@ -657,6 +657,72 @@ func (p *MCPProxyServer) RefreshCodeExecModeTools() {
 		zap.Int("tool_count", len(codeExecTools)))
 }
 
+// buildAggregatedServerPrompts combines built-in prompts with upstream
+// prompts (colon-qualified "serverName:promptName", as returned by
+// Manager.ListPrompts) into the full ServerPrompt set for SetPrompts.
+// getPrompt is invoked with the original colon-qualified name whenever a
+// client requests one of the aggregated prompts — no reverse-parsing of the
+// client-facing "__" name is needed since the handler closure already knows
+// which server it came from. Upstream prompts with a malformed (unqualified)
+// name are skipped.
+func buildAggregatedServerPrompts(
+	builtins []mcpserver.ServerPrompt,
+	upstreamPrompts []mcp.Prompt,
+	getPrompt func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error),
+) []mcpserver.ServerPrompt {
+	all := make([]mcpserver.ServerPrompt, 0, len(builtins)+len(upstreamPrompts))
+	all = append(all, builtins...)
+
+	for _, qualified := range upstreamPrompts {
+		serverName, promptName, ok := strings.Cut(qualified.Name, ":")
+		if !ok {
+			continue
+		}
+
+		qualifiedName := qualified.Name
+		display := qualified
+		display.Name = FormatDirectPromptName(serverName, promptName)
+
+		all = append(all, mcpserver.ServerPrompt{
+			Prompt: display,
+			Handler: func(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return getPrompt(ctx, qualifiedName, request.Params.Arguments)
+			},
+		})
+	}
+
+	return all
+}
+
+// RefreshPrompts rebuilds the default server's prompt set: the built-in
+// prompts plus every prompt aggregated from connected upstream servers.
+// Should be called when upstream servers change (connect/disconnect). A
+// no-op when prompts are disabled.
+func (p *MCPProxyServer) RefreshPrompts() {
+	if !p.config.EnablePrompts {
+		return
+	}
+
+	ctx := context.Background()
+	upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
+	if err != nil {
+		p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
+		return
+	}
+
+	builtins := []mcpserver.ServerPrompt{
+		{Prompt: setupServerPrompt(), Handler: p.handleSetupServerPrompt},
+		{Prompt: troubleshootServerPrompt(), Handler: p.handleTroubleshootPrompt},
+	}
+
+	all := buildAggregatedServerPrompts(builtins, upstreamPrompts, p.upstreamManager.GetPrompt)
+	p.server.SetPrompts(all...)
+
+	p.logger.Info("refreshed prompts",
+		zap.Int("upstream_prompt_count", len(upstreamPrompts)),
+		zap.Int("total_prompt_count", len(all)))
+}
+
 // GetMCPServerForMode returns the MCP server instance for the given routing mode.
 // Falls back to the default retrieve_tools server for unknown modes.
 func (p *MCPProxyServer) GetMCPServerForMode(mode string) *mcpserver.MCPServer {

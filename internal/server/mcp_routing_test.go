@@ -154,6 +154,52 @@ func TestFormatDirectPromptName(t *testing.T) {
 	}
 }
 
+func TestBuildAggregatedServerPrompts(t *testing.T) {
+	builtin := mcpserver.ServerPrompt{
+		Prompt: mcp.NewPrompt("setup-new-mcp-server"),
+		Handler: func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{Description: "builtin"}, nil
+		},
+	}
+
+	upstreamPrompts := []mcp.Prompt{
+		{Name: "server-a:greeting", Description: "hi"},
+	}
+
+	var gotCtx context.Context
+	var gotName string
+	var gotArgs map[string]string
+	fakeGetPrompt := func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error) {
+		gotCtx = ctx
+		gotName = name
+		gotArgs = args
+		return &mcp.GetPromptResult{Description: "from upstream"}, nil
+	}
+
+	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt)
+
+	require.Len(t, all, 2)
+	assert.Equal(t, "setup-new-mcp-server", all[0].Prompt.Name)
+	assert.Equal(t, "server-a__greeting", all[1].Prompt.Name)
+	assert.Equal(t, "hi", all[1].Prompt.Description)
+
+	ctx := context.Background()
+	result, err := all[1].Handler(ctx, mcp.GetPromptRequest{
+		Params: mcp.GetPromptParams{Arguments: map[string]string{"k": "v"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "from upstream", result.Description)
+	assert.Equal(t, ctx, gotCtx)
+	assert.Equal(t, "server-a:greeting", gotName)
+	assert.Equal(t, map[string]string{"k": "v"}, gotArgs)
+}
+
+func TestBuildAggregatedServerPrompts_SkipsMalformedNames(t *testing.T) {
+	upstreamPrompts := []mcp.Prompt{{Name: "no-colon-here"}}
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil)
+	assert.Empty(t, all)
+}
+
 func TestDirectToolNameRoundTrip(t *testing.T) {
 	// Test that formatting and parsing are inverse operations
 	testCases := []struct {
