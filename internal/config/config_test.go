@@ -1427,6 +1427,36 @@ func TestServerConfig_ReconnectOnUse(t *testing.T) {
 	})
 }
 
+func TestServerConfig_ExposePrompts_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		val  *bool
+	}{
+		{"unset", nil},
+		{"true", BoolPtr(true)},
+		{"false", BoolPtr(false)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := ServerConfig{Name: "test", ExposePrompts: tt.val}
+
+			data, err := json.Marshal(original)
+			require.NoError(t, err)
+
+			var decoded ServerConfig
+			require.NoError(t, json.Unmarshal(data, &decoded))
+
+			if tt.val == nil {
+				assert.Nil(t, decoded.ExposePrompts)
+			} else {
+				require.NotNil(t, decoded.ExposePrompts)
+				assert.Equal(t, *tt.val, *decoded.ExposePrompts)
+			}
+		})
+	}
+}
+
 func TestServerConfig_IsToolAllowedByConfig(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -620,6 +620,12 @@ type ServerConfig struct {
 	Isolation      *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
 	ReconnectOnUse bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
 
+	// ExposePrompts overrides whether this server's advertised MCP prompts are
+	// aggregated into mcpproxy's prompts/list. nil (default) inherits the
+	// default-aggregate behavior (included if the server advertises
+	// Capabilities.Prompts); false excludes it regardless of capability.
+	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+
 	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
 	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
 	// when the server is configured with both Command and an HTTP/SSE URL — i.e.,
