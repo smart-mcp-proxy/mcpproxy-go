@@ -178,6 +178,9 @@ type UpstreamRecord struct {
 	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
 	QueueSize             *int             `json:"queue_size,omitempty"`
 	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty"`
+	// ExposePrompts is the per-server override for exposing upstream prompts
+	// through mcpproxy's aggregated prompts/list and prompts/get.
+	ExposePrompts *bool `json:"expose_prompts,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

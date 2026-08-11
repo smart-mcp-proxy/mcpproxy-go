@@ -373,6 +373,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// record read back from BBolt is not a config file and must not claim
 		// the operator stated anything.
 		"quarantineExplicitlySet": true,
+		"ExposePrompts":           true, // persisted to BBolt so the per-server override survives restarts
 	}
 
 	// Get all fields from ServerConfig
