@@ -703,7 +703,8 @@ func (p *MCPProxyServer) RefreshPrompts() {
 		return
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
 	if err != nil {
 		p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
