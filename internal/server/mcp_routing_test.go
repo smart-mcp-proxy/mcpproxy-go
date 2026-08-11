@@ -135,6 +135,25 @@ func TestFormatDirectToolName(t *testing.T) {
 	}
 }
 
+func TestFormatDirectPromptName(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverName string
+		promptName string
+		want       string
+	}{
+		{"simple names", "github", "setup-issue", "github__setup-issue"},
+		{"server with hyphens", "my-server", "greeting", "my-server__greeting"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatDirectPromptName(tt.serverName, tt.promptName)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestDirectToolNameRoundTrip(t *testing.T) {
 	// Test that formatting and parsing are inverse operations
 	testCases := []struct {

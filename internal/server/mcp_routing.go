@@ -62,6 +62,12 @@ func FormatDirectToolName(serverName, toolName string) string {
 	return serverName + DirectModeToolSeparator + toolName
 }
 
+// FormatDirectPromptName formats a server name and prompt name using the
+// same "__" separator convention as FormatDirectToolName.
+func FormatDirectPromptName(serverName, promptName string) string {
+	return FormatDirectToolName(serverName, promptName)
+}
+
 // buildDirectModeTools builds MCP tool definitions for direct mode.
 // Each upstream tool is exposed directly with serverName__toolName naming.
 // Only tools from connected, enabled, non-quarantined servers are included.
