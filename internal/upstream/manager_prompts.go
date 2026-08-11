@@ -82,6 +82,9 @@ func (m *Manager) GetPrompt(ctx context.Context, name string, args map[string]st
 	m.mu.RLock()
 	var targetClient *managed.Client
 	for _, c := range m.clients {
+		if c == nil || c.Config == nil {
+			continue
+		}
 		if c.Config.Name == serverName {
 			targetClient = c
 			break
