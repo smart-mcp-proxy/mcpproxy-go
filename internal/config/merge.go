@@ -663,6 +663,12 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		dst.AuthBroker = &broker
 	}
 
+	// Copy *bool by value (not pointer) to avoid shared state
+	if src.ExposePrompts != nil {
+		exposePrompts := *src.ExposePrompts
+		dst.ExposePrompts = &exposePrompts
+	}
+
 	// Copy nested structs
 	dst.Isolation = copyIsolationConfig(src.Isolation)
 	dst.OAuth = copyOAuthConfig(src.OAuth)
