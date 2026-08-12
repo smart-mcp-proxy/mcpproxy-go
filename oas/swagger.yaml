@@ -909,6 +909,13 @@ components:
           additionalProperties:
             type: string
           type: object
+        expose_prompts:
+          description: |-
+            ExposePrompts overrides whether this server's advertised MCP prompts are
+            aggregated into mcpproxy's prompts/list. nil (default) inherits the
+            default-aggregate behavior (included if the server advertises
+            Capabilities.Prompts); false excludes it regardless of capability.
+          type: boolean
         headers:
           additionalProperties:
             type: string
