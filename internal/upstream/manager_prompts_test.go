@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -52,18 +53,26 @@ func newTestManager(t *testing.T) *Manager {
 // under the given id/name and returns its httptest.Server for cleanup.
 func addConnectedTestServer(t *testing.T, m *Manager, id, name, promptName string) {
 	t.Helper()
+	addConnectedTestServerWithConfig(t, m, id, &config.ServerConfig{
+		Name:    name,
+		Enabled: true,
+	}, promptName)
+}
+
+// addConnectedTestServerWithConfig is addConnectedTestServer with full
+// control over the ServerConfig (e.g. Enabled/Quarantined), so tests can
+// exercise Manager.ListPrompts's per-client skip conditions against a
+// genuinely connected client rather than an absent/never-connected one.
+func addConnectedTestServerWithConfig(t *testing.T, m *Manager, id string, cfg *config.ServerConfig, promptName string) *httptest.Server {
+	t.Helper()
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
 	upstream := newTestPromptUpstreamServer(t, promptName)
 	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
 	t.Cleanup(testServer.Close)
 
-	cfg := &config.ServerConfig{
-		Name:     name,
-		Protocol: "streamable-http",
-		URL:      testServer.URL,
-		Enabled:  true,
-	}
+	cfg.Protocol = "streamable-http"
+	cfg.URL = testServer.URL
 	require.NoError(t, m.AddServerConfig(id, cfg))
 
 	client, ok := m.GetClient(id)
@@ -72,6 +81,8 @@ func addConnectedTestServer(t *testing.T, m *Manager, id, name, promptName strin
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, client.Connect(ctx))
+
+	return testServer
 }
 
 func TestManager_ListPrompts_AggregatesAcrossServers(t *testing.T) {
@@ -117,4 +128,49 @@ func TestManager_GetPrompt_UnknownServer(t *testing.T) {
 	_, err := m.GetPrompt(context.Background(), "nonexistent:greeting", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no client found for server")
+}
+
+func TestManager_ListPrompts_SkipsQuarantinedServer(t *testing.T) {
+	m := newTestManager(t)
+
+	addConnectedTestServerWithConfig(t, m, "srv-a", &config.ServerConfig{
+		Name:        "server-a",
+		Enabled:     true,
+		Quarantined: true,
+	}, "greeting")
+
+	prompts, err := m.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, prompts, "a quarantined server's prompts must not be aggregated")
+}
+
+func TestManager_ListPrompts_SkipsDisabledServer(t *testing.T) {
+	m := newTestManager(t)
+
+	addConnectedTestServerWithConfig(t, m, "srv-a", &config.ServerConfig{
+		Name:    "server-a",
+		Enabled: false,
+	}, "greeting")
+
+	prompts, err := m.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, prompts, "a disabled server's prompts must not be aggregated")
+}
+
+func TestManager_ListPrompts_LogsAndSkipsClientError(t *testing.T) {
+	m := newTestManager(t)
+
+	testServer := addConnectedTestServerWithConfig(t, m, "srv-a", &config.ServerConfig{
+		Name:    "server-a",
+		Enabled: true,
+	}, "greeting")
+
+	// Close the upstream out from under an already-connected client so the
+	// client's ListPrompts fails; the manager must log and skip it rather
+	// than fail the whole aggregation.
+	testServer.Close()
+
+	prompts, err := m.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, prompts)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -15,6 +16,8 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 func TestParseDirectToolName(t *testing.T) {
@@ -892,4 +895,92 @@ func TestDirectModeHandler_CallabilityBlock_PrefersContextRequestID(t *testing.T
 
 	payload := probe.awaitOne(t)
 	assert.Equal(t, "req-from-transport", requestIDOf(t, payload))
+}
+
+// =============================================================================
+// RefreshPrompts (prompt aggregation)
+// =============================================================================
+
+// newTestRefreshPromptsUpstream builds a real in-process MCP server that
+// advertises Capabilities.Prompts and serves one "greeting" prompt.
+func newTestRefreshPromptsUpstream(t *testing.T) *mcpserver.MCPServer {
+	t.Helper()
+	srv := mcpserver.NewMCPServer("test-upstream", "0.0.1",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithPromptCapabilities(true),
+	)
+	srv.AddPrompt(
+		mcp.NewPrompt("greeting", mcp.WithPromptDescription("Say hello")),
+		func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{
+				Messages: []mcp.PromptMessage{
+					{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "hello"}},
+				},
+			}, nil
+		},
+	)
+	return srv
+}
+
+func TestRefreshPrompts_Disabled_NoOp(t *testing.T) {
+	// createTestProxyWithRuntime uses config.DefaultConfig(), which has
+	// EnablePrompts: true, so registerPrompts() already ran at construction.
+	// Clear that baseline so this test can prove RefreshPrompts adds nothing
+	// once prompts are (re-)disabled, rather than merely tolerating leftovers.
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	existing := proxy.server.ListPrompts()
+	names := make([]string, 0, len(existing))
+	for name := range existing {
+		names = append(names, name)
+	}
+	proxy.server.DeletePrompts(names...)
+
+	proxy.config.EnablePrompts = false
+	proxy.RefreshPrompts()
+
+	assert.Empty(t, proxy.server.ListPrompts(), "disabled prompts must not populate the server's prompt set")
+}
+
+func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "setup-new-mcp-server", "built-in prompts must still be registered")
+	require.Contains(t, prompts, "server-a__greeting", "aggregated upstream prompt must be registered under its direct name")
+}
+
+func TestRefreshPrompts_NoUpstreamClients_RegistersOnlyBuiltins(t *testing.T) {
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.upstreamManager = upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	assert.Contains(t, prompts, "setup-new-mcp-server", "built-ins still register when there are no upstream prompts")
+	assert.Len(t, prompts, 2, "only the two built-in prompts should be present")
 }

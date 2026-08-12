@@ -134,3 +134,76 @@ func TestClient_GetPrompt_ReturnsUpstreamResult(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "hello", textContent.Text)
 }
+
+func unconnectedTestClient(t *testing.T) *Client {
+	t.Helper()
+	cfg := &config.ServerConfig{Name: "test-server", Protocol: "streamable-http", URL: "http://127.0.0.1:1"}
+	c, err := NewClient("test-client", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+	return c
+}
+
+func TestClient_ListPrompts_NotConnected_ReturnsError(t *testing.T) {
+	c := unconnectedTestClient(t)
+
+	prompts, err := c.ListPrompts(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, prompts)
+	assert.Contains(t, err.Error(), "not connected")
+}
+
+func TestClient_ListPrompts_ServerInfoNil_ReturnsError(t *testing.T) {
+	upstream := newTestPromptUpstream(t, true, nil)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+	// White-box: force the post-handshake server info to nil while leaving
+	// the transport connected, to exercise the defensive nil-check that
+	// distinguishes "never initialized" from "no Prompts capability".
+	c.mu.Lock()
+	c.serverInfo = nil
+	c.mu.Unlock()
+
+	prompts, err := c.ListPrompts(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, prompts)
+	assert.Contains(t, err.Error(), "server info not available")
+}
+
+func TestClient_ListPrompts_UpstreamError_ReturnsWrappedError(t *testing.T) {
+	upstream := newTestPromptUpstream(t, true, nil)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	// Close the upstream out from under an already-connected client so the
+	// next request fails at the transport layer instead of via IsConnected().
+	testServer.Close()
+
+	prompts, err := c.ListPrompts(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, prompts)
+	assert.Contains(t, err.Error(), "failed to list prompts")
+}
+
+func TestClient_GetPrompt_NotConnected_ReturnsError(t *testing.T) {
+	c := unconnectedTestClient(t)
+
+	result, err := c.GetPrompt(context.Background(), "greeting", nil)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "not connected")
+}
+
+func TestClient_GetPrompt_UpstreamError_ReturnsWrappedError(t *testing.T) {
+	upstream := newTestPromptUpstream(t, true, nil)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	testServer.Close()
+
+	result, err := c.GetPrompt(context.Background(), "greeting", nil)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "GetPrompt failed")
+}

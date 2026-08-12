@@ -1087,6 +1087,35 @@ func TestCopyServerConfig_PreservesAllowlistAndOverrides(t *testing.T) {
 	}
 }
 
+// TestCopyServerConfig_ExposePrompts covers the per-server prompts-aggregation
+// override added alongside the ExposePrompts field: CopyServerConfig must
+// carry both a set and an unset value, and the copy must be by value (not a
+// shared pointer) like every other tri-state *bool/*Duration field above.
+func TestCopyServerConfig_ExposePrompts(t *testing.T) {
+	t.Run("nil stays nil", func(t *testing.T) {
+		src := &ServerConfig{Name: "srv"}
+		dst := CopyServerConfig(src)
+		if dst.ExposePrompts != nil {
+			t.Errorf("ExposePrompts: got %v, want nil", dst.ExposePrompts)
+		}
+	})
+
+	t.Run("set value is copied by value, not aliased", func(t *testing.T) {
+		exposePrompts := false
+		src := &ServerConfig{Name: "srv", ExposePrompts: &exposePrompts}
+
+		dst := CopyServerConfig(src)
+		if dst.ExposePrompts == nil || *dst.ExposePrompts != false {
+			t.Errorf("ExposePrompts: got %v, want false", dst.ExposePrompts)
+		}
+
+		*src.ExposePrompts = true
+		if *dst.ExposePrompts {
+			t.Error("ExposePrompts pointer is shared, not copied by value")
+		}
+	})
+}
+
 // TestMergeServerConfig_InitTimeout covers MCP-3322: a patch carrying
 // init_timeout sets/replaces the per-server override (and records a diff), while
 // a patch that omits it preserves the existing value.
