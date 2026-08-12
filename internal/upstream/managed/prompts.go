@@ -17,7 +17,7 @@ func (mc *Client) ListPrompts(ctx context.Context) ([]mcp.Prompt, error) {
 	prompts, err := mc.coreClient.ListPrompts(ctx)
 	if err != nil {
 		mc.logger.Error("Failed to list prompts",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 		return nil, err
 	}
@@ -38,7 +38,7 @@ func (mc *Client) GetPrompt(ctx context.Context, name string, args map[string]st
 			mc.StateManager.SetError(err)
 		}
 		mc.logger.Error("GetPrompt failed",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.String("prompt", name),
 			zap.Error(err))
 		return nil, err

@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
@@ -30,14 +31,18 @@ func (m *Manager) ListPrompts(ctx context.Context) ([]mcp.Prompt, error) {
 	for id, c := range m.clients {
 		name := ""
 		quarantined := false
-		if c != nil && c.Config != nil {
-			name = c.Config.Name
-			quarantined = c.Config.Quarantined
+		var cfg *config.ServerConfig
+		if c != nil {
+			cfg = c.GetConfig()
+		}
+		if cfg != nil {
+			name = cfg.Name
+			quarantined = cfg.Quarantined
 		}
 		snapshots = append(snapshots, clientSnapshot{
 			id:          id,
 			name:        name,
-			enabled:     c != nil && c.Config != nil && c.Config.Enabled,
+			enabled:     cfg != nil && cfg.Enabled,
 			quarantined: quarantined,
 			client:      c,
 		})
@@ -82,10 +87,14 @@ func (m *Manager) GetPrompt(ctx context.Context, name string, args map[string]st
 	m.mu.RLock()
 	var targetClient *managed.Client
 	for _, c := range m.clients {
-		if c == nil || c.Config == nil {
+		if c == nil {
 			continue
 		}
-		if c.Config.Name == serverName {
+		cfg := c.GetConfig()
+		if cfg == nil {
+			continue
+		}
+		if cfg.Name == serverName {
 			targetClient = c
 			break
 		}
