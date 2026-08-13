@@ -1168,7 +1168,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// provider will reject it (e.g. Figma after a DCR 403, GitHub which has no
 	// DCR endpoint at all; issue #975). Checked on the final URL so a
 	// client_id supplied via oauth.extra_params still passes.
-	if flowErr := c.emptyClientIDFlowError(authURL, "", dcrErr, oauthHandler); flowErr != nil {
+	if flowErr := c.emptyClientIDFlowError(authURL, "", dcrErr); flowErr != nil {
 		return flowErr
 	}
 
@@ -1484,7 +1484,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 
 	// Never store or open an authorization URL that lacks a client_id — the
 	// provider is guaranteed to reject it (issue #975).
-	if flowErr := c.emptyClientIDFlowError(authURL, result.CorrelationID, dcrErr, oauthHandler); flowErr != nil {
+	if flowErr := c.emptyClientIDFlowError(authURL, result.CorrelationID, dcrErr); flowErr != nil {
 		return result, flowErr
 	}
 
@@ -1976,17 +1976,11 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 
 	// Issue #975: never hand back an authorization URL without a client_id —
 	// the provider is guaranteed to reject it (GitHub 404s on client_id=).
-	if flowErr := c.emptyClientIDFlowError(authURL, correlationID, dcrErr, oauthHandler); flowErr != nil {
+	if flowErr := c.emptyClientIDFlowError(authURL, correlationID, dcrErr); flowErr != nil {
 		return "", nil, "", "", flowErr
 	}
 
 	return authURL, oauthHandler, codeVerifier, state, nil
-}
-
-// clientIDProvider is the slice of mcp-go's OAuthHandler the empty-client_id
-// guard needs; an interface so tests can stub it.
-type clientIDProvider interface {
-	GetClientID() string
 }
 
 // emptyClientIDFlowError returns a structured oauth_client_id_required error
@@ -1998,21 +1992,17 @@ type clientIDProvider interface {
 // client without an id; its real outcome is preserved in the error details so
 // a 403 rejection (Figma) stays distinguishable from a provider with no
 // registration endpoint at all (GitHub).
-func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr error, handler clientIDProvider) *contracts.OAuthFlowError {
+func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr error) *contracts.OAuthFlowError {
 	parsed, err := url.Parse(authURL)
 	if err != nil {
 		return nil
 	}
 	if parsed.Query().Get("client_id") != "" {
-		// A client_id present in the URL but absent from the OAuth handler can
-		// only have come from oauth.extra_params. The authorize step will
-		// succeed, but the handler still sends its own (empty) client_id at
-		// token exchange, so only lenient providers accept this. Keep the
-		// escape hatch, but make the failure mode diagnosable.
-		if handler != nil && handler.GetClientID() == "" {
-			c.logger.Warn("⚠️ client_id injected via oauth.extra_params is not used at token exchange — if the callback fails, set oauth.client_id instead",
-				zap.String("server", c.config.Name))
-		}
+		// A client_id present in the URL but absent from the OAuth handler
+		// came from oauth.extra_params. That configuration is fully
+		// functional: OAuthTransportWrapper (internal/oauth/config.go) injects
+		// every extra param — client_id included — into token requests as
+		// well, so the exchange after callback carries it too.
 		return nil
 	}
 	c.logger.Error("❌ OAuth provider requires a client_id but none is available (DCR unsupported or failed)",

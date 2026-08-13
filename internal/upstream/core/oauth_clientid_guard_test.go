@@ -30,7 +30,7 @@ func TestEmptyClientIDFlowError_EmptyClientID(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
 	authURL := "https://github.com/login/oauth/authorize?client_id=&code_challenge=abc&code_challenge_method=S256&redirect_uri=http%3A%2F%2F127.0.0.1%3A62876%2Foauth%2Fcallback"
-	flowErr := c.emptyClientIDFlowError(authURL, "corr-123", errors.New("server does not support dynamic client registration"), nil)
+	flowErr := c.emptyClientIDFlowError(authURL, "corr-123", errors.New("server does not support dynamic client registration"))
 
 	require.NotNil(t, flowErr, "empty client_id in authorization URL must be rejected")
 	assert.Equal(t, contracts.OAuthErrorClientIDRequired, flowErr.ErrorType)
@@ -45,7 +45,7 @@ func TestEmptyClientIDFlowError_MissingClientIDParam(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
 	authURL := "https://github.com/login/oauth/authorize?code_challenge=abc&code_challenge_method=S256"
-	flowErr := c.emptyClientIDFlowError(authURL, "", nil, nil)
+	flowErr := c.emptyClientIDFlowError(authURL, "", nil)
 
 	require.NotNil(t, flowErr, "authorization URL without client_id param must be rejected")
 	assert.Equal(t, contracts.OAuthErrorClientIDRequired, flowErr.ErrorType)
@@ -55,7 +55,7 @@ func TestEmptyClientIDFlowError_PresentClientID(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
 	authURL := "https://github.com/login/oauth/authorize?client_id=Iv1.abc123&code_challenge=abc"
-	flowErr := c.emptyClientIDFlowError(authURL, "corr-123", nil, nil)
+	flowErr := c.emptyClientIDFlowError(authURL, "corr-123", nil)
 
 	assert.Nil(t, flowErr, "a URL carrying a client_id must pass the guard")
 }
@@ -66,7 +66,7 @@ func TestEmptyClientIDFlowError_ClientIDViaExtraParams(t *testing.T) {
 	// A client_id injected through oauth.extra_params must also satisfy the
 	// guard — the check is on the final URL, not on the handler state.
 	authURL := "https://example.com/authorize?client_id=from-extra-params&resource=https%3A%2F%2Fexample.com"
-	flowErr := c.emptyClientIDFlowError(authURL, "", nil, nil)
+	flowErr := c.emptyClientIDFlowError(authURL, "", nil)
 
 	assert.Nil(t, flowErr)
 }
@@ -75,7 +75,7 @@ func TestEmptyClientIDFlowError_UnparseableURL(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
 	// An unparseable URL is not this guard's concern — never block on it.
-	flowErr := c.emptyClientIDFlowError("://not-a-url", "", nil, nil)
+	flowErr := c.emptyClientIDFlowError("://not-a-url", "", nil)
 
 	assert.Nil(t, flowErr)
 }
@@ -88,7 +88,7 @@ func TestEmptyClientIDFlowError_DCR403Details(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
 	authURL := "https://example.com/authorize?client_id="
-	flowErr := c.emptyClientIDFlowError(authURL, "", errors.New("registration failed: HTTP 403 Forbidden"), nil)
+	flowErr := c.emptyClientIDFlowError(authURL, "", errors.New("registration failed: HTTP 403 Forbidden"))
 
 	require.NotNil(t, flowErr)
 	require.NotNil(t, flowErr.Details)
@@ -103,7 +103,7 @@ func TestEmptyClientIDFlowError_DCRUnsupportedDetails(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
 	authURL := "https://github.com/login/oauth/authorize?client_id="
-	flowErr := c.emptyClientIDFlowError(authURL, "", errors.New("server does not support dynamic client registration"), nil)
+	flowErr := c.emptyClientIDFlowError(authURL, "", errors.New("server does not support dynamic client registration"))
 
 	require.NotNil(t, flowErr)
 	require.NotNil(t, flowErr.Details)
@@ -118,27 +118,11 @@ func TestEmptyClientIDFlowError_NoDCRAttempt(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
 	// nil dcrErr (DCR not attempted or succeeded): no DCRStatus fabricated.
-	flowErr := c.emptyClientIDFlowError("https://example.com/authorize?client_id=", "", nil, nil)
+	flowErr := c.emptyClientIDFlowError("https://example.com/authorize?client_id=", "", nil)
 
 	require.NotNil(t, flowErr)
 	require.NotNil(t, flowErr.Details)
 	assert.Nil(t, flowErr.Details.DCRStatus)
-}
-
-type stubClientIDProvider struct{ id string }
-
-func (s stubClientIDProvider) GetClientID() string { return s.id }
-
-// Codex r2 finding 1: a client_id present only via oauth.extra_params passes
-// the guard (escape hatch for lenient providers) but must not be treated as a
-// fully-configured client — the helper only warns; behavior is pass-through.
-func TestEmptyClientIDFlowError_ExtraParamsClientIDStillPasses(t *testing.T) {
-	c := newClientIDGuardTestClient(t)
-
-	authURL := "https://example.com/authorize?client_id=from-extra-params"
-	flowErr := c.emptyClientIDFlowError(authURL, "", nil, stubClientIDProvider{id: ""})
-
-	assert.Nil(t, flowErr)
 }
 
 // Codex r2 finding 2: "Forbidden" without a literal "403" still maps to
@@ -146,7 +130,7 @@ func TestEmptyClientIDFlowError_ExtraParamsClientIDStillPasses(t *testing.T) {
 func TestEmptyClientIDFlowError_ForbiddenMapsTo403(t *testing.T) {
 	c := newClientIDGuardTestClient(t)
 
-	flowErr := c.emptyClientIDFlowError("https://example.com/authorize?client_id=", "", errors.New("registration request failed: Forbidden"), nil)
+	flowErr := c.emptyClientIDFlowError("https://example.com/authorize?client_id=", "", errors.New("registration request failed: Forbidden"))
 
 	require.NotNil(t, flowErr)
 	require.NotNil(t, flowErr.Details.DCRStatus)
