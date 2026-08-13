@@ -56,6 +56,37 @@ final class UpdateService: ObservableObject {
     /// The effective policy in force (FR-015).
     @Published private(set) var policy: EffectiveUpdatePolicy = .permissive
 
+    /// Spec 095: identity of the current check cycle.
+    ///
+    /// One `runCheck` drives BOTH brains, and the GitHub result outlives the
+    /// cycle that produced it. Without a cycle stamp there is no way to tell an
+    /// installer URL that belongs to the session that just failed from one left
+    /// over from an earlier check — and offering the wrong one is a downgrade
+    /// dressed as a recovery (FR-005).
+    private(set) var checkCycleID: Int = 0
+
+    /// Spec 095 FR-005 candidate 1: the signed installer from the GitHub check,
+    /// captured ONLY on a true `-installer.dmg` match. Deliberately separate
+    /// from `downloadURL`, which is a best-effort link with no identity.
+    private(set) var latestGitHubInstaller: GitHubInstallerCapture?
+
+    /// Spec 095: puts the recovery dialog on screen. Wired at the composition
+    /// root; nil in tests that do not exercise the dialog (and therefore in any
+    /// suite that must not open a modal).
+    var presentFailureDialog: UpdateFailureDialogController.Presenter?
+
+    /// Spec 095: opens a recovery download URL, reporting whether it worked so
+    /// the next candidate can be tried. Defaults to the browser.
+    var openFailureDownload: ((URL) -> Bool)?
+
+    /// Spec 095 US2: records one occurrence with the core. Injected at the
+    /// composition root (this service has no API client of its own).
+    var recordUpdateFailure: UpdateFailureRecorder?
+
+    /// The dialog for the most recent occurrence, held so a queued retry can be
+    /// dropped when the app goes away (FR-004).
+    private var failureDialog: UpdateFailureDialogController?
+
     /// The feed updater, when one could be built. Injected in tests.
     private var feedUpdater: (any FeedUpdating)?
 
@@ -159,6 +190,7 @@ final class UpdateService: ObservableObject {
 
     private func runCheck(userInitiated: Bool) {
         lastErrorMessage = nil
+        checkCycleID += 1
         // Re-evaluate: the app may have been moved into /Applications since
         // launch, which is exactly the fallback FR-016's message asks for.
         blockedReason = UpdateInstallability.evaluate(bundleURL: hostBundleURL)
@@ -284,9 +316,68 @@ final class UpdateService: ObservableObject {
 
     // MARK: - GitHub Releases API
 
+    /// What one GitHub release offers this machine.
+    ///
+    /// Two fields because they answer two different questions: `downloadURL` is
+    /// "somewhere the user can download from" (installer, else any matching DMG,
+    /// else the release page), while `installerURL` is the much narrower "the
+    /// signed, notarized installer for this architecture" that Spec 095 FR-005
+    /// is allowed to offer as a recovery.
+    struct GitHubReleaseSelection: Equatable {
+        let downloadURL: String
+        let installerURL: URL?
+    }
+
+    /// Resolve a release's assets. Pure, so the preference order is testable
+    /// without a network call.
+    ///
+    /// Release assets are published as:
+    ///   mcpproxy-<ver>-darwin-arm64.dmg / -amd64.dmg                     (unsigned)
+    ///   mcpproxy-<ver>-darwin-arm64-installer.dmg / -amd64-installer.dmg (signed + notarized)
+    static func selectDownloadTargets(
+        assets: [[String: Any]],
+        arch: String,
+        htmlURL: String
+    ) -> GitHubReleaseSelection {
+        let matches: [(name: String, url: String)] = assets.compactMap { asset in
+            guard let name = asset["name"] as? String,
+                  let url = asset["browser_download_url"] as? String,
+                  name.contains("darwin"),
+                  name.contains(arch),
+                  name.hasSuffix(".dmg") else { return nil }
+            return (name, url)
+        }
+        // Prefer signed & notarized installer DMG when available.
+        let installer = matches.first { $0.name.contains("-installer.dmg") }
+        let downloadURL = installer?.url ?? matches.first?.url ?? htmlURL
+        return GitHubReleaseSelection(
+            downloadURL: downloadURL,
+            installerURL: installer.flatMap { URL(string: $0.url) }
+        )
+    }
+
+    /// Publish one GitHub-check result, stamping the installer with the cycle
+    /// that asked for it. Separate from the request so both can be tested.
+    func applyGitHubResult(
+        cycleID: Int,
+        version: String,
+        selection: GitHubReleaseSelection,
+        releaseNotes: String?
+    ) {
+        latestVersion = version
+        downloadURL = selection.downloadURL
+        self.releaseNotes = releaseNotes
+        if let installerURL = selection.installerURL {
+            latestGitHubInstaller = GitHubInstallerCapture(
+                cycleID: cycleID, version: version, url: installerURL
+            )
+        }
+    }
+
     private func checkWithGitHub() {
         guard !isChecking else { return }
         isChecking = true
+        let cycleID = checkCycleID
         // One line per check, on the record (#862 ask 3). The updater could
         // neither be confirmed nor excluded during the original investigation
         // because its hourly work logged nothing whatsoever.
@@ -322,33 +413,19 @@ final class UpdateService: ObservableObject {
                 // happens to lag behind a freshly published version.
                 if !remoteVersion.isEmpty && !localVersion.isEmpty &&
                    Self.compareSemver(remoteVersion, localVersion) > 0 {
-                    // Find macOS DMG asset matching the host CPU architecture.
-                    // Release assets are published as:
-                    //   mcpproxy-<ver>-darwin-arm64.dmg / -amd64.dmg            (unsigned)
-                    //   mcpproxy-<ver>-darwin-arm64-installer.dmg / -amd64-installer.dmg  (signed + notarized)
-                    let arch = Self.hostArchToken()
-                    var dmgURL = htmlURL
-                    if let assets = json["assets"] as? [[String: Any]] {
-                        let matches: [(name: String, url: String)] = assets.compactMap { asset in
-                            guard let name = asset["name"] as? String,
-                                  let url = asset["browser_download_url"] as? String,
-                                  name.contains("darwin"),
-                                  name.contains(arch),
-                                  name.hasSuffix(".dmg") else { return nil }
-                            return (name, url)
-                        }
-                        // Prefer signed & notarized installer DMG when available.
-                        if let installer = matches.first(where: { $0.name.contains("-installer.dmg") }) {
-                            dmgURL = installer.url
-                        } else if let first = matches.first {
-                            dmgURL = first.url
-                        }
-                    }
+                    let selection = Self.selectDownloadTargets(
+                        assets: json["assets"] as? [[String: Any]] ?? [],
+                        arch: Self.hostArchToken(),
+                        htmlURL: htmlURL
+                    )
 
                     DispatchQueue.main.async {
-                        self.latestVersion = remoteVersion
-                        self.downloadURL = dmgURL
-                        self.releaseNotes = body
+                        self.applyGitHubResult(
+                            cycleID: cycleID,
+                            version: remoteVersion,
+                            selection: selection,
+                            releaseNotes: body
+                        )
                     }
                 }
             } catch {
@@ -379,6 +456,67 @@ extension UpdateService: FeedUpdaterObserver {
             self.lastErrorMessage = message
             AppLifecycle.shared.recordUpdateCheck("feed check failed: \(message)")
         }
+    }
+
+    /// Spec 095: one terminal failure of one update session.
+    func feedUpdater(didFailSession failure: FeedUpdateFailure) {
+        onMain { self.handleUpdateSessionFailure(failure) }
+    }
+
+    /// Spec 095 US1 + US2: count the occurrence, and offer a way forward when
+    /// the updater asked for the failure to be shown.
+    ///
+    /// The recording happens for EVERY occurrence, including the silent ones —
+    /// a failure nobody sees is exactly the failure the counters exist for.
+    private func handleUpdateSessionFailure(_ failure: FeedUpdateFailure) {
+        lastErrorMessage = failure.errorDescription
+        AppLifecycle.shared.recordUpdateCheck("update session failed (\(failure.stage.rawValue))")
+        if let recordUpdateFailure {
+            // Detached: the dialog below must go up now, whatever the core is
+            // doing (FR-010 — off the UI path, one attempt, no retry).
+            let stage = failure.stage
+            Task.detached { await recordUpdateFailure(stage) }
+        }
+
+        guard failure.dialogRequested, let presentFailureDialog else { return }
+        // The occurrence arrives FROM the terminal-completion callback, so the
+        // failed session is already torn down and a retry may start at once.
+        let dialog = UpdateFailureDialogController(
+            content: .make(stage: failure.stage, detail: failure.errorDescription),
+            candidates: failureDownloadCandidates(
+                offeredVersion: failure.offeredVersion, feedInfoURL: failure.feedInfoURL
+            ),
+            sessionIsTerminal: true,
+            opener: { [weak self] url in
+                guard let self else { return false }
+                return (self.openFailureDownload ?? { NSWorkspace.shared.open($0) })(url)
+            },
+            retry: { [weak self] in self?.checkForUpdates() },
+            present: presentFailureDialog
+        )
+        failureDialog?.teardown()
+        failureDialog = dialog
+        dialog.present()
+    }
+
+    /// FR-005: the ordered recovery candidates for one failed session.
+    func failureDownloadCandidates(
+        offeredVersion: String?,
+        feedInfoURL: URL?
+    ) -> [UpdateFailureCandidate] {
+        UpdateFailureDownload.candidates(
+            installer: latestGitHubInstaller,
+            currentCycleID: checkCycleID,
+            offeredVersion: offeredVersion,
+            feedInfoURL: feedInfoURL
+        )
+    }
+
+    /// The app is quitting: a retry queued behind a terminal signal that will
+    /// never arrive must not be left armed (FR-004).
+    func discardPendingFailureRetry() {
+        failureDialog?.teardown()
+        failureDialog = nil
     }
 
     /// Publish on the main thread — synchronously when already there.

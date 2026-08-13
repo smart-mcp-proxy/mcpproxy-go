@@ -160,6 +160,13 @@ type ServerController interface {
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
 	RefreshVersionInfo() *updatecheck.VersionInfo
+	// RecordUpdateFailure records one desktop auto-update failure occurrence
+	// (Spec 095) as the diagnostics code matching stage. It evaluates the
+	// telemetry gate and performs the durable increment behind ONE call so the
+	// handler cannot observe a gate/record race. recorded=false means the gate
+	// was closed at event time (config opt-out, env opt-out, CI, dev build) and
+	// nothing was persisted — a deliberate no-op, not a failure.
+	RecordUpdateFailure(stage string) (recorded bool, err error)
 	// UpdatePolicy reports the effective update policy (Spec 092 FR-015).
 	// Separate from GetVersionInfo because that one returns nil BOTH when
 	// checking is disabled and when no result exists yet — the tray must be
@@ -765,6 +772,11 @@ func (s *Server) setupRoutes() {
 		// Telemetry payload preview (Spec 042) — renders the next heartbeat
 		// payload with runtime stats attached. No network call is made.
 		r.Get("/telemetry/payload", s.handleGetTelemetryPayload)
+
+		// Update-failure recording (Spec 095) — the tray posts one closed-enum
+		// stage per terminal update-session failure. Strictly validated; the
+		// telemetry gate is evaluated by the controller at event time.
+		r.Post("/telemetry/update-failure", s.handleRecordUpdateFailure)
 
 		// Token statistics
 		r.Get("/stats/tokens", s.handleGetTokenStats)

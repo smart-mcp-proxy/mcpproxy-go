@@ -378,6 +378,7 @@ func (m *MockServerController) GetOnboardingState() (*storage.OnboardingState, e
 }
 func (m *MockServerController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
 func (m *MockServerController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }
+func (m *MockServerController) RecordUpdateFailure(_ string) (bool, error)           { return false, nil }
 
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {

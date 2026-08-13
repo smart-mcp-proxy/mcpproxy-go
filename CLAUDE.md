@@ -158,6 +158,6 @@ tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/
 - **Windows installer**: [docs/github-actions-windows-wix-research.md](docs/github-actions-windows-wix-research.md). **Prerelease** (`next` branch + `v*-rc.*` tags, opt-in, off stable channels): [docs/prerelease-builds.md](docs/prerelease-builds.md).
 
 ## Recent Changes
+- 095-update-failure-ux: Added Swift 5.9 (tray, AppKit + Sparkle 2.9.3 vendored via SwiftPM) · Go 1.24 module toolchain (repo builds with local Go 1.25) + existing only — Sparkle 2.9.3 (`SPUUpdater`, `SPUStandardUserDriver`), chi (httpapi), bbolt (diagnostics counters), swaggo/swag v2 (contract regen). **No new dependencies.**
 - 094-filter-diagnostics: Added Go 1.24 (module toolchain; repo builds with local Go 1.25) + existing only — `mark3labs/mcp-go` (tool registration), stdlib `encoding/json`. No new dependencies.
 - 091-connect-client-form: Added Swift 5.9 (SwiftUI sheet + AppKit menu) + Go 1.25 (core) + existing `internal/connect` package (registry, preview, connect, undo, backup), `internal/httpapi/connect.go` routes; Swift `APIClient` over Unix socket (admin context)
-- 090-tray-glance-v2: Added Swift 5.9 (AppKit, SwiftUI for histogram only) + Go 1.25 (core) + AppKit `NSMenuItem` (incl. `subtitle`, macOS 14.4+), fixture-driven XCTest; Go: chi HTTP API, bbolt storage, zap

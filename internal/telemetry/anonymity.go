@@ -92,6 +92,11 @@ type anonymityScanEnvelope struct {
 	// absent field — as a plain RawMessage, absent stays empty while null
 	// arrives as the literal bytes "null" and fails the object-shape check.
 	TPAScanner json.RawMessage `json:"tpa_scanner"`
+
+	// Spec 095 structural check: the diagnostics counter sub-object, whose
+	// error_code_counts_24h map must be cataloged codes → non-negative counts.
+	// Same not-a-pointer reasoning as TPAScanner.
+	Diagnostics json.RawMessage `json:"diagnostics"`
 }
 
 // v7FieldViolation builds the violation for a Spec 080 field that broke its
@@ -292,6 +297,56 @@ func scanV8TPAScanner(raw json.RawMessage) *AnonymityViolation {
 	return nil
 }
 
+// diagFieldViolation builds the violation for a diagnostics counter field that
+// broke its documented shape (cataloged code keys, non-negative counts).
+func diagFieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "diagnostics_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("diagnostics field %s %s", field, reason),
+	}
+}
+
+// scanDiagnosticsCounters asserts the diagnostics sub-object (if present)
+// carries an error_code_counts_24h map keyed EXCLUSIVELY by catalog-registered
+// MCPX_ codes with non-negative integer values (spec 095 FR-014). Until now
+// the scanner never inspected that map, and its producer-side guard
+// (RecordErrorCode) filters on the MCPX_ prefix alone — so a regression that
+// let a server name, URL, or an uncataloged code through would have reached
+// the wire unchecked. Keys are where identifying strings would leak, so the
+// violation deliberately never echoes the offending key.
+func scanDiagnosticsCounters(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	// json.Unmarshal accepts `null` into a nil map; the field, when present,
+	// must be a real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return diagFieldViolation("diagnostics", "must be an object")
+	}
+
+	rawCounts, ok := obj["error_code_counts_24h"]
+	if !ok {
+		return nil
+	}
+	var counts map[string]json.RawMessage
+	if err := json.Unmarshal(rawCounts, &counts); err != nil || counts == nil {
+		return diagFieldViolation("diagnostics.error_code_counts_24h", "must be an object")
+	}
+	for code, v := range counts {
+		if !isValidMCPXCode(code) {
+			return diagFieldViolation("diagnostics.error_code_counts_24h",
+				"carries a key that is not a cataloged MCPX_* diagnostic code")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "diagnostics.error_code_counts_24h", diagFieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
 // ScanForPII scans a serialized telemetry payload (v3+) for PII leaks and
 // structural violations. Returns nil when the payload is clean; otherwise
 // returns an *AnonymityViolation. The returned error satisfies
@@ -309,6 +364,8 @@ func scanV8TPAScanner(raw json.RawMessage) *AnonymityViolation {
 //  5. tpa_scanner (schema v8), if present, is not an object of whitelisted
 //     keys holding non-negative integer counts, with a findings map keyed
 //     exclusively by the fixed severity enum.
+//  6. diagnostics.error_code_counts_24h, if present, is not a map of
+//     catalog-registered MCPX_* codes to non-negative integer counts.
 //
 // The implementation never logs the payload — it only reports which rule
 // tripped and the offending pattern (a small literal). Callers should log at
@@ -371,6 +428,11 @@ func ScanForPII(payloadJSON []byte) error {
 
 	// Rule 5: schema-v8 tpa_scanner must be counts + fixed severity keys only.
 	if v := scanV8TPAScanner(env.TPAScanner); v != nil {
+		return v
+	}
+
+	// Rule 6: diagnostics counters must be cataloged codes → non-negative ints.
+	if v := scanDiagnosticsCounters(env.Diagnostics); v != nil {
 		return v
 	}
 

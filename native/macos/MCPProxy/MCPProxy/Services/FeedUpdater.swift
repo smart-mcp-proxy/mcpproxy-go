@@ -60,6 +60,102 @@ extension FeedUpdating {
     var updateIsReadyToInstall: Bool { false }
 }
 
+// MARK: - Update sessions (Spec 095)
+
+/// One terminal failure of one update session — the unit both the recovery
+/// dialog and the failure counters are measured in (Spec 095 Definitions).
+struct FeedUpdateFailure: Equatable {
+    let stage: UpdateFailureStage
+
+    /// The version the failed session was updating to, when it got far enough
+    /// to know one. Nil for a feed-stage failure.
+    let offeredVersion: String?
+
+    /// The offered item's release-page link from the feed (FR-005 candidate 2).
+    let feedInfoURL: URL?
+
+    /// Whether the updater asked for an error to be shown. Sparkle's own drivers
+    /// already implement FR-002's visibility matrix, so this is inherited rather
+    /// than re-derived here.
+    let dialogRequested: Bool
+
+    /// The operating system's error description, for the dialog's secondary text
+    /// (FR-003). Displayed locally and NEVER transmitted.
+    let errorDescription: String?
+}
+
+/// Per-session failure bookkeeping, free of Sparkle so it can be tested.
+///
+/// The session is the unit of counting: several callbacks may describe the same
+/// failure, and exactly one occurrence must come out of them (FR-001/FR-009).
+/// State resets when a session ends, which is what keeps a scheduled session
+/// Sparkle starts on its own timer from inheriting the previous one's evidence.
+final class UpdateSessionTracker {
+
+    private var downloadProvenance = false
+    private var offeredVersion: String?
+    private var feedInfoURL: URL?
+    private var stashedErrorDescription: String?
+    private var finished = false
+
+    /// A new check is starting.
+    func sessionDidStart() {
+        reset()
+        finished = false
+    }
+
+    /// The feed offered an update (`didFindValidUpdate`).
+    func didFindValidUpdate(version: String, infoURL: URL?) {
+        finished = false
+        offeredVersion = version
+        feedInfoURL = infoURL
+    }
+
+    /// `failedToDownloadUpdate` fired: the provenance latch of FR-007's first
+    /// evidence row.
+    func downloadDidFail() {
+        finished = false
+        downloadProvenance = true
+    }
+
+    /// The user driver was asked to show an error. Stashing it (rather than
+    /// alerting inside that call) is what lets Sparkle tear its own windows down
+    /// first; the dialog is presented from the cycle-finished callback below.
+    func driverDidShowError(_ error: NSError) {
+        finished = false
+        stashedErrorDescription = error.localizedDescription
+    }
+
+    /// The update cycle finished — the occurrence point, the terminal-completion
+    /// signal, and the end of this session's state.
+    ///
+    /// Returns the occurrence, or nil when this was not an eligible failure
+    /// (clean finish, cancellation, "no update found", or a repeat callback).
+    func sessionDidFinish(error: NSError?) -> FeedUpdateFailure? {
+        defer { reset(); finished = true }
+        guard !finished, let error else { return nil }
+        guard let stage = UpdateFailureClassifier.classify(
+            downloadProvenance: downloadProvenance,
+            identity: UpdateFailureErrorIdentity(error)
+        ) else { return nil }
+
+        return FeedUpdateFailure(
+            stage: stage,
+            offeredVersion: offeredVersion,
+            feedInfoURL: feedInfoURL,
+            dialogRequested: stashedErrorDescription != nil,
+            errorDescription: stashedErrorDescription ?? error.localizedDescription
+        )
+    }
+
+    private func reset() {
+        downloadProvenance = false
+        offeredVersion = nil
+        feedInfoURL = nil
+        stashedErrorDescription = nil
+    }
+}
+
 /// Callbacks from the updater. Delivered on the main thread.
 protocol FeedUpdaterObserver: AnyObject {
     /// A version is available from the feed.
@@ -69,7 +165,14 @@ protocol FeedUpdaterObserver: AnyObject {
     func feedUpdaterDidNotFindUpdate()
 
     /// A check or install failed in a way the user should see (FR-016).
+    ///
+    /// Tray-SYNTHESIZED advisories only (the postpone notice and the on-quit
+    /// tripwire). Spec 095 excludes them from classification and counting: they
+    /// are not update-session failures. Session failures arrive below.
     func feedUpdater(didFailWith message: String)
+
+    /// Spec 095: one terminal failure of one update session.
+    func feedUpdater(didFailSession failure: FeedUpdateFailure)
 
     /// FR-012: the bundle is about to be replaced. MUST stop the tray-managed
     /// core before returning — this call is synchronous and the installer runs
@@ -98,7 +201,15 @@ import Sparkle
 final class SparkleFeedUpdater: NSObject, FeedUpdating {
 
     private weak var observer: FeedUpdaterObserver?
-    private var controller: SPUStandardUpdaterController?
+    private var updater: SPUUpdater?
+
+    /// The user driver, retained here because `SPUUpdater` does not own it.
+    /// Spec 095: a subclass whose only override is the failure alert.
+    private var driver: RecoveryUserDriver?
+
+    /// Spec 095: this session's failure evidence.
+    private let session = UpdateSessionTracker()
+
     private var policy: EffectiveUpdatePolicy = .permissive
     private(set) var unavailableReason: String?
 
@@ -132,7 +243,23 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
     /// here; removing the download needs the on-quit installer we refuse to arm.
     private(set) var updateIsReadyToInstall: Bool = false
 
-    var isAvailable: Bool { controller != nil }
+    var isAvailable: Bool { updater != nil }
+
+    /// The Sparkle selectors this class MUST answer, asserted against the ObjC
+    /// runtime in the suite.
+    ///
+    /// Every one of these is an OPTIONAL protocol method matched by selector at
+    /// runtime, so a Swift name that no longer maps to the selector — an
+    /// importer change, a rename, a typo — compiles cleanly and is then simply
+    /// never called. Silence is exactly what an update-failure path cannot
+    /// afford.
+    static let requiredDelegateSelectors = [
+        "updater:mayPerformUpdateCheck:error:",
+        "updater:didFinishUpdateCycleForUpdateCheck:error:",
+        "updater:failedToDownloadUpdate:error:",
+        "updater:didFindValidUpdate:",
+        "updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:",
+    ]
 
     init(observer: FeedUpdaterObserver?) {
         self.observer = observer
@@ -157,13 +284,22 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
             return
         }
 
-        let controller = SPUStandardUpdaterController(
-            startingUpdater: false,
-            updaterDelegate: self,
-            userDriverDelegate: self
+        // Spec 095: NOT SPUStandardUpdaterController. That adapter hardwires the
+        // stock user driver, and the stock driver's failure alert ("Update
+        // Error! … Cancel Update") is a dead end with no retry and no download
+        // path. Building the updater directly is the only way to hand it a
+        // driver subclass. Everything else here is the adapter's own behaviour:
+        // same delegate, same driver class, same deferred start.
+        let driver = RecoveryUserDriver(hostBundle: bundle, delegate: self)
+        driver.failureSink = self
+        let updater = SPUUpdater(
+            hostBundle: bundle,
+            applicationBundle: bundle,
+            userDriver: driver,
+            delegate: self
         )
         do {
-            try controller.updater.start()
+            try updater.start()
         } catch {
             // Misconfiguration (placeholder EdDSA key, missing feed URL, an
             // unsigned bundle). The legacy GitHub path keeps working; the menu
@@ -173,7 +309,8 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
             return
         }
 
-        self.controller = controller
+        self.driver = driver
+        self.updater = updater
         apply(policy: policy)
         NSLog("[MCPProxy] Sparkle updater started (feed channel=%@, scheduled checks=%@)",
               policy.channel.rawValue,
@@ -184,7 +321,7 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
 
     func apply(policy: EffectiveUpdatePolicy) {
         self.policy = policy
-        guard let updater = controller?.updater else { return }
+        guard let updater else { return }
         // FR-015: the kill switch governs the SCHEDULED cycle. `check(userInitiated:)`
         // deliberately does not consult it.
         updater.automaticallyChecksForUpdates = policy.automaticChecksAllowed
@@ -221,13 +358,15 @@ final class SparkleFeedUpdater: NSObject, FeedUpdating {
     }
 
     func check(userInitiated: Bool) {
-        guard let updater = controller?.updater else { return }
+        guard let updater else { return }
         if userInitiated {
             // Always allowed (FR-015, last sentence).
+            session.sessionDidStart()
             updater.checkForUpdates()
             return
         }
         guard policy.automaticChecksAllowed else { return }
+        session.sessionDidStart()
         updater.checkForUpdatesInBackground()
     }
 }
@@ -292,7 +431,41 @@ extension SparkleFeedUpdater: SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         let version = item.displayVersionString
         offeredVersion = version
+        // Spec 095 FR-005 candidate 2: the release page the feed itself points
+        // at, which is the only download URL that is certainly about THIS offer.
+        session.didFindValidUpdate(version: version, infoURL: item.infoURL)
         onMain { [weak self] in self?.observer?.feedUpdater(didFindVersion: version) }
+    }
+
+    /// Spec 095 — the session-start signal, and the ONLY one that covers the
+    /// sessions Sparkle starts on its own timer (`check(userInitiated:)` sees
+    /// only ours). Sparkle calls it at the top of every check; never deferring,
+    /// so it stays a pure notification.
+    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        session.sessionDidStart()
+    }
+
+    /// Spec 095 FR-007, first evidence row: whatever the abort error ends up
+    /// saying, a session that got here failed at the download stage.
+    func updater(_ updater: SPUUpdater, failedToDownloadUpdate item: SUAppcastItem, error: Error) {
+        session.downloadDidFail()
+    }
+
+    /// Spec 095 — the occurrence point.
+    ///
+    /// Fires exactly once per update session, including the silent ones that
+    /// never reach the user driver, and carries the terminal error. It is also
+    /// FR-004's terminal-completion signal: by the time the dialog goes up the
+    /// failed session is already torn down, so Try Again can start immediately.
+    func updater(
+        _ updater: SPUUpdater,
+        didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
+        error: Error?
+    ) {
+        guard let failure = session.sessionDidFinish(error: error as NSError?) else { return }
+        NSLog("[MCPProxy] Sparkle update session failed: stage=%@ dialog=%@",
+              failure.stage.rawValue, failure.dialogRequested ? "yes" : "no")
+        onMain { [weak self] in self?.observer?.feedUpdater(didFailSession: failure) }
     }
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
@@ -376,6 +549,13 @@ extension SparkleFeedUpdater: SPUUpdaterDelegate {
               + "refuse the install. The bundle may be replaced under it.", hook)
     }
 
+    /// Diagnostics only, since Spec 095.
+    ///
+    /// The failure itself is reported from the cycle-finished callback below,
+    /// which Sparkle always delivers right after this one (SPUUpdater.m's
+    /// driver-completion block calls both, in that order) and which — unlike
+    /// this callback — also covers the sessions that abort with no error at all.
+    /// Reporting from both would count and announce one failure twice.
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         let nsError = error as NSError
         // "You already have the newest version" arrives here as an abort too.
@@ -386,9 +566,7 @@ extension SparkleFeedUpdater: SPUUpdaterDelegate {
             onMain { [weak self] in self?.observer?.feedUpdaterDidNotFindUpdate() }
             return
         }
-        let message = error.localizedDescription
-        NSLog("[MCPProxy] Sparkle aborted: %@", message)
-        onMain { [weak self] in self?.observer?.feedUpdater(didFailWith: message) }
+        NSLog("[MCPProxy] Sparkle aborted: %@", error.localizedDescription)
     }
 
     private func onMain(_ work: @escaping () -> Void) {
@@ -433,6 +611,45 @@ extension SparkleFeedUpdater: SPUStandardUserDriverDelegate {
         let version = update.displayVersionString
         offeredVersion = version
         observer?.feedUpdater(didFindVersion: version)
+    }
+}
+
+// MARK: - Recovery user driver (Spec 095)
+
+extension SparkleFeedUpdater {
+    /// Take the error Sparkle wanted to alert about. Called by the driver below,
+    /// on the main thread, and consumed at the end of the cycle.
+    ///
+    /// The presence of a stashed error IS the FR-002 visibility decision: the
+    /// stock drivers only reach `showUpdaterError` when their own matrix says
+    /// the failure should be shown (user-initiated always; scheduled only once
+    /// update UI has been presented), so the tray inherits that policy instead
+    /// of reimplementing it.
+    func stashUpdaterError(_ error: NSError) {
+        session.driverDidShowError(error)
+    }
+}
+
+/// The stock user driver with exactly one behaviour replaced: its failure alert.
+///
+/// Sparkle 2.9.3 offers no delegate hook to suppress or replace that alert
+/// (`didAbortWithError` is notification-only), so the alert has to be overridden
+/// where it is written. Everything else — found-update prompt, progress, release
+/// notes, gentle reminders — stays stock (FR-006).
+///
+/// The override acknowledges IMMEDIATELY and shows nothing. Sparkle's own
+/// implementation closes the checking and status windows before it alerts;
+/// blocking here with a modal of our own would leave those windows up behind it.
+/// Acknowledging lets the abort continue into `dismissUpdateInstallation`, which
+/// closes them, and the recovery dialog is presented from the cycle-finished
+/// callback instead.
+final class RecoveryUserDriver: SPUStandardUserDriver {
+
+    weak var failureSink: SparkleFeedUpdater?
+
+    override func showUpdaterError(_ error: Error, acknowledgement: @escaping () -> Void) {
+        failureSink?.stashUpdaterError(error as NSError)
+        acknowledgement()
     }
 }
 

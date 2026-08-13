@@ -35,10 +35,15 @@ final class ConnectStubURLProtocol: URLProtocol {
     /// Status code replayed for every request.
     static var statusCode = 200
 
+    /// When set, the request fails at the transport instead of answering — a
+    /// core that is not running, or a socket that has gone away.
+    static var transportFailure: Error?
+
     static func reset() {
         recorded = []
         responseBody = Data()
         statusCode = 200
+        transportFailure = nil
     }
 
     /// An APIClient whose traffic is intercepted by this stub.
@@ -75,6 +80,10 @@ final class ConnectStubURLProtocol: URLProtocol {
                 body: Self.body(of: request)
             )
         )
+        if let failure = ConnectStubURLProtocol.transportFailure {
+            client?.urlProtocol(self, didFailWithError: failure)
+            return
+        }
         let response = HTTPURLResponse(
             url: request.url ?? URL(string: "http://127.0.0.1:8080")!,
             statusCode: ConnectStubURLProtocol.statusCode,

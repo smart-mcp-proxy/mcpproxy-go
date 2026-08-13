@@ -796,3 +796,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [092-auto-updater](./specs/092-auto-updater/) | — | — |
 | [093-concurrency-limits](./specs/093-concurrency-limits/) | — | — |
 | [094-filter-diagnostics](./specs/094-filter-diagnostics/) | `shipped` | 14/14 (100%) |
+| [095-update-failure-ux](./specs/095-update-failure-ux/) | `shipped` | 28/28 (100%) |
