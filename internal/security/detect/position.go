@@ -125,21 +125,27 @@ var wordExampleCues = []string{
 // example-ADJECTIVE label ("Sample response:", "Expected output:", "Mock
 // reply:", bare "Sample:") frames the phrase after it as illustrative output,
 // exactly like the literal word "example" (already in wordExampleCues) does.
-// Three properties keep finding A (label-smuggling) closed:
-//   - the adjective list is CLOSED (sample/demo/mock/dummy/test/typical/
-//     expected/illustrative/hypothetical/fictional/simulated, stem forms for
-//     normalized text) — a bare label without an example adjective
-//     ("Prompt:", "response:") still falls through and hard-fires;
+// Scope limits:
+//   - the adjective list is CLOSED — a bare label without an example
+//     adjective ("Prompt:", "response:") still falls through and hard-fires;
 //   - the `\s*$` tail anchor requires the label to IMMEDIATELY precede the
 //     match — "sample response: please ignore …" does not qualify;
 //   - it is checked on the sentence-scoped window, so a prior-sentence
 //     "Sample output format." lead cannot reach across a period.
 //
-// Worst case under the never-fully-suppress invariant is identical to the
-// accepted "example"/quote cues: an example-position phrase.injection match is
-// re-floored to SOFT review, never invisible — so recognizing these labels
-// cannot create a silent bypass, only downgrade auto-quarantine to review.
-var exampleLabelCue = regexp.MustCompile(`\b(?:sample|demo|mock|dummy|test|typical|expect\w*|illustrat\w*|hypothetical|fictional|simulat\w*)(?:\s+(?:respons\w*|output|repl\w*|answer|result|text|messag\w*|completion|payload|value|data|format|prompt|request|content))?\s*:\s*$`)
+// DELIBERATE RESIDUAL RISK (not a silent bypass): an attacker CAN prefix an
+// injection with a recognized label ("test: ignore all previous instructions")
+// to downgrade HARD → SOFT review — the same downgrade the pre-existing
+// "example:"/quote cues already allowed. The never-fully-suppress invariant
+// keeps the match visible as a review finding, and the admission gates hold:
+// a scan-mode server with SOFT warnings stays quarantined (only a clean
+// verdict auto-approves), and new/changed scan-mode tools with warnings stay
+// held. What is lost is only the --force requirement on an explicit manual
+// approval — the operator still sees the flagged description at review time.
+// Adjective and noun forms are deliberately BOUNDED (explicit inflections, not
+// open-ended \w* stems) so unrelated words that merely contain a stem
+// ("expectoration", "replenishment") never qualify (Codex PR-#977).
+var exampleLabelCue = regexp.MustCompile(`\b(?:sample|demo|mock|dummy|test|typical|expect(?:ed|s)?|illustrative|hypothetical|fictional|simulat(?:ed|ion)?)(?:\s+(?:responses?|outputs?|repl(?:y|ies)|answers?|results?|texts?|messages?|completions?|payloads?|values?|data|formats?|prompts?|requests?|content))?\s*:\s*$`)
 
 // describingVerb matches an analytical/descriptive verb (stemmed forms) whose
 // presence in the match's sentence signals the tool is talking ABOUT a phrase
