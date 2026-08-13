@@ -133,15 +133,17 @@ var wordExampleCues = []string{
 //   - it is checked on the sentence-scoped window, so a prior-sentence
 //     "Sample output format." lead cannot reach across a period.
 //
-// DELIBERATE RESIDUAL RISK (not a silent bypass): an attacker CAN prefix an
-// injection with a recognized label ("test: ignore all previous instructions")
-// to downgrade HARD → SOFT review — the same downgrade the pre-existing
-// "example:"/quote cues already allowed. The never-fully-suppress invariant
-// keeps the match visible as a review finding, and the admission gates hold:
-// a scan-mode server with SOFT warnings stays quarantined (only a clean
-// verdict auto-approves), and new/changed scan-mode tools with warnings stay
-// held. What is lost is only the --force requirement on an explicit manual
-// approval — the operator still sees the flagged description at review time.
+// DELIBERATE RESIDUAL RISK (not a silent bypass): an attacker CAN prefix a
+// CURATED phrase-family injection with a recognized label ("test: ignore all
+// previous instructions") to downgrade HARD → SOFT review. Because this cue is
+// honored ONLY via ClassifyPositionForRecall (phrase.injection, which re-floors
+// example-position up to the SOFT review floor), the match stays VISIBLE as a
+// review finding and the scan-mode admission gates hold — a server/tool with
+// SOFT warnings stays quarantined (only a clean verdict auto-approves). What is
+// lost is only the --force requirement on an explicit manual approval. The cue
+// is withheld from the SOFT-only directive.imperative check (plain
+// ClassifyPosition), which drops example-position silently, so a label cannot
+// turn a directive-only match into a clean verdict.
 // Adjective and noun forms are deliberately BOUNDED (explicit inflections, not
 // open-ended \w* stems) so unrelated words that merely contain a stem
 // ("expectoration", "replenishment") never qualify (Codex PR-#977).
@@ -202,7 +204,30 @@ var descriptiveTail = regexp.MustCompile(`\b(?:that|which|who)\s+$`)
 // ClassifyPosition decides whether the match starting at byte offset matchStart
 // in text is in instruction-, descriptive-, or example-position. text may be
 // raw or normalized; matching is case-insensitive on the preceding window.
+//
+// This is the entry point for SOFT-only checks (directive.imperative): an
+// example-position match falls below their emit floor and is SILENTLY dropped,
+// which is their designed US2 false-positive control. It deliberately does NOT
+// honor the example-ADJECTIVE label cue (issue #795) — see
+// ClassifyPositionForRecall for why that cue is unsafe here.
 func ClassifyPosition(text string, matchStart int) Position {
+	return classifyPosition(text, matchStart, false)
+}
+
+// ClassifyPositionForRecall is ClassifyPosition plus the issue-#795
+// example-adjective label cue ("Sample response:", "Expected output:"). It is
+// ONLY for recall-oriented checks (phrase.injection) that re-floor an
+// example-position match up to the SOFT review floor (never-fully-suppress):
+// there a labeled example downgrades HARD→SOFT and stays visible. The cue is
+// intentionally withheld from ClassifyPosition because a SOFT-only check drops
+// example-position entirely, so honoring the label there would let
+// "Test response: <directive>" silently clear to a clean verdict — a real
+// widening, not a friction change (Codex PR-#977 round 2).
+func ClassifyPositionForRecall(text string, matchStart int) Position {
+	return classifyPosition(text, matchStart, true)
+}
+
+func classifyPosition(text string, matchStart int, honorExampleLabel bool) Position {
 	if matchStart <= 0 {
 		return PositionInstruction
 	}
@@ -235,15 +260,15 @@ func ClassifyPosition(text string, matchStart int) Position {
 		window = window[i+1:]
 	}
 
-	// 2. Word illustration cues ("such as", "for example", "example") and
-	// example-adjective labels ("sample response:", "expected output:") in the
-	// current sentence → example-position.
+	// 2. Word illustration cues ("such as", "for example", "example") and — for
+	// recall-oriented callers only — example-adjective labels ("sample
+	// response:", "expected output:") in the current sentence → example-position.
 	for _, cue := range wordExampleCues {
 		if strings.Contains(window, cue) {
 			return PositionExample
 		}
 	}
-	if exampleLabelCue.MatchString(window) {
+	if honorExampleLabel && exampleLabelCue.MatchString(window) {
 		return PositionExample
 	}
 
