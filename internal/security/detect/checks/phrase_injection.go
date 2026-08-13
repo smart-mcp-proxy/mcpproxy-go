@@ -159,7 +159,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	bestThreat := ""
 	for _, fam := range phraseFamilies {
 		for _, loc := range fam.re.FindAllStringIndex(text, -1) {
-			conf := fam.base * detect.ClassifyPosition(text, loc[0]).Discount()
+			conf := fam.base * detect.ClassifyPositionForRecall(text, loc[0]).Discount()
 			if !matched || conf > bestConf {
 				matched = true
 				bestConf = conf
