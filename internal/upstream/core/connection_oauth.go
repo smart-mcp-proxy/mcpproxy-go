@@ -1080,9 +1080,11 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		}
 	}
 
-	// Continue with OAuth flow regardless of DCR result
-	// Public client OAuth (RFC 8252) with PKCE doesn't require client_id
-	// If server doesn't support this, it will reject the authorization request
+	// Continue with the OAuth flow when a client_id is available (static,
+	// persisted, or obtained via DCR). OAuth public clients (RFC 8252 + PKCE)
+	// still require a client_id — PKCE replaces the client secret, not the
+	// id — so the empty-client_id guard below aborts before opening a
+	// guaranteed-broken authorization URL (issue #975).
 
 	c.logger.Info("🌟 Starting OAuth authentication flow",
 		zap.String("server", c.config.Name),
@@ -1159,36 +1161,12 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		}
 	}
 
-	// Check if we're attempting public client OAuth with empty client_id
-	// Some servers (like Figma) advertise DCR but return 403, then reject empty client_id
-	parsedAuthURL, parseErr := url.Parse(authURL)
-	if parseErr == nil {
-		clientIDParam := parsedAuthURL.Query().Get("client_id")
-		if clientIDParam == "" && oauthMode == "public client (PKCE)" {
-			c.logger.Error("❌ OAuth server requires client_id but DCR failed",
-				zap.String("server", c.config.Name),
-				zap.String("url", c.config.URL),
-				zap.String("help", "Configure oauth.client_id in server config or contact the OAuth provider"))
-			// Return structured error for Spec 020
-			return &contracts.OAuthFlowError{
-				Success:    false,
-				ErrorType:  contracts.OAuthErrorClientIDRequired,
-				ErrorCode:  contracts.OAuthCodeNoClientID,
-				ServerName: c.config.Name,
-				Message:    fmt.Sprintf("Server '%s' requires client_id but Dynamic Client Registration returned 403", c.config.Name),
-				Details: &contracts.OAuthErrorDetails{
-					ServerURL: c.config.URL,
-					DCRStatus: &contracts.DCRStatus{
-						Attempted:  true,
-						Success:    false,
-						StatusCode: 403,
-						Error:      "Forbidden",
-					},
-				},
-				Suggestion: "Register an OAuth app with the provider and configure oauth.client_id in server config.",
-				DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-			}
-		}
+	// Never proceed with an authorization URL that lacks a client_id — the
+	// provider will reject it (e.g. Figma after a DCR 403, GitHub which has no
+	// DCR endpoint at all; issue #975). Checked on the final URL so a
+	// client_id supplied via oauth.extra_params still passes.
+	if flowErr := c.emptyClientIDFlowError(authURL, ""); flowErr != nil {
+		return flowErr
 	}
 
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
@@ -2017,7 +1995,50 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		}
 	}
 
+	// Issue #975: never hand back an authorization URL without a client_id —
+	// the provider is guaranteed to reject it (GitHub 404s on client_id=).
+	if flowErr := c.emptyClientIDFlowError(authURL, correlationID); flowErr != nil {
+		return "", nil, "", "", flowErr
+	}
+
 	return authURL, oauthHandler, codeVerifier, state, nil
+}
+
+// emptyClientIDFlowError returns a structured oauth_client_id_required error
+// when the final authorization URL carries no client_id. OAuth public clients
+// (RFC 8252 + PKCE) still require a client_id — PKCE replaces the client
+// secret, not the id — so a provider is guaranteed to reject such a URL
+// (GitHub responds 404; issue #975). Returns nil when the URL has a client_id
+// or cannot be parsed.
+func (c *Client) emptyClientIDFlowError(authURL, correlationID string) *contracts.OAuthFlowError {
+	parsed, err := url.Parse(authURL)
+	if err != nil {
+		return nil
+	}
+	if parsed.Query().Get("client_id") != "" {
+		return nil
+	}
+	c.logger.Error("❌ OAuth provider requires a client_id but none is available (DCR unsupported or failed)",
+		zap.String("server", c.config.Name),
+		zap.String("url", c.config.URL),
+		zap.String("help", "Register an OAuth app with the provider and set oauth.client_id in the server config"))
+	return &contracts.OAuthFlowError{
+		Success:       false,
+		ErrorType:     contracts.OAuthErrorClientIDRequired,
+		ErrorCode:     contracts.OAuthCodeNoClientID,
+		ServerName:    c.config.Name,
+		CorrelationID: correlationID,
+		Message:       fmt.Sprintf("Server '%s' requires a client_id: the OAuth provider does not support Dynamic Client Registration (or registration failed) and no oauth.client_id is configured", c.config.Name),
+		Details: &contracts.OAuthErrorDetails{
+			ServerURL: c.config.URL,
+			DCRStatus: &contracts.DCRStatus{
+				Attempted: true,
+				Success:   false,
+			},
+		},
+		Suggestion: "Register an OAuth app with the provider and set oauth.client_id in the server config.",
+		DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+	}
 }
 
 // waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
