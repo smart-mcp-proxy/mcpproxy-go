@@ -1010,6 +1010,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 	// Determine OAuth mode and attempt registration if needed
 	var oauthMode string
+	var dcrErr error
 	if hasStaticCredentials {
 		// Skip DCR when static credentials are provided in config
 		oauthMode = "static credentials"
@@ -1040,7 +1041,9 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		}()
 
 		if regErr != nil {
-			// DCR failed - proceed with public client OAuth (PKCE without client_id)
+			// DCR failed - proceed and let the empty-client_id guard below
+			// surface a structured error if no client_id materializes
+			dcrErr = regErr
 			oauthMode = "public client (PKCE)"
 			c.logger.Warn("⚠️ Dynamic Client Registration not supported - using public client OAuth with PKCE",
 				zap.String("server", c.config.Name),
@@ -1165,7 +1168,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// provider will reject it (e.g. Figma after a DCR 403, GitHub which has no
 	// DCR endpoint at all; issue #975). Checked on the final URL so a
 	// client_id supplied via oauth.extra_params still passes.
-	if flowErr := c.emptyClientIDFlowError(authURL, ""); flowErr != nil {
+	if flowErr := c.emptyClientIDFlowError(authURL, "", dcrErr); flowErr != nil {
 		return flowErr
 	}
 
@@ -1371,6 +1374,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
 	hasPersistedCredentials := oauthConfig.ClientID != ""
 
+	var dcrErr error
 	if !hasStaticCredentials && !hasPersistedCredentials {
 		c.logger.Info("📋 Attempting Dynamic Client Registration (optional)",
 			zap.String("server", c.config.Name))
@@ -1390,31 +1394,12 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		}()
 
 		if regErr != nil {
+			// DCR failed - the empty-client_id guard below surfaces a
+			// structured error if no client_id materializes (issue #975)
+			dcrErr = regErr
 			c.logger.Info("ℹ️ DCR not available, continuing with public client OAuth",
 				zap.String("server", c.config.Name),
 				zap.Error(regErr))
-
-			if strings.Contains(regErr.Error(), "403") {
-				return result, &contracts.OAuthFlowError{
-					Success:       false,
-					ErrorType:     contracts.OAuthErrorClientIDRequired,
-					ErrorCode:     contracts.OAuthCodeNoClientID,
-					ServerName:    c.config.Name,
-					CorrelationID: result.CorrelationID,
-					Message:       fmt.Sprintf("Server '%s' requires client_id but Dynamic Client Registration returned 403", c.config.Name),
-					Details: &contracts.OAuthErrorDetails{
-						ServerURL: c.config.URL,
-						DCRStatus: &contracts.DCRStatus{
-							Attempted:  true,
-							Success:    false,
-							StatusCode: 403,
-							Error:      "Forbidden",
-						},
-					},
-					Suggestion: "Register an OAuth app with the provider and configure oauth.client_id in server config.",
-					DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-				}
-			}
 		} else {
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
@@ -1495,6 +1480,12 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 				zap.String("server", c.config.Name),
 				zap.Error(err))
 		}
+	}
+
+	// Never store or open an authorization URL that lacks a client_id — the
+	// provider is guaranteed to reject it (issue #975).
+	if flowErr := c.emptyClientIDFlowError(authURL, result.CorrelationID, dcrErr); flowErr != nil {
+		return result, flowErr
 	}
 
 	// Store the auth URL in the result
@@ -1892,6 +1883,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
 	hasPersistedCredentials := oauthConfig.ClientID != ""
 
+	var dcrErr error
 	if !hasStaticCredentials && !hasPersistedCredentials {
 		c.logger.Info("📋 Attempting Dynamic Client Registration (DCR)",
 			zap.String("server", c.config.Name),
@@ -1908,26 +1900,13 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		}()
 
 		if regErr != nil {
+			// DCR failed - the empty-client_id guard below surfaces a
+			// structured error if no client_id materializes (issue #975)
+			dcrErr = regErr
 			c.logger.Warn("⚠️ DCR failed",
 				zap.String("server", c.config.Name),
 				zap.String("correlation_id", correlationID),
 				zap.Error(regErr))
-
-			if strings.Contains(regErr.Error(), "403") {
-				c.logger.Error("❌ DCR returned 403 - client_id required",
-					zap.String("server", c.config.Name),
-					zap.String("correlation_id", correlationID),
-					zap.String("suggestion", "Register an OAuth app with the provider"))
-				return "", nil, "", "", &contracts.OAuthFlowError{
-					Success:       false,
-					ErrorType:     contracts.OAuthErrorClientIDRequired,
-					ErrorCode:     contracts.OAuthCodeNoClientID,
-					ServerName:    c.config.Name,
-					CorrelationID: correlationID,
-					Message:       fmt.Sprintf("Server '%s' requires client_id but DCR returned 403", c.config.Name),
-					Suggestion:    "Register an OAuth app with the provider and configure oauth.client_id in server config.",
-				}
-			}
 		} else {
 			c.logger.Info("✅ DCR succeeded",
 				zap.String("server", c.config.Name),
@@ -1997,7 +1976,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 
 	// Issue #975: never hand back an authorization URL without a client_id —
 	// the provider is guaranteed to reject it (GitHub 404s on client_id=).
-	if flowErr := c.emptyClientIDFlowError(authURL, correlationID); flowErr != nil {
+	if flowErr := c.emptyClientIDFlowError(authURL, correlationID, dcrErr); flowErr != nil {
 		return "", nil, "", "", flowErr
 	}
 
@@ -2009,8 +1988,11 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 // (RFC 8252 + PKCE) still require a client_id — PKCE replaces the client
 // secret, not the id — so a provider is guaranteed to reject such a URL
 // (GitHub responds 404; issue #975). Returns nil when the URL has a client_id
-// or cannot be parsed.
-func (c *Client) emptyClientIDFlowError(authURL, correlationID string) *contracts.OAuthFlowError {
+// or cannot be parsed. dcrErr, when non-nil, is the DCR failure that left the
+// client without an id; its real outcome is preserved in the error details so
+// a 403 rejection (Figma) stays distinguishable from a provider with no
+// registration endpoint at all (GitHub).
+func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr error) *contracts.OAuthFlowError {
 	parsed, err := url.Parse(authURL)
 	if err != nil {
 		return nil
@@ -2021,7 +2003,22 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string) *contract
 	c.logger.Error("❌ OAuth provider requires a client_id but none is available (DCR unsupported or failed)",
 		zap.String("server", c.config.Name),
 		zap.String("url", c.config.URL),
+		zap.NamedError("dcr_error", dcrErr),
 		zap.String("help", "Register an OAuth app with the provider and set oauth.client_id in the server config"))
+	details := &contracts.OAuthErrorDetails{
+		ServerURL: c.config.URL,
+	}
+	if dcrErr != nil {
+		dcrStatus := &contracts.DCRStatus{
+			Attempted: true,
+			Success:   false,
+			Error:     dcrErr.Error(),
+		}
+		if strings.Contains(dcrErr.Error(), "403") {
+			dcrStatus.StatusCode = 403
+		}
+		details.DCRStatus = dcrStatus
+	}
 	return &contracts.OAuthFlowError{
 		Success:       false,
 		ErrorType:     contracts.OAuthErrorClientIDRequired,
@@ -2029,15 +2026,9 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string) *contract
 		ServerName:    c.config.Name,
 		CorrelationID: correlationID,
 		Message:       fmt.Sprintf("Server '%s' requires a client_id: the OAuth provider does not support Dynamic Client Registration (or registration failed) and no oauth.client_id is configured", c.config.Name),
-		Details: &contracts.OAuthErrorDetails{
-			ServerURL: c.config.URL,
-			DCRStatus: &contracts.DCRStatus{
-				Attempted: true,
-				Success:   false,
-			},
-		},
-		Suggestion: "Register an OAuth app with the provider and set oauth.client_id in the server config.",
-		DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+		Details:       details,
+		Suggestion:    "Register an OAuth app with the provider and set oauth.client_id in the server config.",
+		DebugHint:     fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
 	}
 }
 
