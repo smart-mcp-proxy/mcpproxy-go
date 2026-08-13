@@ -12,6 +12,7 @@ func init() {
 	seedCONFIG()
 	seedQUARANTINE()
 	seedNETWORK()
+	seedUPDATE()
 	seedUNKNOWN()
 }
 
@@ -412,6 +413,57 @@ func seedNETWORK() {
 			{Type: FixStepLink, Label: "Offline troubleshooting", URL: docsURL(NetworkOffline)},
 		},
 		DocsURL: docsURL(NetworkOffline),
+	})
+}
+
+// --- UPDATE --------------------------------------------------------------
+
+// seedUPDATE registers the tray auto-update failure stages (spec 095). The
+// entries exist so the codes are catalog-members — the gate the anonymity
+// scanner and prechurn filter apply before a code may be transmitted. The
+// messages/fix steps are written for the docs page and the CLI catalog listing;
+// the failure dialog itself is rendered by the tray, not from these entries.
+func seedUPDATE() {
+	const releasesURL = "https://github.com/smart-mcp-proxy/mcpproxy-go/releases"
+	register(CatalogEntry{
+		Code:        UpdateAppcastFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The app could not check for updates: the update feed was unreachable or unreadable.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateAppcastFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateAppcastFailed),
+	})
+	register(CatalogEntry{
+		Code:        UpdateDownloadFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The app found an update but could not download it.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateDownloadFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateDownloadFailed),
+	})
+	register(CatalogEntry{
+		Code:        UpdateInstallFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The update downloaded but could not be verified or installed.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateInstallFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateInstallFailed),
+	})
+	register(CatalogEntry{
+		Code:        UpdateOtherFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The update attempt failed for an unrecognized reason.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateOtherFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateOtherFailed),
 	})
 }
 

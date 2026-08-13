@@ -8,6 +8,7 @@
 
 import SwiftUI
 import Combine
+import os
 
 // MARK: - Tray menu host
 
@@ -294,6 +295,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
+        // Spec 095: the recovery dialog's AppKit half. The service owns the
+        // failure itself — stage, candidates, retry ordering — and only borrows
+        // a way to put three buttons on screen and open a browser.
+        updateService.presentFailureDialog = { content, respond in
+            UpdateFailureAlertPresenter.present(content, respond: respond)
+        }
+        updateService.openFailureDownload = { UpdateFailureAlertPresenter.openInBrowser($0) }
+
+        // Spec 095 US2: the update service has no API client of its own, and the
+        // client is resolved per occurrence — a failure can happen before the
+        // core is up, or after it has gone away, and neither is worth a retry.
+        //
+        // The current client is mirrored into a lock rather than read through
+        // MainActor at occurrence time: the recovery dialog runs a modal session
+        // on the main actor, and a `MainActor.run` hop would park the recording
+        // until the user dismisses the dialog (or lose it entirely if the app
+        // quits first) — caught live in the spec-095 rig verification.
+        //
+        // The mirror never goes nil: before the core connects (and between
+        // connections) a socket-pinned fallback client makes the one bounded
+        // attempt FR-010 requires — SocketURLProtocol probes the socket per
+        // request, so a dead core fails fast as a URLError, one log line.
+        let fallbackRecordingClient = APIClient(
+            socketPath: InstancePaths.socketPath, requestTimeout: 10
+        )
+        let recordingClient = OSAllocatedUnfairLock<APIClient>(
+            initialState: fallbackRecordingClient
+        )
+        appState.$apiClient
+            .sink { client in recordingClient.withLock { $0 = client ?? fallbackRecordingClient } }
+            .store(in: &cancellables)
+        updateService.recordUpdateFailure = { stage in
+            await recordingClient.withLock({ $0 }).recordUpdateFailure(stage: stage)
+        }
+
         // Spec 092 FR-010: start the feed updater. It gates its own scheduled
         // cycle on the policy above and reports back through UpdateService.
         updateService.startFeedUpdater()
@@ -414,6 +450,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // behaviour — terminate the core and say nothing — is what made the
         // original incident unattributable (#862).
         AppLifecycle.shared.recordTermination()
+        // Spec 095 FR-004: a retry queued behind a terminal signal dies here.
+        updateService.discardPendingFailureRetry()
         if let process = coreManager?.managedProcess {
             AppLifecycle.shared.recordCoreTerminated(
                 pid: process.processIdentifier,

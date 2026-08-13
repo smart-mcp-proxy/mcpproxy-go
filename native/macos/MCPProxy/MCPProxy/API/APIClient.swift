@@ -50,6 +50,11 @@ actor APIClient {
     private let baseURL: String
     private let apiKey: String?
 
+    /// Where a fire-and-forget call's single failure line goes (Spec 095
+    /// FR-010). Injected so a test can read what was written; nothing else in
+    /// this client logs, and nothing here may log a body or a URL.
+    private let log: @Sendable (String) -> Void
+
     /// Which transport this client was configured for.
     ///
     /// The core treats socket callers as administrative, so the native form
@@ -80,10 +85,12 @@ actor APIClient {
         socketPath: String? = nil,
         baseURL: String = "http://127.0.0.1:8080",
         apiKey: String? = nil,
-        requestTimeout: TimeInterval = 30
+        requestTimeout: TimeInterval = 30,
+        log: @escaping @Sendable (String) -> Void = { NSLog("%@", $0) }
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
+        self.log = log
 
         // Unix socket is the default and preferred transport.
         // Only fall back to TCP if explicitly requested (empty socketPath string).
@@ -109,12 +116,14 @@ actor APIClient {
         session: URLSession,
         baseURL: String = "http://127.0.0.1:8080",
         apiKey: String? = nil,
-        transportKind: TransportKind = .unixSocket
+        transportKind: TransportKind = .unixSocket,
+        log: @escaping @Sendable (String) -> Void = { NSLog("%@", $0) }
     ) {
         self.session = session
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.transportKind = transportKind
+        self.log = log
     }
 
     // MARK: - Health
@@ -941,6 +950,42 @@ actor APIClient {
         }
 
         return data
+    }
+
+    // MARK: - Update-failure recording (Spec 095)
+
+    /// Record one update-failure occurrence with the core.
+    ///
+    /// Bounded fire-and-forget (FR-010): one attempt, no retry, no user-visible
+    /// consequence. Every failure mode is treated identically — an older core
+    /// answering 404, a 500, a socket that is not there — because there is
+    /// nothing useful to do about any of them and the dialog must not be
+    /// affected by whether a counter got incremented (FR-016).
+    func recordUpdateFailure(stage: UpdateFailureStage) async {
+        let body = Data(#"{"stage":"\#(stage.rawValue)"}"#.utf8)
+        do {
+            let status = try await statusOnlyRequest(
+                path: "/api/v1/telemetry/update-failure", method: "POST", body: body
+            )
+            guard (200...299).contains(status) else {
+                log("[MCPProxy] update-failure not recorded: stage=\(stage.rawValue) status=\(status)")
+                return
+            }
+        } catch let error as URLError {
+            log("[MCPProxy] update-failure not recorded: stage=\(stage.rawValue) urlerror=\(error.errorCode)")
+        } catch {
+            log("[MCPProxy] update-failure not recorded: stage=\(stage.rawValue) error=\(type(of: error))")
+        }
+    }
+
+    /// Send a request and read ONLY the HTTP status.
+    ///
+    /// Deliberately not `performRequest`/`postAction`: both decode the response
+    /// body to build an error message, and FR-016 forbids depending on anything
+    /// an older core might put there. The body is dropped unread.
+    private func statusOnlyRequest(path: String, method: String, body: Data?) async throws -> Int {
+        let (_, response) = try await rawRequest(path: path, method: method, body: body)
+        return response.statusCode
     }
 
     /// Low-level request execution WITHOUT HTTP status validation. Returns the

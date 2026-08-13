@@ -1071,6 +1071,15 @@ func (s *Service) persistConfig(reason string) {
 	s.logger.Debug("Persisted telemetry config", zap.String("reason", reason))
 }
 
+// IsValidSemverVersion reports whether a build version is a released (semver)
+// build rather than a dev build. It is the EXACT check the heartbeat and
+// opt-out beacon gates apply, exported so callers outside this package
+// (e.g. the update-failure recording seam, spec 095) evaluate the dev-build
+// gate identically instead of reimplementing it.
+func IsValidSemverVersion(v string) bool {
+	return isValidSemver(v)
+}
+
 // isValidSemver checks if the version string is a valid semantic version.
 func isValidSemver(v string) bool {
 	if v == "" {

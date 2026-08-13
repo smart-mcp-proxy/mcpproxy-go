@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-var codeRegex = regexp.MustCompile(`^MCPX_(OAUTH|STDIO|HTTP|DOCKER|CONFIG|QUARANTINE|NETWORK|UNKNOWN)_[A-Z0-9_]+$`)
+var codeRegex = regexp.MustCompile(`^MCPX_(OAUTH|STDIO|HTTP|DOCKER|CONFIG|QUARANTINE|NETWORK|UPDATE|UNKNOWN)_[A-Z0-9_]+$`)
 
 // TestCatalog_Completeness enforces FR-003: every registered code has a
 // non-empty message, at least one fix step, and a docs URL.
@@ -80,6 +80,7 @@ func TestCatalog_MinimumDomainCoverage(t *testing.T) {
 		"CONFIG":     0,
 		"QUARANTINE": 0,
 		"NETWORK":    0,
+		"UPDATE":     0,
 		"UNKNOWN":    0,
 	}
 	for code := range registry {

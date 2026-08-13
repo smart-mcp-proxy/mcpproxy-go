@@ -4,7 +4,7 @@ package diagnostics
 // See FR-004 in specs/044-diagnostics-taxonomy/spec.md.
 //
 // Code format: MCPX_<DOMAIN>_<SPECIFIC> where DOMAIN is one of
-// OAUTH, STDIO, HTTP, DOCKER, CONFIG, QUARANTINE, NETWORK, UNKNOWN.
+// OAUTH, STDIO, HTTP, DOCKER, CONFIG, QUARANTINE, NETWORK, UPDATE, UNKNOWN.
 
 // STDIO domain — stdio-transport MCP server failures.
 const (
@@ -86,6 +86,21 @@ const (
 const (
 	NetworkProxyMisconfig Code = "MCPX_NETWORK_PROXY_MISCONFIG"
 	NetworkOffline        Code = "MCPX_NETWORK_OFFLINE"
+)
+
+// UPDATE domain — desktop auto-update session failures reported by the tray
+// (spec 095). One code per stage of the closed `appcast|download|install|other`
+// enum: the stage is the ONLY failure information that ever leaves the tray, so
+// these codes carry no error text, URL, or version. Unlike every other domain,
+// they are never attached to a server's stateview — they exist purely as
+// counters in the heartbeat's error_code_counts_24h map, which admits keys by
+// catalog membership. Registration below is therefore what makes them
+// transmissible.
+const (
+	UpdateAppcastFailed  Code = "MCPX_UPDATE_APPCAST_FAILED"
+	UpdateDownloadFailed Code = "MCPX_UPDATE_DOWNLOAD_FAILED"
+	UpdateInstallFailed  Code = "MCPX_UPDATE_INSTALL_FAILED"
+	UpdateOtherFailed    Code = "MCPX_UPDATE_OTHER_FAILED"
 )
 
 // UNKNOWN — fallback when no specific classification applies.

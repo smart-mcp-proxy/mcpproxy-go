@@ -3047,6 +3047,17 @@ components:
           description: Defaults to "mcpproxy"
           type: string
       type: object
+    httpapi.UpdateFailureRequest:
+      properties:
+        stage:
+          description: Stage is the failure stage of the update session.
+          enum:
+          - appcast
+          - download
+          - install
+          - other
+          type: string
+      type: object
     management.BulkOperationResult:
       properties:
         errors:
@@ -6420,6 +6431,46 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Preview next telemetry heartbeat payload
+      tags:
+      - telemetry
+  /api/v1/telemetry/update-failure:
+    post:
+      description: |-
+        Records one terminal update-session failure, identified only by its
+        stage (appcast, download, install, other). The body carries no error
+        text, URL, or version — the stage is the only value transmitted.
+        Returns 204 both when the occurrence was durably persisted and when
+        telemetry is inactive at event time (config opt-out, environment
+        opt-out, CI, or dev build), in which case nothing is recorded.
+        Callers cannot and need not distinguish the two.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.UpdateFailureRequest'
+        description: Update failure stage
+        required: true
+      responses:
+        "204":
+          description: Accepted (recorded, or a deliberate no-op while telemetry is
+            inactive)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Malformed body, unknown field, trailing value, or stage outside
+            the closed set
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Persistence failure
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Record a desktop auto-update failure occurrence (Spec 095)
       tags:
       - telemetry
   /api/v1/tool-calls:
