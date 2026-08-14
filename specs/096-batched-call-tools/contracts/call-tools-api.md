@@ -41,8 +41,8 @@ missing arguments. Message names the first offending element index.
 
 `code_execution_max_parallel` (int, default 8, range 1..32, hot-reload applies to
 subsequent executions). REST `POST /api/v1/code/exec` accepts
-`options.max_parallel` with the same presence-tracked pointer semantics as the
-other exec options.
+no execution-level `max_parallel`; precedence is per-batch override >
+`code_execution_max_parallel` > built-in 8.
 
 ## Tool description contract
 

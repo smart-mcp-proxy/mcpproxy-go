@@ -46,10 +46,14 @@ Batch-dispatched elements append the same `jsruntime.ToolCallRecord` a lone call
 
 ## State transitions (per element)
 
+Check order matches lone `call_tool()` exactly: shape → budget → allow-list → agent-scope → permission-tier.
+
 ```
-validated ──fail──▶ slot=error(INVALID_ARGS)            [no budget, no dispatch]
-validated ──pass──▶ gate-checked ──fail──▶ slot=error(gate code)   [no budget]
-gate-checked ─pass─▶ budget-checked ─fail─▶ slot=error(MAX_TOOL_CALLS_EXCEEDED)
-budget-checked ─pass─▶ dispatched ──▶ normalized ──▶ slot=ok/error  [budget consumed, record appended]
-dispatched ──ctx cancelled──▶ (execution already failed; no observable value)
+validated ──fail──▶ slot=error(INVALID_ARGS)                       [no budget, no dispatch]
+validated ─pass─▶ budget-checked ─fail─▶ slot=error(MAX_TOOL_CALLS_EXCEEDED)  [no dispatch]
+budget-checked ─pass─▶ gate-checked ──fail──▶ slot=error(gate code)           [no budget consumed]
+gate-checked ─pass─▶ dispatched ──▶ normalized ──▶ slot=ok/error   [budget consumed; exactly one record appended at join]
+dispatched ──ctx cancelled──▶ slot=error + record at join          [execution already failed; no observable value]
 ```
+
+Invariant: every dispatched element produces exactly one ToolCallRecord at the unconditional join — reservations and records cannot diverge, including under cancellation.
