@@ -234,7 +234,11 @@ func TestRetrieveTools_CodeExecModeNeverTruncated(t *testing.T) {
 	assert.Greater(t, len(raw), len(full)/2)
 }
 
-func TestRetrieveTools_SingleOversizeEntryPassesThrough(t *testing.T) {
+// A single tool with a sprawling schema has no pagination axis: a cache key
+// minted here would resolve to the same oversize payload, an inescapable loop.
+// The response limit still holds, though — so the terminal case is a plain cut
+// with the "cache not available" notice, never an unbounded pass-through.
+func TestRetrieveTools_SingleOversizeEntryIsPlainTruncated(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 
 	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
@@ -255,11 +259,15 @@ func TestRetrieveTools_SingleOversizeEntryPassesThrough(t *testing.T) {
 	full := callRetrieveRaw(t, proxy, args)
 	require.Greater(t, len(full), 2000)
 
-	setTruncateLimit(proxy, 2000)
+	const limit = 2000
+	setTruncateLimit(proxy, limit)
 	raw := callRetrieveRaw(t, proxy, args)
 
-	// Nothing to subdivide with a single record — the oversize text flows
-	// through intact rather than minting a key that resolves to itself.
-	assert.Equal(t, full, raw)
-	assert.NotContains(t, raw, "[truncated by mcpproxy]")
+	assert.LessOrEqual(t, len(raw), limit,
+		"an unpaginable response is still bound by tool_response_limit")
+	assert.Contains(t, raw, "[truncated by mcpproxy, cache not available]",
+		"the notice must be honest about there being no cache handle")
+	assert.NotContains(t, raw, `key="`,
+		"a key here would resolve to the same oversize payload")
+	assert.NotEqual(t, full, raw)
 }

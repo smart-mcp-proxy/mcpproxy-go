@@ -148,8 +148,9 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 // may themselves be paginating (notably read_cache). If paginableUnits <= 1
 // the caller has nothing further to subdivide — caching a fresh key here would
 // just hand the agent a new key resolving to the same oversize payload, an
-// inescapable loop. In that case the text is returned as-is (still over the
-// limit) and the caller decides what to do.
+// inescapable loop. That case still respects the limit, just without a
+// pagination contract: the text is cut plainly and carries the
+// "cache not available" notice instead of a read_cache banner.
 //
 // Termination is therefore agent-driven, not strictly algorithmic: a level
 // whose records all fit individually but overflow collectively keeps minting
@@ -190,9 +191,12 @@ func maybeTruncateAndCacheTextPinned(text, toolName string, args map[string]inte
 	}
 	if paginableUnits <= 1 {
 		// Cannot subdivide further; recursive caching here would just hand the
-		// agent a new key that resolves to the exact same payload. Return the
-		// oversize text intact and let the caller (and the agent) handle it.
-		return text, false
+		// agent a new key that resolves to the exact same payload. The response
+		// limit still holds, so cut plainly: the standard truncation notice, no
+		// read_cache banner and no cache write. Returning the oversize text
+		// intact would have let a single fat record (one tool with a sprawling
+		// schema) pass tool_response_limit unbounded.
+		return truncator.SimpleTruncate(text), true
 	}
 	tr := truncator.TruncateWithRecordPath(text, toolName, args, pinnedRecordPath)
 	if tr.CacheAvailable && cacheStore != nil {

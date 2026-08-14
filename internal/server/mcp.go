@@ -1819,7 +1819,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		)
 	}
 	if wasTruncated {
-		p.logger.Info("retrieve_tools output exceeded the response limit and was truncated-and-cached",
+		p.logger.Info("retrieve_tools output exceeded the response limit and was truncated",
 			zap.String("query", query),
 			zap.Int("tools", len(mcpTools)),
 			zap.Int("full_bytes", len(jsonResult)),
@@ -5097,7 +5097,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	// operators, so surface it as a structured log: it signals the agent is
 	// walking a payload deep enough that even one cache page overflows.
 	if reTruncated {
-		p.logger.Info("read_cache output exceeded the response limit and was recursively truncated-and-cached",
+		p.logger.Info("read_cache output exceeded the response limit and was truncated",
 			zap.String("requested_key", key),
 			zap.Int("offset", offset),
 			zap.Int("limit", limit),

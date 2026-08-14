@@ -84,6 +84,72 @@ func TestCodeExecHandler_OmitsUnsetOptions(t *testing.T) {
 	assert.NotContains(t, options, "allowed_servers")
 }
 
+// TestCodeExecHandler_ForwardsExplicitZeroOptions pins that presence, not
+// value, decides what is dispatched. A zero is a value the caller chose:
+// max_tool_calls 0 means "no limit of my own" and must reach the tool, which
+// applies its own default resolution to it. Inferring "unset" from the zero
+// dropped it, so a configured limit kept applying to a request that opted out.
+func TestCodeExecHandler_ForwardsExplicitZeroOptions(t *testing.T) {
+	recorder, args := execCodeRequest(t, map[string]interface{}{
+		"code": "({ result: 1 })",
+		"options": map[string]interface{}{
+			"max_tool_calls": 0,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.NotNil(t, args)
+
+	options, ok := args["options"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, options, "max_tool_calls", "an explicitly sent option must be forwarded")
+	assert.Equal(t, 0, options["max_tool_calls"])
+	assert.NotContains(t, options, "timeout_ms", "an omitted option must still be absent")
+}
+
+// TestCodeExecHandler_ForwardsExplicitEmptyAllowedServers pins the nil-vs-empty
+// distinction on the list option. An explicit empty array is forwarded as an
+// empty array, which the tool reads exactly as it reads one over MCP — the two
+// surfaces must not disagree about what `"allowed_servers": []` means.
+func TestCodeExecHandler_ForwardsExplicitEmptyAllowedServers(t *testing.T) {
+	recorder, args := execCodeRequest(t, map[string]interface{}{
+		"code": "({ result: 1 })",
+		"options": map[string]interface{}{
+			"allowed_servers": []string{},
+		},
+	})
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.NotNil(t, args)
+
+	options, ok := args["options"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, options, "allowed_servers")
+	assert.Equal(t, []string{}, options["allowed_servers"])
+}
+
+// TestCodeExecHandler_NullOptionsAreUnset pins that a JSON null is absence, not
+// a value: it must dispatch nothing rather than an empty restriction.
+func TestCodeExecHandler_NullOptionsAreUnset(t *testing.T) {
+	recorder, args := execCodeRequest(t, map[string]interface{}{
+		"code": "({ result: 1 })",
+		"options": map[string]interface{}{
+			"timeout_ms":      nil,
+			"max_tool_calls":  nil,
+			"allowed_servers": nil,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.NotNil(t, args)
+
+	options, ok := args["options"].(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, options, "timeout_ms")
+	assert.NotContains(t, options, "max_tool_calls")
+	assert.NotContains(t, options, "allowed_servers")
+}
+
 // TestCodeExecHandler_RejectsOutOfRangeOptions covers the bounds the
 // code_execution tool enforces. Left to the tool they come back as a plain-text
 // tool error the response parser cannot read, so the endpoint checks them
@@ -108,6 +174,15 @@ func TestCodeExecHandler_RejectsOutOfRangeOptions(t *testing.T) {
 			name:    "negative max_tool_calls",
 			options: map[string]interface{}{"max_tool_calls": -1},
 			message: "max_tool_calls cannot be negative",
+		},
+		{
+			// The tool rejects a present timeout_ms of 0 (valid range is
+			// 1-600000). Inferring "unset" from the zero value made this
+			// endpoint accept it and silently substitute the configured
+			// budget instead.
+			name:    "explicit zero timeout_ms",
+			options: map[string]interface{}{"timeout_ms": 0},
+			message: "timeout_ms must be between 1 and 600000 milliseconds",
 		},
 	}
 

@@ -261,6 +261,20 @@ func (t *Truncator) analyzeJSONStructure(content, pinnedPath string) (recordPath
 	return bestArray.Path, bestArray.Count, nil
 }
 
+// SimpleTruncate cuts content to the limit and appends the plain
+// "cache not available" notice, minting no pagination handle at all. It is the
+// terminal path for a caller that has nothing left to subdivide: a cache key
+// there would resolve to the same oversize payload, so the honest answer is a
+// bounded response that says pagination is not on offer. Content already inside
+// the limit — and any content when truncation is disabled (limit 0) — is
+// returned untouched.
+func (t *Truncator) SimpleTruncate(content string) string {
+	if t.limit == 0 {
+		return content
+	}
+	return t.simpleTruncate(content)
+}
+
 // simpleTruncate performs basic truncation without caching
 func (t *Truncator) simpleTruncate(content string) string {
 	if len(content) <= t.limit {

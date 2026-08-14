@@ -577,6 +577,43 @@ func TestTruncateWithRecordPath_PinBeatsHeuristic(t *testing.T) {
 	}
 }
 
+// SimpleTruncate is the terminal path for callers that have nothing left to
+// subdivide: it enforces the limit with the plain notice and never mints a
+// pagination handle. Content already inside the limit — and a limit of 0, which
+// disables truncation entirely — must come back untouched.
+func TestSimpleTruncate_ExportedEntryPoint(t *testing.T) {
+	content := `{"tool":"` + strings.Repeat("x", 1000) + `"}`
+
+	t.Run("over the limit", func(t *testing.T) {
+		truncator := NewTruncator(300)
+		out := truncator.SimpleTruncate(content)
+
+		if len(out) > 300 {
+			t.Errorf("Output length %d exceeds limit 300", len(out))
+		}
+		if !strings.Contains(out, "truncated by mcpproxy, cache not available") {
+			t.Errorf("Expected the plain-truncation notice, got: %s", out)
+		}
+		if strings.Contains(out, `key="`) {
+			t.Error("Plain truncation must not advertise a cache key")
+		}
+	})
+
+	t.Run("within the limit", func(t *testing.T) {
+		truncator := NewTruncator(100000)
+		if out := truncator.SimpleTruncate(content); out != content {
+			t.Error("Content within the limit must pass through unchanged")
+		}
+	})
+
+	t.Run("truncation disabled", func(t *testing.T) {
+		truncator := NewTruncator(0)
+		if out := truncator.SimpleTruncate(content); out != content {
+			t.Errorf("A limit of 0 disables truncation; got %d bytes back", len(out))
+		}
+	})
+}
+
 // An unresolvable pin must never fall back to the heuristic: the banner would
 // then advertise pagination over records the caller never promised. Plain
 // truncation with no cache handle is the safe answer.
