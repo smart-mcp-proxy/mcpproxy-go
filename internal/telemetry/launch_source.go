@@ -1,5 +1,7 @@
 package telemetry
 
+import "sync"
+
 // LaunchSource identifies how the current mcpproxy process was launched, for
 // retention telemetry (spec 044). Detection happens once at process startup
 // (via DetectLaunchSourceOnce, added in a later task), with a one-shot
@@ -110,11 +112,17 @@ var (
 )
 
 // launchSourceOnceT is a test-friendly sync.Once clone with reset support.
+// Do is mutex-guarded: DetectLaunchSourceOnce is reached concurrently by every
+// telemetry-reporting surface (two listeners' status handlers race here), and
+// the mutex also orders the launchSourceCached write before any post-Do read.
 type launchSourceOnceT struct {
+	mu   sync.Mutex
 	done bool
 }
 
 func (o *launchSourceOnceT) Do(f func()) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	if o.done {
 		return
 	}
@@ -124,7 +132,9 @@ func (o *launchSourceOnceT) Do(f func()) {
 
 // resetLaunchSourceOnce is exposed for tests (lower-case).
 func resetLaunchSourceOnce() {
-	launchSourceOnce = launchSourceOnceT{}
+	launchSourceOnce.mu.Lock()
+	defer launchSourceOnce.mu.Unlock()
+	launchSourceOnce.done = false
 	launchSourceCached = ""
 }
 

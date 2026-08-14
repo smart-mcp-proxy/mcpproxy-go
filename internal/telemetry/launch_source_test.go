@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -164,5 +165,32 @@ func TestDetectLaunchSourceOnce_Cached(t *testing.T) {
 	}
 	if !IsValidLaunchSource(first) {
 		t.Fatalf("DetectLaunchSourceOnce returned invalid %q", first)
+	}
+}
+
+// DetectLaunchSourceOnce is reached concurrently by every surface that reports
+// telemetry (two listeners' /api/v1/status handlers race here in practice);
+// the once-guard must be goroutine-safe. Red under -race before the guard
+// gained its mutex.
+func TestDetectLaunchSourceOnceConcurrent(t *testing.T) {
+	resetLaunchSourceOnce()
+	t.Cleanup(resetLaunchSourceOnce)
+
+	const goroutines = 32
+	results := make([]LaunchSource, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			results[i] = DetectLaunchSourceOnce()
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 1; i < goroutines; i++ {
+		if results[i] != results[0] {
+			t.Fatalf("goroutine %d saw %q, goroutine 0 saw %q", i, results[i], results[0])
+		}
 	}
 }
