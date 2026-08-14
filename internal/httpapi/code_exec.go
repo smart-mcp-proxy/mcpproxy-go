@@ -13,6 +13,13 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
+const (
+	// minCodeExecTimeoutMS and maxCodeExecTimeoutMS mirror the bounds the
+	// code_execution tool enforces on timeout_ms.
+	minCodeExecTimeoutMS = 1
+	maxCodeExecTimeoutMS = 600000
+)
+
 // CodeExecRequest represents the request body for code execution.
 type CodeExecRequest struct {
 	Code     string                 `json:"code"`
@@ -22,10 +29,17 @@ type CodeExecRequest struct {
 }
 
 // CodeExecOptions represents execution options.
+//
+// Every field is a pointer so the handler can tell an option the caller sent
+// from one they left out. Inferring that from the zero value conflated the
+// two: an explicit "timeout_ms": 0 (out of range, and rejected as such over
+// MCP) was read as "unset" and silently replaced by the configured budget,
+// while an explicit "max_tool_calls": 0 or "allowed_servers": [] was dropped
+// instead of reaching the tool as the caller wrote it.
 type CodeExecOptions struct {
-	TimeoutMS      int      `json:"timeout_ms"`
-	MaxToolCalls   int      `json:"max_tool_calls"`
-	AllowedServers []string `json:"allowed_servers"`
+	TimeoutMS      *int      `json:"timeout_ms,omitempty"`
+	MaxToolCalls   *int      `json:"max_tool_calls,omitempty"`
+	AllowedServers *[]string `json:"allowed_servers,omitempty"`
 }
 
 // CodeExecResponse represents the response format.
@@ -83,28 +97,63 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the options the caller actually sent against the same bounds the
+	// code_execution tool enforces. The tool reports a violation as a plain-text
+	// tool error rather than the JSON envelope parseResult expects, so catching
+	// it here keeps the caller's answer a proper 400 instead of a parse failure.
+	if req.Options.TimeoutMS != nil &&
+		(*req.Options.TimeoutMS < minCodeExecTimeoutMS || *req.Options.TimeoutMS > maxCodeExecTimeoutMS) {
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_OPTIONS",
+			fmt.Sprintf("timeout_ms must be between %d and %d milliseconds", minCodeExecTimeoutMS, maxCodeExecTimeoutMS))
+		return
+	}
+	if req.Options.MaxToolCalls != nil && *req.Options.MaxToolCalls < 0 {
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_OPTIONS", "max_tool_calls cannot be negative")
+		return
+	}
+
 	// Set defaults
 	if req.Input == nil {
 		req.Input = make(map[string]interface{})
 	}
-	if req.Options.TimeoutMS == 0 {
-		req.Options.TimeoutMS = 120000 // 2 minutes default
-	}
 
-	// Create context with timeout
-	timeout := time.Duration(req.Options.TimeoutMS) * time.Millisecond
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	// Create context with timeout. This bounds the HTTP request; the
+	// code_execution tool applies its own precise deadline inside it.
+	//
+	// A caller-named timeout_ms bounds the request exactly. Without one the
+	// tool resolves the budget from the configured code_execution_timeout_ms,
+	// which may legally be anything up to maxCodeExecTimeoutMS — and a context
+	// only ever shrinks against its parent, so the parent has to cover that
+	// ceiling. A narrower fallback here silently cancelled every configured
+	// budget above it. The route's own deadline (codeExecRequestTimeout, which
+	// adds IO slack on top of the ceiling) still bounds the request overall.
+	timeoutMS := maxCodeExecTimeoutMS
+	if req.Options.TimeoutMS != nil {
+		timeoutMS = *req.Options.TimeoutMS
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 
-	// Build arguments for code_execution tool
+	// Build arguments for code_execution tool. Exactly the options the caller
+	// sent are forwarded, zero values included: to the tool an ABSENT option
+	// means "resolve it" — timeout_ms and max_tool_calls come from config, and
+	// a missing allowed_servers is read as "no restriction" — while a present
+	// one is the caller's own choice. Sending this endpoint's request-level
+	// fallback would override the configured code_execution_timeout_ms instead.
+	execOptions := make(map[string]interface{}, 3)
+	if req.Options.TimeoutMS != nil {
+		execOptions["timeout_ms"] = *req.Options.TimeoutMS
+	}
+	if req.Options.MaxToolCalls != nil {
+		execOptions["max_tool_calls"] = *req.Options.MaxToolCalls
+	}
+	if req.Options.AllowedServers != nil {
+		execOptions["allowed_servers"] = *req.Options.AllowedServers
+	}
 	args := map[string]interface{}{
-		"code":  req.Code,
-		"input": req.Input,
-		"options": map[string]interface{}{
-			"timeout_ms":      req.Options.TimeoutMS,
-			"max_tool_calls":  req.Options.MaxToolCalls,
-			"allowed_servers": req.Options.AllowedServers,
-		},
+		"code":    req.Code,
+		"input":   req.Input,
+		"options": execOptions,
 	}
 
 	// Pass language if specified

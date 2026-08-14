@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -167,18 +168,38 @@ func runCodeExec(_ *cobra.Command, _ []string) error {
 	return runCodeExecStandalone(globalConfig, code, inputData, logger)
 }
 
+// codeExecClientSlack is the head-room added to the server-side execution
+// budget when deriving the client-side deadline: transport, queueing and
+// (de)serialization all happen outside the daemon's own timeout accounting.
+const codeExecClientSlack = 30 * time.Second
+
+// codeExecClientTimeout returns how long the CLI waits for the daemon to
+// answer a code execution request. The daemon enforces the --timeout budget
+// itself, so the client deadline only has to outlive it.
+func codeExecClientTimeout(timeoutMS int) time.Duration {
+	return time.Duration(timeoutMS)*time.Millisecond + codeExecClientSlack
+}
+
 // runCodeExecClientMode executes code via the daemon HTTP API.
 func runCodeExecClientMode(client *cliclient.Client, code string, input map[string]interface{}, logger *zap.Logger) error {
 	// Ping daemon to verify connectivity
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx); err != nil {
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer pingCancel()
+	if err := client.Ping(pingCtx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
 			zap.Error(err),
 			zap.Duration("ping_timeout", 2*time.Second),
 			zap.String("fallback_mode", "standalone"))
-		// Fall back to standalone mode
-		cfg, _ := loadCodeConfig()
+		// Fall back to standalone mode, which needs a usable configuration of
+		// its own (data dir, limits) - without one there is nothing to run.
+		cfg, cfgErr := loadCodeConfig()
+		if cfgErr == nil && cfg == nil {
+			cfgErr = errors.New("no configuration available")
+		}
+		if cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "Error loading configuration for standalone fallback: %v\n", cfgErr)
+			return exitError(2)
+		}
 		return runCodeExecStandalone(cfg, code, input, logger)
 	}
 
@@ -186,8 +207,12 @@ func runCodeExecClientMode(client *cliclient.Client, code string, input map[stri
 	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - fast execution\n")
 
 	// Execute code via daemon
+	clientTimeout := codeExecClientTimeout(codeTimeout)
+	execCtx, execCancel := context.WithTimeout(context.Background(), clientTimeout)
+	defer execCancel()
+
 	result, err := client.CodeExec(
-		ctx,
+		execCtx,
 		code,
 		input,
 		codeTimeout,
@@ -196,6 +221,12 @@ func runCodeExecClientMode(client *cliclient.Client, code string, input map[stri
 		cliclient.CodeExecOptions{Language: codeLanguage},
 	)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			fmt.Fprintf(os.Stderr,
+				"Error: client-side timeout after %s waiting for the daemon to return results (execution budget --timeout=%dms); the daemon may still be running the code\n",
+				clientTimeout, codeTimeout)
+			return exitError(1)
+		}
 		// T029: Use formatErrorWithRequestID to include request_id in error output
 		fmt.Fprintf(os.Stderr, "Error calling daemon: %s\n", formatErrorWithRequestID(err))
 		return exitError(1)

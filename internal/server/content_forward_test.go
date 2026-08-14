@@ -371,10 +371,13 @@ func TestMaybeTruncateAndCacheText_HappyPathStores(t *testing.T) {
 // single-huge-record edge case. When read_cache returns one record bigger than
 // the truncator limit, recursively caching it would produce a new key that
 // resolves to the exact same oversized payload — an infinite loop the agent
-// can never escape. paginableUnits=1 must short-circuit that.
+// can never escape. paginableUnits=1 must short-circuit that, but the response
+// limit still applies: the payload is cut plainly, with the notice that says so
+// and no cache handle to chase.
 func TestMaybeTruncateAndCacheText_NoRecurseOnSingleRecord(t *testing.T) {
 	// A response shaped like a single huge record (e.g. one CodeRabbit review
 	// body of ~70 KB) wrapped in a 1-element records array.
+	const limit = 500
 	body := `{"records":[{"body":"` + strings.Repeat("z", 5000) + `"}],"meta":{"total":1}}`
 	store := &captureStore{}
 
@@ -383,12 +386,14 @@ func TestMaybeTruncateAndCacheText_NoRecurseOnSingleRecord(t *testing.T) {
 		"read_cache",
 		map[string]interface{}{"key": "AAA", "offset": 0, "limit": 1},
 		1, // single record — no further pagination axis available
-		truncate.NewTruncator(500),
+		truncate.NewTruncator(limit),
 		store,
 		nil,
 	)
-	assert.False(t, wasTruncated, "single-record path must NOT recurse")
-	assert.Equal(t, body, out, "single-record body must pass through unchanged")
+	assert.True(t, wasTruncated, "an oversize single record is still truncated")
+	assert.LessOrEqual(t, len(out), limit, "the response limit holds with or without a pagination axis")
+	assert.Contains(t, out, "[truncated by mcpproxy, cache not available]")
+	assert.NotContains(t, out, `key="`, "a key here would resolve to the same payload")
 
 	store.mu.Lock()
 	defer store.mu.Unlock()

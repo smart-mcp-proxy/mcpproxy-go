@@ -142,6 +142,11 @@ func (p *MCPProxyServer) handleDescribeTool(ctx context.Context, request mcp.Cal
 		visible, reason := p.toolVisibleToSession(ctx, serverName, toolName)
 		if !visible {
 			code, remediation := p.describeVisibilityError(reason, serverName, toolName)
+			if reason == visReasonNotIndexed {
+				if canonical, ok := p.suggestCanonicalToolID(ctx, serverName, toolName); ok {
+					remediation = fmt.Sprintf("Tool not found. Tool ids are case-sensitive — did you mean '%s'?", canonical)
+				}
+			}
 			idErrors = append(idErrors, describeToolIDError(id, code, remediation))
 			continue
 		}

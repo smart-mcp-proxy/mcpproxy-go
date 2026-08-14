@@ -50,3 +50,25 @@ func TestSimpleTruncateBudget_MatchesSimpleTruncate(t *testing.T) {
 		}
 	}
 }
+
+// TestTruncateWithCache_TinyLimitStaysBounded: the limit is a hard ceiling on
+// the cached-truncation path too. When even the cache banner cannot fit under
+// the limit, the truncator must fall back to bounded simple truncation instead
+// of returning a banner larger than the limit it enforces.
+func TestTruncateWithCache_TinyLimitStaysBounded(t *testing.T) {
+	tr := NewTruncator(100)
+	records := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		records = append(records, `{"name":"tool-name-that-is-reasonably-long","description":"padding padding padding"}`)
+	}
+	content := `{"tools":[` + strings.Join(records, ",") + `]}`
+
+	result := tr.Truncate(content, "retrieve_tools", map[string]interface{}{"q": "x"})
+
+	if len(result.TruncatedContent) > 100 {
+		t.Errorf("truncated content is %d bytes, over the 100-byte limit", len(result.TruncatedContent))
+	}
+	if result.CacheAvailable {
+		t.Error("a response too small to carry the cache banner must not advertise a cache handle")
+	}
+}

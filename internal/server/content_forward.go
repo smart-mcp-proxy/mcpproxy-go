@@ -148,8 +148,9 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 // may themselves be paginating (notably read_cache). If paginableUnits <= 1
 // the caller has nothing further to subdivide — caching a fresh key here would
 // just hand the agent a new key resolving to the same oversize payload, an
-// inescapable loop. In that case the text is returned as-is (still over the
-// limit) and the caller decides what to do.
+// inescapable loop. That case still respects the limit, just without a
+// pagination contract: the text is cut plainly and carries the
+// "cache not available" notice instead of a read_cache banner.
 //
 // Termination is therefore agent-driven, not strictly algorithmic: a level
 // whose records all fit individually but overflow collectively keeps minting
@@ -167,16 +168,37 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 // logger is optional; receives a zap.Warn if cacheStore.Store fails so the
 // resulting "cache key not found" can be debugged. Pass nil to silence.
 func maybeTruncateAndCacheText(text, toolName string, args map[string]interface{}, paginableUnits int, truncator *truncate.Truncator, cacheStore CacheStore, logger *zap.Logger) (out string, wasTruncated bool) {
+	return maybeTruncateAndCacheTextPinned(text, toolName, args, paginableUnits, "", truncator, cacheStore, logger)
+}
+
+// maybeTruncateAndCacheTextPinned is maybeTruncateAndCacheText for callers that
+// compose their own payload and therefore know which array the banner they emit
+// promises to page. pinnedRecordPath forces that array to be the pagination
+// record path instead of letting the truncator's heuristic pick whichever array
+// happens to hold the most elements — for retrieve_tools that heuristic can land
+// on the Spec 049 "disabled" list or on an array nested inside a tool's input
+// schema, so read_cache would page non-tool records under a banner that
+// advertises tools.
+//
+// The pin is also what makes paginableUnits meaningful: the guard counts units
+// of the SAME array the key pages. If the pinned path is not an array in the
+// payload the truncator emits no cache handle at all (plain truncation), so the
+// banner can never advertise a contract that does not hold. An empty
+// pinnedRecordPath keeps the inferred behaviour.
+func maybeTruncateAndCacheTextPinned(text, toolName string, args map[string]interface{}, paginableUnits int, pinnedRecordPath string, truncator *truncate.Truncator, cacheStore CacheStore, logger *zap.Logger) (out string, wasTruncated bool) {
 	if truncator == nil || !truncator.ShouldTruncate(text) {
 		return text, false
 	}
 	if paginableUnits <= 1 {
 		// Cannot subdivide further; recursive caching here would just hand the
-		// agent a new key that resolves to the exact same payload. Return the
-		// oversize text intact and let the caller (and the agent) handle it.
-		return text, false
+		// agent a new key that resolves to the exact same payload. The response
+		// limit still holds, so cut plainly: the standard truncation notice, no
+		// read_cache banner and no cache write. Returning the oversize text
+		// intact would have let a single fat record (one tool with a sprawling
+		// schema) pass tool_response_limit unbounded.
+		return truncator.SimpleTruncate(text), true
 	}
-	tr := truncator.Truncate(text, toolName, args)
+	tr := truncator.TruncateWithRecordPath(text, toolName, args, pinnedRecordPath)
 	if tr.CacheAvailable && cacheStore != nil {
 		if storeErr := cacheStore.Store(tr.CacheKey, toolName, args, text, tr.RecordPath, tr.TotalRecords); storeErr != nil {
 			logCacheStoreFailure(logger, storeErr, toolName, tr.CacheKey, tr.TotalRecords, len(text))

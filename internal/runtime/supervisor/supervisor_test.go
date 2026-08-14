@@ -1007,3 +1007,105 @@ func TestSupervisor_StopBeforeInitialReconcileIsBarrier(t *testing.T) {
 	require.Zero(t, notifierAfterStop.Load(),
 		"error-code notifier fired after Supervisor.Stop() returned")
 }
+
+// TestToolInfosFromMetadata_ParsesParamsJSON verifies that the cached upstream
+// schema (ToolMetadata.ParamsJSON) is actually parsed into StateView's
+// InputSchema. The REST/CLI tool listings serve StateView verbatim, so a
+// fabricated placeholder here surfaces to users as an empty
+// {"type":"object","properties":{}} schema for every tool.
+func TestToolInfosFromMetadata_ParsesParamsJSON(t *testing.T) {
+	tools := []*config.ToolMetadata{
+		{
+			Name:        "read_file",
+			ServerName:  "fs",
+			Description: "Read a file",
+			ParamsJSON:  `{"type":"object","properties":{"path":{"type":"string","description":"file path"}},"required":["path"]}`,
+		},
+	}
+
+	infos := toolInfosFromMetadata(tools)
+	require.Len(t, infos, 1)
+
+	schema := infos[0].InputSchema
+	require.NotNil(t, schema, "InputSchema must be populated from ParamsJSON")
+	require.Equal(t, "object", schema["type"])
+
+	props, ok := schema["properties"].(map[string]interface{})
+	require.True(t, ok, "properties must be an object, got %#v", schema["properties"])
+	require.Contains(t, props, "path", "parsed schema must carry the upstream properties")
+
+	pathProp, ok := props["path"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "string", pathProp["type"])
+	require.Equal(t, "file path", pathProp["description"])
+
+	required, ok := schema["required"].([]interface{})
+	require.True(t, ok, "required must round-trip, got %#v", schema["required"])
+	require.Equal(t, []interface{}{"path"}, required)
+}
+
+// TestToolInfosFromMetadata_EmptyAndMalformed asserts we never fabricate a
+// placeholder schema: an absent or unparsable ParamsJSON leaves InputSchema
+// nil so the field is omitted downstream rather than reported as an empty
+// object schema.
+func TestToolInfosFromMetadata_EmptyAndMalformed(t *testing.T) {
+	tools := []*config.ToolMetadata{
+		{Name: "no_schema", ServerName: "srv", ParamsJSON: ""},
+		{Name: "broken_schema", ServerName: "srv", ParamsJSON: `{not json`},
+		{Name: "non_object_schema", ServerName: "srv", ParamsJSON: `"just a string"`},
+	}
+
+	infos := toolInfosFromMetadata(tools)
+	require.Len(t, infos, 3)
+
+	for _, info := range infos {
+		require.Nil(t, info.InputSchema, "tool %q should have no InputSchema", info.Name)
+	}
+}
+
+// TestSupervisor_RefreshToolsFromDiscovery_StateViewCarriesSchema covers the
+// end-to-end StateView population path that the REST tool listings read: after
+// discovery, the per-server StateView entry must carry the real upstream
+// schema, not a placeholder.
+func TestSupervisor_RefreshToolsFromDiscovery_StateViewCarriesSchema(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{
+			{Name: "server1", Enabled: true},
+		},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	_ = supervisor.reconcile(configSvc.Current())
+	time.Sleep(50 * time.Millisecond)
+
+	tools := []*config.ToolMetadata{
+		{
+			Name:        "search",
+			ServerName:  "server1",
+			Description: "Search things",
+			ParamsJSON:  `{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`,
+		},
+	}
+
+	require.NoError(t, supervisor.RefreshToolsFromDiscovery(tools))
+
+	snapshot := supervisor.StateView().Snapshot()
+	server1, ok := snapshot.Servers["server1"]
+	require.True(t, ok, "expected server1 in StateView snapshot")
+	require.Len(t, server1.Tools, 1)
+
+	schema := server1.Tools[0].InputSchema
+	require.NotNil(t, schema)
+	props, ok := schema["properties"].(map[string]interface{})
+	require.True(t, ok, "properties must be an object, got %#v", schema["properties"])
+	require.Contains(t, props, "query")
+	require.Contains(t, props, "limit")
+}

@@ -104,7 +104,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum number of tools to return per request (1-1000) |
-| `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited) |
+| `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited). Applies to built-in tools too: an oversize `retrieve_tools` result is truncated and the full payload is retrievable via `read_cache` (except on the code-execution surface, which does not expose `read_cache`) |
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
 | `init_timeout` | duration | `"30s"` | Deadline for an upstream's MCP `initialize` handshake (e.g. `"30s"`, `"120s"`, `"3m"`). Raise this for servers that do legitimate first-run warmup — building a cache/index or prefetching — before they answer `initialize`, so they are not killed mid-startup. Global default; can be overridden per server (see [Server Fields](#server-fields)). Range: `1s`–`30m`; `"0s"`/unset uses the 30s default. |
 

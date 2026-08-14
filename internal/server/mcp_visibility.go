@@ -179,12 +179,51 @@ func (p *MCPProxyServer) lookupIndexedTool(serverName, toolName string) *config.
 	return nil
 }
 
-// splitServerTool splits a "<server>:<tool>" id. ok=false when the id has no
-// server prefix.
+// splitServerTool splits a "<server>:<tool>" id. Whitespace is never
+// significant in a canonical id, so both segments are trimmed. ok=false when
+// the id has no server prefix or either segment is blank.
 func splitServerTool(id string) (serverName, toolName string, ok bool) {
-	parts := strings.SplitN(id, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	parts := strings.SplitN(strings.TrimSpace(id), ":", 2)
+	if len(parts) != 2 {
 		return "", "", false
 	}
-	return parts[0], parts[1], true
+	serverName, toolName = strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if serverName == "" || toolName == "" {
+		return "", "", false
+	}
+	return serverName, toolName, true
+}
+
+// suggestCanonicalToolID resolves an id that differs from an indexed one only
+// by letter case to its canonical form. Case is NOT folded on any resolution
+// path: server and tool names are exact keys in the approval, quarantine,
+// profile and agent-scope stores, so accepting a miscased id would route a
+// call around gates keyed on the exact name. The correction is therefore only
+// ever suggested — and only when the corrected pair is visible to this
+// session, so a suggestion can never confirm that an out-of-scope or
+// quarantined tool exists.
+func (p *MCPProxyServer) suggestCanonicalToolID(ctx context.Context, serverName, toolName string) (string, bool) {
+	servers, err := p.index.GetAllIndexedServerNames()
+	if err != nil {
+		return "", false
+	}
+	for _, server := range servers {
+		if !strings.EqualFold(server, serverName) {
+			continue
+		}
+		tools, terr := p.index.GetToolsByServer(server)
+		if terr != nil {
+			continue
+		}
+		for _, tool := range tools {
+			_, bare := normalizeServerTool(server, tool.Name)
+			if !strings.EqualFold(bare, toolName) || (server == serverName && bare == toolName) {
+				continue
+			}
+			if visible, _ := p.toolVisibleToSession(ctx, server, bare); visible {
+				return server + ":" + bare, true
+			}
+		}
+	}
+	return "", false
 }

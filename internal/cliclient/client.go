@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -211,6 +212,17 @@ func parseAPIError(errorMsg, requestID string) error {
 	return &APIError{Message: errorMsg, RequestID: requestID}
 }
 
+// execHTTPClient returns a shallow copy of the shared HTTP client with no
+// blanket timeout, so a long-running request is bounded by its context alone.
+// The shared client keeps a generous timeout as a safety net for ordinary
+// commands, but that net is shorter than the largest execution budget the
+// daemon accepts.
+func (c *Client) execHTTPClient() *http.Client {
+	clone := *c.httpClient
+	clone.Timeout = 0
+	return &clone
+}
+
 // CodeExecOptions contains optional parameters for code execution via the daemon API.
 type CodeExecOptions struct {
 	Language string // Source language: "javascript" (default) or "typescript"
@@ -256,8 +268,11 @@ func (c *Client) CodeExec(
 	req.Header.Set("Content-Type", "application/json")
 
 	// Send request
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.execHTTPClient().Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("client-side timeout waiting for the daemon to return code execution results: %w", err)
+		}
 		return nil, fmt.Errorf("failed to call code execution API: %w", err)
 	}
 	defer resp.Body.Close()

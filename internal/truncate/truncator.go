@@ -28,8 +28,26 @@ func NewTruncator(limit int) *Truncator {
 	return &Truncator{limit: limit}
 }
 
-// Truncate analyzes and truncates a tool response if it exceeds the limit
+// Truncate analyzes and truncates a tool response if it exceeds the limit.
+// The record array the resulting cache handle pages is inferred from the
+// payload; callers that already know which array their truncation banner
+// promises should use TruncateWithRecordPath instead.
 func (t *Truncator) Truncate(content, toolName string, args map[string]interface{}) *TruncationResult {
+	return t.TruncateWithRecordPath(content, toolName, args, "")
+}
+
+// TruncateWithRecordPath truncates like Truncate but pins the pagination
+// contract to pinnedPath instead of inferring it. Inference prefers whichever
+// array has the most elements, which for a caller-composed payload can be a
+// sibling array (retrieve_tools' Spec 049 "disabled" list) or an array nested
+// inside a record (an input schema's "required"). read_cache would then page
+// records the banner never advertised, and the records it did advertise would
+// be unreachable past the cut.
+//
+// An empty pinnedPath keeps the inferred behaviour. A pinnedPath that is not
+// an array in content falls back to simple truncation with no cache handle at
+// all, so a banner can never advertise a contract that does not hold.
+func (t *Truncator) TruncateWithRecordPath(content, toolName string, args map[string]interface{}, pinnedPath string) *TruncationResult {
 	result := &TruncationResult{
 		TotalSize: len(content),
 	}
@@ -41,7 +59,7 @@ func (t *Truncator) Truncate(content, toolName string, args map[string]interface
 	}
 
 	// Try to analyze JSON structure for record splitting
-	recordPath, totalRecords, err := t.analyzeJSONStructure(content)
+	recordPath, totalRecords, err := t.analyzeJSONStructure(content, pinnedPath)
 	if err != nil {
 		// JSON analysis failed, do simple truncation
 		result.TruncatedContent = t.simpleTruncate(content)
@@ -55,7 +73,16 @@ func (t *Truncator) Truncate(content, toolName string, args map[string]interface
 	cacheKey := cache.GenerateKey(toolName, args, timestamp)
 
 	// Create truncated content with cache instructions
-	result.TruncatedContent = t.createTruncatedWithCache(content, cacheKey, totalRecords, len(content))
+	truncated := t.createTruncatedWithCache(content, cacheKey, totalRecords, len(content))
+	if len(truncated) > t.limit {
+		// The limit is too small to carry even the cache banner. The limit is
+		// the contract, so fall back to bounded simple truncation and mint no
+		// handle — a banner that itself violates the ceiling helps nobody.
+		result.TruncatedContent = t.simpleTruncate(content)
+		result.CacheAvailable = false
+		return result
+	}
+	result.TruncatedContent = truncated
 	result.CacheKey = cacheKey
 	result.RecordPath = recordPath
 	result.TotalRecords = totalRecords
@@ -212,8 +239,12 @@ func (t *Truncator) chooseBestArray(arrays []ArrayInfo, _ string) ArrayInfo {
 	return bestArray
 }
 
-// analyzeJSONStructure analyzes JSON content to find record arrays
-func (t *Truncator) analyzeJSONStructure(content string) (recordPath string, totalRecords int, err error) {
+// analyzeJSONStructure analyzes JSON content to find record arrays. A
+// non-empty pinnedPath selects that array instead of the heuristic pick and
+// errors when it is not one of the arrays found — the caller then falls back
+// to simple truncation rather than emitting a cache handle for the wrong
+// records.
+func (t *Truncator) analyzeJSONStructure(content, pinnedPath string) (recordPath string, totalRecords int, err error) {
 	var data interface{}
 	if err := json.Unmarshal([]byte(content), &data); err != nil {
 		return "", 0, fmt.Errorf("invalid JSON: %w", err)
@@ -225,16 +256,45 @@ func (t *Truncator) analyzeJSONStructure(content string) (recordPath string, tot
 		return "", 0, fmt.Errorf("no record array found")
 	}
 
+	if pinnedPath != "" {
+		for _, arr := range arrays {
+			if arr.Path == pinnedPath {
+				return arr.Path, arr.Count, nil
+			}
+		}
+		return "", 0, fmt.Errorf("pinned record path %q is not an array in the payload", pinnedPath)
+	}
+
 	// Choose the largest array by size
 	bestArray := t.chooseBestArray(arrays, content)
 	return bestArray.Path, bestArray.Count, nil
 }
+
+// SimpleTruncate cuts content to the limit and appends the plain
+// "cache not available" notice, minting no pagination handle at all. It is the
+// terminal path for a caller that has nothing left to subdivide: a cache key
+// there would resolve to the same oversize payload, so the honest answer is a
+// bounded response that says pagination is not on offer. Content already inside
+// the limit — and any content when truncation is disabled (limit 0) — is
+// returned untouched.
+func (t *Truncator) SimpleTruncate(content string) string {
+	if t.limit == 0 {
+		return content
+	}
+	return t.simpleTruncate(content)
+}
+
+// simpleTruncateNotice is the suffix simpleTruncate appends. Its length is
+// part of the retained-prefix math mirrored by SimpleTruncateBudget.
+const simpleTruncateNotice = "\n\n... [truncated by mcpproxy, cache not available]"
 
 // simpleTruncate performs basic truncation without caching
 func (t *Truncator) simpleTruncate(content string) string {
 	if len(content) <= t.limit {
 		return content
 	}
+
+	const notice = simpleTruncateNotice
 
 	messageSpace := 200
 	if t.limit < messageSpace {
@@ -246,8 +306,16 @@ func (t *Truncator) simpleTruncate(content string) string {
 		truncatePoint = 0
 	}
 
-	truncated := content[:truncatePoint]
-	return truncated + "\n\n... [truncated by mcpproxy, cache not available]"
+	if truncatePoint+len(notice) > t.limit {
+		// The limit is the contract; when the notice itself cannot fit under
+		// it, a bare content prefix wins over an over-limit response.
+		if t.limit <= len(notice) {
+			return content[:t.limit]
+		}
+		truncatePoint = t.limit - len(notice)
+	}
+
+	return content[:truncatePoint] + notice
 }
 
 // createTruncatedWithCache creates a truncated response with cache instructions
@@ -298,8 +366,10 @@ func (t *Truncator) ShouldTruncate(content string) bool {
 // too-small-budget guard must match the truncator's REAL retained prefix, not
 // the raw limit — an encoded TOON block is not valid JSON, so Truncate always
 // falls into simpleTruncate for it, which keeps limit - messageSpace bytes
-// (messageSpace = 200, or limit/2 when limit < 200). This mirrors
-// simpleTruncate exactly; keep the two in sync.
+// (messageSpace = 200, or limit/2 when limit < 200, and the limit itself is a
+// hard ceiling: when the notice cannot fit under it the notice is dropped and
+// a bare limit-sized prefix is kept). This mirrors simpleTruncate exactly;
+// keep the two in sync.
 func (t *Truncator) SimpleTruncateBudget() int {
 	if t.limit == 0 {
 		return 0
@@ -311,6 +381,12 @@ func (t *Truncator) SimpleTruncateBudget() int {
 	budget := t.limit - messageSpace
 	if budget < 0 {
 		budget = 0
+	}
+	if budget+len(simpleTruncateNotice) > t.limit {
+		if t.limit <= len(simpleTruncateNotice) {
+			return t.limit
+		}
+		return t.limit - len(simpleTruncateNotice)
 	}
 	return budget
 }

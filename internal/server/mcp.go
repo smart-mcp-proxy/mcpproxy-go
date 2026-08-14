@@ -1790,10 +1790,48 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
 	}
 
-	// Emit success event with args and response (Spec 024)
+	// A discovery response is a tool response like any other: enforce
+	// tool_response_limit and park the full payload behind a read_cache key.
+	// The record path is PINNED to "tools" rather than inferred: the banner
+	// promises tool entries, and the inference heuristic prefers the array with
+	// the most elements — which here can be the Spec 049 "disabled" list (it
+	// can outnumber the callable results) or, with ≤2 results, an array nested
+	// inside a tool's input schema. Pinning is what makes paginableUnits =
+	// len(mcpTools) the right guard too: it counts units of the same array the
+	// key pages, so the single-record short-circuit (0 or 1 entries: nothing to
+	// subdivide, text flows through unchanged) applies to the right array.
+	// `args` (not activityArgs) is the cache-key derivation input.
+	text := string(jsonResult)
+	var wasTruncated bool
+	if routingMode != config.RoutingModeCodeExecution {
+		// The code-execution surface does not register read_cache (see
+		// buildCodeExecModeTools), so a banner there would point the agent
+		// at an unavailable tool — the same reasoning that pins it to full mode.
+		text, wasTruncated = maybeTruncateAndCacheTextPinned(
+			text,
+			"retrieve_tools",
+			args,
+			len(mcpTools),
+			"tools",
+			p.currentTruncator(),
+			p.cacheManager,
+			p.logger,
+		)
+	}
+	if wasTruncated {
+		p.logger.Info("retrieve_tools output exceeded the response limit and was truncated",
+			zap.String("query", query),
+			zap.Int("tools", len(mcpTools)),
+			zap.Int("full_bytes", len(jsonResult)),
+		)
+	}
+
+	// Emit success event with args and response (Spec 024). The FULL response
+	// goes to the activity log — truncation only shapes what the agent sees
+	// (same order handleReadCache uses).
 	p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(text), nil
 }
 
 // handleCallToolRead implements the call_tool_read functionality (Spec 018)
@@ -1844,15 +1882,20 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
 	}
+	// Whitespace is never significant in a canonical id; case is (every gate
+	// below keys on the exact name), so padding is trimmed and nothing else.
+	toolName = strings.TrimSpace(toolName)
 
-	// Parse server and tool name early for activity logging
+	// Parse server and tool name early for activity logging, through the same
+	// splitServerTool the describe_tool path uses: it trims EACH segment, so
+	// "github: create_issue" resolves exactly like "github:create_issue"
+	// instead of missing every exact-name gate below and being dispatched
+	// upstream padded. The canonical id is rebuilt from the trimmed segments
+	// so the validator cache key and every message see the normalized form.
 	var serverName, actualToolName string
-	if strings.Contains(toolName, ":") {
-		parts := strings.SplitN(toolName, ":", 2)
-		if len(parts) == 2 {
-			serverName = parts[0]
-			actualToolName = parts[1]
-		}
+	if parsedServer, parsedTool, ok := splitServerTool(toolName); ok {
+		serverName, actualToolName = parsedServer, parsedTool
+		toolName = parsedServer + ":" + parsedTool
 	}
 
 	// Helper to get session ID for activity logging
@@ -5054,7 +5097,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	// operators, so surface it as a structured log: it signals the agent is
 	// walking a payload deep enough that even one cache page overflows.
 	if reTruncated {
-		p.logger.Info("read_cache output exceeded the response limit and was recursively truncated-and-cached",
+		p.logger.Info("read_cache output exceeded the response limit and was truncated",
 			zap.String("requested_key", key),
 			zap.Int("offset", offset),
 			zap.Int("limit", limit),
@@ -5467,6 +5510,13 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		result, err = p.handleCallToolDestructive(ctx, request)
 	case "retrieve_tools":
 		result, err = p.handleRetrieveTools(ctx, request)
+	case "read_cache":
+		// Truncated responses on this path carry the same "use read_cache"
+		// banner the MCP surface emits, so the follow-up has to be routable
+		// here too — otherwise REST/CLI/Web-UI/tray callers are told to call a
+		// tool that answers "unknown tool: read_cache" (HTTP 500) and the
+		// parked payload is unreachable outside an MCP session.
+		result, err = p.handleReadCache(ctx, request)
 	case "quarantine_security":
 		result, err = p.handleQuarantineSecurity(ctx, request)
 	case "code_execution":

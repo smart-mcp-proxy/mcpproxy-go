@@ -387,14 +387,52 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 
 		// Tool call succeeded
 		record.Success = true
-		record.Result = result
+
+		// Expose the result under its wire (JSON) shape rather than the live Go
+		// value: goja would otherwise surface Go field names and exported methods.
+		plain, nerr := normalizeToolResult(result)
+		if nerr != nil {
+			record.Success = false
+			record.ErrorDetail = nerr.Error()
+			ec.ToolCalls = append(ec.ToolCalls, record)
+
+			return vm.ToValue(map[string]interface{}{
+				"ok": false,
+				"error": map[string]interface{}{
+					"code":    string(ErrorCodeSerializationError),
+					"message": "tool result is not JSON-serializable: " + nerr.Error(),
+				},
+			})
+		}
+
+		record.Result = plain
 		ec.ToolCalls = append(ec.ToolCalls, record)
 
 		return vm.ToValue(map[string]interface{}{
 			"ok":     true,
-			"result": result,
+			"result": plain,
 		})
 	}
+}
+
+// normalizeToolResult converts an upstream tool result into its JSON wire shape
+// so scripts see the documented field names (content[0].text) instead of Go
+// struct fields, and custom MarshalJSON semantics are preserved.
+func normalizeToolResult(v interface{}) (interface{}, error) {
+	if v == nil {
+		return nil, nil
+	}
+
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+
+	var plain interface{}
+	if err := json.Unmarshal(data, &plain); err != nil {
+		return nil, err
+	}
+	return plain, nil
 }
 
 // validateSerializable checks if a value can be JSON-serialized
