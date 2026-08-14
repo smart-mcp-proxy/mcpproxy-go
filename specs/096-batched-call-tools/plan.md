@@ -58,10 +58,10 @@ internal/jsruntime/
 └── tool_result_test.go  # existing wire-shape tests (unchanged)
 
 internal/server/
-├── mcp_code_execution.go  # max_parallel resolution via currentConfig(); options parse
+├── mcp_code_execution.go  # resolve config default into ExecutionOptions.MaxParallel via currentConfig() (no request-level option)
 ├── mcp.go                 # code_execution description (+call_tools, +max_parallel)
 ├── mcp_routing.go         # duplicated description in buildCodeExecutionTool
-└── code_execution_options_test.go  # extend: max_parallel shapes/range
+└── code_execution_options_test.go  # extend: default resolution for MaxParallel (config/absent/zero)
 
 internal/config/
 ├── config.go            # field, default, validation, post-load defaulting

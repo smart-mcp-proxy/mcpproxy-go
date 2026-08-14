@@ -33,7 +33,7 @@ missing arguments. Message names the first offending element index.
 - Per-element enforcement/parity: same gates, codes, records as a lone `call_tool()` today.
 - Pre-dispatch checks run in input order before any dispatch (budget cannot race).
 - Concurrency ≤ effective max_parallel; per-server Spec-093 admission applies inside the call path (queue or shed per that server's config — never bypassed).
-- Bounded by the execution timeout; workers are cancelled with the execution context; no worker mutates execution state after Execute returns.
+- Bounded by the execution timeout; workers are cancelled with the execution context and never mutate script-visible execution state; an in-flight element completing after the execution returns lands only in internally-synchronized records excluded from that execution's response (lone-call timeout parity).
 - Empty array → `[]`, zero cost.
 - Synchronous from the script's perspective; sandbox stays timer-free.
 
