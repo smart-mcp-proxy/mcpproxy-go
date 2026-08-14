@@ -49,9 +49,10 @@ final class AddServerIsolationFieldTests: XCTestCase {
         )
         XCTAssertEqual(config["command"] as? String, "npx")
         XCTAssertNil(config["url"], "a stdio server must not carry a url")
+        let isolation = config["isolation"] as? [String: Any]
         XCTAssertEqual(
-            config["docker_isolation"] as? Bool, true,
-            "a stdio server may carry its isolation choice"
+            isolation?["enabled"] as? Bool, true,
+            "a stdio server records its isolation choice via the backend `isolation` object"
         )
     }
 
@@ -74,8 +75,12 @@ final class AddServerIsolationFieldTests: XCTestCase {
         XCTAssertEqual(config["url"] as? String, "https://api.example.com/mcp")
         XCTAssertNil(config["command"], "an http server must not carry a command")
         XCTAssertNil(
-            config["docker_isolation"],
+            config["isolation"],
             "a URL-based server must never persist an isolation flag — there is no local process"
+        )
+        XCTAssertNil(
+            config["docker_isolation"],
+            "and never the legacy dead key either"
         )
     }
 }

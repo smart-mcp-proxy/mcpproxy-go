@@ -699,8 +699,8 @@ extension ManualServerForm {
     /// Builds the `POST /api/v1/servers` request body from the form's fields.
     /// Extracted as a pure function so the field-gating rules (isolation is
     /// stdio-only; url vs command by transport) are unit-testable without a
-    /// running app or API client. `docker_isolation` is emitted ONLY for stdio
-    /// transports so a URL-based server can never carry an isolation flag.
+    /// running app or API client. The `isolation` override is emitted ONLY for
+    /// stdio transports so a URL-based server can never carry an isolation flag.
     static func makeServerConfig(
         name: String,
         selectedProtocol: String,
@@ -729,7 +729,11 @@ extension ManualServerForm {
             if !args.isEmpty {
                 config["args"] = args
             }
-            config["docker_isolation"] = dockerIsolation
+            // The backend server-create payload takes an `isolation` object
+            // ({"enabled": …}); the old top-level `docker_isolation` bool it
+            // never read, so the toggle silently did nothing. Emit the real
+            // field so an stdio server actually records its isolation choice.
+            config["isolation"] = ["enabled": dockerIsolation]
         } else {
             // URL transports carry no command and no isolation flag.
             config["url"] = url.trimmingCharacters(in: .whitespaces)
