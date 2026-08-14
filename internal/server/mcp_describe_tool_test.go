@@ -232,6 +232,108 @@ func TestDescribeTool_VisibilityParityWithRetrieve(t *testing.T) {
 	}
 }
 
+// Whitespace is never significant in a canonical tool id: ids copied out of a
+// transcript with stray padding must resolve to the same definition.
+func TestDescribeTool_TrimsWhitespaceInIDs(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{
+		"github:create_issue ",
+		" github:create_issue",
+		"github: create_issue",
+	})
+
+	assert.Empty(t, resp.Errors, "padded ids must resolve, not error")
+	require.Len(t, resp.Definitions, 3)
+	for _, def := range resp.Definitions {
+		assert.Equal(t, "github:create_issue", def["name"],
+			"the definition always carries the canonical id")
+	}
+}
+
+// Server/tool ids are case-sensitive by design (approval, quarantine and
+// agent-scope stores all key on exact case). A miscased id must therefore NOT
+// resolve, but the remediation must name the canonical id instead of the
+// generic "re-run retrieve_tools" hint.
+func TestDescribeTool_CaseMismatchDidYouMean(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{"GITHUB:create_issue"})
+
+	assert.Empty(t, resp.Definitions, "a miscased id must not silently resolve")
+	require.Len(t, resp.Errors, 1)
+	e := resp.Errors[0]
+	assert.Equal(t, "GITHUB:create_issue", e["id"], "the error echoes the raw id the caller sent")
+	assert.Equal(t, "not_found", e["error"])
+	remediation, _ := e["remediation"].(string)
+	assert.Contains(t, remediation, "case-sensitive")
+	assert.Contains(t, remediation, "did you mean 'github:create_issue'")
+}
+
+// The same holds for a miscased tool segment.
+func TestDescribeTool_ToolCaseMismatchDidYouMean(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{"github:Create_Issue"})
+
+	assert.Empty(t, resp.Definitions)
+	require.Len(t, resp.Errors, 1)
+	remediation, _ := resp.Errors[0]["remediation"].(string)
+	assert.Contains(t, remediation, "did you mean 'github:create_issue'")
+}
+
+// Security invariant: a did-you-mean suggestion may never confirm the
+// existence of a tool this session cannot see. Out-of-scope and quarantined
+// ids keep the generic not-found remediation even when the only difference
+// from a real id is case.
+func TestDescribeTool_CaseMismatchNoScopeLeak(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedVisibilityFixture(t, proxy)
+
+	agentCtx := &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "parity-bot",
+		AllowedServers: []string{"github", "quarry"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite},
+	}
+	ctx := auth.WithAuthContext(context.Background(), agentCtx)
+
+	for _, c := range []struct{ id, leak string }{
+		{"GITLAB:scoped_tool", "gitlab"},    // out of agent scope
+		{"QUARRY:lingering_tool", "quarry"}, // server quarantined
+	} {
+		t.Run(c.id, func(t *testing.T) {
+			resp := callDescribe(t, proxy, ctx, []interface{}{c.id})
+
+			assert.Empty(t, resp.Definitions)
+			require.Len(t, resp.Errors, 1)
+			assert.Equal(t, "not_found", resp.Errors[0]["error"])
+			remediation, _ := resp.Errors[0]["remediation"].(string)
+			assert.Equal(t, describeNotFoundRemediation, remediation,
+				"a suggestion would confirm that a tool the session cannot see exists")
+			assert.NotContains(t, remediation, c.leak)
+		})
+	}
+}
+
+// A genuinely absent tool keeps the generic remediation — no invented
+// suggestion.
+func TestDescribeTool_GenuinelyMissingKeepsGenericRemediation(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{"github:no_such_tool_at_all"})
+
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, "not_found", resp.Errors[0]["error"])
+	remediation, _ := resp.Errors[0]["remediation"].(string)
+	assert.Equal(t, describeNotFoundRemediation, remediation)
+	assert.NotContains(t, remediation, "did you mean")
+}
+
 // T028 (FR-011): describe_tool is registered in the retrieve_tools routing
 // mode only — the default server and buildCallToolModeTools — and absent from
 // code_execution and direct mode.

@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -848,13 +849,13 @@ func toolInfosFromMetadata(tools []*config.ToolMetadata) []stateview.ToolInfo {
 	}
 	infos := make([]stateview.ToolInfo, len(tools))
 	for i, tool := range tools {
-		// Parse ParamsJSON into InputSchema
+		// Parse ParamsJSON into InputSchema. StateView is served verbatim by the
+		// REST/CLI tool listings, so a malformed schema must stay nil (field
+		// omitted downstream) rather than become a misleading empty object.
 		var inputSchema map[string]interface{}
 		if tool.ParamsJSON != "" {
-			// ParamsJSON is already a JSON string; the API endpoint parses it if needed.
-			inputSchema = map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{}, // TODO: Parse ParamsJSON
+			if err := json.Unmarshal([]byte(tool.ParamsJSON), &inputSchema); err != nil {
+				inputSchema = nil
 			}
 		}
 

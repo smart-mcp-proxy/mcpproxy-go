@@ -164,7 +164,7 @@ func TestAnalyzeJSONStructure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path, count, err := truncator.analyzeJSONStructure(tt.content)
+			path, count, err := truncator.analyzeJSONStructure(tt.content, "")
 
 			if tt.expectError {
 				if err == nil {
@@ -354,7 +354,7 @@ func TestMultipleArrayFields(t *testing.T) {
 		"results": [{"name": "x"}]
 	}`
 
-	path, count, err := truncator.analyzeJSONStructure(content)
+	path, count, err := truncator.analyzeJSONStructure(content, "")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -545,5 +545,53 @@ func TestChooseBestArray(t *testing.T) {
 				t.Errorf("Expected path '%s', got '%s'", tt.expected, best.Path)
 			}
 		})
+	}
+}
+
+// A caller that composes its own payload knows which array its truncation
+// banner promises. Pinning that path keeps read_cache paging those records
+// even when a sibling array has more elements and would win the heuristic.
+func TestTruncateWithRecordPath_PinBeatsHeuristic(t *testing.T) {
+	truncator := NewTruncator(400)
+	content := `{"tools":[{"name":"a"},{"name":"b"}],` +
+		`"disabled":[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5},{"n":6},{"n":7},{"n":8},{"n":9},{"n":10}],` +
+		`"padding":"` + strings.Repeat("x", 600) + `"}`
+
+	inferred := truncator.Truncate(content, "retrieve_tools", nil)
+	if inferred.RecordPath != "disabled" {
+		t.Fatalf("fixture no longer exercises the heuristic: got record path %q", inferred.RecordPath)
+	}
+
+	pinned := truncator.TruncateWithRecordPath(content, "retrieve_tools", nil, "tools")
+	if !pinned.CacheAvailable {
+		t.Fatal("Expected a cache handle for a resolvable pinned path")
+	}
+	if pinned.RecordPath != "tools" {
+		t.Errorf("Expected record path 'tools', got '%s'", pinned.RecordPath)
+	}
+	if pinned.TotalRecords != 2 {
+		t.Errorf("Expected 2 records (the pinned array), got %d", pinned.TotalRecords)
+	}
+	if !strings.Contains(pinned.TruncatedContent, "records: 2") {
+		t.Error("Banner must report the pinned array's record count")
+	}
+}
+
+// An unresolvable pin must never fall back to the heuristic: the banner would
+// then advertise pagination over records the caller never promised. Plain
+// truncation with no cache handle is the safe answer.
+func TestTruncateWithRecordPath_UnresolvablePinDropsCacheHandle(t *testing.T) {
+	truncator := NewTruncator(300)
+	content := `{"disabled":[{"n":1},{"n":2},{"n":3}],"padding":"` + strings.Repeat("x", 400) + `"}`
+
+	result := truncator.TruncateWithRecordPath(content, "retrieve_tools", nil, "tools")
+	if result.CacheAvailable {
+		t.Error("Expected no cache handle when the pinned path is absent")
+	}
+	if result.RecordPath != "" || result.CacheKey != "" {
+		t.Errorf("Expected no pagination contract, got path '%s' key '%s'", result.RecordPath, result.CacheKey)
+	}
+	if !strings.Contains(result.TruncatedContent, "cache not available") {
+		t.Error("Expected the plain-truncation notice")
 	}
 }

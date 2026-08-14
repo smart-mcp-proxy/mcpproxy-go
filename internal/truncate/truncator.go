@@ -28,8 +28,26 @@ func NewTruncator(limit int) *Truncator {
 	return &Truncator{limit: limit}
 }
 
-// Truncate analyzes and truncates a tool response if it exceeds the limit
+// Truncate analyzes and truncates a tool response if it exceeds the limit.
+// The record array the resulting cache handle pages is inferred from the
+// payload; callers that already know which array their truncation banner
+// promises should use TruncateWithRecordPath instead.
 func (t *Truncator) Truncate(content, toolName string, args map[string]interface{}) *TruncationResult {
+	return t.TruncateWithRecordPath(content, toolName, args, "")
+}
+
+// TruncateWithRecordPath truncates like Truncate but pins the pagination
+// contract to pinnedPath instead of inferring it. Inference prefers whichever
+// array has the most elements, which for a caller-composed payload can be a
+// sibling array (retrieve_tools' Spec 049 "disabled" list) or an array nested
+// inside a record (an input schema's "required"). read_cache would then page
+// records the banner never advertised, and the records it did advertise would
+// be unreachable past the cut.
+//
+// An empty pinnedPath keeps the inferred behaviour. A pinnedPath that is not
+// an array in content falls back to simple truncation with no cache handle at
+// all, so a banner can never advertise a contract that does not hold.
+func (t *Truncator) TruncateWithRecordPath(content, toolName string, args map[string]interface{}, pinnedPath string) *TruncationResult {
 	result := &TruncationResult{
 		TotalSize: len(content),
 	}
@@ -41,7 +59,7 @@ func (t *Truncator) Truncate(content, toolName string, args map[string]interface
 	}
 
 	// Try to analyze JSON structure for record splitting
-	recordPath, totalRecords, err := t.analyzeJSONStructure(content)
+	recordPath, totalRecords, err := t.analyzeJSONStructure(content, pinnedPath)
 	if err != nil {
 		// JSON analysis failed, do simple truncation
 		result.TruncatedContent = t.simpleTruncate(content)
@@ -212,8 +230,12 @@ func (t *Truncator) chooseBestArray(arrays []ArrayInfo, _ string) ArrayInfo {
 	return bestArray
 }
 
-// analyzeJSONStructure analyzes JSON content to find record arrays
-func (t *Truncator) analyzeJSONStructure(content string) (recordPath string, totalRecords int, err error) {
+// analyzeJSONStructure analyzes JSON content to find record arrays. A
+// non-empty pinnedPath selects that array instead of the heuristic pick and
+// errors when it is not one of the arrays found — the caller then falls back
+// to simple truncation rather than emitting a cache handle for the wrong
+// records.
+func (t *Truncator) analyzeJSONStructure(content, pinnedPath string) (recordPath string, totalRecords int, err error) {
 	var data interface{}
 	if err := json.Unmarshal([]byte(content), &data); err != nil {
 		return "", 0, fmt.Errorf("invalid JSON: %w", err)
@@ -223,6 +245,15 @@ func (t *Truncator) analyzeJSONStructure(content string) (recordPath string, tot
 	arrays := t.findArraysRecursive(data, "", 0, 4)
 	if len(arrays) == 0 {
 		return "", 0, fmt.Errorf("no record array found")
+	}
+
+	if pinnedPath != "" {
+		for _, arr := range arrays {
+			if arr.Path == pinnedPath {
+				return arr.Path, arr.Count, nil
+			}
+		}
+		return "", 0, fmt.Errorf("pinned record path %q is not an array in the payload", pinnedPath)
 	}
 
 	// Choose the largest array by size
