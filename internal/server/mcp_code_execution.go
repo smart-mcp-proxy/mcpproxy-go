@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
@@ -43,6 +45,9 @@ const (
 		"(no require(), filesystem, or network access)\n\n" +
 		"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. " +
 		"Types are automatically stripped before execution.\n\n" +
+		"**Stored scripts**: Instead of `code`, pass `script: \"<name>\"` to run a script stored server-side in the `scripts/` directory next to mcpproxy's config file — " +
+		"a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. Naming a script that does not exist returns the " +
+		"available names, which is how you discover what is stored.\n\n" +
 		"**Important runtime rules**:\n" +
 		"- `call_tool` and `call_tools` are strictly SYNCHRONOUS. Do not use `await`.\n" +
 		"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n" +
@@ -57,6 +62,13 @@ const (
 
 	codeExecutionLanguageDescription = "Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. " +
 		"Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'."
+
+	codeExecutionScriptDescription = "Name of a STORED script to execute instead of sending `code` inline (Spec 097). Scripts live as `<name>.js` / `<name>.ts` files in the `scripts/` " +
+		"directory next to mcpproxy's active config file and are read fresh on every invocation, so an edited script takes effect immediately. " +
+		"Provide EXACTLY ONE of `code` or `script`. The name is a bare identifier (letters, digits, '-' and '_'; 1-64 chars) — never a path. " +
+		"The language comes from the file extension (.js → javascript, .ts → typescript); an explicit `language` that contradicts it is an error. " +
+		"DISCOVERY: calling with a name that does not exist returns an error listing the available script names (first 20 alphabetically, plus the total), " +
+		"so the current set can always be recovered from a single failed call. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code."
 
 	codeExecutionInputDescription = "Input data accessible as global `input` variable in code (default: {})"
 
@@ -76,18 +88,25 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// resolution instead of being floored to the configured limit.
 	options := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
 
-	// Extract code (required)
-	code, err := request.RequireString("code")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'code': %v", err)), nil
-	}
-
 	// Get all arguments
 	args := request.GetArguments()
 
 	// Extract language (optional, default: "javascript")
-	if language, ok := args["language"].(string); ok && language != "" {
-		options.Language = language
+	explicitLanguage, errMsg := codeExecStringArg(args, "language")
+	if errMsg != "" {
+		return mcp.NewToolResultError(errMsg), nil
+	}
+	if explicitLanguage != "" {
+		options.Language = explicitLanguage
+	}
+
+	// Spec 097: the source is EITHER inline code or a stored script name, never
+	// both and never neither. This is resolved before anything else runs — the
+	// handler is the only execution-time resolver on every surface (MCP, REST
+	// and both CLI modes send the NAME, never the content).
+	code, scriptName, errMsg := p.resolveCodeExecutionSource(args, &options)
+	if errMsg != "" {
+		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Extract input (optional) - this is an object
@@ -129,11 +148,8 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	executionStart := time.Now()
 	parentCallID := mintCorrelationIDAt(executionStart, "code_execution")
 
-	// Get config path (handle nil mainServer for CLI mode)
-	var configPath string
-	if p.mainServer != nil {
-		configPath = p.mainServer.GetConfigPath()
-	}
+	// Config path for history records (empty when no authority was wired).
+	configPath := p.activeConfigFilePath()
 
 	// Create tool caller adapter that wraps the upstream manager
 	toolCaller := &upstreamToolCaller{
@@ -250,6 +266,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	p.logger.Info("executing code",
 		zap.String("execution_id", options.ExecutionID),
 		zap.String("language", effectiveLanguage),
+		zap.String("script", scriptName), // empty for an inline call (Spec 097)
 		zap.Int("code_length", len(code)),
 		zap.Int("timeout_ms", options.TimeoutMs),
 		zap.Int("max_tool_calls", options.MaxToolCalls),
@@ -341,15 +358,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Record the parent code_execution call in history
 	codeExecRecord := &storage.ToolCallRecord{
-		ID:         parentCallID,
-		ServerID:   "code_execution", // Special server ID for built-in tool
-		ServerName: "mcpproxy",       // Built-in tool
-		ToolName:   "code_execution",
-		Arguments: map[string]interface{}{
-			"code":     code,
-			"input":    options.Input,
-			"language": effectiveLanguage,
-		},
+		ID:               parentCallID,
+		ServerID:         "code_execution", // Special server ID for built-in tool
+		ServerName:       "mcpproxy",       // Built-in tool
+		ToolName:         "code_execution",
+		Arguments:        codeExecRecordArguments(code, scriptName, effectiveLanguage, options.Input),
 		Response:         result,
 		Duration:         int64(executionDuration),
 		Timestamp:        executionStart,
@@ -402,11 +415,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			errorMsg = result.Error.Message
 		}
 	}
-	codeExecArgs := map[string]interface{}{
-		"code":     code,
-		"input":    options.Input,
-		"language": effectiveLanguage,
-	}
+	codeExecArgs := codeExecRecordArguments(code, scriptName, effectiveLanguage, options.Input)
 
 	// Spec 035: Determine content trust for code_execution based on tools called.
 	// If any tool called within the JS sandbox has openWorldHint=true (or nil, default true),
@@ -436,6 +445,96 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			mcp.NewTextContent(string(resultJSON)),
 		},
 	}, nil
+}
+
+// codeExecutionSourceXORMessage explains the Spec 097 exactly-one-of rule.
+// JSON Schema cannot express XOR, so the schema marks both parameters optional
+// and the handler is the one place that enforces the rule — on every surface.
+const codeExecutionSourceXORMessage = "Provide exactly one of 'code' (inline source) or 'script' (the name of a script stored in the 'scripts' directory next to mcpproxy's config file) — not both, not neither."
+
+// codeExecStringArg reads an optional string argument, returning a user-facing
+// message when the value is present but is not a string.
+func codeExecStringArg(args map[string]interface{}, key string) (value, errMsg string) {
+	raw, present := args[key]
+	if !present || raw == nil {
+		return "", ""
+	}
+	str, ok := raw.(string)
+	if !ok {
+		return "", fmt.Sprintf("Parameter '%s' must be a string", key)
+	}
+	return str, ""
+}
+
+// resolveCodeExecutionSource applies the exactly-one-of rule and returns the
+// source to execute together with the stored-script name it came from (empty
+// for an inline call). For a stored script the language is derived from the
+// file extension and written back into options, so everything downstream —
+// transpilation, logging, records — sees what actually ran.
+func (p *MCPProxyServer) resolveCodeExecutionSource(args map[string]interface{}, options *jsruntime.ExecutionOptions) (code, scriptName, errMsg string) {
+	code, errMsg = codeExecStringArg(args, "code")
+	if errMsg != "" {
+		return "", "", errMsg
+	}
+	scriptName, errMsg = codeExecStringArg(args, "script")
+	if errMsg != "" {
+		return "", "", errMsg
+	}
+
+	if (code == "") == (scriptName == "") {
+		return "", "", codeExecutionSourceXORMessage
+	}
+	if scriptName == "" {
+		return code, "", ""
+	}
+
+	source, language, err := codescripts.Resolve(p.scriptsDir(), scriptName, options.Language)
+	if err != nil {
+		return "", "", fmt.Sprintf("Cannot execute stored script: %v", err)
+	}
+	options.Language = language
+	return string(source), scriptName, ""
+}
+
+// activeConfigFilePath returns the configuration FILE this server belongs to:
+// the path declared at construction (WithConfigFilePath — every production
+// surface passes it), else the running server's own resolution.
+func (p *MCPProxyServer) activeConfigFilePath() string {
+	if p.configFilePath != "" {
+		return p.configFilePath
+	}
+	if p.mainServer != nil {
+		return p.mainServer.GetConfigPath()
+	}
+	return ""
+}
+
+// scriptsDir resolves the stored-scripts directory (Spec 097 FR-001): the
+// `scripts` directory beside the active config file. When no authority was
+// declared at all, the data dir's default config path is the documented
+// last-resort fallback — never a directory derived from --data-dir alone.
+func (p *MCPProxyServer) scriptsDir() string {
+	configFilePath := p.activeConfigFilePath()
+	if configFilePath == "" && p.config != nil {
+		configFilePath = config.GetConfigPath(p.config.DataDir)
+	}
+	return codescripts.DirFor(configFilePath)
+}
+
+// codeExecRecordArguments builds the argument payload recorded for a
+// code_execution call. History and the activity event share it so they cannot
+// disagree: both keep the EXECUTED SOURCE under "code" (Spec 024 parity) and,
+// for a stored script, additionally name it.
+func codeExecRecordArguments(code, scriptName, language string, input map[string]interface{}) map[string]interface{} {
+	args := map[string]interface{}{
+		"code":     code,
+		"input":    input,
+		"language": language,
+	}
+	if scriptName != "" {
+		args["script"] = scriptName
+	}
+	return args
 }
 
 // applyCodeExecutionOptions parses the `options` object of a code_execution

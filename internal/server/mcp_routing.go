@@ -490,9 +490,16 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithDestructiveHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(false),
+			// Spec 097: the stub mirrors the live parameter shape — optional
+			// `code`, optional `script` — so a stored-script call reaches this
+			// handler and gets the "enable it" explanation instead of a schema
+			// rejection. Its DESCRIPTIONS stay minimal and disabled-only: a
+			// disabled tool must not advertise a contract it cannot honor.
 			mcp.WithString("code",
-				mcp.Required(),
 				mcp.Description("JavaScript source code to execute."),
+			),
+			mcp.WithString("script",
+				mcp.Description("Name of a stored script to execute."),
 			),
 		)
 		return []mcpserver.ServerTool{{
@@ -509,9 +516,13 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
+		// Spec 097: optional `code` + optional `script`; the handler enforces
+		// the exactly-one-of rule (see mcp.go for the same shape).
 		mcp.WithString("code",
-			mcp.Required(),
 			mcp.Description(codeExecutionCodeDescription),
+		),
+		mcp.WithString("script",
+			mcp.Description(codeExecutionScriptDescription),
 		),
 		mcp.WithString("language",
 			mcp.Description(codeExecutionLanguageDescription),

@@ -22,7 +22,11 @@ const (
 
 // CodeExecRequest represents the request body for code execution.
 type CodeExecRequest struct {
-	Code     string                 `json:"code"`
+	Code string `json:"code"`
+	// Script names a server-side stored script to run instead of Code
+	// (Spec 097). Exactly one of Code or Script may be set; the value is a
+	// bare name, never a path, and only the code_execution tool resolves it.
+	Script   string                 `json:"script,omitempty"`
 	Language string                 `json:"language,omitempty"` // "javascript" (default) or "typescript"
 	Input    map[string]interface{} `json:"input"`
 	Options  CodeExecOptions        `json:"options"`
@@ -84,9 +88,13 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
-	if req.Code == "" {
-		h.writeError(w, r, http.StatusBadRequest, "MISSING_CODE", "Code field is required")
+	// Exactly one source: inline code, or the name of a stored script the tool
+	// resolves (Spec 097). JSON Schema cannot express the XOR and neither can
+	// this struct, so the rule is checked here — before dispatch — to answer a
+	// malformed request as a 400 rather than as a tool error.
+	if (req.Code == "") == (req.Script == "") {
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST",
+			"Provide exactly one of 'code' (inline source) or 'script' (the name of a stored script)")
 		return
 	}
 
@@ -151,9 +159,15 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		execOptions["allowed_servers"] = *req.Options.AllowedServers
 	}
 	args := map[string]interface{}{
-		"code":    req.Code,
 		"input":   req.Input,
 		"options": execOptions,
+	}
+	// Forward whichever source the caller named — for a stored script that is
+	// the NAME alone, so the tool stays the only execution-time resolver.
+	if req.Script != "" {
+		args["script"] = req.Script
+	} else {
+		args["code"] = req.Code
 	}
 
 	// Pass language if specified

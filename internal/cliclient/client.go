@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
@@ -226,6 +227,12 @@ func (c *Client) execHTTPClient() *http.Client {
 // CodeExecOptions contains optional parameters for code execution via the daemon API.
 type CodeExecOptions struct {
 	Language string // Source language: "javascript" (default) or "typescript"
+
+	// Script names a server-side stored script to execute instead of inline
+	// code (Spec 097). Only the NAME travels: the daemon's code_execution
+	// handler is the single execution-time resolver, so a stored script means
+	// the same thing over MCP, REST and both CLI modes.
+	Script string
 }
 
 // CodeExec executes JavaScript or TypeScript code via the daemon API.
@@ -240,7 +247,6 @@ func (c *Client) CodeExec(
 ) (*CodeExecResult, error) {
 	// Build request body
 	reqBody := map[string]interface{}{
-		"code":  code,
 		"input": input,
 		"options": map[string]interface{}{
 			"timeout_ms":      timeoutMS,
@@ -249,8 +255,20 @@ func (c *Client) CodeExec(
 		},
 	}
 
-	// Apply optional language parameter
-	if len(opts) > 0 && opts[0].Language != "" && opts[0].Language != "javascript" {
+	// Exactly one source travels (Spec 097): inline code, or the NAME of a
+	// stored script the daemon resolves. Sending an empty "code" alongside a
+	// script name would leave the caller's request ambiguous on the wire.
+	if len(opts) > 0 && opts[0].Script != "" {
+		reqBody["script"] = opts[0].Script
+	} else {
+		reqBody["code"] = code
+	}
+
+	// Forward the language verbatim when the caller named one. Deciding
+	// whether the user MEANT it belongs to the caller (the CLI sends it only
+	// when --language was explicitly set); dropping an explicit "javascript"
+	// here would silently swallow a contradiction with a stored .ts script.
+	if len(opts) > 0 && opts[0].Language != "" {
 		reqBody["language"] = opts[0].Language
 	}
 
@@ -284,6 +302,53 @@ func (c *Client) CodeExec(
 	}
 
 	return &result, nil
+}
+
+// GetCodeScripts lists the stored scripts the DAEMON can execute (Spec 097),
+// together with the directory it read them from. Asking the daemon rather than
+// listing locally is the point: a listing that disagreed with the process which
+// actually resolves scripts would be worse than none.
+func (c *Client) GetCodeScripts(ctx context.Context) (dir string, entries []codescripts.Entry, err error) {
+	url := c.baseURL + "/api/v1/code/scripts"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to call stored scripts API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Scripts []codescripts.Entry `json:"scripts"`
+			Dir     string              `json:"dir"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return "", nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return "", nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data.Dir, apiResp.Data.Scripts, nil
 }
 
 // CallToolResult represents tool call result.

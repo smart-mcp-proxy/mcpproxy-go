@@ -177,6 +177,27 @@ type MCPProxyServer struct {
 	// MCP-32: observability manager for tool-call metrics + OTLP tracing. Nil
 	// when observability is disabled; all use sites must nil-guard.
 	observability *observability.Manager
+
+	// configFilePath is the ACTIVE configuration FILE this server belongs to,
+	// handed in at construction (Spec 097). It is the authority for anything
+	// derived from the config directory — today the stored-scripts directory.
+	// Empty in constructions that did not declare one; see
+	// activeConfigFilePath() for the fallback order.
+	configFilePath string
+}
+
+// MCPProxyOption customizes an MCPProxyServer at construction time.
+type MCPProxyOption func(*MCPProxyServer)
+
+// WithConfigFilePath declares the ACTIVE configuration FILE path this server
+// serves (Spec 097). Every surface that stands up an MCPProxyServer passes it:
+// the daemon from the runtime config service, the CLI's in-process server from
+// its own --config resolution. It must be the config FILE, never a directory
+// derived from --data-dir, which may be overridden after the file is chosen.
+func WithConfigFilePath(path string) MCPProxyOption {
+	return func(p *MCPProxyServer) {
+		p.configFilePath = path
+	}
 }
 
 // SetObservability wires the observability manager used to record tool-call
@@ -244,6 +265,7 @@ func NewMCPProxyServer(
 	debugSearch bool,
 	config *config.Config,
 	sigCache *toolsig.Cache,
+	opts ...MCPProxyOption,
 ) *MCPProxyServer {
 	// The production path passes the Runtime-owned cache (single owner,
 	// Spec 085 FR-008). Standalone constructions (CLI one-shots, tests) may
@@ -485,6 +507,14 @@ func NewMCPProxyServer(
 		jsPool:               jsPool,
 		sessionStore:         sessionStore,
 		hooks:                hooks,
+	}
+
+	// Apply construction options before anything reads them (tool registration
+	// below already runs against the finished server).
+	for _, opt := range opts {
+		if opt != nil {
+			opt(proxy)
+		}
 	}
 
 	// Let the hooks (registered before the proxy existed) reach it.
@@ -915,9 +945,14 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithReadOnlyHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(true),
+			// Spec 097: `code` is no longer schema-required — a call may supply
+			// `script` instead. JSON Schema cannot express the exactly-one-of
+			// rule, so handleCodeExecution enforces it for every surface.
 			mcp.WithString("code",
-				mcp.Required(),
 				mcp.Description(codeExecutionCodeDescription),
+			),
+			mcp.WithString("script",
+				mcp.Description(codeExecutionScriptDescription),
 			),
 			mcp.WithString("language",
 				mcp.Description(codeExecutionLanguageDescription),

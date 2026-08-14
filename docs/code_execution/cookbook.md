@@ -31,7 +31,8 @@ annotations and omit `language`.
 
 1. [When to reach for the cookbook](#when-to-reach-for-the-cookbook)
 2. [The sandbox contract (read this first)](#the-sandbox-contract-read-this-first)
-3. Recipes
+3. [Store a recipe as a script](#store-a-recipe-as-a-script)
+4. Recipes
    - [Recipe 1 — Batch call (one tool, many inputs)](#recipe-1--batch-call-one-tool-many-inputs)
    - [Recipe 2 — Fan‑out + merge (many tools, one object)](#recipe-2--fan-out--merge-many-tools-one-object)
    - [Recipe 3 — Sequential pipeline (chain calls)](#recipe-3--sequential-pipeline-chain-calls)
@@ -42,8 +43,8 @@ annotations and omit `language`.
    - [Recipe 8 — Cursor / pagination walk](#recipe-8--cursor--pagination-walk)
    - [Recipe 9 — Rate‑limit via chunking](#recipe-9--rate-limit-via-chunking)
    - [Recipe 10 — Deduplicate + enrich](#recipe-10--deduplicate--enrich)
-4. [Benchmarks — token & latency](#benchmarks--token--latency)
-5. [Upgrade note — TypeScript GA](#upgrade-note-typescript-ga)
+5. [Benchmarks — token & latency](#benchmarks--token--latency)
+6. [Upgrade note — TypeScript GA](#upgrade-note-typescript-ga)
 
 ---
 
@@ -95,6 +96,51 @@ with `call_tools(requests, {max_parallel})` (1–32).
 > and `queue_size: 9` serializes a 10‑element batch, while the same server with
 > **no** `queue_size` sheds the overflow as nine per‑slot `queue_full` errors.
 > Set `queue_size` headroom, or match `max_parallel` to the cap.
+
+---
+
+## Store a recipe as a script
+
+Once a recipe below has settled into a workflow you run repeatedly, stop paying
+for its source on every call. Save it as a **stored script** — a `<name>.ts` /
+`<name>.js` file in the `scripts/` directory next to mcpproxy's active config
+file — and invoke it by name:
+
+```bash
+mkdir -p ~/.mcpproxy/scripts
+cp recipe-1.ts ~/.mcpproxy/scripts/user-lookup.ts   # the recipe BODY, no annotation lines
+mcpproxy code scripts list
+mcpproxy code exec --script user-lookup --input='{"usernames":["octocat","torvalds"]}'
+```
+
+```json
+{"script": "user-lookup", "input": {"usernames": ["octocat", "torvalds"]}}
+```
+
+Things to know when converting a recipe:
+
+- **Store the body only.** The `// language:` / `// input:` lines are
+  annotations for this document. The **file extension** replaces the `language`
+  parameter (`.ts` → TypeScript, `.js` → JavaScript), and `input` stays a
+  request parameter — pass it per invocation, exactly as inline.
+- **Nothing else changes.** Same sandbox contract, same `options`
+  (`max_tool_calls`, `timeout_ms`), same `call_tools` batching semantics, same
+  activity records. `script` only changes where the source text came from.
+- **Name it like a token**: 1–64 characters of `A-Za-z0-9_-`, never a path.
+  Files up to 256 KB; both `name.js` and `name.ts` present is ambiguous and
+  rejected.
+- **Edit by atomic replace** (write a temp file, `mv` it over) and the next
+  invocation runs the new content — no daemon restart, so the authoring loop is
+  still "edit, rerun".
+- **Discovery** is the not‑found error: naming a script that does not exist
+  returns the available names (first 20 alphabetically, plus the total), so an
+  agent never needs the list out of band. `mcpproxy code scripts list` shows the
+  full set, including `ambiguous` and `invalid` entries.
+- **Read‑only surface**: nothing writes scripts for you — no tool, no endpoint,
+  no CLI verb. Authoring is the filesystem, deliberately.
+
+Full reference: [overview.md § Stored Scripts](overview.md#stored-scripts) ·
+[api-reference.md § Stored Scripts](api-reference.md#stored-scripts).
 
 ---
 

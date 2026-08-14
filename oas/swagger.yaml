@@ -3715,6 +3715,33 @@ paths:
       summary: Get annotation coverage report
       tags:
       - annotations
+  /api/v1/code/scripts:
+    get:
+      description: 'List the stored scripts available to the code_execution tool.
+        Scripts are `<name>.js` / `<name>.ts` files in the `scripts/` directory next
+        to the active configuration file. Entries are advisory: `ok` scripts are invocable,
+        `ambiguous` names have both extensions, and `invalid` ones report why (empty,
+        oversized, unreadable, non-regular). Read-only — there is no write surface
+        for stored scripts.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Stored scripts and the directory they were read from
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List stored code-execution scripts
+      tags:
+      - code
   /api/v1/config:
     get:
       description: Retrieves the current MCPProxy configuration including all server

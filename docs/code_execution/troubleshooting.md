@@ -9,9 +9,10 @@ Common issues, error messages, and solutions for the `code_execution` tool.
 3. [Runtime Errors](#runtime-errors)
 4. [Timeout Issues](#timeout-issues)
 5. [Tool Call Errors](#tool-call-errors)
-6. [Serialization Errors](#serialization-errors)
-7. [Performance Issues](#performance-issues)
-8. [Debugging Tips](#debugging-tips)
+6. [Stored Script Errors](#stored-script-errors)
+7. [Serialization Errors](#serialization-errors)
+8. [Performance Issues](#performance-issues)
+9. [Debugging Tips](#debugging-tips)
 
 ---
 
@@ -560,6 +561,176 @@ call_tools(requests, {max_parallel: 1});
 
 Queued calls wait up to `queue_timeout`, and that wall-clock wait happens inside
 the script's `timeout_ms` budget — size `queue_size` and `timeout_ms` together.
+
+---
+
+## Stored Script Errors
+
+These apply to invocations that name a [stored script](overview.md#stored-scripts)
+(`script: "<name>"`, `--script <name>`) instead of sending `code` inline. One
+command answers most of them:
+
+```bash
+mcpproxy code scripts list   # names, paths, statuses, and the directory that was read
+```
+
+### Error: "Provide exactly one of 'code' or 'script'"
+
+**Symptom**:
+```
+Provide exactly one of 'code' (inline source) or 'script' (the name of a script stored in the 'scripts' directory next to mcpproxy's config file) — not both, not neither.
+```
+
+Over REST the same rule is an HTTP 400 before dispatch:
+```json
+{"ok": false, "error": {"code": "INVALID_REQUEST", "message": "Provide exactly one of 'code' (inline source) or 'script' (the name of a stored script)"}}
+```
+
+**Cause**: The request carried both `code` and `script`, or neither. JSON Schema
+cannot express "exactly one of", so neither field is schema-required and the
+rule is enforced by the tool.
+
+**Solution**: Send one source. On the CLI, `--code`, `--file` and `--script` are
+mutually exclusive (`--code, --file and --script are mutually exclusive`, exit
+code 2).
+
+---
+
+### Error: "stored script X not found"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "fetch-pr" not found in /Users/me/.mcpproxy/scripts. Available scripts (3): daily-report, fetch-prs, triage
+```
+
+Or, with an empty/absent directory:
+```
+Cannot execute stored script: stored script "fetch-pr" not found: no stored scripts in /Users/me/.mcpproxy/scripts (create fetch-pr.js or fetch-pr.ts there)
+```
+
+**Cause**: No `<name>.js` / `<name>.ts` in the scripts directory. Usually a typo
+(names are **case-sensitive**), a file that is not a script (uppercase or other
+extension: `.JS`, `.mjs`, `.jsx` are ignored), or the wrong directory — the
+scripts directory follows the **active config file**, not `--data-dir`.
+
+**Solution**: This error *is* the discovery mechanism — it lists the first 20
+available names alphabetically plus the total, so an MCP client can recover the
+name set from the failed call. For the full picture, including where the daemon
+looked:
+```bash
+mcpproxy code scripts list
+mcpproxy code scripts list --config /etc/mcpproxy/mcp_config.json   # a non-default config
+```
+If the directory in the message is not the one you authored in, start the daemon
+with the config file you meant (`mcpproxy serve --config …`) — with
+`~/.mcpproxy/mcp_config.json` the scripts live in `~/.mcpproxy/scripts/`.
+mcpproxy never creates the directory itself; `mkdir -p` it.
+
+---
+
+### Error: "invalid script name"
+
+**Symptom**:
+```
+Cannot execute stored script: invalid script name "../../etc/passwd": character "." is not allowed (names are 1-64 characters of A-Z, a-z, 0-9, '-' or '_' — a name, never a path)
+```
+
+**Cause**: `script` is a **name**, never a path. Separators, `..`, dots,
+extensions, non-ASCII characters and names longer than 64 characters are
+rejected before the filesystem is touched at all.
+
+**Solution**: Pass the base name only — `fetch-prs`, not `fetch-prs.js`,
+`./fetch-prs.js`, or `/abs/path/fetch-prs.js`.
+
+---
+
+### Error: "stored script X is ambiguous"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "triage" is ambiguous: /Users/me/.mcpproxy/scripts/triage.js and /Users/me/.mcpproxy/scripts/triage.ts both exist — remove one
+```
+
+**Cause**: Both extensions exist for one name — often a leftover after
+converting a script from JavaScript to TypeScript. Ambiguity is never resolved
+silently.
+
+**Solution**: Delete (or rename) one of the two files. `mcpproxy code scripts
+list` flags such names with status `ambiguous` before you hit them at runtime.
+
+---
+
+### Error: "stored script X is oversized / empty / unreadable / non-regular"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "big-report" (/Users/me/.mcpproxy/scripts/big-report.js) is oversized: scripts are limited to 262144 bytes
+```
+
+**Cause**:
+
+| Reason | Meaning |
+|--------|---------|
+| `oversized` | The file exceeds the 256 KB stored-script bound (inline `code` has no such bound; this one exists purely to bound the daemon-side read) |
+| `empty` | Zero bytes — commonly a half-finished redirect (`> script.js`) |
+| `unreadable` | Permissions or an I/O error; the detail carries the OS error |
+| `non-regular` | The path is a symlink, directory, or device — scripts must be regular files |
+
+**Solution**: Split an oversized workflow into several scripts (or move bulk
+data into `input`), finish the write, fix permissions, or replace the symlink
+with the real file. Copy, do not link:
+```bash
+cp /shared/workflows/report.js ~/.mcpproxy/scripts/report.js
+```
+The scripts *directory* itself may be a symlink — it is operator-controlled;
+only the script file may not be.
+
+---
+
+### Error: "stored script X is a .ts file but language Y was requested"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "daily-report" is a .ts file (typescript) but language "javascript" was requested — omit 'language' or set it to "typescript"
+```
+
+**Cause**: The extension is authoritative for a stored script, and the explicit
+`language` contradicted it.
+
+**Solution**: Omit `language` entirely — the extension decides. (The CLI already
+forwards `--language` only when you set it explicitly, so its `javascript`
+default cannot trigger this.)
+
+---
+
+### Issue: An edited script still runs the old content
+
+**Cause**: Almost always the file was not replaced where the daemon looks, or
+the edit went to a different scripts directory. There is no cache and no
+watcher: every invocation opens and reads the file once, so a completed
+replacement is visible to the very next call — no restart, nothing to flush.
+
+**Solution**: Confirm the path with `mcpproxy code scripts list` (it always
+prints the directory it read), then edit by **atomic replace** so no invocation
+can observe a half-written file:
+```bash
+tmp=$(mktemp ~/.mcpproxy/scripts/.report.XXXXXX)
+cp new-report.js "$tmp" && mv "$tmp" ~/.mcpproxy/scripts/report.js
+```
+Editing **in place** while an invocation is reading is the one unsupported case:
+that run gets whatever the read returned (validated, but unspecified).
+
+---
+
+### Issue: No way to upload or edit a script through the API
+
+**Cause**: Working as designed. v1 has **no write path** for stored scripts — no
+MCP tool, no REST endpoint, no CLI verb creates, updates, or deletes them. Code
+running in the sandbox has no filesystem access either.
+
+**Solution**: Author scripts with your normal filesystem tooling (editor, `scp`,
+configuration management). `GET /api/v1/code/scripts` and `mcpproxy code scripts
+list` are read-only views of the result.
 
 ---
 

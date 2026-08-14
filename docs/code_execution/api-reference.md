@@ -9,8 +9,9 @@ Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript)
 3. [Response Format](#response-format)
 4. [JavaScript API](#javascript-api)
 5. [Error Codes](#error-codes)
-6. [Configuration](#configuration)
-7. [CLI Reference](#cli-reference)
+6. [Stored Scripts](#stored-scripts)
+7. [Configuration](#configuration)
+8. [CLI Reference](#cli-reference)
 
 ---
 
@@ -28,6 +29,10 @@ Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript)
       "code": {
         "type": "string",
         "description": "JavaScript or TypeScript source code (ES2020+) to execute..."
+      },
+      "script": {
+        "type": "string",
+        "description": "Name of a stored script to execute instead of sending `code` inline. Bare name (1-64 chars of A-Za-z0-9_-), never a path; resolved from the scripts/ directory next to the active config file..."
       },
       "language": {
         "type": "string",
@@ -62,11 +67,14 @@ Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript)
           }
         }
       }
-    },
-    "required": ["code"]
+    }
   }
 }
 ```
+
+Neither `code` nor `script` is `required`: exactly one of them must be supplied,
+a rule JSON Schema cannot express. The tool enforces it and rejects a call
+carrying both or neither. See [Stored Scripts](#stored-scripts).
 
 ---
 
@@ -93,6 +101,18 @@ Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript)
 }
 ```
 
+### Stored-Script Request
+
+```json
+{
+  "script": "fetch-prs",
+  "input": {
+    "owner": "acme",
+    "repo": "api"
+  }
+}
+```
+
 ### Full Request with Options
 
 ```json
@@ -113,8 +133,9 @@ Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `code` | string | **Yes** | JavaScript or TypeScript source code to execute (ES2020+ syntax supported) |
-| `language` | string | No | Source language: `"javascript"` (default) or `"typescript"` |
+| `code` | string | **Exactly one of** `code` / `script` | JavaScript or TypeScript source code to execute (ES2020+ syntax supported) |
+| `script` | string | **Exactly one of** `code` / `script` | Name of a [stored script](#stored-scripts) to execute — a bare name, never a path |
+| `language` | string | No | Source language: `"javascript"` (default) or `"typescript"`. For a stored script the extension decides, and a contradicting value is an error |
 | `input` | object | No | Input data accessible as `input` global variable (default: `{}`) |
 | `options` | object | No | Execution options (see below) |
 
@@ -527,6 +548,119 @@ var isObject = typeof value === 'object' && value !== null;
 
 ---
 
+## Stored Scripts
+
+A stored script is a `<name>.js` / `<name>.ts` file in the `scripts/` directory
+next to the **active configuration file** (`~/.mcpproxy/scripts/` by default,
+`<dir-of---config>/scripts/` when `--config` names another file). Callers
+address it by base name via the `script` parameter; the code_execution tool is
+the only component that resolves a name to a file, on every surface.
+
+### File Rules
+
+| Rule | Value |
+|------|-------|
+| Name | 1-64 characters of `A-Za-z0-9_-`, case-sensitive; validated before any filesystem access |
+| Path | never accepted — separators, `..`, dots, absolute paths and non-ASCII are invalid names |
+| Extension | lowercase `.js` or `.ts` only |
+| Language | derived from the extension (`.js` → `javascript`, `.ts` → `typescript`) |
+| Size | 1 byte to 262144 bytes (256 KB); empty and oversized files are rejected |
+| File type | regular file; symlinks, directories and devices are rejected (`O_NOFOLLOW` on Unix, checked policy on Windows) |
+| Ambiguity | `<name>.js` and `<name>.ts` both present → the invocation fails naming both paths |
+
+Each invocation performs exactly one open and one bounded read — no cache, no
+watcher — so an atomic replacement (write temp + `rename`) takes effect on the
+next invocation with no daemon restart. Additions and deletions likewise.
+
+Execution is identical to inline code in every other respect: sandbox
+restrictions, `allowed_servers`, `max_tool_calls`, `timeout_ms`, quarantine and
+permission enforcement, and activity/history records — which keep storing the
+executed source under `code` and additionally carry `script: "<name>"`.
+
+### Invocation Errors
+
+| Situation | Message (abbreviated) |
+|-----------|-----------------------|
+| Both or neither of `code` / `script` | `Provide exactly one of 'code' (inline source) or 'script' (the name of a script stored in the 'scripts' directory next to mcpproxy's config file) — not both, not neither.` |
+| Unknown name | `stored script "X" not found in <dir>. Available scripts (N): a, b, c …` |
+| No scripts at all | `stored script "X" not found: no stored scripts in <dir> (create X.js or X.ts there)` |
+| Invalid name | `invalid script name "…": character "/" is not allowed …` |
+| Both extensions present | `stored script "X" is ambiguous: <dir>/X.js and <dir>/X.ts both exist — remove one` |
+| Empty / oversized / unreadable / non-regular | `stored script "X" (<path>) is oversized: scripts are limited to 262144 bytes` |
+| `language` contradicts the extension | `stored script "X" is a .ts file (typescript) but language "javascript" was requested …` |
+
+The not-found error **is** the MCP discovery mechanism (FR-004): it lists the
+first 20 `ok` names alphabetically plus the total count, so an agent recovers
+the current name set from one failed call. Tool registrations are static — there
+is no listing tool and no `tools/list_changed` notification.
+
+### REST: `POST /api/v1/code/exec`
+
+The request body gains an optional `script` field, mutually exclusive with
+`code`:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/code/exec \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $MCPPROXY_API_KEY" \
+  -d '{"script": "fetch-prs", "input": {"owner": "acme", "repo": "api"}}'
+```
+
+Supplying both or neither is answered as **HTTP 400** in the endpoint's own
+envelope, before anything is dispatched:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "Provide exactly one of 'code' (inline source) or 'script' (the name of a stored script)"
+  },
+  "request_id": "…"
+}
+```
+
+### REST: `GET /api/v1/code/scripts`
+
+Read-only listing of the stored scripts, using the same API-key auth as the rest
+of `/api/v1` (`X-API-Key` header or `?apikey=`):
+
+```bash
+curl -H "X-API-Key: $MCPPROXY_API_KEY" http://127.0.0.1:8080/api/v1/code/scripts
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "dir": "/Users/me/.mcpproxy/scripts",
+    "scripts": [
+      {"name": "daily-report", "paths": ["/Users/me/.mcpproxy/scripts/daily-report.ts"], "status": "ok"},
+      {"name": "fetch-prs",    "paths": ["/Users/me/.mcpproxy/scripts/fetch-prs.js"],    "status": "ok"},
+      {"name": "half-written", "paths": ["/Users/me/.mcpproxy/scripts/half-written.js"], "status": "invalid", "reason": "empty"},
+      {"name": "triage",       "paths": ["/Users/me/.mcpproxy/scripts/triage.js",
+                                          "/Users/me/.mcpproxy/scripts/triage.ts"],       "status": "ambiguous"}
+    ]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `dir` | The directory that was read — always reported, so "no scripts" and "not the directory you meant" are distinguishable |
+| `name` | Token-valid base name |
+| `paths` | One source path, or both candidates when `status` is `ambiguous` |
+| `status` | `ok` (invocable), `ambiguous`, or `invalid` |
+| `reason` | Present for `invalid`: `empty`, `oversized`, `unreadable`, or `non-regular` |
+
+An absent or empty directory returns an empty `scripts` list, not an error.
+Statuses are advisory — the tool re-checks at invocation time.
+
+**There is no write surface.** No endpoint, tool, or CLI verb creates, updates,
+or deletes a script; the filesystem is the sole authoring interface.
+
+---
+
 ## Configuration
 
 ### Global Configuration
@@ -592,15 +726,22 @@ mcpproxy code exec [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--code` | string | | JavaScript code to execute (required if `--file` not provided) |
-| `--file` | string | | Path to JavaScript file (required if `--code` not provided) |
+| `--code` | string | | Inline JavaScript/TypeScript code to execute |
+| `--file` | string | | Path to a local JavaScript/TypeScript file, read by the CLI |
+| `--script` | string | | Name of a [stored script](#stored-scripts) resolved server-side |
 | `--input` | string | `"{}"` | Input data as JSON string |
 | `--input-file` | string | | Path to JSON file containing input data |
 | `--timeout` | int | `120000` | Execution timeout in milliseconds (1-600000) |
 | `--max-tool-calls` | int | `0` | Maximum tool calls (0 = unlimited) |
 | `--allowed-servers` | []string | `[]` | Comma-separated list of allowed server names |
 | `--log-level` | string | `"info"` | Log level (trace, debug, info, warn, error) |
-| `--config` | string | `~/.mcpproxy/mcp_config.json` | Path to MCP configuration file |
+| `--config` | string | `~/.mcpproxy/mcp_config.json` | Path to MCP configuration file (also decides which `scripts/` directory is used) |
+
+Exactly one of `--code`, `--file`, `--script` must be given; combining them is
+rejected with exit code 2. `--script` sends the **name** in both daemon and
+standalone mode — the content never crosses the wire, and only the handler
+resolves it. `--language` is forwarded only when you actually set it, so its
+`javascript` default cannot contradict a stored `.ts` script.
 
 #### Exit Codes
 
@@ -618,6 +759,9 @@ mcpproxy code exec --code="({ result: input.value * 2 })" --input='{"value": 21}
 
 # Code from file
 mcpproxy code exec --file=script.js --input-file=params.json
+
+# Stored script, resolved server-side by name
+mcpproxy code exec --script=fetch-prs --input='{"owner":"acme","repo":"api"}'
 
 # Call upstream tools
 mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user})" --input='{"user":"octocat"}'
@@ -686,16 +830,53 @@ EOF
 mcpproxy code exec --file=/tmp/script.js
 ```
 
+### Command: `mcpproxy code scripts list`
+
+List the [stored scripts](#stored-scripts) the code_execution tool can run.
+
+```bash
+mcpproxy code scripts list
+mcpproxy code scripts list -o json
+mcpproxy code scripts list --config /etc/mcpproxy/mcp_config.json
+```
+
+When a daemon is running the CLI asks it (`GET /api/v1/code/scripts`) — the
+process that actually resolves scripts describes itself, so the listing can
+never disagree with what executes. Without a daemon the local scripts directory
+is read directly.
+
+```text
+Stored scripts in /Users/me/.mcpproxy/scripts (3):
+  daily-report                     ok                   /Users/me/.mcpproxy/scripts/daily-report.ts
+  fetch-prs                        ok                   /Users/me/.mcpproxy/scripts/fetch-prs.js
+  triage                           ambiguous            /Users/me/.mcpproxy/scripts/triage.js, /Users/me/.mcpproxy/scripts/triage.ts
+
+Run one with: mcpproxy code exec --script <name>
+```
+
+`-o json` / `-o yaml` emit `{"dir": …, "scripts": [ … ]}`, the same shape the
+REST endpoint returns. There is deliberately no command that writes a script.
+
 ---
 
 ## Validation Rules
 
-### Code Validation
+### Source Validation
 
-- **Required**: `code` parameter must be provided
-- **Type**: Must be a string
-- **Syntax**: Must be valid JavaScript (ES2020+ supported)
+- **Exactly one of** `code` (inline source) or `script` (a stored script name)
+  must be provided; both or neither is rejected before execution
+- **Type**: Both must be strings
+- **Syntax**: `code` must be valid JavaScript (ES2020+ supported)
 - **Serialization**: Return value must be JSON-serializable
+
+### Script Name Validation
+
+- **Token**: 1-64 characters of `A-Za-z0-9_-`, checked before any filesystem
+  access — a name is never a path
+- **File**: `<name>.js` or `<name>.ts` (lowercase), a regular file of 1 byte to
+  256 KB; both extensions present is ambiguous and rejected
+- **Language**: derived from the extension; an explicit `language` that
+  contradicts it is rejected
 
 ### Input Validation
 
