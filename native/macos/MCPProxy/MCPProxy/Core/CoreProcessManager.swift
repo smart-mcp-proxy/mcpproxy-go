@@ -762,6 +762,13 @@ actor CoreProcessManager {
     private func launchAndConnectOnce() async throws {
         await transitionState(to: .launching)
 
+        // Any pre-update stop intent belonged to the PREVIOUS core; starting a
+        // new one voids it. Clearing it here is what stops a latched intent from
+        // masking a future crash if a Sparkle install aborts after the
+        // pre-install stop (the stopped core came down, so the flag was never
+        // consumed by a postpone, but the install never relaunched us either).
+        await MainActor.run { appState.isStoppingForUpdate = false }
+
         // Resolve the core binary
         let binaryPath = try resolveBinary()
         coreBinaryPath = binaryPath
