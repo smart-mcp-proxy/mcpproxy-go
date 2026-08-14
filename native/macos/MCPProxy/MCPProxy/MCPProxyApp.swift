@@ -450,6 +450,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // behaviour — terminate the core and say nothing — is what made the
         // original incident unattributable (#862).
         AppLifecycle.shared.recordTermination()
+        // Record termination intent BEFORE tearing down the core: the core will
+        // exit cleanly (status 0) while the tray is still `.connected`, and only
+        // this flag tells handleProcessExit that clean exit was intended rather
+        // than an external kill to recover from. Set on MainActor (we are on it)
+        // so it is visible before the SIGTERM is even delivered.
+        appState.isTerminating = true
         // Spec 095 FR-004: a retry queued behind a terminal signal dies here.
         updateService.discardPendingFailureRetry()
         if let process = coreManager?.managedProcess {

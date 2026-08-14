@@ -246,6 +246,17 @@ final class AppState: ObservableObject {
     /// dead after the next reboot.
     @Published var isStopped: Bool = false
 
+    /// Whether the tray itself is terminating (app quit / logout / restart, set
+    /// in `applicationWillTerminate` before the core is torn down). Distinct
+    /// from `isStopped` (a user "Stop" that keeps the tray running): on the
+    /// quit path the core is terminated while the tray is still `.connected`
+    /// and `isStopped` is false, so the resulting clean exit needs this
+    /// explicit intent to be recognised as expected rather than a crash. A
+    /// clean (status 0) exit with NONE of the intent flags set is an EXTERNAL
+    /// termination the tray did not ask for, and must still trigger recovery —
+    /// which is why status 0 alone does not count as expected.
+    @Published var isTerminating: Bool = false
+
     /// GH #410 — whether the tray may start a core when it opens. The one piece of
     /// launcher state the tray persists; it says nothing about whether a core is
     /// running (that is always discovered live from the socket). Mirrors

@@ -197,15 +197,21 @@ enum CoreError: Error, Equatable {
     /// Whether a core process exit should be treated as expected — i.e. NOT
     /// surfaced to the user as an error and NOT retried.
     ///
-    /// A clean exit (status 0) is expected on its own: it is the graceful path
-    /// a normal quit takes. It must count as expected even when the app never
-    /// moved to `.shuttingDown` first — the app-termination path
-    /// (`applicationWillTerminate`) terminates the core directly, so the core
-    /// exits cleanly while the tray is still nominally `.connected`. Treating
-    /// that as a crash is what popped a spurious "MCPProxy Error" on every quit.
-    static func isExpectedExit(status: Int32, userStopped: Bool, shuttingDown: Bool) -> Bool {
-        if userStopped || shuttingDown { return true }
-        return status == 0
+    /// Expected iff the tray INTENDED the stop: the user stopped the core
+    /// (`userStopped`), the manager is shutting the core down (`shuttingDown`),
+    /// or the app itself is terminating (`appTerminating`, set in
+    /// `applicationWillTerminate` before the core is torn down). The
+    /// app-termination path is why `shuttingDown` alone is insufficient: it
+    /// terminates the core directly while the tray is still `.connected`, so the
+    /// clean exit needs the explicit `appTerminating` intent — treating that as
+    /// a crash is what popped a spurious "MCPProxy Error" on every quit.
+    ///
+    /// A clean (status 0) exit is deliberately NOT expected on its own: the Go
+    /// core exits 0 on any graceful SIGTERM, so an EXTERNAL kill the tray did
+    /// not ask for also produces status 0, and that must still trigger recovery
+    /// rather than being silently swallowed.
+    static func isExpectedExit(userStopped: Bool, shuttingDown: Bool, appTerminating: Bool) -> Bool {
+        userStopped || shuttingDown || appTerminating
     }
 
     /// Log levels zap emits that never, on their own, represent a core failure.
@@ -220,9 +226,7 @@ enum CoreError: Error, Equatable {
         var output = ""
         output.reserveCapacity(input.count)
         var iterator = input.unicodeScalars.makeIterator()
-        var pending: Unicode.Scalar? = nil
-        while let scalar = pending ?? iterator.next() {
-            pending = nil
+        while let scalar = iterator.next() {
             // ESC (0x1B) begins an escape sequence. A CSI sequence is
             // "ESC [ <params> <final byte 0x40–0x7E>"; consume through the
             // final byte. Any other ESC-prefixed pair is dropped as a unit.
@@ -256,17 +260,38 @@ enum CoreError: Error, Equatable {
         return result.isEmpty ? nil : result
     }
 
-    /// Whether a single stderr line is a routine zap log line at DEBUG / INFO /
-    /// WARN level. The first recognised level token decides the line's
-    /// severity; a line with no recognised level (a bare error string, a Go
-    /// panic) is NOT benign and is kept.
+    /// Whether a single line is a routine zap console log line at DEBUG / INFO /
+    /// WARN level, and therefore not on its own a failure to surface.
+    ///
+    /// A line only qualifies when it has the zap console SHAPE — a
+    /// `<file>.go:<line>` caller token — AND a benign level token appears
+    /// BEFORE that caller (the level always precedes the caller in zap's
+    /// encoder). This structural check avoids two false classifications a bare
+    /// token scan makes: an arbitrary error message that merely contains the
+    /// word "INFO" (e.g. "failed to parse INFO configuration") is NOT a log
+    /// line and is kept; and a Go panic header ("panic: …"), which has no `.go:`
+    /// caller of the zap form, is kept. An ERROR-level token before the caller
+    /// always wins (the line is a genuine error log) and is kept.
     private static func lineIsBenignLog(_ line: String) -> Bool {
-        for token in line.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
-            let upper = token.uppercased()
-            if errorLogLevels.contains(upper) { return false }
-            if benignLogLevels.contains(upper) { return true }
+        let tokens = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        guard let callerIndex = tokens.firstIndex(where: isZapCaller) else {
+            return false // no zap caller ⇒ not a routine log line ⇒ keep it
         }
-        return false
+        var sawBenignLevel = false
+        for token in tokens[..<callerIndex] {
+            let upper = token.uppercased()
+            if errorLogLevels.contains(upper) { return false } // a real error log
+            if benignLogLevels.contains(upper) { sawBenignLevel = true }
+        }
+        return sawBenignLevel
+    }
+
+    /// A zap console caller token: `<path>.go:<line>` (e.g. `managed/client.go:695`).
+    private static func isZapCaller(_ token: String) -> Bool {
+        guard let colon = token.lastIndex(of: ":") else { return false }
+        let file = token[..<colon]
+        let lineNo = token[token.index(after: colon)...]
+        return file.hasSuffix(".go") && !lineNo.isEmpty && lineNo.allSatisfy(\.isNumber)
     }
 
     /// Short, user-facing description of the error.

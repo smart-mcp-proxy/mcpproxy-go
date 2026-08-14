@@ -2086,19 +2086,31 @@ actor CoreProcessManager {
             reason: "core process exited"
         )
 
-        // An expected exit — the user stopped the core, the tray is shutting
-        // down, or the core exited cleanly (status 0) — is neither surfaced as
-        // an error nor retried. Crucially, a clean exit counts even when the
-        // state never moved to `.shuttingDown`: the app-termination path
-        // (`applicationWillTerminate`) terminates the core directly while the
-        // tray is still `.connected`, and that normal quit must not pop an
-        // "MCPProxy Error".
-        let isStopped = await MainActor.run { appState.isStopped }
-        let isShuttingDownState = await MainActor.run {
-            if case .shuttingDown = appState.coreState { return true }
-            return false
+        // An expected exit — the user stopped the core, the manager is shutting
+        // it down, or the app is terminating — is neither surfaced as an error
+        // nor retried. The app-termination path (`applicationWillTerminate`)
+        // terminates the core directly while the tray is still `.connected`, so
+        // it sets `appState.isTerminating`; a clean (status 0) exit with none of
+        // these intents is an EXTERNAL kill and DOES trigger recovery below.
+        //
+        // Read all three intents in ONE MainActor hop so they are a consistent
+        // snapshot, then revalidate the launch generation: this hop is a
+        // suspension point and actor reentrancy could let a retry advance the
+        // generation while we were away, in which case this callback is stale
+        // and must not notify or start recovery against the replacement.
+        let intent = await MainActor.run {
+            (stopped: appState.isStopped,
+             shuttingDown: { if case .shuttingDown = appState.coreState { return true }; return false }(),
+             terminating: appState.isTerminating)
         }
-        if CoreError.isExpectedExit(status: status, userStopped: isStopped, shuttingDown: isShuttingDownState) {
+        if let generation, generation != launchGeneration {
+            NSLog("[MCPProxy] handleProcessExit: launch %d superseded by %d during exit handling, standing down",
+                  generation, launchGeneration)
+            return
+        }
+        if CoreError.isExpectedExit(
+            userStopped: intent.stopped, shuttingDown: intent.shuttingDown, appTerminating: intent.terminating
+        ) {
             NSLog("[MCPProxy] handleProcessExit: expected exit (status %d), not retrying", status)
             return
         }

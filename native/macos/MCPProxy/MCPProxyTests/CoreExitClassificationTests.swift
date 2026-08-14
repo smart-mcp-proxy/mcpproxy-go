@@ -26,31 +26,41 @@ final class CoreExitClassificationTests: XCTestCase {
         + "Successfully retrieved tools via direct call to upstream server   "
         + "{\"upstream_id\": \"jira-abc\"}"
 
-    // MARK: - isExpectedExit (facet 1: don't notify on a clean quit)
+    // MARK: - isExpectedExit (facet 1: notify only on an UNINTENDED exit)
 
-    func testCleanExitIsExpectedEvenWhenNotShuttingDown() {
-        // The app-termination path never sets `.shuttingDown`, yet a status-0
-        // exit there is a normal quit, not a crash.
+    func testAppTerminatingExitIsExpected() {
+        // The app-termination path never sets `.shuttingDown`, but it does set
+        // `isTerminating`, and that intent makes the resulting clean exit
+        // expected — the normal quit that used to pop a spurious error.
         XCTAssertTrue(
-            CoreError.isExpectedExit(status: 0, userStopped: false, shuttingDown: false)
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: true)
         )
     }
 
     func testUserStoppedExitIsExpected() {
         XCTAssertTrue(
-            CoreError.isExpectedExit(status: 137, userStopped: true, shuttingDown: false)
+            CoreError.isExpectedExit(userStopped: true, shuttingDown: false, appTerminating: false)
         )
     }
 
     func testShuttingDownExitIsExpected() {
         XCTAssertTrue(
-            CoreError.isExpectedExit(status: 143, userStopped: false, shuttingDown: true)
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: true, appTerminating: false)
+        )
+    }
+
+    func testCleanExitWithoutIntentIsNotExpected() {
+        // An EXTERNAL kill (SIGTERM) makes the Go core exit 0 too. With no tray
+        // intent set, that clean exit is NOT expected — the tray must recover,
+        // not silently sit on a dead core.
+        XCTAssertFalse(
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: false)
         )
     }
 
     func testUnexpectedNonZeroCrashIsNotExpected() {
         XCTAssertFalse(
-            CoreError.isExpectedExit(status: 1, userStopped: false, shuttingDown: false)
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: false)
         )
     }
 
@@ -101,6 +111,29 @@ final class CoreExitClassificationTests: XCTestCase {
         let diag = CoreError.diagnostic(fromStderr: buffer)
         XCTAssertNotNil(diag)
         XCTAssertTrue(diag!.contains("panic: runtime error"))
+    }
+
+    // A real error message that merely CONTAINS the word "INFO" is not a log
+    // line (no zap `.go:NNN` caller) and must be kept, not swallowed as benign.
+    func testErrorMessageContainingLevelWordIsKept() {
+        let msg = "failed to parse INFO configuration section"
+        XCTAssertEqual(CoreError.diagnostic(fromStderr: msg), msg)
+    }
+
+    // A panic whose message contains a level word is still kept — the panic
+    // header has no zap caller, so the structural check never calls it benign.
+    func testPanicMentioningLevelWordIsKept() {
+        let msg = "panic: INFO invariant violated"
+        XCTAssertEqual(CoreError.diagnostic(fromStderr: msg), msg)
+    }
+
+    // A benign INFO line whose MESSAGE body contains the word "error" is still
+    // dropped: the level before the `.go:` caller is INFO, not an error level.
+    func testInfoLineWithErrorInMessageIsStillBenign() {
+        let line =
+            "2026-08-14 07:36:05 \u{1B}[34mINFO\u{1B}[0m upstream/manager.go:12 "
+            + "handled error response from upstream gracefully"
+        XCTAssertNil(CoreError.diagnostic(fromStderr: line))
     }
 
     // MARK: - fromExitCode wiring
