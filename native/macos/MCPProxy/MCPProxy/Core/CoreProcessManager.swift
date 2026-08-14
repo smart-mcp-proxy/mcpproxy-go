@@ -762,13 +762,6 @@ actor CoreProcessManager {
     private func launchAndConnectOnce() async throws {
         await transitionState(to: .launching)
 
-        // Any pre-update stop intent belonged to the PREVIOUS core; starting a
-        // new one voids it. Clearing it here is what stops a latched intent from
-        // masking a future crash if a Sparkle install aborts after the
-        // pre-install stop (the stopped core came down, so the flag was never
-        // consumed by a postpone, but the install never relaunched us either).
-        await MainActor.run { appState.isStoppingForUpdate = false }
-
         // Resolve the core binary
         let binaryPath = try resolveBinary()
         coreBinaryPath = binaryPath
@@ -1450,8 +1443,9 @@ actor CoreProcessManager {
         let generation = launchGeneration
         proc.terminationHandler = { [weak self] terminatedProcess in
             let status = terminatedProcess.terminationStatus
+            let pid = terminatedProcess.processIdentifier
             Task {
-                await self?.handleProcessExit(status: status, generation: generation)
+                await self?.handleProcessExit(status: status, generation: generation, pid: pid)
             }
         }
 
@@ -2071,7 +2065,7 @@ actor CoreProcessManager {
     // MARK: - Private: Process Exit Handling
 
     /// Handle the core process exiting.
-    func handleProcessExit(status: Int32, generation: Int? = nil) async {
+    func handleProcessExit(status: Int32, generation: Int? = nil, pid: Int32? = nil) async {
         // A callback from a launch we already abandoned says nothing about the
         // core we have now. Acting on it is how a reaped attempt turns into an
         // extra spawn.
@@ -2082,34 +2076,38 @@ actor CoreProcessManager {
         }
 
         let stderr = stderrBuffer
+        let exitedPID = pid ?? process?.processIdentifier ?? 0
 
         // Recorded whatever we decide to do about it, and recorded here rather
         // than only in the retry branches: an exit that leads to no retry (the
         // user stopped it, a clean shutdown) is exactly the one that otherwise
         // leaves no trace at all (#862).
         AppLifecycle.shared.recordCoreExited(
-            pid: process?.processIdentifier ?? 0,
+            pid: exitedPID,
             status: status,
             reason: "core process exited"
         )
 
         // An expected exit — the user stopped the core, the manager is shutting
-        // it down, or the app is terminating — is neither surfaced as an error
-        // nor retried. The app-termination path (`applicationWillTerminate`)
-        // terminates the core directly while the tray is still `.connected`, so
-        // it sets `appState.isTerminating`; a clean (status 0) exit with none of
-        // these intents is an EXTERNAL kill and DOES trigger recovery below.
+        // it down, the app is terminating, or Sparkle stopped THIS pid for a
+        // pre-install swap — is neither surfaced as an error nor retried. The
+        // app-termination path (`applicationWillTerminate`) terminates the core
+        // directly while the tray is still `.connected`, so it sets
+        // `appState.isTerminating`; a clean (status 0) exit with none of these
+        // intents is an EXTERNAL kill and DOES trigger recovery below.
         //
-        // Read all three intents in ONE MainActor hop so they are a consistent
+        // Read the intents in ONE MainActor hop so they are a consistent
         // snapshot, then revalidate the launch generation: this hop is a
         // suspension point and actor reentrancy could let a retry advance the
         // generation while we were away, in which case this callback is stale
-        // and must not notify or start recovery against the replacement.
+        // and must not notify or start recovery against the replacement. The
+        // pre-update intent is matched by pid, so a stale intent for a different
+        // (already-replaced) core can never mark this exit expected.
         let intent = await MainActor.run {
             (stopped: appState.isStopped,
              shuttingDown: { if case .shuttingDown = appState.coreState { return true }; return false }(),
              terminating: appState.isTerminating,
-             stoppingForUpdate: appState.isStoppingForUpdate)
+             stoppingForUpdate: appState.stoppedForUpdatePID != nil && appState.stoppedForUpdatePID == exitedPID)
         }
         if let generation, generation != launchGeneration {
             NSLog("[MCPProxy] handleProcessExit: launch %d superseded by %d during exit handling, standing down",
