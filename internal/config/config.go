@@ -1343,6 +1343,12 @@ type UpdateCheckConfig struct {
 	// Channel selects which releases are offered as updates: "stable"
 	// (default; prereleases never offered) or "rc" (prereleases included).
 	// Empty resolves to stable. Validated in ValidateDetailed.
+	//
+	// NOTE: for a RELEASED build the running binary's own version is
+	// authoritative and overrides this field — a stable build is never
+	// offered an RC (even with channel=rc), and an RC build always tracks the
+	// rc channel. This field only takes effect on dev/unstamped builds. See
+	// internal/updatecheck.Checker.IncludePrereleases.
 	Channel string `json:"channel,omitempty" mapstructure:"channel"`
 }
 

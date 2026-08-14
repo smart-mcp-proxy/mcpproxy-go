@@ -1132,10 +1132,27 @@ func (a *App) performSelfUpdate() {
 	}
 }
 
+// includePrereleases reports whether this tray build may be offered a
+// prerelease. The running build's own version is authoritative: a stable
+// build is never offered an RC (even with the env flag set — a stale opt-in
+// must not resurrect RC offers), while an RC build tracks the rc channel. A
+// dev/unstamped build honors the env opt-in so local testing can exercise it.
+// Mirrors internal/updatecheck.Checker.IncludePrereleases.
+func (a *App) includePrereleases() bool {
+	v := a.version
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	if semver.IsValid(v) {
+		return semver.Prerelease(v) != ""
+	}
+	return os.Getenv("MCPPROXY_ALLOW_PRERELEASE_UPDATES") == trueStr
+}
+
 // getLatestRelease fetches the latest release information from GitHub
 func (a *App) getLatestRelease() (*GitHubRelease, error) {
-	// Check if prerelease updates are allowed
-	allowPrerelease := os.Getenv("MCPPROXY_ALLOW_PRERELEASE_UPDATES") == trueStr
+	// Check if prerelease updates are allowed (build-identity authoritative)
+	allowPrerelease := a.includePrereleases()
 
 	if allowPrerelease {
 		// Get all releases and find the latest (including prereleases)

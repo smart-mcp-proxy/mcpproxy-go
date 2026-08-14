@@ -13,7 +13,11 @@ func TestCheckerPolicyReflectsConfigAndEnvironment(t *testing.T) {
 	t.Setenv(EnvDisableAutoUpdate, "")
 	t.Setenv(EnvAllowPrereleaseUpdates, "")
 
-	c := New(zap.NewNop(), "v1.0.0")
+	// A dev/unstamped build: its channel is NOT fixed by build identity, so the
+	// config/env opt-in is what this test exercises. (A released stable build
+	// clamps to stable regardless of config — see
+	// TestChecker_Policy_ChannelFollowsBuildIdentity.)
+	c := New(zap.NewNop(), "development")
 
 	p := c.Policy()
 	if !p.Enabled {

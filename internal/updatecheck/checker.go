@@ -208,12 +208,58 @@ func (c *Checker) enabledLocked() bool {
 // MCPPROXY_ALLOW_PRERELEASE_UPDATES=true wins over the config channel
 // (Spec 079 FR-014 precedence: env > config); otherwise channel=rc opts in.
 func (c *Checker) IncludePrereleases() bool {
-	if os.Getenv(EnvAllowPrereleaseUpdates) == "true" {
+	// The running build's own version is authoritative (issue: a stable user
+	// must never be offered an RC; an RC user may be offered stable or the next
+	// RC). This deliberately overrides the config/env opt-in for RELEASED
+	// builds, so a stale `channel: rc` config left over from a
+	// previously-installed RC cannot resurrect RC offers on a stable build.
+	switch versionChannelKind(c.version) {
+	case buildChannelStable:
+		// A stable build never tracks prereleases, whatever the config/env say.
+		return false
+	case buildChannelPrerelease:
+		// An RC build tracks the rc channel: it is offered the next RC, and —
+		// via pure-semver comparison (compareVersions) — its graduating stable.
 		return true
+	default:
+		// buildChannelUnknown: a dev/unstamped build (local `go build`, tests)
+		// has no release identity to honor, so the config/env opt-in still
+		// applies — this is the only path that can exercise the rc channel
+		// without a released RC binary.
+		if os.Getenv(EnvAllowPrereleaseUpdates) == "true" {
+			return true
+		}
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		return c.cfgPrerelease
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.cfgPrerelease
+}
+
+// buildChannelKind classifies the running build's own version.
+type buildChannelKind int
+
+const (
+	// buildChannelUnknown is an unstamped/dev build (invalid semver, e.g.
+	// "development") with no release identity — the config/env opt-in applies.
+	buildChannelUnknown buildChannelKind = iota
+	// buildChannelStable is a released stable build (valid semver, no
+	// prerelease suffix) — never offered a prerelease.
+	buildChannelStable
+	// buildChannelPrerelease is a released RC build (valid semver with an
+	// -rc.N / -next.* suffix) — tracks the rc channel.
+	buildChannelPrerelease
+)
+
+// versionChannelKind classifies a build version for channel selection.
+func versionChannelKind(version string) buildChannelKind {
+	v := ensureVPrefix(version)
+	if !semver.IsValid(v) {
+		return buildChannelUnknown
+	}
+	if semver.Prerelease(v) != "" {
+		return buildChannelPrerelease
+	}
+	return buildChannelStable
 }
 
 // Start begins the background update checker.
