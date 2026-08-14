@@ -108,6 +108,13 @@ final class UpdateService: ObservableObject {
     /// Bundle whose in-place updatability is evaluated; injected in tests.
     private let hostBundleURL: URL
 
+    /// The tray app's own release version for the build-identity channel clamp
+    /// (a stable app never offers itself an RC). Resolved once at init from the
+    /// injected override or the host bundle's CFBundleShortVersionString, so
+    /// the clamp is deterministic in tests instead of depending on whatever
+    /// bundle the hostBundleURL happens to resolve to on the test machine.
+    private let hostVersion: String?
+
     /// The legacy GitHub check. Injected in tests so the suite issues no
     /// network requests — nil means "use the real one".
     private let legacyCheck: (() -> Void)?
@@ -117,15 +124,26 @@ final class UpdateService: ObservableObject {
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         hostBundleURL: URL = Bundle.main.bundleURL,
+        hostVersion: String? = nil,
         feedUpdater: (any FeedUpdating)? = nil,
         legacyCheck: (() -> Void)? = nil
     ) {
         self.environment = environment
         self.hostBundleURL = hostBundleURL
+        self.hostVersion = hostVersion ?? Self.hostBundleVersion(hostBundleURL)
         self.feedUpdater = feedUpdater
         self.legacyCheck = legacyCheck
-        self.policy = UpdatePolicyResolver.resolve(core: nil, environment: environment)
+        self.policy = UpdatePolicyResolver.resolve(
+            core: nil, environment: environment, hostVersion: self.hostVersion)
         self.blockedReason = UpdateInstallability.evaluate(bundleURL: hostBundleURL)
+    }
+
+    /// The tray app's own `CFBundleShortVersionString`, read from the host
+    /// bundle (injected in tests). Feeds the build-identity channel clamp in
+    /// UpdatePolicyResolver.resolve — nil (unreadable/dev bundle) means "don't
+    /// clamp", deferring to the core policy.
+    static func hostBundleVersion(_ bundleURL: URL) -> String? {
+        Bundle(url: bundleURL)?.infoDictionary?["CFBundleShortVersionString"] as? String
     }
 
     // MARK: - Wiring
@@ -158,7 +176,8 @@ final class UpdateService: ObservableObject {
     /// FR-015: apply the policy the core reports. Idempotent; safe to call on
     /// every connect and on every config hot-reload.
     func applyCorePolicy(_ corePolicy: CoreUpdatePolicy?) {
-        let resolved = UpdatePolicyResolver.resolve(core: corePolicy, environment: environment)
+        let resolved = UpdatePolicyResolver.resolve(
+            core: corePolicy, environment: environment, hostVersion: hostVersion)
         guard resolved != policy else { return }
         policy = resolved
         feedUpdater?.apply(policy: resolved)

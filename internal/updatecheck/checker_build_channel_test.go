@@ -55,6 +55,21 @@ func TestChecker_IncludePrereleases_BuildIdentityAuthoritative(t *testing.T) {
 			t.Error("dev build must honor the env override")
 		}
 	})
+
+	t.Run("go-install pseudo-version is dev, not RC", func(t *testing.T) {
+		// A `go install @commit` pseudo-version is valid semver with a
+		// prerelease component but is NOT a released RC — it must not be
+		// force-tracked onto the rc channel; the opt-in governs it.
+		pseudo := "v0.47.1-0.20260701123456-abcdef123456"
+		c := New(zap.NewNop(), pseudo)
+		if c.IncludePrereleases() {
+			t.Error("pseudo-version must default to stable (not forced onto rc like a real -rc build)")
+		}
+		c.SetConfig(true, true)
+		if !c.IncludePrereleases() {
+			t.Error("pseudo-version must honor config channel=rc (treated as a dev build)")
+		}
+	})
 }
 
 // Policy().Channel is derived from IncludePrereleases(), so the same

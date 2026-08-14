@@ -1318,7 +1318,7 @@ offline.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `true` | Master switch for update checking. When `false`, no network check is performed (background poll *and* the manual `/api/v1/info?refresh=true` re-check) and no upgrade nudge appears on any surface — the `update` object is omitted from `/api/v1/info`. |
-| `channel` | string | `"stable"` | Release channel: `"stable"` (GitHub `releases/latest`; prereleases never offered) or `"rc"` (prerelease tags such as `v0.47.0-rc.1` included). |
+| `channel` | string | `"stable"` | Release channel: `"stable"` (GitHub `releases/latest`; prereleases never offered) or `"rc"` (prerelease tags such as `v0.47.0-rc.1` included). **Released builds ignore this field** — the running binary's own version is authoritative (a stable build is never offered an RC; an RC build always tracks `rc`); it only applies to dev/unstamped builds. See [docs/prerelease-builds.md](prerelease-builds.md). |
 
 Both keys are optional and hot-reloadable: editing them (config file or
 `POST /api/v1/config/apply`) takes effect without a restart, and re-enabling

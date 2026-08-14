@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 )
 
@@ -222,10 +223,12 @@ func (c *Checker) IncludePrereleases() bool {
 		// via pure-semver comparison (compareVersions) — its graduating stable.
 		return true
 	default:
-		// buildChannelUnknown: a dev/unstamped build (local `go build`, tests)
-		// has no release identity to honor, so the config/env opt-in still
-		// applies — this is the only path that can exercise the rc channel
-		// without a released RC binary.
+		// buildChannelUnknown: a build with no RELEASE identity — an unstamped
+		// local build ("development"/"dev", which the Start/CheckNow semver
+		// guard skips entirely) or a `go install @commit` pseudo-version (valid
+		// semver, so it DOES check). Neither is an -rc.*/-next.* release, so the
+		// config/env opt-in still applies — the only way to exercise the rc
+		// channel without a released RC binary.
 		if os.Getenv(EnvAllowPrereleaseUpdates) == "true" {
 			return true
 		}
@@ -254,6 +257,14 @@ const (
 func versionChannelKind(version string) buildChannelKind {
 	v := ensureVPrefix(version)
 	if !semver.IsValid(v) {
+		return buildChannelUnknown
+	}
+	// A `go install @commit` pseudo-version (e.g. v0.47.1-0.20260701123456-abc)
+	// is valid semver WITH a prerelease component, but it is a development
+	// build off an arbitrary commit — not an -rc.*/-next.* release. Classify it
+	// as unknown so it is not force-tracked onto the rc channel; the config/env
+	// opt-in governs it like any other dev build.
+	if module.IsPseudoVersion(v) {
 		return buildChannelUnknown
 	}
 	if semver.Prerelease(v) != "" {
