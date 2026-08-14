@@ -707,7 +707,6 @@ func TestDetectConfigChanges_CodeExecution(t *testing.T) {
 		"code_execution_max_parallel":   func(c *config.Config) { c.CodeExecutionMaxParallel = 16 },
 		"code_execution_timeout_ms":     func(c *config.Config) { c.CodeExecutionTimeoutMs = 60000 },
 		"code_execution_max_tool_calls": func(c *config.Config) { c.CodeExecutionMaxToolCalls = 5 },
-		"code_execution_pool_size":      func(c *config.Config) { c.CodeExecutionPoolSize = 20 },
 	}
 
 	for name, mutate := range changes {
@@ -719,9 +718,22 @@ func TestDetectConfigChanges_CodeExecution(t *testing.T) {
 		})
 	}
 
+	t.Run("code_execution_pool_size requires a restart", func(t *testing.T) {
+		// The JS runtime pool is sized once at server construction and never
+		// resized in-process; claiming hot application would leave the old
+		// concurrency cap silently in force.
+		result := DetectConfigChanges(mk(nil), mk(func(c *config.Config) { c.CodeExecutionPoolSize = 20 }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "code_execution_pool_size")
+		assert.NotContains(t, result.ChangedFields, "code_execution")
+		assert.True(t, result.RequiresRestart)
+		assert.Contains(t, result.RestartReason, "code_execution_pool_size")
+	})
+
 	t.Run("unchanged settings are not reported", func(t *testing.T) {
 		result := DetectConfigChanges(mk(nil), mk(nil))
 		require.True(t, result.Success)
 		assert.NotContains(t, result.ChangedFields, "code_execution")
+		assert.NotContains(t, result.ChangedFields, "code_execution_pool_size")
 	})
 }
