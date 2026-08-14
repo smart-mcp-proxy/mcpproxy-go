@@ -217,9 +217,9 @@ func DeriveLanguage(name, ext, explicitLanguage string) (string, error) {
 // source together with the language derived from its extension.
 //
 // Order matters: the name is validated BEFORE any filesystem call (SC-003),
-// then both candidate extensions are probed, then the surviving candidate is
-// opened with the platform's no-follow idiom and read through a bounded
-// reader. Exactly one open and one read per call — no cache, no re-read.
+// then the directory decides which candidates exist, then the surviving
+// candidate is opened with the platform's no-follow idiom and read through a
+// bounded reader. Exactly one open and one read per call — no cache, no re-read.
 func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language string, err error) {
 	if err := ValidateName(name); err != nil {
 		return nil, "", err
@@ -232,14 +232,12 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 		return nil, "", newNotFoundError(scriptsDir, name)
 	}
 
-	// Probe both extensions. Lstat (not Stat) so a symlink is seen as a
-	// symlink here; the open below is the authoritative, race-free check.
-	var found []string
-	for _, ext := range []string{extJS, extTS} {
-		path := filepath.Join(scriptsDir, name+ext)
-		if _, statErr := os.Lstat(path); statErr == nil {
-			found = append(found, path)
+	found, err := candidatesFor(scriptsDir, name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, "", newNotFoundError(scriptsDir, name)
 		}
+		return nil, "", &InvalidError{Name: name, Path: scriptsDir, Reason: ReasonUnreadable, Detail: err.Error()}
 	}
 
 	switch len(found) {
@@ -295,6 +293,44 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 	}
 
 	return data, lang, nil
+}
+
+// candidatesFor returns the paths of the script files backing `name`, in
+// extension order (.js then .ts), by reading the directory and comparing entry
+// names BYTE FOR BYTE — the same rule List applies.
+//
+// The obvious implementation, stat-ing the two constructed paths, delegates the
+// name→file decision to the filesystem, and on the default macOS and Windows
+// volumes that decision is case-insensitive. `backdoor.JS` then satisfied a
+// probe for `backdoor.js` and executed, while every discovery surface — the
+// listing, GET /api/v1/code/scripts, the not-found error — skipped it as an
+// unknown extension; conversely `foo.js` plus `FOO.ts` were two ok listing
+// entries that both refused to run as ambiguous. Reading the directory removes
+// the filesystem's matching from the loop entirely, so the two agree on every
+// platform. Resolve's no-follow open remains the authoritative check.
+func candidatesFor(scriptsDir, name string) ([]string, error) {
+	dirEntries, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	present := make(map[string]bool, 2)
+	for _, d := range dirEntries {
+		switch d.Name() {
+		case name + extJS:
+			present[extJS] = true
+		case name + extTS:
+			present[extTS] = true
+		}
+	}
+
+	found := make([]string, 0, 2)
+	for _, ext := range []string{extJS, extTS} {
+		if present[ext] {
+			found = append(found, filepath.Join(scriptsDir, name+ext))
+		}
+	}
+	return found, nil
 }
 
 // newNotFoundError builds the discovery-carrying not-found error (FR-004).

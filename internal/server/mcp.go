@@ -5530,6 +5530,12 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	// into a string by the IsError branch at the bottom of this function.
 	ctx, shed := withShedCapture(ctx)
 
+	// Spec 097: the same problem for code_execution's refusals — a disabled
+	// feature is a 403 and a missing stored script a 404, but the handler can
+	// only answer with an isError result. Capture the typed refusal so the HTTP
+	// layer classifies it without re-parsing the message.
+	ctx, codeExecRefusal := withCodeExecCapture(ctx)
+
 	// Route to the appropriate handler based on tool name
 	var result *mcp.CallToolResult
 	var err error
@@ -5584,6 +5590,12 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		}
 		if len(result.Content) > 0 {
 			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
+				// A code_execution refusal keeps its typed identity so the HTTP
+				// layer can answer 403/404/400 (Spec 097). The message stays the
+				// agent-readable one either way.
+				if refusal := codeExecRefusal.take(); refusal != nil {
+					return nil, &codeExecDispatchError{err: refusal, message: textContent.Text}
+				}
 				return nil, fmt.Errorf("%s", textContent.Text)
 			}
 		}

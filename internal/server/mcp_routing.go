@@ -504,8 +504,11 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 		)
 		return []mcpserver.ServerTool{{
 			Tool: codeExecutionTool,
-			Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				return mcp.NewToolResultError("Code execution is disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy configuration file."), nil
+			Handler: func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				// Same wording, same typed identity as the handler-level gate:
+				// which surface refused must not change what the caller is told.
+				recordCodeExecRefusal(ctx, config.ErrCodeExecutionDisabled)
+				return mcp.NewToolResultError(config.CodeExecutionDisabledMessage), nil
 			},
 		}}
 	}

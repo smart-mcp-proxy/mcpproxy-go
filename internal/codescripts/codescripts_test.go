@@ -109,6 +109,145 @@ func TestResolve_ValidatesNameBeforeFilesystemAccess(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "resolution must never create the scripts directory")
 }
 
+// TestResolve_TraversalCorpusWithExistingTargets closes the hole the
+// missing-directory corpus leaves open. There, every traversal value misses the
+// filesystem anyway, so an invalid-NAME answer is equally consistent with
+// "validated first" and "probed first, then explained the miss nicely". Here the
+// escape TARGET EXISTS: a resolver that probed before validating would open it
+// and hand back its bytes. Rejection therefore proves the ordering SC-003
+// requires, not just the outcome.
+func TestResolve_TraversalCorpusWithExistingTargets(t *testing.T) {
+	const canary = "({pwned: true})"
+
+	root := t.TempDir()
+	scriptsDir := filepath.Join(root, "scripts")
+	require.NoError(t, os.MkdirAll(scriptsDir, 0o755))
+
+	// Every planted file is a real, readable, correctly-named script — the only
+	// thing wrong with reaching it is the path used to get there.
+	writeScript(t, filepath.Join(root, "outside"), "evil.js", canary)
+	writeScript(t, filepath.Join(scriptsDir, "sub"), "nested.js", canary)
+	writeScript(t, scriptsDir, "sibling.js", canary)
+
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"parent traversal to an existing file", "../outside/evil"},
+		{"nested existing file", "sub/nested"},
+		{"dot segment onto an existing sibling", "./sibling"},
+		{"absolute path to an existing file", filepath.Join(root, "outside", "evil")},
+		{"name carrying the extension of an existing file", "sibling.js"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, _, err := Resolve(scriptsDir, tc.value, "")
+			require.Error(t, err, "value %q reaches an existing file and must be rejected", tc.value)
+			var invalid *InvalidNameError
+			require.True(t, errors.As(err, &invalid),
+				"invalid name %q must be rejected by the validator, before any filesystem call; got %T: %v", tc.value, err, err)
+			assert.NotContains(t, string(src), "pwned", "no bytes may be read from outside the scripts directory")
+		})
+	}
+}
+
+// TestResolve_ValidatesNameBeforeReadingTheDirectory is the ordering half of
+// SC-003, and the half a missing directory cannot show: against a scripts
+// directory that EXISTS but cannot be read, any implementation that touched the
+// filesystem before validating would surface the read failure (an unreadable
+// InvalidError), while one that validates first still answers with the name
+// error. The two orderings therefore produce different error types here, which
+// is exactly what "rejected before any filesystem call" has to mean.
+func TestResolve_ValidatesNameBeforeReadingTheDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+
+	scriptsDir := filepath.Join(t.TempDir(), "scripts")
+	require.NoError(t, os.MkdirAll(scriptsDir, 0o755))
+	writeScript(t, scriptsDir, "present.js", "1")
+	require.NoError(t, os.Chmod(scriptsDir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(scriptsDir, 0o755) })
+
+	// The directory really is unreadable: a VALID name reports that, so the
+	// name error below cannot be a coincidence of the directory being empty.
+	_, _, err := Resolve(scriptsDir, "present", "")
+	var unreadable *InvalidError
+	require.True(t, errors.As(err, &unreadable), "want *InvalidError, got %T: %v", err, err)
+	require.Equal(t, ReasonUnreadable, unreadable.Reason)
+
+	for _, tc := range traversalCorpus {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := Resolve(scriptsDir, tc.value, "")
+			require.Error(t, err)
+			var invalid *InvalidNameError
+			require.True(t, errors.As(err, &invalid),
+				"invalid name %q must be rejected before the directory is read; got %T: %v", tc.value, err, err)
+		})
+	}
+}
+
+// TestResolve_ExtensionCaseIsExact pins that name→file mapping is decided by an
+// exact byte comparison against the directory's real entries, not by the
+// filesystem's own name matching. On a case-insensitive volume (default macOS
+// APFS, NTFS) a constructed-path probe for "backdoor.js" happily opens
+// `backdoor.JS` — a file the listing, GET /api/v1/code/scripts and the
+// not-found error all omit, because they compare extensions exactly. A name
+// that executes but no discovery surface reports is worse than no listing at
+// all, so the resolver has to agree with the listing on every platform.
+func TestResolve_ExtensionCaseIsExact(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "backdoor.JS", "({pwned: true})")
+	writeScript(t, dir, "shouty.TS", "({pwned: true})")
+
+	for _, name := range []string{"backdoor", "shouty"} {
+		t.Run(name, func(t *testing.T) {
+			src, _, err := Resolve(dir, name, "")
+			require.Error(t, err, "an uppercase extension is not a stored script")
+			var notFound *NotFoundError
+			require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
+			assert.NotContains(t, string(src), "pwned")
+		})
+	}
+
+	entries, err := List(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the listing must agree: neither file is a stored script")
+}
+
+// TestResolve_CaseDistinctNamesAreDistinctScripts is the other direction of the
+// same seam: `foo.js` and `FOO.ts` are two independent names to the listing, and
+// a constructed-path probe on a case-insensitive volume found both extensions
+// for either name and called it ambiguous. Each must resolve to its own file.
+func TestResolve_CaseDistinctNamesAreDistinctScripts(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "foo.js", "({from: 'js'})")
+	writeScript(t, dir, "FOO.ts", "({from: 'ts'})")
+
+	src, lang, err := Resolve(dir, "foo", "")
+	require.NoError(t, err, "foo.js is the only exact-cased match for \"foo\"")
+	assert.Equal(t, "({from: 'js'})", string(src))
+	assert.Equal(t, LanguageJavaScript, lang)
+
+	src, lang, err = Resolve(dir, "FOO", "")
+	require.NoError(t, err, "FOO.ts is the only exact-cased match for \"FOO\"")
+	assert.Equal(t, "({from: 'ts'})", string(src))
+	assert.Equal(t, LanguageTypeScript, lang)
+
+	entries, err := List(dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name)
+		assert.Equal(t, StatusOK, e.Status, "%s is invocable, so the listing must say so", e.Name)
+	}
+	assert.Equal(t, []string{"FOO", "foo"}, names)
+}
+
 func TestResolve_JavaScriptAndTypeScript(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "fetch-prs.js", "({ok: true})")

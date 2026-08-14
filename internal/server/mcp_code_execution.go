@@ -83,6 +83,20 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	p.recordBuiltinTool("code_execution")
 	p.logger.Debug("code_execution tool called")
 
+	// enable_code_execution is a FEATURE switch, so it is enforced where every
+	// surface passes rather than at registration. The MCP surfaces gate by
+	// omitting the tool or serving a disabled stub, but REST /api/v1/code/exec,
+	// REST /api/v1/tools/call and the tray all reach this handler through
+	// CallToolDirect — which routed straight here, letting an API-key holder run
+	// inline code and, since Spec 097, read and execute a server-side stored
+	// script while the operator believed the feature was off. The check reads
+	// the LIVE snapshot so a hot-reloaded flag takes effect on the next call;
+	// no config at all means nothing to disable.
+	if cfg := p.currentConfig(); cfg != nil && !cfg.EnableCodeExecution {
+		recordCodeExecRefusal(ctx, config.ErrCodeExecutionDisabled)
+		return mcp.NewToolResultError(config.CodeExecutionDisabledMessage), nil
+	}
+
 	// Parse arguments. MaxToolCalls starts at the unset sentinel so an explicit
 	// max_tool_calls: 0 — the documented unlimited override — survives default
 	// resolution instead of being floored to the configured limit.
@@ -104,7 +118,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// both and never neither. This is resolved before anything else runs — the
 	// handler is the only execution-time resolver on every surface (MCP, REST
 	// and both CLI modes send the NAME, never the content).
-	code, scriptName, errMsg := p.resolveCodeExecutionSource(args, &options)
+	code, scriptName, errMsg := p.resolveCodeExecutionSource(ctx, args, &options)
 	if errMsg != "" {
 		return mcp.NewToolResultError(errMsg), nil
 	}
@@ -471,7 +485,7 @@ func codeExecStringArg(args map[string]interface{}, key string) (value, errMsg s
 // for an inline call). For a stored script the language is derived from the
 // file extension and written back into options, so everything downstream —
 // transpilation, logging, records — sees what actually ran.
-func (p *MCPProxyServer) resolveCodeExecutionSource(args map[string]interface{}, options *jsruntime.ExecutionOptions) (code, scriptName, errMsg string) {
+func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args map[string]interface{}, options *jsruntime.ExecutionOptions) (code, scriptName, errMsg string) {
 	code, errMsg = codeExecStringArg(args, "code")
 	if errMsg != "" {
 		return "", "", errMsg
@@ -490,6 +504,10 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(args map[string]interface{},
 
 	source, language, err := codescripts.Resolve(p.scriptsDir(), scriptName, options.Language)
 	if err != nil {
+		// Keep the typed identity reachable for the REST surface (404 for a
+		// name that is not there, 400 for one that cannot run) — the text alone
+		// would force it to classify these by prose.
+		recordCodeExecRefusal(ctx, err)
 		return "", "", fmt.Sprintf("Cannot execute stored script: %v", err)
 	}
 	options.Language = language

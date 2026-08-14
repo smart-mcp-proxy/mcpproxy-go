@@ -620,6 +620,26 @@ envelope, before anything is dispatched:
 }
 ```
 
+The remaining refusals carry the tool's own explanation and a status a client
+can act on. Only a genuine execution fault is a 500, so an agent's retry policy
+never re-sends a request that cannot succeed:
+
+| Situation | Status | `error.code` |
+|-----------|--------|--------------|
+| `enable_code_execution` is `false` | 403 | `FEATURE_DISABLED` |
+| Unknown script name (carries the available names) | 404 | `SCRIPT_NOT_FOUND` |
+| Invalid script name | 400 | `INVALID_SCRIPT_NAME` |
+| Ambiguous, empty, oversized, unreadable or non-regular | 400 | `SCRIPT_UNUSABLE` |
+| `language` contradicts the extension | 400 | `INVALID_LANGUAGE` |
+| Execution fault (pool, storage, internal) | 500 | `EXECUTION_FAILED` |
+
+A script that RUNS and throws is not a refusal: that is still `HTTP 200` with
+`ok: false` and a `RUNTIME_ERROR` in the envelope.
+
+`enable_code_execution: false` is enforced for every caller, not just MCP ones —
+the check sits in the tool handler that REST, the CLI and the tray all reach, so
+switching the feature off also stops stored scripts from being read from disk.
+
 ### REST: `GET /api/v1/code/scripts`
 
 Read-only listing of the stored scripts, using the same API-key auth as the rest

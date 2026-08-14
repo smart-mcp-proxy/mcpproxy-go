@@ -387,18 +387,30 @@ type codeScriptsPayload struct {
 // at execution time, so its view is the authoritative one; only without a
 // daemon does the CLI read the scripts directory itself.
 func runCodeScriptsList(_ *cobra.Command, _ []string) error {
-	if cfg, err := loadCodeConfig(); err == nil {
-		if client, ok := newDaemonClient(cfg, nil); ok {
-			ctx, cancel := context.WithTimeout(context.Background(), codeScriptsListTimeout)
-			defer cancel()
+	// A failed config load does not rule the daemon out: socket detection needs
+	// no config at all, so a daemon started with --config elsewhere is still
+	// reachable and still the authority. cfg is nil on error, which
+	// newDaemonClient already tolerates.
+	cfg, cfgErr := loadCodeConfig()
+	if client, ok := newDaemonClient(cfg, nil); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), codeScriptsListTimeout)
+		defer cancel()
 
-			dir, entries, err := client.GetCodeScripts(ctx)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error listing stored scripts from the daemon: %s\n", formatErrorWithRequestID(err))
-				return exitError(1)
-			}
-			return outputCodeScripts(dir, entries)
+		dir, entries, err := client.GetCodeScripts(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing stored scripts from the daemon: %s\n", formatErrorWithRequestID(err))
+			return exitError(1)
 		}
+		return outputCodeScripts(dir, entries)
+	}
+
+	// Falling back silently was the trap: with no config loaded this reads the
+	// DEFAULT scripts directory and reports it as the answer, so a daemon
+	// serving a different directory is contradicted by a listing that looks
+	// authoritative. The local answer is still the best available, but the
+	// reader has to know that is what it is.
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load configuration (%v); listing the local scripts directory only\n", cfgErr)
 	}
 
 	dir, entries, err := localCodeScripts()

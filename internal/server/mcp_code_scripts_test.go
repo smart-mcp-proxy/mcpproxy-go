@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -159,6 +161,101 @@ func TestCodeExecution_StoredScriptMatchesInline(t *testing.T) {
 
 	assert.Equal(t, inline, stored, "a stored script must execute identically to the same source inline")
 	assert.Contains(t, stored, `"result":42`)
+}
+
+// TestCodeExecution_StoredScriptMatchesInlineUnderEnforcement is the parity
+// case with teeth (SC-002 / FR-005). Comparing a self-contained arithmetic
+// script proves the source arrives intact and nothing more; what the shared
+// path actually risks is ORDERING — the resolver writes options.Language part
+// way through a fixed language→resolve→options→scope sequence, so a stored
+// script could silently execute under different option and scope enforcement
+// than the same source inline. This runs both branches through call_tool()
+// under a caller-set timeout and tool-call budget, an allowed_servers
+// restriction and a deny-all profile scope, and requires the answers — and the
+// records they leave behind — to agree.
+func TestCodeExecution_StoredScriptMatchesInlineUnderEnforcement(t *testing.T) {
+	// Two calls: one to a server the options exclude, one to a server they
+	// allow. Neither needs a real upstream — the allow-list is consulted before
+	// any connection — and the second call also proves the budget was not spent
+	// refusing the first.
+	const source = `var denied = call_tool('deploy-srv', 'ship', {});
+var allowed = call_tool('research-srv', 'search', {});
+({
+  denied: denied.ok ? 'RAN' : denied.error.code,
+  allowed: allowed.ok ? 'RAN' : allowed.error.code
+})`
+
+	options := map[string]interface{}{
+		"timeout_ms":      7500,
+		"max_tool_calls":  3,
+		"allowed_servers": []interface{}{"research-srv"},
+	}
+
+	// Each branch gets its own proxy so the record it leaves behind is the only
+	// one in storage, and so neither can observe the other's execution.
+	run := func(t *testing.T, ctx context.Context, args map[string]interface{}) (text string, rec *storage.ToolCallRecord) {
+		t.Helper()
+		proxy, scriptsDir := newStoredScriptProxy(t)
+		writeStoredScript(t, scriptsDir, "enforced.js", source)
+
+		request := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "code_execution", Arguments: args}}
+		result, err := proxy.handleCodeExecution(ctx, request)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		records, err := proxy.storage.GetServerToolCalls("code_execution", 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, records, "the parent code_execution call must be recorded")
+		return resultText(t, result), records[0]
+	}
+
+	scenarios := []struct {
+		name string
+		ctx  func() context.Context
+	}{
+		{
+			name: "allowed_servers restriction",
+			ctx:  context.Background,
+		},
+		{
+			name: "deny-all profile scope on top",
+			ctx: func() context.Context {
+				return profile.WithProfileScope(context.Background(), profile.NewProfileScope("locked", nil))
+			},
+		},
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			storedText, storedRec := run(t, sc.ctx(), map[string]interface{}{
+				"script":  "enforced",
+				"input":   map[string]interface{}{},
+				"options": options,
+			})
+			inlineText, inlineRec := run(t, sc.ctx(), map[string]interface{}{
+				"code":    source,
+				"input":   map[string]interface{}{},
+				"options": options,
+			})
+
+			assert.Equal(t, inlineText, storedText,
+				"a stored script must be enforced exactly like the same source inline")
+			assert.Contains(t, storedText, "SERVER_NOT_ALLOWED",
+				"the excluded server must be refused inside the stored script too")
+
+			// The records agree on everything except the one field a stored
+			// script is meant to add.
+			assert.Equal(t, source, storedRec.Arguments["code"], "the record keeps the executed source")
+			assert.Equal(t, "enforced", storedRec.Arguments["script"])
+			assert.NotContains(t, inlineRec.Arguments, "script")
+			for _, key := range []string{"code", "input", "language"} {
+				assert.Equal(t, inlineRec.Arguments[key], storedRec.Arguments[key],
+					"records must agree on %q", key)
+			}
+			assert.Equal(t, inlineRec.Error, storedRec.Error)
+			assert.Equal(t, inlineRec.ExecutionType, storedRec.ExecutionType)
+		})
+	}
 }
 
 // TestCodeExecution_StoredTypeScript pins that the extension derives the
@@ -390,6 +487,147 @@ func TestCodeExecutionDisabledStub_AcceptsScript(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.IsError)
 	assert.Contains(t, resultText(t, result), "disabled")
+}
+
+// TestCodeExecution_DisabledGateCoversEveryDispatch pins enable_code_execution
+// as a FEATURE switch rather than a tool-registration detail. The MCP surfaces
+// gated it by omitting the tool (or serving a disabled stub), but every
+// non-MCP caller — REST /api/v1/code/exec, REST /api/v1/tools/call, the tray —
+// reaches the handler through CallToolDirect, which routes code_execution
+// straight through. With the flag off an API-key holder could still run inline
+// code and, since Spec 097, read and execute a server-side stored script. The
+// gate belongs on the handler, where every surface passes.
+func TestCodeExecution_DisabledGateCoversEveryDispatch(t *testing.T) {
+	proxy, scriptsDir := newStoredScriptProxy(t)
+	writeStoredScript(t, scriptsDir, "sentinel.js", "({result: 'executed'})")
+	proxy.config.EnableCodeExecution = false
+
+	call := func(t *testing.T, args map[string]interface{}) error {
+		t.Helper()
+		_, err := proxy.CallToolDirect(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "code_execution", Arguments: args},
+		})
+		require.Error(t, err, "a disabled feature must not answer with a result")
+		return err
+	}
+
+	t.Run("a stored script is neither resolved nor executed", func(t *testing.T) {
+		err := call(t, map[string]interface{}{"script": "sentinel"})
+		assert.Contains(t, err.Error(), "disabled")
+		assert.NotContains(t, err.Error(), "executed", "the script must never run")
+	})
+
+	t.Run("a missing script name is not answered with the discovery listing", func(t *testing.T) {
+		err := call(t, map[string]interface{}{"script": "nope"})
+		assert.Contains(t, err.Error(), "disabled")
+		assert.NotContains(t, err.Error(), "sentinel",
+			"a disabled feature must not enumerate the scripts directory")
+	})
+
+	t.Run("inline code is refused too", func(t *testing.T) {
+		err := call(t, map[string]interface{}{"code": "({result: 'executed'})"})
+		assert.Contains(t, err.Error(), "disabled")
+		assert.NotContains(t, err.Error(), "executed")
+	})
+
+	t.Run("the wording matches the disabled stub", func(t *testing.T) {
+		stub := proxy.buildCodeExecutionTool()
+		require.Len(t, stub, 1)
+		result, err := stub[0].Handler(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "code_execution", Arguments: map[string]interface{}{"script": "sentinel"}},
+		})
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		assert.Equal(t, resultText(t, result), call(t, map[string]interface{}{"script": "sentinel"}).Error(),
+			"every surface must explain a disabled feature the same way")
+	})
+
+	t.Run("re-enabling takes effect without reconstruction", func(t *testing.T) {
+		proxy.config.EnableCodeExecution = true
+		t.Cleanup(func() { proxy.config.EnableCodeExecution = false })
+
+		result := callCodeExecution(t, proxy, map[string]interface{}{"script": "sentinel"})
+		require.False(t, result.IsError, resultText(t, result))
+		assert.Contains(t, resultText(t, result), "executed")
+	})
+}
+
+// TestCodeExecution_RefusalsKeepTheirTypeThroughDispatch is the seam that lets
+// the REST surface answer a stored-script rejection with a 4xx. The MCP
+// contract makes the handler return an isError RESULT, and CallToolDirect
+// flattens that to a plain error — so without a typed channel the HTTP layer
+// has nothing but prose to classify by, and every caller mistake arrives as a
+// retryable 500. Each refusal must therefore stay reachable through
+// errors.As/errors.Is while keeping its agent-readable message.
+func TestCodeExecution_RefusalsKeepTheirTypeThroughDispatch(t *testing.T) {
+	proxy, scriptsDir := newStoredScriptProxy(t)
+	writeStoredScript(t, scriptsDir, "alpha.js", "({result: 1})")
+	writeStoredScript(t, scriptsDir, "dup.js", "1")
+	writeStoredScript(t, scriptsDir, "dup.ts", "1")
+	writeStoredScript(t, scriptsDir, "blank.js", "")
+	writeStoredScript(t, scriptsDir, "typed.ts", "const x: number = 1; ({x})")
+
+	dispatch := func(t *testing.T, args map[string]interface{}) error {
+		t.Helper()
+		_, err := proxy.CallToolDirect(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "code_execution", Arguments: args},
+		})
+		require.Error(t, err)
+		return err
+	}
+
+	t.Run("not found", func(t *testing.T) {
+		err := dispatch(t, map[string]interface{}{"script": "nope"})
+		var notFound *codescripts.NotFoundError
+		require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
+		assert.Contains(t, err.Error(), "alpha", "the discovery listing must survive alongside the type")
+	})
+
+	t.Run("invalid name", func(t *testing.T) {
+		err := dispatch(t, map[string]interface{}{"script": "../../etc/passwd"})
+		var invalidName *codescripts.InvalidNameError
+		assert.True(t, errors.As(err, &invalidName), "want *InvalidNameError, got %T: %v", err, err)
+	})
+
+	t.Run("ambiguous", func(t *testing.T) {
+		err := dispatch(t, map[string]interface{}{"script": "dup"})
+		var ambiguous *codescripts.AmbiguousError
+		assert.True(t, errors.As(err, &ambiguous), "want *AmbiguousError, got %T: %v", err, err)
+	})
+
+	t.Run("present but unusable", func(t *testing.T) {
+		err := dispatch(t, map[string]interface{}{"script": "blank"})
+		var invalid *codescripts.InvalidError
+		require.True(t, errors.As(err, &invalid), "want *InvalidError, got %T: %v", err, err)
+		assert.Equal(t, codescripts.ReasonEmpty, invalid.Reason)
+	})
+
+	t.Run("language contradicts the extension", func(t *testing.T) {
+		err := dispatch(t, map[string]interface{}{"script": "typed", "language": "javascript"})
+		var mismatch *codescripts.LanguageMismatchError
+		assert.True(t, errors.As(err, &mismatch), "want *LanguageMismatchError, got %T: %v", err, err)
+	})
+
+	t.Run("feature disabled", func(t *testing.T) {
+		proxy.config.EnableCodeExecution = false
+		t.Cleanup(func() { proxy.config.EnableCodeExecution = true })
+
+		err := dispatch(t, map[string]interface{}{"script": "alpha"})
+		assert.True(t, errors.Is(err, config.ErrCodeExecutionDisabled), "want the disabled sentinel, got %T: %v", err, err)
+		assert.Equal(t, config.CodeExecutionDisabledMessage, err.Error())
+	})
+
+	t.Run("an execution fault keeps no refusal type", func(t *testing.T) {
+		// A script that runs and throws is not a refusal: it comes back as a
+		// normal result envelope, so the REST surface still answers 200 with
+		// ok:false rather than reclassifying it as a caller mistake.
+		writeStoredScript(t, scriptsDir, "boom.js", "throw new Error('kaboom')")
+		result, err := proxy.CallToolDirect(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "code_execution", Arguments: map[string]interface{}{"script": "boom"}},
+		})
+		require.NoError(t, err, "a thrown error is reported inside the result, not as a dispatch failure")
+		require.NotNil(t, result)
+	})
 }
 
 // TestCodeExecution_EndToEndFreshness (T011 / FR-009) pins the whole
