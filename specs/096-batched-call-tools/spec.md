@@ -50,7 +50,7 @@ An operator caps how hard one sandbox execution may hammer upstreams. The batch 
 
 1. **Given** the configured default `max_parallel`, **When** a batch larger than the bound runs, **Then** no more than `max_parallel` elements are in flight at any moment and all elements still complete.
 2. **Given** a per-call `max_parallel` override within the permitted range, **When** the batch runs, **Then** the override governs; an override outside the permitted range (or non-integer) is rejected before any element is dispatched.
-3. **Given** a per-server concurrency limit lower than `max_parallel`, **When** a batch targets that server, **Then** the per-server limit governs those elements (the batch queues rather than bypasses).
+3. **Given** a per-server concurrency limit lower than `max_parallel`, **When** a batch targets that server, **Then** the per-server limit governs those elements exactly as it governs individual calls: they queue when the server has queue capacity configured, and are shed with that server's standard per-call error when it does not — never bypassed.
 
 ---
 
