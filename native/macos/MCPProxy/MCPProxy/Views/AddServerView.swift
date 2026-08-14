@@ -269,7 +269,9 @@ struct ManualServerForm: View {
     @State private var envText = ""
     @State private var workingDir = ""
     @State private var isEnabled = true
-    @State private var dockerIsolation = true
+    // Docker isolation applies only to local stdio servers; default off (matches
+    // the Web UI's AddServerModal.vue) so a URL server never starts pre-checked.
+    @State private var dockerIsolation = false
     @State private var quarantined = false
     @State private var submitPhase: SubmitPhase = .idle
     @State private var lastSavedServerName: String?  // Track what was saved so Retry can clean up
@@ -396,11 +398,18 @@ struct ManualServerForm: View {
                                     .foregroundStyle(.tertiary)
                             }
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Toggle("Docker Isolation", isOn: $dockerIsolation)
-                                Text("Runs the server in an isolated Docker container. Prevents access to your filesystem, network, and other system resources. Recommended for untrusted servers.")
-                                    .font(.scaled(.caption2, scale: fontScale))
-                                    .foregroundStyle(.tertiary)
+                            // Docker isolation sandboxes a LOCAL child process, so it
+                            // only makes sense for command-based (stdio) servers. A
+                            // remote URL server has no local process to isolate — hide
+                            // the toggle for http/sse/streamable-http (mirrors the Web
+                            // UI's `:disabled="formData.type !== 'stdio'"`).
+                            if Self.showsDockerIsolation(forProtocol: selectedProtocol) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Toggle("Docker Isolation", isOn: $dockerIsolation)
+                                    Text("Runs the server in an isolated Docker container. Prevents access to your filesystem, network, and other system resources. Recommended for untrusted servers.")
+                                        .font(.scaled(.caption2, scale: fontScale))
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
@@ -540,47 +549,18 @@ struct ManualServerForm: View {
             lastSavedServerName = nil
         }
 
-        var config: [String: Any] = [
-            "name": name.trimmingCharacters(in: .whitespaces),
-            "protocol": selectedProtocol,
-            "enabled": isEnabled,
-            "docker_isolation": dockerIsolation,
-            "quarantined": quarantined,
-        ]
-
-        if selectedProtocol == "http" {
-            config["url"] = url.trimmingCharacters(in: .whitespaces)
-        } else {
-            config["command"] = command.trimmingCharacters(in: .whitespaces)
-            let args = argsText.components(separatedBy: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            if !args.isEmpty {
-                config["args"] = args
-            }
-        }
-
-        let trimmedDir = workingDir.trimmingCharacters(in: .whitespaces)
-        if !trimmedDir.isEmpty {
-            config["working_dir"] = trimmedDir
-        }
-
-        // Parse env vars
-        let envLines = envText.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        if !envLines.isEmpty {
-            var envDict: [String: String] = [:]
-            for line in envLines {
-                let parts = line.split(separator: "=", maxSplits: 1)
-                if parts.count == 2 {
-                    envDict[String(parts[0])] = String(parts[1])
-                }
-            }
-            if !envDict.isEmpty {
-                config["env"] = envDict
-            }
-        }
+        let config = Self.makeServerConfig(
+            name: name,
+            selectedProtocol: selectedProtocol,
+            enabled: isEnabled,
+            dockerIsolation: dockerIsolation,
+            quarantined: quarantined,
+            url: url,
+            command: command,
+            argsText: argsText,
+            workingDir: workingDir,
+            envText: envText
+        )
 
         let serverName = name.trimmingCharacters(in: .whitespaces)
 
@@ -700,5 +680,87 @@ struct ManualServerForm: View {
             // Can't get logs — that's fine, just return empty
         }
         return ""
+    }
+}
+
+// MARK: - Pure field-gating seam (unit-testable without a running app)
+
+extension ManualServerForm {
+    /// Whether the "Docker Isolation" toggle applies to the selected transport.
+    /// Docker isolation sandboxes a LOCAL child process, so it is meaningful only
+    /// for command-based (stdio) servers. URL transports (http / sse /
+    /// streamable-http) are just a remote endpoint the proxy connects to — there
+    /// is no local process to isolate, so the toggle is hidden and its value is
+    /// never persisted. Mirrors the Web UI's `formData.type !== 'stdio'` gate.
+    static func showsDockerIsolation(forProtocol proto: String) -> Bool {
+        proto == "stdio"
+    }
+
+    /// Builds the `POST /api/v1/servers` request body from the form's fields.
+    /// Extracted as a pure function so the field-gating rules (isolation is
+    /// stdio-only; url vs command by transport) are unit-testable without a
+    /// running app or API client. The `isolation` override is emitted ONLY for
+    /// stdio transports so a URL-based server can never carry an isolation flag.
+    static func makeServerConfig(
+        name: String,
+        selectedProtocol: String,
+        enabled: Bool,
+        dockerIsolation: Bool,
+        quarantined: Bool,
+        url: String,
+        command: String,
+        argsText: String,
+        workingDir: String,
+        envText: String
+    ) -> [String: Any] {
+        var config: [String: Any] = [
+            "name": name.trimmingCharacters(in: .whitespaces),
+            "protocol": selectedProtocol,
+            "enabled": enabled,
+            "quarantined": quarantined,
+        ]
+
+        if showsDockerIsolation(forProtocol: selectedProtocol) {
+            // stdio only — a local process to sandbox.
+            config["command"] = command.trimmingCharacters(in: .whitespaces)
+            let args = argsText.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if !args.isEmpty {
+                config["args"] = args
+            }
+            // The backend server-create payload takes an `isolation` object
+            // ({"enabled": …}); the old top-level `docker_isolation` bool it
+            // never read, so the toggle silently did nothing. Emit the real
+            // field so an stdio server actually records its isolation choice.
+            config["isolation"] = ["enabled": dockerIsolation]
+        } else {
+            // URL transports carry no command and no isolation flag.
+            config["url"] = url.trimmingCharacters(in: .whitespaces)
+        }
+
+        let trimmedDir = workingDir.trimmingCharacters(in: .whitespaces)
+        if !trimmedDir.isEmpty {
+            config["working_dir"] = trimmedDir
+        }
+
+        // Parse env vars
+        let envLines = envText.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if !envLines.isEmpty {
+            var envDict: [String: String] = [:]
+            for line in envLines {
+                let parts = line.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 {
+                    envDict[String(parts[0])] = String(parts[1])
+                }
+            }
+            if !envDict.isEmpty {
+                config["env"] = envDict
+            }
+        }
+
+        return config
     }
 }
