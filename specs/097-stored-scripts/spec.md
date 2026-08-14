@@ -40,7 +40,7 @@ An operator or script author runs `mcpproxy code exec --script fetch-prs --input
 
 ### User Story 3 - Discover what scripts exist (Priority: P2)
 
-An agent (or operator) needs to know which workflows are available. The CLI offers `mcpproxy code scripts list` showing each script's name and source file; MCP clients see the available script names surfaced through the code-execution tool's own interface so they can invoke by name without out-of-band knowledge.
+An agent (or operator) needs to know which workflows are available. The CLI offers `mcpproxy code scripts list` showing each script's name and source file (asking the daemon when one is running, so both always agree). MCP clients learn the valid names from the code-execution tool itself: the tool description documents the mechanism, and any invocation naming a nonexistent script returns the available names (bounded) in its error — so an agent recovers the name set in one failed call without out-of-band knowledge. Live enumeration surfaces (a dedicated listing tool, `tools/list_changed` notifications) are deliberately out of scope for v1: tool registrations are static, and error-driven discovery covers the recovery path.
 
 **Why this priority**: Invocation-by-reference is unusable if callers cannot learn the valid names; ranks with the CLI story but below the core invocation.
 
@@ -49,7 +49,7 @@ An agent (or operator) needs to know which workflows are available. The CLI offe
 **Acceptance Scenarios**:
 
 1. **Given** two files in the scripts directory, **When** `mcpproxy code scripts list` runs, **Then** both names appear with their file paths (and `-o json` emits a machine-readable list).
-2. **Given** an MCP client connected to the daemon, **When** it inspects the code-execution tool, **Then** the currently available script names are discoverable without invoking anything.
+2. **Given** an MCP client connected to the daemon, **When** it invokes the code-execution tool with a `script` name that does not exist, **Then** the error lists the currently available script names (up to 20), reflecting the directory's current contents.
 3. **Given** an empty or absent scripts directory, **When** listing, **Then** the result is an explicit empty list, not an error.
 
 ---
@@ -71,11 +71,13 @@ A script author edits `scripts/fetch-prs.js` while the daemon runs. The next inv
 
 ### Edge Cases
 
-- **Name resolution is strictly confined**: a `script` value that attempts to escape the scripts directory (path separators, `..`, absolute paths, symlinks pointing outside, names differing only by extension tricks) is rejected as an invalid name — never resolved. Valid names are a restricted token set (letters, digits, hyphen, underscore), mapped to `<name>.js` (or `<name>.ts`) inside the scripts directory only.
-- **Ambiguous name** (both `<name>.js` and `<name>.ts` exist): the call is rejected with an error naming both candidates; ambiguity is never resolved silently.
-- **Unreadable or oversized file**: a script file that cannot be read, or exceeds the same size bound that applies to inline `code`, fails the invocation with a clear error; it does not crash or hang the daemon.
-- **Empty script file**: rejected the same way an empty inline `code` is.
+- **Name resolution is strictly confined, at open time**: a `script` value is validated as a restricted token (ASCII letters, digits, hyphen, underscore; 1–64 chars; case-sensitive) BEFORE any filesystem access — anything else (path separators, `..`, absolute paths, dots, Unicode) is rejected as an invalid name without touching the filesystem. Resolution then opens `<name>.js` / `<name>.ts` (lowercase extensions only) through a mechanism that confines the open to the scripts directory at open time — a symlink in place of the script file is rejected (scripts must be regular files), so no check-then-open race can escape the directory. The scripts directory itself may be a symlink (it is operator-controlled and resolved as the root of confinement).
+- **Ambiguous name** (both `<name>.js` and `<name>.ts` exist): the call is rejected with an error naming both candidates; ambiguity is never resolved silently. Listings show the name flagged as ambiguous.
+- **One invocation, one snapshot**: the script's bytes are opened, size-checked, and read exactly once per invocation; concurrent edits affect the next invocation, never the running one.
+- **Unreadable or oversized file**: a script file that cannot be read, exceeds the stored-script size bound (256 KB), or is empty fails the invocation with a specific error; it does not crash or hang the daemon. (Inline `code` today has no explicit bound; the stored-script bound is new and applies only to stored scripts.)
 - **Missing scripts directory**: treated as "no scripts" — listing returns empty, invocation returns the not-found error; the daemon does not create the directory on its own in v1.
+- **Language selection**: `.ts` scripts run through the same TypeScript path as inline `language: "typescript"`; `.js` scripts run as JavaScript. Supplying an explicit `language` that contradicts the extension is rejected; supplying a matching one is accepted.
+- **Listing hygiene**: files whose base name fails the token rules, with unrecognized or uppercase extensions, are ignored by listing and unreachable by invocation (they are not scripts).
 - **Sandbox parity**: a stored script executes with exactly the sandbox limits, scope/permission enforcement, timeout/budget options, and activity logging of the equivalent inline invocation — `script` changes only where the source text comes from, nothing about how it runs.
 - **No write path**: nothing in v1 creates, modifies, or deletes script files — no MCP tool, no REST endpoint, no CLI verb. The filesystem is the only authoring interface.
 
@@ -83,18 +85,18 @@ A script author edits `scripts/fetch-prs.js` while the daemon runs. The next inv
 
 ### Functional Requirements
 
-- **FR-001**: The system MUST resolve stored scripts from a `scripts/` directory under the mcpproxy configuration directory; files with supported extensions (`.js`, `.ts`) constitute the script set, addressed by their base name.
+- **FR-001**: The system MUST resolve stored scripts from the `scripts/` directory next to the ACTIVE configuration file — the daemon uses the config file it loaded; the CLI in standalone mode uses the config file it resolves by the same rules; the CLI in daemon mode delegates resolution entirely to the daemon (the name, never the content, crosses the wire). Files with supported lowercase extensions (`.js`, `.ts`) and token-valid base names constitute the script set, addressed by base name.
 - **FR-002**: The code-execution tool MUST accept `script: "<name>"` as an alternative to `code`, executing the named file's content with all other parameters (`input`, options) behaving identically to an inline invocation. Supplying both `code` and `script`, or neither, MUST be rejected with an explanatory error.
-- **FR-003**: Script names MUST be validated against a restricted token set (letters, digits, hyphen, underscore only) and resolved strictly inside the scripts directory; any name failing validation or any resolution escaping the directory (including via symlinks) MUST be rejected without filesystem access outside the directory.
-- **FR-004**: An invocation naming a nonexistent script MUST fail with an error that includes the available script names (bounded to a reasonable count) or states that none exist.
-- **FR-005**: A stored-script invocation MUST execute under exactly the same sandbox restrictions, scope/permission enforcement, execution options, budgets, and activity/history logging as the equivalent inline invocation, and activity records MUST identify the script by name.
+- **FR-003**: Script names MUST be validated (ASCII letters, digits, hyphen, underscore; 1–64 chars) before any filesystem access, and resolution MUST be confined to the scripts directory at open time: the open itself cannot traverse outside the directory, and a non-regular file (symlink, directory, device) at the script path is rejected. No check-then-open window may permit an escape.
+- **FR-004**: An invocation naming a nonexistent script MUST fail with an error that includes up to 20 available script names (alphabetical) or states that none exist — this error is the MCP discovery mechanism.
+- **FR-005**: A stored-script invocation MUST execute under exactly the same sandbox restrictions, scope/permission enforcement, execution options, budgets, and activity/history logging as the equivalent inline invocation. Records keep storing the executed source exactly as they do for inline code (Spec 024 parity) and additionally carry the script name.
 - **FR-006**: The CLI MUST support `mcpproxy code exec --script <name>` in both daemon and standalone modes, mutually exclusive with `--code` and `--file`, resolving from the same scripts directory with identical semantics.
 - **FR-007**: The CLI MUST provide `mcpproxy code scripts list` showing each available script's name and source path, honoring the standard output-format flags (`-o json|yaml`); an empty or absent directory yields an empty list, not an error.
-- **FR-008**: MCP clients MUST be able to discover the currently available script names through the code-execution tool surface without out-of-band knowledge.
+- **FR-008**: MCP clients MUST be able to recover the currently available script names through the code-execution tool surface without out-of-band knowledge, via the FR-004 error listing; the tool description MUST document the `script` parameter and this discovery mechanism. Tool registrations remain static; no `tools/list_changed` notifications or dedicated listing tool in v1.
 - **FR-009**: Script content MUST be read at invocation time (or equivalently freshened) such that file edits, additions, and deletions take effect on the next use without a daemon restart.
-- **FR-010**: A script file exceeding the size bound that applies to inline `code`, unreadable, ambiguous (multiple extensions), or empty MUST fail the invocation with a specific error; no partial execution.
+- **FR-010**: A script file exceeding 256 KB, unreadable, ambiguous (both extensions present), or empty MUST fail the invocation with a specific error; no partial execution. Each invocation executes exactly one atomically-read snapshot of the file.
 - **FR-011**: v1 MUST NOT expose any write/upload/delete capability for scripts through any API surface; the filesystem is the sole authoring interface.
-- **FR-012**: The capability MUST be available in both editions and on every surface where the code-execution tool is available today.
+- **FR-012**: The REST code-execution endpoint MUST accept `script` as an alternative to `code` with the same exactly-one-of validation (HTTP 400 otherwise), and a read-only REST listing endpoint MUST expose the same name/path data as the CLI listing (this is what daemon-mode CLI uses). Both editions; every surface where the code-execution tool is available today. No write/upload/delete surface anywhere (see FR-011).
 
 ### Key Entities
 
@@ -106,18 +108,18 @@ A script author edits `scripts/fetch-prs.js` while the daemon runs. The next inv
 
 ### Measurable Outcomes
 
-- **SC-001**: Invoking a 19KB stored workflow by name transmits over 95% fewer request bytes than the inline equivalent, with identical execution results.
-- **SC-002**: A stored script invocation returns byte-identical results to the same script passed inline as `code` (same input, same stub upstreams) in 100% of tested scenarios.
-- **SC-003**: 100% of path-escape attempts in a traversal test corpus (relative traversal, absolute paths, separator injection, symlink escape, extension tricks) are rejected without any filesystem access outside the scripts directory.
-- **SC-004**: A script edit on disk is reflected in the very next invocation in 100% of trials, with no daemon restart.
+- **SC-001**: Invoking a 19KB stored workflow by name transmits over 95% fewer request bytes than the inline equivalent.
+- **SC-002**: For deterministic scripts against stub upstreams, a stored-script invocation and the same source passed inline produce identical results in every tested scenario.
+- **SC-003**: Every entry in a traversal corpus (relative traversal, absolute paths, separator injection, dot names, Unicode, symlinked script file, oversized name) is rejected with the invalid-name or non-regular-file error class; corpus entries that are invalid tokens are proven (via test instrumentation of the resolver) to be rejected before any filesystem call.
+- **SC-004**: A script edit on disk is reflected in the very next invocation, with no daemon restart, in every trial of the freshness test.
 - **SC-005**: Existing inline `code` behavior is unchanged: the full existing test suite passes without modification (beyond additions).
 
 ## Assumptions
 
 - The scripts directory location is fixed (`<config-dir>/scripts/`) in v1; a `code_scripts` name→path config map from the issue is deferred — the directory convention alone covers the stated need without new config surface, and a map can be added compatibly later.
-- Discovery for MCP clients is satisfied by surfacing names through the code-execution tool surface (e.g., its description or a parameter-level enumeration); a dedicated `list_scripts` MCP tool is not required in v1 and would grow the tool surface for little gain.
-- The inline-code size bound is the reference bound for stored scripts; v1 introduces no separate script-size configuration.
-- Hot-freshness is defined by read-at-invocation semantics; no watcher-based cache is required so long as FR-009's observable behavior holds.
+- Discovery for MCP clients is error-driven (FR-004/FR-008): tool registrations are built once from static descriptions in this codebase, so live name enumeration in the tool description would go stale; the not-found error is always current. A dedicated listing tool and change notifications are deferred.
+- Inline `code` has no explicit size bound today; stored scripts get a fixed 256 KB bound (not configurable in v1) purely to bound daemon-side file reads.
+- Hot-freshness is defined by read-at-invocation semantics (one open+read per invocation); no watcher, no cache, hence nothing to invalidate.
 - TypeScript stored scripts are supported exactly insofar as inline TypeScript is supported today (same transpilation path).
 
 ## Commit Message Conventions *(mandatory)*
