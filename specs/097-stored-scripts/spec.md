@@ -64,7 +64,7 @@ A script author edits `scripts/fetch-prs.js` while the daemon runs. The next inv
 
 **Acceptance Scenarios**:
 
-1. **Given** a stored script has been invoked, **When** its file content changes on disk, **Then** the next invocation runs the new content without any daemon restart.
+1. **Given** a stored script has been invoked, **When** its file is atomically replaced (write-then-rename) with new content, **Then** the next invocation runs the new content without any daemon restart.
 2. **Given** a new file appears in (or is removed from) the scripts directory, **When** scripts are next listed or invoked, **Then** the addition/removal is reflected.
 
 ---
@@ -93,8 +93,8 @@ A script author edits `scripts/fetch-prs.js` while the daemon runs. The next inv
 - **FR-006**: The CLI MUST support `mcpproxy code exec --script <name>` in both daemon and standalone modes, mutually exclusive with `--code` and `--file`, resolving from the same scripts directory with identical semantics.
 - **FR-007**: The CLI MUST provide `mcpproxy code scripts list` showing every token-valid script name with its source path(s) and a status — `ok`, `ambiguous` (both candidate paths shown), or `invalid` (empty/oversized/unreadable, with the reason) — honoring the standard output-format flags (`-o json|yaml`); only `ok` scripts are invocable; an empty or absent directory yields an empty list, not an error.
 - **FR-008**: MCP clients MUST be able to recover the currently available script names through the code-execution tool surface without out-of-band knowledge, via the FR-004 error listing; the tool description MUST document the `script` parameter and this discovery mechanism. Tool registrations remain static; no `tools/list_changed` notifications or dedicated listing tool in v1.
-- **FR-009**: Script content MUST be read at invocation time (or equivalently freshened) such that file edits, additions, and deletions take effect on the next use without a daemon restart.
-- **FR-010**: A script file exceeding 256 KB, unreadable, ambiguous (both extensions present), or empty MUST fail the invocation with a specific error; no partial execution. Each invocation executes exactly one atomically-read snapshot of the file.
+- **FR-009**: Script content MUST be read at invocation time such that atomic replacements (write-then-rename), additions, and deletions take effect on the next use without a daemon restart; the behavior of an invocation concurrent with an in-place write is unspecified content, validated as read.
+- **FR-010**: A script file exceeding 256 KB, unreadable, ambiguous (both extensions present), or empty MUST fail the invocation with a specific error; no partial execution. Each invocation executes exactly one validated read result of the file.
 - **FR-011**: v1 MUST NOT expose any write/upload/delete capability for scripts through any API surface; the filesystem is the sole authoring interface.
 - **FR-012**: The REST code-execution endpoint MUST accept `script` as an alternative to `code` with the same exactly-one-of validation (HTTP 400 otherwise), and a read-only REST listing endpoint MUST expose the same name/path data as the CLI listing (this is what daemon-mode CLI uses). Both editions; every surface where the code-execution tool is available today. No write/upload/delete surface anywhere (see FR-011).
 
@@ -111,7 +111,7 @@ A script author edits `scripts/fetch-prs.js` while the daemon runs. The next inv
 - **SC-001**: Invoking a 19KB stored workflow by name transmits over 95% fewer request bytes than the inline equivalent.
 - **SC-002**: For deterministic scripts against stub upstreams, a stored-script invocation and the same source passed inline produce identical results in every tested scenario.
 - **SC-003**: Every entry in a traversal corpus (relative traversal, absolute paths, separator injection, dot names, Unicode, symlinked script file, oversized name) is rejected with the invalid-name or non-regular-file error class; corpus entries that are invalid tokens are proven (via test instrumentation of the resolver) to be rejected before any filesystem call.
-- **SC-004**: A script edit on disk is reflected in the very next invocation, with no daemon restart, in every trial of the freshness test.
+- **SC-004**: An atomic replacement of a script file is reflected in the very next invocation, with no daemon restart, in every trial of the freshness test.
 - **SC-005**: Existing inline `code` behavior is unchanged: the full existing test suite passes without modification (beyond additions).
 
 ## Assumptions
