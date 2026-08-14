@@ -8,7 +8,7 @@
 - Execution, budgets, scope enforcement, results: identical to inline.
 
 ## REST
-- `POST /api/v1/code/exec`: body gains optional `script`; exactly-one-of validation → HTTP 400; otherwise identical.
+- `POST /api/v1/code/exec`: body gains optional `script`; exactly-one-of violation → HTTP 400, envelope `{ok:false, error:{code:"INVALID_REQUEST", message}}` (the endpoint's existing shape); otherwise identical.
 - `GET /api/v1/code/scripts` (NEW, read-only, API-key auth): `{success: true, data: {scripts: [{name, paths, status, reason?}], dir}}`.
 
 ## CLI
@@ -16,7 +16,7 @@
 - `mcpproxy code scripts list` — daemon GET when running, else local; `-o json|yaml` supported.
 
 ## Authority
-scripts dir = directory of the ACTIVE config file on each surface (daemon: GetConfigPath incl. nil-mainServer fallback; CLI standalone: --config or ~/.mcpproxy/mcp_config.json). Never derived from --data-dir.
+scripts dir = directory of the ACTIVE config file, passed into the server at construction on every surface (daemon: runtime config service; CLI standalone in-process server: --config or ~/.mcpproxy/mcp_config.json via a shared helper); config.GetConfigPath(DataDir) only as last-resort fallback when no path was provided. The handler is the only resolver for execution; the CLI resolves only for daemonless `code scripts list`. Never derived from --data-dir.
 
 ## Records
 Activity/history keep storing the executed source as `code` (Spec 024 parity) plus additive `script: <name>`.
