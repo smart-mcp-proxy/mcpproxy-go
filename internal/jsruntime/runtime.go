@@ -154,6 +154,12 @@ func Execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 
 // execute is Execute plus the execution context it ran, which tests inspect for
 // state the Result does not carry (recorded tool calls, the worker context).
+//
+// After a timeout return the abandoned script goroutine may still append to
+// the returned context's ToolCalls (lone call and batch alike — there is no
+// vm.Interrupt). A test that reads the context after a timeout MUST first
+// synchronize with the script goroutine (e.g. via stub-side signalling, as the
+// cancellation tests do) or it races.
 func execute(ctx context.Context, caller ToolCaller, code string, opts ExecutionOptions) (*Result, *ExecutionContext) {
 	// Generate execution ID if not provided
 	if opts.ExecutionID == "" {
