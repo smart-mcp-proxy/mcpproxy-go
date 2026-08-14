@@ -1861,3 +1861,74 @@ func TestTrustedHostsLoadAndEnvOverride(t *testing.T) {
 		assert.Empty(t, cfg.TrustedHosts)
 	})
 }
+
+// TestCodeExecutionMaxParallel covers the Spec 096 config field end to end:
+// the built-in default, an operator value surviving load, the accepted range,
+// and the absent/zero → default resolution the sandbox relies on (a zero would
+// otherwise mean "no workers" and stall every batch).
+func TestCodeExecutionMaxParallel(t *testing.T) {
+	t.Run("default is 8", func(t *testing.T) {
+		assert.Equal(t, 8, DefaultConfig().CodeExecutionMaxParallel)
+	})
+
+	t.Run("absent value resolves to the default", func(t *testing.T) {
+		cfg := &Config{}
+		require.NoError(t, cfg.Validate())
+		assert.Equal(t, 8, cfg.CodeExecutionMaxParallel)
+	})
+
+	t.Run("zero resolves to the default", func(t *testing.T) {
+		cfg := &Config{CodeExecutionMaxParallel: 0}
+		require.NoError(t, cfg.Validate())
+		assert.Equal(t, 8, cfg.CodeExecutionMaxParallel)
+	})
+
+	t.Run("explicit value survives", func(t *testing.T) {
+		cfg := &Config{CodeExecutionMaxParallel: 16}
+		require.NoError(t, cfg.Validate())
+		assert.Equal(t, 16, cfg.CodeExecutionMaxParallel)
+	})
+
+	t.Run("range validation", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			value   int
+			wantErr bool
+		}{
+			{name: "zero means default", value: 0},
+			{name: "lower bound", value: 1},
+			{name: "upper bound", value: 32},
+			{name: "below range", value: -1, wantErr: true},
+			{name: "above range", value: 33, wantErr: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := &Config{Listen: "127.0.0.1:8080", CodeExecutionMaxParallel: tc.value}
+				errs := cfg.ValidateDetailed()
+				var found bool
+				for _, e := range errs {
+					if e.Field == "code_execution_max_parallel" {
+						found = true
+					}
+				}
+				assert.Equal(t, tc.wantErr, found, "validation errors: %v", errs)
+			})
+		}
+	})
+
+	t.Run("value loads from the config file", func(t *testing.T) {
+		tmp := t.TempDir()
+		cfgPath := filepath.Join(tmp, "mcp_config.json")
+		raw, err := json.Marshal(map[string]any{
+			"listen":                      "127.0.0.1:0",
+			"data_dir":                    tmp,
+			"code_execution_max_parallel": 4,
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(cfgPath, raw, 0o600))
+
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, 4, cfg.CodeExecutionMaxParallel)
+	})
+}

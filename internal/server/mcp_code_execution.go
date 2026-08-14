@@ -21,6 +21,50 @@ import (
 	"go.uber.org/zap"
 )
 
+// The code_execution tool is registered on two surfaces — the default tool set
+// (registerTools) and the routing-mode builder (buildCodeExecutionTool) — which
+// must advertise exactly the same contract. They share these strings so the two
+// descriptions cannot drift apart.
+const (
+	codeExecutionToolDescription = "Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. " +
+		"Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations " +
+		"that would require multiple round-trips otherwise.\n\n" +
+		"**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n" +
+		"**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n" +
+		"**Available in code**:\n" +
+		"- `input` global: Your input data passed via the 'input' parameter\n" +
+		"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n" +
+		"- `call_tools(requests, options)`: Call INDEPENDENT tools in parallel. `requests` is an array (max 100) of " +
+		"{server, tool, args} objects; `options` is optional and accepts `max_parallel` (1-32, defaults to the configured " +
+		"code_execution_max_parallel). Returns one {ok, result} / {ok, error} slot per request, in input order, so one " +
+		"failing call never fails the others. Malformed arguments return a single {ok:false, error} envelope and dispatch nothing.\n" +
+		"- Modern JavaScript (ES2020+): arrow functions, const/let, template literals, destructuring, classes, for-of, " +
+		"optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect " +
+		"(no require(), filesystem, or network access)\n\n" +
+		"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. " +
+		"Types are automatically stripped before execution.\n\n" +
+		"**Important runtime rules**:\n" +
+		"- `call_tool` and `call_tools` are strictly SYNCHRONOUS. Do not use `await`.\n" +
+		"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n" +
+		"- The last evaluated expression in your script is automatically returned as the final output.\n\n" +
+		"**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."
+
+	codeExecutionCodeDescription = "JavaScript or TypeScript source code (ES2020+) to execute. Supports modern syntax: arrow functions, const/let, template literals, destructuring, " +
+		"optional chaining, nullish coalescing. Use `input` to access input data, `call_tool(serverName, toolName, args)` to invoke one upstream tool and " +
+		"`call_tools([{server, tool, args}, ...], {max_parallel})` to invoke independent tools in parallel. " +
+		"Both are SYNCHRONOUS — do not use await. Return value is the last evaluated expression and must be JSON-serializable. " +
+		"Example: `const res = call_tool('github', 'get_user', {username: input.username}); const data = JSON.parse(res.result.content[0].text); ({user: data, timestamp: Date.now()})`"
+
+	codeExecutionLanguageDescription = "Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. " +
+		"Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'."
+
+	codeExecutionInputDescription = "Input data accessible as global `input` variable in code (default: {})"
+
+	codeExecutionOptionsDescription = "Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), " +
+		"allowed_servers (array of server names, empty=all allowed). Batch concurrency is not an execution option: " +
+		"call_tools() defaults to the configured code_execution_max_parallel and is overridden per batch with call_tools(requests, {max_parallel})."
+)
+
 // handleCodeExecution executes JavaScript code that orchestrates multiple upstream tools
 func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
@@ -60,7 +104,16 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 
-	resolveCodeExecutionDefaults(&options, p.config.CodeExecutionTimeoutMs, p.config.CodeExecutionMaxToolCalls)
+	// Read the LIVE snapshot, not the construction-time one: a hot-reloaded
+	// code_execution_* value must reach the executions that start after it.
+	// Without a config at all, every knob resolves to its built-in default.
+	var configTimeoutMs, configMaxToolCalls, configMaxParallel int
+	if cfg := p.currentConfig(); cfg != nil {
+		configTimeoutMs = cfg.CodeExecutionTimeoutMs
+		configMaxToolCalls = cfg.CodeExecutionMaxToolCalls
+		configMaxParallel = cfg.CodeExecutionMaxParallel
+	}
+	resolveCodeExecutionDefaults(&options, configTimeoutMs, configMaxToolCalls, configMaxParallel)
 
 	// Extract session information from context
 	var sessionID, clientName, clientVersion string
@@ -405,13 +458,18 @@ const codeExecMaxToolCallsUnset = -1
 // resolveCodeExecutionDefaults fills config defaults for the options the
 // caller left unset. timeout_ms uses zero as its unset marker (0 is out of
 // range and rejected during parsing); max_tool_calls uses the sentinel so an
-// explicit zero survives.
-func resolveCodeExecutionDefaults(opts *jsruntime.ExecutionOptions, configTimeoutMs, configMaxToolCalls int) {
+// explicit zero survives. max_parallel has no request-level option — it is
+// the configured default for call_tools() batches, which a script overrides
+// per batch inside the sandbox.
+func resolveCodeExecutionDefaults(opts *jsruntime.ExecutionOptions, configTimeoutMs, configMaxToolCalls, configMaxParallel int) {
 	if opts.TimeoutMs == 0 {
 		opts.TimeoutMs = configTimeoutMs
 	}
 	if opts.MaxToolCalls == codeExecMaxToolCallsUnset {
 		opts.MaxToolCalls = configMaxToolCalls
+	}
+	if opts.MaxParallel == 0 {
+		opts.MaxParallel = configMaxParallel
 	}
 }
 

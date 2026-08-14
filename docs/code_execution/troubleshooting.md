@@ -38,6 +38,7 @@ Error: code_execution is disabled in configuration. Set 'enable_code_execution: 
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8,
   "mcpServers": [...]
 }
 ```
@@ -87,6 +88,29 @@ mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"code execut
   }
 }
 ```
+
+---
+
+### Error: "code_execution_max_parallel: must be between 1 and 32"
+
+**Symptom**: mcpproxy refuses to load the configuration file:
+```
+config validation failed: code_execution_max_parallel: must be between 1 and 32 (or 0 for default)
+```
+
+**Cause**: `code_execution_max_parallel` is outside the supported range.
+
+**Solution**: Use a value between 1 and 32 (or omit the key / set `0` for the
+default of 8):
+```json
+{
+  "code_execution_max_parallel": 8
+}
+```
+
+The same range applies to the per-batch override —
+`call_tools(requests, {max_parallel: 40})` returns a single `INVALID_ARGS`
+envelope instead of dispatching.
 
 ---
 
@@ -365,6 +389,9 @@ for (var i = 0; i < input.items.length; i++) {
 ```
 
 **Cause**: Code called `call_tool()` more times than `max_tool_calls` allows.
+Every element of a `call_tools()` batch counts as one call too, checked in input
+order — tail elements over the limit come back as per-slot
+`MAX_TOOL_CALLS_EXCEEDED` errors and are never dispatched.
 
 **Solution**:
 
@@ -463,6 +490,79 @@ mcpproxy call tool --tool-name=upstream_servers \
 
 ---
 
+### Error: "call_tools: element N: ..." (INVALID_ARGS)
+
+**Symptom**: `call_tools()` returns a single envelope instead of an array of slots:
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "INVALID_ARGS",
+    "message": "call_tools: element 3: must be an object with server and tool"
+  }
+}
+```
+
+**Cause**: The batch itself is malformed, so nothing was dispatched and no budget
+was consumed. Triggers: `requests` is not an array, an element is not an object
+with non-empty `server`/`tool` strings, a supplied `args` is not an object, the
+array has a sparse hole, `options` is not an object, `max_parallel` is not an
+integer in 1-32, or the batch exceeds 100 elements.
+
+**Solution**: Fix the element the message names, then check the result shape
+before mapping over it:
+```javascript
+var slots = call_tools(requests, {max_parallel: 8});
+if (!Array.isArray(slots)) {
+  // whole batch rejected — slots is {ok:false, error:{...}}
+  ({error: slots.error.message});
+} else {
+  ({results: slots});
+}
+```
+
+For more than 100 items, chunk the array and issue one `call_tools()` per chunk.
+
+---
+
+### Error: "upstream server X is busy: its concurrency limit (N) is saturated (queue_full)"
+
+**Symptom**: A `call_tools()` batch returns one success and many failed slots
+mentioning a concurrency limit:
+```json
+[
+  {"ok": true,  "result": {...}},
+  {"ok": false, "error": {
+    "code": "UPSTREAM_ERROR",
+    "message": "upstream server \"fragile-db\" is busy: its concurrency limit (1) is saturated (queue_full) — please retry shortly"
+  }}
+]
+```
+
+**Cause**: The target server has a per-server concurrency limit
+(`max_concurrent_requests`) with **no** `queue_size`. Batching never bypasses
+those limits: calls over the cap are shed immediately, which is the server's
+configured policy — one shed error per overflow element.
+
+**Solution**: Give the server queue headroom, or lower the batch concurrency to
+match its cap:
+```json
+{
+  "mcpServers": [
+    { "name": "fragile-db", "command": "db-mcp", "max_concurrent_requests": 1, "queue_size": 20 }
+  ]
+}
+```
+```javascript
+// Or match the cap from the script
+call_tools(requests, {max_parallel: 1});
+```
+
+Queued calls wait up to `queue_timeout`, and that wall-clock wait happens inside
+the script's `timeout_ms` budget — size `queue_size` and `timeout_ms` together.
+
+---
+
 ## Serialization Errors
 
 ### Error: "Result contains non-JSON-serializable values"
@@ -555,6 +655,24 @@ for (var i = 0; i < items.length; i++) {
 // Good: 1 batch tool call
 call_tool('api', 'get_batch', {ids: items});
 ```
+
+**Run independent calls in parallel** (when the tool has no bulk variant):
+```javascript
+// Bad: N sequential calls — latency is the sum
+for (var i = 0; i < items.length; i++) {
+  call_tool('api', 'get', {id: items[i]});
+}
+
+// Good: one batch — latency is about the slowest call
+var slots = call_tools(items.map(function (id) {
+  return {server: 'api', tool: 'get', args: {id: id}};
+}), {max_parallel: 8});
+```
+
+Only batch calls that do not depend on each other. Raise
+`code_execution_max_parallel` (or `options.max_parallel`, max 32) if upstreams
+can take the pressure — and check the target server's `max_concurrent_requests` /
+`queue_size` first (see the `queue_full` entry above).
 
 **Cache repeated calls**:
 ```javascript

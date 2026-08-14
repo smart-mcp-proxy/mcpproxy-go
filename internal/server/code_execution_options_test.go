@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 )
@@ -193,27 +194,27 @@ func TestRESTCodeExecOmittedOptionsKeepConfigDefaults(t *testing.T) {
 func TestResolveCodeExecutionDefaults(t *testing.T) {
 	t.Run("absent max_tool_calls takes the configured limit", func(t *testing.T) {
 		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
-		resolveCodeExecutionDefaults(&opts, 120000, 5)
+		resolveCodeExecutionDefaults(&opts, 120000, 5, 0)
 		assert.Equal(t, 5, opts.MaxToolCalls)
 	})
 
 	t.Run("explicit zero survives as the unlimited override", func(t *testing.T) {
 		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
 		require.Empty(t, applyCodeExecutionOptions(map[string]interface{}{"max_tool_calls": 0}, &opts))
-		resolveCodeExecutionDefaults(&opts, 120000, 5)
+		resolveCodeExecutionDefaults(&opts, 120000, 5, 0)
 		assert.Equal(t, 0, opts.MaxToolCalls)
 	})
 
 	t.Run("explicit positive value wins over config", func(t *testing.T) {
 		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
 		require.Empty(t, applyCodeExecutionOptions(map[string]interface{}{"max_tool_calls": 2}, &opts))
-		resolveCodeExecutionDefaults(&opts, 120000, 5)
+		resolveCodeExecutionDefaults(&opts, 120000, 5, 0)
 		assert.Equal(t, 2, opts.MaxToolCalls)
 	})
 
 	t.Run("absent timeout takes the configured budget", func(t *testing.T) {
 		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
-		resolveCodeExecutionDefaults(&opts, 300000, 0)
+		resolveCodeExecutionDefaults(&opts, 300000, 0, 0)
 		assert.Equal(t, 300000, opts.TimeoutMs)
 		assert.Equal(t, 0, opts.MaxToolCalls)
 	})
@@ -240,4 +241,59 @@ func TestApplyCodeExecutionOptionsRejectsNonIntegers(t *testing.T) {
 			assert.Equal(t, tc.errMsg, applyCodeExecutionOptions(tc.options, &got))
 		})
 	}
+}
+
+// TestResolveCodeExecutionMaxParallel pins the batch concurrency default
+// (Spec 096): an execution that carries no MaxParallel takes the configured
+// code_execution_max_parallel, so a hot-reloaded value reaches the sandbox on
+// the next execution. The per-batch call_tools({max_parallel}) override lives
+// inside the sandbox and is not visible here.
+func TestResolveCodeExecutionMaxParallel(t *testing.T) {
+	t.Run("unset takes the configured value", func(t *testing.T) {
+		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
+		resolveCodeExecutionDefaults(&opts, 120000, 0, 16)
+		assert.Equal(t, 16, opts.MaxParallel)
+	})
+
+	t.Run("zero config value leaves the sandbox default in place", func(t *testing.T) {
+		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
+		resolveCodeExecutionDefaults(&opts, 120000, 0, 0)
+		assert.Zero(t, opts.MaxParallel, "an unset config value must stay unset for the sandbox to default")
+	})
+
+	t.Run("already-resolved value is not overwritten", func(t *testing.T) {
+		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset, MaxParallel: 4}
+		resolveCodeExecutionDefaults(&opts, 120000, 0, 16)
+		assert.Equal(t, 4, opts.MaxParallel)
+	})
+}
+
+// TestCodeExecutionDescriptionsDocumentCallTools (Spec 096): both
+// code_execution registrations — the default surface in registerTools and the
+// routing-mode builder — must document call_tools() and its max_parallel
+// override. The two used to carry duplicated prose that could drift; they now
+// share one source, and this test pins both the wording and the sharing.
+func TestCodeExecutionDescriptionsDocumentCallTools(t *testing.T) {
+	t.Run("the shared description documents the batch API", func(t *testing.T) {
+		assert.Contains(t, codeExecutionToolDescription, "call_tools(requests, options)")
+		assert.Contains(t, codeExecutionToolDescription, "max_parallel")
+		assert.Contains(t, codeExecutionCodeDescription, "call_tools")
+		assert.Contains(t, codeExecutionOptionsDescription, "max_parallel")
+	})
+
+	t.Run("the routing-mode tool carries the shared description", func(t *testing.T) {
+		p := &MCPProxyServer{config: &config.Config{EnableCodeExecution: true}}
+		tools := p.buildCodeExecutionTool()
+		require.Len(t, tools, 1)
+
+		assert.Equal(t, codeExecutionToolDescription, tools[0].Tool.Description)
+
+		options, ok := tools[0].Tool.InputSchema.Properties["options"].(map[string]interface{})
+		require.True(t, ok, "code_execution has no options parameter")
+		assert.Equal(t, codeExecutionOptionsDescription, options["description"])
+
+		code, ok := tools[0].Tool.InputSchema.Properties["code"].(map[string]interface{})
+		require.True(t, ok, "code_execution has no code parameter")
+		assert.Equal(t, codeExecutionCodeDescription, code["description"])
+	})
 }

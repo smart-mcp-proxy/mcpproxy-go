@@ -29,7 +29,8 @@ Enable code execution in your config:
   "enable_code_execution": true,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
-  "code_execution_pool_size": 10
+  "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8
 }
 ```
 
@@ -39,6 +40,7 @@ Enable code execution in your config:
 | `code_execution_timeout_ms` | integer | `120000` | Execution timeout (2 minutes) |
 | `code_execution_max_tool_calls` | integer | `0` | Max tool calls (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | Number of VM instances to pool |
+| `code_execution_max_parallel` | integer | `8` | Default concurrency for `call_tools()` batches (1-32) |
 
 ## CLI Usage
 
@@ -85,6 +87,33 @@ var result = call_tool('github', 'create_issue', {
   body: 'Description'
 });
 ```
+
+#### call_tools(requests, options)
+
+Execute **independent** tools in parallel and get one result slot per request, in
+input order:
+
+```javascript
+var slots = call_tools([
+  {server: 'github', tool: 'get_pull_request', args: {owner: 'acme', repo: 'api', pullNumber: 1}},
+  {server: 'github', tool: 'get_pull_request', args: {owner: 'acme', repo: 'api', pullNumber: 2}},
+  {server: 'ci', tool: 'latest_pipeline', args: {project: 'acme/api'}}
+], {max_parallel: 5});
+
+slots.map(function (s) { return s.ok ? s.result : 'ERR: ' + s.error.code; });
+```
+
+- `requests`: array of `{server, tool, args?}` (max 100). `args` defaults to `{}`.
+- `options.max_parallel`: 1-32, defaults to `code_execution_max_parallel` (8).
+- Each slot is the same `{ok: true, result}` / `{ok: false, error}` envelope
+  `call_tool()` returns, so one failing element never fails its siblings.
+- Malformed arguments return a single `{ok: false, error}` envelope naming the
+  first offending element index, and nothing is dispatched.
+- Every element costs one unit of `max_tool_calls`, checked in input order.
+- Per-server concurrency limits still apply: a server capped with
+  `max_concurrent_requests` and **no** `queue_size` sheds the overflow as
+  per-slot `queue_full` errors. Set `queue_size` (or lower `max_parallel`) when
+  fanning out against a limited server.
 
 #### log(message)
 
@@ -239,6 +268,6 @@ const user: User = { name: input.username };
 
 1. **Keep code simple**: Complex logic is harder to debug
 2. **Handle errors**: Use try/catch for tool calls
-3. **Minimize tool calls**: Batch operations when possible
+3. **Minimize tool calls**: Batch operations when possible; run independent calls with `call_tools()` instead of a sequential loop
 4. **Use logging**: Add log() calls for debugging
 5. **Test locally**: Use CLI to test before integrating

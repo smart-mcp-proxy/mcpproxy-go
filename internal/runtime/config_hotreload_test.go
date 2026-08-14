@@ -683,3 +683,57 @@ func TestDetectConfigChanges_HTTPTimeouts(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "http_idle_timeout")
 	})
 }
+
+// TestDetectConfigChanges_CodeExecution (Spec 096 FR-004): the code-execution
+// knobs are read per execution via the live config snapshot, so an edit that
+// touches only one of them must be reported as a hot-reloadable change instead
+// of being swallowed as "No configuration changes detected".
+func TestDetectConfigChanges_CodeExecution(t *testing.T) {
+	mk := func(mutate func(*config.Config)) *config.Config {
+		cfg := &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			CodeExecutionTimeoutMs:    120000,
+			CodeExecutionMaxToolCalls: 0,
+			CodeExecutionPoolSize:     10,
+			CodeExecutionMaxParallel:  8,
+		}
+		if mutate != nil {
+			mutate(cfg)
+		}
+		return cfg
+	}
+
+	changes := map[string]func(*config.Config){
+		"code_execution_max_parallel":   func(c *config.Config) { c.CodeExecutionMaxParallel = 16 },
+		"code_execution_timeout_ms":     func(c *config.Config) { c.CodeExecutionTimeoutMs = 60000 },
+		"code_execution_max_tool_calls": func(c *config.Config) { c.CodeExecutionMaxToolCalls = 5 },
+	}
+
+	for name, mutate := range changes {
+		t.Run(name, func(t *testing.T) {
+			result := DetectConfigChanges(mk(nil), mk(mutate))
+			require.True(t, result.Success)
+			assert.Contains(t, result.ChangedFields, "code_execution")
+			assert.False(t, result.RequiresRestart, "code execution settings are hot-reloadable")
+		})
+	}
+
+	t.Run("code_execution_pool_size requires a restart", func(t *testing.T) {
+		// The JS runtime pool is sized once at server construction and never
+		// resized in-process; claiming hot application would leave the old
+		// concurrency cap silently in force.
+		result := DetectConfigChanges(mk(nil), mk(func(c *config.Config) { c.CodeExecutionPoolSize = 20 }))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "code_execution_pool_size")
+		assert.NotContains(t, result.ChangedFields, "code_execution")
+		assert.True(t, result.RequiresRestart)
+		assert.Contains(t, result.RestartReason, "code_execution_pool_size")
+	})
+
+	t.Run("unchanged settings are not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk(nil))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "code_execution")
+		assert.NotContains(t, result.ChangedFields, "code_execution_pool_size")
+	})
+}

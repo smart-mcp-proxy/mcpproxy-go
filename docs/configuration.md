@@ -288,6 +288,14 @@ tool-call endpoint returns `429` with `Retry-After`, and the activity log
 records the call with a `rejected` status carrying the reason (`queue_full` or
 `queue_timeout`) and scope (`server` or `global`).
 
+**Batched sandbox calls.** A `call_tools()` batch from
+[code execution](#code-execution) goes through the same admission path, so these
+limits are never bypassed by batching. A server capped at
+`max_concurrent_requests: 1` with `queue_size: 9` serializes a 10-element batch;
+the same server with **no** `queue_size` returns one result and nine per-slot
+`queue_full` errors. Give servers you fan out against enough `queue_size`
+headroom (or keep `code_execution_max_parallel` at their cap).
+
 **Hot reload.** All limits are hot-reloadable — edit the config file and the new
 values govern subsequent admissions without a restart. Running calls are never
 interrupted, but they keep counting against the new caps: after lowering a cap,
@@ -1161,7 +1169,8 @@ See [Tool Quarantine](features/tool-quarantine.md) for complete details.
   "enable_code_execution": false,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
-  "code_execution_pool_size": 10
+  "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8
 }
 ```
 
@@ -1171,8 +1180,23 @@ See [Tool Quarantine](features/tool-quarantine.md) for complete details.
 | `code_execution_timeout_ms` | integer | `120000` | Default timeout in milliseconds (1-600000, max 10 minutes) |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls per execution (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | Number of JavaScript VM instances in pool (1-100) |
+| `code_execution_max_parallel` | integer | `8` | Default concurrency for `call_tools()` batches (1-32). Hot-reloaded; applies to executions that start after the change |
 
 Code execution supports both JavaScript (ES2020+) and TypeScript. TypeScript code is automatically transpiled via esbuild before execution.
+
+Inside a script, `call_tool(server, tool, args)` runs one upstream tool at a time and `call_tools(requests, options)` fans out **independent** calls in parallel:
+
+```javascript
+var slots = call_tools([
+  {server: "github", tool: "get_pull_request", args: {owner: "acme", repo: "api", pullNumber: 1}},
+  {server: "github", tool: "get_pull_request", args: {owner: "acme", repo: "api", pullNumber: 2}}
+], {max_parallel: 5});
+// slots[i] is {ok: true, result} or {ok: false, error} for requests[i]
+```
+
+`requests` holds at most 100 elements; each costs one unit of `code_execution_max_tool_calls` budget. Concurrency precedence is `options.max_parallel` (1-32) > `code_execution_max_parallel` > built-in 8.
+
+> **Batching vs. per-server limits.** [Concurrency limits](#concurrency-limits--request-queueing) still govern each element. A server with `max_concurrent_requests` set and **no** `queue_size` sheds everything over the cap — a 10-element batch against `max_concurrent_requests: 1` returns 1 result and 9 per-slot `queue_full` errors. Give such servers `queue_size` headroom (or lower `max_parallel`) before fanning out against them.
 
 See [Code Execution Documentation](code_execution/overview.md) for complete details.
 
@@ -1448,6 +1472,7 @@ Here's a complete configuration example with all major sections:
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8,
 
   "read_only_mode": false,
   "disable_management": false,

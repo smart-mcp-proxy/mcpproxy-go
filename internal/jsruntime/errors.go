@@ -29,6 +29,20 @@ const (
 
 	// ErrorCodeInvalidLanguage indicates an unsupported language was specified
 	ErrorCodeInvalidLanguage ErrorCode = "INVALID_LANGUAGE"
+
+	// ErrorCodeInvalidArgs indicates a host function was called with arguments
+	// it cannot interpret (wrong arity, wrong types, malformed batch element)
+	ErrorCodeInvalidArgs ErrorCode = "INVALID_ARGS"
+
+	// ErrorCodeAccessDenied indicates the agent token cannot reach the server
+	ErrorCodeAccessDenied ErrorCode = "ACCESS_DENIED"
+
+	// ErrorCodePermissionDenied indicates the agent token lacks the permission
+	// tier the requested tool needs
+	ErrorCodePermissionDenied ErrorCode = "PERMISSION_DENIED"
+
+	// ErrorCodeUpstreamError indicates the upstream tool call itself failed
+	ErrorCodeUpstreamError ErrorCode = "UPSTREAM_ERROR"
 )
 
 // JsError represents a JavaScript execution error with message, stack trace, and error code

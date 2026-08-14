@@ -191,6 +191,29 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "server_concurrency_defaults")
 	}
 
+	// Code execution settings (Spec 096 FR-004 — hot-reloadable). The
+	// code_execution handler resolves timeout / max_tool_calls /
+	// max_parallel from the LIVE snapshot (p.currentConfig()) on every
+	// execution, so a lone edit here must be reported as a change instead of
+	// being swallowed as "no changes detected". EnableCodeExecution is
+	// deliberately absent: toggling it changes the registered tool set,
+	// which is a restart concern.
+	if oldCfg.CodeExecutionTimeoutMs != newCfg.CodeExecutionTimeoutMs ||
+		oldCfg.CodeExecutionMaxToolCalls != newCfg.CodeExecutionMaxToolCalls ||
+		oldCfg.CodeExecutionMaxParallel != newCfg.CodeExecutionMaxParallel {
+		result.ChangedFields = append(result.ChangedFields, "code_execution")
+	}
+
+	// The JS runtime pool is sized once at server construction and never
+	// resized in-process, so unlike its siblings pool_size cannot apply hot.
+	if oldCfg.CodeExecutionPoolSize != newCfg.CodeExecutionPoolSize {
+		result.ChangedFields = append(result.ChangedFields, "code_execution_pool_size")
+		result.RequiresRestart = true
+		if result.RestartReason == "" {
+			result.RestartReason = "code_execution_pool_size is sized at startup - requires restart"
+		}
+	}
+
 	// Logging configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
 		result.ChangedFields = append(result.ChangedFields, "logging")
