@@ -26,8 +26,10 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	p.recordBuiltinTool("code_execution")
 	p.logger.Debug("code_execution tool called")
 
-	// Parse arguments
-	var options jsruntime.ExecutionOptions
+	// Parse arguments. MaxToolCalls starts at the unset sentinel so an explicit
+	// max_tool_calls: 0 — the documented unlimited override — survives default
+	// resolution instead of being floored to the configured limit.
+	options := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
 
 	// Extract code (required)
 	code, err := request.RequireString("code")
@@ -57,13 +59,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 
-	// Apply defaults from config if not specified in request
-	if options.TimeoutMs == 0 {
-		options.TimeoutMs = p.config.CodeExecutionTimeoutMs
-	}
-	if options.MaxToolCalls == 0 {
-		options.MaxToolCalls = p.config.CodeExecutionMaxToolCalls
-	}
+	resolveCodeExecutionDefaults(&options, p.config.CodeExecutionTimeoutMs, p.config.CodeExecutionMaxToolCalls)
 
 	// Extract session information from context
 	var sessionID, clientName, clientVersion string
@@ -398,6 +394,26 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 // one. Both are accepted; matching only the JSON shapes dropped every
 // restriction a REST caller set, so a request limited to specific servers ran
 // unrestricted.
+// codeExecMaxToolCallsUnset marks max_tool_calls as not supplied by the
+// caller. Zero cannot be the sentinel: an explicit 0 is the documented
+// unlimited override, distinct from "use the configured limit". Negative
+// caller values are rejected during parsing, so the sentinel can never arrive
+// from outside.
+const codeExecMaxToolCallsUnset = -1
+
+// resolveCodeExecutionDefaults fills config defaults for the options the
+// caller left unset. timeout_ms uses zero as its unset marker (0 is out of
+// range and rejected during parsing); max_tool_calls uses the sentinel so an
+// explicit zero survives.
+func resolveCodeExecutionDefaults(opts *jsruntime.ExecutionOptions, configTimeoutMs, configMaxToolCalls int) {
+	if opts.TimeoutMs == 0 {
+		opts.TimeoutMs = configTimeoutMs
+	}
+	if opts.MaxToolCalls == codeExecMaxToolCallsUnset {
+		opts.MaxToolCalls = configMaxToolCalls
+	}
+}
+
 func applyCodeExecutionOptions(optionsObj map[string]interface{}, opts *jsruntime.ExecutionOptions) string {
 	// Parse timeout_ms
 	if timeoutMs, ok := codeExecOptionInt(optionsObj["timeout_ms"]); ok {

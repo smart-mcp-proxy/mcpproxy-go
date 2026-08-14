@@ -275,11 +275,17 @@ func (t *Truncator) SimpleTruncate(content string) string {
 	return t.simpleTruncate(content)
 }
 
+// simpleTruncateNotice is the suffix simpleTruncate appends. Its length is
+// part of the retained-prefix math mirrored by SimpleTruncateBudget.
+const simpleTruncateNotice = "\n\n... [truncated by mcpproxy, cache not available]"
+
 // simpleTruncate performs basic truncation without caching
 func (t *Truncator) simpleTruncate(content string) string {
 	if len(content) <= t.limit {
 		return content
 	}
+
+	const notice = simpleTruncateNotice
 
 	messageSpace := 200
 	if t.limit < messageSpace {
@@ -291,8 +297,16 @@ func (t *Truncator) simpleTruncate(content string) string {
 		truncatePoint = 0
 	}
 
-	truncated := content[:truncatePoint]
-	return truncated + "\n\n... [truncated by mcpproxy, cache not available]"
+	if truncatePoint+len(notice) > t.limit {
+		// The limit is the contract; when the notice itself cannot fit under
+		// it, a bare content prefix wins over an over-limit response.
+		if t.limit <= len(notice) {
+			return content[:t.limit]
+		}
+		truncatePoint = t.limit - len(notice)
+	}
+
+	return content[:truncatePoint] + notice
 }
 
 // createTruncatedWithCache creates a truncated response with cache instructions
@@ -343,8 +357,10 @@ func (t *Truncator) ShouldTruncate(content string) bool {
 // too-small-budget guard must match the truncator's REAL retained prefix, not
 // the raw limit — an encoded TOON block is not valid JSON, so Truncate always
 // falls into simpleTruncate for it, which keeps limit - messageSpace bytes
-// (messageSpace = 200, or limit/2 when limit < 200). This mirrors
-// simpleTruncate exactly; keep the two in sync.
+// (messageSpace = 200, or limit/2 when limit < 200, and the limit itself is a
+// hard ceiling: when the notice cannot fit under it the notice is dropped and
+// a bare limit-sized prefix is kept). This mirrors simpleTruncate exactly;
+// keep the two in sync.
 func (t *Truncator) SimpleTruncateBudget() int {
 	if t.limit == 0 {
 		return 0
@@ -356,6 +372,12 @@ func (t *Truncator) SimpleTruncateBudget() int {
 	budget := t.limit - messageSpace
 	if budget < 0 {
 		budget = 0
+	}
+	if budget+len(simpleTruncateNotice) > t.limit {
+		if t.limit <= len(simpleTruncateNotice) {
+			return t.limit
+		}
+		return t.limit - len(simpleTruncateNotice)
 	}
 	return budget
 }

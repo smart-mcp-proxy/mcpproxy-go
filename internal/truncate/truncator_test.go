@@ -210,7 +210,9 @@ func TestTruncateWithinLimit(t *testing.T) {
 }
 
 func TestTruncateSimpleMode(t *testing.T) {
-	truncator := NewTruncator(50) // Very small limit
+	// Small, but with room for the notice under the limit — at or below
+	// len(simpleTruncateNotice) the notice is dropped to keep the bound.
+	truncator := NewTruncator(60)
 	content := `{"message": "this is a simple response that doesn't have structured records"}`
 	args := map[string]interface{}{"param": "value"}
 
@@ -218,6 +220,10 @@ func TestTruncateSimpleMode(t *testing.T) {
 
 	if !strings.Contains(result.TruncatedContent, "truncated by mcpproxy, cache not available") {
 		t.Error("Simple truncation message not found")
+	}
+
+	if len(result.TruncatedContent) > 60 {
+		t.Errorf("Truncated content exceeds the limit: %d bytes", len(result.TruncatedContent))
 	}
 
 	if result.CacheAvailable {
@@ -610,6 +616,18 @@ func TestSimpleTruncate_ExportedEntryPoint(t *testing.T) {
 		truncator := NewTruncator(0)
 		if out := truncator.SimpleTruncate(content); out != content {
 			t.Errorf("A limit of 0 disables truncation; got %d bytes back", len(out))
+		}
+	})
+
+	// The bound must hold for every legal limit, including ones smaller than
+	// the truncation notice itself — there the notice is dropped rather than
+	// letting the output exceed the limit it exists to enforce.
+	t.Run("small limits stay bounded", func(t *testing.T) {
+		for _, limit := range []int{10, 50, 100, 120} {
+			truncator := NewTruncator(limit)
+			if out := truncator.SimpleTruncate(content); len(out) > limit {
+				t.Errorf("limit %d: output is %d bytes", limit, len(out))
+			}
 		}
 	})
 }

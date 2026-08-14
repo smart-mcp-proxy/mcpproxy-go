@@ -184,3 +184,37 @@ func TestRESTCodeExecOmittedOptionsKeepConfigDefaults(t *testing.T) {
 	assert.Zero(t, options.MaxToolCalls, "an unsent max_tool_calls must fall through to the configured default")
 	assert.Empty(t, options.AllowedServers, "an unsent allowed_servers must not restrict anything")
 }
+
+// TestResolveCodeExecutionDefaults pins default resolution against the
+// documented contract that max_tool_calls: 0 means unlimited. An absent option
+// (the unset sentinel) takes the configured value; an explicit zero is the
+// caller's unlimited override and must survive — flooring it to the config
+// limit made the override impossible to express on any transport.
+func TestResolveCodeExecutionDefaults(t *testing.T) {
+	t.Run("absent max_tool_calls takes the configured limit", func(t *testing.T) {
+		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
+		resolveCodeExecutionDefaults(&opts, 120000, 5)
+		assert.Equal(t, 5, opts.MaxToolCalls)
+	})
+
+	t.Run("explicit zero survives as the unlimited override", func(t *testing.T) {
+		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
+		require.Empty(t, applyCodeExecutionOptions(map[string]interface{}{"max_tool_calls": 0}, &opts))
+		resolveCodeExecutionDefaults(&opts, 120000, 5)
+		assert.Equal(t, 0, opts.MaxToolCalls)
+	})
+
+	t.Run("explicit positive value wins over config", func(t *testing.T) {
+		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
+		require.Empty(t, applyCodeExecutionOptions(map[string]interface{}{"max_tool_calls": 2}, &opts))
+		resolveCodeExecutionDefaults(&opts, 120000, 5)
+		assert.Equal(t, 2, opts.MaxToolCalls)
+	})
+
+	t.Run("absent timeout takes the configured budget", func(t *testing.T) {
+		opts := jsruntime.ExecutionOptions{MaxToolCalls: codeExecMaxToolCallsUnset}
+		resolveCodeExecutionDefaults(&opts, 300000, 0)
+		assert.Equal(t, 300000, opts.TimeoutMs)
+		assert.Equal(t, 0, opts.MaxToolCalls)
+	})
+}
