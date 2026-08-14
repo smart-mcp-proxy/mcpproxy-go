@@ -279,7 +279,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         updateService.stopManagedCore = { [weak self] in
             guard let self else { return true }
             let pid = self.coreManager?.managedProcess?.processIdentifier
+            // Mark stop INTENT for THIS pid before terminating: the core's
+            // resulting clean (status 0) exit must not pop a spurious "MCPProxy
+            // Error" nor race a reconnection against Sparkle's bundle swap.
+            // Scoping to the pid (not a global flag) means a later core with a
+            // different pid is unaffected even if this intent is never consumed.
+            self.appState.stoppedForUpdatePID = pid
             let outcome = ManagedCoreStop.stop(pid: pid)
+            if !outcome.coreIsDown {
+                // The stop did not bring the core down — Sparkle will postpone
+                // the install and the tray keeps managing the still-live core,
+                // so clear the intent (that pid's future exit is not ours).
+                self.appState.stoppedForUpdatePID = nil
+            }
             NSLog("[MCPProxy] Pre-update core stop: pid=%d outcome=%@",
                   pid ?? -1, String(describing: outcome))
             AppLifecycle.shared.note("pre-update core stop: \(outcome)")
@@ -450,6 +462,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // behaviour — terminate the core and say nothing — is what made the
         // original incident unattributable (#862).
         AppLifecycle.shared.recordTermination()
+        // Record termination intent BEFORE tearing down the core: the core will
+        // exit cleanly (status 0) while the tray is still `.connected`, and only
+        // this flag tells handleProcessExit that clean exit was intended rather
+        // than an external kill to recover from. Set on MainActor (we are on it)
+        // so it is visible before the SIGTERM is even delivered.
+        appState.isTerminating = true
         // Spec 095 FR-004: a retry queued behind a terminal signal dies here.
         updateService.discardPendingFailureRetry()
         if let process = coreManager?.managedProcess {

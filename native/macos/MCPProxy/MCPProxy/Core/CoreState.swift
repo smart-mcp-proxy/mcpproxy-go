@@ -183,9 +183,120 @@ enum CoreError: Error, Equatable {
         case 5:
             return .permissionError
         default:
-            let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return .general(message.isEmpty ? "Exit code \(code)" : message)
+            // Only surface a genuine error diagnostic — never a benign INFO /
+            // DEBUG / WARN log line the core happened to print last, and never
+            // with raw ANSI colour codes still in it. If nothing worse than
+            // routine logging was captured, fall back to the bare exit code.
+            if let diagnostic = diagnostic(fromStderr: stderr) {
+                return .general(diagnostic)
+            }
+            return .general("Exit code \(code)")
         }
+    }
+
+    /// Whether a core process exit should be treated as expected — i.e. NOT
+    /// surfaced to the user as an error and NOT retried.
+    ///
+    /// Expected iff the tray INTENDED the stop, via any of its stop paths:
+    ///   - `userStopped`: the user hit Stop;
+    ///   - `shuttingDown`: the manager is shutting the core down;
+    ///   - `appTerminating`: the app is quitting (`applicationWillTerminate`
+    ///     sets the intent before the core is torn down);
+    ///   - `stoppingForUpdate`: the tray stopped the core so Sparkle can swap
+    ///     the app bundle (Spec 092 pre-install stop).
+    /// The last two are why `shuttingDown` alone is insufficient: both terminate
+    /// the core directly while the tray is still `.connected`, so the clean exit
+    /// needs an explicit intent — treating it as a crash is what popped a
+    /// spurious "MCPProxy Error".
+    ///
+    /// A clean (status 0) exit is deliberately NOT expected on its own: the Go
+    /// core exits 0 on any graceful SIGTERM, so an EXTERNAL kill the tray did
+    /// not ask for also produces status 0, and that must still trigger recovery
+    /// rather than being silently swallowed.
+    static func isExpectedExit(
+        userStopped: Bool, shuttingDown: Bool, appTerminating: Bool, stoppingForUpdate: Bool
+    ) -> Bool {
+        userStopped || shuttingDown || appTerminating || stoppingForUpdate
+    }
+
+    /// Log levels zap emits that never, on their own, represent a core failure.
+    private static let benignLogLevels: Set<String> = ["DEBUG", "INFO", "WARN", "WARNING"]
+
+    /// Log levels that DO represent a failure worth showing the user.
+    private static let errorLogLevels: Set<String> = ["ERROR", "DPANIC", "PANIC", "FATAL"]
+
+    /// Strip ANSI SGR / CSI escape sequences (e.g. zap's coloured console
+    /// encoder) from `input` so nothing raw ever reaches a notification body.
+    static func stripANSICodes(_ input: String) -> String {
+        var output = ""
+        output.reserveCapacity(input.count)
+        var iterator = input.unicodeScalars.makeIterator()
+        while let scalar = iterator.next() {
+            // ESC (0x1B) begins an escape sequence. A CSI sequence is
+            // "ESC [ <params> <final byte 0x40–0x7E>"; consume through the
+            // final byte. Any other ESC-prefixed pair is dropped as a unit.
+            if scalar.value == 0x1B {
+                guard let next = iterator.next() else { break }
+                if next == "[" {
+                    while let param = iterator.next() {
+                        if (0x40...0x7E).contains(param.value) { break }
+                    }
+                }
+                continue
+            }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+
+    /// Extract a genuine error diagnostic from captured stderr, or `nil` when
+    /// the output contains nothing worse than benign INFO / DEBUG / WARN log
+    /// lines. ANSI colour codes are stripped from anything returned.
+    static func diagnostic(fromStderr raw: String) -> String? {
+        let cleaned = stripANSICodes(raw)
+        var kept: [String] = []
+        for rawLine in cleaned.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            if lineIsBenignLog(line) { continue }
+            kept.append(line)
+        }
+        let result = kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? nil : result
+    }
+
+    /// Whether a single line is a routine zap console log line at DEBUG / INFO /
+    /// WARN level, and therefore not on its own a failure to surface.
+    ///
+    /// A line only qualifies when it has the zap console SHAPE — a
+    /// `<file>.go:<line>` caller token — AND a benign level token appears
+    /// BEFORE that caller (the level always precedes the caller in zap's
+    /// encoder). This structural check avoids two false classifications a bare
+    /// token scan makes: an arbitrary error message that merely contains the
+    /// word "INFO" (e.g. "failed to parse INFO configuration") is NOT a log
+    /// line and is kept; and a Go panic header ("panic: …"), which has no `.go:`
+    /// caller of the zap form, is kept. An ERROR-level token before the caller
+    /// always wins (the line is a genuine error log) and is kept.
+    private static func lineIsBenignLog(_ line: String) -> Bool {
+        let tokens = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        guard let callerIndex = tokens.firstIndex(where: isZapCaller) else {
+            return false // no zap caller ⇒ not a routine log line ⇒ keep it
+        }
+        var sawBenignLevel = false
+        for token in tokens[..<callerIndex] {
+            let upper = token.uppercased()
+            if errorLogLevels.contains(upper) { return false } // a real error log
+            if benignLogLevels.contains(upper) { sawBenignLevel = true }
+        }
+        return sawBenignLevel
+    }
+
+    /// A zap console caller token: `<path>.go:<line>` (e.g. `managed/client.go:695`).
+    private static func isZapCaller(_ token: String) -> Bool {
+        guard let colon = token.lastIndex(of: ":") else { return false }
+        let file = token[..<colon]
+        let lineNo = token[token.index(after: colon)...]
+        return file.hasSuffix(".go") && !lineNo.isEmpty && lineNo.allSatisfy(\.isNumber)
     }
 
     /// Short, user-facing description of the error.

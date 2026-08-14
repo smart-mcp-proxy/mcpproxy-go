@@ -1443,8 +1443,9 @@ actor CoreProcessManager {
         let generation = launchGeneration
         proc.terminationHandler = { [weak self] terminatedProcess in
             let status = terminatedProcess.terminationStatus
+            let pid = terminatedProcess.processIdentifier
             Task {
-                await self?.handleProcessExit(status: status, generation: generation)
+                await self?.handleProcessExit(status: status, generation: generation, pid: pid)
             }
         }
 
@@ -2064,7 +2065,7 @@ actor CoreProcessManager {
     // MARK: - Private: Process Exit Handling
 
     /// Handle the core process exiting.
-    func handleProcessExit(status: Int32, generation: Int? = nil) async {
+    func handleProcessExit(status: Int32, generation: Int? = nil, pid: Int32? = nil) async {
         // A callback from a launch we already abandoned says nothing about the
         // core we have now. Acting on it is how a reaped attempt turns into an
         // extra spawn.
@@ -2075,36 +2076,66 @@ actor CoreProcessManager {
         }
 
         let stderr = stderrBuffer
+        let exitedPID = pid ?? process?.processIdentifier ?? 0
 
         // Recorded whatever we decide to do about it, and recorded here rather
         // than only in the retry branches: an exit that leads to no retry (the
         // user stopped it, a clean shutdown) is exactly the one that otherwise
         // leaves no trace at all (#862).
         AppLifecycle.shared.recordCoreExited(
-            pid: process?.processIdentifier ?? 0,
+            pid: exitedPID,
             status: status,
             reason: "core process exited"
         )
 
-        // If stopped by user, don't retry — this is intentional
-        let isStopped = await MainActor.run { appState.isStopped }
-        if isStopped {
-            NSLog("[MCPProxy] handleProcessExit: stopped by user, not retrying")
+        // An expected exit — the user stopped the core, the manager is shutting
+        // it down, the app is terminating, or Sparkle stopped THIS pid for a
+        // pre-install swap — is neither surfaced as an error nor retried. The
+        // app-termination path (`applicationWillTerminate`) terminates the core
+        // directly while the tray is still `.connected`, so it sets
+        // `appState.isTerminating`; a clean (status 0) exit with none of these
+        // intents is an EXTERNAL kill and DOES trigger recovery below.
+        //
+        // Read the intents in ONE MainActor hop so they are a consistent
+        // snapshot, then revalidate the launch generation: this hop is a
+        // suspension point and actor reentrancy could let a retry advance the
+        // generation while we were away, in which case this callback is stale
+        // and must not notify or start recovery against the replacement. The
+        // pre-update intent is matched by pid, so a stale intent for a different
+        // (already-replaced) core can never mark this exit expected.
+        let intent = await MainActor.run {
+            (stopped: appState.isStopped,
+             shuttingDown: { if case .shuttingDown = appState.coreState { return true }; return false }(),
+             terminating: appState.isTerminating,
+             stoppingForUpdate: appState.stoppedForUpdatePID != nil && appState.stoppedForUpdatePID == exitedPID)
+        }
+        if let generation, generation != launchGeneration {
+            NSLog("[MCPProxy] handleProcessExit: launch %d superseded by %d during exit handling, standing down",
+                  generation, launchGeneration)
             return
         }
-
-        // Normal exit (0) during shutdown is expected
-        if status == 0 {
-            let currentState = await MainActor.run { appState.coreState }
-            if case .shuttingDown = currentState {
-                return // Expected during shutdown
-            }
+        if CoreError.isExpectedExit(
+            userStopped: intent.stopped, shuttingDown: intent.shuttingDown,
+            appTerminating: intent.terminating, stoppingForUpdate: intent.stoppingForUpdate
+        ) {
+            NSLog("[MCPProxy] handleProcessExit: expected exit (status %d), not retrying", status)
+            return
         }
 
         let error = CoreError.fromExitCode(status, stderr: stderr)
 
         // Send notification for non-trivial errors
         await notificationService.sendCoreError(error: error)
+
+        // sendCoreError is another suspension point: a competing retry, a
+        // shutdown, or a replacement launch may have advanced the generation
+        // while it was in flight. Revalidate before touching shared recovery
+        // state — the non-retryable branch writes `.error`, which would
+        // otherwise clobber the state of the launch that superseded us.
+        if let generation, generation != launchGeneration {
+            NSLog("[MCPProxy] handleProcessExit: superseded during notification, not recovering")
+            return
+        }
 
         if error.isRetryable && retryCount < maxRetries {
             // Honour the same gate as every other reconnection entry point. If
