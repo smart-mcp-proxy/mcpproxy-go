@@ -23,7 +23,7 @@ Verified on branch `097-stored-scripts` (stacked on 096). File:line references t
 ## R4. CLI — ordering inversion and the options seam
 
 - Flags at `code_cmd.go:82-91`; three-way mutual exclusion (`--code`/`--file`/`--script`) in `runCodeExec` :121-129.
-- **Ordering trap**: `loadCodeAndInput()` runs at :131 but `loadCodeConfig()` at :143 — script resolution needs the config path, so standalone resolution defers out of `loadCodeAndInput`; daemon mode sends the NAME (never content) via `cliclient.CodeExecOptions` (`client.go:227-229`, currently only `Language`) — add `Script string`, body set beside language at :253-255; positional signatures untouched. Ping-failure fallback (:189-206) re-resolves standalone — must work there too.
+- **Ordering trap**: `loadCodeAndInput()` runs at :131 but `loadCodeConfig()` at :143 — script resolution needs the config path; daemon mode sends the NAME (never content) via `cliclient.CodeExecOptions` (`client.go:227-229`, currently only `Language`) — add `Script string`, body set beside language at :253-255; positional signatures untouched. Ping-failure fallback (:189-206) re-resolves standalone — must work there too.
 - `code scripts list`: new `codeScriptsCmd` with `list` child, `codeCmd.AddCommand` beside :79. Daemon running → GET /api/v1/code/scripts; else local resolution.
 
 ## R5. REST listing — zero interface change
@@ -44,4 +44,4 @@ Setting `options.Language = "typescript"` suffices (transpile at `runtime.go:178
 - Args forwarding: `codeExecArgsCapture` at `internal/server/code_execution_options_test.go:106-112` — assert daemon mode sends `script`, not content.
 - CLI: `code_cmd_test.go` child re-exec pattern (:108,:144) incl. ping-failure fallback (:129).
 - E2E: `/code/exec` covered in Go e2e tests; **`scripts/test-api-e2e.sh` has no code-exec coverage** — extending it is optional, note honestly.
-- SC-003 proof: split the name validator so it is independently callable; table-test the traversal corpus against it (no fs hook needed). **Symlink test cases must be guarded `runtime.GOOS != "windows"`** (platform divergence; repo precedent for silently-vanishing tests).
+- SC-003 proof: split the name validator so it is independently callable; table-test the traversal corpus against it (no fs hook needed). **Symlink test cases are attempted on every platform** and skipped at runtime only when symlink creation fails for privilege reasons (Windows non-elevated); include a Windows reparse-point case. Never build-tag them away (repo precedent for silently-vanishing tests).

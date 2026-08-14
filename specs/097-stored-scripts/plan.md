@@ -5,17 +5,17 @@
 
 ## Summary
 
-Let the daemon execute named scripts from `<active-config-dir>/scripts/` via `script: "<name>"` on the code_execution tool (and REST), `--script` on the CLI, with a `code scripts list` CLI verb backed by a read-only REST listing. A new small `internal/codescripts` package owns name validation, confined resolution (os.Root + Lstat regular-file policy — R1), listing with statuses, and language derivation; every surface delegates to it. No write path anywhere; sandbox/logging parity with inline code.
+Let the daemon execute named scripts from `<active-config-dir>/scripts/` via `script: "<name>"` on the code_execution tool (and REST), `--script` on the CLI, with a `code scripts list` CLI verb backed by a read-only REST listing. A new small `internal/codescripts` package owns name validation (the confinement boundary), platform-appropriate no-follow resolution (R1), listing with statuses, and language derivation; the code_execution handler is the only execution-time resolver on every surface. No write path anywhere; sandbox/logging parity with inline code.
 
 ## Technical Context
 
 **Language/Version**: Go 1.25
 **Primary Dependencies**: stdlib only. **No new dependencies.**
 **Storage**: none — filesystem read-only at invocation time
-**Testing**: `go test -race` (new package + httpapi + server + cmd), traversal-corpus table tests, CLI child re-exec tests, symlink cases gated off Windows
+**Testing**: `go test -race` (new package + httpapi + server + cmd), traversal-corpus table tests, CLI child re-exec tests; symlink cases attempted on every platform and skipped only when symlink creation is unprivileged
 **Target Platform**: all supported; both editions
 **Project Type**: single Go project, existing layout + one new package
-**Performance Goals**: SC-001 — request bytes for a 19KB workflow drop >95%; resolution adds one OpenRoot+Lstat+Open+read per invocation (negligible vs script execution)
+**Performance Goals**: SC-001 — request bytes for a 19KB workflow drop >95%; resolution adds one probe+open+bounded-read per invocation (negligible vs script execution)
 **Constraints**: confinement by pre-fs name validation (the SC-003 boundary); symlink rejection atomic on Unix (O_NOFOLLOW), best-effort on Windows (Lstat, documented); 256KB bound via LimitReader(max+1) on the open fd; one validated read per invocation; static tool registrations (discovery is error-driven); no write surface
 **Scale/Scope**: 1 new package (~4 files), 3 registration-site edits, handler seam, REST endpoint + request field, CLI verb + flag, docs/swagger
 
@@ -26,7 +26,7 @@ Let the daemon execute named scripts from `<active-config-dir>/scripts/` via `sc
 | I. Performance at Scale | PASS | Per-invocation file read; no index/search impact. |
 | II. Actor-Based Concurrency | PASS | No new goroutines; pure request-scoped reads. |
 | III. Configuration-Driven | PASS | Scripts dir derived from the active config file location; no new config field in v1 (deliberate — spec Assumptions). |
-| IV. Security by Default | PASS | Token validation before fs access; os.Root confinement; non-regular rejection; no write path; REST inherits API-key auth. |
+| IV. Security by Default | PASS | Token validation before fs access (the boundary); atomic no-follow open on Unix, checked policy on Windows; no write path; REST inherits API-key auth. |
 | V. TDD | PASS | Red-green per task; traversal corpus; parity tests. |
 | VI. Documentation Hygiene | PASS | Tool descriptions ×3 sites, docs set, swagger regen. |
 

@@ -12,7 +12,7 @@
 - `GET /api/v1/code/scripts` (NEW, read-only, API-key auth): `{success: true, data: {scripts: [{name, paths, status, reason?}], dir}}`.
 
 ## CLI
-- `mcpproxy code exec --script <name>` — mutually exclusive with `--code`/`--file`; daemon mode sends the NAME (never content); standalone resolves locally from the same authority.
+- `mcpproxy code exec --script <name>` — mutually exclusive with `--code`/`--file`; BOTH modes send the NAME into the tool args (never content) — the handler is the only execution-time resolver; in standalone mode the in-process handler's authority comes from the shared config-path helper.
 - `mcpproxy code scripts list` — daemon GET when running, else local; `-o json|yaml` supported.
 
 ## Authority
