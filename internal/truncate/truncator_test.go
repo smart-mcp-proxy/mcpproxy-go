@@ -1,6 +1,7 @@
 package truncate
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -236,8 +237,15 @@ func TestTruncateSimpleMode(t *testing.T) {
 }
 
 func TestTruncateWithCache(t *testing.T) {
-	truncator := NewTruncator(100) // Small limit to trigger truncation
-	content := `{"data": [{"id": 1, "name": "item1"}, {"id": 2, "name": "item2"}, {"id": 3, "name": "item3"}], "total": 3}`
+	// The limit must have room for the ~300-byte cache banner — below that the
+	// truncator falls back to bounded simple truncation with no handle.
+	truncator := NewTruncator(500)
+	items := make([]string, 0, 3)
+	for i := 1; i <= 3; i++ {
+		items = append(items, fmt.Sprintf(`{"id": %d, "name": "item%d", "description": %q}`,
+			i, i, strings.Repeat("padding ", 30)))
+	}
+	content := `{"data": [` + strings.Join(items, ", ") + `], "total": 3}`
 	args := map[string]interface{}{"param": "value"}
 
 	result := truncator.Truncate(content, "test_tool", args)
@@ -272,8 +280,13 @@ func TestTruncateWithCache(t *testing.T) {
 }
 
 func TestTruncateRootArray(t *testing.T) {
-	truncator := NewTruncator(30) // Small limit to trigger truncation
-	content := `[{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]`
+	// Same banner-room constraint as TestTruncateWithCache.
+	truncator := NewTruncator(500)
+	items := make([]string, 0, 4)
+	for i := 1; i <= 4; i++ {
+		items = append(items, fmt.Sprintf(`{"id": %d, "payload": %q}`, i, strings.Repeat("padding ", 25)))
+	}
+	content := `[` + strings.Join(items, ", ") + `]`
 	args := map[string]interface{}{}
 
 	result := truncator.Truncate(content, "test_tool", args)

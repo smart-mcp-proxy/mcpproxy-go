@@ -218,3 +218,26 @@ func TestResolveCodeExecutionDefaults(t *testing.T) {
 		assert.Equal(t, 0, opts.MaxToolCalls)
 	})
 }
+
+// TestApplyCodeExecutionOptionsRejectsNonIntegers: a fractional or non-numeric
+// option must be rejected, not silently converted — max_tool_calls: 0.5
+// truncated to 0 would flip a caller's intended limit into the unlimited
+// override, and timeout_ms: 1.9 would run with a 1ms budget.
+func TestApplyCodeExecutionOptionsRejectsNonIntegers(t *testing.T) {
+	cases := []struct {
+		name    string
+		options map[string]interface{}
+		errMsg  string
+	}{
+		{"fractional max_tool_calls", map[string]interface{}{"max_tool_calls": 0.5}, "max_tool_calls must be an integer"},
+		{"fractional timeout_ms", map[string]interface{}{"timeout_ms": 1.9}, "timeout_ms must be an integer"},
+		{"non-numeric timeout_ms", map[string]interface{}{"timeout_ms": "5000"}, "timeout_ms must be an integer"},
+		{"fractional json.Number", map[string]interface{}{"max_tool_calls": json.Number("0.5")}, "max_tool_calls must be an integer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got jsruntime.ExecutionOptions
+			assert.Equal(t, tc.errMsg, applyCodeExecutionOptions(tc.options, &got))
+		})
+	}
+}

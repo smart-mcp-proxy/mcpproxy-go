@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -416,7 +417,13 @@ func resolveCodeExecutionDefaults(opts *jsruntime.ExecutionOptions, configTimeou
 
 func applyCodeExecutionOptions(optionsObj map[string]interface{}, opts *jsruntime.ExecutionOptions) string {
 	// Parse timeout_ms
-	if timeoutMs, ok := codeExecOptionInt(optionsObj["timeout_ms"]); ok {
+	if raw, present := optionsObj["timeout_ms"]; present && raw != nil {
+		timeoutMs, ok := codeExecOptionInt(raw)
+		if !ok {
+			// A fractional 1.9 silently becoming a 1ms budget is worse than an
+			// error; same for non-numeric values.
+			return "timeout_ms must be an integer"
+		}
 		opts.TimeoutMs = timeoutMs
 		// Validate timeout range
 		if opts.TimeoutMs < 1 || opts.TimeoutMs > 600000 {
@@ -425,7 +432,13 @@ func applyCodeExecutionOptions(optionsObj map[string]interface{}, opts *jsruntim
 	}
 
 	// Parse max_tool_calls
-	if maxToolCalls, ok := codeExecOptionInt(optionsObj["max_tool_calls"]); ok {
+	if raw, present := optionsObj["max_tool_calls"]; present && raw != nil {
+		maxToolCalls, ok := codeExecOptionInt(raw)
+		if !ok {
+			// 0.5 truncated to 0 would flip a caller's limit into the
+			// unlimited override.
+			return "max_tool_calls must be an integer"
+		}
 		opts.MaxToolCalls = maxToolCalls
 		// Validate max_tool_calls
 		if opts.MaxToolCalls < 0 {
@@ -458,9 +471,16 @@ func applyCodeExecutionOptions(optionsObj map[string]interface{}, opts *jsruntim
 func codeExecOptionInt(value interface{}) (int, bool) {
 	switch v := value.(type) {
 	case float64:
+		if v != math.Trunc(v) {
+			return 0, false
+		}
 		return int(v), true
 	case float32:
-		return int(v), true
+		f := float64(v)
+		if f != math.Trunc(f) {
+			return 0, false
+		}
+		return int(f), true
 	case int:
 		return v, true
 	case int32:

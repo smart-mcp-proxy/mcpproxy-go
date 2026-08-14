@@ -73,7 +73,16 @@ func (t *Truncator) TruncateWithRecordPath(content, toolName string, args map[st
 	cacheKey := cache.GenerateKey(toolName, args, timestamp)
 
 	// Create truncated content with cache instructions
-	result.TruncatedContent = t.createTruncatedWithCache(content, cacheKey, totalRecords, len(content))
+	truncated := t.createTruncatedWithCache(content, cacheKey, totalRecords, len(content))
+	if len(truncated) > t.limit {
+		// The limit is too small to carry even the cache banner. The limit is
+		// the contract, so fall back to bounded simple truncation and mint no
+		// handle — a banner that itself violates the ceiling helps nobody.
+		result.TruncatedContent = t.simpleTruncate(content)
+		result.CacheAvailable = false
+		return result
+	}
+	result.TruncatedContent = truncated
 	result.CacheKey = cacheKey
 	result.RecordPath = recordPath
 	result.TotalRecords = totalRecords
