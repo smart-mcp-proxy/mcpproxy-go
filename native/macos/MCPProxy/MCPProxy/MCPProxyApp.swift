@@ -279,7 +279,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         updateService.stopManagedCore = { [weak self] in
             guard let self else { return true }
             let pid = self.coreManager?.managedProcess?.processIdentifier
+            // Mark stop INTENT before terminating: this is a deliberate
+            // tray-initiated stop, so the core's resulting clean (status 0)
+            // exit must not pop a spurious "MCPProxy Error" nor race a
+            // reconnection against Sparkle's bundle swap.
+            self.appState.isStoppingForUpdate = true
             let outcome = ManagedCoreStop.stop(pid: pid)
+            if !outcome.coreIsDown {
+                // The stop did not bring the core down — Sparkle will postpone
+                // the install and the tray keeps managing the still-live core,
+                // so clear the intent (no exit is coming to consume it).
+                self.appState.isStoppingForUpdate = false
+            }
             NSLog("[MCPProxy] Pre-update core stop: pid=%d outcome=%@",
                   pid ?? -1, String(describing: outcome))
             AppLifecycle.shared.note("pre-update core stop: \(outcome)")

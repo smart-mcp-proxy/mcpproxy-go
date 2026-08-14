@@ -33,19 +33,28 @@ final class CoreExitClassificationTests: XCTestCase {
         // `isTerminating`, and that intent makes the resulting clean exit
         // expected — the normal quit that used to pop a spurious error.
         XCTAssertTrue(
-            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: true)
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: true, stoppingForUpdate: false)
         )
     }
 
     func testUserStoppedExitIsExpected() {
         XCTAssertTrue(
-            CoreError.isExpectedExit(userStopped: true, shuttingDown: false, appTerminating: false)
+            CoreError.isExpectedExit(userStopped: true, shuttingDown: false, appTerminating: false, stoppingForUpdate: false)
         )
     }
 
     func testShuttingDownExitIsExpected() {
         XCTAssertTrue(
-            CoreError.isExpectedExit(userStopped: false, shuttingDown: true, appTerminating: false)
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: true, appTerminating: false, stoppingForUpdate: false)
+        )
+    }
+
+    func testPreUpdateStopExitIsExpected() {
+        // Sparkle's pre-install stop terminates the core while the tray is still
+        // connected; its clean exit must not pop an error nor race the bundle
+        // swap with a reconnection.
+        XCTAssertTrue(
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: false, stoppingForUpdate: true)
         )
     }
 
@@ -54,13 +63,13 @@ final class CoreExitClassificationTests: XCTestCase {
         // intent set, that clean exit is NOT expected — the tray must recover,
         // not silently sit on a dead core.
         XCTAssertFalse(
-            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: false)
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: false, stoppingForUpdate: false)
         )
     }
 
     func testUnexpectedNonZeroCrashIsNotExpected() {
         XCTAssertFalse(
-            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: false)
+            CoreError.isExpectedExit(userStopped: false, shuttingDown: false, appTerminating: false, stoppingForUpdate: false)
         )
     }
 

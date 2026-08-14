@@ -197,21 +197,26 @@ enum CoreError: Error, Equatable {
     /// Whether a core process exit should be treated as expected — i.e. NOT
     /// surfaced to the user as an error and NOT retried.
     ///
-    /// Expected iff the tray INTENDED the stop: the user stopped the core
-    /// (`userStopped`), the manager is shutting the core down (`shuttingDown`),
-    /// or the app itself is terminating (`appTerminating`, set in
-    /// `applicationWillTerminate` before the core is torn down). The
-    /// app-termination path is why `shuttingDown` alone is insufficient: it
-    /// terminates the core directly while the tray is still `.connected`, so the
-    /// clean exit needs the explicit `appTerminating` intent — treating that as
-    /// a crash is what popped a spurious "MCPProxy Error" on every quit.
+    /// Expected iff the tray INTENDED the stop, via any of its stop paths:
+    ///   - `userStopped`: the user hit Stop;
+    ///   - `shuttingDown`: the manager is shutting the core down;
+    ///   - `appTerminating`: the app is quitting (`applicationWillTerminate`
+    ///     sets the intent before the core is torn down);
+    ///   - `stoppingForUpdate`: the tray stopped the core so Sparkle can swap
+    ///     the app bundle (Spec 092 pre-install stop).
+    /// The last two are why `shuttingDown` alone is insufficient: both terminate
+    /// the core directly while the tray is still `.connected`, so the clean exit
+    /// needs an explicit intent — treating it as a crash is what popped a
+    /// spurious "MCPProxy Error".
     ///
     /// A clean (status 0) exit is deliberately NOT expected on its own: the Go
     /// core exits 0 on any graceful SIGTERM, so an EXTERNAL kill the tray did
     /// not ask for also produces status 0, and that must still trigger recovery
     /// rather than being silently swallowed.
-    static func isExpectedExit(userStopped: Bool, shuttingDown: Bool, appTerminating: Bool) -> Bool {
-        userStopped || shuttingDown || appTerminating
+    static func isExpectedExit(
+        userStopped: Bool, shuttingDown: Bool, appTerminating: Bool, stoppingForUpdate: Bool
+    ) -> Bool {
+        userStopped || shuttingDown || appTerminating || stoppingForUpdate
     }
 
     /// Log levels zap emits that never, on their own, represent a core failure.

@@ -257,6 +257,15 @@ final class AppState: ObservableObject {
     /// which is why status 0 alone does not count as expected.
     @Published var isTerminating: Bool = false
 
+    /// Whether the tray is intentionally stopping the managed core to let the
+    /// Sparkle updater swap the app bundle (Spec 092 FR-012 pre-install stop).
+    /// Like `isTerminating` this is stop INTENT: the core's resulting clean exit
+    /// must not be surfaced as a crash or race a reconnection against the
+    /// in-progress bundle swap. Distinct from `isStopped` so it carries none of
+    /// the user-facing "Stopped" semantics; self-resetting (cleared when the
+    /// stop is postponed and the core stays live — see `stopManagedCore`).
+    @Published var isStoppingForUpdate: Bool = false
+
     /// GH #410 — whether the tray may start a core when it opens. The one piece of
     /// launcher state the tray persists; it says nothing about whether a core is
     /// running (that is always discovered live from the socket). Mirrors

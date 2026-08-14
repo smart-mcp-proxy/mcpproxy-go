@@ -2101,7 +2101,8 @@ actor CoreProcessManager {
         let intent = await MainActor.run {
             (stopped: appState.isStopped,
              shuttingDown: { if case .shuttingDown = appState.coreState { return true }; return false }(),
-             terminating: appState.isTerminating)
+             terminating: appState.isTerminating,
+             stoppingForUpdate: appState.isStoppingForUpdate)
         }
         if let generation, generation != launchGeneration {
             NSLog("[MCPProxy] handleProcessExit: launch %d superseded by %d during exit handling, standing down",
@@ -2109,7 +2110,8 @@ actor CoreProcessManager {
             return
         }
         if CoreError.isExpectedExit(
-            userStopped: intent.stopped, shuttingDown: intent.shuttingDown, appTerminating: intent.terminating
+            userStopped: intent.stopped, shuttingDown: intent.shuttingDown,
+            appTerminating: intent.terminating, stoppingForUpdate: intent.stoppingForUpdate
         ) {
             NSLog("[MCPProxy] handleProcessExit: expected exit (status %d), not retrying", status)
             return
@@ -2119,6 +2121,16 @@ actor CoreProcessManager {
 
         // Send notification for non-trivial errors
         await notificationService.sendCoreError(error: error)
+
+        // sendCoreError is another suspension point: a competing retry, a
+        // shutdown, or a replacement launch may have advanced the generation
+        // while it was in flight. Revalidate before touching shared recovery
+        // state — the non-retryable branch writes `.error`, which would
+        // otherwise clobber the state of the launch that superseded us.
+        if let generation, generation != launchGeneration {
+            NSLog("[MCPProxy] handleProcessExit: superseded during notification, not recovering")
+            return
+        }
 
         if error.isRetryable && retryCount < maxRetries {
             // Honour the same gate as every other reconnection entry point. If
