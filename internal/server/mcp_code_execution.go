@@ -52,35 +52,8 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Extract options object (optional)
 	if optionsObj, ok := args["options"].(map[string]interface{}); ok && optionsObj != nil {
-		// Parse timeout_ms
-		if timeoutMs, ok := optionsObj["timeout_ms"].(float64); ok {
-			options.TimeoutMs = int(timeoutMs)
-			// Validate timeout range
-			if options.TimeoutMs < 1 || options.TimeoutMs > 600000 {
-				return mcp.NewToolResultError("timeout_ms must be between 1 and 600000 milliseconds"), nil
-			}
-		}
-
-		// Parse max_tool_calls
-		if maxToolCalls, ok := optionsObj["max_tool_calls"].(float64); ok {
-			options.MaxToolCalls = int(maxToolCalls)
-			// Validate max_tool_calls
-			if options.MaxToolCalls < 0 {
-				return mcp.NewToolResultError("max_tool_calls cannot be negative"), nil
-			}
-		}
-
-		// Parse allowed_servers
-		if allowedServers, ok := optionsObj["allowed_servers"].([]interface{}); ok {
-			serverNames := make([]string, 0, len(allowedServers))
-			for _, serverVal := range allowedServers {
-				if serverName, ok := serverVal.(string); ok {
-					serverNames = append(serverNames, serverName)
-				} else {
-					return mcp.NewToolResultError("allowed_servers must be an array of strings"), nil
-				}
-			}
-			options.AllowedServers = serverNames
+		if errMsg := applyCodeExecutionOptions(optionsObj, &options); errMsg != "" {
+			return mcp.NewToolResultError(errMsg), nil
 		}
 	}
 
@@ -413,6 +386,80 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			mcp.NewTextContent(string(resultJSON)),
 		},
 	}, nil
+}
+
+// applyCodeExecutionOptions parses the `options` object of a code_execution
+// call into opts, returning a user-facing message when a value is out of range
+// or the wrong type (empty string means the options were applied).
+//
+// Values arrive in two shapes: JSON-decoded over the MCP transport (float64,
+// []interface{}) and Go-typed from an in-process caller that builds the
+// arguments map directly — the REST handler behind POST /api/v1/code/exec is
+// one. Both are accepted; matching only the JSON shapes dropped every
+// restriction a REST caller set, so a request limited to specific servers ran
+// unrestricted.
+func applyCodeExecutionOptions(optionsObj map[string]interface{}, opts *jsruntime.ExecutionOptions) string {
+	// Parse timeout_ms
+	if timeoutMs, ok := codeExecOptionInt(optionsObj["timeout_ms"]); ok {
+		opts.TimeoutMs = timeoutMs
+		// Validate timeout range
+		if opts.TimeoutMs < 1 || opts.TimeoutMs > 600000 {
+			return "timeout_ms must be between 1 and 600000 milliseconds"
+		}
+	}
+
+	// Parse max_tool_calls
+	if maxToolCalls, ok := codeExecOptionInt(optionsObj["max_tool_calls"]); ok {
+		opts.MaxToolCalls = maxToolCalls
+		// Validate max_tool_calls
+		if opts.MaxToolCalls < 0 {
+			return "max_tool_calls cannot be negative"
+		}
+	}
+
+	// Parse allowed_servers
+	switch allowedServers := optionsObj["allowed_servers"].(type) {
+	case []string:
+		opts.AllowedServers = append(make([]string, 0, len(allowedServers)), allowedServers...)
+	case []interface{}:
+		serverNames := make([]string, 0, len(allowedServers))
+		for _, serverVal := range allowedServers {
+			serverName, ok := serverVal.(string)
+			if !ok {
+				return "allowed_servers must be an array of strings"
+			}
+			serverNames = append(serverNames, serverName)
+		}
+		opts.AllowedServers = serverNames
+	}
+
+	return ""
+}
+
+// codeExecOptionInt normalises the numeric shapes a code_execution option can
+// arrive in: float64 from a JSON decode, json.Number from a decoder using
+// UseNumber, and the integer types an in-process caller passes through.
+func codeExecOptionInt(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(parsed), true
+	default:
+		return 0, false
+	}
 }
 
 // toolCallRecord tracks information about a single tool call for observability

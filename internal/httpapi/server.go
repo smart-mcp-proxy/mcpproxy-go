@@ -44,7 +44,51 @@ import (
 const (
 	asyncToggleTimeout = 5 * time.Second
 	secretTypeKeyring  = "keyring"
+
+	// defaultAPIRequestTimeout bounds an ordinary /api/v1 request.
+	defaultAPIRequestTimeout = 60 * time.Second
+
+	// codeExecPath is the one REST route that runs caller-supplied code.
+	codeExecPath = "/api/v1/code/exec"
+
+	// codeExecRequestTimeout is the parent deadline for POST /api/v1/code/exec.
+	// The handler derives the precise budget from the caller's timeout_ms, but
+	// a context only ever shrinks against its parent, so the parent has to
+	// cover the longest execution the code_execution tool accepts (600000ms)
+	// plus slack for request and response IO. Under the blanket 60s deadline
+	// every longer execution was cancelled at 60s regardless of what the
+	// caller asked for.
+	codeExecRequestTimeout = 630 * time.Second
 )
+
+// longRunningAPIBudgets lists the /api/v1 paths that need more than
+// defaultAPIRequestTimeout, keyed by request path.
+func longRunningAPIBudgets() map[string]time.Duration {
+	return map[string]time.Duration{
+		codeExecPath: codeExecRequestTimeout,
+	}
+}
+
+// apiRequestTimeout builds the /api/v1 request-deadline middleware. Paths
+// listed in budgets get their own deadline; everything else gets
+// defaultBudget. Each budget's handler chain is built once at setup rather
+// than per request.
+func apiRequestTimeout(defaultBudget time.Duration, budgets map[string]time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		fallback := middleware.Timeout(defaultBudget)(next)
+		wrapped := make(map[string]http.Handler, len(budgets))
+		for path, budget := range budgets {
+			wrapped[path] = middleware.Timeout(budget)(next)
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if handler, ok := wrapped[r.URL.Path]; ok {
+				handler.ServeHTTP(w, r)
+				return
+			}
+			fallback.ServeHTTP(w, r)
+		})
+	}
+}
 
 // ServerController defines the interface for core server functionality
 type ServerController interface {
@@ -644,8 +688,10 @@ func (s *Server) setupRoutes() {
 
 	// API v1 routes with timeout and authentication middleware
 	s.router.Route("/api/v1", func(r chi.Router) {
-		// Apply timeout and API key authentication middleware to API routes only
-		r.Use(middleware.Timeout(60 * time.Second))
+		// Apply timeout and API key authentication middleware to API routes only.
+		// The deadline is per-route: the long-running routes carry their own
+		// budget, everything else gets defaultAPIRequestTimeout.
+		r.Use(apiRequestTimeout(defaultAPIRequestTimeout, longRunningAPIBudgets()))
 		r.Use(s.apiKeyAuthMiddleware())
 		// Spec 042: Tier 2 telemetry middlewares. Both fetch the registry via
 		// a closure so the registry can be installed after route setup.

@@ -13,6 +13,16 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
+const (
+	// defaultCodeExecTimeoutMS bounds the HTTP request when the caller sent no
+	// timeout_ms. It is only a request-level fallback — the execution's own
+	// budget comes from the configured code_execution_timeout_ms.
+	defaultCodeExecTimeoutMS = 120000
+	// maxCodeExecTimeoutMS mirrors the ceiling the code_execution tool enforces
+	// on timeout_ms.
+	maxCodeExecTimeoutMS = 600000
+)
+
 // CodeExecRequest represents the request body for code execution.
 type CodeExecRequest struct {
 	Code     string                 `json:"code"`
@@ -83,28 +93,53 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate execution options against the same bounds the code_execution
+	// tool enforces. The tool reports a violation as a plain-text tool error
+	// rather than the JSON envelope parseResult expects, so catching it here
+	// keeps the caller's answer a proper 400 instead of a parse failure.
+	if req.Options.TimeoutMS < 0 || req.Options.TimeoutMS > maxCodeExecTimeoutMS {
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_OPTIONS",
+			fmt.Sprintf("timeout_ms must be between 1 and %d milliseconds", maxCodeExecTimeoutMS))
+		return
+	}
+	if req.Options.MaxToolCalls < 0 {
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_OPTIONS", "max_tool_calls cannot be negative")
+		return
+	}
+
 	// Set defaults
 	if req.Input == nil {
 		req.Input = make(map[string]interface{})
 	}
-	if req.Options.TimeoutMS == 0 {
-		req.Options.TimeoutMS = 120000 // 2 minutes default
-	}
 
-	// Create context with timeout
-	timeout := time.Duration(req.Options.TimeoutMS) * time.Millisecond
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	// Create context with timeout. This bounds the HTTP request; the
+	// code_execution tool applies its own deadline from timeout_ms inside it.
+	timeoutMS := req.Options.TimeoutMS
+	if timeoutMS == 0 {
+		timeoutMS = defaultCodeExecTimeoutMS
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 
-	// Build arguments for code_execution tool
+	// Build arguments for code_execution tool. Only options the caller actually
+	// supplied are forwarded: a zero value means "unset" to the tool, which
+	// resolves timeout_ms and max_tool_calls from config and reads an absent
+	// allowed_servers as "no restriction". Sending this endpoint's own fallback
+	// would override the configured code_execution_timeout_ms instead.
+	execOptions := make(map[string]interface{}, 3)
+	if req.Options.TimeoutMS > 0 {
+		execOptions["timeout_ms"] = req.Options.TimeoutMS
+	}
+	if req.Options.MaxToolCalls > 0 {
+		execOptions["max_tool_calls"] = req.Options.MaxToolCalls
+	}
+	if len(req.Options.AllowedServers) > 0 {
+		execOptions["allowed_servers"] = req.Options.AllowedServers
+	}
 	args := map[string]interface{}{
-		"code":  req.Code,
-		"input": req.Input,
-		"options": map[string]interface{}{
-			"timeout_ms":      req.Options.TimeoutMS,
-			"max_tool_calls":  req.Options.MaxToolCalls,
-			"allowed_servers": req.Options.AllowedServers,
-		},
+		"code":    req.Code,
+		"input":   req.Input,
+		"options": execOptions,
 	}
 
 	// Pass language if specified
