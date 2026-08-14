@@ -140,7 +140,7 @@ overrides both `update_check.channel` and `MCPPROXY_ALLOW_PRERELEASE_UPDATES`:
 
 The macOS tray applies the same rule to itself: a stable tray app never offers
 itself an RC even when attached to a newer RC core. See
-[docs/prerelease-builds.md](../prerelease-builds.md).
+[Prerelease Builds](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/prerelease-builds.md).
 
 ### Examples
 
