@@ -225,6 +225,13 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 		return nil, "", err
 	}
 
+	// An empty scripts dir would make filepath.Join produce a bare relative
+	// path resolved against the process CWD — never that. No authority means
+	// no scripts.
+	if scriptsDir == "" {
+		return nil, "", newNotFoundError(scriptsDir, name)
+	}
+
 	// Probe both extensions. Lstat (not Stat) so a symlink is seen as a
 	// symlink here; the open below is the authoritative, race-free check.
 	var found []string

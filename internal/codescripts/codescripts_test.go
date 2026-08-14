@@ -456,3 +456,23 @@ func TestDirFor(t *testing.T) {
 		DirFor(filepath.Join("/home", "u", ".mcpproxy", "mcp_config.json")))
 	assert.Empty(t, DirFor(""), "no config path means no scripts directory")
 }
+
+// An empty scripts directory path must never fall through to process-CWD
+// resolution: filepath.Join("", "foo.js") is a relative "foo.js", which would
+// execute a file from wherever the daemon happens to run.
+func TestResolveEmptyScriptsDirNeverTouchesCWD(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "cwdscript.js"), []byte("({})"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tmp)
+
+	_, _, err := Resolve("", "cwdscript", "")
+	var nf *NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("Resolve with empty scriptsDir: want NotFoundError, got %v", err)
+	}
+	if nf.Total != 0 || len(nf.Available) != 0 {
+		t.Fatalf("empty scriptsDir must report no scripts, got %+v", nf)
+	}
+}
