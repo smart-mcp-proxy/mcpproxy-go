@@ -80,7 +80,7 @@ For a **released** build the running binary's own version is authoritative and c
 
 The `update_check.channel` config field and `MCPPROXY_ALLOW_PRERELEASE_UPDATES` env flag now only take effect on **dev / unstamped** builds (local `go build`, `go install` without a release tag), where there is no release identity to honor — they let developers exercise the rc path without a released RC binary.
 
-The Swift macOS tray inherits this decision from the core: it reads `update_policy.channel` from `GET /api/v1/info` (which the core resolves from the running version) and sets its Sparkle `allowedChannels` / feed selection accordingly, so all update surfaces agree. (Spec 079 — converging the Go tray's own self-update resolution fully onto the shared checker is FR-001a.)
+The Swift macOS tray takes the core's `update_policy.channel` (from `GET /api/v1/info`) as an **input**, then applies its own build-identity clamp on top: it narrows the channel to `stable` when the tray app's **own** bundle (`CFBundleShortVersionString`) is a stable release. This matters for mixed versions — a stable tray app attached to a separately-installed **newer RC core** reports `channel=rc` from that core, but the tray must never update *itself* to an RC, so it clamps to stable regardless. The clamp is narrowing-only (it can only pin to stable, never force `rc`); an RC tray app keeps the core's channel. Its Sparkle `allowedChannels` / feed selection then follow the clamped channel. (Spec 079 FR-013a; converging the Go tray's own self-update resolution fully onto the shared checker is FR-001a.)
 
 ### Installing an RC
 
