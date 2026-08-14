@@ -1198,7 +1198,13 @@ var slots = call_tools([
 
 > **Batching vs. per-server limits.** [Concurrency limits](#concurrency-limits--request-queueing) still govern each element. A server with `max_concurrent_requests` set and **no** `queue_size` sheds everything over the cap — a 10-element batch against `max_concurrent_requests: 1` returns 1 result and 9 per-slot `queue_full` errors. Give such servers `queue_size` headroom (or lower `max_parallel`) before fanning out against them.
 
-See [Code Execution Documentation](code_execution/overview.md) for complete details.
+### Stored Scripts
+
+Long workflows do not have to be re-sent inline on every call. A `<name>.js` / `<name>.ts` file placed in the `scripts/` directory **next to this configuration file** (`~/.mcpproxy/scripts/` by default, `<dir-of---config>/scripts/` when `--config` points elsewhere) is invocable by name — `{"script": "<name>", "input": {...}}` over MCP/REST, or `mcpproxy code exec --script <name>`.
+
+There is no configuration key for this: the directory convention is the whole surface, and the scripts directory is never derived from `--data-dir`. Names are 1-64 characters of `A-Za-z0-9_-` (never a path), files are lowercase `.js`/`.ts` up to 256 KB, and each invocation re-reads the file, so an atomic replacement takes effect on the next run with no restart. `mcpproxy code scripts list` (or `GET /api/v1/code/scripts`) lists what exists; nothing writes scripts through any API.
+
+See [Code Execution Documentation](code_execution/overview.md) for complete details, and [Stored Scripts](code_execution/overview.md#stored-scripts) for the authoring rules.
 
 ---
 

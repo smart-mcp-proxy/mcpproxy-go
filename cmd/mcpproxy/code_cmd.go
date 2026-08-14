@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -40,6 +42,13 @@ var (
 Use --language typescript to write TypeScript code with type annotations,
 interfaces, enums, and generics. Types are automatically stripped before execution.
 
+Use --script <name> to run a script stored server-side in the scripts/ directory
+next to the configuration file, instead of sending source with --code/--file.
+Exactly one of --code, --file or --script may be given. The name is a bare
+identifier, never a path, and its extension decides the language, so --language
+is only needed for inline code. List what is stored with 'mcpproxy code scripts
+list'.
+
 The code has access to:
 - input: Global variable containing the input data (from --input or --input-file)
 - call_tool(serverName, toolName, args): Function to invoke upstream MCP tools
@@ -56,6 +65,32 @@ Exit codes:
 		RunE: runCodeExec,
 	}
 
+	codeScriptsCmd = &cobra.Command{
+		Use:   "scripts",
+		Short: "Inspect the stored scripts available to code execution",
+		Long: `Stored scripts are ` + "`<name>.js`" + ` / ` + "`<name>.ts`" + ` files in the scripts/ directory
+next to mcpproxy's configuration file. Run one with:
+
+  mcpproxy code exec --script <name>
+
+Scripts are authored in the filesystem — there is no command that writes them.`,
+	}
+
+	codeScriptsListCmd = &cobra.Command{
+		Use:   "list",
+		Short: "List stored scripts",
+		Long: `List the stored scripts the code_execution tool can run.
+
+When a daemon is running the listing comes from the daemon, so it always
+describes the process that actually resolves scripts; otherwise the local
+scripts directory is read directly.
+
+Each entry carries a status: 'ok' (invocable), 'ambiguous' (both a .js and a .ts
+file share the name — remove one) or 'invalid' with the reason it cannot run.`,
+		Args: cobra.NoArgs,
+		RunE: runCodeScriptsList,
+	}
+
 	// Command flags for code exec
 	codeSource       string
 	codeFile         string
@@ -67,6 +102,12 @@ Exit codes:
 	codeLogLevel     string
 	codeConfigPath   string
 	codeLanguage     string
+	codeScriptName   string
+
+	// codeLanguageExplicit records whether --language was actually set by the
+	// user. The flag has a default ("javascript"), and a default is not a
+	// choice: forwarded as one it would contradict every stored .ts script.
+	codeLanguageExplicit bool
 )
 
 // GetCodeCommand returns the code command for adding to the root command
@@ -78,9 +119,15 @@ func init() {
 	// Add exec subcommand to code command
 	codeCmd.AddCommand(codeExecCmd)
 
+	// Stored-script discovery (Spec 097). Read-only: scripts are authored in
+	// the filesystem, never through the CLI.
+	codeScriptsCmd.AddCommand(codeScriptsListCmd)
+	codeCmd.AddCommand(codeScriptsCmd)
+
 	// Define flags for code exec command
 	codeExecCmd.Flags().StringVar(&codeSource, "code", "", "JavaScript code to execute (required if --file is not provided)")
 	codeExecCmd.Flags().StringVar(&codeFile, "file", "", "Path to JavaScript file to execute (required if --code is not provided)")
+	codeExecCmd.Flags().StringVar(&codeScriptName, "script", "", "Name of a stored script in the scripts/ directory next to the config file (mutually exclusive with --code/--file)")
 	codeExecCmd.Flags().StringVar(&codeInput, "input", "{}", "Input data as JSON string (default: {})")
 	codeExecCmd.Flags().StringVar(&codeInputFile, "input-file", "", "Path to JSON file containing input data")
 	codeExecCmd.Flags().IntVar(&codeTimeout, "timeout", 120000, "Execution timeout in milliseconds (1-600000)")
@@ -89,6 +136,10 @@ func init() {
 	codeExecCmd.Flags().StringVarP(&codeLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
 	codeExecCmd.Flags().StringVarP(&codeConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	codeExecCmd.Flags().StringVar(&codeLanguage, "language", "javascript", "Source code language: javascript, typescript")
+
+	// The scripts commands resolve the same config FILE as exec, so they take
+	// the same --config override.
+	codeScriptsListCmd.Flags().StringVarP(&codeConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 
 	// Add examples
 	codeExecCmd.Example = `  # Execute inline code with input
@@ -103,6 +154,12 @@ func init() {
   # Execute TypeScript from file
   mcpproxy code exec --language typescript --file=script.ts --input-file=params.json
 
+  # Execute a stored script by name (scripts/ next to the config file)
+  mcpproxy code exec --script=daily-report --input='{"repo":"smart-mcp-proxy/mcpproxy-go"}'
+
+  # See which stored scripts exist
+  mcpproxy code scripts list
+
   # Call upstream tools
   mcpproxy code exec --code="call_tool('github', 'get_user', {username: input.user})" --input='{"user":"octocat"}'
 
@@ -116,16 +173,16 @@ func init() {
   mcpproxy code exec --code="..." --log-level=trace`
 }
 
-func runCodeExec(_ *cobra.Command, _ []string) error {
+func runCodeExec(cmd *cobra.Command, _ []string) error {
 	// Validate arguments
-	if codeSource == "" && codeFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: either --code or --file must be provided\n")
+	if err := validateCodeSourceFlags(codeSource, codeFile, codeScriptName); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return exitError(2)
 	}
-	if codeSource != "" && codeFile != "" {
-		fmt.Fprintf(os.Stderr, "Error: --code and --file are mutually exclusive\n")
-		return exitError(2)
-	}
+
+	// Record whether --language is the user's choice or just its default,
+	// before either execution mode reads it.
+	setCodeLanguageExplicit(cmd)
 
 	// Load code and input
 	code, inputData, err := loadCodeAndInput()
@@ -218,7 +275,7 @@ func runCodeExecClientMode(client *cliclient.Client, code string, input map[stri
 		codeTimeout,
 		codeMaxToolCalls,
 		codeAllowedSrvs,
-		cliclient.CodeExecOptions{Language: codeLanguage},
+		cliclient.CodeExecOptions{Language: codeExecLanguageArg(), Script: codeScriptName},
 	)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -278,6 +335,15 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 	// Create truncator
 	truncator := truncate.NewTruncator(globalConfig.ToolResponseLimit)
 
+	// Spec 097: the in-process server needs the SAME config-file authority the
+	// daemon has, or a stored script resolves differently depending on whether
+	// a daemon happened to be running. A failure here is not fatal: only stored
+	// scripts depend on it, and they report their own error.
+	configFilePath, cfgPathErr := codeConfigFilePath()
+	if cfgPathErr != nil {
+		logger.Warn("could not resolve the config file path for stored scripts", zap.Error(cfgPathErr))
+	}
+
 	// Create MCP proxy server
 	mcpProxy := server.NewMCPProxyServer(
 		storageManager,
@@ -290,27 +356,12 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 		false,
 		globalConfig,
 		nil, // standalone one-shot: no runtime-owned signature cache
+		server.WithConfigFilePath(configFilePath),
 	)
 	defer mcpProxy.Close()
 
-	// Build arguments for code_execution tool
-	args := map[string]interface{}{
-		"code":  code,
-		"input": input,
-		"options": map[string]interface{}{
-			"timeout_ms":      codeTimeout,
-			"max_tool_calls":  codeMaxToolCalls,
-			"allowed_servers": codeAllowedSrvs,
-		},
-	}
-
-	// Pass language if not the default
-	if codeLanguage != "" && codeLanguage != "javascript" {
-		args["language"] = codeLanguage
-	}
-
 	// Call the code_execution tool
-	result, err := mcpProxy.CallBuiltInTool(ctx, "code_execution", args)
+	result, err := mcpProxy.CallBuiltInTool(ctx, "code_execution", codeExecToolArgs(code, codeScriptName, input))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error calling code_execution tool: %v\n", err)
 		return exitError(1)
@@ -320,7 +371,174 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 	return outputResultFromMCP(result)
 }
 
+// codeScriptsListTimeout bounds the daemon listing request: it is a directory
+// read on the far side, so it either answers immediately or something is wrong.
+const codeScriptsListTimeout = 10 * time.Second
+
+// codeScriptsPayload is the machine-readable shape of `code scripts list`,
+// mirroring GET /api/v1/code/scripts so both surfaces read the same.
+type codeScriptsPayload struct {
+	Dir     string              `json:"dir"`
+	Scripts []codescripts.Entry `json:"scripts"`
+}
+
+// runCodeScriptsList lists the stored scripts available to code execution.
+// A running daemon answers for itself — it is the process that resolves scripts
+// at execution time, so its view is the authoritative one; only without a
+// daemon does the CLI read the scripts directory itself.
+func runCodeScriptsList(_ *cobra.Command, _ []string) error {
+	// A failed config load does not rule the daemon out: socket detection needs
+	// no config at all, so a daemon started with --config elsewhere is still
+	// reachable and still the authority. cfg is nil on error, which
+	// newDaemonClient already tolerates.
+	cfg, cfgErr := loadCodeConfig()
+	if client, ok := newDaemonClient(cfg, nil); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), codeScriptsListTimeout)
+		defer cancel()
+
+		dir, entries, err := client.GetCodeScripts(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing stored scripts from the daemon: %s\n", formatErrorWithRequestID(err))
+			return exitError(1)
+		}
+		return outputCodeScripts(dir, entries)
+	}
+
+	// Falling back silently was the trap: with no config loaded this reads the
+	// DEFAULT scripts directory and reports it as the answer, so a daemon
+	// serving a different directory is contradicted by a listing that looks
+	// authoritative. The local answer is still the best available, but the
+	// reader has to know that is what it is.
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load configuration (%v); listing the local scripts directory only\n", cfgErr)
+	}
+
+	dir, entries, err := localCodeScripts()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing stored scripts: %v\n", err)
+		return exitError(1)
+	}
+	return outputCodeScripts(dir, entries)
+}
+
+// localCodeScripts lists the scripts directory belonging to the config FILE the
+// code command works against — the same authority the in-process handler uses,
+// so a daemonless listing cannot disagree with a daemonless execution.
+func localCodeScripts() (string, []codescripts.Entry, error) {
+	configFilePath, err := codeConfigFilePath()
+	if err != nil {
+		return "", nil, err
+	}
+	dir := codescripts.DirFor(configFilePath)
+	entries, err := codescripts.List(dir)
+	if err != nil {
+		return dir, nil, err
+	}
+	return dir, entries, nil
+}
+
+func outputCodeScripts(dir string, entries []codescripts.Entry) error {
+	if format := ResolveOutputFormat(); format == "json" || format == "yaml" {
+		formatter, err := GetOutputFormatter()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating output formatter: %v\n", err)
+			return exitError(1)
+		}
+		out, err := formatter.Format(codeScriptsPayload{Dir: dir, Scripts: entries})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting stored scripts: %v\n", err)
+			return exitError(1)
+		}
+		fmt.Println(out)
+		return nil
+	}
+
+	renderCodeScripts(os.Stdout, dir, entries)
+	return nil
+}
+
+// renderCodeScripts writes the human-readable listing. It always names the
+// directory it read: "no scripts" and "scripts, but not where you think" look
+// identical otherwise.
+func renderCodeScripts(w io.Writer, dir string, entries []codescripts.Entry) {
+	if len(entries) == 0 {
+		fmt.Fprintf(w, "No stored scripts in %s\n", dir)
+		fmt.Fprintf(w, "Create <name>.js or <name>.ts there, then run: mcpproxy code exec --script <name>\n")
+		return
+	}
+
+	fmt.Fprintf(w, "Stored scripts in %s (%d):\n", dir, len(entries))
+	for _, entry := range entries {
+		status := string(entry.Status)
+		if entry.Reason != "" {
+			status += " (" + entry.Reason + ")"
+		}
+		fmt.Fprintf(w, "  %-32s %-20s %s\n", entry.Name, status, strings.Join(entry.Paths, ", "))
+	}
+	fmt.Fprintf(w, "\nRun one with: mcpproxy code exec --script <name>\n")
+}
+
 // Helper functions
+
+// validateCodeSourceFlags enforces the exactly-one-source rule across the three
+// ways to name what runs: inline --code, a local --file, or a server-side
+// stored script by --script (Spec 097).
+func validateCodeSourceFlags(code, file, script string) error {
+	named := 0
+	for _, v := range []string{code, file, script} {
+		if v != "" {
+			named++
+		}
+	}
+	switch {
+	case named == 0:
+		return fmt.Errorf("one of --code, --file or --script must be provided")
+	case named > 1:
+		return fmt.Errorf("--code, --file and --script are mutually exclusive")
+	}
+	return nil
+}
+
+// setCodeLanguageExplicit records whether --language carries the user's own
+// choice or merely its default value.
+func setCodeLanguageExplicit(cmd *cobra.Command) {
+	codeLanguageExplicit = cmd != nil && cmd.Flags().Changed("language")
+}
+
+// codeExecLanguageArg returns the language to send with the request: the flag's
+// value only when the user actually set it. A stored script derives its
+// language from the file extension and rejects a contradicting explicit one, so
+// forwarding the flag's "javascript" default would break every .ts script.
+func codeExecLanguageArg() string {
+	if !codeLanguageExplicit {
+		return ""
+	}
+	return codeLanguage
+}
+
+// codeExecToolArgs builds the code_execution arguments for standalone
+// (in-process) execution. A stored script contributes its NAME, never content
+// the CLI resolved itself: the handler is the only execution-time resolver, so
+// the same name means the same thing whether or not a daemon is running.
+func codeExecToolArgs(code, script string, input map[string]interface{}) map[string]interface{} {
+	args := map[string]interface{}{
+		"input": input,
+		"options": map[string]interface{}{
+			"timeout_ms":      codeTimeout,
+			"max_tool_calls":  codeMaxToolCalls,
+			"allowed_servers": codeAllowedSrvs,
+		},
+	}
+	if script != "" {
+		args["script"] = script
+	} else {
+		args["code"] = code
+	}
+	if language := codeExecLanguageArg(); language != "" {
+		args["language"] = language
+	}
+	return args
+}
 
 func loadCodeAndInput() (string, map[string]interface{}, error) {
 	var code string
@@ -387,6 +605,21 @@ func outputResult(result *cliclient.CodeExecResult) error {
 }
 
 func outputResultFromMCP(result *mcp.CallToolResult) error {
+	// A tool ERROR is plain text, not the execution envelope — and for a stored
+	// script that text is the recovery path: naming one that does not exist
+	// answers with the available names (FR-004). Parsing it as JSON and giving
+	// up ("unexpected result format") threw that away.
+	if result.IsError {
+		for _, content := range result.Content {
+			if textContent, ok := mcp.AsTextContent(content); ok {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", textContent.Text)
+				return exitError(1)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "Error: code execution failed\n")
+		return exitError(1)
+	}
+
 	// Existing logic to parse MCP result
 	for _, content := range result.Content {
 		if textContent, ok := mcp.AsTextContent(content); ok {
@@ -411,19 +644,27 @@ func outputResultFromMCP(result *mcp.CallToolResult) error {
 	return exitError(1)
 }
 
+// codeConfigFilePath resolves the config FILE the code command works against:
+// --config when given, else the documented default. It is deliberately NOT
+// derived from --data-dir — that flag overrides the data directory AFTER the
+// config file has been chosen, so deriving from it would disagree with the
+// file actually loaded (and with the daemon) about where stored scripts live.
+func codeConfigFilePath() (string, error) {
+	if codeConfigPath != "" {
+		return codeConfigPath, nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".mcpproxy", "mcp_config.json"), nil
+}
+
 // loadCodeConfig loads the MCP configuration file for code command
 func loadCodeConfig() (*config.Config, error) {
-	var configFilePath string
-
-	if codeConfigPath != "" {
-		configFilePath = codeConfigPath
-	} else {
-		// Use default path
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
-		}
-		configFilePath = filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
+	configFilePath, err := codeConfigFilePath()
+	if err != nil {
+		return nil, err
 	}
 
 	// Check if config file exists

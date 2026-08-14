@@ -225,6 +225,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		cfg.DebugSearch,
 		cfg,
 		rt.SignatureCache(), // Spec 085 FR-008: the ONE Runtime-owned signature cache
+		// Spec 097: the daemon's stored-script authority is the config FILE it
+		// actually loaded, declared here rather than re-derived per request.
+		WithConfigFilePath(server.GetConfigPath()),
 	)
 	// MCP-32: give the MCP proxy access to observability for tool-call metrics
 	// and OTLP spans.

@@ -6,6 +6,8 @@ The `code_execution` tool enables LLM agents to orchestrate multiple upstream MC
 
 **TypeScript support**: Set `language: "typescript"` to write code with type annotations, interfaces, enums, and generics. Types are automatically stripped before execution with near-zero overhead (<5ms).
 
+**Stored scripts**: Instead of sending the source inline on every call, keep the workflow in `<config-dir>/scripts/<name>.js` and invoke it with `script: "<name>"`. See [Stored Scripts](#stored-scripts).
+
 ## When to Use Code Execution
 
 ✅ **Use code_execution when:**
@@ -132,14 +134,15 @@ Transform, filter, and aggregate data from multiple tool calls before returning 
 
 ### Execution Flow
 
-1. **Request Parsing**: Extract `code`, `input`, and `options` from the request
-2. **Validation**: Verify timeout (1-600000ms) and max_tool_calls (>= 0)
-3. **Pool Acquisition**: Acquire a JavaScript VM from the pool (blocks if all VMs are in use)
-4. **Sandbox Setup**: Create isolated environment with `input` global and the `call_tool()` / `call_tools()` functions
-5. **Execution**: Run JavaScript with timeout enforcement and tool call tracking
-6. **Result Extraction**: Validate result is JSON-serializable and return structured response
-7. **Pool Release**: Return VM to pool for reuse
-8. **Response**: Return `{ok: true, value: <result>}` or `{ok: false, error: {...}}`
+1. **Request Parsing**: Extract `code` (or `script`), `input`, and `options` from the request
+2. **Source Resolution**: Enforce exactly-one-of `code` / `script`; for a `script`, read the stored file and derive its language (see [Stored Scripts](#stored-scripts))
+3. **Validation**: Verify timeout (1-600000ms) and max_tool_calls (>= 0)
+4. **Pool Acquisition**: Acquire a JavaScript VM from the pool (blocks if all VMs are in use)
+5. **Sandbox Setup**: Create isolated environment with `input` global and the `call_tool()` / `call_tools()` functions
+6. **Execution**: Run JavaScript with timeout enforcement and tool call tracking
+7. **Result Extraction**: Validate result is JSON-serializable and return structured response
+8. **Pool Release**: Return VM to pool for reuse
+9. **Response**: Return `{ok: true, value: <result>}` or `{ok: false, error: {...}}`
 
 ## Security Model
 
@@ -247,14 +250,141 @@ The `code_execution` tool will appear in the tools list when an LLM agent connec
     "type": "object",
     "properties": {
       "code": {"type": "string", "description": "JavaScript or TypeScript source code..."},
+      "script": {"type": "string", "description": "Name of a STORED script to execute instead of sending code inline (Spec 097)..."},
       "language": {"type": "string", "enum": ["javascript", "typescript"], "description": "Source language; defaults to javascript. TypeScript types are stripped before execution (GA, Spec 033 FR-001)."},
       "input": {"type": "object", "description": "Input data accessible as global input variable..."},
       "options": {"type": "object", "description": "Execution options..."}
-    },
-    "required": ["code"]
+    }
   }
 }
 ```
+
+Neither `code` nor `script` is schema-`required`: JSON Schema cannot express
+"exactly one of", so the tool enforces it and rejects a call that supplies both
+or neither.
+
+## Stored Scripts
+
+Sending a long workflow inline costs its full token count on every run, retry,
+and parameter tweak. A **stored script** is that workflow kept on the server —
+a `<name>.js` / `<name>.ts` file in the `scripts/` directory next to the active
+configuration file — invoked by name:
+
+```json
+{
+  "name": "code_execution",
+  "arguments": {
+    "script": "fetch-prs",
+    "input": {"owner": "acme", "repo": "api"}
+  }
+}
+```
+
+Everything else is identical to an inline call: same sandbox, same
+`allowed_servers` / `max_tool_calls` / `timeout_ms` handling, same quarantine and
+permission enforcement, same activity and history records (which store the
+executed source exactly as they do for inline code, plus the script name).
+`script` changes only where the source text comes from.
+
+### 1. Author a script
+
+```bash
+mkdir -p ~/.mcpproxy/scripts
+cat > ~/.mcpproxy/scripts/fetch-prs.js <<'JS'
+var rs = call_tools([1, 2, 3].map(function (n) {
+  return {server: "github", tool: "get_pull_request",
+          args: {owner: input.owner, repo: input.repo, pullNumber: n}};
+}));
+({titles: rs.map(function (r) { return r.ok ? JSON.parse(r.result.content[0].text).title : "ERR"; })});
+JS
+```
+
+The directory is derived from the **active config file**, not from `--data-dir`:
+with the default `~/.mcpproxy/mcp_config.json` it is `~/.mcpproxy/scripts/`, and
+with `--config /etc/mcpproxy/mcp_config.json` it is `/etc/mcpproxy/scripts/`.
+mcpproxy never creates the directory itself — an absent one simply means "no
+scripts".
+
+### 2. Run it
+
+```bash
+mcpproxy code scripts list
+mcpproxy code exec --script fetch-prs --input='{"owner":"acme","repo":"api"}'
+```
+
+`--script` is mutually exclusive with `--code` and `--file`. In both daemon and
+standalone mode the CLI sends the **name**; the daemon (or the in-process
+handler) is the only thing that resolves it, so every surface agrees on what a
+name means.
+
+### Naming and file rules
+
+| Rule | Value |
+|------|-------|
+| Name | 1-64 characters of `A-Za-z0-9_-`, case-sensitive |
+| Path | never — a name with a separator, `..`, or a dot is rejected before any filesystem access |
+| Extension | lowercase `.js` or `.ts` only (`.JS`, `.mjs`, `.jsx` are not scripts) |
+| Language | derived from the extension; an explicit `language` that contradicts it is an error |
+| Size | 1 byte to 256 KB — empty and oversized files are rejected |
+| File type | regular files only; a symlink at the script path is rejected |
+| Ambiguity | `name.js` **and** `name.ts` both present → the call fails naming both |
+
+Files that break the name or extension rules are ignored by listings and
+unreachable by invocation — they are not scripts.
+
+> **Confinement**: the name is validated *before* the filesystem is touched, so
+> a valid name cannot traverse out of the scripts directory by construction. On
+> top of that, the file is opened with symlink-following disabled (atomically on
+> Unix via `O_NOFOLLOW`; a checked policy on Windows, where creating symlinks
+> requires elevation). The scripts directory itself may be a symlink — it is
+> operator-controlled.
+
+### Editing without a restart
+
+Each invocation performs exactly one open and one bounded read; there is no
+cache and no file watcher, so there is nothing to invalidate. Edit by **atomic
+replace** — write a temporary file and `rename` it over the script — and the
+next invocation runs the new content:
+
+```bash
+tmp=$(mktemp ~/.mcpproxy/scripts/.fetch-prs.XXXXXX)
+cat > "$tmp" <<'JS'
+({updated: true});
+JS
+mv "$tmp" ~/.mcpproxy/scripts/fetch-prs.js   # atomic within the same filesystem
+```
+
+Adding or deleting a file is reflected on the next invocation or listing.
+Editing a script **in place** while it is being invoked is the one unsupported
+case: the run gets whatever the read returned (validated, but unspecified).
+
+### Discovering script names
+
+```bash
+mcpproxy code scripts list          # human-readable, always names the directory it read
+mcpproxy code scripts list -o json  # {"dir": "...", "scripts": [{"name","paths","status"}]}
+```
+
+```bash
+curl -H "X-API-Key: $KEY" http://127.0.0.1:8080/api/v1/code/scripts
+```
+
+MCP clients do not get a listing tool — registrations are static, so an embedded
+list would go stale. Discovery is **error-driven** instead: invoking a name that
+does not exist returns an error listing the first 20 available names
+alphabetically plus the total, so an agent recovers the current name set from a
+single failed call.
+
+```text
+Cannot execute stored script: stored script "fetch-pr" not found in
+/Users/me/.mcpproxy/scripts. Available scripts (3): daily-report, fetch-prs, triage
+```
+
+### No write path
+
+Nothing in mcpproxy creates, edits, or deletes a stored script: no MCP tool, no
+REST endpoint, no CLI verb. The filesystem is the sole authoring interface, so
+sandboxed code that can *run* a stored workflow can never author one.
 
 ## Common Patterns
 

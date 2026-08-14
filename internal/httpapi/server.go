@@ -842,6 +842,10 @@ func (s *Server) setupRoutes() {
 		// Code execution endpoint (for CLI client mode)
 		r.Post("/code/exec", NewCodeExecHandler(s.controller, s.logger).ServeHTTP)
 
+		// Stored scripts (Spec 097). Read-only by design: scripts are authored
+		// in the filesystem, never through the API.
+		r.Get("/code/scripts", s.handleListScripts)
+
 		// Configuration management. Applying/patching config can add, remove,
 		// enable, disable or quarantine upstream servers (mcpServers), so these
 		// mutating routes carry the agent-token gate too — otherwise an agent

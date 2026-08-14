@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -10,6 +11,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
@@ -22,7 +25,11 @@ const (
 
 // CodeExecRequest represents the request body for code execution.
 type CodeExecRequest struct {
-	Code     string                 `json:"code"`
+	Code string `json:"code"`
+	// Script names a server-side stored script to run instead of Code
+	// (Spec 097). Exactly one of Code or Script may be set; the value is a
+	// bare name, never a path, and only the code_execution tool resolves it.
+	Script   string                 `json:"script,omitempty"`
 	Language string                 `json:"language,omitempty"` // "javascript" (default) or "typescript"
 	Input    map[string]interface{} `json:"input"`
 	Options  CodeExecOptions        `json:"options"`
@@ -84,9 +91,13 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
-	if req.Code == "" {
-		h.writeError(w, r, http.StatusBadRequest, "MISSING_CODE", "Code field is required")
+	// Exactly one source: inline code, or the name of a stored script the tool
+	// resolves (Spec 097). JSON Schema cannot express the XOR and neither can
+	// this struct, so the rule is checked here — before dispatch — to answer a
+	// malformed request as a 400 rather than as a tool error.
+	if (req.Code == "") == (req.Script == "") {
+		h.writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST",
+			"Provide exactly one of 'code' (inline source) or 'script' (the name of a stored script)")
 		return
 	}
 
@@ -151,9 +162,15 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		execOptions["allowed_servers"] = *req.Options.AllowedServers
 	}
 	args := map[string]interface{}{
-		"code":    req.Code,
 		"input":   req.Input,
 		"options": execOptions,
+	}
+	// Forward whichever source the caller named — for a stored script that is
+	// the NAME alone, so the tool stays the only execution-time resolver.
+	if req.Script != "" {
+		args["script"] = req.Script
+	} else {
+		args["code"] = req.Code
 	}
 
 	// Pass language if specified
@@ -164,6 +181,17 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Call the code_execution built-in tool
 	result, err := h.toolCaller.CallTool(ctx, "code_execution", args)
 	if err != nil {
+		// A refusal the caller could have avoided is not a server fault. Naming
+		// a script that does not exist is the documented discovery path, and a
+		// mistyped or ambiguous name is a caller mistake; answered as 500 they
+		// look retryable to an agent's retry policy and count as server errors
+		// in monitoring. The tool's own explanation is what travels, since that
+		// text is how the caller recovers.
+		if status, code, message, ok := classifyCodeExecError(err); ok {
+			h.logger.Debugw("Code execution refused", "status", status, "code", code, "error", err)
+			h.writeError(w, r, status, code, message)
+			return
+		}
 		h.logger.Errorw("Code execution failed", "error", err)
 		h.writeError(w, r, http.StatusInternalServerError, "EXECUTION_FAILED", err.Error())
 		return
@@ -181,6 +209,55 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+}
+
+// classifyCodeExecError maps a code_execution dispatch failure onto an HTTP
+// status. ok=false means the failure is a genuine server-side fault and keeps
+// the 500 EXECUTION_FAILED answer.
+//
+// The MCP contract makes the tool handler answer these with an isError RESULT,
+// never a transport error, so the dispatch layer flattens them to a string on
+// the way out — which would leave nothing here but prefix matching. It instead
+// preserves the typed identity through errors.As/errors.Is (the same technique
+// spec 093 uses for a concurrency shed's 429), so the returned message is the
+// error's own wording, without the dispatch wrapper's "tool call failed:".
+func classifyCodeExecError(err error) (status int, code, message string, ok bool) {
+	if errors.Is(err, config.ErrCodeExecutionDisabled) {
+		return http.StatusForbidden, "FEATURE_DISABLED", config.CodeExecutionDisabledMessage, true
+	}
+
+	var notFound *codescripts.NotFoundError
+	if errors.As(err, &notFound) {
+		// 404 rather than 400: the request is well formed, the script is not
+		// there — and the message carries the available names (FR-004).
+		return http.StatusNotFound, "SCRIPT_NOT_FOUND", notFound.Error(), true
+	}
+
+	var invalidName *codescripts.InvalidNameError
+	if errors.As(err, &invalidName) {
+		return http.StatusBadRequest, "INVALID_SCRIPT_NAME", invalidName.Error(), true
+	}
+
+	var mismatch *codescripts.LanguageMismatchError
+	if errors.As(err, &mismatch) {
+		// Same class as the handler's own pre-dispatch language check above.
+		return http.StatusBadRequest, "INVALID_LANGUAGE", mismatch.Error(), true
+	}
+
+	var ambiguous *codescripts.AmbiguousError
+	if errors.As(err, &ambiguous) {
+		return http.StatusBadRequest, "SCRIPT_UNUSABLE", ambiguous.Error(), true
+	}
+
+	var invalid *codescripts.InvalidError
+	if errors.As(err, &invalid) {
+		// Empty, oversized, unreadable or non-regular: the named script exists
+		// but cannot run. Nothing the daemon can do about it, and retrying the
+		// same name will not help until the file is fixed.
+		return http.StatusBadRequest, "SCRIPT_UNUSABLE", invalid.Error(), true
+	}
+
+	return 0, "", "", false
 }
 
 func (h *CodeExecHandler) parseResult(result interface{}) CodeExecResponse {
