@@ -116,12 +116,31 @@ are the operator override:
 
 - `MCPPROXY_DISABLE_AUTO_UPDATE=true` disables checking even when
   `update_check.enabled` is `true`.
-- `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` selects the prerelease channel even
-  when `update_check.channel` is `"stable"`.
+- `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` selects the prerelease channel — but
+  see the build-identity rule below: it only takes effect on dev/unstamped
+  builds.
 
 The env vars only widen in one direction (disable checks / include
 prereleases). They cannot re-enable checking that the config disabled: with
 `update_check.enabled: false`, no check runs regardless of environment.
+
+### The running build's version decides the channel
+
+For a **released** build the running binary's own version is authoritative and
+overrides both `update_check.channel` and `MCPPROXY_ALLOW_PRERELEASE_UPDATES`:
+
+- a **stable** build (e.g. `v0.56.0`) is **never** offered an RC — a stale `rc`
+  opt-in left over from a previously-installed RC cannot resurrect RC offers;
+- an **RC** build (`-rc.N` / `-next.*`) tracks the **rc** channel automatically
+  (offered the next RC, and its graduating stable) with no opt-in;
+- a **dev / unstamped** build (local `go build`, a `go install @commit`
+  pseudo-version) has no release identity, so the `channel` config key and
+  `MCPPROXY_ALLOW_PRERELEASE_UPDATES` still apply — the only way to exercise the
+  rc channel without a released RC binary.
+
+The macOS tray applies the same rule to itself: a stable tray app never offers
+itself an RC even when attached to a newer RC core. See
+[Prerelease Builds](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/prerelease-builds.md).
 
 ### Examples
 

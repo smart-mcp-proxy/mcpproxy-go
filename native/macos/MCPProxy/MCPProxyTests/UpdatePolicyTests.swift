@@ -13,9 +13,51 @@ final class UpdatePolicyTests: XCTestCase {
 
     private func resolve(
         core: CoreUpdatePolicy? = nil,
-        env: [String: String] = [:]
+        env: [String: String] = [:],
+        hostVersion: String? = nil
     ) -> EffectiveUpdatePolicy {
-        UpdatePolicyResolver.resolve(core: core, environment: env)
+        UpdatePolicyResolver.resolve(core: core, environment: env, hostVersion: hostVersion)
+    }
+
+    // MARK: - Build-identity channel clamp
+
+    /// A stable tray app attached to a newer RC core (mixed versions are
+    /// supported) must NOT inherit the core's rc channel and offer itself an
+    /// RC. The app's own bundle version pins it to stable.
+    func testStableHostBundleClampsRCCoreToStable() {
+        let policy = resolve(
+            core: CoreUpdatePolicy(enabled: true, channel: "rc", nudgesSuppressed: false),
+            hostVersion: "0.56.0"
+        )
+        XCTAssertEqual(policy.channel, .stable,
+                       "a stable app must never track the rc channel, even behind an rc core")
+        XCTAssertTrue(policy.automaticChecksAllowed, "the clamp only affects the channel, not enablement")
+    }
+
+    /// An RC app keeps the rc channel so it is offered the next RC / its stable.
+    func testRCHostBundleKeepsRCChannel() {
+        let policy = resolve(
+            core: CoreUpdatePolicy(enabled: true, channel: "rc", nudgesSuppressed: false),
+            hostVersion: "0.56.0-rc.1"
+        )
+        XCTAssertEqual(policy.channel, .rc)
+    }
+
+    /// An unparseable / dev bundle version does not clamp: defer to the core.
+    func testUnparseableHostBundleDefersToCore() {
+        let policy = resolve(
+            core: CoreUpdatePolicy(enabled: true, channel: "rc", nudgesSuppressed: false),
+            hostVersion: "dev"
+        )
+        XCTAssertEqual(policy.channel, .rc, "an unknown host version must defer to the core channel")
+    }
+
+    /// A nil host version (not supplied) leaves prior behavior untouched.
+    func testNilHostVersionDefersToCore() {
+        let policy = resolve(
+            core: CoreUpdatePolicy(enabled: true, channel: "rc", nudgesSuppressed: false)
+        )
+        XCTAssertEqual(policy.channel, .rc)
     }
 
     // MARK: - No core yet

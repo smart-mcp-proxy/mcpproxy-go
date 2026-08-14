@@ -47,13 +47,18 @@ final class UpdateServiceFeedTests: XCTestCase {
     private func makeService(
         env: [String: String] = [:],
         bundlePath: String = "/Applications/MCPProxy.app",
+        hostVersion: String? = "dev",
         feed: StubFeedUpdater? = StubFeedUpdater(),
         corePolicy: CoreUpdatePolicy? = .legacyDefault
     ) -> (UpdateService, StubFeedUpdater?) {
+        // hostVersion defaults to "dev" (unparseable ⇒ no build-identity clamp)
+        // so the channel-forwarding tests below are deterministic instead of
+        // depending on whatever bundle bundlePath resolves to on the machine.
         let counter = legacyCounter
         let service = UpdateService(
             environment: env,
             hostBundleURL: URL(fileURLWithPath: bundlePath),
+            hostVersion: hostVersion,
             feedUpdater: feed,
             legacyCheck: { counter.count += 1 }
         )
@@ -129,6 +134,23 @@ final class UpdateServiceFeedTests: XCTestCase {
         XCTAssertEqual(service.policy.channel, .rc)
         XCTAssertEqual(feed?.appliedPolicies.last?.channel, .rc,
                        "the feed must learn the channel or FR-014 cannot hold")
+    }
+
+    func testStableHostAppNeverForwardsRCToTheFeed() {
+        // A stable tray app attached to an rc core must clamp itself to stable
+        // end-to-end: the feed updater must receive channel=stable so Sparkle
+        // fetches the stable feed / empty allowedChannels (build-identity rule).
+        // Start with no core policy (awaitingCore) so the rc→stable clamp
+        // produces a policy that genuinely differs from the baseline and is
+        // therefore forwarded to the feed (applyCorePolicy is idempotent).
+        let (service, feed) = makeService(hostVersion: "0.56.0", corePolicy: nil)
+        service.applyCorePolicy(
+            CoreUpdatePolicy(enabled: true, channel: "rc", nudgesSuppressed: false)
+        )
+        XCTAssertEqual(service.policy.channel, .stable,
+                       "a stable app must not track rc even behind an rc core")
+        XCTAssertEqual(feed?.appliedPolicies.last?.channel, .stable,
+                       "the feed must receive the clamped stable channel")
     }
 
     func testDisablingThePolicyRetractsAnAlreadyAdvertisedUpdate() {

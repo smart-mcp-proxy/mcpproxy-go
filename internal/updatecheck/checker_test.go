@@ -328,20 +328,22 @@ func TestChecker_EnvDisableWinsOverConfig(t *testing.T) {
 	}
 }
 
-// TestChecker_IncludePrereleases_Resolution verifies channel resolution:
-// default stable, config channel=rc opts in, and the
-// MCPPROXY_ALLOW_PRERELEASE_UPDATES env override wins over a stable config
-// channel (FR-013/FR-014).
+// TestChecker_IncludePrereleases_Resolution verifies channel resolution for
+// dev/unstamped builds, whose channel is NOT fixed by build identity: default
+// stable, config channel=rc opts in, and the MCPPROXY_ALLOW_PRERELEASE_UPDATES
+// env override wins over a stable config channel (FR-013/FR-014). For a
+// released build the running version is authoritative and overrides the
+// config/env opt-in — see TestChecker_IncludePrereleases_BuildIdentityAuthoritative.
 func TestChecker_IncludePrereleases_Resolution(t *testing.T) {
 	t.Run("default is stable", func(t *testing.T) {
-		checker := New(zaptest.NewLogger(t), "v1.0.0")
+		checker := New(zaptest.NewLogger(t), "development")
 		if checker.IncludePrereleases() {
 			t.Error("IncludePrereleases() = true by default, want false (stable channel)")
 		}
 	})
 
 	t.Run("config rc channel opts in", func(t *testing.T) {
-		checker := New(zaptest.NewLogger(t), "v1.0.0")
+		checker := New(zaptest.NewLogger(t), "development")
 		checker.SetConfig(true, true)
 		if !checker.IncludePrereleases() {
 			t.Error("IncludePrereleases() = false, want true after SetConfig(_, true)")
@@ -350,7 +352,7 @@ func TestChecker_IncludePrereleases_Resolution(t *testing.T) {
 
 	t.Run("env override wins over stable config", func(t *testing.T) {
 		t.Setenv(EnvAllowPrereleaseUpdates, "true")
-		checker := New(zaptest.NewLogger(t), "v1.0.0")
+		checker := New(zaptest.NewLogger(t), "development")
 		checker.SetConfig(true, false)
 		if !checker.IncludePrereleases() {
 			t.Error("IncludePrereleases() = false, want true: env override must win")

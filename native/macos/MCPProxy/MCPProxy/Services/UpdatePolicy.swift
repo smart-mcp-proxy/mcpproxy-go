@@ -154,9 +154,23 @@ enum UpdatePolicyResolver {
     ///   - environment: the tray process environment (injected for tests).
     static func resolve(
         core: CoreUpdatePolicy?,
-        environment: [String: String]
+        environment: [String: String],
+        hostVersion: String? = nil
     ) -> EffectiveUpdatePolicy {
-        let channel = UpdateChannel(apiValue: core?.channel)
+        var channel = UpdateChannel(apiValue: core?.channel)
+
+        // The running TRAY app's own version is authoritative for what it may
+        // update ITSELF to. Mixed app+core versions are supported (a stable app
+        // can attach to a newer external RC core, which reports channel=rc), so
+        // without this clamp a stable app would inherit the core's rc channel
+        // and offer itself an RC. A stable bundle is therefore pinned to the
+        // stable channel regardless of the core policy — mirroring the core's
+        // build-identity clamp (internal/updatecheck). An RC or unparseable
+        // bundle keeps the core channel (an RC app tracks rc; nil host version
+        // means "don't know", so defer to the core).
+        if let hostVersion, let parsed = SemanticVersion.parse(hostVersion), !parsed.isPrerelease {
+            channel = .stable
+        }
 
         // The tray's own kill switch. Checked first because it is the most
         // explicit statement of intent available, and it works with no core.
