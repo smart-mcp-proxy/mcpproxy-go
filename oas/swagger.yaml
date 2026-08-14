@@ -62,6 +62,10 @@ components:
         check_server_repo:
           description: Repository detection settings
           type: boolean
+        code_execution_max_parallel:
+          description: 'Default concurrency for call_tools() batches (1-32, default:
+            8)'
+          type: integer
         code_execution_max_tool_calls:
           description: 'Max tool calls per execution (0 = unlimited, default: 0)'
           type: integer

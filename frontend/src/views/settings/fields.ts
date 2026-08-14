@@ -325,6 +325,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
       { key: 'code_execution_timeout_ms', label: 'Max run time per execution (ms)', control: 'number', min: 1, max: 600000 },
       { key: 'code_execution_max_tool_calls', label: 'Max tool calls per execution', help: '0 = unlimited.', control: 'number', min: 0 },
       { key: 'code_execution_pool_size', label: 'JavaScript runtime pool size', help: 'How many sandboxes run concurrently.', control: 'number', min: 1, max: 100 },
+      { key: 'code_execution_max_parallel', label: 'Parallel calls per call_tools() batch', help: 'Default concurrency for batched tool calls; a script can lower it per call.', control: 'number', min: 1, max: 32 },
     ],
   },
   {

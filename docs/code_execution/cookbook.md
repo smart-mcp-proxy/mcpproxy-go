@@ -19,7 +19,9 @@ annotations and omit `language`.
 > **New to code execution?** Read [overview.md](overview.md) first, then the
 > [api-reference.md](api-reference.md) for the full tool schema. This cookbook
 > assumes you know that `call_tool(server, tool, args)` returns
-> `{ ok: true, result }` or `{ ok: false, error }`, and that the script's
+> `{ ok: true, result }` or `{ ok: false, error }`, that
+> `call_tools(requests, options)` returns one such envelope per request in input
+> order, and that the script's
 > **last expression** becomes the result `value`. A bare top‑level `return`
 > is a **SyntaxError** (`Illegal return statement`) — `return` is only legal
 > inside a function. To early‑exit, wrap the body in an IIFE (see the
@@ -64,22 +66,35 @@ the #1 source of surprises:
 
 | Capability | Status | Implication for recipes |
 |------------|--------|-------------------------|
-| `call_tool(server, tool, args)` | ✅ | The only way to reach upstream tools. Synchronous — returns when the tool responds. |
+| `call_tool(server, tool, args)` | ✅ | Reaches one upstream tool. Synchronous — returns when the tool responds. |
+| `call_tools(requests, options)` | ✅ | Reaches **independent** upstream tools in parallel: an array of ≤100 `{server, tool, args}` objects in, one `{ok, result}` / `{ok, error}` slot per request out, in input order. Also synchronous. |
 | `input` global | ✅ | Your parameters. Type it with `as` or an `interface` for IDE‑grade safety. |
 | ES2020+ stdlib (`map`/`filter`/`reduce`, `JSON`, `Math`, `Date`) | ✅ | Use it freely for transforms and aggregation. |
 | `console.log` | ✅ | Goes to **server logs**, not the result. Use for debugging. |
 | Top‑level `return` | ❌ | `return` outside a function is a **SyntaxError** (`Illegal return statement`). The result is the script's **last expression**. To early‑exit, wrap the body in an IIFE: `(() => { … return x; })()`. |
 | `setTimeout` / `setInterval` | ❌ | **No wall‑clock sleep.** "Backoff" and "rate‑limit" recipes work by *bounding* and *chunking*, never by sleeping. |
 | `require` / `import` / `fetch` / `fs` | ❌ | No modules, no network, no filesystem. All I/O goes through `call_tool`. |
-| Concurrency | ❌ (sequential) | Tool calls run **one at a time** server‑side. "Fan‑out" saves *round‑trips*, not wall‑clock from parallelism. Be honest about this when estimating latency. |
+| Concurrency | ✅ only via `call_tools` | Loops of `call_tool` run **one at a time**; a `call_tools` batch runs up to `max_parallel` elements at once (default `code_execution_max_parallel`, 8). Sequential loops save *round‑trips*; batches also save wall‑clock. |
 
-Two control knobs you will reach for constantly (set in `options`):
+Control knobs you will reach for constantly (set in `options`):
 
 - `max_tool_calls` — a hard ceiling that aborts the script with
   `MAX_TOOL_CALLS_EXCEEDED`. Always set it on loops so a bad `input` can't fan
-  out unbounded.
+  out unbounded. Each `call_tools` element counts as one call.
 - `timeout_ms` — wall‑clock budget (default 120 000, max 600 000). The
-  transpile step counts toward it (negligibly).
+  transpile step counts toward it (negligibly), and a whole `call_tools` batch
+  lives inside it.
+
+Batch concurrency is **not** an `options` field: it comes from the
+`code_execution_max_parallel` config key (default 8) and is overridden per batch
+with `call_tools(requests, {max_parallel})` (1–32).
+
+> **Check the target server's limits before you fan out.** Per‑server
+> [concurrency limits](../configuration.md#concurrency-limits--request-queueing)
+> still apply and are never bypassed: a server with `max_concurrent_requests: 1`
+> and `queue_size: 9` serializes a 10‑element batch, while the same server with
+> **no** `queue_size` sheds the overflow as nine per‑slot `queue_full` errors.
+> Set `queue_size` headroom, or match `max_parallel` to the cap.
 
 ---
 
@@ -110,6 +125,34 @@ read the previous result before issuing the next.
 **Guardrail:** set `options.max_tool_calls` to `usernames.length` (or a sane
 cap) so an oversized input can't run away.
 
+**Parallel variant:** the lookups are independent, so `call_tools` turns the
+sequential loop into one bounded fan‑out — the batch takes about as long as its
+slowest element instead of the sum:
+
+```typescript
+// language: "typescript"
+// input: { "usernames": ["octocat", "torvalds", "gaearon"] }
+const slots = call_tools(
+  (input.usernames as string[]).map((login: string) => ({
+    server: "github", tool: "get_user", args: { username: login },
+  })),
+  { max_parallel: 5 },
+);
+
+const users = slots.map((res: any, i: number) => {
+  const login = (input.usernames as string[])[i];
+  if (!res.ok) return { login, error: res.error.message };
+  const u = res.result as User;
+  return { login, name: u.name, followers: u.followers };
+});
+
+({ users, count: users.length });
+```
+
+Slots come back in input order (`slots[i]` ↔ `requests[i]`), one failing element
+never poisons the rest, and a batch is capped at 100 elements — chunk longer
+lists into several `call_tools` calls.
+
 ---
 
 ## Recipe 2 — Fan‑out + merge (many tools, one object)
@@ -136,8 +179,30 @@ const ci     = call_tool("ci",     "latest_pipeline", { project: input.repo });
 **Replaces:** 3 round‑trips + a final model turn to stitch the pieces together.
 Here the merge happens server‑side; the model sees one tidy object.
 
-**Note on "parallel":** the three calls run sequentially in the sandbox. The win
-is collapsing 4 model turns into 1 — not parallel network I/O.
+**Note on "parallel":** written this way the three calls run sequentially. Since
+none of them depends on another, `call_tools` runs them at once and the merge
+reads the slots by position:
+
+```typescript
+// language: "typescript"
+// input: { "repo": "octocat/Hello-World" }
+const [owner, name] = (input.repo as string).split("/");
+
+const [repo, issues, ci] = call_tools([
+  { server: "github", tool: "get_repo",        args: { owner, repo: name } },
+  { server: "github", tool: "list_issues",     args: { owner, repo: name, state: "open" } },
+  { server: "ci",     tool: "latest_pipeline", args: { project: input.repo } },
+]) as any[];
+
+({
+  repo:       repo.ok   ? { stars: repo.result.stargazers_count } : { error: repo.error.message },
+  openIssues: issues.ok ? issues.result.length                    : null,
+  ci:         ci.ok     ? ci.result.status                        : "unknown",
+});
+```
+
+Now the win is both: 4 model turns collapse into 1, **and** the dashboard costs
+one slow call instead of three.
 
 ---
 
@@ -362,6 +427,12 @@ the per‑script call count with `max_tool_calls` and let the agent resume acros
 turns. (See [troubleshooting.md](troubleshooting.md) for the
 `setTimeout`‑is‑unavailable rationale.)
 
+**With `call_tools`:** keep `max_parallel` at or below the server's
+`max_concurrent_requests` — a batch wider than the cap does not go faster, it
+just queues (or, with no `queue_size`, sheds the overflow into per‑slot
+`queue_full` errors). The proxy‑side cap is the durable fix; `max_parallel` is
+the script‑side courtesy.
+
 **Replaces:** 100 individual round‑trips with ~10 bulk calls in one script.
 
 ---
@@ -432,11 +503,15 @@ wall‑clock. An N‑step orchestration costs:
 
 Each eliminated round‑trip removes a full model turn — its latency, its
 generated tool‑call JSON, and its re‑reading of the intermediate result. For a
-5‑step recipe that is roughly a **5×** reduction in model turns. Server‑side the
-N tool calls still run sequentially (the sandbox is single‑threaded — see [the
-sandbox contract](#the-sandbox-contract-read-this-first)), so `code_execution`
-optimizes the *agent loop*, not raw upstream I/O. Quote round‑trip savings, not
-parallelism, when you describe the win.
+5‑step recipe that is roughly a **5×** reduction in model turns.
+
+Server‑side, sequential `call_tool` steps still run one at a time (the sandbox is
+single‑threaded — see [the sandbox contract](#the-sandbox-contract-read-this-first)),
+so a chained pipeline optimizes the *agent loop*, not raw upstream I/O. Where the
+steps are **independent**, `call_tools` also cuts server‑side wall‑clock: N calls
+cost about `ceil(N / max_parallel) × slowest-call` instead of their sum. Quote
+parallelism only for `call_tools` batches; for chained recipes, quote round‑trip
+savings.
 
 ---
 
@@ -456,7 +531,8 @@ deliberate opt‑in):
   "enable_code_execution": true,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
-  "code_execution_pool_size": 10
+  "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8
 }
 ```
 

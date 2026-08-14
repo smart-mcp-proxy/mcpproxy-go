@@ -275,6 +275,80 @@ if (!res.ok) {
 var data = res.result;
 ```
 
+#### `call_tools(requests, options)`
+
+Calls **independent** upstream MCP tools in parallel and returns one result slot
+per request, in input order.
+
+**Parameters**:
+- `requests` (array, required): Up to 100 elements of `{server, tool, args}`.
+  `server` and `tool` are non-empty strings; `args` is optional and defaults to `{}`.
+- `options` (object, optional): `{max_parallel}` — integer 1-32, defaults to the
+  configured `code_execution_max_parallel` (8). Unknown keys are ignored.
+
+**Returns**: An array with `slots.length === requests.length`, where each slot is
+the same envelope `call_tool()` returns:
+
+```javascript
+// slots[i] for a successful requests[i]
+{
+  "ok": true,
+  "result": <tool result>
+}
+
+// slots[i] for a failed requests[i]
+{
+  "ok": false,
+  "error": {
+    "message": "<error message>",
+    "code": "<error code>"
+  }
+}
+```
+
+**Example**:
+```javascript
+var slots = call_tools(
+  [1, 2, 3, 4, 5].map(function (n) {
+    return {server: 'github', tool: 'get_pull_request',
+            args: {owner: 'acme', repo: 'api', pullNumber: n}};
+  }),
+  {max_parallel: 5}
+);
+
+var titles = slots.map(function (r) {
+  if (!r.ok) { return 'ERR: ' + r.error.code; }
+  return JSON.parse(r.result.content[0].text).title;
+});
+({titles: titles});
+```
+
+**Semantics**:
+- Per-element enforcement matches a lone `call_tool()`: the same gates, the same
+  error codes, the same activity records. One failing element never affects its
+  siblings.
+- Each element costs one unit of `max_tool_calls`, checked in input order before
+  anything is dispatched.
+- Concurrency never exceeds the effective `max_parallel`, and per-server
+  concurrency limits still apply inside the call path.
+- The whole batch runs inside the execution timeout; a timeout cancels in-flight
+  elements.
+- `call_tools([])` returns `[]` and costs nothing. Like `call_tool()`, the
+  function is **synchronous** — do not use `await`.
+
+**Whole-call errors**: a malformed call returns a **single** envelope (not an
+array) and dispatches nothing:
+
+```javascript
+{ok: false, error: {code: "INVALID_ARGS", message: "call_tools: element 3: ..."}}
+```
+
+This happens when `requests` is not an array, an element is not an object with
+non-empty `server`/`tool` strings, a supplied `args` is not an object, the array
+has a sparse hole, `options` is not an object, `max_parallel` is not an integer
+in 1-32, or the batch exceeds 100 elements. The message names the first
+offending element index.
+
 ### Available JavaScript Features
 
 #### JavaScript Standard Library (ES2020+)
@@ -330,6 +404,7 @@ var isObject = typeof value === 'object' && value !== null;
 | `MAX_TOOL_CALLS_EXCEEDED` | Tool call limit exceeded | Code called `call_tool()` more than `max_tool_calls` times | Reduce tool calls, increase limit, or use pagination |
 | `SERVER_NOT_ALLOWED` | Server not in allowed list | Attempted to call server not in `allowed_servers` | Add server to allowed list or remove restriction |
 | `SERIALIZATION_ERROR` | Result not JSON-serializable | Return value contains functions, circular refs, etc. | Return only plain objects, arrays, primitives |
+| `INVALID_ARGS` | Host function called with arguments it cannot interpret | Wrong arity for `call_tool()`, or a malformed `call_tools()` batch (bad element shape, bad `max_parallel`, >100 elements) | Fix the offending argument — the message names the first offending element index |
 
 ### Error Examples
 
@@ -463,7 +538,8 @@ Edit `~/.mcpproxy/mcp_config.json`:
   "enable_code_execution": false,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
-  "code_execution_pool_size": 10
+  "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8
 }
 ```
 
@@ -475,6 +551,7 @@ Edit `~/.mcpproxy/mcp_config.json`:
 | `code_execution_timeout_ms` | number | `120000` | Default timeout in milliseconds (range: 1-600000) |
 | `code_execution_max_tool_calls` | number | `0` | Default max tool calls (0 = unlimited) |
 | `code_execution_pool_size` | number | `10` | Number of JavaScript VM instances in pool (range: 1-100) |
+| `code_execution_max_parallel` | number | `8` | Default concurrency for `call_tools()` batches (range: 1-32). Hot-reloaded; applies to executions started after the change |
 
 ### Per-Request Overrides
 
@@ -492,6 +569,10 @@ Per-request options override global configuration:
 ```
 
 **Priority**: Request options > Global config > Built-in defaults
+
+`max_parallel` is deliberately **not** a request option: batch concurrency is
+overridden inside the script, per batch, with `call_tools(requests, {max_parallel})`.
+Its priority is per-batch override > `code_execution_max_parallel` > built-in 8.
 
 ---
 
@@ -628,6 +709,15 @@ mcpproxy code exec --file=/tmp/script.js
 - **max_tool_calls**: Must be >= 0
 - **allowed_servers**: Must be array of strings (server names)
 
+### `call_tools()` Batch Validation
+
+- **requests**: Must be a dense array of at most 100 elements
+- **element**: Must be an object with non-empty `server` and `tool` strings; a
+  supplied `args` must be an object (omitted = `{}`)
+- **options.max_parallel**: Must be an integer between 1 and 32
+- A violation returns one `INVALID_ARGS` envelope naming the first offending
+  index; no element is dispatched and no budget is consumed
+
 ### Return Value Validation
 
 **Valid return values**:
@@ -654,6 +744,20 @@ The pool size determines how many concurrent executions can run simultaneously:
 - **Large pool (50-100)**: High concurrency, higher memory usage
 
 **Recommendation**: Start with default (10) and adjust based on load.
+
+### Batch Concurrency (`call_tools`)
+
+`code_execution_max_parallel` (default 8) bounds how many elements of one batch
+run at once; `call_tools(requests, {max_parallel})` overrides it per batch
+(1-32). A batch of N independent calls costs roughly `ceil(N / max_parallel) ×
+slowest-call` instead of the sum of all calls.
+
+**Interaction with per-server limits**: Spec 093 concurrency limits are enforced
+inside the call path and are never bypassed by batching. A server with
+`max_concurrent_requests: 1` and `queue_size: 9` serializes a 10-element batch;
+the same server with **no** `queue_size` sheds the overflow, returning 1 result
+and 9 per-slot `queue_full` errors. Give limited servers `queue_size` headroom —
+or lower `max_parallel` to match their cap — before fanning out against them.
 
 ### Timeout Settings
 

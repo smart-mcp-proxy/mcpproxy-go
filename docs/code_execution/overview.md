@@ -109,7 +109,7 @@ Transform, filter, and aggregate data from multiple tool calls before returning 
 │  JavaScript Runtime Pool                     │
 │  - Acquires VM from pool (blocks if full)   │
 │  - Creates isolated sandbox                 │
-│  - Binds input global and call_tool()       │
+│  - Binds input, call_tool(), call_tools()   │
 └────────────┬────────────────────────────────┘
              │
              ▼
@@ -135,7 +135,7 @@ Transform, filter, and aggregate data from multiple tool calls before returning 
 1. **Request Parsing**: Extract `code`, `input`, and `options` from the request
 2. **Validation**: Verify timeout (1-600000ms) and max_tool_calls (>= 0)
 3. **Pool Acquisition**: Acquire a JavaScript VM from the pool (blocks if all VMs are in use)
-4. **Sandbox Setup**: Create isolated environment with `input` global and `call_tool()` function
+4. **Sandbox Setup**: Create isolated environment with `input` global and the `call_tool()` / `call_tools()` functions
 5. **Execution**: Run JavaScript with timeout enforcement and tool call tracking
 6. **Result Extraction**: Validate result is JSON-serializable and return structured response
 7. **Pool Release**: Return VM to pool for reuse
@@ -158,6 +158,7 @@ The JavaScript execution environment is **heavily sandboxed** to prevent securit
 ✅ **Available:**
 - `input` - Global variable with request input data
 - `call_tool(serverName, toolName, args)` - Function to call upstream MCP tools
+- `call_tools(requests, options)` - Function to call independent upstream tools in parallel (see [Pattern 5](#pattern-5-parallel-fan-out-with-call_tools))
 - Modern JavaScript (ES2020+) standard library including Array, Object, String, Math, Date, JSON, Map, Set, Symbol, Promise, Proxy, Reflect
 
 ### Configuration & Limits
@@ -167,9 +168,12 @@ The JavaScript execution environment is **heavily sandboxed** to prevent securit
   "enable_code_execution": false,           // Must be explicitly enabled (default: false)
   "code_execution_timeout_ms": 120000,      // Default: 2 minutes, max: 10 minutes
   "code_execution_max_tool_calls": 0,       // Default: unlimited
-  "code_execution_pool_size": 10            // Default: 10 concurrent VMs
+  "code_execution_pool_size": 10,           // Default: 10 concurrent VMs
+  "code_execution_max_parallel": 8          // Default: 8 concurrent calls per call_tools() batch (1-32)
 }
 ```
+
+`code_execution_max_parallel` is hot-reloaded and applies to executions that start after the change. It is not a request-level option: a script overrides it per batch with `call_tools(requests, {max_parallel})`, so precedence is per-batch override > `code_execution_max_parallel` > built-in 8.
 
 **Per-Request Overrides:**
 ```javascript
@@ -347,6 +351,51 @@ The `code_execution` tool will appear in the tools list when an LLM agent connec
   };
 })();
 ```
+
+### Pattern 5: Parallel Fan-out with call_tools
+
+```javascript
+// Independent calls — no element depends on another's result
+var prs = call_tools(
+  [1, 2, 3, 4, 5].map(function (n) {
+    return {server: 'github', tool: 'get_pull_request',
+            args: {owner: 'acme', repo: 'api', pullNumber: n}};
+  }),
+  {max_parallel: 5}
+);
+
+var titles = prs.map(function (r) {
+  if (!r.ok) { return 'ERR: ' + r.error.code; }
+  return JSON.parse(r.result.content[0].text).title;
+});
+({titles: titles});
+```
+
+`call_tools(requests, options)` dispatches up to `max_parallel` elements at a
+time and returns one slot per request, in input order — so the batch takes about
+as long as its slowest element instead of the sum of all of them. Rules:
+
+- `requests`: array of `{server, tool, args?}`, at most 100 elements; `args`
+  defaults to `{}`.
+- `options.max_parallel`: integer 1-32. Defaults to `code_execution_max_parallel`
+  (8). Unknown option keys are ignored.
+- Each slot is the same envelope `call_tool()` returns, so a failing element
+  never poisons its siblings.
+- Malformed arguments (not an array, bad element shape, sparse hole, bad
+  `max_parallel`, more than 100 elements) return a **single**
+  `{ok: false, error: {code: "INVALID_ARGS", ...}}` envelope naming the first
+  offending index, and nothing is dispatched.
+- Every element costs one unit of `max_tool_calls`, checked in input order, and
+  the whole batch runs inside the execution timeout.
+- Use it only for **independent** calls — chained steps still belong in a
+  sequential pipeline (Pattern 1).
+
+> **Per-server limits still apply.** [Concurrency limits](../configuration.md#concurrency-limits--request-queueing)
+> are enforced inside the call path, never bypassed by batching. A server with
+> `max_concurrent_requests: 1` and `queue_size: 9` serializes a 10-element batch;
+> the same server with **no** `queue_size` sheds the overflow as per-slot
+> `queue_full` errors. Configure `queue_size` headroom (or lower `max_parallel`)
+> before fanning out against a limited server.
 
 ## Error Handling
 
