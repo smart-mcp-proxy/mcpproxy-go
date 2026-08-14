@@ -183,9 +183,90 @@ enum CoreError: Error, Equatable {
         case 5:
             return .permissionError
         default:
-            let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return .general(message.isEmpty ? "Exit code \(code)" : message)
+            // Only surface a genuine error diagnostic — never a benign INFO /
+            // DEBUG / WARN log line the core happened to print last, and never
+            // with raw ANSI colour codes still in it. If nothing worse than
+            // routine logging was captured, fall back to the bare exit code.
+            if let diagnostic = diagnostic(fromStderr: stderr) {
+                return .general(diagnostic)
+            }
+            return .general("Exit code \(code)")
         }
+    }
+
+    /// Whether a core process exit should be treated as expected — i.e. NOT
+    /// surfaced to the user as an error and NOT retried.
+    ///
+    /// A clean exit (status 0) is expected on its own: it is the graceful path
+    /// a normal quit takes. It must count as expected even when the app never
+    /// moved to `.shuttingDown` first — the app-termination path
+    /// (`applicationWillTerminate`) terminates the core directly, so the core
+    /// exits cleanly while the tray is still nominally `.connected`. Treating
+    /// that as a crash is what popped a spurious "MCPProxy Error" on every quit.
+    static func isExpectedExit(status: Int32, userStopped: Bool, shuttingDown: Bool) -> Bool {
+        if userStopped || shuttingDown { return true }
+        return status == 0
+    }
+
+    /// Log levels zap emits that never, on their own, represent a core failure.
+    private static let benignLogLevels: Set<String> = ["DEBUG", "INFO", "WARN", "WARNING"]
+
+    /// Log levels that DO represent a failure worth showing the user.
+    private static let errorLogLevels: Set<String> = ["ERROR", "DPANIC", "PANIC", "FATAL"]
+
+    /// Strip ANSI SGR / CSI escape sequences (e.g. zap's coloured console
+    /// encoder) from `input` so nothing raw ever reaches a notification body.
+    static func stripANSICodes(_ input: String) -> String {
+        var output = ""
+        output.reserveCapacity(input.count)
+        var iterator = input.unicodeScalars.makeIterator()
+        var pending: Unicode.Scalar? = nil
+        while let scalar = pending ?? iterator.next() {
+            pending = nil
+            // ESC (0x1B) begins an escape sequence. A CSI sequence is
+            // "ESC [ <params> <final byte 0x40–0x7E>"; consume through the
+            // final byte. Any other ESC-prefixed pair is dropped as a unit.
+            if scalar.value == 0x1B {
+                guard let next = iterator.next() else { break }
+                if next == "[" {
+                    while let param = iterator.next() {
+                        if (0x40...0x7E).contains(param.value) { break }
+                    }
+                }
+                continue
+            }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+
+    /// Extract a genuine error diagnostic from captured stderr, or `nil` when
+    /// the output contains nothing worse than benign INFO / DEBUG / WARN log
+    /// lines. ANSI colour codes are stripped from anything returned.
+    static func diagnostic(fromStderr raw: String) -> String? {
+        let cleaned = stripANSICodes(raw)
+        var kept: [String] = []
+        for rawLine in cleaned.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            if lineIsBenignLog(line) { continue }
+            kept.append(line)
+        }
+        let result = kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? nil : result
+    }
+
+    /// Whether a single stderr line is a routine zap log line at DEBUG / INFO /
+    /// WARN level. The first recognised level token decides the line's
+    /// severity; a line with no recognised level (a bare error string, a Go
+    /// panic) is NOT benign and is kept.
+    private static func lineIsBenignLog(_ line: String) -> Bool {
+        for token in line.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+            let upper = token.uppercased()
+            if errorLogLevels.contains(upper) { return false }
+            if benignLogLevels.contains(upper) { return true }
+        }
+        return false
     }
 
     /// Short, user-facing description of the error.

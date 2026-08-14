@@ -2086,19 +2086,21 @@ actor CoreProcessManager {
             reason: "core process exited"
         )
 
-        // If stopped by user, don't retry — this is intentional
+        // An expected exit — the user stopped the core, the tray is shutting
+        // down, or the core exited cleanly (status 0) — is neither surfaced as
+        // an error nor retried. Crucially, a clean exit counts even when the
+        // state never moved to `.shuttingDown`: the app-termination path
+        // (`applicationWillTerminate`) terminates the core directly while the
+        // tray is still `.connected`, and that normal quit must not pop an
+        // "MCPProxy Error".
         let isStopped = await MainActor.run { appState.isStopped }
-        if isStopped {
-            NSLog("[MCPProxy] handleProcessExit: stopped by user, not retrying")
-            return
+        let isShuttingDownState = await MainActor.run {
+            if case .shuttingDown = appState.coreState { return true }
+            return false
         }
-
-        // Normal exit (0) during shutdown is expected
-        if status == 0 {
-            let currentState = await MainActor.run { appState.coreState }
-            if case .shuttingDown = currentState {
-                return // Expected during shutdown
-            }
+        if CoreError.isExpectedExit(status: status, userStopped: isStopped, shuttingDown: isShuttingDownState) {
+            NSLog("[MCPProxy] handleProcessExit: expected exit (status %d), not retrying", status)
+            return
         }
 
         let error = CoreError.fromExitCode(status, stderr: stderr)
