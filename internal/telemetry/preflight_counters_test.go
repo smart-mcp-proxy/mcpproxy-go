@@ -187,9 +187,8 @@ func TestPreflightCounterStore_24hDecay(t *testing.T) {
 		if err := b.Put([]byte(preflightKeyDiscoveryOmission24h), encodeCounter(17, pastStart.Unix())); err != nil {
 			return err
 		}
-		if err := b.Put([]byte(preflightKeyAvailabilityBlock24h), encodeCounter(9, pastStart.Unix())); err != nil {
-			return err
-		}
+		// availability_block_24h has no storage key of its own — it is the sum
+		// of the reason keys, so seeding a stale reason covers it.
 		return b.Put([]byte(preflightKeyAvailabilityReasonPfx+BlockReasonToolNotCallable),
 			encodeCounter(9, pastStart.Unix()))
 	})
@@ -571,5 +570,56 @@ func TestScanForPII_AcceptsWellFormedPreflight(t *testing.T) {
 		`"discovery_omission_24h":9}}`)
 	if err := ScanForPII(payload); err != nil {
 		t.Errorf("well-formed preflight must pass, got: %v", err)
+	}
+}
+
+// The total and its per-reason split must never disagree. Each counter key
+// carries its OWN window start, so a total whose window opened earlier can
+// decay to zero while a reason key that started later survives — producing a
+// payload whose reason counts sum to more than the total they supposedly split
+// (opencode review, round 4, finding 3).
+func TestPreflightSnapshot_TotalAlwaysMatchesReasonSplit(t *testing.T) {
+	db, cleanup := newTestPreflightDB(t)
+	defer cleanup()
+
+	now := time.Now()
+	// reason A's window opened 25h ago (expired); reason B's opened 2h ago.
+	expired := now.Add(-25 * time.Hour)
+	recent := now.Add(-2 * time.Hour)
+
+	err := db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(PreflightCountersBucketName))
+		if err != nil {
+			return err
+		}
+		if err := b.Put([]byte(preflightKeyAvailabilityReasonPfx+BlockReasonServerQuarantined),
+			encodeCounter(1, expired.Unix())); err != nil {
+			return err
+		}
+		return b.Put([]byte(preflightKeyAvailabilityReasonPfx+BlockReasonTokenScope),
+			encodeCounter(1, recent.Unix()))
+	})
+	if err != nil {
+		t.Fatalf("seeding counters: %v", err)
+	}
+
+	var s bboltPreflightCounterStore
+	snap, err := s.Snapshot(db)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	sum := 0
+	for _, n := range snap.AvailabilityBlockReasons24h {
+		sum += n
+	}
+	if snap.AvailabilityBlock24h != sum {
+		t.Errorf("availability_block_24h = %d but its reason split sums to %d; "+
+			"the total and the split must be the same number",
+			snap.AvailabilityBlock24h, sum)
+	}
+	// The expired reason is gone, the recent one survives.
+	if sum != 1 {
+		t.Errorf("reason split sums to %d, want 1 (the expired reason must decay out)", sum)
 	}
 }

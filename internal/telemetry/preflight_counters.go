@@ -27,9 +27,11 @@ const (
 	preflightKeyFilterDiagMissing24h  = "filter_diag_missing_annotation_24h"
 	preflightKeyFilterDiagExplicit24h = "filter_diag_explicit_24h"
 	preflightKeyFilterDiagFollowed24h = "filter_diag_followed_24h"
-	preflightKeyAvailabilityBlock24h  = "availability_block_24h"
 	preflightKeyDiscoveryOmission24h  = "discovery_omission_24h"
 	preflightKeyAvailabilityReasonPfx = "availability_block_reason_24h_"
+	// NOTE: there is deliberately no availability_block_24h storage key. The
+	// wire field of that name is the SUM of the per-reason keys, computed at
+	// snapshot time so the total and its split can never disagree.
 )
 
 // Availability block reason keys (issue #969). This is a CLOSED enum mirroring
@@ -137,7 +139,9 @@ type PreflightCounters struct {
 	// emitted-but-never-followed means the block is being ignored.
 	FilterDiagFollowed24h int `json:"filter_diag_followed_24h"`
 	// AvailabilityBlock24h counts policy blocks (the "blocked" decision on the
-	// single emitActivityPolicyDecision funnel) in the last 24h.
+	// single emitActivityPolicyDecision funnel) in the last 24h. Derived: it is
+	// exactly the sum of AvailabilityBlockReasons24h, since every block bumps
+	// one reason key.
 	AvailabilityBlock24h int `json:"availability_block_24h"`
 	// AvailabilityBlockReasons24h splits AvailabilityBlock24h by the closed
 	// reason enum. Sparse: reasons with a zero count are omitted.
@@ -343,9 +347,13 @@ func (bboltPreflightCounterStore) RecordAvailabilityBlock(db *bbolt.DB, reason s
 		if err != nil {
 			return err
 		}
-		if err := bumpPreflightCounter(b, preflightKeyAvailabilityBlock24h, 1, now); err != nil {
-			return err
-		}
+		// Only the per-reason key is written. The total is DERIVED from the
+		// reason counts at snapshot time (see snapshotPreflightAt) rather than
+		// kept as its own counter: every block bumps exactly one reason key, so
+		// the sum is the total by construction — whereas a separate aggregate
+		// key carries its own independent 24h window and would drift out of
+		// agreement with the split it is supposed to summarise.
+		//
 		// Write-side cardinality backstop: a key the bucket has never seen is
 		// only admitted while the distinct-key budget holds; past it, the count
 		// still lands (in the overflow bucket) but the key set cannot grow.
@@ -418,10 +426,9 @@ func snapshotPreflightAt(db *bbolt.DB, now time.Time) (PreflightCounters, error)
 		out.FilterDiagMissingAnnotation24h = read(preflightKeyFilterDiagMissing24h)
 		out.FilterDiagExplicit24h = read(preflightKeyFilterDiagExplicit24h)
 		out.FilterDiagFollowed24h = read(preflightKeyFilterDiagFollowed24h)
-		out.AvailabilityBlock24h = read(preflightKeyAvailabilityBlock24h)
 		out.DiscoveryOmission24h = read(preflightKeyDiscoveryOmission24h)
 
-		// per-reason 24h counts
+		// per-reason 24h counts; AvailabilityBlock24h is their sum
 		c := b.Cursor()
 		prefix := []byte(preflightKeyAvailabilityReasonPfx)
 		for k, v := c.Seek(prefix); k != nil && strings.HasPrefix(string(k), preflightKeyAvailabilityReasonPfx); k, v = c.Next() {
@@ -440,6 +447,7 @@ func snapshotPreflightAt(db *bbolt.DB, now time.Time) (PreflightCounters, error)
 					out.AvailabilityBlockReasons24h = make(map[string]int)
 				}
 				out.AvailabilityBlockReasons24h[reason] = int(cnt)
+				out.AvailabilityBlock24h += int(cnt)
 			}
 		}
 		return nil

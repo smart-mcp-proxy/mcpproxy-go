@@ -177,7 +177,7 @@ about anecdotes.
 | `preflight.filter_diag_missing_annotation_24h` | non-negative integer | Omissions in those blocks caused by **absent upstream annotations** ("fix the server" class), summed across filters |
 | `preflight.filter_diag_explicit_24h` | non-negative integer | Omissions caused by an **explicitly unsafe hint** ("the filter is working" class), summed across filters |
 | `preflight.filter_diag_followed_24h` | non-negative integer | Blocks the agent **acted on**: a later `retrieve_tools` call in the same MCP session dropped or relaxed a filter the block blamed |
-| `preflight.availability_block_24h` | non-negative integer | Policy **blocks** (quarantine, scope, permissions, tool approval, output policy) in the last 24h |
+| `preflight.availability_block_24h` | non-negative integer | Policy **blocks** (quarantine, scope, permissions, tool approval, output policy) in the last 24h. Derived as the sum of the reason split below — each reason is stored with its own 24h window, and a separate stored total would drift out of agreement with the split it summarises |
 | `preflight.availability_block_reasons_24h` | map, **fixed enum keys only** → non-negative integer | The same total split by reason: `intent_invalid`, `intent_rejected`, `profile_scope`, `token_scope`, `token_permission`, `server_quarantined`, `tool_pending_approval`, `tool_changed_approval`, `tool_not_callable`, `output_sanitisation`, `output_schema`, `other` |
 | `preflight.discovery_omission_24h` | non-negative integer | `retrieve_tools` responses that **withheld locked or quarantined matches** the caller could not see (`include_disabled` unset) — the silent-unavailability substrate |
 
