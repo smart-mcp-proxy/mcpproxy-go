@@ -26,6 +26,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -2107,9 +2108,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// (e.g. FastMCP's Pydantic validate_call). See #322.
 	activityArgs := injectAuthMetadata(ctx, args)
 
-	// Check if server is quarantined before calling tool
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig.Quarantined {
+	// Spec 098 FR-002: one evaluation of the shared policy gates — server
+	// quarantine, tool-level quarantine (Spec 032) and callability — through the
+	// same classifier the preflight evaluator uses, so a tool dispatch refuses
+	// can never preflight as `ready`. The response SELECTION below keeps the
+	// long-standing dispatch order (quarantine → approval lock → generic block).
+	gate := p.evaluateToolGate(serverName, actualToolName)
+
+	if gate.serverQuarantined() {
 		p.logger.Debug("handleCallToolVariant: server is quarantined",
 			zap.String("server_name", serverName))
 
@@ -2120,36 +2126,29 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
 	}
 
-	// Check tool-level quarantine (Spec 032) - only if server is not quarantined
-	if p.config.IsQuarantineEnabled() {
-		if serverConfig != nil && !serverConfig.IsQuarantineSkipped() {
-			if approval, approvalErr := p.storage.GetToolApproval(serverName, actualToolName); approvalErr == nil {
-				if approval.Status == storage.ToolApprovalStatusPending {
-					p.logger.Debug("handleCallToolVariant: tool is pending approval (quarantined)",
-						zap.String("server_name", serverName),
-						zap.String("tool_name", actualToolName))
+	switch gate.lockStatus {
+	case storage.ToolApprovalStatusPending:
+		p.logger.Debug("handleCallToolVariant: tool is pending approval (quarantined)",
+			zap.String("server_name", serverName),
+			zap.String("tool_name", actualToolName))
 
-					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
-						"Tool is pending approval (new unapproved tool)")
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
+			"Tool is pending approval (new unapproved tool)")
 
-					return toolPendingApprovalResult(serverName, actualToolName, approval), nil
-				}
-				if approval.Status == storage.ToolApprovalStatusChanged {
-					p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
-						zap.String("server_name", serverName),
-						zap.String("tool_name", actualToolName))
+		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+	case storage.ToolApprovalStatusChanged:
+		p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
+			zap.String("server_name", serverName),
+			zap.String("tool_name", actualToolName))
 
-					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
-						"Tool description/schema changed since last approval")
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
+			"Tool description/schema changed since last approval")
 
-					return toolChangedApprovalResult(serverName, actualToolName, approval), nil
-				}
-			}
-		}
+		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
 	}
 
-	if !p.isToolCallable(serverName, actualToolName) {
-		errMsg := p.blockedToolMessage(serverName, actualToolName)
+	if !gate.callable() {
+		errMsg := gate.blockedMessage()
 		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
@@ -2268,10 +2267,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
-	// Derive server ID safely (serverConfig may be nil if storage lookup failed)
+	// Derive server ID safely (the gate's server record is nil when the storage
+	// lookup failed)
 	var serverID string
-	if serverConfig != nil {
-		serverID = storage.GenerateServerID(serverConfig)
+	if gate.serverConfig != nil {
+		serverID = storage.GenerateServerID(gate.serverConfig)
 	}
 
 	// Record tool call for history (even if error)
@@ -2626,9 +2626,12 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Spec 028: Inject auth identity into activity metadata (separate copy for logging only)
 	activityArgs := injectAuthMetadata(ctx, args)
 
-	// Check if server is quarantined before calling tool
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig.Quarantined {
+	// Shared policy gates (Spec 098 FR-002), same primitive as every other
+	// dispatch path.
+	gate := p.evaluateToolGate(serverName, actualToolName)
+	serverConfig := gate.serverConfig
+
+	if gate.serverQuarantined() {
 		p.logger.Debug("handleCallTool: server is quarantined",
 			zap.String("server_name", serverName))
 
@@ -2642,8 +2645,19 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	p.logger.Debug("handleCallTool: checking connection status",
 		zap.String("server_name", serverName))
 
-	if !p.isToolCallable(serverName, actualToolName) {
-		errMsg := p.blockedToolMessage(serverName, actualToolName)
+	switch gate.lockStatus {
+	case storage.ToolApprovalStatusPending:
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked",
+			"Tool is pending approval (new unapproved tool)")
+		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+	case storage.ToolApprovalStatusChanged:
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked",
+			"Tool description/schema changed since last approval")
+		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
+	}
+
+	if !gate.callable() {
+		errMsg := gate.blockedMessage()
 		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
@@ -5762,46 +5776,41 @@ func (p *MCPProxyServer) serverToolCounts(serverName string, toolNames []string)
 }
 
 // classifyServerToolStatus returns "" when the tool is callable, otherwise the
-// disable reason. Mirrors classifyDisabledTool's precedence so the two never
-// drift. The config-denied leg prefers the live runtime signal (the same
-// authority isToolCallable/blockedToolMessage use — config-file disabled_tools
-// only lives in the live config, not always in the storage copy); it falls
-// back to the storage ServerConfig when no runtime is wired (unit tests).
+// disable reason. It delegates to the SHARED gate primitive (Spec 098 FR-002 /
+// research D2), so the discovery-facing status can no longer disagree with what
+// dispatch would actually do. Two divergences of the pre-098 classifier are
+// resolved in dispatch's favor, because dispatch is ground truth:
+//
+//   - the pending/changed gate now honors the quarantine flags (global switch +
+//     per-server trust_mode auto). The old version checked the approval status
+//     unconditionally and therefore reported false "pending_approval" for
+//     auto-approving servers whose tools dispatch happily calls;
+//   - a quarantined SERVER now reports server_quarantined instead of "callable"
+//     — every dispatch path refuses those tools.
+//
+// A genuine approval-read failure keeps the historical behavior here (report
+// callable rather than invent a lock): this surface describes state, it does not
+// gate anything, and the gates themselves still fail closed.
 func (p *MCPProxyServer) classifyServerToolStatus(serverName, toolName string) contracts.DisabledToolStatus {
-	if strings.Contains(toolName, ":") {
-		if parts := strings.SplitN(toolName, ":", 2); len(parts) == 2 {
-			if serverName == "" {
-				serverName = parts[0]
-			}
-			toolName = parts[1]
-		}
-	}
-	sc, err := p.storage.GetUpstreamServer(serverName)
-	if err != nil || sc == nil {
+	gate := p.evaluateToolGate(serverName, toolName)
+	switch gate.class {
+	case preflight.ToolClassServerNotConfigured:
+		return contracts.DisabledStatusUnknown
+	case preflight.ToolClassServerQuarantined:
+		return contracts.DisabledStatusServerQuarantined
+	case preflight.ToolClassServerDisabled:
+		return contracts.DisabledStatusServerDisabled
+	case preflight.ToolClassDeniedByConfig:
+		return contracts.DisabledStatusByConfig
+	case preflight.ToolClassBlockedByUser:
+		return contracts.DisabledStatusByUser
+	case preflight.ToolClassPendingApproval, preflight.ToolClassChanged:
+		return contracts.DisabledStatusPendingApproval
+	case preflight.ToolClassReady:
+		return "" // callable
+	default:
 		return contracts.DisabledStatusUnknown
 	}
-	if !sc.Enabled {
-		return contracts.DisabledStatusServerDisabled
-	}
-	configDenied := false
-	if p.mainServer != nil && p.mainServer.runtime != nil {
-		configDenied = p.mainServer.runtime.IsToolConfigDenied(serverName, toolName)
-	} else {
-		configDenied = !sc.IsToolAllowedByConfig(toolName)
-	}
-	if configDenied {
-		return contracts.DisabledStatusByConfig
-	}
-	if approval, aerr := p.storage.GetToolApproval(serverName, toolName); aerr == nil && approval != nil {
-		if approval.Disabled {
-			return contracts.DisabledStatusByUser
-		}
-		if approval.Status == storage.ToolApprovalStatusPending ||
-			approval.Status == storage.ToolApprovalStatusChanged {
-			return contracts.DisabledStatusPendingApproval
-		}
-	}
-	return "" // callable
 }
 
 // serverToolNames returns the best-available list of a server's tool names:

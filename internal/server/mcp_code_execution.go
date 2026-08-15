@@ -177,6 +177,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		clientName:      clientName,
 		clientVersion:   clientVersion,
 		mainServer:      p.mainServer,
+		proxy:           p,
 	}
 
 	// Log pool metrics before acquisition
@@ -697,6 +698,10 @@ type upstreamToolCaller struct {
 	clientName      string  // MCP client name
 	clientVersion   string  // MCP client version
 	mainServer      *Server // Reference to main server for tokenizer access
+	// proxy is the policy authority for the shared dispatch gates (Spec 098
+	// FR-002). nil in unit tests that drive the caller directly, in which case
+	// the gate is skipped exactly as it was before the consolidation.
+	proxy *MCPProxyServer
 }
 
 // CallTool implements jsruntime.ToolCaller interface
@@ -715,6 +720,23 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		zap.String("server", serverName),
 		zap.String("tool", toolName),
 	)
+
+	// Spec 098 FR-002: the sandbox is a dispatch path like any other, so it
+	// consumes the same shared gate primitive as call_tool_* and direct mode —
+	// a script must not reach a quarantined, disabled, config-denied or
+	// approval-locked tool that every other surface refuses. This covers both
+	// script surfaces: ad-hoc code_execution and stored scripts (spec 097).
+	//
+	// It is deliberately FAIL-OPEN for an unknown server (no stored record):
+	// dispatch has always been permissive about existence (FR-002 makes that
+	// guarantee one-way), and tightening it here would break in-process fixtures
+	// that register an upstream without a config record.
+	if refusal := u.policyRefusal(serverName, toolName); refusal != nil {
+		duration := time.Since(startTime)
+		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
+		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
+		return nil, refusal
+	}
 
 	// Get the managed client for the server
 	client, exists := u.upstreamManager.GetClient(serverName)
@@ -750,6 +772,32 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	}
 
 	return result, nil
+}
+
+// policyRefusal evaluates the shared per-tool policy gates for a sandboxed call
+// and returns the refusal a script sees, or nil when the tool is callable.
+func (u *upstreamToolCaller) policyRefusal(serverName, toolName string) error {
+	if u.proxy == nil || u.proxy.storage == nil {
+		return nil
+	}
+	gate := u.proxy.evaluateToolGate(serverName, toolName)
+	if gate.serverConfig == nil {
+		// Unknown server: leave the existing "server not found" path to answer.
+		return nil
+	}
+	if gate.callable() {
+		return nil
+	}
+	if gate.serverQuarantined() {
+		return fmt.Errorf("server %q is quarantined for security review; its tools cannot be called until it is approved", serverName)
+	}
+	switch gate.lockStatus {
+	case storage.ToolApprovalStatusPending:
+		return fmt.Errorf("tool %s:%s is pending security approval and cannot be called", serverName, toolName)
+	case storage.ToolApprovalStatusChanged:
+		return fmt.Errorf("tool %s:%s changed since approval and is locked pending review", serverName, toolName)
+	}
+	return fmt.Errorf("%s", gate.blockedMessage())
 }
 
 // upstreamAnsweredWithError reports whether a dispatched result is an MCP
