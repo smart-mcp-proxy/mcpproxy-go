@@ -8,6 +8,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
@@ -123,6 +124,11 @@ func directBlockReasonKey(decision directCallabilityDecision) string {
 	}
 }
 
+// evaluate classifies one direct-mode tool through the SHARED gate primitive
+// (Spec 098 FR-002) so direct mode, the call_tool_* variants, code_execution and
+// stored scripts cannot disagree about what is callable. The memoized storage
+// reads below still exist because this evaluator runs over a whole tool list;
+// only the classification moved.
 func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) directCallabilityDecision {
 	decision := directCallabilityDecision{
 		serverName: serverName,
@@ -139,14 +145,16 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 		return decision
 	}
 	decision.serverConfig = serverConfig
-
-	if !serverConfig.Enabled || serverConfig.Quarantined {
-		return decision
-	}
-
-	if e.proxy.isToolConfigDenied(serverName, toolName, serverConfig) {
-		decision.configDenied = true
-		return decision
+	configDenied := e.proxy.isToolConfigDenied(serverName, toolName, serverConfig)
+	// The server-level gates own the response when they fire, so the fields that
+	// SELECT a more specific refusal — the config-denial wording and the
+	// approval-lock message below — are only surfaced once the server itself is
+	// past them. Pre-098 this was an early return on `!Enabled || Quarantined`;
+	// the flag is the same gate, kept so a disabled server still answers
+	// "server disabled" rather than "tool pending approval".
+	serverGatesPassed := serverConfig.Enabled && !serverConfig.Quarantined
+	if serverGatesPassed {
+		decision.configDenied = configDenied
 	}
 
 	approval, approvalErr := e.getToolApproval(serverName, toolName)
@@ -156,19 +164,33 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 	}
 	decision.approval = approval
 
-	if e.proxy.config != nil && e.proxy.config.IsQuarantineEnabled() && !serverConfig.IsQuarantineSkipped() && approval != nil {
+	// The LIVE config, like evaluateToolGate: a hot-reloaded quarantine_enabled
+	// must take effect on the next call here too, or direct mode would keep
+	// waving through tools the other dispatch paths have started refusing.
+	cfg := e.proxy.currentConfig()
+	quarantineEnabled := cfg == nil || cfg.IsQuarantineEnabled()
+	// approvalStatus drives the RESPONSE shape only, and keeps the pre-098
+	// preference for the pending/changed message over the generic block, so a
+	// refusal reads exactly as it always did.
+	if serverGatesPassed && quarantineEnabled && !serverConfig.IsQuarantineSkipped() && approval != nil {
 		switch approval.Status {
 		case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
 			decision.approvalStatus = approval.Status
-			return decision
 		}
 	}
 
-	if approval != nil && approval.Disabled {
-		return decision
-	}
-
-	decision.callable = true
+	class := preflight.ClassifyTool(preflight.ClassifyInputs{
+		Server: preflight.ServerPolicy{
+			Found:                  true,
+			Enabled:                serverConfig.Enabled,
+			Quarantined:            serverConfig.Quarantined,
+			AutoApproveToolChanges: serverConfig.IsQuarantineSkipped(),
+		},
+		QuarantineEnabled: quarantineEnabled,
+		ConfigDenied:      configDenied,
+		Approval:          approvalStateFor(approval),
+	})
+	decision.callable = class.Callable()
 	return decision
 }
 

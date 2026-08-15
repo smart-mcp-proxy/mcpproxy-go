@@ -8,7 +8,9 @@ const typeLabels: Record<string, string> = {
   'tool_call': 'Tool Call',
   'policy_decision': 'Policy Decision',
   'quarantine_change': 'Quarantine Change',
-  'server_change': 'Server Change'
+  'server_change': 'Server Change',
+  // Spec 098: one executed required-tools preflight.
+  'preflight': 'Preflight'
 }
 
 // Activity type icons
@@ -16,7 +18,8 @@ const typeIcons: Record<string, string> = {
   'tool_call': '🔧',
   'policy_decision': '🛡️',
   'quarantine_change': '⚠️',
-  'server_change': '🔄'
+  'server_change': '🔄',
+  'preflight': '🛫'
 }
 
 // Status labels
@@ -91,6 +94,154 @@ export const getIntentIcon = (operationType: string): string => {
  */
 export const getIntentBadgeClass = (operationType: string): string => {
   return intentClasses[operationType] || 'badge-ghost'
+}
+
+// --- Spec 098: preflight activity records -----------------------------------
+//
+// A preflight record is set-scoped, not server-scoped: `server_name` and
+// `tool_name` are empty by construction and everything an operator wants to see
+// lives in `metadata`:
+//   {verdict, ids_count, reasons: {code: count}, per_tool: [{id,status,reason?}]}
+// (written by runtime.ActivityService.RecordPreflight). Without the helpers
+// below the row renders as three empty columns, which is exactly the
+// transparency gap FR-014 exists to close.
+
+/** One {reason code, count} pair of the metadata rollup. */
+export interface PreflightReasonCount {
+  reason: string
+  count: number
+}
+
+/** One line of the per-tool detail. `reason` is absent for a ready tool. */
+export interface PreflightPerToolEntry {
+  id: string
+  status: string
+  reason?: string
+}
+
+/**
+ * How many distinct reason codes the one-line summary names before it collapses
+ * the tail into "+N more". A preflight may carry up to 100 ids across 15 reason
+ * codes; an uncapped rollup would push every other column off screen.
+ */
+const MAX_PREFLIGHT_SUMMARY_REASONS = 3
+
+/** True for a Spec 098 preflight activity record. */
+export const isPreflightActivity = (activity?: { type?: string } | null): boolean =>
+  activity?.type === 'preflight'
+
+/**
+ * Read `metadata.reasons` into a DETERMINISTIC order: most frequent first, ties
+ * broken alphabetically. Object key order is insertion-dependent, so without the
+ * sort two renders of the same record could disagree.
+ */
+export const preflightReasonRollup = (
+  metadata?: Record<string, any> | null
+): PreflightReasonCount[] => {
+  const counts = new Map<string, number>()
+
+  const reasons = metadata?.reasons
+  if (reasons && typeof reasons === 'object' && !Array.isArray(reasons)) {
+    for (const [reason, count] of Object.entries(reasons as Record<string, unknown>)) {
+      counts.set(reason, Number(count) || 0)
+    }
+  }
+
+  // Fallback for a record whose rollup is missing: recount from the per-tool
+  // detail, which carries the same codes.
+  if (counts.size === 0) {
+    for (const tool of preflightPerTool(metadata)) {
+      if (tool.reason) counts.set(tool.reason, (counts.get(tool.reason) ?? 0) + 1)
+    }
+  }
+
+  return Array.from(counts, ([reason, count]) => ({ reason, count }))
+    .sort((a, b) => (b.count - a.count) || a.reason.localeCompare(b.reason))
+}
+
+/**
+ * Render a rollup as "code xN, code xN". `limit <= 0` names them all; a positive
+ * limit collapses the tail into "+N more".
+ */
+export const formatPreflightReasons = (
+  rollup: PreflightReasonCount[],
+  limit = 0
+): string => {
+  if (rollup.length === 0) return ''
+
+  const shown = limit > 0 ? rollup.slice(0, limit) : rollup
+  const remaining = rollup.length - shown.length
+  const parts = shown.map(entry => `${entry.reason} x${entry.count}`)
+  if (remaining > 0) parts.push(`+${remaining} more`)
+  return parts.join(', ')
+}
+
+/** Ordered per-tool detail; malformed entries are dropped, never rendered. */
+export const preflightPerTool = (
+  metadata?: Record<string, any> | null
+): PreflightPerToolEntry[] => {
+  const perTool = metadata?.per_tool
+  if (!Array.isArray(perTool)) return []
+
+  return perTool
+    .filter((entry): entry is Record<string, unknown> =>
+      Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry))
+    .map(entry => {
+      const line: PreflightPerToolEntry = {
+        id: String(entry.id ?? ''),
+        status: String(entry.status ?? ''),
+      }
+      if (entry.reason) line.reason = String(entry.reason)
+      return line
+    })
+}
+
+/**
+ * Number of unique tool ids the run evaluated. `ids_count` is authoritative;
+ * the per-tool length is the fallback for a partially-written record.
+ */
+export const preflightIdsCount = (metadata?: Record<string, any> | null): number => {
+  const count = Number(metadata?.ids_count)
+  if (Number.isFinite(count) && count > 0) return count
+  return preflightPerTool(metadata).length
+}
+
+/**
+ * One-line verdict summary for the activity table, e.g.
+ * "blocked (4 tools): server_disabled x2, tool_changed x1".
+ * Empty string when the record carries no readable verdict, so the caller can
+ * fall back to its usual placeholder.
+ */
+export const formatPreflightSummary = (metadata?: Record<string, any> | null): string => {
+  const verdict = metadata?.verdict
+  if (!verdict || typeof verdict !== 'string') return ''
+
+  const count = preflightIdsCount(metadata)
+  const summary = `${verdict} (${count} ${count === 1 ? 'tool' : 'tools'})`
+  const reasons = formatPreflightReasons(
+    preflightReasonRollup(metadata),
+    MAX_PREFLIGHT_SUMMARY_REASONS
+  )
+  return reasons ? `${summary}: ${reasons}` : summary
+}
+
+/**
+ * Badge class for a set-level verdict. `ready` is the only success; the rest are
+ * an operator action (blocked/unknown_ids) or a retry (degraded_retryable).
+ */
+export const getPreflightVerdictBadgeClass = (verdict?: string): string => {
+  switch (verdict) {
+    case 'ready':
+      return 'badge-success'
+    case 'degraded_retryable':
+      return 'badge-info'
+    case 'blocked':
+      return 'badge-warning'
+    case 'unknown_ids':
+      return 'badge-error'
+    default:
+      return 'badge-ghost'
+  }
 }
 
 /**

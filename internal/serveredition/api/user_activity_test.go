@@ -30,9 +30,7 @@ type mockActivityProvider struct {
 
 func (m *mockActivityProvider) ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
 	var matched []*storage.ActivityRecord
-	for _, r := range m.records {
-		matched = append(matched, r)
-	}
+	matched = append(matched, m.records...)
 	total := len(matched)
 
 	// Apply pagination.

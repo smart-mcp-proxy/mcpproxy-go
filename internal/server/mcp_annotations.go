@@ -6,6 +6,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
 )
 
 // SessionRisk holds the result of analyzing all connected servers' tool annotations
@@ -247,63 +248,28 @@ func filterByAnnotationsWithDiagnostics(tools []annotatedSearchResult, readOnlyO
 
 // shouldExclude returns true if a tool should be excluded based on its annotations and active filters.
 func shouldExclude(annotations *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) bool {
-	_, _, excluded := excludeReason(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
-	return excluded
+	return toolannotations.ShouldExclude(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
 }
 
-// Filter parameter names, used as the diagnostics map keys (Spec 094 FR-003)
-// and interpolated literally into the suggestion string (FR-006).
+// The filter parameter names — used as the diagnostics map keys (Spec 094
+// FR-003) and interpolated literally into the suggestion string (FR-006) — now
+// live in internal/toolannotations (FilterKeyReadOnlyOnly and friends) and
+// arrive here as the filterKey returned by excludeReason, so the server-side
+// wording cannot diverge from the classifier's attribution keys. These aliases
+// keep the server-local spelling for call sites that name a filter directly
+// (the Spec-094 engagement counters in preflight_telemetry.go); they are
+// definitionally the classifier's keys, so the two cannot drift.
 const (
-	filterKeyReadOnlyOnly     = "read_only_only"
-	filterKeyExcludeDestruct  = "exclude_destructive"
-	filterKeyExcludeOpenWorld = "exclude_open_world"
+	filterKeyReadOnlyOnly     = toolannotations.FilterKeyReadOnlyOnly
+	filterKeyExcludeDestruct  = toolannotations.FilterKeyExcludeDestruct
+	filterKeyExcludeOpenWorld = toolannotations.FilterKeyExcludeOpenWorld
 )
 
-// excludeReason decides whether a tool is excluded and, when it is, which
-// filter is responsible and why (Spec 094 FR-004). It is the single source of
-// truth for the filter semantics — shouldExclude delegates to it, so the
-// diagnostics can never describe a different filter than the one that ran.
-//
-// Filters are evaluated read-only → destructive → open-world and the FIRST one
-// that excludes the tool owns the omission, which keeps per-filter counts
-// summable (no double counting). `explicit` distinguishes an omission caused by
-// an explicitly unsafe hint (remediation: none, the filter is working) from one
-// caused by absent/unset annotations (remediation: fix upstream metadata).
+// excludeReason delegates to the shared classifier in internal/toolannotations
+// (Spec 098 T005). The semantics — first-failing filter owns the omission,
+// evaluated read-only → destructive → open-world, `explicit` distinguishing an
+// unsafe hint from a missing one — are frozen by Spec 094 FR-004 and now live in
+// one place so the preflight evaluator and retrieve_tools cannot drift apart.
 func excludeReason(annotations *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) (filterKey string, explicit, excluded bool) {
-	if readOnlyOnly {
-		// Must have explicit readOnlyHint=true to pass
-		if annotations == nil || annotations.ReadOnlyHint == nil {
-			return filterKeyReadOnlyOnly, false, true
-		}
-		if !*annotations.ReadOnlyHint {
-			return filterKeyReadOnlyOnly, true, true
-		}
-	}
-
-	if excludeDestructive {
-		// Exclude if destructiveHint is true or nil (default is true per spec).
-		// However, a tool with readOnlyHint=true is inherently non-destructive,
-		// so treat destructiveHint as false when readOnlyHint is explicitly true.
-		isReadOnly := annotations != nil && annotations.ReadOnlyHint != nil && *annotations.ReadOnlyHint
-		if !isReadOnly {
-			if annotations == nil || annotations.DestructiveHint == nil {
-				return filterKeyExcludeDestruct, false, true
-			}
-			if *annotations.DestructiveHint {
-				return filterKeyExcludeDestruct, true, true
-			}
-		}
-	}
-
-	if excludeOpenWorld {
-		// Exclude if openWorldHint is true or nil (default is true per spec)
-		if annotations == nil || annotations.OpenWorldHint == nil {
-			return filterKeyExcludeOpenWorld, false, true
-		}
-		if *annotations.OpenWorldHint {
-			return filterKeyExcludeOpenWorld, true, true
-		}
-	}
-
-	return "", false, false
+	return toolannotations.ExcludeReason(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
 }

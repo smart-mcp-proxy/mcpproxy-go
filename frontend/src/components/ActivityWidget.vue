@@ -56,6 +56,13 @@
               <div class="text-sm font-medium">
                 <span v-if="activity.server_name">{{ activity.server_name }}</span>
                 <span v-if="activity.tool_name" class="text-base-content/70">:{{ activity.tool_name }}</span>
+                <!-- Spec 098: a preflight has no server/tool — show its verdict instead of a blank row. -->
+                <span
+                  v-if="!activity.server_name && !activity.tool_name && isPreflightActivity(activity)"
+                  class="text-base-content/70"
+                >
+                  {{ formatPreflightSummary(activity.metadata) || 'Preflight' }}
+                </span>
               </div>
               <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
             </div>
@@ -77,6 +84,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
+import { formatPreflightSummary, isPreflightActivity } from '@/utils/activity'
 
 const router = useRouter()
 
@@ -134,7 +142,9 @@ const getTypeIcon = (type: string): string => {
     'tool_call': '🔧',
     'policy_decision': '🛡️',
     'quarantine_change': '⚠️',
-    'server_change': '🔄'
+    'server_change': '🔄',
+    // Spec 098: required-tools preflight
+    'preflight': '🛫'
   }
   return typeIcons[type] || '📋'
 }

@@ -109,22 +109,21 @@ func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileSc
 //	    server doesn't skip it.
 //
 // Returns "" when neither gate fires.
+//
+// Spec 098 FR-002: both gates now read from the shared toolGate primitive, so
+// describe_tool, dispatch and the preflight evaluator consult exactly one
+// evaluation of the quarantine/approval state. The gate order (server
+// quarantine, then the tool-level lock) is unchanged.
 func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string {
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig != nil && serverConfig.Quarantined {
+	gate := p.evaluateToolGate(serverName, toolName)
+	if gate.serverQuarantined() {
 		return visReasonServerQuarantined
 	}
-
-	if (p.config == nil || p.config.IsQuarantineEnabled()) &&
-		serverConfig != nil && !serverConfig.IsQuarantineSkipped() {
-		if approval, aerr := p.storage.GetToolApproval(serverName, toolName); aerr == nil && approval != nil {
-			switch approval.Status {
-			case storage.ToolApprovalStatusPending:
-				return visReasonToolPendingApproval
-			case storage.ToolApprovalStatusChanged:
-				return visReasonToolChangedApproval
-			}
-		}
+	switch gate.lockStatus {
+	case storage.ToolApprovalStatusPending:
+		return visReasonToolPendingApproval
+	case storage.ToolApprovalStatusChanged:
+		return visReasonToolChangedApproval
 	}
 	return ""
 }

@@ -388,6 +388,18 @@
                     <code v-if="activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded">
                       {{ activity.tool_name }}
                     </code>
+                    <!--
+                      Spec 098: a preflight is set-scoped, so server/tool are
+                      empty by construction — the verdict summary is what makes
+                      the row readable.
+                    -->
+                    <span
+                      v-else-if="isPreflightActivity(activity) && formatPreflightSummary(activity.metadata)"
+                      class="text-sm"
+                      :title="formatPreflightSummary(activity.metadata)"
+                    >
+                      {{ formatPreflightSummary(activity.metadata) }}
+                    </span>
                     <span v-else-if="activity.metadata?.action" class="text-sm">
                       {{ activity.metadata.action }}
                     </span>
@@ -606,8 +618,65 @@
               </div>
             </div>
 
-            <!-- Policy Decision Details (for blocked activities) -->
-            <div v-if="selectedActivity.type === 'policy_decision' || selectedActivity.status === 'blocked'">
+            <!-- Preflight verdict (Spec 098) -->
+            <div v-if="isPreflightActivity(selectedActivity)">
+              <h4 class="font-semibold mb-2 flex items-center gap-2">
+                <span>🛫</span>
+                Preflight Verdict
+              </h4>
+              <div class="bg-base-200 rounded p-3 space-y-3">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm text-base-content/60">Verdict:</span>
+                  <span
+                    class="badge badge-sm"
+                    :class="getPreflightVerdictBadgeClass(selectedActivity.metadata?.verdict)"
+                  >
+                    {{ selectedActivity.metadata?.verdict || 'unknown' }}
+                  </span>
+                  <span class="text-sm text-base-content/60">
+                    {{ preflightIdsCount(selectedActivity.metadata) }} tool(s) checked
+                  </span>
+                </div>
+                <div
+                  v-if="preflightReasonRollup(selectedActivity.metadata).length > 0"
+                  class="flex items-center gap-1 flex-wrap"
+                >
+                  <span class="text-sm text-base-content/60">Reasons:</span>
+                  <span
+                    v-for="entry in preflightReasonRollup(selectedActivity.metadata)"
+                    :key="entry.reason"
+                    class="badge badge-sm badge-outline"
+                  >
+                    {{ entry.reason }} x{{ entry.count }}
+                  </span>
+                </div>
+                <div v-if="preflightPerTool(selectedActivity.metadata).length > 0" class="space-y-1">
+                  <span class="text-sm text-base-content/60">Tools:</span>
+                  <div
+                    v-for="(tool, idx) in preflightPerTool(selectedActivity.metadata)"
+                    :key="`${tool.id}-${idx}`"
+                    class="flex items-center gap-2 bg-base-100 rounded px-2 py-1 text-sm"
+                  >
+                    <span
+                      class="badge badge-xs"
+                      :class="tool.status === 'ready' ? 'badge-success' : 'badge-warning'"
+                    >
+                      {{ tool.status }}
+                    </span>
+                    <code class="text-xs break-all">{{ tool.id }}</code>
+                    <span v-if="tool.reason" class="text-xs text-base-content/60">{{ tool.reason }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!--
+              Policy Decision Details (for blocked activities). A preflight
+              record is stored with status "blocked" whenever any tool is
+              unavailable, but it is not a policy decision — it renders its own
+              verdict section above.
+            -->
+            <div v-if="!isPreflightActivity(selectedActivity) && (selectedActivity.type === 'policy_decision' || selectedActivity.status === 'blocked')">
               <h4 class="font-semibold mb-2 text-warning flex items-center gap-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
@@ -712,6 +781,16 @@ import {
   matchesSessionFilter,
   resolveSessionFilter,
 } from '@/utils/sessionGrouping'
+// Spec 098: preflight records carry their verdict in metadata; the renderers
+// are shared (and unit-tested) rather than re-derived in the template.
+import {
+  formatPreflightSummary,
+  getPreflightVerdictBadgeClass,
+  isPreflightActivity,
+  preflightIdsCount,
+  preflightPerTool,
+  preflightReasonRollup,
+} from '@/utils/activity'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
@@ -748,6 +827,8 @@ const activityTypes = [
   { value: 'policy_decision', label: 'Policy Decision', icon: '🛡️' },
   { value: 'quarantine_change', label: 'Quarantine Change', icon: '⚠️' },
   { value: 'server_change', label: 'Server Change', icon: '🔄' },
+  // Spec 098: required-tools preflight (set-scoped record).
+  { value: 'preflight', label: 'Preflight', icon: '🛫' },
 ]
 
 // Pagination
@@ -1197,7 +1278,9 @@ const formatType = (type: string): string => {
     'config_change': 'Config Change',
     'policy_decision': 'Policy Decision',
     'quarantine_change': 'Quarantine Change',
-    'server_change': 'Server Change'
+    'server_change': 'Server Change',
+    // Spec 098
+    'preflight': 'Preflight'
   }
   return typeLabels[type] || type
 }
@@ -1212,7 +1295,9 @@ const getTypeIcon = (type: string): string => {
     'config_change': '⚡',
     'policy_decision': '🛡️',
     'quarantine_change': '⚠️',
-    'server_change': '🔄'
+    'server_change': '🔄',
+    // Spec 098
+    'preflight': '🛫'
   }
   return typeIcons[type] || '📋'
 }

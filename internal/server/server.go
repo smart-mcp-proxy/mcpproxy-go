@@ -317,14 +317,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				}
 			}()
 
-			authCtx := &auth.AuthContext{
-				Type:           auth.AuthTypeAgent,
-				AgentName:      agentToken.Name,
-				TokenPrefix:    agentToken.TokenPrefix,
-				AllowedServers: agentToken.AllowedServers,
-				Permissions:    agentToken.Permissions,
-				ProfilePin:     agentToken.ProfilePin,
-			}
+			authCtx := agentToken.AuthContext()
 			ctx := auth.WithAuthContext(r.Context(), authCtx)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return

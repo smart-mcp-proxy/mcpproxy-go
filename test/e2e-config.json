@@ -5,6 +5,7 @@
   "debug_search": false,
   "mcpServers": [
     {
+      "quarantined": false,
       "name": "everything",
       "protocol": "stdio",
       "command": "npx",
@@ -14,11 +15,11 @@
       ],
       "oauth": null,
       "enabled": true,
-      "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2026-07-14T21:23:24.883151+03:00"
+      "updated": "2026-08-15T20:42:15.386597+03:00"
     },
     {
+      "quarantined": false,
       "name": "launcher-test",
       "url": "http://127.0.0.1:39933/mcp",
       "protocol": "http",
@@ -30,9 +31,8 @@
       ],
       "oauth": null,
       "enabled": true,
-      "quarantined": false,
       "created": "2026-05-11T00:00:00Z",
-      "updated": "2026-07-14T21:23:24.892192+03:00",
+      "updated": "2026-08-15T20:42:15.394634+03:00",
       "launcher_wait_timeout": "10s"
     }
   ],
@@ -69,7 +69,7 @@
     "compress": true,
     "json_format": false
   },
-  "api_key": "a2f179cd162108e56b5f2493c309993d17e313626ee3ed1f8360d6fb60d3830b",
+  "api_key": "b255c7a2740f579778244f9fc0c871e5f5af02b46382dbfd47476563e3bd9958",
   "require_mcp_auth": false,
   "read_only_mode": false,
   "disable_management": false,
@@ -155,6 +155,7 @@
   "enable_code_execution": false,
   "code_execution_timeout_ms": 120000,
   "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8,
   "activity_retention_days": 90,
   "activity_max_records": 100000,
   "activity_max_size_mb": 256,

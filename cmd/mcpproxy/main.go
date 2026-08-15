@@ -779,6 +779,24 @@ func classifyError(err error) int {
 		return ExitCodeSuccess
 	}
 
+	// Spec 098: a preflight verdict is a RESULT, not a failure of mcpproxy, and
+	// it carries its own exit code (10/11/12). It is checked first so the
+	// string-matching heuristics below — "config", "invalid", "denied" all
+	// appear in remediation text — can never reclassify a verdict as a config
+	// or permission error.
+	var preflightErr *preflightVerdictError
+	if errors.As(err, &preflightErr) {
+		return preflightErr.ExitCode()
+	}
+
+	// …and a preflight failure that is NOT a verdict is a plain general error
+	// (FR-009), for the same reason: the heuristics below read the daemon's
+	// message, which a transport or argument failure does not control.
+	var preflightGeneralErr *preflightGeneralError
+	if errors.As(err, &preflightGeneralErr) {
+		return preflightGeneralErr.ExitCode()
+	}
+
 	// Check for port conflict errors
 	var portErr *server.PortInUseError
 	if errors.As(err, &portErr) {

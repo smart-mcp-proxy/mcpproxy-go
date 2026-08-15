@@ -1,0 +1,290 @@
+{
+  "spec": "098-tools-preflight",
+  "requirement": "FR-016",
+  "description": "Scenario-keyed sabotage matrix for the required-tools preflight. Each scenario names one deliberately induced proxy state and the EXACT per-tool verdict it must produce: status, reason, retryable and action (an omitted action means the reason carries none). The set-level verdict and CLI exit code are the ones a single-tool request of that shape must report. internal/server/preflight_e2e_test.go drives every scenario against a real mcpproxy binary and asserts these values independently, and a reflection check fails if any code of the 15-code enum has no scenario here.",
+  "surfaces": {
+    "e2e": "induced against a running mcpproxy binary with sabotaged fixture upstreams",
+    "state-injected": "induced by injecting the connection-state snapshot the runtime cannot be forced into deterministically from outside"
+  },
+  "scenarios": [
+    {
+      "scenario": "all_ready",
+      "surface": "e2e",
+      "sabotage": "none: indexed, approved tool on an enabled, healthy, trusted server — asserted both unfiltered and under each of the three annotation filters, since a fully annotated tool must survive all of them",
+      "expect": {
+        "status": "ready",
+        "verdict": "ready",
+        "exit_code": 0
+      }
+    },
+    {
+      "scenario": "quarantine_flip",
+      "surface": "e2e",
+      "sabotage": "POST /api/v1/servers/{server}/quarantine on a previously healthy, indexed server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_quarantined",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "tool_definition_drift",
+      "surface": "e2e",
+      "sabotage": "rewrite the upstream tool's description in the fixture tools file, then restart the server so the proxy re-lists it (rug-pull guard trips)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_changed",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "new_tool_after_baseline",
+      "surface": "e2e",
+      "sabotage": "add a tool to the fixture tools file after the trusted server's baseline was auto-approved, then restart the server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_pending_approval",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "tool_blocked_by_user",
+      "surface": "e2e",
+      "sabotage": "POST /api/v1/servers/{server}/tools/block for one tool",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_blocked_by_user",
+        "retryable": false,
+        "action": "enable",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "config_denial",
+      "surface": "e2e",
+      "sabotage": "server configured with disabled_tools containing the requested tool",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_denied_by_config",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "server_disable",
+      "surface": "e2e",
+      "sabotage": "server configured with enabled:false",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_disabled",
+        "retryable": false,
+        "action": "enable",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "upstream_killed",
+      "surface": "e2e",
+      "sabotage": "arm the fixture's fail-switch file, SIGKILL the upstream process, then force a reconnect: the restarted fixture exits immediately, so the server settles in a stable non-connected state",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_unhealthy",
+        "retryable": true,
+        "action": "view_logs",
+        "verdict": "degraded_retryable",
+        "exit_code": 10
+      }
+    },
+    {
+      "scenario": "mid_indexing",
+      "surface": "e2e",
+      "sabotage": "restart an already-indexed server with a long initialize delay, so it sits in connecting/discovering while its tools remain in the shared index (a never-indexed server would report not_found instead: existence outranks connection state)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_initializing",
+        "retryable": true,
+        "verdict": "degraded_retryable",
+        "exit_code": 10
+      }
+    },
+    {
+      "scenario": "missing_annotation_read_only_only",
+      "surface": "e2e",
+      "sabotage": "policy.read_only_only against a tool whose upstream definition declares no annotations",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "missing_annotation_exclude_destructive",
+      "surface": "e2e",
+      "sabotage": "policy.exclude_destructive against a tool with no destructiveHint and no read-only hint",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "missing_annotation_exclude_open_world",
+      "surface": "e2e",
+      "sabotage": "policy.exclude_open_world against a tool with no openWorldHint",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "policy_filtered_read_only_only",
+      "surface": "e2e",
+      "sabotage": "policy.read_only_only against a tool explicitly annotated readOnlyHint:false",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "policy_filtered_exclude_destructive",
+      "surface": "e2e",
+      "sabotage": "policy.exclude_destructive against a tool explicitly annotated destructiveHint:true",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "policy_filtered_exclude_open_world",
+      "surface": "e2e",
+      "sabotage": "policy.exclude_open_world against a tool explicitly annotated openWorldHint:true",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "unknown_tool_id",
+      "surface": "e2e",
+      "sabotage": "misspelled tool name on a configured, healthy server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "unknown_server",
+      "surface": "e2e",
+      "sabotage": "tool id naming a server that is not configured at all",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_not_configured",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "hash_mismatch",
+      "surface": "e2e",
+      "sabotage": "pin_hash at the current schema version whose digest does not match the tool's stored hash",
+      "expect": {
+        "status": "unavailable",
+        "reason": "hash_mismatch",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "hash_mismatch_schema_version_bump",
+      "surface": "e2e",
+      "sabotage": "pin_hash carrying the tool's CURRENT digest under a different hash schema version (simulates a proxy-side hash-algorithm bump)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "hash_mismatch",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "pending_auth",
+      "surface": "state-injected",
+      "sabotage": "connection-state snapshot reports the deferred-OAuth PendingAuth state for the server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "oauth_required",
+        "retryable": false,
+        "action": "login",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "profile_out_of_scope_operator",
+      "surface": "e2e",
+      "sabotage": "preflight under a profile whose server list excludes the requested tool's server, called with the operator API key",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_not_in_scope",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "profile_out_of_scope_agent_token",
+      "surface": "e2e",
+      "sabotage": "same out-of-scope request as profile_out_of_scope_operator, called with an agent token whose allowed_servers excludes the server: scope-silence maps it to a plain not_found, byte-indistinguishable from an absent tool",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    }
+  ]
+}

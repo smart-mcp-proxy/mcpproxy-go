@@ -181,6 +181,72 @@ See [Configuration](https://docs.mcpproxy.app/configuration/config-file/) and [U
 
 ---
 
+## How AI Agents Work Through MCPProxy
+
+Once connected, your agent sees a handful of built-in MCPProxy tools instead of hundreds of upstream schemas. A typical session has three beats — discover, call, audit — plus an optional preflight gate for unattended automations.
+
+### 1. Discover — spend one query, not your context window
+
+The agent asks for what it needs in plain keywords via `retrieve_tools`:
+
+```json
+{ "query": "create github issue", "limit": 5 }
+```
+
+MCPProxy runs a BM25 search across every connected server and returns only the top-ranked matches — each with a `call_with` hint recommending the right call variant for its annotations:
+
+```json
+{
+  "tools": [
+    { "name": "github:create_issue", "score": 0.89, "call_with": "call_tool_write" },
+    { "name": "gitlab:create_issue", "score": 0.72, "call_with": "call_tool_write" }
+  ]
+}
+```
+
+This is where the token savings come from: the schemas of the hundreds of tools the agent *didn't* need never enter its context. The agent loads full schemas on demand with `describe_tool` (batch up to 5 ids) only for the tools it's about to use.
+
+### 2. Call — with declared intent
+
+The agent executes the tool through the variant matching its intent (`call_tool_read`, `call_tool_write`, or `call_tool_destructive`), addressing it as `server:tool`:
+
+```json
+{
+  "name": "github:create_issue",
+  "args_json": "{\"repo\": \"acme/api\", \"title\": \"Bug report\"}",
+  "intent": { "operation_type": "write", "reason": "Filing bug per user request" }
+}
+```
+
+MCPProxy validates the intent against the tool's annotations (a "read" call can't reach a destructive tool), checks quarantine and approval state, and scans arguments and responses for sensitive data before anything leaves the machine.
+
+### 3. Audit — every call is on the record
+
+Every call lands in the local [Activity Log](https://docs.mcpproxy.app/features/activity-log/) with a request ID, so you can reconstruct exactly what an agent did:
+
+```bash
+mcpproxy activity list                          # everything, newest first
+mcpproxy activity list --request-id <id>        # one workflow, correlated
+```
+
+### Gate automations before they burn tokens
+
+For recurring headless jobs (cron, CI, n8n), don't let the agent discover a missing tool the expensive way. One preflight command checks that every required tool is ready — without contacting any upstream server — and reports exactly why when it isn't (server quarantined, tool changed since approval, OAuth expired, typo'd id):
+
+```bash
+mcpproxy tools preflight gh-ops:sync_issues slack:post_message --wait 10s
+case $? in
+  0)  run-agent-session ;;   # all ready — go
+  10) exit 75 ;;             # transient (server starting) — let the next cron tick retry
+  11) page-operator ;;       # blocked — someone must approve / enable / log in
+  12) fail-pipeline ;;       # unknown tool id — the automation itself is misconfigured
+esac
+```
+
+See [Required-Tools Preflight](https://docs.mcpproxy.app/features/tools-preflight/) for the full reason taxonomy, REST endpoint, and GitHub Actions / n8n recipes.
+
+---
+
 ## 🔐 Optional HTTPS Setup
 
 MCPProxy works with HTTP by default for easy setup. HTTPS is optional and primarily useful for production environments or when stricter security is required.
@@ -295,6 +361,7 @@ curl -k https://localhost:8080/api/v1/status
 - [OAuth Authentication](https://docs.mcpproxy.app/features/oauth-authentication/)
 - [Code Execution](https://docs.mcpproxy.app/features/code-execution/)
 - [Activity Log](https://docs.mcpproxy.app/features/activity-log/)
+- [Required-Tools Preflight](https://docs.mcpproxy.app/features/tools-preflight/)
 - [Agent Tokens](https://docs.mcpproxy.app/features/agent-tokens/)
 - [Sensitive Data Detection](https://docs.mcpproxy.app/features/sensitive-data-detection/)
 

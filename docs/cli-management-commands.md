@@ -738,11 +738,116 @@ mcpproxy tools reject --server github --all
 
 ---
 
+### `mcpproxy tools preflight <server:tool> [...]`
+
+Check that required tools are ready — deterministically, side-effect-free, and
+**without calling any upstream server** — before a cron/CI job spends model
+tokens finding out the hard way (Spec 098). Wraps `POST /api/v1/preflight`; the
+check reads the tool index, approval records, connection state and config
+policy only, and changes nothing. Requires daemon. The exit code is the
+product: a wrapper can branch retry-vs-page-vs-fix on it without parsing any
+JSON. See [Required-Tools Preflight](features/tools-preflight.md).
+
+**Usage:**
+```bash
+mcpproxy tools preflight <server:tool> [<server:tool>...] [flags]
+```
+
+**Flags:**
+- `--profile <name>` - Evaluate under a named profile's server scope (unknown profile fails with exit 1)
+- `--pin <server:tool>=sha256/v<N>:<hex>` - Pin a tool to a schema hash; a divergence reports `hash_mismatch` (repeatable; each pinned id must be in the requested list). Current pins come from `mcpproxy tools list -o json` (`hash` field, operator tier)
+- `--read-only-only` - Require tools to be annotated read-only
+- `--exclude-destructive` - Require tools to be annotated non-destructive
+- `--exclude-open-world` - Require tools to be annotated closed-world
+- `--wait <duration>` - Poll local state for up to this long while every failure is retryable (max `10s`; larger values are rejected by the daemon)
+- `--output, -o` - Output format: `table`, `json`, `yaml` (or `MCPPROXY_OUTPUT`); `--help-json` for machine-readable command metadata
+
+**Exit codes** (worst class present wins):
+
+| Exit | Verdict | Meaning | Wrapper action |
+|------|---------|---------|----------------|
+| `0` | `ready` | Every tool is ready | Proceed |
+| `10` | `degraded_retryable` | A server is starting up or unhealthy | Back off and retry |
+| `11` | `blocked` | Operator action needed (approve, enable, log in, re-pin) | Page the operator |
+| `12` | `unknown_ids` | At least one requested id is unknown in your view (typo, removed server) | Fix the job's tool list |
+| `1` | — | The command itself failed (daemon unreachable, invalid arguments, rejected request) | Investigate |
+
+**Examples:**
+```bash
+mcpproxy tools preflight gh-ops:sync_issues slack:post_message
+mcpproxy tools preflight ctl:echo -o json
+mcpproxy tools preflight ctl:echo --pin ctl:echo=sha256/v1:9f86d081884c7d65...
+mcpproxy tools preflight ctl:echo --profile work --wait 5s
+mcpproxy tools preflight ctl:echo --read-only-only
+```
+
+**Output:**
+- `table` (default): a `VERDICT: <verdict> (exit <code>)` / `CHECKED: <time>`
+  header (plus `WAITED: <n>ms` when `--wait` was given), then one row per tool:
+  ID, STATUS, REASON, RETRYABLE, ACTION, DETAIL
+- `-o json|yaml`: the wire response body (`verdict`, `checked_at`, `waited_ms`,
+  `tools[]` with per-tool `reason`/`retryable`/`action`/`detail`/`remediation`);
+  identical key names in both formats
+
+**Behavior:**
+- Zero upstream calls, zero side effects — never triggers connects, reconnects
+  or re-indexing, even when it finds a dead server
+- One result per unique id; a ready tool carries no failure fields
+- A non-ready verdict is reported once (as the exit code + a one-line summary
+  on stderr), not as a duplicated error dump
+- Every executed preflight writes an activity record before the response —
+  auditable via `mcpproxy activity list` (type `preflight`, source `cli`)
+
+**Cron recipe** — gate a nightly agent job on its required tools; the exit code
+alone decides:
+
+```bash
+#!/bin/sh
+# Fail deterministically BEFORE the agent session spends tokens on discovery.
+mcpproxy tools preflight gh-ops:sync_issues slack:post_message --wait 10s || exit $?
+run-nightly-agent-job
+```
+
+Or branch on the class:
+
+```bash
+mcpproxy tools preflight gh-ops:sync_issues slack:post_message --wait 10s
+case $? in
+  0)  run-nightly-agent-job ;;
+  10) echo "degraded, retrying next cycle" ;;          # transient — back off
+  11) notify-oncall "mcpproxy: operator action required" ;;
+  12) notify-oncall "mcpproxy: unknown tool id — config drift?" ;;
+  *)  notify-oncall "mcpproxy: preflight itself failed" ;;
+esac
+```
+
+**GitHub Actions step** — a failing preflight fails the step and skips the rest
+of the job:
+
+```yaml
+jobs:
+  nightly-agent:
+    runs-on: [self-hosted, mcpproxy]
+    steps:
+      - name: Preflight required tools
+        run: |
+          mcpproxy tools preflight gh-ops:sync_issues slack:post_message \
+            --wait 10s -o json
+      - name: Run agent job
+        run: ./run-agent-job.sh
+```
+
+---
+
 ## Exit Codes
 
 - `0` - Success
 - `1` - Execution failure (API error, connection failure, user declined confirmation)
 - `2` - Invalid arguments or configuration (non-interactive without --force)
+
+`mcpproxy tools preflight` additionally uses verdict exit codes `10` (degraded,
+retryable), `11` (blocked, operator action) and `12` (unknown id) — see its
+section above.
 
 ---
 
