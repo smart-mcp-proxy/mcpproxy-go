@@ -34,6 +34,7 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `last_error_code` | `MCPX_DOCKER_CLI_NOT_FOUND` | Most recent stable `MCPX_*` diagnostic code (schema v7). Enum code only, never error text |
 | `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2}}` | Security/TPA scanner activity (schema v8) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan ran |
 | `feature_flags.deep_scan_enabled` | `false` | Whether the opt-in deep-scan layer is turned on (schema v8) |
+| `preflight` | `{"filter_diag_emitted_24h":3,"availability_block_24h":2,"availability_block_reasons_24h":{"server_quarantined":2},"discovery_omission_24h":5}` | Preflight baseline counters (issue #969) — counts only, reason map keyed by a fixed enum. Omitted entirely when nothing was counted. See below |
 
 The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
 
@@ -157,6 +158,58 @@ The decision lives in the scanner package (`scanCallbackAdapter.countsForTelemet
 The whole `tpa_scanner` object is **omitted** when every counter is zero, so an install that never scans emits a payload shape-identical to v7. The anonymity scanner (`internal/telemetry/anonymity.go`, rule `v8_field_invalid`) re-asserts the contract on the serialized payload before every send: whitelisted keys, non-negative integers, and severity-enum keys only — a producer-side regression that leaked a server name or rule id as a map key would block the heartbeat rather than transmit it.
 
 **Never transmitted**: the scanned server's name, the scanner id, rule ids, finding titles or descriptions, matched content, file paths, and scan error messages.
+
+## Preflight baseline counters (issue #969)
+
+The `preflight` sub-object measures two things the proxy currently does silently:
+how often a `retrieve_tools` response **explains a filter** it applied (spec 094's
+`filter_diagnostics` block) and whether the agent then acted on that explanation,
+and how often a tool the caller asked for **existed but was withheld**.
+
+These counters ship **one release ahead** of the required-tools-preflight feature
+on purpose. Without a live pre-feature window there is nothing to compare the
+post-feature numbers against, and "did preflight help?" degrades into an argument
+about anecdotes.
+
+| Field | Type | What it counts |
+|-------|------|----------------|
+| `preflight.filter_diag_emitted_24h` | non-negative integer | `retrieve_tools` responses that **delivered** a `filter_diagnostics` block in the last 24h — the denominator for the rest. Counted after response truncation, so a block that `tool_response_limit` cut back out of the payload is not counted (and cannot be "followed") |
+| `preflight.filter_diag_missing_annotation_24h` | non-negative integer | Omissions in those blocks caused by **absent upstream annotations** ("fix the server" class), summed across filters |
+| `preflight.filter_diag_explicit_24h` | non-negative integer | Omissions caused by an **explicitly unsafe hint** ("the filter is working" class), summed across filters |
+| `preflight.filter_diag_followed_24h` | non-negative integer | Blocks the agent **acted on**: a later `retrieve_tools` call in the same MCP session dropped or relaxed a filter the block blamed |
+| `preflight.availability_block_24h` | non-negative integer | Policy **blocks** (quarantine, scope, permissions, tool approval, output policy) in the last 24h. Derived as the sum of the reason split below — each reason is stored with its own 24h window, and a separate stored total would drift out of agreement with the split it summarises |
+| `preflight.availability_block_reasons_24h` | map, **fixed enum keys only** → non-negative integer | The same total split by reason: `intent_invalid`, `intent_rejected`, `profile_scope`, `token_scope`, `token_permission`, `server_quarantined`, `tool_pending_approval`, `tool_changed_approval`, `tool_not_callable`, `output_sanitisation`, `output_schema`, `other` |
+| `preflight.discovery_omission_24h` | non-negative integer | `retrieve_tools` responses that **withheld locked or quarantined matches** the caller could not see (`include_disabled` unset) — the silent-unavailability substrate |
+
+**How the reason keys stay safe.** The classification comes from the gate that
+fired, not from parsing the message it wrote: every call site of the single
+policy-decision funnel (`emitActivityPolicyDecision`) declares a key from the
+closed enum above, while the operator-facing prose — which embeds server and tool
+names — stays in the activity log and never reaches telemetry. A key outside the
+enum is folded into `other` at write time, filtered again at read time and in the
+wire form, and the anonymity scanner (rule `preflight_field_invalid`) blocks the
+heartbeat outright if a non-enum key ever reaches the serialized payload.
+
+**The follow-through signal holds no identity.** Detecting "the agent relaxed the
+filter" needs only the previous call's blamed filter *keys* plus the session it
+belonged to. That note is in-memory, per session, expires after 15 minutes,
+is capped, is consumed on first use (one block can be followed at most once), and
+is never persisted or transmitted — only the resulting count is.
+
+Because that note is keyed by session, a transport that mints no session id
+cannot be credited with a follow-through, while its emissions still count. Read
+`filter_diag_followed_24h / filter_diag_emitted_24h` as a **lower bound** on
+engagement, not an exact rate.
+
+The whole `preflight` object is **omitted** when every counter is zero, so an
+install that never trips one emits a payload shape-identical to one from before
+the field existed. Counters are gated at **event time**: nothing is written while
+telemetry is opted out, so an occurrence observed during opt-out can never become
+transmissible if telemetry is re-enabled later.
+
+**Never transmitted**: the query text, tool or server names, filter values, the
+session id, the number of tools in the response, or any part of the suggestion
+string the agent saw.
 
 ## One-time opt-out signal
 
