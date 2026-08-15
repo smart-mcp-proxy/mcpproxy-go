@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 const (
@@ -199,7 +200,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		// invoking upstream. Direct mode must not bypass disabled, quarantine, or
 		// approval controls enforced by call_tool_* variants.
 		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, enrichedArgs); blocked != nil {
-			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable")
+			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", telemetry.BlockReasonToolNotCallable)
 			return blocked, nil
 		}
 

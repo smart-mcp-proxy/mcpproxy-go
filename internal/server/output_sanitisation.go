@@ -13,6 +13,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 // osDecision is the pure outcome of the output-sanitisation decision core
@@ -109,7 +110,7 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 	}
 
 	if d.block {
-		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", d.reason)
+		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", d.reason, telemetry.BlockReasonOutputSanitisation)
 		return mcp.NewToolResultError("tool output blocked by sanitisation policy: " + d.reason)
 	}
 
@@ -151,7 +152,9 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 
 	if redactedCount > 0 || len(strippedClasses) > 0 {
 		action, reason := summariseSanitisation(redactedCount, redactedCats, strippedClasses)
-		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, action, reason)
+		// Redact/strip are not blocks — the availability counter ignores them —
+		// but the key is still declared so the funnel has no unclassified sites.
+		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, action, reason, telemetry.BlockReasonOutputSanitisation)
 	}
 
 	return nil
