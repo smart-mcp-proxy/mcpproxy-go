@@ -19,6 +19,12 @@ internal/server/testdata/*.golden.json text eol=lf
 # comparisons fail with a trailing \r.
 internal/server/testdata/**/*.golden.json text eol=lf
 
+# Spec 098 tools/list merge-base snapshots (FR-015 byte-identity): these are
+# plain .json (not *.golden.json), so the patterns above do not reach them.
+# Without this Windows checks out CRLF and all three
+# TestToolsListSnapshot_MatchesMergeBaseGoldens surfaces fail on \r alone.
+internal/server/testdata/toolslist_goldens/*.json text eol=lf
+
 # Self-contained verification/QA reports embed base64 PNG screenshots, so a
 # single file is multiple MB of "HTML". They are point-in-time artifacts, not
 # source. Mark them linguist-generated so GitHub's language stats reflect the

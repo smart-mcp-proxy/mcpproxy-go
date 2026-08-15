@@ -105,6 +105,14 @@ func toolsListGoldenPath(surface string) string {
 	return filepath.Join("testdata", toolsListGoldenDir, surface+".json")
 }
 
+// normalizeGoldenEOL strips CR from CRLF line endings. The goldens are pinned
+// to LF in .gitattributes, but Windows runners default to core.autocrlf=true,
+// so a checkout that predates (or ignores) that pin would otherwise fail the
+// byte comparison on \r alone — a spurious FR-015 "regression".
+func normalizeGoldenEOL(b []byte) []byte {
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+}
+
 // TestToolsListSnapshot_MatchesMergeBaseGoldens is the FR-015 gate.
 func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
@@ -123,8 +131,9 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 	for _, surface := range toolsListGoldenSurfaces {
 		surface := surface
 		t.Run(surface, func(t *testing.T) {
-			want, err := os.ReadFile(toolsListGoldenPath(surface))
+			raw, err := os.ReadFile(toolsListGoldenPath(surface))
 			require.NoError(t, err, "missing golden for surface %s", surface)
+			want := normalizeGoldenEOL(raw)
 
 			got := renderToolsListGolden(t, surfaces[surface])
 			if bytes.Equal(got, want) {
