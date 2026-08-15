@@ -276,6 +276,14 @@ type HeartbeatPayload struct {
 	// MCPX_* enum strings, non-negative int counts.
 	Diagnostics *DiagnosticsCounters `json:"diagnostics,omitempty"`
 
+	// Issue #969 (Phase 0): required-tools-preflight BASELINE counters —
+	// filter-diagnostics engagement + availability/discovery-omission classes.
+	// Omitted entirely when all counters are zero (omitempty on the pointer),
+	// so an install that never trips one is shape-identical to a payload from
+	// before this field existed. No PII: non-negative counts, plus a reason map
+	// keyed exclusively by the closed availabilityBlockReasonKeys enum.
+	Preflight *PreflightCounters `json:"preflight,omitempty"`
+
 	// Schema v8: anonymous TPA / security-scanner outcome counters. Omitted
 	// entirely when all counters are zero (omitempty on the pointer) — an
 	// install that never scans is shape-identical to a v7 payload. No PII:
@@ -352,6 +360,12 @@ type Service struct {
 	// nil-safety guarantee as activationStore. When nil, Diagnostics is omitted.
 	diagCounterStore DiagnosticsCounterStore
 	diagCounterDB    *bbolt.DB
+
+	// Issue #969 (Phase 0): preflight baseline counter store + DB handle.
+	// Optional — same nil-safety guarantee as activationStore. When nil, the
+	// preflight sub-object is omitted and every Record* below is a no-op.
+	preflightStore PreflightCounterStore
+	preflightDB    *bbolt.DB
 
 	// Spec 080 (US2): funnel observability store + DB handle. Optional —
 	// same nil-safety guarantee as activationStore. When nil, web_ui_opened,
@@ -543,6 +557,104 @@ func (s *Service) DiagnosticsCounterStore() DiagnosticsCounterStore {
 // diagnostics counter store (or nil).
 func (s *Service) DiagnosticsCounterDB() *bbolt.DB {
 	return s.diagCounterDB
+}
+
+// SetPreflightCounterStore wires the BBolt-backed preflight baseline counter
+// store (issue #969, Phase 0). Optional; when unset, heartbeat payloads omit
+// the preflight object and every Record* below is a no-op. Safe to call once
+// during startup.
+func (s *Service) SetPreflightCounterStore(store PreflightCounterStore, db *bbolt.DB) {
+	s.preflightStore = store
+	s.preflightDB = db
+}
+
+// PreflightCounterStore returns the wired preflight counter store (or nil).
+func (s *Service) PreflightCounterStore() PreflightCounterStore {
+	return s.preflightStore
+}
+
+// PreflightCounterDB returns the BBolt DB handle associated with the preflight
+// counter store (or nil).
+func (s *Service) PreflightCounterDB() *bbolt.DB {
+	return s.preflightDB
+}
+
+// preflightSink returns the store/DB pair to write to, or (nil, nil) when
+// nothing may be recorded.
+//
+// The opt-out is evaluated at EVENT time, not only at heartbeat time — the
+// strictest of the existing postures (recordUpdateFailure, spec 095 FR-013).
+// An occurrence observed while telemetry is off is never persisted, so it can
+// never become transmissible if the user turns telemetry back on later.
+func (s *Service) preflightSink() (PreflightCounterStore, *bbolt.DB) {
+	if s == nil || s.preflightStore == nil || s.preflightDB == nil {
+		return nil, nil
+	}
+	if s.optedOut.Load() {
+		return nil, nil
+	}
+	s.mu.Lock()
+	cfg := s.config
+	s.mu.Unlock()
+	if !EffectiveTelemetryEnabled(cfg) {
+		return nil, nil
+	}
+	return s.preflightStore, s.preflightDB
+}
+
+// preflightDebug logs a counter-persistence failure without ever propagating it
+// — a telemetry counter must never break the request path that produced it.
+func (s *Service) preflightDebug(msg string, err error) {
+	if err == nil || s.logger == nil {
+		return
+	}
+	s.logger.Debug(msg, zap.Error(err))
+}
+
+// RecordFilterDiagnosticsEmitted counts one retrieve_tools response that
+// carried a spec-094 filter_diagnostics block, plus that block's per-reason
+// class totals. Counts only — the filter keys and tool identities stay in the
+// response and never reach telemetry.
+func (s *Service) RecordFilterDiagnosticsEmitted(missingAnnotation, explicit int) {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record filter_diagnostics emission",
+		store.RecordFilterDiagnosticsEmitted(db, missingAnnotation, explicit))
+}
+
+// RecordFilterDiagnosticsFollowed counts one diagnostics block the agent acted
+// on (a later same-session retrieve_tools relaxed a blamed filter).
+func (s *Service) RecordFilterDiagnosticsFollowed() {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record filter_diagnostics follow-up",
+		store.RecordFilterDiagnosticsFollowed(db))
+}
+
+// RecordAvailabilityBlock counts one policy block by its structured reason key.
+// Reasons outside the closed enum are folded into "other" by the store.
+func (s *Service) RecordAvailabilityBlock(reason string) {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record availability block",
+		store.RecordAvailabilityBlock(db, reason))
+}
+
+// RecordDiscoveryOmission counts one retrieve_tools response that withheld
+// locked/quarantined matches from the caller.
+func (s *Service) RecordDiscoveryOmission() {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record discovery omission",
+		store.RecordDiscoveryOmission(db))
 }
 
 // SetConfiguredIDECountProvider wires a function that returns the number of
@@ -986,6 +1098,20 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 			}
 		} else {
 			s.logger.Debug("Failed to load diagnostics counters for heartbeat", zap.Error(err))
+		}
+	}
+
+	// Issue #969 (Phase 0): preflight baseline counters. Same flush shape as
+	// the Phase H diagnostics block above — load from BBolt (decay applied at
+	// read time), omit entirely when all counters are zero or the store is not
+	// wired (short-lived CLI commands).
+	if s.preflightStore != nil && s.preflightDB != nil {
+		if snap, err := s.preflightStore.Snapshot(s.preflightDB); err == nil {
+			if !snap.isZero() {
+				payload.Preflight = &snap
+			}
+		} else {
+			s.logger.Debug("Failed to load preflight counters for heartbeat", zap.Error(err))
 		}
 	}
 

@@ -97,6 +97,11 @@ type anonymityScanEnvelope struct {
 	// error_code_counts_24h map must be cataloged codes → non-negative counts.
 	// Same not-a-pointer reasoning as TPAScanner.
 	Diagnostics json.RawMessage `json:"diagnostics"`
+
+	// Issue #969 structural check: the preflight baseline counter sub-object,
+	// whose availability_block_reasons_24h map must be closed-enum reason keys
+	// → non-negative counts. Same not-a-pointer reasoning as TPAScanner.
+	Preflight json.RawMessage `json:"preflight"`
 }
 
 // v7FieldViolation builds the violation for a Spec 080 field that broke its
@@ -347,6 +352,114 @@ func scanDiagnosticsCounters(raw json.RawMessage) *AnonymityViolation {
 	return nil
 }
 
+// preflightFieldViolation builds the violation for a preflight counter field
+// that broke its documented shape (closed-enum reason keys, non-negative
+// counts).
+func preflightFieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "preflight_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("preflight field %s %s", field, reason),
+	}
+}
+
+// scanPreflightCounters asserts the preflight sub-object (if present) is a
+// CLOSED object of non-negative integer counts whose
+// availability_block_reasons_24h map is keyed EXCLUSIVELY by the closed
+// availability-block reason enum (issue #969).
+// The producer folds unknown reasons into "other" and MarshalJSON filters again;
+// this is the wire-form backstop, so a regression that let a reason STRING
+// (which embeds server and tool names) become a key is caught before transmit.
+// Keys are where identifying strings would leak, so the violation deliberately
+// never echoes the offending key.
+func scanPreflightCounters(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	// json.Unmarshal accepts `null` into a nil map; the field, when present,
+	// must be a real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return preflightFieldViolation("preflight", "must be an object")
+	}
+
+	// The sub-object is CLOSED: only the documented count keys plus the reason
+	// map may appear. Validating the known scalars alone would let a future
+	// field that carries free text (a server name, a query, an error message)
+	// ride along unchecked — exactly the leak this rule exists to stop. A new
+	// counter must be added to preflightAllowedKeys deliberately, which is the
+	// point at which its shape gets reviewed.
+	for key := range obj {
+		if !isPreflightAllowedKey(key) {
+			return preflightFieldViolation("preflight",
+				"carries a key outside the fixed preflight counter set")
+		}
+	}
+
+	// Every scalar the sub-object carries is a non-negative count.
+	for _, key := range preflightScalarKeys {
+		v, ok := obj[key]
+		if !ok {
+			continue
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "preflight."+key, preflightFieldViolation); viol != nil {
+			return viol
+		}
+	}
+
+	rawCounts, ok := obj[preflightReasonsKey]
+	if !ok {
+		return nil
+	}
+	var counts map[string]json.RawMessage
+	if err := json.Unmarshal(rawCounts, &counts); err != nil || counts == nil {
+		return preflightFieldViolation("preflight.availability_block_reasons_24h", "must be an object")
+	}
+	for reason, v := range counts {
+		if !IsAvailabilityBlockReason(reason) {
+			return preflightFieldViolation("preflight.availability_block_reasons_24h",
+				"carries a key outside the fixed availability-block reason enum")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "preflight.availability_block_reasons_24h", preflightFieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// preflightScalarKeys is the fixed set of non-negative-integer keys allowed in
+// the preflight sub-object.
+var preflightScalarKeys = []string{
+	"filter_diag_emitted_24h",
+	"filter_diag_missing_annotation_24h",
+	"filter_diag_explicit_24h",
+	"filter_diag_followed_24h",
+	"availability_block_24h",
+	"discovery_omission_24h",
+}
+
+// preflightReasonsKey is the one non-scalar key the preflight sub-object may
+// carry (a closed-enum map, validated separately).
+const preflightReasonsKey = "availability_block_reasons_24h"
+
+// preflightAllowedKeys is the CLOSED key set of the preflight sub-object:
+// preflightScalarKeys plus the reason map. Anything else is a violation.
+var preflightAllowedKeys = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(preflightScalarKeys)+1)
+	for _, k := range preflightScalarKeys {
+		m[k] = struct{}{}
+	}
+	m[preflightReasonsKey] = struct{}{}
+	return m
+}()
+
+func isPreflightAllowedKey(key string) bool {
+	_, ok := preflightAllowedKeys[key]
+	return ok
+}
+
 // ScanForPII scans a serialized telemetry payload (v3+) for PII leaks and
 // structural violations. Returns nil when the payload is clean; otherwise
 // returns an *AnonymityViolation. The returned error satisfies
@@ -366,6 +479,10 @@ func scanDiagnosticsCounters(raw json.RawMessage) *AnonymityViolation {
 //     exclusively by the fixed severity enum.
 //  6. diagnostics.error_code_counts_24h, if present, is not a map of
 //     catalog-registered MCPX_* codes to non-negative integer counts.
+//  7. preflight (issue #969), if present, is not a CLOSED object of
+//     non-negative integer counts (keys drawn from preflightAllowedKeys) whose
+//     availability_block_reasons_24h map is keyed exclusively by the closed
+//     availability-block reason enum.
 //
 // The implementation never logs the payload — it only reports which rule
 // tripped and the offending pattern (a small literal). Callers should log at
@@ -433,6 +550,12 @@ func ScanForPII(payloadJSON []byte) error {
 
 	// Rule 6: diagnostics counters must be cataloged codes → non-negative ints.
 	if v := scanDiagnosticsCounters(env.Diagnostics); v != nil {
+		return v
+	}
+
+	// Rule 7: preflight counters must be closed-enum reason keys → non-negative
+	// ints, and every scalar a non-negative count.
+	if v := scanPreflightCounters(env.Preflight); v != nil {
 		return v
 	}
 

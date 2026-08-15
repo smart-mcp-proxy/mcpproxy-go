@@ -255,7 +255,15 @@ func shouldExclude(annotations *config.ToolAnnotations, readOnlyOnly, excludeDes
 // FR-003) and interpolated literally into the suggestion string (FR-006) — now
 // live in internal/toolannotations (FilterKeyReadOnlyOnly and friends) and
 // arrive here as the filterKey returned by excludeReason, so the server-side
-// wording cannot diverge from the classifier's attribution keys.
+// wording cannot diverge from the classifier's attribution keys. These aliases
+// keep the server-local spelling for call sites that name a filter directly
+// (the Spec-094 engagement counters in preflight_telemetry.go); they are
+// definitionally the classifier's keys, so the two cannot drift.
+const (
+	filterKeyReadOnlyOnly     = toolannotations.FilterKeyReadOnlyOnly
+	filterKeyExcludeDestruct  = toolannotations.FilterKeyExcludeDestruct
+	filterKeyExcludeOpenWorld = toolannotations.FilterKeyExcludeOpenWorld
+)
 
 // excludeReason delegates to the shared classifier in internal/toolannotations
 // (Spec 098 T005). The semantics — first-failing filter owns the omission,

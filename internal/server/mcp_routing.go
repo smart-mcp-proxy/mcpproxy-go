@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 const (
@@ -154,12 +155,38 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		startTime := time.Now()
 
+		// Get session ID for activity logging
+		var sessionID string
+		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+			sessionID = sess.SessionID()
+		}
+
+		// Get request ID from context. Direct-mode calls that did not arrive
+		// over an HTTP transport carry none, and every activity this handler
+		// emits — including the agent-token and callability blocks below, which
+		// fire before anything else — needs an id a consumer can correlate on.
+		// Mint one rather than emit anonymously; a transport-supplied id always
+		// wins so the records still line up with the access log.
+		//
+		// Both ids are resolved BEFORE the agent-token gates so those denials
+		// can emit a correlatable policy decision like every other block.
+		requestID := reqcontext.GetRequestID(ctx)
+		if requestID == "" {
+			requestID = mintActivityRequestID(serverName, toolName)
+		}
+
 		// Check auth context for server access and permissions
 		authCtx := auth.AuthContextFromContext(ctx)
 		if authCtx != nil {
 			// Check server access
 			if !authCtx.CanAccessServer(serverName) {
-				return mcp.NewToolResultError(fmt.Sprintf("Access denied: token does not have access to server '%s'", serverName)), nil
+				errMsg := fmt.Sprintf("Access denied: token does not have access to server '%s'", serverName)
+				// Direct mode denied these silently: no activity record and,
+				// since issue #969, no availability counter either. Emit the
+				// same policy decision the call_tool_* variants emit at the
+				// equivalent gate so the funnel has no blind spot.
+				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
+				return mcp.NewToolResultError(errMsg), nil
 			}
 
 			// Determine required permission from annotations
@@ -170,25 +197,10 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			}
 
 			if !authCtx.HasPermission(requiredPerm) {
-				return mcp.NewToolResultError(fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", requiredPerm, serverName, toolName)), nil
+				errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", requiredPerm, serverName, toolName)
+				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+				return mcp.NewToolResultError(errMsg), nil
 			}
-		}
-
-		// Get session ID for activity logging
-		var sessionID string
-		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
-			sessionID = sess.SessionID()
-		}
-
-		// Get request ID from context. Direct-mode calls that did not arrive
-		// over an HTTP transport carry none, and every activity this handler
-		// emits — including the callability block below, which fires before
-		// anything else — needs an id a consumer can correlate on. Mint one
-		// rather than emit anonymously; a transport-supplied id always wins so
-		// the records still line up with the access log.
-		requestID := reqcontext.GetRequestID(ctx)
-		if requestID == "" {
-			requestID = mintActivityRequestID(serverName, toolName)
 		}
 
 		// Get arguments from the request
@@ -198,8 +210,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		// Enforce direct-mode callability before emitting a tool-started event or
 		// invoking upstream. Direct mode must not bypass disabled, quarantine, or
 		// approval controls enforced by call_tool_* variants.
-		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, enrichedArgs); blocked != nil {
-			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable")
+		// The reason key comes from the gate that actually fired (quarantine,
+		// pending/changed approval, or plain not-callable) rather than from
+		// this one funnel site — see directBlockReasonKey.
+		if blocked, reasonKey := p.directToolCallabilityBlockWithReason(ctx, serverName, toolName, enrichedArgs); blocked != nil {
+			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", reasonKey)
 			return blocked, nil
 		}
 

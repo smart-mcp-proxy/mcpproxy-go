@@ -2789,6 +2789,14 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 			diagStore := telemetry.NewDiagnosticsCounterStore()
 			r.telemetryService.SetDiagnosticsCounterStore(diagStore, db)
 
+			// Issue #969 (Phase 0): wire the preflight baseline counter store
+			// on the same DB, pre-creating its bucket for the same
+			// first-write-race reason as the diagnostics bucket above.
+			if err := telemetry.EnsurePreflightCountersBucket(db); err != nil {
+				r.logger.Warn("Failed to ensure preflight_counters bucket", zap.Error(err))
+			}
+			r.telemetryService.SetPreflightCounterStore(telemetry.NewPreflightCounterStore(), db)
+
 			// Wire error-code notifier into supervisor so every classified
 			// DiagnosticError increments the 24h per-code counter. Spec 080
 			// (US3, FR-012): the same stream also refreshes last_error_code —
@@ -2900,6 +2908,50 @@ func (r *Runtime) RecordRetrieveToolsCallForActivation() {
 	if err := store.IncrementRetrieveToolsCall(db); err != nil {
 		r.logger.Debug("activation: IncrementRetrieveToolsCall failed", zap.Error(err))
 	}
+}
+
+// --- Issue #969 (Phase 0): preflight baseline counters ---
+//
+// These forwarders keep internal/server unaware of BBolt, exactly like
+// RecordRetrieveToolsCallForActivation above. Each is nil-safe and the
+// telemetry service applies the event-time opt-out gate, so a counter is never
+// persisted for an install that has telemetry off.
+
+// RecordFilterDiagnosticsEmitted counts one retrieve_tools response that
+// attached a spec-094 filter_diagnostics block, plus that block's summed
+// per-reason-class counts.
+func (r *Runtime) RecordFilterDiagnosticsEmitted(missingAnnotation, explicit int) {
+	if r == nil || r.telemetryService == nil {
+		return
+	}
+	r.telemetryService.RecordFilterDiagnosticsEmitted(missingAnnotation, explicit)
+}
+
+// RecordFilterDiagnosticsFollowed counts one diagnostics block the agent acted
+// on within the same MCP session.
+func (r *Runtime) RecordFilterDiagnosticsFollowed() {
+	if r == nil || r.telemetryService == nil {
+		return
+	}
+	r.telemetryService.RecordFilterDiagnosticsFollowed()
+}
+
+// RecordAvailabilityBlock counts one policy block by its structured reason key
+// (closed enum; see telemetry.BlockReason*).
+func (r *Runtime) RecordAvailabilityBlock(reason string) {
+	if r == nil || r.telemetryService == nil {
+		return
+	}
+	r.telemetryService.RecordAvailabilityBlock(reason)
+}
+
+// RecordDiscoveryOmission counts one retrieve_tools response that withheld
+// locked/quarantined matches the caller could not see.
+func (r *Runtime) RecordDiscoveryOmission() {
+	if r == nil || r.telemetryService == nil {
+		return
+	}
+	r.telemetryService.RecordDiscoveryOmission()
 }
 
 // SetSessionClientResolver wires the session -> MCP client lookup that stamps
