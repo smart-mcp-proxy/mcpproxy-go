@@ -269,13 +269,35 @@ func TestFilterDiagnosticsSurvived_PartialBlockDoesNotCount(t *testing.T) {
 		"the block is complete even though the payload as a whole was cut")
 }
 
-// Braces and quotes inside a JSON string must not unbalance the scan.
+// Braces and quotes inside a JSON string must not unbalance the scan, and an
+// escape sequence must not desynchronise it — a scanner that mis-tracks string
+// state would call a truncated block complete (or vice versa).
 func TestHasCompleteJSONObject_IgnoresBracesInStrings(t *testing.T) {
-	require.True(t, hasCompleteJSONObject(`{"note":"a } brace and a \" quote"}`))
-	require.False(t, hasCompleteJSONObject(`{"note":"unterminated } brace`))
-	require.True(t, hasCompleteJSONObject(`  {"a":1} trailing junk`))
-	require.False(t, hasCompleteJSONObject(`  "not an object"`))
-	require.False(t, hasCompleteJSONObject(``))
+	for _, tc := range []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"brace and escaped quote inside string", `{"note":"a } brace and a \" quote"}`, true},
+		{"unterminated string swallows the brace", `{"note":"unterminated } brace`, false},
+		{"trailing junk after a closed object", `  {"a":1} trailing junk`, true},
+		{"not an object", `  "not an object"`, false},
+		{"empty input", ``, false},
+		{"empty object", `{}`, true},
+		{"balanced nested", `{"a":{"b":1}}`, true},
+		{"unbalanced nested closes only the inner object", `{"a":{"b":1}`, false},
+		// An escaped backslash is consumed as data: the quote that follows
+		// genuinely closes the string, so the trailing brace must be seen.
+		{"escaped backslash ends the string", `{"a":"x\\"}`, true},
+		{"cut immediately after an escaped backslash", `{"a":"x\\`, false},
+		{"escaped quote does not end the string", `{"a":"x\""}`, true},
+		{"brace inside string", `{"a":"}"}`, true},
+		{"escaped quote then brace inside string", `{"a":"\"}"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, hasCompleteJSONObject(tc.in))
+		})
+	}
 }
 
 // simpleTruncateNoticeFixture mirrors the plain-text notice both truncation
