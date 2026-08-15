@@ -724,6 +724,13 @@ export type ActivityType =
   | 'policy_decision'
   | 'quarantine_change'
   | 'server_change'
+  /**
+   * Spec 098: one executed required-tools preflight. Set-scoped, not
+   * server-scoped — server_name/tool_name are empty and the verdict,
+   * requested-id count and per-tool reason codes live in `metadata`
+   * ({verdict, ids_count, reasons{code:count}, per_tool[{id,status,reason?}]}).
+   */
+  | 'preflight'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 

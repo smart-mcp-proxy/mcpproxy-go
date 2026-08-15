@@ -2194,3 +2194,57 @@ func (c *Client) EditRegistrySource(ctx context.Context, id, name, sourceURL, se
 	}
 	return &apiResp.Data.Registry, nil
 }
+
+// Preflight runs a required-tools preflight against the daemon (Spec 098).
+//
+// The verdict is DATA, not an error: a 200 carrying `blocked` comes back as a
+// response with no error, and the caller turns it into an exit code. Only a
+// request the daemon refused (400/503) or a transport failure is an error here.
+func (c *Client) Preflight(ctx context.Context, request *contracts.PreflightRequest) (*contracts.PreflightResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/preflight", c.baseURL)
+
+	bodyBytes, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call preflight API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var apiResp struct {
+		Success   bool                         `json:"success"`
+		Data      *contracts.PreflightResponse `json:"data"`
+		Error     string                       `json:"error"`
+		RequestID string                       `json:"request_id"`
+	}
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response (status %d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	if !apiResp.Success || resp.StatusCode != http.StatusOK {
+		msg := apiResp.Error
+		if msg == "" {
+			msg = fmt.Sprintf("API returned status %d", resp.StatusCode)
+		}
+		return nil, parseAPIError(msg, apiResp.RequestID)
+	}
+	if apiResp.Data == nil {
+		return nil, fmt.Errorf("daemon returned success with no preflight data")
+	}
+	return apiResp.Data, nil
+}

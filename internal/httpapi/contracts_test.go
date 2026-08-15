@@ -16,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -373,6 +374,10 @@ func (m *MockServerController) GetToolApproval(_, _ string) (*storage.ToolApprov
 	return nil, nil
 }
 func (m *MockServerController) GetToolApprovalStatus(_, _ string) (string, error) { return "", nil }
+func (m *MockServerController) RunPreflight(_ context.Context, _ preflight.Params) (preflight.Outcome, error) {
+	return preflight.Outcome{}, nil
+}
+func (m *MockServerController) RecordPreflight(_ internalRuntime.PreflightActivity) error { return nil }
 func (m *MockServerController) GetOnboardingState() (*storage.OnboardingState, error) {
 	return &storage.OnboardingState{}, nil
 }
