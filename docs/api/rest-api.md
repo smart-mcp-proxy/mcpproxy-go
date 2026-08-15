@@ -602,9 +602,161 @@ search/filter/sort over the full set. For relevance-ranked discovery use
 server cannot be read the endpoint still returns every tool it could gather and
 sets `partial: true` with `failed_servers` (it does not fail the whole request).
 
+Operator-tier callers (admin API key, Unix socket, named pipe) additionally
+receive each approved tool's current schema-hash pin in `hash`
+(`sha256/v{N}:{hex}`) — the authoring surface for `POST /api/v1/preflight`
+pins. Agent tokens never receive hashes.
+
 #### GET /api/v1/servers/{name}/tools
 
-List tools for a specific server.
+List tools for a specific server. Carries the same operator-tier `hash` pin
+field as the global listing.
+
+#### POST /api/v1/preflight
+
+Required-tools preflight (Spec 098): a deterministic, side-effect-free
+availability check for a caller-supplied list of tool IDs. It performs **zero
+upstream calls** and mutates no runtime state — verdicts are computed from
+local state only (tool index, approval records, connection-state snapshot,
+config policy). The HTTP status reports whether the **check executed**, never
+what it found: a fully blocked set is still a `200` carrying
+`verdict: "blocked"` in the body. See
+[Required-Tools Preflight](../features/tools-preflight.md) for the feature
+guide and `mcpproxy tools preflight` for the CLI wrapper.
+
+**Request Body:**
+```json
+{
+  "tools": [
+    { "id": "gh-ops:sync_issues" },
+    { "id": "ctl:echo", "pin_hash": "sha256/v1:9f86d081884c7d65..." }
+  ],
+  "profile": "work",
+  "policy": { "read_only_only": true },
+  "wait_ms": 5000
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tools` | array | Required, 1–100 entries — the limit applies to the **raw** array, before dedup. Each entry carries `id` (`<server>:<tool>`) and optional `pin_hash`. Duplicate IDs are deduplicated (one result per unique ID); duplicates carrying **different** `pin_hash` values are a `400`. |
+| `profile` | string | Optional. Evaluate under this profile's server scope so verdicts match a profile-pinned session's view. Unknown profile: `400`. Omitted: unscoped operator view. |
+| `policy` | object | Optional annotation filters, Spec 094 semantics: `read_only_only`, `exclude_destructive`, `exclude_open_world` (evaluated in that fixed order; the first excluding filter owns the verdict). |
+| `wait_ms` | integer | Optional, 0–10000. Poll local state while every failure is retryable-class (see below). Values over the cap are a `400`, not a silent clamp. |
+
+**Response** (standard `APIResponse{data}` envelope):
+```json
+{
+  "success": true,
+  "data": {
+    "verdict": "blocked",
+    "checked_at": "2026-08-15T06:00:00Z",
+    "waited_ms": 0,
+    "tools": [
+      {
+        "id": "gh-ops:sync_issues",
+        "status": "ready",
+        "hash": "sha256/v1:9f86d081884c7d65..."
+      },
+      {
+        "id": "slack:post_message",
+        "status": "unavailable",
+        "reason": "server_disabled",
+        "retryable": false,
+        "action": "enable",
+        "detail": "Server \"slack\" is disabled.",
+        "remediation": "Enable the server (mcpproxy upstream enable <server>)."
+      }
+    ]
+  }
+}
+```
+
+Results are ordered by first occurrence of each unique ID in the request. A
+`ready` result omits all failure fields — `ready` is a status, not a reason. An
+`action` with no value is **omitted**, not `"none"` (matching the health-action
+vocabulary). A malformed ID (missing the `:` separator) gets a **per-ID**
+`not_found` with a format hint in `detail`, never a request-level error — one
+bad entry cannot mask verdicts for the rest. `not_found` results may carry
+`did_you_mean` (up to 3 nearest caller-visible IDs). `waited_ms` is present
+whenever `wait_ms` was requested, including as `0` (see wait semantics).
+
+**Failure reasons** (closed enum, Spec 098 FR-003). Evolution is additive-only;
+treat unknown codes as non-retryable. `server_saturated` is reserved and never
+emitted. When multiple states co-occur for one ID, exactly one reason is
+reported per the fixed precedence order (server-level states before tool-level;
+see the feature page).
+
+| `reason` | `retryable` | Default `action` | Set verdict | CLI exit |
+|---|---|---|---|---|
+| `server_initializing` | true | — (omitted) | `degraded_retryable` | 10 |
+| `server_unhealthy` | true | best-effort from diagnostics (`restart`/`login`/`view_logs`; default `view_logs`) | `degraded_retryable` | 10 |
+| `server_disabled` | false | `enable` | `blocked` | 11 |
+| `server_quarantined` | false | `approve` | `blocked` | 11 |
+| `tool_pending_approval` | false | `approve` | `blocked` | 11 |
+| `tool_changed` | false | `approve` | `blocked` | 11 |
+| `tool_blocked_by_user` | false | `enable` | `blocked` | 11 |
+| `oauth_required` | false | `login` | `blocked` | 11 |
+| `hash_mismatch` | false | `configure` | `blocked` | 11 |
+| `server_not_in_scope` (operator tier only) | false | `configure` | `blocked` | 11 |
+| `tool_denied_by_config` | false | `configure` | `blocked` | 11 |
+| `missing_annotation` | false | `configure` | `blocked` | 11 |
+| `policy_filtered` | false | — (omitted) | `blocked` | 11 |
+| `not_found` | false | `configure` | `unknown_ids` | 12 |
+| `server_not_configured` | false | `configure` | `unknown_ids` | 12 |
+
+The set-level `verdict` is the worst class present:
+`unknown_ids` > `blocked` > `degraded_retryable` > `ready`.
+
+**Status codes:**
+
+- `200` — the check executed; the availability verdict is data in the body.
+- `400` — validation error: invalid JSON, empty or oversized (>100 raw entries)
+  `tools`, a duplicate ID with conflicting `pin_hash` values, `wait_ms` out of
+  range, or an unknown `profile`.
+- `401` — missing or invalid credentials.
+- `503` — the check could not run honestly: the runtime is unavailable, an
+  index/storage/snapshot read failed (reduced-fidelity verdicts are never
+  emitted), or the activity record could not be persisted.
+
+A request rejected with `400`/`503` executed no preflight and writes **no**
+activity record.
+
+**`wait_ms` semantics:** polling happens only while **every** current failure
+is retryable-class (`server_initializing` / `server_unhealthy`). The endpoint
+re-evaluates local state on a floor interval of ≥250 ms until every tool is
+ready, a non-retryable failure appears (waiting cannot help, so it resolves
+immediately), or the deadline passes; it always resolves with current reasons —
+never hangs. Waiting capacity is a small fixed semaphore (4 slots) dedicated to
+preflight; when it is exhausted the request degrades gracefully — it resolves
+immediately with current verdicts and `waited_ms: 0` instead of queuing or
+failing.
+
+**Disclosure tiers:**
+
+- **Operator tier** (admin API key, Unix socket, Windows named pipe): full
+  results — `hash` pins on ready results, `did_you_mean` suggestions, and the
+  `server_not_in_scope` diagnosis when a supplied `profile` excludes an
+  existing server (with a `detail` noting that a session under that profile
+  sees `not_found`).
+- **Agent-token tier**: scope-silence — an out-of-scope ID's entire result is
+  byte-indistinguishable from an ordinary `not_found` (same wording; no hashes;
+  no `did_you_mean` crossing the scope boundary). `did_you_mean` is computed
+  over the caller-visible index only and never suggests a quarantined server's
+  tools.
+
+**Activity-record guarantee:** every request answered `200` writes an activity
+record **synchronously, before the response is returned** — request ID,
+requested-ID count, set verdict, and per-tool reason codes (tool IDs and enum
+codes only; no descriptions, no arguments, no hashes; local-only, never
+telemetry). Correlate via the `X-Request-Id` response header and
+`mcpproxy activity list --request-id <id>`.
+
+**Hash pins** (`pin_hash`): format `sha256/v{N}:{hex}`. The hash schema version
+is embedded so a proxy-side hash-algorithm bump is distinguishable from genuine
+upstream drift (both report `hash_mismatch`, with different `detail`). Current
+pins are discoverable on ready preflight results and on the operator-tier tool
+listings above.
 
 ### Registries
 
@@ -1008,7 +1160,7 @@ List activity records with filtering and pagination.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `type` | string | Filter by type: `tool_call`, `policy_decision`, `quarantine_change`, `server_change` |
+| `type` | string | Filter by type: `tool_call`, `policy_decision`, `quarantine_change`, `server_change`, `preflight` |
 | `server` | string | Filter by server name |
 | `tool` | string | Filter by tool name |
 | `session_id` | string | Filter by MCP session ID |
