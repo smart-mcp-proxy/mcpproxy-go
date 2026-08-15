@@ -184,7 +184,7 @@ Preflight answers with different candor depending on who is asking:
 
 The agent-token behavior is deliberate **scope-silence**: an out-of-scope probe learns nothing — not even that the server exists. `did_you_mean` suggestions (nearest-name, up to 3) are computed over the caller-visible index only and never name a quarantined server's tools. See [Agent Tokens](./agent-tokens.md) and [Profiles](./profiles.md).
 
-A token's evaluation scope is the intersection of its `allowed_servers`, its `profile_pin`, and any `profile` in the request — so naming another profile can only narrow it. If the pinned profile has since been **deleted**, the scope becomes deny-all and every id answers `not_found`: the pin is a restriction the operator applied, and losing the profile it names must never hand the token a wider view than it had before. Re-mint the token (or re-create the profile) to restore it.
+A token's evaluation scope is the intersection of its `allowed_servers`, its `profile_pin`, and any `profile` in the request — so naming another profile can only narrow it. If the pinned profile has since been **deleted**, the scope becomes deny-all and every id answers `not_found`: the pin is a restriction the operator applied, and losing the profile it names must never hand the token a wider view than it had before. The live MCP session path resolves the same way — a preflight's `not_found` for a stale pin is never a false alarm the session would contradict. Re-mint the token (or re-create the profile) to restore it.
 
 ## Transparency: every preflight is on the record
 

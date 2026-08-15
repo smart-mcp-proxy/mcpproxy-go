@@ -1526,9 +1526,16 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// servers' tools, so switching costs no re-index. The shared index remains
 	// the allow-all fallback; profileScope still post-filters as defense in depth
 	// (and covers the fallback path below).
+	//
+	// A deny-all scope (an empty profile, or the scope a stale agent-token pin
+	// resolves to) deliberately skips ForProfile: that call lazily CREATES and
+	// caches an on-disk per-profile index, so honoring it would let a request
+	// that is allowed to see nothing leave a new index directory behind — for a
+	// profile that may no longer exist. The post-filter below returns the same
+	// empty result set from the shared index.
 	profileName, profileScope := p.resolveActiveProfile(ctx)
 	searchIndex := p.index
-	if profileName != "" {
+	if profileName != "" && !profileScope.DeniesAll() {
 		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
 			searchIndex = pIdx
 		} else if perr != nil {

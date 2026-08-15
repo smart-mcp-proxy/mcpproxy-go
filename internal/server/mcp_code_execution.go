@@ -13,7 +13,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -247,35 +246,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	}
 
 	// Spec 057 (Codex #621 finding 2): Intersect profile scope into code_execution.
-	// The jsruntime treats an empty AllowedServers as "allow all"; at a profile URL
-	// we must restrict to profile servers regardless of what the caller supplied.
-	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil {
-		// A profile is active: enforce its effective server set even when empty.
-		// A deny-all profile (servers: []) or a non-overlapping token∩profile
-		// yields an EMPTY allow-list, which the jsruntime would otherwise treat
-		// as "allow all" — leaking every server. RestrictToAllowed closes that.
-		options.RestrictToAllowed = true
-		// Build the effective allowed-servers list: profile servers only.
-		// If the caller also supplied allowed_servers, intersect the two sets.
-		profileServers := profileScope.AllowedServerNames()
-		if len(options.AllowedServers) == 0 {
-			// No caller-supplied restriction: use profile servers as the restriction.
-			options.AllowedServers = profileServers
-		} else {
-			// Intersect caller-supplied list with profile servers.
-			profileSet := make(map[string]struct{}, len(profileServers))
-			for _, s := range profileServers {
-				profileSet[s] = struct{}{}
-			}
-			var intersected []string
-			for _, s := range options.AllowedServers {
-				if _, ok := profileSet[s]; ok {
-					intersected = append(intersected, s)
-				}
-			}
-			options.AllowedServers = intersected
-		}
-	}
+	p.applyProfileScopeToExecution(ctx, &options)
 
 	// Execute code
 	p.logger.Info("executing code",
@@ -976,6 +947,53 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 			zap.String("record_id", record.ID),
 		)
 	}
+}
+
+// applyProfileScopeToExecution intersects the request's ACTIVE profile into the
+// sandbox's allow-list (Spec 057, Codex #621 finding 2).
+//
+// It resolves through resolveActiveProfile — token pin > /mcp/p/<slug> URL >
+// session set_profile — rather than reading the URL-injected scope alone. The
+// URL-only read was a scope hole: a profile-pinned agent token connected to the
+// base /mcp endpoint carried no URL scope, so the sandbox ran under the token's
+// full server scope and could call straight past its pin, including a stale pin
+// that every other session path now answers deny-all.
+//
+// The jsruntime treats an empty AllowedServers as "allow all", so an active
+// profile ALWAYS sets RestrictToAllowed: a deny-all profile, a stale pin, or a
+// non-overlapping token∩profile must yield an empty allow-list that denies
+// everything rather than leaking every server.
+func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, options *jsruntime.ExecutionOptions) {
+	if options == nil {
+		return
+	}
+	_, profileScope := p.resolveActiveProfile(ctx)
+	if profileScope == nil {
+		return
+	}
+
+	options.RestrictToAllowed = true
+	profileServers := profileScope.AllowedServerNames()
+	if len(options.AllowedServers) == 0 {
+		// No caller-supplied restriction: the profile is the restriction.
+		// AllowedServerNames returns a non-nil empty slice for a deny-all
+		// scope, which RestrictToAllowed then enforces as "nothing".
+		options.AllowedServers = profileServers
+		return
+	}
+
+	// Intersect the caller-supplied list with the profile's servers.
+	profileSet := make(map[string]struct{}, len(profileServers))
+	for _, s := range profileServers {
+		profileSet[s] = struct{}{}
+	}
+	intersected := make([]string, 0, len(options.AllowedServers))
+	for _, s := range options.AllowedServers {
+		if _, ok := profileSet[s]; ok {
+			intersected = append(intersected, s)
+		}
+	}
+	options.AllowedServers = intersected
 }
 
 // lookupToolPermission returns the required permission tier for a tool based on its annotations.

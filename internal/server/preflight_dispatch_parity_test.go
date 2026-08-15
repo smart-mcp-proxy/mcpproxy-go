@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -385,4 +386,66 @@ func TestDispatchKeepsLockMessagePreferenceForDisabledPendingTool(t *testing.T) 
 	assert.False(t, gate.callable())
 	assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
 	assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class)
+}
+
+// Scope parity: the session (MCP) path and the preflight path must answer a
+// STALE agent-token profile_pin the same way — deny-all, not "fall back to the
+// token's own scope". Preflight has intersected to deny-all since spec 098
+// (resolvePreflightScope); this asserts the live session path agrees, so an
+// agent cannot reach through /mcp what a preflight tells it it cannot have.
+func TestStaleTokenPinDeniesOnBothSessionAndPreflightPaths(t *testing.T) {
+	fixture := newPreflightFixture(t, func(cfg *config.Config) {
+		cfg.Profiles = []config.ProfileConfig{{Name: "ops", Servers: []string{"gh"}}}
+	})
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: true, Protocol: "http"})
+	fixture.addServer(t, &config.ServerConfig{Name: "secret", Enabled: true, Protocol: "http"})
+	fixture.indexTool(t, "gh", "create_issue")
+	fixture.indexTool(t, "secret", "exfiltrate")
+
+	// A token scoped to BOTH servers but pinned to "ops" (gh only): the pin is
+	// the narrowing under test.
+	authCtx := &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "agent-1",
+		ProfilePin:     "ops",
+		AllowedServers: []string{"gh", "secret"},
+	}
+	ctx := auth.WithAuthContext(context.Background(), authCtx)
+	params := preflight.Params{
+		Tools:           []preflight.ToolRef{{ID: "gh:create_issue"}, {ID: "secret:exfiltrate"}},
+		Tier:            preflight.TierAgentToken,
+		TokenProfilePin: "ops",
+		TokenServers:    []string{"gh", "secret"},
+	}
+
+	// Baseline: while "ops" exists both paths allow gh and deny secret.
+	visible, _ := fixture.proxy.toolVisibleToSession(ctx, "gh", "create_issue")
+	assert.True(t, visible, "session path: the pinned profile's server is visible")
+	visible, reason := fixture.proxy.toolVisibleToSession(ctx, "secret", "exfiltrate")
+	assert.False(t, visible)
+	assert.Equal(t, visReasonServerNotInScope, reason)
+
+	out, err := fixture.proxy.RunPreflight(ctx, params)
+	require.NoError(t, err)
+	assert.Equal(t, preflight.StatusReady, resultByID(t, out, "gh:create_issue").Status)
+	assert.Equal(t, preflight.ReasonNotFound, resultByID(t, out, "secret:exfiltrate").Reason)
+
+	// The operator deletes the pinned profile. Neither path may widen.
+	fixture.cfg.Profiles = nil
+
+	for _, id := range []struct{ server, tool string }{{"gh", "create_issue"}, {"secret", "exfiltrate"}} {
+		visible, reason := fixture.proxy.toolVisibleToSession(ctx, id.server, id.tool)
+		assert.False(t, visible, "session path: %s:%s must be denied under a stale pin", id.server, id.tool)
+		assert.Equal(t, visReasonServerNotInScope, reason)
+
+		_, scope := fixture.proxy.resolveActiveProfile(ctx)
+		require.NotNil(t, scope)
+		vis, _ := fixture.proxy.indexedToolVisible(authCtx, scope, id.server, id.tool)
+		assert.False(t, vis, "search path: %s:%s must be denied under a stale pin", id.server, id.tool)
+	}
+
+	out, err = fixture.proxy.RunPreflight(ctx, params)
+	require.NoError(t, err)
+	assert.Equal(t, preflight.ReasonNotFound, resultByID(t, out, "gh:create_issue").Reason)
+	assert.Equal(t, preflight.ReasonNotFound, resultByID(t, out, "secret:exfiltrate").Reason)
 }
