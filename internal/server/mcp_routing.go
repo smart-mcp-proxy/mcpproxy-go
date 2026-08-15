@@ -175,6 +175,18 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			requestID = mintActivityRequestID(serverName, toolName)
 		}
 
+		// Spec 057 / Profiles v2: the active profile (token pin > URL > session
+		// set_profile) gates direct-mode dispatch exactly as it gates
+		// call_tool_* (mcp.go handleCallToolVariant). It runs independently of
+		// the agent-token gates below so an unauthenticated /mcp/p/<slug>
+		// connection is filtered too, and it runs FIRST so a profile-pinned
+		// token cannot reach a server outside its pin through this routing mode.
+		if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+			errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
+			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+
 		// Check auth context for server access and permissions
 		authCtx := auth.AuthContextFromContext(ctx)
 		if authCtx != nil {

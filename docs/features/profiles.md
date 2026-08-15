@@ -60,8 +60,8 @@ The `set_profile` MCP tool switches the active profile **inside a live session**
 ```
 
 - The selection is keyed by the MCP session id (stable per streamable-HTTP / SSE connection) and persists for the lifetime of that session.
-- It applies to subsequent `retrieve_tools`, `call_tool_*`, and `code_execution` calls on the base `/mcp` endpoint — `retrieve_tools` searches the profile's per-profile index directly.
-- Passing an empty string (`""`) clears the selection and returns to all servers (the result lists every configured server).
+- It applies to subsequent `retrieve_tools`, `call_tool_*`, `code_execution` and direct-mode (`server__tool`) calls on the base `/mcp` endpoint — `retrieve_tools` searches the profile's per-profile index directly.
+- Passing an empty string (`""`) clears the selection and returns to all servers (the result lists every configured server). A token with a [`profile_pin`](./agent-tokens.md#profile-pinning) keeps its pin — the result then lists the pinned profile's servers, since that is what the session can still reach.
 - An unknown slug is rejected: `unknown profile '<slug>' (available: research, deploy)`.
 - Session state is cleared automatically on session close.
 
@@ -73,12 +73,12 @@ When more than one source could select a profile, the effective profile for a re
 
 | # | Source | Scope |
 |---|--------|-------|
-| 1 | Agent-token `profile_pin` | Server-enforced, immutable for the connection. *(Hook reserved for Profiles v2 T3; inert until then.)* |
+| 1 | Agent-token [`profile_pin`](./agent-tokens.md#profile-pinning) | Server-enforced, immutable for the connection. If the pinned profile has been deleted, the request resolves to a **deny-all** scope rather than falling to the tiers below. |
 | 2 | URL `/mcp/p/<slug>` | Explicit and authoritative **for that request** — overrides the session default. |
 | 3 | `set_profile` session selection | The default for the base `/mcp` endpoint for the session lifetime. |
 | 4 | None | No filtering (admin / all servers). |
 
-So a request that arrives via `/mcp/p/<other>` is scoped to `<other>` even if the session previously ran `set_profile`; a session selection that no longer matches any configured profile is treated as stale and dropped.
+So a request that arrives via `/mcp/p/<other>` is scoped to `<other>` even if the session previously ran `set_profile`; a session selection that no longer matches any configured profile is treated as stale and dropped. A stale **token pin** is not dropped the same way — a pin is a restriction an operator applied to a credential, so it fails closed (deny-all) instead of widening back to the token's own scope.
 
 ## REST API
 

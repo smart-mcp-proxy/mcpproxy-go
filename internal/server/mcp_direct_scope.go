@@ -43,20 +43,30 @@ func (p *MCPProxyServer) lookupDirectToolPermission(directName string) (string, 
 	return perm, ok
 }
 
-// filterDirectModeToolsForAuth filters tools/list for scoped agent tokens.
+// filterDirectModeToolsForAuth filters tools/list for scoped agent tokens and
+// for any request with an active profile.
 //
 // Direct mode registers upstream tools globally as server__tool. Without this
 // filter, scoped agent tokens prevent execution but still disclose tool names,
 // descriptions, and schemas for servers outside their scope. Call-time auth is
 // still authoritative; this filter only removes tools that the current token
 // could not call from discovery responses.
+//
+// The profile filter (Spec 057) is applied to EVERY auth type, not just agent
+// tokens: an unauthenticated /mcp/p/<slug> connection runs as an admin context
+// yet must still be profile-filtered, exactly as it is on the retrieve_tools
+// path (see indexedToolVisible). Direct mode previously honored no profile at
+// all — a profile-pinned token saw and could call every server in its token
+// scope — so the pin was enforced on one routing mode and not the other.
 func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
 	if len(tools) == 0 {
 		return tools
 	}
 
 	authCtx := auth.AuthContextFromContext(ctx)
-	if authCtx == nil || authCtx.Type != auth.AuthTypeAgent {
+	_, profileScope := p.resolveActiveProfile(ctx)
+	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	if !isScopedAgent && profileScope == nil {
 		return tools
 	}
 
@@ -64,6 +74,15 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 	for _, tool := range tools {
 		serverName, _, ok := ParseDirectToolName(tool.Name)
 		if !ok {
+			filtered = append(filtered, tool)
+			continue
+		}
+
+		if !profileScope.Allows(serverName) {
+			continue
+		}
+
+		if !isScopedAgent {
 			filtered = append(filtered, tool)
 			continue
 		}
