@@ -539,12 +539,14 @@ func TestEvaluate_NoRuntimeEntryMakesNoConnectionClaim(t *testing.T) {
 	assert.Equal(t, StatusReady, res[0].Status)
 }
 
-// …but when the reader is AUTHORITATIVE (every configured server has an entry,
-// which is what the served snapshot guarantees), a missing entry means the
-// process cannot see the runtime. FR-005 lets `not_found` — and `ready` all the
-// more — be stated only from a view that establishes the server is Ready, so
-// the evaluation refuses instead of answering from a gap.
-func TestEvaluate_AuthoritativeSnapshotRefusesOnMissingEntry(t *testing.T) {
+// …but when the reader is AUTHORITATIVE (the served snapshot), a missing entry
+// for a configured server means its state has not been PUBLISHED yet: the
+// stateview starts empty and fills per-server asynchronously (first supervisor
+// reconcile ~500ms), so startup / reconcile / config-add windows legitimately
+// hit this. FR-005 forbids answering ready/not_found from that gap, and a 503
+// would be dishonest too (the runtime is fine, just not caught up) — the
+// answer is the retryable server_initializing verdict.
+func TestEvaluate_AuthoritativeSnapshotAnswersInitializingOnMissingEntry(t *testing.T) {
 	tests := []struct {
 		name  string
 		world func() *world
@@ -589,14 +591,17 @@ func TestEvaluate_AuthoritativeSnapshotRefusesOnMissingEntry(t *testing.T) {
 			ec := tc.world().ctx()
 			ec.RequireRuntimeEntry = true
 
-			_, err := Evaluate(context.Background(), ec, []ToolRef{{ID: id}})
-			require.ErrorIs(t, err, ErrRuntimeUnavailable)
-			require.Contains(t, err.Error(), srv)
+			results, err := Evaluate(context.Background(), ec, []ToolRef{{ID: id}})
+			require.NoError(t, err, "an unpublished entry is a verdict, never an infrastructure error")
+			require.Len(t, results, 1)
+			assert.Equal(t, ReasonServerInitializing, results[0].Reason)
+			assert.True(t, results[0].Retryable)
+			assert.Contains(t, results[0].Detail, "no published connection state")
 		})
 	}
 
 	// The server-level gates still answer before the connection gate is reached,
-	// so a disabled or unconfigured server does not become a 503.
+	// so a disabled or unconfigured server keeps its own reason.
 	for _, tc := range []struct {
 		name   string
 		world  *world

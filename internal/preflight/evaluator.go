@@ -132,19 +132,18 @@ type EvalContext struct {
 	// Pins maps a requested id to its pin string, for callers that carry pins
 	// separately from the refs. A ToolRef.PinHash always wins over this map.
 	Pins map[string]string
-	// RequireRuntimeEntry says the State reader is an AUTHORITATIVE snapshot:
-	// every configured server has an entry in it, so a missing entry means the
-	// process cannot see the runtime rather than "this server has no state".
-	//
-	// The served surface sets it (the glue only builds an EvalContext once it
-	// holds a real stateview snapshot). It then refuses with
-	// ErrRuntimeUnavailable instead of answering ready/not_found from a view
-	// that cannot establish the server is Ready — FR-005 permits not_found only
-	// from an authoritative Ready view, and `ready` states even more.
+	// RequireRuntimeEntry says the State reader is the served, authoritative
+	// snapshot. A configured server missing from it is state that has not been
+	// PUBLISHED yet (the stateview starts empty and fills per-server
+	// asynchronously — startup, first reconcile, config-add windows), so the
+	// evaluator answers the retryable server_initializing verdict instead of
+	// claiming ready/not_found from the gap (FR-005) — and instead of a 503,
+	// which would misreport a healthy-but-not-caught-up runtime as broken.
 	//
 	// It stays false for pure-unit evaluations, which legitimately run with a
 	// nil or partial StateReader and expect the evaluator to make no connection
-	// claim at all.
+	// claim at all. ErrRuntimeUnavailable remains the GLUE's refusal for a
+	// runtime that is wired but has no stateview snapshot object at all.
 	RequireRuntimeEntry bool
 }
 
@@ -390,20 +389,20 @@ func classDetail(class ToolClass, serverName, toolName string) string {
 // for a server it has already established is configured, enabled and in scope.
 // What that licenses depends on how authoritative the reader is:
 //
-//   - RequireRuntimeEntry (the served surface): the snapshot claims to cover
-//     every configured server, so a gap is a broken runtime view, not a quiet
-//     server. Answering `ready` or `not_found` there would state per-tool
-//     knowledge nothing established (FR-005), so it errors and the surface
-//     answers 503 (FR-006).
+//   - RequireRuntimeEntry (the served surface): the snapshot fills per-server
+//     asynchronously, so a gap is state that has not been PUBLISHED yet
+//     (startup / reconcile / config-add windows). Answering `ready` or
+//     `not_found` there would state per-tool knowledge nothing established
+//     (FR-005), so it answers the retryable server_initializing verdict.
 //   - otherwise (pure-unit evaluations): no claim at all — absence of runtime
 //     information is not evidence of ill health.
 func connectionVerdict(ec *EvalContext, id, serverName string) (Result, bool, error) {
 	if ec.State == nil {
-		return Result{}, false, runtimeEntryError(ec, serverName)
+		return runtimeEntryVerdict(ec, id, serverName)
 	}
 	rt, found := ec.State.ServerRuntime(serverName)
 	if !found {
-		return Result{}, false, runtimeEntryError(ec, serverName)
+		return runtimeEntryVerdict(ec, id, serverName)
 	}
 
 	switch rt.State {
@@ -441,21 +440,28 @@ func connectionVerdict(ec *EvalContext, id, serverName string) (Result, bool, er
 	case RuntimeStateUnknown:
 		// The reader answered found=true with a state it could not map. That is
 		// the same absence of evidence a missing entry is.
-		return Result{}, false, runtimeEntryError(ec, serverName)
+		return runtimeEntryVerdict(ec, id, serverName)
 
 	default:
-		return Result{}, false, runtimeEntryError(ec, serverName)
+		return runtimeEntryVerdict(ec, id, serverName)
 	}
 }
 
-// runtimeEntryError is the refusal for "no usable connection state for a server
-// the caller is entitled to a verdict on" — nil unless the reader claimed to be
-// authoritative.
-func runtimeEntryError(ec *EvalContext, serverName string) error {
+// runtimeEntryVerdict answers "no usable connection state for a configured
+// server". Under an authoritative snapshot this is NOT an infrastructure
+// failure: the stateview publishes an empty snapshot at startup and fills
+// per-server asynchronously (first supervisor reconcile ~500ms; entries land
+// individually), so a missing entry is simply state that has not been
+// published YET — the honest verdict is the retryable server_initializing,
+// never a 503 and never a ready/not_found claim (FR-005). Without the
+// authoritative contract (pure-unit evaluations) the evaluator makes no
+// connection-state claim at all.
+func runtimeEntryVerdict(ec *EvalContext, id, serverName string) (Result, bool, error) {
 	if !ec.RequireRuntimeEntry {
-		return nil
+		return Result{}, false, nil
 	}
-	return fmt.Errorf("%w: no connection state for configured server %q", ErrRuntimeUnavailable, serverName)
+	return unavailable(id, ReasonServerInitializing,
+		fmt.Sprintf("Server %q has no published connection state yet (startup or reconcile in progress).", serverName)), true, nil
 }
 
 // normalizeHealthAction accepts only the existing health-action vocabulary for

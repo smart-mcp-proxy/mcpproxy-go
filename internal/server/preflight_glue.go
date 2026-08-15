@@ -75,11 +75,12 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 		Tier:      tier,
 		Scope:     scope,
 		Filters:   params.Filters,
-		// The stateview covers every configured server (the supervisor's
-		// reconcile writes one entry per config server), so with a real snapshot
-		// in hand a missing entry is a broken runtime view rather than a quiet
-		// server — and the evaluator must refuse instead of answering
-		// ready/not_found without an authoritative Ready view (FR-005).
+		// With a real snapshot in hand, a configured server missing from it is
+		// state the supervisor has not published yet (startup / reconcile /
+		// config-add windows) — the evaluator answers the retryable
+		// server_initializing verdict instead of ready/not_found (FR-005).
+		// The 503 refusal (ErrRuntimeUnavailable) is reserved for a wired
+		// runtime with no snapshot object at all (preflightSnapshot above).
 		RequireRuntimeEntry: state != nil,
 	}
 
