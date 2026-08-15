@@ -173,7 +173,7 @@ about anecdotes.
 
 | Field | Type | What it counts |
 |-------|------|----------------|
-| `preflight.filter_diag_emitted_24h` | non-negative integer | `retrieve_tools` responses that carried a `filter_diagnostics` block in the last 24h — the denominator for the rest |
+| `preflight.filter_diag_emitted_24h` | non-negative integer | `retrieve_tools` responses that **delivered** a `filter_diagnostics` block in the last 24h — the denominator for the rest. Counted after response truncation, so a block that `tool_response_limit` cut back out of the payload is not counted (and cannot be "followed") |
 | `preflight.filter_diag_missing_annotation_24h` | non-negative integer | Omissions in those blocks caused by **absent upstream annotations** ("fix the server" class), summed across filters |
 | `preflight.filter_diag_explicit_24h` | non-negative integer | Omissions caused by an **explicitly unsafe hint** ("the filter is working" class), summed across filters |
 | `preflight.filter_diag_followed_24h` | non-negative integer | Blocks the agent **acted on**: a later `retrieve_tools` call in the same MCP session dropped or relaxed a filter the block blamed |

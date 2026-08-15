@@ -1477,8 +1477,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// retrieve_tools call in this session was handed a spec-094 diagnostics
 	// block, this call counts as "followed" when it dropped or relaxed at least
 	// one of the filters that block blamed. The note is consumed either way, so
-	// one block can be followed at most once. Evaluated here — before this
-	// call can write a note of its own — and never blocks the request.
+	// one block can be followed at most once. Evaluated here — before this call
+	// can write a note of its own. The lookup itself is an in-memory map read
+	// under a dedicated mutex; only the rare positive result reaches the
+	// counter store, whose write shares the cost profile of the activation
+	// counters this handler already bumps unconditionally above.
 	if p.consumeFilterDiagFollowUp(sessionID,
 		activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld), startTime) {
 		p.recordFilterDiagnosticsFollowed()
@@ -1759,12 +1762,6 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// to the pre-feature one.
 	if filterDiag != nil && filterDiag.OmittedTotal >= 1 {
 		response["filter_diagnostics"] = filterDiag
-
-		// Issue #969 (Phase 0): baseline engagement counters, hooked at the
-		// ATTACH site so "emitted" means "the agent actually received a block".
-		// Counts only; the note is in-memory and identity-free.
-		p.recordFilterDiagnosticsEmitted(filterDiag)
-		p.noteFilterDiagnostics(sessionID, filterDiag, startTime)
 	}
 
 	// Spec 085 (FR-009): compact responses carry one deterministic hint line
@@ -1908,6 +1905,19 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			zap.Int("tools", len(mcpTools)),
 			zap.Int("full_bytes", len(jsonResult)),
 		)
+	}
+
+	// Issue #969 (Phase 0): baseline engagement counters. Hooked HERE, after
+	// truncation, rather than at the attach site: tool_response_limit can cut
+	// the block back out of the payload (SimpleTruncate is a plain tail cut),
+	// and a block the agent never received is neither an emission to count nor
+	// something a later call can "follow". `emitted` is the denominator the
+	// followed/emitted ratio divides by, so overcounting it would silently
+	// understate engagement — the one number these counters exist to measure.
+	// Counts only; the note is in-memory and identity-free.
+	if filterDiag != nil && filterDiag.OmittedTotal >= 1 && filterDiagnosticsSurvived(text, wasTruncated) {
+		p.recordFilterDiagnosticsEmitted(filterDiag)
+		p.noteFilterDiagnostics(sessionID, filterDiag, startTime)
 	}
 
 	// Emit success event with args and response (Spec 024). The FULL response

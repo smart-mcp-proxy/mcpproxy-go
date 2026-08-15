@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
@@ -128,6 +130,158 @@ func TestFilterDiagNotes_Bounded(t *testing.T) {
 		p.noteFilterDiagnostics(sid, diagBlaming(filterKeyReadOnlyOnly), base.Add(time.Duration(i)*time.Millisecond))
 	}
 	require.LessOrEqual(t, len(p.filterDiagNotes), maxFilterDiagNotes)
+}
+
+// Concurrent retrieve_tools calls in ONE session can complete out of order.
+// The note the agent most recently received must win, so a LATE-finishing
+// earlier call may not clobber it (opencode review, round 1, finding 3).
+func TestFilterDiagNotes_StaleWriteDoesNotClobberNewer(t *testing.T) {
+	p := &MCPProxyServer{}
+	base := time.Now()
+
+	// Call B (started later) lands first, then call A (started earlier) lands.
+	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyExcludeDestruct), base.Add(time.Second))
+	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), base)
+
+	p.filterDiagMu.Lock()
+	note := p.filterDiagNotes["sess-1"]
+	p.filterDiagMu.Unlock()
+	require.Equal(t, []string{filterKeyExcludeDestruct}, note.filters,
+		"the newer note must survive the late-landing older write")
+	require.True(t, note.at.Equal(base.Add(time.Second)),
+		"the newer timestamp must survive, else the TTL expires early")
+
+	// The follow-up is therefore judged against the filters the agent actually
+	// saw last: dropping exclude_destructive counts.
+	require.True(t, p.consumeFilterDiagFollowUp("sess-1",
+		[]string{filterKeyReadOnlyOnly}, base.Add(2*time.Second)))
+}
+
+// Refreshing a session that ALREADY has a note cannot grow the map, so it must
+// not evict an unrelated session's still-eligible note (finding 4).
+func TestFilterDiagNotes_RefreshAtCapacityEvictsNothing(t *testing.T) {
+	p := &MCPProxyServer{}
+	base := time.Now()
+
+	// Fill exactly to capacity; sess-0 is the oldest and therefore the entry a
+	// capacity eviction would take.
+	for i := 0; i < maxFilterDiagNotes; i++ {
+		p.noteFilterDiagnostics(fmt.Sprintf("sess-%d", i),
+			diagBlaming(filterKeyReadOnlyOnly), base.Add(time.Duration(i)*time.Millisecond))
+	}
+	require.Len(t, p.filterDiagNotes, maxFilterDiagNotes)
+
+	// The NEWEST session gets a second diagnostics block. This replaces its own
+	// key, so nothing needs to be evicted.
+	newest := fmt.Sprintf("sess-%d", maxFilterDiagNotes-1)
+	p.noteFilterDiagnostics(newest, diagBlaming(filterKeyExcludeDestruct), base.Add(time.Hour))
+
+	require.Len(t, p.filterDiagNotes, maxFilterDiagNotes)
+	p.filterDiagMu.Lock()
+	_, oldestSurvived := p.filterDiagNotes["sess-0"]
+	p.filterDiagMu.Unlock()
+	require.True(t, oldestSurvived,
+		"replacing an existing key must not cost an unrelated session its note")
+}
+
+// The consume side has the same out-of-order hazard as the write side: a call
+// that STARTED before the note was written cannot be a reaction to it, so it
+// must neither count itself as a follow-up nor destroy the note the genuinely
+// later call still needs (opencode review, round 2, finding 2).
+func TestFilterDiagFollowUp_EarlierCallCannotConsumeNewerNote(t *testing.T) {
+	p := &MCPProxyServer{}
+	base := time.Now()
+
+	// Call B is handed the block at base+1s.
+	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), base.Add(time.Second))
+
+	// Call A started at base — before that block existed — and drops the
+	// blamed filter for unrelated reasons. It must not count.
+	require.False(t, p.consumeFilterDiagFollowUp("sess-1", nil, base),
+		"a call that predates the block cannot be a reaction to it")
+
+	// And the note must still be there for the call that genuinely follows.
+	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, base.Add(2*time.Second)),
+		"the stale call must not have consumed the note")
+}
+
+// A block that tool_response_limit cut back out of the payload was never
+// received, so it is neither an emission nor something a later call can follow
+// (opencode review, round 2, finding 3).
+func TestFilterDiagnosticsSurvived(t *testing.T) {
+	withBlock := `{"filter_diagnostics":{"omitted_total":3},"tools":[]}`
+	cutAway := `{"tools":[{"name":"a"}]}... [truncated]`
+
+	// Untruncated responses always carry what was attached — no scan needed.
+	require.True(t, filterDiagnosticsSurvived(cutAway, false),
+		"an untruncated response carries the block the handler attached")
+
+	require.True(t, filterDiagnosticsSurvived(withBlock, true),
+		"truncation that preserved the block still counts as emitted")
+	require.False(t, filterDiagnosticsSurvived(cutAway, true),
+		"a block truncated out of the payload was never delivered")
+}
+
+// --- direct-mode block reason classification (finding 5) ---
+
+// Direct mode funnels every callability block through ONE emit site. The reason
+// key must still come from what actually fired, or the whole availability
+// reason distribution collapses into tool_not_callable.
+func TestDirectBlockReasonKey_ClassifiesPerGate(t *testing.T) {
+	quarantined := directCallabilityDecision{
+		serverConfig: &config.ServerConfig{Name: "github", Enabled: true, Quarantined: true},
+	}
+	require.Equal(t, telemetry.BlockReasonServerQuarantined, directBlockReasonKey(quarantined))
+
+	pending := directCallabilityDecision{
+		serverConfig:   &config.ServerConfig{Name: "github", Enabled: true},
+		approvalStatus: storage.ToolApprovalStatusPending,
+	}
+	require.Equal(t, telemetry.BlockReasonToolPendingApproval, directBlockReasonKey(pending))
+
+	changed := directCallabilityDecision{
+		serverConfig:   &config.ServerConfig{Name: "github", Enabled: true},
+		approvalStatus: storage.ToolApprovalStatusChanged,
+	}
+	require.Equal(t, telemetry.BlockReasonToolChanged, directBlockReasonKey(changed))
+
+	disabled := directCallabilityDecision{
+		serverConfig: &config.ServerConfig{Name: "github", Enabled: false},
+	}
+	require.Equal(t, telemetry.BlockReasonToolNotCallable, directBlockReasonKey(disabled))
+
+	// Every key the classifier can produce is a member of the closed enum, so a
+	// direct-mode block can never land in the "other" overflow bucket.
+	for _, d := range []directCallabilityDecision{quarantined, pending, changed, disabled} {
+		require.True(t, telemetry.IsAvailabilityBlockReason(directBlockReasonKey(d)))
+	}
+}
+
+// The reason travels with the block result, so the routing handler emits the
+// key that matches the gate that fired.
+func TestDirectToolCallabilityBlockWithReason_Quarantine(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "github", Enabled: true, Quarantined: true,
+	}))
+
+	result, reasonKey := proxy.directToolCallabilityBlockWithReason(
+		context.Background(), "github", "list_repos", map[string]interface{}{})
+	require.NotNil(t, result)
+	require.Equal(t, telemetry.BlockReasonServerQuarantined, reasonKey)
+}
+
+// A callable tool yields no block and no reason key.
+func TestDirectToolCallabilityBlockWithReason_CallableIsSilent(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "github", Enabled: true,
+	}))
+
+	result, reasonKey := proxy.directToolCallabilityBlockWithReason(
+		context.Background(), "github", "list_repos", map[string]interface{}{})
+	require.Nil(t, result)
+	require.Empty(t, reasonKey)
 }
 
 // --- end-to-end through retrieve_tools ---

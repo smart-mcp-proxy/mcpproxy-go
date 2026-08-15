@@ -2,6 +2,7 @@ package server
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,21 @@ func (p *MCPProxyServer) recordAvailabilityBlock(reason string) {
 		return
 	}
 	p.mainServer.runtime.RecordAvailabilityBlock(reason)
+}
+
+// filterDiagnosticsResponseKey is the response key the spec-094 block is
+// attached under. Used to confirm the block survived response truncation.
+const filterDiagnosticsResponseKey = `"filter_diagnostics"`
+
+// filterDiagnosticsSurvived reports whether the diagnostics block is still in
+// the payload the agent will actually receive. An untruncated response always
+// carries it (the caller only asks when it was attached), so the string search
+// is confined to the truncated path and never runs on the common case.
+func filterDiagnosticsSurvived(deliveredText string, wasTruncated bool) bool {
+	if !wasTruncated {
+		return true
+	}
+	return strings.Contains(deliveredText, filterDiagnosticsResponseKey)
 }
 
 // --- filter-diagnostics follow-through, per session ---
@@ -117,6 +133,23 @@ func (p *MCPProxyServer) noteFilterDiagnostics(sessionID string, diag *filterDia
 	if p.filterDiagNotes == nil {
 		p.filterDiagNotes = make(map[string]filterDiagNote)
 	}
+
+	// Two retrieve_tools calls of one session can be in flight at once and
+	// finish out of order, so an EARLIER call may land here after a later one.
+	// The note must describe the block the agent most recently received:
+	// letting the stale write win would both compare the next call against the
+	// wrong filter set and back-date the TTL, expiring the note early.
+	if prev, exists := p.filterDiagNotes[sessionID]; exists {
+		if !at.After(prev.at) {
+			return
+		}
+		// Replacing an existing key cannot grow the map, so skip the prune —
+		// at capacity it would evict an unrelated session's still-eligible
+		// note to make room that is not needed.
+		p.filterDiagNotes[sessionID] = filterDiagNote{filters: filters, at: at}
+		return
+	}
+
 	p.pruneFilterDiagNotesLocked(at)
 	p.filterDiagNotes[sessionID] = filterDiagNote{filters: filters, at: at}
 }
@@ -137,6 +170,19 @@ func (p *MCPProxyServer) consumeFilterDiagFollowUp(sessionID string, activeKeys 
 	if !ok {
 		return false
 	}
+
+	// Mirror of the write-side ordering guard: overlapping calls in one session
+	// mean this call may have STARTED before the note was written, in which
+	// case the block had not been delivered yet and this call cannot be a
+	// reaction to it. Leave the note for the call that genuinely follows —
+	// consuming it here would both miscount this call and rob the real
+	// follow-up of its one chance. (A negative age also slips past the TTL
+	// check below, which compares an unsigned intent against a signed
+	// duration.)
+	if !at.After(note.at) {
+		return false
+	}
+
 	delete(p.filterDiagNotes, sessionID)
 	if at.Sub(note.at) > filterDiagNoteTTL {
 		return false
