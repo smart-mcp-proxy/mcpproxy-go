@@ -1915,9 +1915,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// followed/emitted ratio divides by, so overcounting it would silently
 	// understate engagement — the one number these counters exist to measure.
 	// Counts only; the note is in-memory and identity-free.
+	//
+	// The note is stamped with DELIVERY time (now), not the request's start
+	// time: overlapping calls in one session can finish out of order, so start
+	// time would order the notes wrongly, and a follow-up can only react to a
+	// block that had already reached the agent.
 	if filterDiag != nil && filterDiag.OmittedTotal >= 1 && filterDiagnosticsSurvived(text, wasTruncated) {
 		p.recordFilterDiagnosticsEmitted(filterDiag)
-		p.noteFilterDiagnostics(sessionID, filterDiag, startTime)
+		p.noteFilterDiagnostics(sessionID, filterDiag, time.Now())
 	}
 
 	// Emit success event with args and response (Spec 024). The FULL response

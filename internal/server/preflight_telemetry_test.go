@@ -205,12 +205,37 @@ func TestFilterDiagFollowUp_EarlierCallCannotConsumeNewerNote(t *testing.T) {
 		"the stale call must not have consumed the note")
 }
 
+// Notes are ordered by DELIVERY time, so a call that started first but returned
+// last correctly owns the note — start time would order these backwards
+// (opencode review, round 3, finding 2).
+func TestFilterDiagNotes_OrderedByDeliveryNotStart(t *testing.T) {
+	p := &MCPProxyServer{}
+	base := time.Now()
+
+	// A started first but delivers last; B started later and delivered first.
+	// The handler stamps each note at delivery, so A's is the newer note.
+	bDelivered := base.Add(1 * time.Second)
+	aDelivered := base.Add(2 * time.Second)
+	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyExcludeDestruct), bDelivered)
+	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), aDelivered)
+
+	p.filterDiagMu.Lock()
+	note := p.filterDiagNotes["sess-1"]
+	p.filterDiagMu.Unlock()
+	require.Equal(t, []string{filterKeyReadOnlyOnly}, note.filters,
+		"the last-DELIVERED block is the one the agent saw last")
+
+	// A call starting after that delivery, having dropped read_only_only,
+	// counts as the follow-up.
+	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, aDelivered.Add(time.Millisecond)))
+}
+
 // A block that tool_response_limit cut back out of the payload was never
 // received, so it is neither an emission nor something a later call can follow
 // (opencode review, round 2, finding 3).
 func TestFilterDiagnosticsSurvived(t *testing.T) {
-	withBlock := `{"filter_diagnostics":{"omitted_total":3},"tools":[]}`
-	cutAway := `{"tools":[{"name":"a"}]}... [truncated]`
+	withBlock := `{"filter_diagnostics":{"omitted_total":3},"tools":[]}` + simpleTruncateNoticeFixture
+	cutAway := `{"tools":[{"name":"a"}]}` + simpleTruncateNoticeFixture
 
 	// Untruncated responses always carry what was attached — no scan needed.
 	require.True(t, filterDiagnosticsSurvived(cutAway, false),
@@ -221,6 +246,42 @@ func TestFilterDiagnosticsSurvived(t *testing.T) {
 	require.False(t, filterDiagnosticsSurvived(cutAway, true),
 		"a block truncated out of the payload was never delivered")
 }
+
+// A cut landing INSIDE the block leaves the key present but its value
+// unterminated. The agent cannot act on that, so it is not an emission
+// (opencode review, round 3, finding 1).
+func TestFilterDiagnosticsSurvived_PartialBlockDoesNotCount(t *testing.T) {
+	// The key survived the byte cut; its object did not.
+	cutMidValue := `{"disabled":[],"filter_diagnostics":{"omitted_total":3,"omitted_by_fil` +
+		simpleTruncateNoticeFixture
+	require.False(t, filterDiagnosticsSurvived(cutMidValue, true),
+		"an unterminated block was never usable by the agent")
+
+	// Nested objects must be balanced all the way out, not just to the first
+	// closing brace.
+	cutInNested := `{"filter_diagnostics":{"omitted_by_filter":{"read_only_only":{"missing_annotation":2}` +
+		simpleTruncateNoticeFixture
+	require.False(t, filterDiagnosticsSurvived(cutInNested, true))
+
+	complete := `{"filter_diagnostics":{"omitted_by_filter":{"read_only_only":{"missing_annotation":2}}},"tools":[` +
+		simpleTruncateNoticeFixture
+	require.True(t, complete != "" && filterDiagnosticsSurvived(complete, true),
+		"the block is complete even though the payload as a whole was cut")
+}
+
+// Braces and quotes inside a JSON string must not unbalance the scan.
+func TestHasCompleteJSONObject_IgnoresBracesInStrings(t *testing.T) {
+	require.True(t, hasCompleteJSONObject(`{"note":"a } brace and a \" quote"}`))
+	require.False(t, hasCompleteJSONObject(`{"note":"unterminated } brace`))
+	require.True(t, hasCompleteJSONObject(`  {"a":1} trailing junk`))
+	require.False(t, hasCompleteJSONObject(`  "not an object"`))
+	require.False(t, hasCompleteJSONObject(``))
+}
+
+// simpleTruncateNoticeFixture mirrors the plain-text notice both truncation
+// paths append. It is why the delivered payload is never parseable JSON as a
+// whole, and therefore why the block is checked on its own.
+const simpleTruncateNoticeFixture = "\n\n... [truncated by mcpproxy, cache not available]"
 
 // --- direct-mode block reason classification (finding 5) ---
 

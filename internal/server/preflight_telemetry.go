@@ -62,15 +62,68 @@ func (p *MCPProxyServer) recordAvailabilityBlock(reason string) {
 // attached under. Used to confirm the block survived response truncation.
 const filterDiagnosticsResponseKey = `"filter_diagnostics"`
 
-// filterDiagnosticsSurvived reports whether the diagnostics block is still in
-// the payload the agent will actually receive. An untruncated response always
-// carries it (the caller only asks when it was attached), so the string search
-// is confined to the truncated path and never runs on the common case.
+// filterDiagnosticsSurvived reports whether the diagnostics block is present
+// AND COMPLETE in the payload the agent will actually receive.
+//
+// Both truncation paths cut the serialized response at a byte offset and append
+// a plain-text notice, so the delivered text is never parseable JSON as a whole
+// — testing the block on its own is the only workable check. Mere key presence
+// is not enough either: a cut landing inside the block leaves the key with an
+// unterminated value, which no agent can act on, so it must not count as an
+// emission. An untruncated response always carries what was attached, so none
+// of this runs on the common path.
 func filterDiagnosticsSurvived(deliveredText string, wasTruncated bool) bool {
 	if !wasTruncated {
 		return true
 	}
-	return strings.Contains(deliveredText, filterDiagnosticsResponseKey)
+	idx := strings.Index(deliveredText, filterDiagnosticsResponseKey)
+	if idx < 0 {
+		return false
+	}
+	rest := deliveredText[idx+len(filterDiagnosticsResponseKey):]
+	colon := strings.IndexByte(rest, ':')
+	if colon < 0 {
+		return false
+	}
+	return hasCompleteJSONObject(rest[colon+1:])
+}
+
+// hasCompleteJSONObject reports whether s opens with a JSON object (after
+// optional whitespace) that is also CLOSED within s. String contents are
+// skipped, so a brace inside a tool description cannot unbalance the scan.
+func hasCompleteJSONObject(s string) bool {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	if i >= len(s) || s[i] != '{' {
+		return false
+	}
+
+	depth := 0
+	inString := false
+	escaped := false
+	for ; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case inString:
+			// Braces inside a JSON string are literal text.
+		case c == '{':
+			depth++
+		case c == '}':
+			depth--
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- filter-diagnostics follow-through, per session ---
@@ -84,7 +137,14 @@ type filterDiagNote struct {
 	// filters are the filter keys the block blamed (filterKeyReadOnlyOnly &c),
 	// sorted so comparisons are order-independent.
 	filters []string
-	at      time.Time
+	// at is when the block was DELIVERED to the agent, not when the request
+	// that produced it started. Overlapping calls in one session can finish out
+	// of order, so start time is not a valid ordering key: the note that must
+	// win is the one for the response the agent saw last. Delivery time is also
+	// the honest origin for the TTL, and it makes the follow-up comparison a
+	// plain causality test — a reaction can only come from a call that started
+	// after the block reached the agent.
+	at time.Time
 }
 
 const (
@@ -115,9 +175,10 @@ func activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld bool) [
 }
 
 // noteFilterDiagnostics remembers that this session was just handed a
-// diagnostics block blaming `diag`'s filters. Sessions without an id (stdio
-// transports that do not mint one) are skipped rather than pooled under "",
-// which would let one client's call count as another's follow-up.
+// diagnostics block blaming `diag`'s filters. `at` is the DELIVERY time of the
+// response carrying the block. Sessions without an id (stdio transports that do
+// not mint one) are skipped rather than pooled under "", which would let one
+// client's call count as another's follow-up.
 func (p *MCPProxyServer) noteFilterDiagnostics(sessionID string, diag *filterDiagnostics, at time.Time) {
 	if sessionID == "" || diag == nil || len(diag.OmittedByFilter) == 0 {
 		return
@@ -134,11 +195,12 @@ func (p *MCPProxyServer) noteFilterDiagnostics(sessionID string, diag *filterDia
 		p.filterDiagNotes = make(map[string]filterDiagNote)
 	}
 
-	// Two retrieve_tools calls of one session can be in flight at once and
-	// finish out of order, so an EARLIER call may land here after a later one.
-	// The note must describe the block the agent most recently received:
-	// letting the stale write win would both compare the next call against the
-	// wrong filter set and back-date the TTL, expiring the note early.
+	// Two retrieve_tools calls of one session can be in flight at once. Because
+	// `at` is delivery time, the later write is by construction the block the
+	// agent saw last — but goroutine scheduling can still land the two writes
+	// here in either order, so the comparison is explicit. Letting an older
+	// delivery win would compare the next call against the wrong filter set and
+	// back-date the TTL, expiring the note early.
 	if prev, exists := p.filterDiagNotes[sessionID]; exists {
 		if !at.After(prev.at) {
 			return
@@ -171,14 +233,12 @@ func (p *MCPProxyServer) consumeFilterDiagFollowUp(sessionID string, activeKeys 
 		return false
 	}
 
-	// Mirror of the write-side ordering guard: overlapping calls in one session
-	// mean this call may have STARTED before the note was written, in which
-	// case the block had not been delivered yet and this call cannot be a
-	// reaction to it. Leave the note for the call that genuinely follows —
-	// consuming it here would both miscount this call and rob the real
-	// follow-up of its one chance. (A negative age also slips past the TTL
-	// check below, which compares an unsigned intent against a signed
-	// duration.)
+	// Causality gate: `at` is when THIS call started and note.at is when the
+	// block was DELIVERED, so a call that started first cannot be reacting to
+	// it. Leave the note for the call that genuinely follows — consuming it
+	// here would both miscount this call and rob the real follow-up of its one
+	// chance. (A negative age also slips past the TTL check below, which
+	// compares it against a positive duration.)
 	if !at.After(note.at) {
 		return false
 	}
