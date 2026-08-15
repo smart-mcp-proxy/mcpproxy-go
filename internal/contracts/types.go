@@ -291,6 +291,17 @@ type Tool struct {
 	HeldReason  string   `json:"held_reason,omitempty"`
 	HeldVerdict string   `json:"held_verdict,omitempty"`
 	HeldSignals []string `json:"held_signals,omitempty"`
+	// Hash is the tool's current stored hash rendered in the preflight pin
+	// format "sha256/v{N}:{hex}" (Spec 098 FR-011), where N is the approval
+	// record's HashSchemaVersion. It is the authoring surface for
+	// `POST /api/v1/preflight` pins and `mcpproxy tools preflight --pin`:
+	// copy the value straight into a pin.
+	//
+	// Disclosure is OPERATOR TIER ONLY — same rule as the preflight per-tool
+	// result. The field is omitted for agent-token callers and for tools with
+	// no stored hash (no approval record yet, or a record written before
+	// hashes existed).
+	Hash string `json:"hash,omitempty"`
 }
 
 // DisabledToolStatus is the single machine-branchable reason a tool exists but
@@ -1212,4 +1223,122 @@ type UpdatePolicy struct {
 	// NudgesSuppressed asks UI surfaces to stay quiet (CI / non-interactive)
 	// while machine-readable fields keep reporting the facts.
 	NudgesSuppressed bool `json:"nudges_suppressed"`
+}
+
+// ---------------------------------------------------------------------------
+// Required-tools preflight (Spec 098)
+//
+// The wire mirror of internal/preflight. The evaluator package owns the
+// semantics (classes, retryability, precedence); these constants exist so the
+// REST DTOs, the OpenAPI spec and the generated TypeScript all name the same
+// values. An anti-drift unit test in internal/preflight asserts the two sets
+// are identical, so a new code cannot land on one side only.
+// ---------------------------------------------------------------------------
+
+// PreflightStatus is the per-tool outcome. `ready` is a success status, not a
+// failure reason: ready results omit reason/retryable/action/detail/remediation.
+type PreflightStatus = string
+
+const (
+	PreflightStatusReady       PreflightStatus = "ready"
+	PreflightStatusUnavailable PreflightStatus = "unavailable"
+)
+
+// PreflightReason is the closed 15-code failure enum (Spec 098 FR-003).
+// Evolution is additive-only; consumers MUST treat an unknown code as
+// non-retryable. `server_saturated` is reserved and deliberately absent.
+type PreflightReason = string
+
+const (
+	PreflightReasonServerInitializing  PreflightReason = "server_initializing"
+	PreflightReasonServerUnhealthy     PreflightReason = "server_unhealthy"
+	PreflightReasonServerDisabled      PreflightReason = "server_disabled"
+	PreflightReasonServerQuarantined   PreflightReason = "server_quarantined"
+	PreflightReasonToolPendingApproval PreflightReason = "tool_pending_approval"
+	PreflightReasonToolChanged         PreflightReason = "tool_changed"
+	PreflightReasonToolBlockedByUser   PreflightReason = "tool_blocked_by_user"
+	PreflightReasonOAuthRequired       PreflightReason = "oauth_required"
+	PreflightReasonHashMismatch        PreflightReason = "hash_mismatch"
+	PreflightReasonServerNotInScope    PreflightReason = "server_not_in_scope"
+	PreflightReasonToolDeniedByConfig  PreflightReason = "tool_denied_by_config"
+	PreflightReasonMissingAnnotation   PreflightReason = "missing_annotation"
+	PreflightReasonPolicyFiltered      PreflightReason = "policy_filtered"
+	PreflightReasonNotFound            PreflightReason = "not_found"
+	PreflightReasonServerNotConfigured PreflightReason = "server_not_configured"
+)
+
+// PreflightVerdict is the set-level aggregate: the worst class present. It
+// drives the CLI exit code (ready 0 < degraded_retryable 10 < blocked 11 <
+// unknown_ids 12).
+type PreflightVerdict = string
+
+const (
+	PreflightVerdictReady             PreflightVerdict = "ready"
+	PreflightVerdictDegradedRetryable PreflightVerdict = "degraded_retryable"
+	PreflightVerdictBlocked           PreflightVerdict = "blocked"
+	PreflightVerdictUnknownIDs        PreflightVerdict = "unknown_ids"
+)
+
+// PreflightToolRef is one requested tool id, optionally hash-pinned.
+type PreflightToolRef struct {
+	// ID is a canonical "<server>:<tool>" id. A malformed id is answered with a
+	// per-ID not_found carrying a format hint, never a request-level error.
+	ID string `json:"id"`
+	// PinHash is "sha256/v{N}:{hex}" — the schema version is embedded so a
+	// proxy-side hash-algorithm bump is distinguishable from upstream drift.
+	PinHash string `json:"pin_hash,omitempty"`
+}
+
+// PreflightPolicy carries the annotation filters the check evaluates under
+// (spec 094 semantics: read_only_only -> exclude_destructive ->
+// exclude_open_world, first excluding filter owns the omission).
+type PreflightPolicy struct {
+	ReadOnlyOnly       bool `json:"read_only_only,omitempty"`
+	ExcludeDestructive bool `json:"exclude_destructive,omitempty"`
+	ExcludeOpenWorld   bool `json:"exclude_open_world,omitempty"`
+}
+
+// PreflightRequest is the POST /api/v1/preflight body.
+type PreflightRequest struct {
+	// Tools is 1..100 entries BEFORE dedup; duplicates are collapsed, and
+	// duplicate ids carrying different pins are a validation error.
+	Tools []PreflightToolRef `json:"tools"`
+	// Profile evaluates under a named profile's server scope. Unknown: 400.
+	Profile string           `json:"profile,omitempty"`
+	Policy  *PreflightPolicy `json:"policy,omitempty"`
+	// WaitMS polls local state for up to this many milliseconds (cap 10000)
+	// while every failure is retryable-class.
+	WaitMS int `json:"wait_ms,omitempty"`
+}
+
+// PreflightToolResult is one per-tool verdict. Failure fields are present only
+// for `unavailable`; `action` is omitted (not "none") when a reason has no
+// action, matching the health-action vocabulary.
+type PreflightToolResult struct {
+	ID          string          `json:"id"`
+	Status      PreflightStatus `json:"status"`
+	Reason      PreflightReason `json:"reason,omitempty"`
+	Retryable   *bool           `json:"retryable,omitempty"`
+	Action      string          `json:"action,omitempty"`
+	Detail      string          `json:"detail,omitempty"`
+	Remediation string          `json:"remediation,omitempty"`
+	// Hash is the tool's current pin ("sha256/v{N}:{hex}") — operator tier,
+	// ready results only. Never disclosed to an agent token.
+	Hash string `json:"hash,omitempty"`
+	// DidYouMean carries up to 3 nearest caller-visible ids on not_found. It
+	// never crosses a scope boundary and never names a quarantined server's
+	// tools.
+	DidYouMean []string `json:"did_you_mean,omitempty"`
+}
+
+// PreflightResponse is the 200 body: HTTP status reports whether the CHECK
+// executed; the availability verdict lives here.
+type PreflightResponse struct {
+	Verdict   PreflightVerdict `json:"verdict"`
+	CheckedAt time.Time        `json:"checked_at"`
+	// WaitedMS is present when wait_ms was requested (0 when the wait
+	// semaphore was exhausted and the request resolved immediately).
+	WaitedMS *int `json:"waited_ms,omitempty"`
+	// Tools are ordered by first occurrence of each unique id in the request.
+	Tools []PreflightToolResult `json:"tools"`
 }

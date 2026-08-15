@@ -46,6 +46,25 @@ type AgentToken struct {
 	ProfilePin     string     `json:"profile_pin,omitempty"` // Profile this token is pinned to (Profiles v2 T3)
 }
 
+// AuthContext builds the request AuthContext for a validated agent token. It
+// is the single constructor for the agent tier so no auth path can silently
+// drop a field: the REST path used to omit ProfilePin, which meant a
+// profile-pinned token evaluated (and, with Spec 098, preflighted) against the
+// unpinned server set. Returns nil for a nil token.
+func (t *AgentToken) AuthContext() *AuthContext {
+	if t == nil {
+		return nil
+	}
+	return &AuthContext{
+		Type:           AuthTypeAgent,
+		AgentName:      t.Name,
+		TokenPrefix:    t.TokenPrefix,
+		AllowedServers: t.AllowedServers,
+		Permissions:    t.Permissions,
+		ProfilePin:     t.ProfilePin,
+	}
+}
+
 // IsExpired returns true if the token has passed its expiry time.
 func (t *AgentToken) IsExpired() bool {
 	if t.ExpiresAt.IsZero() {
