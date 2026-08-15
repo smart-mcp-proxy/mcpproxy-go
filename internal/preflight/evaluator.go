@@ -132,6 +132,20 @@ type EvalContext struct {
 	// Pins maps a requested id to its pin string, for callers that carry pins
 	// separately from the refs. A ToolRef.PinHash always wins over this map.
 	Pins map[string]string
+	// RequireRuntimeEntry says the State reader is an AUTHORITATIVE snapshot:
+	// every configured server has an entry in it, so a missing entry means the
+	// process cannot see the runtime rather than "this server has no state".
+	//
+	// The served surface sets it (the glue only builds an EvalContext once it
+	// holds a real stateview snapshot). It then refuses with
+	// ErrRuntimeUnavailable instead of answering ready/not_found from a view
+	// that cannot establish the server is Ready — FR-005 permits not_found only
+	// from an authoritative Ready view, and `ready` states even more.
+	//
+	// It stays false for pure-unit evaluations, which legitimately run with a
+	// nil or partial StateReader and expect the evaluator to make no connection
+	// claim at all.
+	RequireRuntimeEntry bool
 }
 
 // Result is one per-tool verdict. It mirrors the wire DTO minus serialization
@@ -261,7 +275,11 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 		return Result{}, fmt.Errorf("preflight: read tool approval for %q: %w", id, err)
 	}
 	if indexed == nil && approval == nil {
-		if res, notReady := connectionVerdict(ec, id, serverName); notReady {
+		res, notReady, cerr := connectionVerdict(ec, id, serverName)
+		if cerr != nil {
+			return Result{}, cerr
+		}
+		if notReady {
 			return res, nil
 		}
 		return corpus.notFoundResult(id)
@@ -295,7 +313,11 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 
 	// 11-13. Connection state: oauth_required → server_unhealthy →
 	//        server_initializing. All server-level (FR-005).
-	if res, unhealthy := connectionVerdict(ec, id, serverName); unhealthy {
+	res, unhealthy, cerr := connectionVerdict(ec, id, serverName)
+	if cerr != nil {
+		return Result{}, cerr
+	}
+	if unhealthy {
 		return res, nil
 	}
 
@@ -322,12 +344,12 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	}
 
 	// 15. ready
-	res := Result{ID: id, Status: StatusReady}
+	ready := Result{ID: id, Status: StatusReady}
 	// Hash disclosure is operator-tier only (FR-013) and only on ready results.
 	if ec.Tier != TierAgentToken && approval != nil && approval.CurrentHash != "" {
-		res.Hash = FormatPin(approval.HashSchemaVersion, approval.CurrentHash)
+		ready.Hash = FormatPin(approval.HashSchemaVersion, approval.CurrentHash)
 	}
-	return res, nil
+	return ready, nil
 }
 
 // unavailable builds a failure result from the taxonomy defaults.
@@ -362,17 +384,26 @@ func classDetail(class ToolClass, serverName, toolName string) string {
 	}
 }
 
-// connectionVerdict applies the three connection-state gates. found=false in the
-// snapshot means the evaluator makes no claim at all: absence of runtime
-// information is not evidence of ill health (and the served surface refuses with
-// 503 when the runtime is unavailable entirely, FR-006).
-func connectionVerdict(ec *EvalContext, id, serverName string) (Result, bool) {
+// connectionVerdict applies the three connection-state gates.
+//
+// A missing snapshot entry means the evaluator has no connection information
+// for a server it has already established is configured, enabled and in scope.
+// What that licenses depends on how authoritative the reader is:
+//
+//   - RequireRuntimeEntry (the served surface): the snapshot claims to cover
+//     every configured server, so a gap is a broken runtime view, not a quiet
+//     server. Answering `ready` or `not_found` there would state per-tool
+//     knowledge nothing established (FR-005), so it errors and the surface
+//     answers 503 (FR-006).
+//   - otherwise (pure-unit evaluations): no claim at all — absence of runtime
+//     information is not evidence of ill health.
+func connectionVerdict(ec *EvalContext, id, serverName string) (Result, bool, error) {
 	if ec.State == nil {
-		return Result{}, false
+		return Result{}, false, runtimeEntryError(ec, serverName)
 	}
 	rt, found := ec.State.ServerRuntime(serverName)
 	if !found {
-		return Result{}, false
+		return Result{}, false, runtimeEntryError(ec, serverName)
 	}
 
 	switch rt.State {
@@ -383,7 +414,7 @@ func connectionVerdict(ec *EvalContext, id, serverName string) (Result, bool) {
 		if rt.Detail != "" {
 			res.Detail = rt.Detail
 		}
-		return res, true
+		return res, true, nil
 
 	case RuntimeStateError, RuntimeStateDisconnected:
 		detail := fmt.Sprintf("Server %q is not connected.", serverName)
@@ -394,7 +425,7 @@ func connectionVerdict(ec *EvalContext, id, serverName string) (Result, bool) {
 		if action := normalizeHealthAction(rt.Action); action != "" {
 			res.Action = action
 		}
-		return res, true
+		return res, true, nil
 
 	case RuntimeStateConnecting, RuntimeStateDiscovering, RuntimeStateAuthenticating:
 		// Server-level only — never a per-tool claim about indexing progress.
@@ -402,14 +433,29 @@ func connectionVerdict(ec *EvalContext, id, serverName string) (Result, bool) {
 		if rt.Detail != "" {
 			detail = rt.Detail
 		}
-		return unavailable(id, ReasonServerInitializing, detail), true
+		return unavailable(id, ReasonServerInitializing, detail), true, nil
 
-	case RuntimeStateReady, RuntimeStateUnknown:
-		return Result{}, false
+	case RuntimeStateReady:
+		return Result{}, false, nil
+
+	case RuntimeStateUnknown:
+		// The reader answered found=true with a state it could not map. That is
+		// the same absence of evidence a missing entry is.
+		return Result{}, false, runtimeEntryError(ec, serverName)
 
 	default:
-		return Result{}, false
+		return Result{}, false, runtimeEntryError(ec, serverName)
 	}
+}
+
+// runtimeEntryError is the refusal for "no usable connection state for a server
+// the caller is entitled to a verdict on" — nil unless the reader claimed to be
+// authoritative.
+func runtimeEntryError(ec *EvalContext, serverName string) error {
+	if !ec.RequireRuntimeEntry {
+		return nil
+	}
+	return fmt.Errorf("%w: no connection state for configured server %q", ErrRuntimeUnavailable, serverName)
 }
 
 // normalizeHealthAction accepts only the existing health-action vocabulary for

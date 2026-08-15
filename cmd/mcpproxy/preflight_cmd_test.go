@@ -69,6 +69,34 @@ func TestPreflightTransportErrorsUseGeneralExitCode(t *testing.T) {
 	assert.Equal(t, ExitCodeGeneralError, classifyError(errors.New("mcpproxy daemon is not reachable. Start with: mcpproxy serve")))
 }
 
+// A non-verdict preflight failure must be exit 1 even when its message is full
+// of the words the string heuristics branch on. Untyped, each of these lands in
+// the 4/5 band, which a cron wrapper cannot tell apart from a real config or
+// permission problem in mcpproxy itself (FR-009).
+func TestPreflightGeneralError_NotReclassifiedByStringHeuristics(t *testing.T) {
+	for _, message := range []string{
+		"preflight failed: failed to load configuration",
+		"preflight failed: invalid configuration in ~/.mcpproxy/mcp_config.json",
+		"preflight failed: dial unix ~/.mcpproxy/mcpproxy.sock: permission denied",
+		"preflight failed: operation not permitted",
+	} {
+		t.Run(message, func(t *testing.T) {
+			untyped := errors.New(message)
+			require.NotEqual(t, ExitCodeGeneralError, classifyError(untyped),
+				"precondition: this message is exactly what the heuristics misfile")
+			assert.Equal(t, ExitCodeGeneralError, classifyError(newPreflightGeneralError(untyped)))
+		})
+	}
+}
+
+// Wrapping must never swallow a verdict: the verdict IS the command's answer.
+func TestPreflightGeneralError_PassesVerdictsThrough(t *testing.T) {
+	verdict := newPreflightVerdictError(preflight.VerdictUnknownIDs, "1 of 1 tools unavailable: not_found")
+	assert.Equal(t, verdict, newPreflightGeneralError(verdict))
+	assert.Equal(t, ExitCodePreflightUnknownIDs, classifyError(newPreflightGeneralError(verdict)))
+	assert.Nil(t, newPreflightGeneralError(nil))
+}
+
 // --- T018: exit-code precedence (worst class wins, 12 > 11 > 10) ------------
 
 func TestPreflightExitVerdict_WorstClassWins(t *testing.T) {
@@ -205,6 +233,23 @@ func TestBuildPreflightRequest(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicting")
 	})
 
+	// The wire field is milliseconds, so the range must be checked on the exact
+	// duration: truncation would turn both of these into accepted values (0 and
+	// 10000) that the daemon has no way to recognize as out of range.
+	t.Run("wait range is validated before the millisecond truncation", func(t *testing.T) {
+		_, err := buildPreflightRequest([]string{"ctl:echo"}, nil, "", -1*time.Nanosecond, contracts.PreflightPolicy{})
+		require.Error(t, err, "-1ns must be rejected, not truncated to 0")
+		assert.Contains(t, err.Error(), "negative")
+
+		_, err = buildPreflightRequest([]string{"ctl:echo"}, nil, "", 10*time.Second+time.Nanosecond, contracts.PreflightPolicy{})
+		require.Error(t, err, "10s+1ns must be rejected, not truncated to the in-range 10000ms")
+		assert.Contains(t, err.Error(), "cap")
+
+		req, err := buildPreflightRequest([]string{"ctl:echo"}, nil, "", 10*time.Second, contracts.PreflightPolicy{})
+		require.NoError(t, err, "exactly the cap is allowed")
+		assert.Equal(t, preflight.MaxWaitMS, req.WaitMS)
+	})
+
 	t.Run("a hash containing colons and slashes survives the split", func(t *testing.T) {
 		req, err := buildPreflightRequest([]string{"ctl:echo"}, []string{"ctl:echo=sha256/v2:deadbeef"}, "", 0, contracts.PreflightPolicy{})
 		require.NoError(t, err)
@@ -281,6 +326,30 @@ func TestRenderPreflight_TableCarriesVerdictAndPerToolReasons(t *testing.T) {
 	assert.Contains(t, rendered, preflight.ReasonServerInitializing)
 	assert.Contains(t, rendered, "ID")
 	assert.Contains(t, rendered, "RETRYABLE")
+}
+
+// NewFormatter is case-insensitive, so the render branch has to be too:
+// `-o JSON` selected the JSON formatter and then took the table path, emitting
+// a "VERDICT:" header followed by JSON-encoded table rows.
+func TestRenderPreflight_FormatIsCaseInsensitive(t *testing.T) {
+	for _, format := range []string{"JSON", " Json ", "YAML", "TABLE"} {
+		t.Run(format, func(t *testing.T) {
+			rendered, err := renderPreflight(format, samplePreflightResponse())
+			require.NoError(t, err)
+
+			if strings.EqualFold(strings.TrimSpace(format), "table") {
+				assert.Contains(t, rendered, "VERDICT: degraded_retryable (exit 10)")
+				return
+			}
+			assert.NotContains(t, rendered, "VERDICT:",
+				"a structured format must not be rendered through the table branch")
+
+			var decoded map[string]interface{}
+			require.NoError(t, yaml.Unmarshal([]byte(rendered), &decoded),
+				"YAML parses JSON too, so one check covers both structured formats")
+			assert.Equal(t, preflight.VerdictDegradedRetryable, decoded["verdict"])
+		})
+	}
 }
 
 func TestRenderPreflight_UnknownFormatIsAStructuredError(t *testing.T) {

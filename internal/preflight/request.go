@@ -21,6 +21,13 @@ var (
 	ErrRuntimeUnavailable = errors.New("preflight: runtime unavailable")
 )
 
+// MaxWaitMS is the FR-012 cap on a request's wait budget. It lives here so the
+// REST validator and the CLI flag check the same number: the CLI has to know it
+// because it converts a duration to milliseconds, and a lossy conversion would
+// otherwise smuggle an out-of-range wait past the daemon's own check as a
+// rounded, in-range one.
+const MaxWaitMS = 10000
+
 // Params is one preflight request as the glue layer receives it: the caller's
 // identity-derived inputs (tier, token scope, token profile pin) plus the
 // request's own inputs (tool refs, profile, policy filters).

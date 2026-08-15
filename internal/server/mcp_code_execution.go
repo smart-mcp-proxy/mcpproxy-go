@@ -782,6 +782,14 @@ func (u *upstreamToolCaller) policyRefusal(serverName, toolName string) error {
 	}
 	gate := u.proxy.evaluateToolGate(serverName, toolName)
 	if gate.serverConfig == nil {
+		if gate.storageErr != nil {
+			// The record exists as far as anyone knows — it just could not be
+			// read. Fail-open is licensed for a server that is genuinely
+			// UNKNOWN, not for one whose policy the proxy failed to load;
+			// treating a BBolt failure as "unknown server" would let a script
+			// through a quarantine gate by breaking the database.
+			return fmt.Errorf("cannot verify policy for server %q: %w", serverName, gate.storageErr)
+		}
 		// Unknown server: leave the existing "server not found" path to answer.
 		return nil
 	}

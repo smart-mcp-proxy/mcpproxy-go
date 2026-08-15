@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -37,11 +38,16 @@ const (
 	preflightMaxTools = 100
 	// preflightMaxWaitMS is the wait_ms cap. Over it is a 400 rather than a
 	// silent clamp, so a caller asking for a 60s wait learns that it will not
-	// get one.
-	preflightMaxWaitMS = 10000
+	// get one. The number lives in the evaluator package because the CLI checks
+	// it too.
+	preflightMaxWaitMS = preflight.MaxWaitMS
 	// preflightPollFloor is the minimum interval between re-evaluations during
 	// a wait (FR-012). Waiting must add no meaningful load.
 	preflightPollFloor = 250 * time.Millisecond
+	// preflightMaxBody caps the request body. 100 ids with pins fit in a few KB;
+	// 1 MiB is generous for the contract and still bounds what an unauthenticated
+	// -adjacent surface can make the process buffer.
+	preflightMaxBody = 1 << 20
 	// preflightWaitSlots is the dedicated wait budget: the number of preflights
 	// that may be parked in their poll loop at once. Small and fixed — a flood
 	// of waiting preflights must not tie up the HTTP server, and spec 093's
@@ -156,16 +162,16 @@ func disclosureTier(r *http.Request) (preflight.Tier, *auth.AuthContext) {
 // @Produce json
 // @Param request body contracts.PreflightRequest true "Tool IDs (1-100 before dedup), optional profile, annotation policy filters and wait budget"
 // @Success 200 {object} contracts.APIResponse{data=contracts.PreflightResponse} "Preflight verdict and per-tool results"
-// @Failure 400 {object} contracts.APIResponse "Validation error (empty or oversized tool list, conflicting duplicate pins, unknown profile, wait_ms out of range)"
+// @Failure 400 {object} contracts.APIResponse "Validation error (malformed, oversized, doubled or unknown-field body; empty or oversized tool list; conflicting duplicate pins; unknown profile; wait_ms out of range)"
 // @Failure 401 {object} contracts.APIResponse "Missing or invalid credentials"
 // @Failure 503 {object} contracts.APIResponse "Runtime unavailable, evaluator infrastructure read failure, or the activity record could not be persisted"
 // @Security ApiKeyHeader
 // @Security ApiKeyQuery
 // @Router /api/v1/preflight [post]
 func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
-	var req contracts.PreflightRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
+	req, err := decodePreflightRequest(w, r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -179,7 +185,7 @@ func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params := preflightParams(r, &req, tools)
+	params := preflightParams(r, req, tools)
 
 	outcome, waitedMS, err := s.runPreflightWithWait(r.Context(), params, req.WaitMS)
 	if err != nil {
@@ -215,6 +221,37 @@ func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// decodePreflightRequest reads the body strictly: bounded, no unknown fields,
+// exactly one JSON value.
+//
+// A preflight is a gate — a caller writes one request body and then trusts the
+// exit code for months — so a typo'd key (`wait` for `wait_ms`, `pin` for
+// `pin_hash`) must fail loudly at the first run instead of being dropped into a
+// silently weaker check. Same reasoning as the telemetry endpoint's decoder,
+// whose exact shape this follows.
+func decodePreflightRequest(w http.ResponseWriter, r *http.Request) (*contracts.PreflightRequest, error) {
+	// MaxBytesReader, not io.LimitReader: a LimitReader truncates silently, so
+	// an oversized body padded past the cap could present a clean EOF to the
+	// trailing-value check below.
+	r.Body = http.MaxBytesReader(w, r.Body, preflightMaxBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	// The messages are HTTP response text, not Go error strings, so they go
+	// through the 400 type this file already uses for caller mistakes.
+	var req contracts.PreflightRequest
+	if err := dec.Decode(&req); err != nil {
+		return nil, newPreflightValidationError("Invalid JSON payload")
+	}
+	// DisallowUnknownFields guards the first value only; a second Decode must
+	// hit EOF or the body carried trailing JSON (or trailing garbage).
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, newPreflightValidationError("Request body must contain exactly one JSON object")
+	}
+	return &req, nil
+}
+
 // runPreflightWithWait evaluates once and, when a wait budget was requested and
 // every current failure is retryable, keeps re-evaluating local state until the
 // set is ready, a non-retryable failure appears, or the deadline passes
@@ -242,6 +279,13 @@ func (s *Server) runPreflightWithWait(ctx context.Context, params preflight.Para
 	interval := s.preflightPollInterval()
 	start := time.Now()
 	deadline := start.Add(time.Duration(waitMS) * time.Millisecond)
+	// Every re-evaluation is bounded by the WAIT deadline, not just by the
+	// caller's request context: the wait budget is the promise ("resolves within
+	// wait_ms"), and an evaluation started at the last poll must not be allowed
+	// to run past it on a slow storage read.
+	waitCtx, cancelWait := context.WithDeadline(ctx, deadline)
+	defer cancelWait()
+
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 
@@ -256,15 +300,22 @@ func (s *Server) runPreflightWithWait(ctx context.Context, params preflight.Para
 		}
 		timer.Reset(sleep)
 		select {
-		case <-ctx.Done():
-			// The caller went away. Resolve with what we have rather than
-			// manufacturing an error — "always resolves" (FR-012).
+		case <-waitCtx.Done():
+			// Either the caller went away or the budget ran out. Resolve with
+			// what we have rather than manufacturing an error — "always
+			// resolves" (FR-012).
 			return outcome, elapsedMS(start), nil
 		case <-timer.C:
 		}
 
-		next, err := s.controller.RunPreflight(ctx, params)
+		next, err := s.controller.RunPreflight(waitCtx, params)
 		if err != nil {
+			// A budget expiry mid-evaluation is the deadline doing its job, not
+			// an infrastructure failure: answer with the last verdict rather
+			// than turning a completed wait into a 503.
+			if waitCtx.Err() != nil && ctx.Err() == nil {
+				return outcome, elapsedMS(start), nil
+			}
 			return preflight.Outcome{}, elapsedMS(start), err
 		}
 		outcome = next

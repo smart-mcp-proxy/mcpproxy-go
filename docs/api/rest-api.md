@@ -713,7 +713,10 @@ The set-level `verdict` is the worst class present:
 - `200` — the check executed; the availability verdict is data in the body.
 - `400` — validation error: invalid JSON, empty or oversized (>100 raw entries)
   `tools`, a duplicate ID with conflicting `pin_hash` values, `wait_ms` out of
-  range, or an unknown `profile`.
+  range, or an unknown `profile`. The body is read strictly — at most 1 MiB,
+  exactly one JSON object, and no unknown fields — so a mistyped key (`wait`
+  for `wait_ms`, `pin` for `pin_hash`) fails loudly instead of silently
+  weakening the check a pipeline then trusts.
 - `401` — missing or invalid credentials.
 - `503` — the check could not run honestly: the runtime is unavailable, an
   index/storage/snapshot read failed (reduced-fidelity verdicts are never

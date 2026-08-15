@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -229,6 +231,100 @@ func TestCodeExecutionGateFailsOpenForUnknownServer(t *testing.T) {
 
 	// ... and with no proxy wired at all (bare unit-test callers).
 	assert.NoError(t, (&upstreamToolCaller{}).policyRefusal("gh", "create_issue"))
+}
+
+// Fail-open is licensed for a server that is genuinely UNKNOWN. It is not
+// licensed for one whose record could not be READ: treating a storage failure
+// as "unknown server" would let a script through a quarantine gate by breaking
+// the database.
+func TestCodeExecutionGateRefusesWhenTheServerRecordCannotBeRead(t *testing.T) {
+	fixture := newPreflightFixture(t, nil)
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: true, Protocol: "http"})
+	caller := &upstreamToolCaller{proxy: fixture.proxy}
+
+	require.NoError(t, caller.policyRefusal("gh", "create_issue"))
+
+	require.NoError(t, fixture.storage.Close())
+
+	err := caller.policyRefusal("gh", "create_issue")
+	require.Error(t, err, "an unreadable record must not be mistaken for an unknown server")
+	assert.Contains(t, err.Error(), "cannot verify policy")
+
+	// The same read failure must also refuse on a server the config never
+	// mentioned — the point is that nothing can be verified at all.
+	require.Error(t, caller.policyRefusal("never-configured", "some_tool"))
+}
+
+// Direct mode reads the LIVE config for the global quarantine switch, exactly
+// as evaluateToolGate does. Before this, it took the construction-time config
+// and defaulted a missing one to "quarantine off", so the two dispatch paths
+// disagreed about the same pending tool — the skew FR-002 exists to prevent.
+func TestDirectCallabilityReadsTheSameQuarantineSwitchAsTheSharedGate(t *testing.T) {
+	fixture := newPreflightFixture(t, nil)
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: true, Protocol: "http"})
+	require.NoError(t, fixture.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "gh", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending,
+	}))
+
+	assertAgree := func(t *testing.T, wantCallable bool) {
+		t.Helper()
+		gate := fixture.proxy.evaluateToolGate("gh", "create_issue")
+		assert.Equal(t, wantCallable, gate.callable(), "shared gate")
+		block := fixture.proxy.directToolCallabilityBlock(context.Background(), "gh", "create_issue", map[string]interface{}{})
+		assert.Equal(t, wantCallable, block == nil, "direct mode")
+	}
+
+	assertAgree(t, false)
+
+	off := false
+	fixture.cfg.QuarantineEnabled = &off
+	assertAgree(t, true)
+
+	// No resolvable config at all: both paths must fail CLOSED on the switch
+	// rather than one of them reading "quarantine off".
+	saved := fixture.proxy.config
+	fixture.proxy.config = nil
+	t.Cleanup(func() { fixture.proxy.config = saved })
+	assertAgree(t, false)
+}
+
+// A disabled server answers "server disabled", not "tool pending approval":
+// the server-level gates own the response when they fire (pre-098 ordering,
+// git show bfd43e7ce). Spec 098 moved only the callability DECISION into the
+// shared classifier, not the wording preference.
+func TestDirectCallabilityDisabledServerKeepsTheServerLevelRefusal(t *testing.T) {
+	fixture := newPreflightFixture(t, nil)
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: false, Protocol: "http"})
+	require.NoError(t, fixture.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "gh", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending,
+	}))
+
+	block := fixture.proxy.directToolCallabilityBlock(context.Background(), "gh", "create_issue", map[string]interface{}{})
+	require.NotNil(t, block, "a disabled server is never callable")
+
+	rendered := renderToolResultText(t, block)
+	assert.Contains(t, rendered, "TOOL_BLOCKED")
+	assert.NotContains(t, rendered, "TOOL_QUARANTINED",
+		"a disabled server must not answer with the approval-lock response")
+
+	// Enabling the server hands the response back to the approval lock.
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: true, Protocol: "http"})
+	enabled := fixture.proxy.directToolCallabilityBlock(context.Background(), "gh", "create_issue", map[string]interface{}{})
+	require.NotNil(t, enabled)
+	assert.Contains(t, renderToolResultText(t, enabled), "TOOL_QUARANTINED")
+}
+
+// renderToolResultText flattens a CallToolResult's text content for assertions.
+func renderToolResultText(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	var b strings.Builder
+	for _, content := range result.Content {
+		if text, ok := content.(mcp.TextContent); ok {
+			b.WriteString(text.Text)
+		}
+	}
+	require.NotEmpty(t, b.String(), "expected text content in %+v", result)
+	return b.String()
 }
 
 // The consolidated classifier resolves the two research-D2 divergences in

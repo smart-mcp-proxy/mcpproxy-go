@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
@@ -79,4 +80,37 @@ func newPreflightVerdictError(verdict, summary string) error {
 		return nil
 	}
 	return &preflightVerdictError{verdict: verdict, summary: summary}
+}
+
+// preflightGeneralError marks a preflight failure that is NOT a verdict — bad
+// arguments, an unreachable daemon, a rendering failure.
+//
+// FR-009 gives those exit code 1, and the type is what guarantees it: without
+// it they fall through to classifyError's string heuristics, where the daemon's
+// own "failed to load configuration" or a remediation string containing
+// "permission denied" would come back as exit 4 or 5. A cron wrapper reads
+// those as mcpproxy-level failures, and 4/5 are also inside the band a
+// preflight wrapper watches, so the misclassification is silent.
+type preflightGeneralError struct {
+	err error
+}
+
+func (e *preflightGeneralError) Error() string { return e.err.Error() }
+
+func (e *preflightGeneralError) Unwrap() error { return e.err }
+
+// ExitCode is always the general error code, whatever the message says.
+func (e *preflightGeneralError) ExitCode() int { return ExitCodeGeneralError }
+
+// newPreflightGeneralError wraps a non-verdict failure, passing nil through and
+// leaving an already-typed verdict error alone (the verdict IS the answer).
+func newPreflightGeneralError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var verdictErr *preflightVerdictError
+	if errors.As(err, &verdictErr) {
+		return err
+	}
+	return &preflightGeneralError{err: err}
 }

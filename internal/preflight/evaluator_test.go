@@ -539,6 +539,85 @@ func TestEvaluate_NoRuntimeEntryMakesNoConnectionClaim(t *testing.T) {
 	assert.Equal(t, StatusReady, res[0].Status)
 }
 
+// …but when the reader is AUTHORITATIVE (every configured server has an entry,
+// which is what the served snapshot guarantees), a missing entry means the
+// process cannot see the runtime. FR-005 lets `not_found` — and `ready` all the
+// more — be stated only from a view that establishes the server is Ready, so
+// the evaluation refuses instead of answering from a gap.
+func TestEvaluate_AuthoritativeSnapshotRefusesOnMissingEntry(t *testing.T) {
+	tests := []struct {
+		name  string
+		world func() *world
+	}{
+		{
+			name: "would otherwise be ready",
+			world: func() *world {
+				w := healthyWorld()
+				delete(w.state.states, srv)
+				return w
+			},
+		},
+		{
+			name: "would otherwise be not_found",
+			world: func() *world {
+				w := healthyWorld()
+				w.unindex().forget()
+				delete(w.state.states, srv)
+				return w
+			},
+		},
+		{
+			name: "entry exists but its state is unmappable",
+			world: func() *world {
+				w := healthyWorld()
+				w.state.states[srv] = ServerRuntime{State: RuntimeStateUnknown}
+				return w
+			},
+		},
+		{
+			name: "no state reader at all",
+			world: func() *world {
+				w := healthyWorld()
+				w.state = nil
+				return w
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ec := tc.world().ctx()
+			ec.RequireRuntimeEntry = true
+
+			_, err := Evaluate(context.Background(), ec, []ToolRef{{ID: id}})
+			require.ErrorIs(t, err, ErrRuntimeUnavailable)
+			require.Contains(t, err.Error(), srv)
+		})
+	}
+
+	// The server-level gates still answer before the connection gate is reached,
+	// so a disabled or unconfigured server does not become a 503.
+	for _, tc := range []struct {
+		name   string
+		world  *world
+		reason Reason
+	}{
+		{"disabled", healthyWorld().disable(), ReasonServerDisabled},
+		{"quarantined", healthyWorld().quarantine(), ReasonServerQuarantined},
+		{"unconfigured", healthyWorld().unconfigure(), ReasonServerNotConfigured},
+	} {
+		t.Run("gated before the connection check: "+tc.name, func(t *testing.T) {
+			delete(tc.world.state.states, srv)
+			ec := tc.world.ctx()
+			ec.RequireRuntimeEntry = true
+
+			results, err := Evaluate(context.Background(), ec, []ToolRef{{ID: id}})
+			require.NoError(t, err)
+			assert.Equal(t, tc.reason, results[0].Reason)
+		})
+	}
+}
+
 // The spec-044 diagnostic may sharpen the server_unhealthy action, but only
 // within the existing health vocabulary.
 func TestEvaluate_UnhealthyActionOverride(t *testing.T) {

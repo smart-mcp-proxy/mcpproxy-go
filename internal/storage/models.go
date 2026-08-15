@@ -16,6 +16,14 @@ import (
 // record with a synthesized approved one.
 var ErrToolApprovalNotFound = errors.New("tool approval not found")
 
+// ErrUpstreamNotFound is returned by GetUpstream/GetUpstreamServer when no
+// record exists for the requested server name. Callers that decide policy from
+// the record MUST use errors.Is to tell it apart from a real read failure
+// (corrupt record, closed DB, mmap remap): "no such server" is a verdict the
+// caller can state, while an unreadable record means the caller knows nothing
+// and must fail closed rather than answer "not configured".
+var ErrUpstreamNotFound = errors.New("upstream not found")
+
 // Bucket names for bbolt database
 const (
 	UpstreamsBucket       = "upstreams"

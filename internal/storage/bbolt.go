@@ -200,7 +200,7 @@ func (b *BoltDB) GetUpstream(id string) (*UpstreamRecord, error) {
 		bucket := tx.Bucket([]byte(UpstreamsBucket))
 		data := bucket.Get([]byte(id))
 		if data == nil {
-			return fmt.Errorf("upstream not found")
+			return ErrUpstreamNotFound
 		}
 
 		record = &UpstreamRecord{}

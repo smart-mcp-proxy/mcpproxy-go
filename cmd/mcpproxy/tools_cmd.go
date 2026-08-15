@@ -887,8 +887,9 @@ Examples:
 				})
 			if err != nil {
 				// Argument errors keep the usage block: the operator mistyped
-				// the invocation and the syntax is the answer.
-				return err
+				// the invocation and the syntax is the answer. They are still
+				// exit 1, not a verdict code.
+				return newPreflightGeneralError(err)
 			}
 			cmd.SilenceUsage = true
 			// From here the command's return value is a VERDICT, not a usage
@@ -924,12 +925,21 @@ func preflightArgs(cmd *cobra.Command, args []string) error {
 // buildPreflightRequest turns CLI arguments into the REST request body.
 //
 // It validates only what is genuinely local (pin syntax, pins naming an id that
-// was not requested). Everything else — the 100-id cap, the wait cap, unknown
-// profiles — is the daemon's rule, and duplicating it here would give the two
-// surfaces two chances to disagree.
+// was not requested, and the wait range — see below). Everything else — the
+// 100-id cap, unknown profiles — is the daemon's rule, and duplicating it here
+// would give the two surfaces two chances to disagree.
+//
+// --wait is the exception, and only because the wire field is milliseconds: the
+// conversion is LOSSY, so `--wait -1ns` would reach the daemon as 0 and
+// `--wait 10.0000001s` as an in-range 10000. Both would be accepted as
+// something the operator did not ask for. The range is checked on the exact
+// duration, against the same cap the daemon enforces (preflight.MaxWaitMS).
 func buildPreflightRequest(ids, pins []string, profile string, wait time.Duration, policy contracts.PreflightPolicy) (*contracts.PreflightRequest, error) {
 	pinByID, err := parsePreflightPins(pins)
 	if err != nil {
+		return nil, err
+	}
+	if err := validatePreflightWaitFlag(wait); err != nil {
 		return nil, err
 	}
 
@@ -962,6 +972,22 @@ func buildPreflightRequest(ids, pins []string, profile string, wait time.Duratio
 	return request, nil
 }
 
+// maxPreflightWait is the --wait cap as a duration, derived from the wire cap
+// so the two can never drift apart.
+const maxPreflightWait = preflight.MaxWaitMS * time.Millisecond
+
+// validatePreflightWaitFlag rejects a wait outside [0, 10s] on the EXACT
+// duration, before it is truncated to milliseconds.
+func validatePreflightWaitFlag(wait time.Duration) error {
+	if wait < 0 {
+		return fmt.Errorf("--wait must not be negative (got %s)", wait)
+	}
+	if wait > maxPreflightWait {
+		return fmt.Errorf("--wait is %s, which exceeds the cap of %s", wait, maxPreflightWait)
+	}
+	return nil
+}
+
 // parsePreflightPins parses repeatable `--pin <id>=<hash>` flags. The split is
 // on the FIRST '=' because a pin value is "sha256/v1:<hex>" — it carries ':'
 // and '/', but never '=' — while the id carries ':'.
@@ -990,7 +1016,7 @@ func parsePreflightPins(pins []string) (map[string]string, error) {
 func runToolsPreflight(request *contracts.PreflightRequest) error {
 	client, _, err := newSecurityCLIClient()
 	if err != nil {
-		return err
+		return newPreflightGeneralError(err)
 	}
 
 	// The request's own wait budget is capped at 10s daemon-side; the transport
@@ -1000,12 +1026,12 @@ func runToolsPreflight(request *contracts.PreflightRequest) error {
 
 	response, err := client.Preflight(ctx, request)
 	if err != nil {
-		return cliError("preflight failed", err)
+		return newPreflightGeneralError(cliError("preflight failed", err))
 	}
 
 	rendered, err := renderPreflight(ResolveOutputFormat(), response)
 	if err != nil {
-		return err
+		return newPreflightGeneralError(err)
 	}
 	fmt.Print(rendered)
 
@@ -1073,13 +1099,19 @@ func preflightSummary(response *contracts.PreflightResponse) string {
 // pure (returns the string instead of printing) so every format is unit-tested
 // without capturing stdout.
 func renderPreflight(outputFormat string, response *contracts.PreflightResponse) (string, error) {
-	formatter, err := output.NewFormatter(outputFormat)
+	// Normalize ONCE, before both the formatter lookup and the branch below.
+	// NewFormatter is case-insensitive, so `-o JSON` used to select the JSON
+	// formatter and then fall into the table branch, emitting a table header
+	// followed by JSON-encoded rows.
+	format := strings.ToLower(strings.TrimSpace(outputFormat))
+
+	formatter, err := output.NewFormatter(format)
 	if err != nil {
 		return "", output.NewStructuredError(output.ErrCodeInvalidOutputFormat, err.Error()).
 			WithGuidance("Use -o table, -o json, or -o yaml")
 	}
 
-	if outputFormat == "json" || outputFormat == "yaml" {
+	if format == "json" || format == "yaml" {
 		// Marshal through the wire DTO's JSON tags so `-o yaml` emits the same
 		// key names as `-o json` and the REST payload, rather than yaml's
 		// lowercased Go field names.

@@ -83,7 +83,7 @@ curl -s -X POST -H "X-API-Key: $API_KEY" \
 }
 ```
 
-**HTTP status reports whether the check executed, never what it found.** A fully blocked toolset is still a 200 — the verdict lives in the body. Only a malformed request (400: empty list, more than 100 entries, conflicting duplicate pins, unknown profile, `wait_ms` out of range) or a proxy that cannot answer honestly (503: runtime unavailable, local state unreadable, or the audit record could not be persisted) is non-200.
+**HTTP status reports whether the check executed, never what it found.** A fully blocked toolset is still a 200 — the verdict lives in the body. Only a malformed request (400: empty list, more than 100 entries, conflicting duplicate pins, unknown profile, `wait_ms` out of range, or a body that is oversized, doubled, or carries an unknown field) or a proxy that cannot answer honestly (503: runtime unavailable, local state unreadable, or the audit record could not be persisted) is non-200.
 
 A failing tool carries the full diagnosis:
 
@@ -183,6 +183,8 @@ Preflight answers with different candor depending on who is asking:
 | `did_you_mean` | nearest visible ids | only within the token's own scope |
 
 The agent-token behavior is deliberate **scope-silence**: an out-of-scope probe learns nothing — not even that the server exists. `did_you_mean` suggestions (nearest-name, up to 3) are computed over the caller-visible index only and never name a quarantined server's tools. See [Agent Tokens](./agent-tokens.md) and [Profiles](./profiles.md).
+
+A token's evaluation scope is the intersection of its `allowed_servers`, its `profile_pin`, and any `profile` in the request — so naming another profile can only narrow it. If the pinned profile has since been **deleted**, the scope becomes deny-all and every id answers `not_found`: the pin is a restriction the operator applied, and losing the profile it names must never hand the token a wider view than it had before. Re-mint the token (or re-create the profile) to restore it.
 
 ## Transparency: every preflight is on the record
 

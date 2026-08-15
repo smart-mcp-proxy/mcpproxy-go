@@ -18,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -299,6 +300,96 @@ func TestRunPreflightRuntimeUnavailable(t *testing.T) {
 	var nilServer *Server
 	_, err = nilServer.RunPreflight(context.Background(), preflight.Params{})
 	require.ErrorIs(t, err, preflight.ErrRuntimeUnavailable)
+}
+
+// An unreadable upstream record is NOT the same as an absent one. Reporting a
+// failed read as server_not_configured would put a storage failure into the
+// reason taxonomy — the caller would "learn" a server was removed and go fix
+// their config (FR-005/FR-008: infra read failures are 503, never a reason).
+func TestRunPreflightStorageReadFailureIsAnErrorNotAVerdict(t *testing.T) {
+	fixture := newPreflightFixture(t, nil)
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: true, Protocol: "http"})
+	fixture.indexTool(t, "gh", "create_issue")
+
+	// A genuinely absent server stays a verdict...
+	out, err := fixture.proxy.RunPreflight(context.Background(), preflight.Params{
+		Tools: []preflight.ToolRef{{ID: "nosuch:tool"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, preflight.ReasonServerNotConfigured, out.Results[0].Reason)
+
+	// ...while a broken store is an error. Closing the DB is the cheapest
+	// faithful stand-in for the read failures BBolt actually produces.
+	require.NoError(t, fixture.storage.Close())
+
+	_, err = fixture.proxy.RunPreflight(context.Background(), preflight.Params{
+		Tools: []preflight.ToolRef{{ID: "gh:create_issue"}},
+	})
+	require.Error(t, err, "a failed upstream-record read must not resolve to a reason code")
+	assert.Contains(t, err.Error(), "upstream record read for")
+	assert.NotErrorIs(t, err, storage.ErrUpstreamNotFound)
+}
+
+// A proxy WITH a runtime but without a usable connection-state view is the
+// degraded process state FR-006 names: refuse, rather than evaluate blind and
+// call every tool ready. (A proxy with no runtime at all is the pure-unit
+// construction the rest of this file uses, and keeps evaluating.)
+func TestRunPreflightRefusesWhenTheRuntimeHasNoStateView(t *testing.T) {
+	fixture := newPreflightFixture(t, nil)
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: true, Protocol: "http"})
+	fixture.indexTool(t, "gh", "create_issue")
+
+	params := preflight.Params{Tools: []preflight.ToolRef{{ID: "gh:create_issue"}}}
+
+	out, err := fixture.proxy.RunPreflight(context.Background(), params)
+	require.NoError(t, err)
+	require.Equal(t, preflight.StatusReady, out.Results[0].Status)
+
+	fixture.proxy.mainServer = &Server{runtime: &internalRuntime.Runtime{}}
+	t.Cleanup(func() { fixture.proxy.mainServer = nil })
+
+	_, err = fixture.proxy.RunPreflight(context.Background(), params)
+	require.ErrorIs(t, err, preflight.ErrRuntimeUnavailable)
+}
+
+// A token pinned to a profile that has since been deleted must not fall back to
+// the token's own (wider) server scope: the pin is a narrowing the operator
+// applied, and losing the profile it names cannot hand the agent a view it was
+// never granted. It resolves to deny-all, which at this tier reads as not_found.
+func TestRunPreflightStaleTokenPinDeniesRatherThanWidens(t *testing.T) {
+	fixture := newPreflightFixture(t, func(cfg *config.Config) {
+		cfg.Profiles = []config.ProfileConfig{{Name: "ops", Servers: []string{"gh"}}}
+	})
+	fixture.addServer(t, &config.ServerConfig{Name: "gh", Enabled: true, Protocol: "http"})
+	fixture.addServer(t, &config.ServerConfig{Name: "secret", Enabled: true, Protocol: "http"})
+	fixture.indexTool(t, "gh", "create_issue")
+	fixture.indexTool(t, "secret", "exfiltrate")
+
+	tools := []preflight.ToolRef{{ID: "gh:create_issue"}, {ID: "secret:exfiltrate"}}
+	params := preflight.Params{
+		Tools:           tools,
+		Tier:            preflight.TierAgentToken,
+		TokenProfilePin: "ops",
+		TokenServers:    []string{"gh", "secret"},
+	}
+
+	// While the pinned profile exists it narrows the token to gh.
+	out, err := fixture.proxy.RunPreflight(context.Background(), params)
+	require.NoError(t, err)
+	assert.Equal(t, preflight.StatusReady, resultByID(t, out, "gh:create_issue").Status)
+	assert.Equal(t, preflight.ReasonNotFound, resultByID(t, out, "secret:exfiltrate").Reason)
+
+	// The operator deletes the profile. The token's view must not grow.
+	fixture.cfg.Profiles = nil
+
+	out, err = fixture.proxy.RunPreflight(context.Background(), params)
+	require.NoError(t, err)
+	assert.Equal(t, preflight.ReasonNotFound, resultByID(t, out, "gh:create_issue").Reason,
+		"a removed pin must deny, not degrade to the token's own scope")
+	assert.Equal(t, preflight.ReasonNotFound, resultByID(t, out, "secret:exfiltrate").Reason)
+	for _, res := range out.Results {
+		assert.Empty(t, res.DidYouMean, "a deny-all scope has no visible corpus to suggest from")
+	}
 }
 
 // Hash disclosure is operator-tier only, and a stale pin fails closed

@@ -62,7 +62,10 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 	// and the tool annotations, so every tool in a batch is judged against the
 	// same instant and the annotation filters see exactly what the spec 094
 	// discovery filters see.
-	state, annotations := p.preflightSnapshot()
+	state, annotations, err := p.preflightSnapshot()
+	if err != nil {
+		return preflight.Outcome{}, err
+	}
 
 	ec := preflight.EvalContext{
 		Index:     &preflightIndexReader{index: p.index, annotations: annotations},
@@ -72,6 +75,12 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 		Tier:      tier,
 		Scope:     scope,
 		Filters:   params.Filters,
+		// The stateview covers every configured server (the supervisor's
+		// reconcile writes one entry per config server), so with a real snapshot
+		// in hand a missing entry is a broken runtime view rather than a quiet
+		// server — and the evaluator must refuse instead of answering
+		// ready/not_found without an authoritative Ready view (FR-005).
+		RequireRuntimeEntry: state != nil,
 	}
 
 	results, err := preflight.Evaluate(ctx, ec, params.Tools)
@@ -88,20 +97,25 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 // evaluation scope: token scope ∩ token pin ∩ requested profile.
 //
 // A requested profile that does not exist is a caller error (400). A token pin
-// that no longer matches a configured profile is warn-skipped instead, matching
-// resolveActiveProfile: the operator removed a profile after minting the token,
-// and failing every one of that agent's preflights would be worse than
-// degrading to the token's own server scope.
+// that no longer matches a configured profile keeps its name as a restriction
+// over an EMPTY server set, which intersects to deny-all: the pin is a
+// narrowing the operator applied to that token, so losing the profile it names
+// must never hand the token a wider view than it had yesterday. The agent then
+// sees every id as not_found (tier scope-silence) — a loud, correct answer that
+// names the removed profile in the logs, rather than a silent widening.
 func (p *MCPProxyServer) resolvePreflightScope(params preflight.Params) (*preflight.Scope, error) {
 	inputs := preflight.ScopeInputs{TokenServers: params.TokenServers}
 
 	if pin := params.TokenProfilePin; pin != "" {
+		inputs.TokenPinName = pin
 		if scope := p.profileScopeForSlug(pin); scope != nil {
-			inputs.TokenPinName = pin
 			inputs.TokenPinServers = scope.AllowedServerNames()
-		} else if p.logger != nil {
-			p.logger.Warn("preflight: agent-token profile_pin no longer matches any configured profile; falling through",
-				zap.String("profile_pin", pin))
+		} else {
+			inputs.TokenPinServers = nil
+			if p.logger != nil {
+				p.logger.Warn("preflight: agent-token profile_pin no longer matches any configured profile; evaluating under a deny-all scope",
+					zap.String("profile_pin", pin))
+			}
 		}
 	}
 
@@ -210,24 +224,27 @@ func (r *preflightApprovalReader) ToolApproval(serverName, toolName string) (*pr
 // is judged against the same instant, and the annotations the filters see are
 // the same ones the spec 094 discovery filters see.
 //
-// Both are nil when no supervisor is wired: the evaluator then makes no
-// connection-state claim at all, which is honest, whereas a fabricated "ready"
-// or "unhealthy" would not be.
-func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations) {
+// A proxy with NO runtime wired at all is a pure-unit construction: both reads
+// come back nil and the evaluator makes no connection-state claim, which is
+// honest, whereas a fabricated "ready" or "unhealthy" would not be. But once a
+// runtime IS wired, a missing supervisor / stateview / snapshot is the degraded
+// process state FR-006 names: the served surface must refuse with 503 rather
+// than evaluate blind, so that case returns ErrRuntimeUnavailable.
+func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations, error) {
 	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
-		return nil, nil
+		return nil, nil, fmt.Errorf("%w: the supervisor is not running", preflight.ErrRuntimeUnavailable)
 	}
 	view := supervisor.StateView()
 	if view == nil {
-		return nil, nil
+		return nil, nil, fmt.Errorf("%w: no connection-state view", preflight.ErrRuntimeUnavailable)
 	}
 	snapshot := view.Snapshot()
 	if snapshot == nil {
-		return nil, nil
+		return nil, nil, fmt.Errorf("%w: the connection-state snapshot is empty", preflight.ErrRuntimeUnavailable)
 	}
 
 	servers := snapshot.Servers
@@ -245,7 +262,7 @@ func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(server
 		}
 		return nil
 	}
-	return &preflightStateSnapshot{servers: servers}, annotations
+	return &preflightStateSnapshot{servers: servers}, annotations, nil
 }
 
 type preflightStateSnapshot struct {
@@ -321,37 +338,56 @@ type preflightConfigPolicy struct {
 	// servers memoizes the stored upstream record for the lifetime of ONE
 	// request. Beyond saving a BBolt read per gate, it gives the whole batch a
 	// consistent view: every tool in one preflight is judged against the same
-	// server record, even if the config changes mid-evaluation.
-	servers map[string]*config.ServerConfig
+	// server record, even if the config changes mid-evaluation. The read ERROR
+	// is memoized alongside it, so a failure stays a failure for every tool in
+	// the batch instead of resolving differently on a retry within one request.
+	servers map[string]serverRecordResult
 }
 
-func (c *preflightConfigPolicy) serverRecord(serverName string) *config.ServerConfig {
+type serverRecordResult struct {
+	record *config.ServerConfig
+	err    error
+}
+
+// serverRecord reads (and memoizes) one stored upstream. "No such server" comes
+// back as (nil, nil) — a verdict the evaluator can state — while any other read
+// failure comes back as an error, because a record the process could not read
+// says nothing about whether the server is configured.
+func (c *preflightConfigPolicy) serverRecord(serverName string) (*config.ServerConfig, error) {
 	if c.servers == nil {
-		c.servers = make(map[string]*config.ServerConfig)
+		c.servers = make(map[string]serverRecordResult)
 	}
-	if record, ok := c.servers[serverName]; ok {
-		return record
+	if cached, ok := c.servers[serverName]; ok {
+		return cached.record, cached.err
 	}
+
 	record, err := c.proxy.storage.GetUpstreamServer(serverName)
-	if err != nil {
-		record = nil
+	switch {
+	case err == nil:
+		// A nil record with a nil error is not a shape the storage seam
+		// produces, but treating it as "not configured" is the honest reading.
+	case errors.Is(err, storage.ErrUpstreamNotFound):
+		record, err = nil, nil
+	default:
+		record, err = nil, fmt.Errorf("upstream record read for %q: %w", serverName, err)
 	}
-	c.servers[serverName] = record
-	return record
+
+	c.servers[serverName] = serverRecordResult{record: record, err: err}
+	return record, err
 }
 
 // ServerPolicy reads the server record from STORAGE — the same authority the
 // dispatch gates consult (config.db is authoritative), so preflight and dispatch
 // cannot disagree about enabled/quarantined state. A missing record is
-// Found:false, not an error.
+// Found:false; an UNREADABLE one is an error, which the served surface answers
+// with 503 rather than reporting the server as not configured (FR-005/FR-008: a
+// reason code is a claim about proxy state, and a failed read supports none).
 func (c *preflightConfigPolicy) ServerPolicy(serverName string) (preflight.ServerPolicy, error) {
-	serverConfig := c.serverRecord(serverName)
+	serverConfig, err := c.serverRecord(serverName)
+	if err != nil {
+		return preflight.ServerPolicy{}, err
+	}
 	if serverConfig == nil {
-		// The storage seam reports a missing upstream as an error, which is
-		// indistinguishable here from a read failure. Treating it as
-		// "not configured" matches every dispatch path (they all fail closed on
-		// the same signal), and the alternative — 503 on every typo'd server
-		// name — would be strictly worse.
 		return preflight.ServerPolicy{}, nil
 	}
 	return preflight.ServerPolicy{
@@ -367,7 +403,11 @@ func (c *preflightConfigPolicy) ServerPolicy(serverName string) (preflight.Serve
 // applies (it prefers the live runtime config, falling back to the stored
 // record).
 func (c *preflightConfigPolicy) ToolConfigDenied(serverName, toolName string) (bool, error) {
-	return c.proxy.isToolConfigDenied(serverName, toolName, c.serverRecord(serverName)), nil
+	record, err := c.serverRecord(serverName)
+	if err != nil {
+		return false, err
+	}
+	return c.proxy.isToolConfigDenied(serverName, toolName, record), nil
 }
 
 func (c *preflightConfigPolicy) QuarantineEnabled() bool {

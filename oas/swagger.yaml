@@ -4725,8 +4725,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
-          description: Validation error (empty or oversized tool list, conflicting
-            duplicate pins, unknown profile, wait_ms out of range)
+          description: Validation error (malformed, oversized, doubled or unknown-field
+            body; empty or oversized tool list; conflicting duplicate pins; unknown
+            profile; wait_ms out of range)
         "401":
           content:
             application/json:

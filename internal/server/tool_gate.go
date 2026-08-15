@@ -30,7 +30,9 @@ type toolGate struct {
 	// class is the shared classification — the single authority on callability.
 	class preflight.ToolClass
 	// serverConfig is the stored upstream record, nil when the server is not
-	// configured (or unreadable).
+	// configured OR its record could not be read — storageErr tells the two
+	// apart, which matters for the paths that deliberately fail OPEN on an
+	// unknown server.
 	serverConfig *config.ServerConfig
 	// approval is the spec 032 record, nil when none exists (implicit-approved).
 	approval *storage.ToolApprovalRecord
@@ -42,8 +44,10 @@ type toolGate struct {
 	// as before this consolidation. class, which follows the spec-098 precedence
 	// (user block outranks the quarantine lock), remains the callability truth.
 	lockStatus string
-	// storageErr is a genuine approval-read failure. Dispatch fails CLOSED on it
-	// (isToolCallable always has), so it is folded into callable().
+	// storageErr is a genuine read failure on either stored input (the upstream
+	// record or the approval record) — never the "no such record" sentinels.
+	// Dispatch fails CLOSED on it (isToolCallable always has), so it is folded
+	// into callable().
 	storageErr error
 }
 
@@ -84,8 +88,14 @@ func (p *MCPProxyServer) evaluateToolGate(serverName, toolName string) toolGate 
 
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
 	if err != nil || serverConfig == nil {
-		// The storage seam reports "no such upstream" as an error; every
-		// dispatch path has always treated that as not-callable.
+		// "No such upstream" is a verdict every dispatch path has always
+		// treated as not-callable. A genuine read failure is NOT that verdict:
+		// it is recorded so the paths that fail open on an unknown server (the
+		// sandbox bridge) can refuse instead of mistaking an unreadable record
+		// for an absent one.
+		if err != nil && !errors.Is(err, storage.ErrUpstreamNotFound) {
+			gate.storageErr = err
+		}
 		gate.class = preflight.ToolClassServerNotConfigured
 		return gate
 	}

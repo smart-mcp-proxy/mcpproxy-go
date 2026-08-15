@@ -113,10 +113,14 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 	}
 	decision.serverConfig = serverConfig
 	configDenied := e.proxy.isToolConfigDenied(serverName, toolName, serverConfig)
-	// The server-level gates own the response when they fire, so the
-	// config-denial flag (which selects the operator-policy wording) is only
-	// surfaced once the server itself is past them — exactly as before.
-	if serverConfig.Enabled && !serverConfig.Quarantined {
+	// The server-level gates own the response when they fire, so the fields that
+	// SELECT a more specific refusal — the config-denial wording and the
+	// approval-lock message below — are only surfaced once the server itself is
+	// past them. Pre-098 this was an early return on `!Enabled || Quarantined`;
+	// the flag is the same gate, kept so a disabled server still answers
+	// "server disabled" rather than "tool pending approval".
+	serverGatesPassed := serverConfig.Enabled && !serverConfig.Quarantined
+	if serverGatesPassed {
 		decision.configDenied = configDenied
 	}
 
@@ -127,12 +131,15 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 	}
 	decision.approval = approval
 
-	cfg := e.proxy.config
-	quarantineEnabled := cfg != nil && cfg.IsQuarantineEnabled()
+	// The LIVE config, like evaluateToolGate: a hot-reloaded quarantine_enabled
+	// must take effect on the next call here too, or direct mode would keep
+	// waving through tools the other dispatch paths have started refusing.
+	cfg := e.proxy.currentConfig()
+	quarantineEnabled := cfg == nil || cfg.IsQuarantineEnabled()
 	// approvalStatus drives the RESPONSE shape only, and keeps the pre-098
 	// preference for the pending/changed message over the generic block, so a
 	// refusal reads exactly as it always did.
-	if quarantineEnabled && !serverConfig.IsQuarantineSkipped() && approval != nil {
+	if serverGatesPassed && quarantineEnabled && !serverConfig.IsQuarantineSkipped() && approval != nil {
 		switch approval.Status {
 		case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
 			decision.approvalStatus = approval.Status

@@ -42,6 +42,9 @@ type preflightController struct {
 	last    preflightStep
 	calls   []preflight.Params
 	records []internalRuntime.PreflightActivity
+	// deadlines records the deadline (zero when none) of the context each
+	// evaluation ran under, so the wait loop's bounding can be asserted.
+	deadlines []time.Time
 
 	recordErr error
 }
@@ -50,10 +53,12 @@ func (c *preflightController) GetCurrentConfig() interface{} {
 	return &config.Config{APIKey: preflightTestAPIKey}
 }
 
-func (c *preflightController) RunPreflight(_ context.Context, params preflight.Params) (preflight.Outcome, error) {
+func (c *preflightController) RunPreflight(ctx context.Context, params preflight.Params) (preflight.Outcome, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, params)
+	deadline, _ := ctx.Deadline()
+	c.deadlines = append(c.deadlines, deadline)
 	step := c.last
 	if len(c.script) > 0 {
 		step = c.script[0]
@@ -90,6 +95,14 @@ func (c *preflightController) capturedParams() []preflight.Params {
 	defer c.mu.Unlock()
 	out := make([]preflight.Params, len(c.calls))
 	copy(out, c.calls)
+	return out
+}
+
+func (c *preflightController) capturedDeadlines() []time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]time.Time, len(c.deadlines))
+	copy(out, c.deadlines)
 	return out
 }
 
@@ -231,6 +244,14 @@ func TestPreflight_RequiresAuthentication(t *testing.T) {
 
 // --- T015: validation (every 400 rule) --------------------------------------
 
+// oversizedPreflightBody is a syntactically valid request whose padding pushes
+// it past the body cap. It is a single JSON value, so only the cap can reject
+// it — and the cap has to fail the decode rather than truncate, or the padding
+// could hide a second value from the trailing check.
+func oversizedPreflightBody() string {
+	return fmt.Sprintf(`{"tools":[{"id":"ctl:%s"}]}`, strings.Repeat("x", preflightMaxBody))
+}
+
 func TestPreflight_ValidationRejections(t *testing.T) {
 	oversized := make([]contracts.PreflightToolRef, 0, preflightMaxTools+1)
 	for i := 0; i <= preflightMaxTools; i++ {
@@ -284,6 +305,34 @@ func TestPreflight_ValidationRejections(t *testing.T) {
 			name:        "negative wait_ms",
 			body:        contracts.PreflightRequest{Tools: []contracts.PreflightToolRef{{ID: "ctl:echo"}}, WaitMS: -1},
 			wantMessage: "must not be negative",
+		},
+		{
+			// A gate is written once and trusted for months, so a mistyped key
+			// must fail loudly instead of silently weakening the check: `wait`
+			// would be dropped and the caller would never learn it waits 0ms.
+			name:        "unknown field",
+			body:        `{"tools":[{"id":"ctl:echo"}],"wait":5000}`,
+			wantMessage: "Invalid JSON payload",
+		},
+		{
+			name:        "unknown field inside a tool ref",
+			body:        `{"tools":[{"id":"ctl:echo","pin":"sha256/v1:aaaa"}]}`,
+			wantMessage: "Invalid JSON payload",
+		},
+		{
+			name:        "trailing json after the request object",
+			body:        `{"tools":[{"id":"ctl:echo"}]}{"tools":[{"id":"ctl:other"}]}`,
+			wantMessage: "exactly one JSON object",
+		},
+		{
+			name:        "trailing garbage after the request object",
+			body:        `{"tools":[{"id":"ctl:echo"}]} nonsense`,
+			wantMessage: "exactly one JSON object",
+		},
+		{
+			name:        "body over the size cap",
+			body:        oversizedPreflightBody(),
+			wantMessage: "Invalid JSON payload",
 		},
 	}
 
@@ -535,6 +584,33 @@ func TestPreflightWait_ResolvesAtDeadlineWithCurrentReasons(t *testing.T) {
 	assert.GreaterOrEqual(t, *resp.WaitedMS, 40, "it should have waited close to the whole budget")
 	assert.Less(t, elapsed, 5*time.Second, "the wait must be bounded by the requested budget")
 	assert.Greater(t, ctrl.callCount(), 2, "it must re-evaluate local state while waiting")
+}
+
+// Every re-evaluation must be bounded by the WAIT deadline, not just by the
+// request context: wait_ms is the promise the caller gets ("this resolves
+// within N ms"), and an evaluation entered at the last poll could otherwise sit
+// on a slow storage read long past the budget.
+func TestPreflightWait_PollEvaluationsAreBoundedByTheWaitDeadline(t *testing.T) {
+	ctrl := &preflightController{last: preflightStep{outcome: unavailableOutcome("ctl:echo", preflight.ReasonServerInitializing)}}
+	srv := newPreflightServer(t, ctrl)
+	srv.preflightPollOverride = 5 * time.Millisecond
+
+	const waitMS = 60
+	start := time.Now()
+	w := doPreflight(t, srv, contracts.PreflightRequest{
+		Tools:  []contracts.PreflightToolRef{{ID: "ctl:echo"}},
+		WaitMS: waitMS,
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	deadlines := ctrl.capturedDeadlines()
+	require.Greater(t, len(deadlines), 2, "the loop must have polled")
+	budgetEnd := start.Add(waitMS * time.Millisecond)
+	for i, deadline := range deadlines[1:] {
+		require.False(t, deadline.IsZero(), "poll %d ran on an unbounded context", i+1)
+		assert.False(t, deadline.After(budgetEnd.Add(20*time.Millisecond)),
+			"poll %d may not outlive the wait budget", i+1)
+	}
 }
 
 func TestPreflightWait_StopsAsSoonAsEverythingIsReady(t *testing.T) {
