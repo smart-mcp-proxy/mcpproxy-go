@@ -8,12 +8,14 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
 )
 
 // This file is the ONLY bridge between the pure evaluator in internal/preflight
@@ -40,12 +42,8 @@ import (
 // read — the served surface maps those to 503 rather than fabricating a reason
 // code (FR-006).
 func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Params) (preflight.Outcome, error) {
-	if p == nil || p.storage == nil || p.index == nil {
-		return preflight.Outcome{}, preflight.ErrRuntimeUnavailable
-	}
-	cfg := p.currentConfig()
-	if cfg == nil {
-		return preflight.Outcome{}, preflight.ErrRuntimeUnavailable
+	if _, err := p.preflightRuntimeConfig(); err != nil {
+		return preflight.Outcome{}, err
 	}
 
 	scope, err := p.resolvePreflightScope(params)
@@ -56,6 +54,40 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 	tier := params.Tier
 	if tier == "" {
 		tier = preflight.TierOperator
+	}
+
+	return p.evaluatePreflight(ctx, params.Tools, tier, scope, params.Filters)
+}
+
+// preflightRuntimeConfig is the shared "can this process answer at all" guard:
+// no storage, no index or no live config is the degraded state FR-006 names,
+// and every front door must refuse rather than evaluate blind.
+func (p *MCPProxyServer) preflightRuntimeConfig() (*config.Config, error) {
+	if p == nil || p.storage == nil || p.index == nil {
+		return nil, preflight.ErrRuntimeUnavailable
+	}
+	cfg := p.currentConfig()
+	if cfg == nil {
+		return nil, preflight.ErrRuntimeUnavailable
+	}
+	return cfg, nil
+}
+
+// evaluatePreflight is the ONE evaluation seam. Both front doors — the REST
+// surface's RunPreflight (which resolves its scope from profile NAMES) and the
+// in-band check mode's RunPreflightForSession (which projects the session's own
+// visibility predicate, spec 099 FR-003/FR-009a) — end here, so the two
+// surfaces cannot drift in what they read or how they read it.
+func (p *MCPProxyServer) evaluatePreflight(
+	ctx context.Context,
+	refs []preflight.ToolRef,
+	tier preflight.Tier,
+	scope *preflight.Scope,
+	filters toolannotations.Filters,
+) (preflight.Outcome, error) {
+	cfg, err := p.preflightRuntimeConfig()
+	if err != nil {
+		return preflight.Outcome{}, err
 	}
 
 	// ONE snapshot for the whole request: it supplies both the connection state
@@ -74,7 +106,7 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 		Policy:    &preflightConfigPolicy{proxy: p, cfg: cfg},
 		Tier:      tier,
 		Scope:     scope,
-		Filters:   params.Filters,
+		Filters:   filters,
 		// With a real snapshot in hand, a configured server missing from it is
 		// state the supervisor has not published yet (startup / reconcile /
 		// config-add windows) — the evaluator answers the retryable
@@ -84,7 +116,7 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 		RequireRuntimeEntry: state != nil,
 	}
 
-	results, err := preflight.Evaluate(ctx, ec, params.Tools)
+	results, err := preflight.Evaluate(ctx, ec, refs)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
@@ -130,6 +162,119 @@ func (p *MCPProxyServer) resolvePreflightScope(params preflight.Params) (*prefli
 	}
 
 	return preflight.ResolveScope(inputs), nil
+}
+
+// RunPreflightForSession evaluates one IN-BAND preflight — describe_tool check
+// mode (spec 099 FR-003/FR-009/FR-009a).
+//
+// Two things are pinned here rather than passed in, because they are the
+// security contract of the in-band surface:
+//
+//   - The tier is ALWAYS the agent-token tier. /mcp is unauthenticated by
+//     default and its middleware hands such requests a full admin context for
+//     back-compat, so no auth context in band proves anything about who is
+//     calling; a caller-selectable tier would be a caller-selectable
+//     disclosure. Operators wanting scope names and hashes use the REST
+//     surface over an authenticated channel (FR-009).
+//   - The scope is the SESSION's, never a request parameter: check mode takes
+//     no `profile`, so an agent cannot re-point or widen its own view by
+//     asking (FR-009a).
+func (p *MCPProxyServer) RunPreflightForSession(ctx context.Context, refs []preflight.ToolRef, filters toolannotations.Filters) (preflight.Outcome, error) {
+	scope, err := p.sessionPreflightScope(ctx)
+	if err != nil {
+		return preflight.Outcome{}, err
+	}
+	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters)
+}
+
+// sessionPreflightScope projects the session's OWN visibility predicate onto a
+// preflight scope (FR-009a).
+//
+// It deliberately does not re-derive the scope from names the way the REST path
+// does. The composition an MCP session is subject to — agent-token
+// allowed_servers ∩ agent-token profile pin ∩ the session's active profile
+// (path-pinned or set_profile) — already exists as exactly two functions:
+// resolveActiveProfile and serverInScope, which retrieve_tools and describe_tool
+// use on every call. Enumerating the servers an evaluation could name and
+// filtering them through that same predicate makes the invariant structural: a
+// check can never see a tool the same session's retrieve_tools cannot, because
+// it is the same test, not a reimplementation of it. In particular it inherits
+// the deny-all resolution of a token pin whose profile was deleted, and
+// CanAccessServer's rule that an agent token with an EMPTY allowed_servers list
+// grants nothing (which a name-based intersection would read as "no
+// restriction").
+//
+// nil means unrestricted, and is returned only when there is no auth context
+// and no profile in effect — i.e. nothing to restrict.
+func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.Scope, error) {
+	authCtx := auth.AuthContextFromContext(ctx)
+	profileName, profileScope := p.resolveActiveProfile(ctx)
+	if authCtx == nil && profileScope == nil {
+		return nil, nil
+	}
+
+	names, err := p.preflightServerUniverse()
+	if err != nil {
+		return nil, err
+	}
+	allowed := make([]string, 0, len(names))
+	for _, name := range names {
+		if p.serverInScope(authCtx, profileScope, name) {
+			allowed = append(allowed, name)
+		}
+	}
+	return preflight.NewScope(profileName, allowed), nil
+}
+
+// preflightServerUniverse is every server name an evaluation could legitimately
+// reach: stored upstreams (the authority the evaluator's ServerPolicy reads),
+// the indexed corpus (the authority did_you_mean suggests from) and the live
+// config. A name outside this union is not "out of scope" — it is not
+// configured, which the precedence chain answers before the scope gate ever
+// runs.
+//
+// A failed read is an error, never a smaller universe: silently shrinking it
+// would turn a storage failure into a scope verdict.
+func (p *MCPProxyServer) preflightServerUniverse() ([]string, error) {
+	seen := make(map[string]struct{})
+	names := make([]string, 0, 16)
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	upstreams, err := p.storage.ListUpstreams()
+	if err != nil {
+		return nil, fmt.Errorf("preflight: list upstream servers: %w", err)
+	}
+	for _, server := range upstreams {
+		if server != nil {
+			add(server.Name)
+		}
+	}
+
+	indexed, err := p.index.GetAllIndexedServerNames()
+	if err != nil {
+		return nil, fmt.Errorf("preflight: list indexed servers: %w", err)
+	}
+	for _, name := range indexed {
+		add(name)
+	}
+
+	if cfg := p.currentConfig(); cfg != nil {
+		for _, server := range cfg.Servers {
+			if server != nil {
+				add(server.Name)
+			}
+		}
+	}
+	return names, nil
 }
 
 // ---------------------------------------------------------------------------

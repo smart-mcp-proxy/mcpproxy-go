@@ -147,11 +147,27 @@ func preflightParams(r *http.Request, req *contracts.PreflightRequest, tools []p
 // tier, and the tool-listing endpoints use it to decide whether a tool's hash
 // pin may be published (T020, FR-011 + FR-013). The returned AuthContext is
 // non-nil only for the agent-token tier, whose scope the caller needs.
+//
+// Spec 099 FR-018a corrects an inherited defect: the original mapping was
+// "anything that is not an agent token is an operator", which in the SERVER
+// edition handed the operator tier — scope diagnostics and hash pins — to
+// AuthTypeUser, an ordinary OAuth-authenticated tenant user who is not an
+// admin of anything. The rule is now positive rather than residual: only an
+// admin-class context (API key over TCP, the Unix socket, the Windows named
+// pipe — all AuthTypeAdmin — plus the server edition's OAuth admin,
+// AuthTypeAdminUser) is an operator. Every other authenticated type, and any
+// type added later, falls to the agent-token tier, so a new credential kind
+// cannot inherit disclosure by default.
+//
+// A nil AuthContext stays operator: it is the in-process / personal-edition
+// path where the REST layer is reached without the auth middleware having run,
+// and demoting it would silently strip hashes from the local admin surfaces.
 func disclosureTier(r *http.Request) (preflight.Tier, *auth.AuthContext) {
-	if authCtx := auth.AuthContextFromContext(r.Context()); authCtx != nil && authCtx.Type == auth.AuthTypeAgent {
-		return preflight.TierAgentToken, authCtx
+	authCtx := auth.AuthContextFromContext(r.Context())
+	if authCtx == nil || authCtx.IsAdmin() {
+		return preflight.TierOperator, nil
 	}
-	return preflight.TierOperator, nil
+	return preflight.TierAgentToken, authCtx
 }
 
 // handlePreflight handles POST /api/v1/preflight

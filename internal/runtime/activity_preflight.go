@@ -47,6 +47,11 @@ type PreflightActivity struct {
 	// Status overrides the derived activity status. Leave empty to derive it
 	// from Verdict via PreflightActivityStatus.
 	Status string
+	// Surface names the surface that ran the preflight, for surfaces the
+	// Source alone does not identify (spec 099 FR-013:
+	// storage.PreflightSurfaceMCPCheck). Empty for the REST endpoint, whose
+	// metadata then stays exactly as spec 098 shipped it.
+	Surface string
 	// Timestamp defaults to time.Now() when zero.
 	Timestamp time.Time
 	Tools     []PreflightToolOutcome
@@ -153,10 +158,16 @@ func preflightMetadata(rec PreflightActivity) map[string]interface{} {
 		perTool = append(perTool, entry)
 	}
 
-	return map[string]interface{}{
+	metadata := map[string]interface{}{
 		storage.MetadataKeyPreflightVerdict:  rec.Verdict,
 		storage.MetadataKeyPreflightIDsCount: len(rec.Tools),
 		storage.MetadataKeyPreflightReasons:  reasons,
 		storage.MetadataKeyPreflightPerTool:  perTool,
 	}
+	// Absent, not empty, for the REST surface: adding a key to every record it
+	// has written since spec 098 would change a payload nothing asked to change.
+	if rec.Surface != "" {
+		metadata[storage.MetadataKeyPreflightSurface] = rec.Surface
+	}
+	return metadata
 }

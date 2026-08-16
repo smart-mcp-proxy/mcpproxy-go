@@ -152,11 +152,30 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Return full JSON Schema + long description for specific tools found via retrieve_tools. Use when a compact signature is marked lossy ('~') or you need the exact schema before calling.",
+    "description": "Return full JSON Schema + long description for specific tools found via retrieve_tools. Use when a compact signature is marked lossy ('~') or you need the exact schema before calling. With check:true it returns one availability verdict per id instead of schemas ('ready', or a reason code with retryable/action), to gate a plan before its first call.",
     "inputSchema": {
       "properties": {
+        "check": {
+          "description": "Check availability only, no schemas (default: false).",
+          "type": "boolean"
+        },
+        "filters": {
+          "description": "check:true only. Annotation filters, as in retrieve_tools.",
+          "properties": {
+            "exclude_destructive": {
+              "type": "boolean"
+            },
+            "exclude_open_world": {
+              "type": "boolean"
+            },
+            "read_only_only": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
         "tool_ids": {
-          "description": "1-5 tool ids in '\u003cserver\u003e:\u003ctool\u003e' format, from retrieve_tools results.",
+          "description": "Tool ids in '\u003cserver\u003e:\u003ctool\u003e' format from retrieve_tools. Max 5, or 50 with check:true.",
           "items": {
             "type": "string"
           },

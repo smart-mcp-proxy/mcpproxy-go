@@ -503,6 +503,41 @@ func TestPreflightParams_TierDetection(t *testing.T) {
 		assert.Equal(t, preflight.TierOperator, preflightParams(req, body, tools).Tier)
 	})
 
+	// Spec 099 FR-018a: the server edition's ordinary OAuth user is NOT an
+	// operator. The constructor is the same one internal/serveredition/auth
+	// hands the middleware, so this asserts the mapping for both editions from
+	// the one place that owns it (the package builds identically under
+	// -tags server; there is no edition-specific disclosureTier).
+	t.Run("oauth user is the scoped tier, oauth admin is not", func(t *testing.T) {
+		userReq := httptest.NewRequest(http.MethodPost, "/api/v1/preflight", nil)
+		userReq = userReq.WithContext(auth.WithAuthContext(userReq.Context(),
+			auth.UserContext("01J0USER", "user@tenant.example", "Tenant User", "google")))
+
+		tier, authCtx := disclosureTier(userReq)
+		assert.Equal(t, preflight.TierAgentToken, tier,
+			"a non-admin tenant user must not receive scope diagnostics or hash pins")
+		require.NotNil(t, authCtx)
+		assert.Nil(t, authCtx.AllowedServers, "the tier changes; the evaluation scope does not")
+		assert.Equal(t, preflight.TierAgentToken, preflightParams(userReq, body, tools).Tier)
+
+		adminReq := httptest.NewRequest(http.MethodPost, "/api/v1/preflight", nil)
+		adminReq = adminReq.WithContext(auth.WithAuthContext(adminReq.Context(),
+			auth.AdminUserContext("01J0ADMIN", "admin@tenant.example", "Tenant Admin", "google")))
+		adminTier, adminCtx := disclosureTier(adminReq)
+		assert.Equal(t, preflight.TierOperator, adminTier, "an OAuth admin is admin-class")
+		assert.Nil(t, adminCtx)
+	})
+
+	t.Run("an unrecognized auth type falls to the scoped tier", func(t *testing.T) {
+		// Fail-closed: disclosure is granted positively to admin-class contexts,
+		// so a credential kind added later cannot inherit the operator tier by
+		// simply not being an agent token (the original defect's shape).
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/preflight", nil)
+		req = req.WithContext(auth.WithAuthContext(req.Context(), &auth.AuthContext{Type: "workload_identity"}))
+		tier, _ := disclosureTier(req)
+		assert.Equal(t, preflight.TierAgentToken, tier)
+	})
+
 	t.Run("agent token is the scoped tier and carries its scope", func(t *testing.T) {
 		authCtx := (&auth.AgentToken{
 			Name:           "cron",

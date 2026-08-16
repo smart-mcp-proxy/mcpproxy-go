@@ -144,6 +144,13 @@ type MCPProxyServer struct {
 	// production — telemetryRegistry() then resolves via mainServer.runtime.
 	telemetryRegOverride *telemetry.CounterRegistry
 
+	// preflightRecorder overrides the synchronous preflight activity write
+	// describe_tool check mode depends on (Spec 099 FR-013). Nil in production,
+	// where recordPreflightActivity resolves via mainServer.runtime; tests
+	// install one to observe the record — or to fail it — without standing up a
+	// whole Runtime (mirrors workSessionResolver).
+	preflightRecorder func(runtime.PreflightActivity) error
+
 	// Routing mode MCP server instances (Spec 031)
 	// Each instance has different tools registered for its routing mode.
 	directServer   *mcpserver.MCPServer // Direct mode: upstream tools with serverName__toolName naming
