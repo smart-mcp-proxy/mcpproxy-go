@@ -76,17 +76,6 @@ var mcpCheckExemptReasons = map[string]string{
 	preflight.ReasonServerNotConfigured: "the in-band surface is pinned to the agent-token tier (FR-009), where this collapses to not_found",
 }
 
-// scenariosBySurface indexes the matrix by surface.
-func scenariosBySurface(scenarios map[string]sabotageScenario, surface string) map[string]sabotageScenario {
-	out := make(map[string]sabotageScenario)
-	for name, scenario := range scenarios {
-		if scenario.Surface == surface {
-			out[name] = scenario
-		}
-	}
-	return out
-}
-
 type sabotageMatrix struct {
 	Scenarios []sabotageScenario `json:"scenarios"`
 }
