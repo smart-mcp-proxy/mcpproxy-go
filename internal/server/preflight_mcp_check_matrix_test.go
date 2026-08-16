@@ -313,7 +313,7 @@ func TestPreflightMatrixNeverIndexedWhileConnecting(t *testing.T) {
 // preflightParityComparedFields are the per-result fields the parity loop
 // asserts equal between the two surfaces, by their wire names.
 //
-// preflightParityExcludedFields are the ONLY fields allowed to differ, each with
+// The per-surface exclusion maps below name the ONLY fields allowed to differ, each with
 // the reason it does. FR-017 requires the exclusions to be named rather than
 // expressed as "whatever the loop happens not to touch": an omission is
 // invisible, a name is reviewable. TestPreflightParityExclusionsAreNamed turns
@@ -322,13 +322,22 @@ func TestPreflightMatrixNeverIndexedWhileConnecting(t *testing.T) {
 var (
 	preflightParityComparedFields = []string{"id", "status", "reason", "retryable", "action", "detail", "remediation", "did_you_mean"}
 
-	preflightParityExcludedFields = map[string]string{
+	// Exclusions are scoped PER SURFACE: a reason that justifies excluding a
+	// field from one payload says nothing about the other. A globally excluded
+	// "hash" would let a future hash field on the MCP payload silently escape
+	// comparison even though FR-004 forbids it there — the exact narrowing
+	// FR-017's "by name" rule exists to prevent.
+	preflightParityExcludedMCPFields = map[string]string{
 		"checked_at": "a timestamp, not a verdict: each surface stamps its own instant (FR-004)",
-		"hash":       "REST may disclose a pin at the operator tier; in band, never, at any tier (FR-004)",
 		"request_id": "in-band only: the correlation id an agent hands a human (FR-004)",
-		"waited_ms":  "REST only: check mode takes no wait budget (non-goal)",
 		"verdict":    "compared once at the set level, not per result",
 		"results":    "the in-band container of the compared results",
+	}
+	preflightParityExcludedRESTFields = map[string]string{
+		"checked_at": "a timestamp, not a verdict: each surface stamps its own instant (FR-004)",
+		"hash":       "REST may disclose a pin at the operator tier; in band, never, at any tier (FR-004)",
+		"waited_ms":  "REST only: check mode takes no wait budget (non-goal)",
+		"verdict":    "compared once at the set level, not per result",
 		"tools":      "the REST container of the compared results",
 	}
 )
@@ -341,32 +350,55 @@ func TestPreflightParityExclusionsAreNamed(t *testing.T) {
 	compared := make(map[string]bool, len(preflightParityComparedFields))
 	for _, name := range preflightParityComparedFields {
 		compared[name] = true
-		assert.NotContainsf(t, preflightParityExcludedFields, name,
-			"%q cannot be both compared and excluded", name)
+		assert.NotContainsf(t, preflightParityExcludedMCPFields, name,
+			"%q cannot be both compared and MCP-excluded", name)
+		assert.NotContainsf(t, preflightParityExcludedRESTFields, name,
+			"%q cannot be both compared and REST-excluded", name)
 	}
 
-	for _, payload := range []any{
-		describeCheckResult{}, describeCheckPayload{},
-		contracts.PreflightToolResult{}, contracts.PreflightResponse{},
-	} {
-		typ := reflect.TypeOf(payload)
-		for i := 0; i < typ.NumField(); i++ {
-			name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
-			require.NotEmptyf(t, name, "%s.%s has no json tag", typ.Name(), typ.Field(i).Name)
-			if compared[name] {
-				continue
+	surfaces := []struct {
+		payloads []any
+		excluded map[string]string
+		surface  string
+	}{
+		{[]any{describeCheckResult{}, describeCheckPayload{}}, preflightParityExcludedMCPFields, "mcp-check"},
+		{[]any{contracts.PreflightToolResult{}, contracts.PreflightResponse{}}, preflightParityExcludedRESTFields, "rest"},
+	}
+	for _, sf := range surfaces {
+		for _, payload := range sf.payloads {
+			typ := reflect.TypeOf(payload)
+			for i := 0; i < typ.NumField(); i++ {
+				name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+				require.NotEmptyf(t, name, "%s.%s has no json tag", typ.Name(), typ.Field(i).Name)
+				if compared[name] {
+					continue
+				}
+				_, excluded := sf.excluded[name]
+				assert.Truef(t, excluded,
+					"%s.%s (%q) is neither compared by the parity test nor excluded from it by name on the %s surface",
+					typ.Name(), typ.Field(i).Name, name, sf.surface)
 			}
-			_, excluded := preflightParityExcludedFields[name]
-			assert.Truef(t, excluded,
-				"%s.%s (%q) is neither compared by the parity test nor excluded from it by name",
-				typ.Name(), typ.Field(i).Name, name)
+		}
+		// The reverse direction: an exclusion that names no real field on its
+		// own surface is stale and must be pruned, not carried.
+		for name := range sf.excluded {
+			found := false
+			for _, payload := range sf.payloads {
+				typ := reflect.TypeOf(payload)
+				for i := 0; i < typ.NumField(); i++ {
+					if tag, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ","); tag == name {
+						found = true
+					}
+				}
+			}
+			assert.Truef(t, found, "excluded field %q names no field on the %s surface", name, sf.surface)
 		}
 	}
 }
 
 // For identical ids and identical proxy state, the in-band surface and the REST
 // surface AT THE SAME TIER name the same thing. The two payloads deliberately
-// differ only on the fields named in preflightParityExcludedFields — excluded by
+// differ only on the fields named in the per-surface exclusion maps — excluded by
 // name, not by a loose matcher — and anything else that differs is a defect in
 // the glue.
 func TestPreflightInBandRESTParityAtAgentTokenTier(t *testing.T) {
