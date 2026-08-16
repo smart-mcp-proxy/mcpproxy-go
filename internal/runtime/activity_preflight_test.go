@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"sort"
 	"testing"
 	"time"
 
@@ -122,6 +123,70 @@ func TestRecordPreflightAfterStopIsRefused(t *testing.T) {
 
 	err := svc.RecordPreflight(PreflightActivity{RequestID: "req-late", Verdict: preflight.VerdictReady})
 	assert.ErrorIs(t, err, ErrActivityShuttingDown)
+}
+
+// Spec 099 FR-013: the in-band record renders the raw request under its own
+// metadata key, so the raw requested count is recoverable from the record even
+// though ids_count reports the unique one.
+func TestRecordPreflightRawArgumentsSurviveTheRoundTrip(t *testing.T) {
+	svc, mgr := newPreflightActivityService(t)
+
+	require.NoError(t, svc.RecordPreflight(PreflightActivity{
+		RequestID: "req-args",
+		Source:    storage.ActivitySourceMCP,
+		Surface:   storage.PreflightSurfaceMCPCheck,
+		Verdict:   preflight.VerdictReady,
+		Arguments: &PreflightArguments{
+			ToolIDs: []string{" gh:create_issue ", "gh:create_issue", "slack:post"},
+			Filters: []string{"read_only_only"},
+		},
+		Tools: []PreflightToolOutcome{
+			{ID: "gh:create_issue", Status: preflight.StatusReady},
+			{ID: "slack:post", Status: preflight.StatusReady},
+		},
+	}))
+
+	filter := storage.DefaultActivityFilter()
+	filter.RequestID = "req-args"
+	records, _, err := mgr.ListActivities(filter)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	metadata := records[0].Metadata
+
+	assert.InDelta(t, 2, metadata[storage.MetadataKeyPreflightIDsCount], 0.0001,
+		"ids_count stays the UNIQUE count, as on the REST surface")
+
+	arguments, ok := metadata[storage.MetadataKeyPreflightArguments].(map[string]interface{})
+	require.True(t, ok, "the arguments must survive the BBolt JSON round trip")
+	ids, ok := arguments[storage.PreflightArgumentsKeyToolIDs].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []interface{}{" gh:create_issue ", "gh:create_issue", "slack:post"}, ids,
+		"as sent: request order, untrimmed, duplicates intact")
+	assert.Len(t, ids, 3, "the raw requested count is recoverable")
+	assert.Equal(t, []interface{}{"read_only_only"}, arguments[storage.PreflightArgumentsKeyFilters])
+}
+
+// The REST surface sets neither Surface nor Arguments, and its metadata must
+// therefore carry exactly the four keys spec 098 shipped — adding a key to every
+// record written since then would change a payload nothing asked to change.
+func TestPreflightMetadataRESTKeysAreUnchanged(t *testing.T) {
+	metadata := preflightMetadata(PreflightActivity{
+		RequestID: "req-rest",
+		Verdict:   preflight.VerdictReady,
+		Tools:     []PreflightToolOutcome{{ID: "gh:create_issue", Status: preflight.StatusReady}},
+	})
+
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	assert.Equal(t, []string{
+		storage.MetadataKeyPreflightIDsCount,
+		storage.MetadataKeyPreflightPerTool,
+		storage.MetadataKeyPreflightReasons,
+		storage.MetadataKeyPreflightVerdict,
+	}, keys, "the REST record gains no key from a feature it does not use")
 }
 
 func TestPreflightActivityStatusMapping(t *testing.T) {

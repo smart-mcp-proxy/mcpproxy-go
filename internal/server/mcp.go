@@ -151,6 +151,16 @@ type MCPProxyServer struct {
 	// whole Runtime (mirrors workSessionResolver).
 	preflightRecorder func(runtime.PreflightActivity) error
 
+	// preflightStateSource overrides the connection-state snapshot the
+	// preflight glue reads (Spec 099). Nil in production, where
+	// preflightSnapshot resolves it from the supervisor's StateView; tests
+	// install one so the cells that REQUIRE a live snapshot — the connection
+	// states, and the readable upstream annotations policy_filtered needs —
+	// are driven through the real glue and the real handler instead of around
+	// them (mirrors preflightRecorder). It returns exactly what
+	// preflightSnapshot returns: the state reader and the annotation lookup.
+	preflightStateSource func() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations, error)
+
 	// Routing mode MCP server instances (Spec 031)
 	// Each instance has different tools registered for its routing mode.
 	directServer   *mcpserver.MCPServer // Direct mode: upstream tools with serverName__toolName naming

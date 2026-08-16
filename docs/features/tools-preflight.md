@@ -256,7 +256,7 @@ Every executed preflight writes an [activity log](./activity-log.md) record — 
 
 The same rule holds in band: one check-mode call writes exactly one record (marked `surface: mcp-check`) before the verdict is returned, and a failed write fails the tool call. The `request_id` in the response body is that record's id, so an agent can hand a human the exact handle that finds the run — `mcpproxy activity list --request-id <id>` — without leaving the session.
 
-The record carries the request ID, the requested-id count (unique ids, after dedup), the set verdict, and per-tool reason codes (ids and enum codes only — no descriptions, no arguments, and nothing leaves the machine):
+The record carries the request ID, the requested-id count (unique ids, after dedup), the set verdict, and per-tool reason codes (ids and enum codes only — no descriptions, no upstream tool arguments, and nothing leaves the machine). An in-band record additionally carries the call's own `arguments` — the raw `tool_ids` array as the agent sent it, plus any annotation `filters` — so the raw requested count stays readable next to the deduped one:
 
 ```bash
 RID=$(curl -si -X POST -H "X-API-Key: $API_KEY" http://127.0.0.1:8080/api/v1/preflight \

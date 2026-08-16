@@ -240,7 +240,8 @@ func (p *MCPProxyServer) handleDescribeToolCheck(
 
 	// FR-013: durable BEFORE the verdict is returned. A check nobody can audit
 	// afterwards is not answered — the in-band mirror of the REST 503.
-	if err := p.recordPreflightActivity(describeCheckActivityRecord(ctx, outcome, sessionID, requestID)); err != nil {
+	if err := p.recordPreflightActivity(
+		describeCheckActivityRecord(ctx, outcome, rawIDs, mode.filters, sessionID, requestID)); err != nil {
 		if p.logger != nil {
 			p.logger.Error("describe_tool check: preflight activity record could not be persisted",
 				zap.String("request_id", requestID), zap.Error(err))
@@ -308,15 +309,27 @@ func describeCheckResponse(outcome preflight.Outcome, requestID string, checkedA
 // describeCheckActivityRecord builds the FR-013 payload: enum codes, counts and
 // tool ids only — the same shape the REST surface writes, plus the surface
 // marker that tells the two apart. ids_count is the count of UNIQUE ids, as on
-// the REST surface, so the two records mean the same thing.
-func describeCheckActivityRecord(ctx context.Context, outcome preflight.Outcome, sessionID, requestID string) internalRuntime.PreflightActivity {
+// the REST surface, so the two records mean the same thing; the RAW request that
+// produced them is recorded alongside it, so "how many ids did the agent
+// actually send" survives the dedup that ids_count reports.
+func describeCheckActivityRecord(
+	ctx context.Context,
+	outcome preflight.Outcome,
+	rawIDs []string,
+	filters toolannotations.Filters,
+	sessionID, requestID string,
+) internalRuntime.PreflightActivity {
 	record := internalRuntime.PreflightActivity{
 		RequestID: requestID,
 		SessionID: sessionID,
 		Source:    storage.ActivitySourceMCP,
 		Surface:   storage.PreflightSurfaceMCPCheck,
 		Verdict:   outcome.Verdict,
-		Tools:     make([]internalRuntime.PreflightToolOutcome, 0, len(outcome.Results)),
+		Arguments: &internalRuntime.PreflightArguments{
+			ToolIDs: rawIDs,
+			Filters: describeCheckFilterNames(filters),
+		},
+		Tools: make([]internalRuntime.PreflightToolOutcome, 0, len(outcome.Results)),
 	}
 	if record.Verdict == "" {
 		record.Verdict = preflight.VerdictReady
@@ -334,6 +347,28 @@ func describeCheckActivityRecord(ctx context.Context, outcome preflight.Outcome,
 		record.Tools = append(record.Tools, entry)
 	}
 	return record
+}
+
+// describeCheckFilterNames lists the annotation filters in effect, in the order
+// describe_tool declares them, for the activity record's raw arguments. Nil when
+// none are set, so a filterless check records no filters key at all.
+func describeCheckFilterNames(filters toolannotations.Filters) []string {
+	var names []string
+	for _, key := range describeCheckFilterKeys {
+		var on bool
+		switch key {
+		case "read_only_only":
+			on = filters.ReadOnlyOnly
+		case "exclude_destructive":
+			on = filters.ExcludeDestructive
+		case "exclude_open_world":
+			on = filters.ExcludeOpenWorld
+		}
+		if on {
+			names = append(names, key)
+		}
+	}
+	return names
 }
 
 // recordPreflightActivity writes one preflight record synchronously and returns

@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 )
 
 const preflightTestAPIKey = "preflight-test-api-key"
@@ -498,9 +499,22 @@ func TestPreflightParams_TierDetection(t *testing.T) {
 		assert.Equal(t, preflight.TierOperator, preflightParams(req, body, tools).Tier)
 	})
 
-	t.Run("no auth context defaults to operator", func(t *testing.T) {
+	t.Run("no auth context falls to the scoped tier", func(t *testing.T) {
+		// Spec 099 FR-018a: the operator tier is granted POSITIVELY, and a
+		// request that reached the handler without the auth middleware having
+		// run is not evidence of an admin. Nothing is lost by demoting it —
+		// every real operator path installs an explicit admin context, which
+		// TestPreflight_TrustedTransportsAreOperatorTier asserts end-to-end
+		// through the middleware rather than by constructing one here.
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/preflight", nil)
-		assert.Equal(t, preflight.TierOperator, preflightParams(req, body, tools).Tier)
+		tier, authCtx := disclosureTier(req)
+		assert.Equal(t, preflight.TierAgentToken, tier)
+		assert.Nil(t, authCtx)
+
+		params := preflightParams(req, body, tools)
+		assert.Equal(t, preflight.TierAgentToken, params.Tier)
+		assert.Nil(t, params.TokenServers, "the tier narrows; a missing credential invents no scope")
+		assert.Empty(t, params.TokenProfilePin)
 	})
 
 	// Spec 099 FR-018a: the server edition's ordinary OAuth user is NOT an
@@ -552,6 +566,48 @@ func TestPreflightParams_TierDetection(t *testing.T) {
 		assert.Equal(t, preflight.TierAgentToken, params.Tier)
 		assert.Equal(t, []string{"ctl"}, params.TokenServers)
 		assert.Equal(t, "pinned", params.TokenProfilePin)
+	})
+}
+
+// End-to-end proof that the two operator transports authenticate the way
+// PRODUCTION authenticates them, rather than by a hand-built context in a unit
+// test: FR-018a's positive grant is only safe if the middleware really does
+// install an admin context for a validated API key and for the OS-authenticated
+// socket / named pipe. If either stopped doing so, the operator tier would
+// silently disappear from that surface, and this is the test that would say so.
+func TestPreflight_TrustedTransportsAreOperatorTier(t *testing.T) {
+	t.Run("api key over TCP", func(t *testing.T) {
+		ctrl := &preflightController{last: preflightStep{outcome: readyOutcome("ctl:echo")}}
+		srv := newPreflightServer(t, ctrl)
+
+		w := doPreflight(t, srv, contracts.PreflightRequest{
+			Tools: []contracts.PreflightToolRef{{ID: "ctl:echo"}},
+		})
+		require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+		params := ctrl.capturedParams()
+		require.Len(t, params, 1)
+		assert.Equal(t, preflight.TierOperator, params[0].Tier)
+	})
+
+	t.Run("unix socket / windows named pipe", func(t *testing.T) {
+		// The socket carries no API key — it is authenticated by OS-level
+		// permissions, which the middleware turns into an explicit admin
+		// context. FR-013 names socket and pipe as operator surfaces.
+		ctrl := &preflightController{last: preflightStep{outcome: readyOutcome("ctl:echo")}}
+		srv := newPreflightServer(t, ctrl)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/preflight",
+			strings.NewReader(`{"tools":[{"id":"ctl:echo"}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(transport.TagConnectionContext(req.Context(), transport.ConnectionSourceTray))
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+		params := ctrl.capturedParams()
+		require.Len(t, params, 1)
+		assert.Equal(t, preflight.TierOperator, params[0].Tier)
 	})
 }
 

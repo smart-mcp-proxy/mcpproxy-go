@@ -136,8 +136,14 @@ func preflightParams(r *http.Request, req *contracts.PreflightRequest, tools []p
 	}
 	if tier, authCtx := disclosureTier(r); tier == preflight.TierAgentToken {
 		params.Tier = preflight.TierAgentToken
-		params.TokenServers = authCtx.AllowedServers
-		params.TokenProfilePin = authCtx.ProfilePin
+		// authCtx is nil when the request carries no auth context at all. The
+		// tier still narrows to the floor, but there is no token scope to apply:
+		// disclosure and visibility are separate decisions, and inventing a
+		// scope here would turn a missing credential into a deny-all evaluation.
+		if authCtx != nil {
+			params.TokenServers = authCtx.AllowedServers
+			params.TokenProfilePin = authCtx.ProfilePin
+		}
 	}
 	return params
 }
@@ -159,12 +165,19 @@ func preflightParams(r *http.Request, req *contracts.PreflightRequest, tools []p
 // type added later, falls to the agent-token tier, so a new credential kind
 // cannot inherit disclosure by default.
 //
-// A nil AuthContext stays operator: it is the in-process / personal-edition
-// path where the REST layer is reached without the auth middleware having run,
-// and demoting it would silently strip hashes from the local admin surfaces.
+// A NIL AuthContext is part of "every other type": a request that reached a
+// handler without the auth middleware having run proves nothing about who is
+// calling, so it gets the floor rather than the ceiling. Nothing is lost by
+// that, because every operator path carries an EXPLICIT admin context —
+// apiKeyAuthMiddleware installs auth.AdminContext() for a validated API key and
+// for the OS-authenticated Unix socket / Windows named pipe before the handler
+// runs. The only way to arrive here with no context at all is the middleware's
+// no-config passthrough, where "cannot read the config" is precisely not
+// evidence of admin. Keeping nil on the operator side would preserve the
+// residual-grant shape FR-018a exists to remove.
 func disclosureTier(r *http.Request) (preflight.Tier, *auth.AuthContext) {
 	authCtx := auth.AuthContextFromContext(r.Context())
-	if authCtx == nil || authCtx.IsAdmin() {
+	if authCtx != nil && authCtx.IsAdmin() {
 		return preflight.TierOperator, nil
 	}
 	return preflight.TierAgentToken, authCtx

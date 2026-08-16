@@ -357,6 +357,40 @@ func TestDescribeToolCheck_NormalizationAndDedup(t *testing.T) {
 		"the record counts UNIQUE ids, exactly as the REST record does")
 }
 
+// FR-013: ids_count is the UNIQUE count — the definition that makes the in-band
+// and REST records mean the same thing — so the RAW request has to survive
+// somewhere, or "the agent asked for four ids, two of them duplicates" is
+// unrecoverable from the log. It survives in the recorded arguments, exactly as
+// sent: request order, untrimmed, duplicates intact.
+func TestDescribeToolCheck_RawArgumentsStayRecoverable(t *testing.T) {
+	fixture := newDescribeCheckFixture(t, nil)
+	seedCheckFixture(t, fixture)
+
+	rawIDs := []interface{}{" gh:pending_tool ", "gh:create_issue", "gh:pending_tool", "gh:create_issue "}
+	_, _ = fixture.check(t, context.Background(), rawIDs,
+		map[string]interface{}{"filters": map[string]interface{}{"exclude_destructive": true}})
+
+	require.Len(t, fixture.records, 1)
+	record := fixture.records[0]
+	require.NotNil(t, record.Arguments, "the in-band record carries the request as sent")
+	assert.Equal(t, []string{" gh:pending_tool ", "gh:create_issue", "gh:pending_tool", "gh:create_issue "},
+		record.Arguments.ToolIDs)
+	assert.Equal(t, []string{"exclude_destructive"}, record.Arguments.Filters,
+		"the filters that shaped the verdict are part of the request")
+
+	// The two counts are recoverable and different: that difference is the
+	// whole point of recording both.
+	assert.Len(t, record.Arguments.ToolIDs, 4, "raw requested count")
+	assert.Len(t, record.Tools, 2, "unique evaluated count (ids_count)")
+
+	// A filterless check records no filters at all rather than three falses.
+	fixture.records = nil
+	_, _ = fixture.check(t, context.Background(), []interface{}{"gh:create_issue"}, nil)
+	require.Len(t, fixture.records, 1)
+	require.NotNil(t, fixture.records[0].Arguments)
+	assert.Empty(t, fixture.records[0].Arguments.Filters)
+}
+
 // --- FR-007: filters ---------------------------------------------------------
 
 // A tool whose upstream definition declares no annotations is withheld by each

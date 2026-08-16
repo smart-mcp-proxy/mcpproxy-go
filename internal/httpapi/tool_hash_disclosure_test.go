@@ -165,6 +165,29 @@ func TestToolHash_NeverDisclosedToAgentToken(t *testing.T) {
 	}
 }
 
+// Spec 099 FR-018a: a request that reached the handler with NO auth context —
+// the middleware's no-config passthrough is the only way in — is not evidence of
+// an admin, so it gets the agent-token tier and no pin. This is the second
+// consumer of disclosureTier, and the one where a residual grant would publish
+// hashes rather than merely widen a diagnosis.
+func TestToolHash_NoAuthContextGetsNoPin(t *testing.T) {
+	ctrl := &unconfiguredToolHashController{toolHashController: newToolHashController()}
+	srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
+
+	tools := fetchTools(t, srv, "/api/v1/tools", "")
+	require.Contains(t, tools, "create_issue")
+	assert.NotContains(t, tools["create_issue"], "hash",
+		"no auth context is the disclosure floor, not the ceiling")
+}
+
+// unconfiguredToolHashController reproduces the ONE middleware path that reaches
+// a handler without installing an auth context: no readable config.
+type unconfiguredToolHashController struct {
+	*toolHashController
+}
+
+func (c *unconfiguredToolHashController) GetCurrentConfig() interface{} { return nil }
+
 // The hash is proxy state, never upstream-supplied: a server declaring a tool
 // field literally named "hash" must not be able to publish a pin through the
 // listing (it would let a malicious upstream pin itself to a value the operator

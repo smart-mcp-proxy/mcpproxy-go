@@ -377,6 +377,12 @@ func (r *preflightApprovalReader) ToolApproval(serverName, toolName string) (*pr
 // process state FR-006 names: the served surface must refuse with 503 rather
 // than evaluate blind, so that case returns ErrRuntimeUnavailable.
 func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations, error) {
+	// The one injectable seam (nil in production): a test can supply the
+	// snapshot a fixture without a live supervisor cannot produce, and still
+	// exercise every line of glue below the snapshot read.
+	if p.preflightStateSource != nil {
+		return p.preflightStateSource()
+	}
 	if p.mainServer == nil || p.mainServer.runtime == nil {
 		return nil, nil, nil
 	}

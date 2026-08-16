@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -14,8 +15,8 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
 )
 
 // Spec 099 T007 — the in-band half of the committed sabotage matrix.
@@ -28,52 +29,29 @@ import (
 //
 // Cells that need a live connection-state snapshot (the three connection
 // reasons) or readable upstream annotations (policy_filtered — Bleve stores
-// identity and text only, so an index round-trip always loses annotations) are
-// driven through the SAME evaluator with an injected snapshot and then
-// projected onto the in-band payload, which is the precedent spec 098 set with
-// its pending_auth cell. What is in-band-specific about those rows is the
-// projection, and that is what is asserted.
+// identity and text only, so an index round-trip always loses annotations)
+// cannot be induced by fixture state alone. They are driven through the SAME
+// call path as every other row — the real describe_tool handler, the real
+// scope/tier glue, the real projection — with ONLY the snapshot injected, at
+// the one seam production reads it from. Injecting the snapshot rather than the
+// EvalContext is what keeps the glue wiring (scope composition, tier pinning,
+// index-annotation enrichment, the activity write) inside the test instead of
+// beside it.
 
-// --- state-injected stubs with annotations ----------------------------------
-
-type annotatedStubIndex struct {
-	tools       map[string][]string
-	annotations map[string]*config.ToolAnnotations
-}
-
-func (s annotatedStubIndex) ToolsByServer(serverName string) ([]preflight.IndexedTool, error) {
-	out := make([]preflight.IndexedTool, 0, len(s.tools[serverName]))
-	for _, name := range s.tools[serverName] {
-		out = append(out, preflight.IndexedTool{
-			Name:        serverName + ":" + name,
-			Annotations: s.annotations[serverName+":"+name],
-		})
-	}
-	return out, nil
-}
-
-func (s annotatedStubIndex) IndexedServerNames() ([]string, error) {
-	names := make([]string, 0, len(s.tools))
-	for name := range s.tools {
-		names = append(names, name)
-	}
-	return names, nil
-}
-
-// evaluateInjected runs the real evaluator over an injected state snapshot and
-// returns the in-band payload the check handler would have serialized.
-func evaluateInjected(t *testing.T, ec preflight.EvalContext, id string) describeCheckResult {
+// injectPreflightSnapshot makes the fixture's proxy see a connection-state
+// snapshot: every configured server in the given state, and the given
+// annotations on gh:create_issue (the tool the annotation cells check).
+func injectPreflightSnapshot(t *testing.T, f *describeCheckFixture, state preflight.ServerRuntimeState, annotations *config.ToolAnnotations) {
 	t.Helper()
-	ec.Tier = preflight.TierAgentToken
-	results, err := preflight.Evaluate(context.Background(), ec, []preflight.ToolRef{{ID: id}})
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-
-	payload := describeCheckResponse(
-		preflight.Outcome{Verdict: preflight.VerdictForResults(results), Results: results},
-		"req-injected", time.Now().UTC())
-	require.Len(t, payload.Results, 1)
-	return payload.Results[0]
+	f.proxy.preflightStateSource = func() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations, error) {
+		return stubState{state: state}, func(serverName, toolName string) *config.ToolAnnotations {
+			if serverName == "gh" && toolName == "create_issue" {
+				return annotations
+			}
+			return nil
+		}, nil
+	}
+	t.Cleanup(func() { f.proxy.preflightStateSource = nil })
 }
 
 // assertMatrixCell checks one per-tool result against its committed row.
@@ -133,16 +111,16 @@ func TestPreflightMatrixMCPSurfaces(t *testing.T) {
 		"mcp_check_out_of_scope":          "secret:exfiltrate",
 	}
 	// Cells whose state cannot be induced without a live snapshot or readable
-	// annotations, driven through the evaluator with an injected one.
-	injected := map[string]func(t *testing.T) describeCheckResult{
-		"mcp_check_oauth_required": func(t *testing.T) describeCheckResult {
-			return evaluateInjected(t, injectedEvalContext(preflight.RuntimeStatePendingAuth, nil), "gh:create_issue")
+	// annotations: same handler, same glue, only the snapshot injected.
+	injected := map[string]func(t *testing.T) (describeCheckResult, string){
+		"mcp_check_oauth_required": func(t *testing.T) (describeCheckResult, string) {
+			return checkWithSnapshot(t, fixture, preflight.RuntimeStatePendingAuth, nil, nil)
 		},
-		"mcp_check_server_unhealthy": func(t *testing.T) describeCheckResult {
-			return evaluateInjected(t, injectedEvalContext(preflight.RuntimeStateError, nil), "gh:create_issue")
+		"mcp_check_server_unhealthy": func(t *testing.T) (describeCheckResult, string) {
+			return checkWithSnapshot(t, fixture, preflight.RuntimeStateError, nil, nil)
 		},
-		"mcp_check_server_initializing": func(t *testing.T) describeCheckResult {
-			return evaluateInjected(t, injectedEvalContext(preflight.RuntimeStateConnecting, nil), "gh:create_issue")
+		"mcp_check_server_initializing": func(t *testing.T) (describeCheckResult, string) {
+			return checkWithSnapshot(t, fixture, preflight.RuntimeStateConnecting, nil, nil)
 		},
 	}
 	for filterKey, annotations := range map[string]*config.ToolAnnotations{
@@ -151,10 +129,9 @@ func TestPreflightMatrixMCPSurfaces(t *testing.T) {
 		"exclude_open_world":  {OpenWorldHint: boolPtr(true)},
 	} {
 		filterKey, annotations := filterKey, annotations
-		injected["mcp_check_policy_filtered_"+filterKey] = func(t *testing.T) describeCheckResult {
-			ec := injectedEvalContext(preflight.RuntimeStateReady, annotations)
-			ec.Filters = filtersFor(filterKey)
-			return evaluateInjected(t, ec, "gh:create_issue")
+		injected["mcp_check_policy_filtered_"+filterKey] = func(t *testing.T) (describeCheckResult, string) {
+			return checkWithSnapshot(t, fixture, preflight.RuntimeStateReady, annotations,
+				map[string]interface{}{"filters": map[string]interface{}{filterKey: true}})
 		}
 	}
 
@@ -173,14 +150,14 @@ func TestPreflightMatrixMCPSurfaces(t *testing.T) {
 		})
 	}
 
-	// --- state-injected verdict cells ---
+	// --- snapshot-injected verdict cells ---
 	for scenarioName, drive := range injected {
 		scenario, ok := scenarios[scenarioName]
 		require.Truef(t, ok, "scenario %q is missing from %s", scenarioName, preflightMatrixPath)
 		driven[scenarioName] = true
 		t.Run(scenarioName, func(t *testing.T) {
-			result := drive(t)
-			assertMatrixCell(t, scenario, result, preflight.ReasonVerdict(result.Reason))
+			result, verdict := drive(t)
+			assertMatrixCell(t, scenario, result, verdict)
 		})
 	}
 
@@ -280,29 +257,22 @@ func overCapIDs() []interface{} {
 	return ids
 }
 
-func filtersFor(key string) toolannotations.Filters {
-	switch key {
-	case "read_only_only":
-		return toolannotations.Filters{ReadOnlyOnly: true}
-	case "exclude_destructive":
-		return toolannotations.Filters{ExcludeDestructive: true}
-	default:
-		return toolannotations.Filters{ExcludeOpenWorld: true}
-	}
-}
-
-// injectedEvalContext is a configured, enabled, indexed, approved gh:create_issue
-// on a server in the given connection state.
-func injectedEvalContext(state preflight.ServerRuntimeState, annotations *config.ToolAnnotations) preflight.EvalContext {
-	return preflight.EvalContext{
-		Index: annotatedStubIndex{
-			tools:       map[string][]string{"gh": {"create_issue"}},
-			annotations: map[string]*config.ToolAnnotations{"gh:create_issue": annotations},
-		},
-		Approvals: stubApprovals{},
-		State:     stubState{state: state},
-		Policy:    stubPolicy{enabled: map[string]bool{"gh": true}},
-	}
+// checkWithSnapshot runs one real check-mode call for gh:create_issue with a
+// connection-state snapshot injected, and returns its single result plus the set
+// verdict the handler computed.
+func checkWithSnapshot(
+	t *testing.T,
+	fixture *describeCheckFixture,
+	state preflight.ServerRuntimeState,
+	annotations *config.ToolAnnotations,
+	extra map[string]interface{},
+) (describeCheckResult, string) {
+	t.Helper()
+	injectPreflightSnapshot(t, fixture, state, annotations)
+	payload, raw := fixture.check(t, scopedAgentContext(), []interface{}{"gh:create_issue"}, extra)
+	require.Len(t, payload.Results, 1)
+	assert.NotContains(t, raw, "\"hash\"", "no hash is ever returned in band")
+	return payload.Results[0], payload.Verdict
 }
 
 // TestPreflightMatrixNeverIndexedWhileConnecting is the FR-016 erratum: on a
@@ -340,10 +310,65 @@ func TestPreflightMatrixNeverIndexedWhileConnecting(t *testing.T) {
 
 // --- FR-017: in-band vs REST parity -----------------------------------------
 
+// preflightParityComparedFields are the per-result fields the parity loop
+// asserts equal between the two surfaces, by their wire names.
+//
+// preflightParityExcludedFields are the ONLY fields allowed to differ, each with
+// the reason it does. FR-017 requires the exclusions to be named rather than
+// expressed as "whatever the loop happens not to touch": an omission is
+// invisible, a name is reviewable. TestPreflightParityExclusionsAreNamed turns
+// that into a gate — a field added to either payload belongs on one list or the
+// other, or the build of the parity claim fails.
+var (
+	preflightParityComparedFields = []string{"id", "status", "reason", "retryable", "action", "detail", "remediation", "did_you_mean"}
+
+	preflightParityExcludedFields = map[string]string{
+		"checked_at": "a timestamp, not a verdict: each surface stamps its own instant (FR-004)",
+		"hash":       "REST may disclose a pin at the operator tier; in band, never, at any tier (FR-004)",
+		"request_id": "in-band only: the correlation id an agent hands a human (FR-004)",
+		"waited_ms":  "REST only: check mode takes no wait budget (non-goal)",
+		"verdict":    "compared once at the set level, not per result",
+		"results":    "the in-band container of the compared results",
+		"tools":      "the REST container of the compared results",
+	}
+)
+
+// Every field on either payload is either compared or excluded BY NAME. This is
+// the gate FR-017 asks for: adding a field to one surface's result without
+// deciding whether it must agree with the other's fails here, instead of
+// silently leaving the parity claim narrower than it reads.
+func TestPreflightParityExclusionsAreNamed(t *testing.T) {
+	compared := make(map[string]bool, len(preflightParityComparedFields))
+	for _, name := range preflightParityComparedFields {
+		compared[name] = true
+		assert.NotContainsf(t, preflightParityExcludedFields, name,
+			"%q cannot be both compared and excluded", name)
+	}
+
+	for _, payload := range []any{
+		describeCheckResult{}, describeCheckPayload{},
+		contracts.PreflightToolResult{}, contracts.PreflightResponse{},
+	} {
+		typ := reflect.TypeOf(payload)
+		for i := 0; i < typ.NumField(); i++ {
+			name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+			require.NotEmptyf(t, name, "%s.%s has no json tag", typ.Name(), typ.Field(i).Name)
+			if compared[name] {
+				continue
+			}
+			_, excluded := preflightParityExcludedFields[name]
+			assert.Truef(t, excluded,
+				"%s.%s (%q) is neither compared by the parity test nor excluded from it by name",
+				typ.Name(), typ.Field(i).Name, name)
+		}
+	}
+}
+
 // For identical ids and identical proxy state, the in-band surface and the REST
 // surface AT THE SAME TIER name the same thing. The two payloads deliberately
-// differ on checked_at and hash, which are excluded BY NAME rather than by a
-// loose matcher — anything else that differs is a defect in the glue.
+// differ only on the fields named in preflightParityExcludedFields — excluded by
+// name, not by a loose matcher — and anything else that differs is a defect in
+// the glue.
 func TestPreflightInBandRESTParityAtAgentTokenTier(t *testing.T) {
 	fixture := newDescribeCheckFixture(t, nil)
 	seedCheckFixture(t, fixture)
@@ -390,7 +415,10 @@ func TestPreflightInBandRESTParityAtAgentTokenTier(t *testing.T) {
 			mcpResult := checkResultByID(t, inBand, id)
 			restResult := resultByID(t, rest, id)
 
-			// The compared tuple, field by field and by name.
+			// The compared set, field by field and by wire name. It is the
+			// same list TestPreflightParityExclusionsAreNamed measures the two
+			// payloads against, so "compared" cannot quietly shrink.
+			assert.Equal(t, restResult.ID, mcpResult.ID, "id")
 			assert.Equal(t, restResult.Status, mcpResult.Status, "status")
 			assert.Equal(t, restResult.Reason, mcpResult.Reason, "reason")
 			assert.Equal(t, restResult.Action, mcpResult.Action, "action")
@@ -402,13 +430,17 @@ func TestPreflightInBandRESTParityAtAgentTokenTier(t *testing.T) {
 			}
 			// Detail and remediation are not in the FR-017 tuple, but they come
 			// from the same evaluator result, so a divergence would mean the
-			// projection rewrote them.
+			// projection rewrote them. did_you_mean is compared for the same
+			// reason: it is computed over the caller-visible scope, which the
+			// two surfaces must resolve identically.
 			assert.Equal(t, restResult.Detail, mcpResult.Detail, "detail")
 			assert.Equal(t, restResult.Remediation, mcpResult.Remediation, "remediation")
+			assert.Equal(t, restResult.DidYouMean, mcpResult.DidYouMean, "did_you_mean")
 
-			// The two documented divergences: the REST result may carry a hash
-			// (not at this tier, but the field exists); the in-band payload has
-			// no hash field at all, and checked_at is a timestamp, not a verdict.
+			// hash is one of the named exclusions and the only one with a
+			// disclosure consequence, so it gets an assertion of its own: the
+			// in-band payload has no such field at all, and at this tier the
+			// REST payload must not fill one either.
 			assert.Empty(t, restResult.Hash, "the agent-token tier discloses no hash on either surface")
 		})
 	}
