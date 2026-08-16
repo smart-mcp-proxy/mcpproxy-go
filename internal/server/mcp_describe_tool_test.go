@@ -194,7 +194,9 @@ func TestDescribeTool_VisibilityParityWithRetrieve(t *testing.T) {
 		wantError string // "" = definition expected
 	}{
 		{"github:visible_tool", ""},
-		{"gitlab:scoped_tool", "invisible"},
+		// Spec 099 FR-011: an out-of-scope id is plain not_found — the retired
+		// `invisible` code confirmed that a tool this session may not see exists.
+		{"gitlab:scoped_tool", "not_found"},
 		{"quarry:lingering_tool", "quarantined"},
 		{"github:pending_tool", "pending_approval"},
 		{"github:changed_tool", "changed"},
@@ -371,9 +373,12 @@ func TestDescribeTool_RegisteredInRetrieveToolsModeOnly(t *testing.T) {
 	})
 }
 
-// T028 (FR-011): the describe_tool definition costs ≤150 tokens counted with
-// tiktoken cl100k_base — the same pinned encoder the spec-083 profiler uses,
-// so the budget and the profiler agree.
+// T028 (spec 085 FR-011) / spec 099 FR-015: the describe_tool definition costs
+// ≤describeToolTokenBudget tokens counted with tiktoken cl100k_base — the same
+// pinned encoder the spec-083 profiler uses, so the budget and the profiler
+// agree. The budget rose from 150 to 250 when check mode added two parameters;
+// the exact bytes are additionally pinned by the tools/list goldens, so prose
+// cannot drift silently under the ceiling.
 func TestDescribeTool_DefinitionTokenBudget(t *testing.T) {
 	tool := buildDescribeToolTool()
 	serialized, err := json.Marshal(tool)
@@ -383,16 +388,31 @@ func TestDescribeTool_DefinitionTokenBudget(t *testing.T) {
 	require.NoError(t, err, "cl100k_base encoding must be loadable (bench pins the same encoder)")
 
 	tokens := len(enc.Encode(string(serialized), nil, nil))
-	assert.LessOrEqual(t, tokens, 150,
-		"describe_tool definition must stay within the 150-token budget (FR-011); got %d tokens for %s",
-		tokens, serialized)
+	assert.LessOrEqual(t, tokens, describeToolTokenBudget,
+		"describe_tool definition must stay within the %d-token budget (spec 099 FR-015); got %d tokens for %s",
+		describeToolTokenBudget, tokens, serialized)
 
-	// Schema sanity: single required array-of-strings param.
+	// Schema sanity: one required array-of-strings param plus the two optional
+	// check-mode params, and nothing else — the reserved expect_hashes is NOT
+	// declared (FR-008).
 	assert.Equal(t, "describe_tool", tool.Name)
 	require.Contains(t, tool.InputSchema.Properties, "tool_ids")
 	assert.Equal(t, []string{"tool_ids"}, tool.InputSchema.Required)
 	idsSchema := tool.InputSchema.Properties["tool_ids"].(map[string]any)
 	assert.Equal(t, "array", idsSchema["type"])
+
+	require.Contains(t, tool.InputSchema.Properties, "check")
+	assert.Equal(t, "boolean", tool.InputSchema.Properties["check"].(map[string]any)["type"])
+	require.Contains(t, tool.InputSchema.Properties, "filters")
+	filters := tool.InputSchema.Properties["filters"].(map[string]any)
+	assert.Equal(t, "object", filters["type"])
+	assert.Equal(t, map[string]any{
+		"read_only_only":      map[string]any{"type": "boolean"},
+		"exclude_destructive": map[string]any{"type": "boolean"},
+		"exclude_open_world":  map[string]any{"type": "boolean"},
+	}, filters["properties"], "the three spec-094 annotation filters, and only those (FR-007)")
+	assert.NotContains(t, tool.InputSchema.Properties, describeCheckReservedHashes)
+	assert.Len(t, tool.InputSchema.Properties, 3)
 }
 
 // T029 (FR-012): describe_tool output is byte-identical whether the configured

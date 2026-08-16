@@ -554,7 +554,8 @@ The MCP endpoints (not REST) additionally expose progressive-disclosure discover
 
 - **`tool_response_mode`** config (`full` default | `compact`, hot-reloadable via `POST /api/v1/config/apply`) controls `retrieve_tools` serialization only. In `compact` mode each entry is `{id, score, sig, desc, lossy}` — a one-line parameter signature (`*` = required, `~` = lossy) plus a first-sentence description — instead of full `inputSchema`, and the response carries one top-level `hint` line. Ranking is identical between modes.
 - **`detail`** — optional per-call `retrieve_tools` parameter (`compact` | `full`) overriding the configured mode for that call.
-- **`describe_tool`** — built-in second-stage tool (retrieve_tools mode only): accepts 1–5 `server:tool` ids and returns full definitions (`name`, `description`, `inputSchema`, `server`, `annotations`, `call_with`) with per-id errors for unknown/invisible ids. It applies the same visibility pipeline as search (profile scope, agent-token scope, quarantine, tool approval, disabled) and never returns a definition `retrieve_tools` could not.
+- **`describe_tool`** — built-in second-stage tool (retrieve_tools mode only): accepts 1–5 `server:tool` ids and returns full definitions (`name`, `description`, `inputSchema`, `server`, `annotations`, `call_with`) with per-id errors for ids that do not resolve. It applies the same visibility pipeline as search (profile scope, agent-token scope, quarantine, tool approval, disabled) and never returns a definition `retrieve_tools` could not. Per-id error codes: `not_found`, `quarantined`, `pending_approval`, `changed`, `disabled` (Spec 099 retired `invisible`: an out-of-scope id now reports `not_found`, indistinguishable from an id that does not exist — see the [breaking-change note](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/CHANGELOG.md)).
+- **`describe_tool` check mode (Spec 099)** — the same built-in with `check: true` answers availability instead of definitions: up to 50 ids, an optional `filters` object (`read_only_only`, `exclude_destructive`, `exclude_open_world` — the REST body of `POST /api/v1/preflight` calls the same object `policy`), and a response of `{verdict, checked_at, request_id, results[]}` carrying the same reason codes this endpoint returns. It is the in-band twin of `POST /api/v1/preflight`, evaluated by the same evaluator, and differs deliberately: always the agent-token disclosure tier (never a hash, never `server_not_in_scope`), the session's own scope with no `profile` parameter, no hash pins (`expect_hashes` is a reserved field name and is rejected), and no wait budget. See [Required-Tools Preflight](../features/tools-preflight.md#in-band-describe_tool-check-mode).
 
 ### Tools
 
@@ -737,12 +738,14 @@ failing.
 
 **Disclosure tiers:**
 
-- **Operator tier** (admin API key, Unix socket, Windows named pipe): full
-  results — `hash` pins on ready results, `did_you_mean` suggestions, and the
-  `server_not_in_scope` diagnosis when a supplied `profile` excludes an
-  existing server (with a `detail` noting that a session under that profile
-  sees `not_found`).
-- **Agent-token tier**: scope-silence — an out-of-scope ID's entire result is
+- **Operator tier** (admin API key, Unix socket, Windows named pipe — plus the
+  server edition's OAuth **admin**): full results — `hash` pins on ready
+  results, `did_you_mean` suggestions, and the `server_not_in_scope` diagnosis
+  when a supplied `profile` excludes an existing server (with a `detail` noting
+  that a session under that profile sees `not_found`).
+- **Agent-token tier** (agent tokens, the server edition's ordinary OAuth users,
+  and the whole in-band `describe_tool` check surface): scope-silence — an
+  out-of-scope ID's entire result is
   byte-indistinguishable from an ordinary `not_found` (same wording; no hashes;
   no `did_you_mean` crossing the scope boundary). `did_you_mean` is computed
   over the caller-visible index only and never suggests a quarantined server's
@@ -750,7 +753,8 @@ failing.
 
 **Activity-record guarantee:** every request answered `200` writes an activity
 record **synchronously, before the response is returned** — request ID,
-requested-ID count, set verdict, and per-tool reason codes (tool IDs and enum
+requested-ID count (unique IDs, after dedup), set verdict, and per-tool reason
+codes (tool IDs and enum
 codes only; no descriptions, no arguments, no hashes; local-only, never
 telemetry). Correlate via the `X-Request-Id` response header and
 `mcpproxy activity list --request-id <id>`.

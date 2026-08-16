@@ -23,10 +23,24 @@ import (
 // MCPPROXY_WRITE_TOOLSLIST_GOLDENS set — so the capture and the comparison
 // share one serializer and cannot drift.
 //
-// Unlike the spec-085/094 delta test in mcp_menu_surface_test.go (which allows
-// an enumerated, intentional delta), this test allows NO delta at all. A
-// failure here is a spec-098 regression, not a golden to refresh: goldens are
-// only regenerated when a DIFFERENT, deliberate spec changes the MCP surface.
+// SPEC 099 (FR-014/FR-015) converted this from a NO-delta gate into an
+// ENUMERATED-delta gate — the spec-085/094 pattern in mcp_menu_surface_test.go
+// — because 099 ships an MCP feature where 098 shipped none. Two things now
+// hold together, and both have to:
+//
+//  1. Every surface is byte-identical to its golden, exactly as before. The
+//     goldens for the two surfaces that carry describe_tool were regenerated
+//     DELIBERATELY, once, so the new definition — including its prose — is
+//     pinned byte-for-byte and a later edit shows up as a reviewable diff
+//     rather than drifting silently under the token budget.
+//  2. The regenerated goldens differ from the frozen pre-099 capture
+//     (testdata/toolslist_goldens/pre099/) in EXACTLY one tool entry,
+//     describe_tool, on exactly those two surfaces. Every other tool, and the
+//     whole code_execution surface, is byte-equal — which is why that surface
+//     has no pre099 copy at all: its golden was never regenerated.
+//
+// A failure in (1) with no accompanying spec is a regression, not a golden to
+// refresh. A failure in (2) means a change reached further than it claimed.
 //
 // Surfaces covered (the three routing modes that expose a static, built-in
 // tool set):
@@ -42,6 +56,11 @@ import (
 
 const (
 	toolsListGoldenDir = "toolslist_goldens"
+
+	// toolsListPre099Dir holds the FROZEN pre-099 capture of the two surfaces
+	// spec 099 was allowed to move. It is never regenerated: it is the baseline
+	// the enumerated delta is measured against.
+	toolsListPre099Dir = "pre099"
 
 	// toolsListGoldenWriteEnv, when set to a directory, makes this test WRITE
 	// the goldens instead of comparing them. Used once to capture the
@@ -145,6 +164,69 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 			t.Errorf("surface %s: tools/list is not byte-identical to the merge-base golden (spec 098 FR-015)", surface)
 		})
 	}
+}
+
+// toolsListPre099Surfaces maps a surface to the tool entries spec 099 was
+// allowed to change on it (FR-014). A surface absent from this map may not move
+// at all — code_execution_mode is deliberately absent.
+var toolsListPre099Surfaces = map[string][]string{
+	"default_server":      {"describe_tool"},
+	"retrieve_tools_mode": {"describe_tool"},
+}
+
+// TestToolsListSnapshot_Spec099DeltaIsExactlyDescribeTool is the FR-014 gate:
+// the goldens moved, and this is the enumeration of how far.
+func TestToolsListSnapshot_Spec099DeltaIsExactlyDescribeTool(t *testing.T) {
+	for surface, allowed := range toolsListPre099Surfaces {
+		surface, allowed := surface, allowed
+		t.Run(surface, func(t *testing.T) {
+			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre099Dir, surface+".json"))
+			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
+
+			// The tool SET is unchanged: 099 adds parameters to an existing
+			// built-in, it does not register or retire one.
+			assert.Equal(t, sortedToolNames(before), sortedToolNames(after),
+				"surface %s: spec 099 adds no tool and removes none", surface)
+
+			changed := make([]string, 0, 1)
+			for name, pre := range before {
+				post, ok := after[name]
+				if !ok {
+					continue // already reported by the set comparison
+				}
+				if !bytes.Equal(pre, post) {
+					changed = append(changed, name)
+				}
+			}
+			sort.Strings(changed)
+			assert.Equal(t, allowed, changed,
+				"surface %s: spec 099 may change describe_tool and nothing else", surface)
+		})
+	}
+
+	// The one surface that had no delta to enumerate: it must still match the
+	// spec-098 merge-base bytes, so it never needed a pre099 copy.
+	assert.NotContains(t, toolsListPre099Surfaces, "code_execution_mode",
+		"code_execution mode carries no describe_tool and must not move (FR-002/FR-014)")
+}
+
+func decodeToolsListGolden(t *testing.T, path string) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err, "missing golden %s", path)
+	var tools map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(normalizeGoldenEOL(raw), &tools))
+	require.NotEmpty(t, tools)
+	return tools
+}
+
+func sortedToolNames(tools map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // reportToolsListDiff decodes both sides and reports added/removed/changed

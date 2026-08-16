@@ -119,6 +119,31 @@
     },
     "name": "call_tool_write"
   },
+  "code_execution": {
+    "annotations": {
+      "title": "Code Execution (Disabled)",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config.",
+    "inputSchema": {
+      "properties": {
+        "code": {
+          "description": "JavaScript source code to execute.",
+          "type": "string"
+        },
+        "script": {
+          "description": "Name of a stored script to execute.",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "code_execution"
+  },
   "describe_tool": {
     "annotations": {
       "title": "Describe Tool",
@@ -127,30 +152,11 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Return full JSON Schema + long description for specific tools found via retrieve_tools. Use when a compact signature is marked lossy ('~') or you need the exact schema before calling. With check:true it returns one availability verdict per id instead of schemas ('ready', or a reason code with retryable/action), to gate a plan before its first call.",
+    "description": "Return full JSON Schema + long description for specific tools found via retrieve_tools. Use when a compact signature is marked lossy ('~') or you need the exact schema before calling.",
     "inputSchema": {
       "properties": {
-        "check": {
-          "description": "Check availability only, no schemas (default: false).",
-          "type": "boolean"
-        },
-        "filters": {
-          "description": "check:true only. Annotation filters, as in retrieve_tools.",
-          "properties": {
-            "exclude_destructive": {
-              "type": "boolean"
-            },
-            "exclude_open_world": {
-              "type": "boolean"
-            },
-            "read_only_only": {
-              "type": "boolean"
-            }
-          },
-          "type": "object"
-        },
         "tool_ids": {
-          "description": "Tool ids in '\u003cserver\u003e:\u003ctool\u003e' format from retrieve_tools. Max 5, or 50 with check:true.",
+          "description": "1-5 tool ids in '\u003cserver\u003e:\u003ctool\u003e' format, from retrieve_tools results.",
           "items": {
             "type": "string"
           },
@@ -231,11 +237,11 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages to access the complete dataset with pagination.",
+    "description": "Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages.",
     "inputSchema": {
       "properties": {
         "key": {
-          "description": "Cache key provided by mcpproxy when a response was truncated (e.g. 'Use read_cache tool: key=\"abc123def...\"')",
+          "description": "Cache key provided by mcpproxy when a response was truncated.",
           "type": "string"
         },
         "limit": {
@@ -262,7 +268,7 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers. ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
+    "description": "Search and discover available upstream tools using BM25 full-text search. WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. Use natural language to describe what you want to accomplish. ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
     "inputSchema": {
       "properties": {
         "debug": {
@@ -289,10 +295,6 @@
           "description": "When debug=true, explain why a specific tool was ranked low (format: 'server:tool')",
           "type": "string"
         },
-        "include_disabled": {
-          "description": "Set true to also surface tools that exist but are currently locked by config, user, or quarantine (default: false). Returns a 'disabled' list (name/server/description/status) plus a 'remediation' map; callable results are unaffected and listed first.",
-          "type": "boolean"
-        },
         "include_session_risk_warning": {
           "description": "Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag.",
           "type": "boolean"
@@ -306,7 +308,7 @@
           "type": "number"
         },
         "query": {
-          "description": "Natural language description of what you want to accomplish. Be specific about your task (e.g., 'create a new GitHub repository', 'get weather for London', 'query SQLite database for users'). The search will find the most relevant tools across all connected servers.",
+          "description": "Natural language description of what you want to accomplish. Be specific (e.g., 'create a new GitHub repository', 'get weather for London').",
           "type": "string"
         },
         "read_only_only": {

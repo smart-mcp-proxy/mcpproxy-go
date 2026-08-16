@@ -120,6 +120,35 @@ const (
 	// MetadataKeyPreflightPerTool is the ordered per-tool detail:
 	// [{id, status, reason?}] using the PreflightPerTool* keys below.
 	MetadataKeyPreflightPerTool = "per_tool"
+	// MetadataKeyPreflightSurface names the surface that ran the preflight when
+	// it is not the REST endpoint — currently only "mcp-check", the in-band
+	// describe_tool check mode (spec 099 FR-013). It is OMITTED for the REST
+	// surface, whose records predate it and stay byte-identical.
+	MetadataKeyPreflightSurface = "surface"
+
+	// MetadataKeyPreflightArguments records the in-band caller's request AS
+	// SENT, so the raw requested-id count stays recoverable from the record
+	// even though MetadataKeyPreflightIDsCount is the UNIQUE count both
+	// surfaces agree on (spec 099 FR-013). It carries the PreflightArgumentsKey*
+	// members below: still ids and enum-valued filter names, never descriptions
+	// or upstream arguments. OMITTED for the REST surface, whose records
+	// predate it and stay byte-identical.
+	MetadataKeyPreflightArguments = "arguments"
+
+	// Keys inside MetadataKeyPreflightArguments.
+	//
+	// PreflightArgumentsKeyToolIDs is the raw tool_ids array: request order,
+	// untrimmed, duplicates intact — len() is the raw requested count.
+	PreflightArgumentsKeyToolIDs = "tool_ids"
+	// PreflightArgumentsKeyFilters lists the annotation filters that were in
+	// effect, in the order describe_tool declares them. Absent when none were.
+	PreflightArgumentsKeyFilters = "filters"
+
+	// PreflightSurfaceMCPCheck marks a record written by describe_tool check
+	// mode. It matches the `surface` value the spec-099 sabotage-matrix rows
+	// carry, so a matrix row and an activity record name the surface the same
+	// way.
+	PreflightSurfaceMCPCheck = "mcp-check"
 
 	// Keys inside one MetadataKeyPreflightPerTool entry.
 	PreflightPerToolKeyID     = "id"

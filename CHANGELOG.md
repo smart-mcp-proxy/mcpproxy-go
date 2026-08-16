@@ -5,6 +5,30 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **mcp/describe_tool:** the per-id error code `invisible` is retired. An id on a server the
+  session cannot see (agent-token scope or active profile) now reports `not_found` — the same
+  code, `remediation` text and shape as an id that does not exist. A distinct code confirmed
+  that a hidden tool existed, which is the disclosure the contract was written to prevent, and
+  it is the only per-id code `describe_tool` has ever removed. **Migration:** a consumer
+  switching on `invisible` should treat it as `not_found`; the remediation string it renders is
+  unchanged. The plain-mode error vocabulary is now `not_found | quarantined | pending_approval
+  | changed | disabled`. (spec 099 FR-011, [#969](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/969))
+- **server edition / REST disclosure:** an ordinary OAuth-authenticated user (`AuthTypeUser`)
+  is now the agent-token disclosure tier rather than the operator tier, so tenant users no
+  longer receive tool hash pins or `server_not_in_scope` scope diagnostics from
+  `POST /api/v1/preflight` and the tool-listing endpoints. Admin API key, Unix socket, Windows
+  named pipe and the OAuth **admin** role are unaffected. (spec 099 FR-018a)
+
+### Features
+
+- **mcp:** `describe_tool` check mode — an optional `check: true` returns one availability
+  verdict per id (up to 50) from the spec-098 preflight evaluator instead of schemas, so an
+  agent can gate a multi-step plan without leaving the MCP session. Optional `filters`
+  (`read_only_only`, `exclude_destructive`, `exclude_open_world`); every run is on the activity
+  record, and the returned `request_id` finds it. (spec 099, [#969](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/969))
+
 ### Bug Fixes
 
 - **homebrew:** One-line install in docs + guard tap job against pre-release tags (#486) ([#486](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/486)) ([`1098701`](https://github.com/smart-mcp-proxy/mcpproxy-go/commit/109870116fe17aa1ce7ecfd603962c1d3de21ba0))
