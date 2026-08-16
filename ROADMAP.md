@@ -800,3 +800,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [096-batched-call-tools](./specs/096-batched-call-tools/) | `in-flight` | 15/16 (94%) |
 | [097-stored-scripts](./specs/097-stored-scripts/) | `in-flight` | 13/14 (93%) |
 | [098-tools-preflight](./specs/098-tools-preflight/) | `drafted` | 0/33 (0%) |
+| [099-describe-check-mode](./specs/099-describe-check-mode/) | `drafted` | 0/10 (0%) |
