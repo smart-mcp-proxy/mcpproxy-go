@@ -30,13 +30,50 @@ type sabotageExpectation struct {
 	Action    string `json:"action,omitempty"`
 	Verdict   string `json:"verdict"`
 	ExitCode  int    `json:"exit_code"`
+	// RequestError is set INSTEAD of a verdict for a row whose request is
+	// rejected rather than evaluated (spec 099 FR-012/FR-016: the cap boundary,
+	// filters without check, the reserved field). Its value is the fragment the
+	// error message must contain.
+	RequestError string `json:"request_error,omitempty"`
+	// PlainError is set INSTEAD of a verdict for an mcp-plain row: plain
+	// describe_tool answers per-id codes from its own vocabulary, not preflight
+	// reasons (spec 099 FR-011).
+	PlainError string `json:"plain_error,omitempty"`
 }
 
 type sabotageScenario struct {
-	Scenario string              `json:"scenario"`
-	Surface  string              `json:"surface"`
+	Scenario string `json:"scenario"`
+	Surface  string `json:"surface"`
+	// Tier is the disclosure tier the row is observed at (spec 099 FR-016).
+	Tier     string              `json:"tier"`
 	Sabotage string              `json:"sabotage"`
 	Expect   sabotageExpectation `json:"expect"`
+}
+
+// Matrix surfaces. The first two induce state for the REST endpoint; the last
+// two are the spec-099 in-band surfaces.
+const (
+	surfaceE2E           = "e2e"
+	surfaceStateInjected = "state-injected"
+	surfaceMCPCheck      = "mcp-check"
+	surfaceMCPPlain      = "mcp-plain"
+)
+
+// mcpCheckExemptReasons are the two codes the in-band surface cannot produce BY
+// DESIGN, and therefore the only two the mcp-check coverage gate excuses (spec
+// 099 FR-008/FR-009). The exemption is encoded here rather than left implicit:
+// if either ever becomes observable in band, this list is what has to change,
+// in the same commit as the behavior.
+var mcpCheckExemptReasons = map[string]string{
+	preflight.ReasonHashMismatch:     "in-band hash pins were trimmed from v1 (FR-008): nothing in band can request a pin",
+	preflight.ReasonServerNotInScope: "the in-band surface is pinned to the agent-token tier (FR-009), where this collapses to not_found",
+	// FR-009 names BOTH collapsing codes; FR-016's parenthetical listed only
+	// the first. The collapse is symmetric in the evaluator and has to be — if
+	// an unconfigured server answered differently from an out-of-scope one, a
+	// token could probe arbitrary names and learn which servers exist behind
+	// its scope. The two mcp_check_unknown_server / mcp_check_out_of_scope rows
+	// assert the collapse itself, which is the observable behavior.
+	preflight.ReasonServerNotConfigured: "the in-band surface is pinned to the agent-token tier (FR-009), where this collapses to not_found",
 }
 
 type sabotageMatrix struct {
@@ -72,12 +109,30 @@ func TestPreflightSabotageMatrixCoversEveryReason(t *testing.T) {
 	scenarios := loadSabotageMatrix(t)
 
 	covered := make(map[string]int)
+	coveredInBand := make(map[string]int)
 	for name, scenario := range scenarios {
 		expect := scenario.Expect
-		require.Containsf(t, []string{preflight.StatusReady, preflight.StatusUnavailable},
-			expect.Status, "scenario %q: status must be a valid preflight status", name)
 		require.NotEmptyf(t, scenario.Surface, "scenario %q: surface must say how the state is induced", name)
 		require.NotEmptyf(t, scenario.Sabotage, "scenario %q: sabotage must describe the induced state", name)
+		require.Containsf(t, []string{preflight.TierOperator, preflight.TierAgentToken},
+			scenario.Tier, "scenario %q: tier must be a valid disclosure tier", name)
+		if scenario.Surface == surfaceMCPCheck || scenario.Surface == surfaceMCPPlain {
+			assert.Equalf(t, preflight.TierAgentToken, scenario.Tier,
+				"scenario %q: the whole in-band surface is the agent-token tier (spec 099 FR-009)", name)
+		}
+
+		// Rows that are REJECTED rather than evaluated, and rows on the plain
+		// surface with its own vocabulary, carry no verdict to check against
+		// the taxonomy.
+		if expect.RequestError != "" || expect.PlainError != "" {
+			assert.Emptyf(t, expect.Status, "scenario %q: a rejected/plain row carries no preflight status", name)
+			assert.Emptyf(t, expect.Reason, "scenario %q: a rejected/plain row carries no preflight reason", name)
+			assert.Emptyf(t, expect.Verdict, "scenario %q: a rejected/plain row carries no verdict", name)
+			continue
+		}
+
+		require.Containsf(t, []string{preflight.StatusReady, preflight.StatusUnavailable},
+			expect.Status, "scenario %q: status must be a valid preflight status", name)
 
 		if expect.Status == preflight.StatusReady {
 			assert.Emptyf(t, expect.Reason, "scenario %q: a ready row carries no reason", name)
@@ -91,6 +146,9 @@ func TestPreflightSabotageMatrixCoversEveryReason(t *testing.T) {
 		require.Truef(t, preflight.ValidReason(expect.Reason),
 			"scenario %q: %q is not a member of the closed reason enum", name, expect.Reason)
 		covered[expect.Reason]++
+		if scenario.Surface == surfaceMCPCheck {
+			coveredInBand[expect.Reason]++
+		}
 
 		require.NotNilf(t, expect.Retryable, "scenario %q: a failure row must state retryable", name)
 		assert.Equalf(t, preflight.Retryable(expect.Reason), *expect.Retryable,
@@ -106,6 +164,17 @@ func TestPreflightSabotageMatrixCoversEveryReason(t *testing.T) {
 	for _, reason := range preflight.AllReasons() {
 		assert.Positivef(t, covered[reason],
 			"reason %q has no scenario in %s: FR-016 requires a sabotage cell per enum code",
+			reason, preflightMatrixPath)
+
+		if why, exempt := mcpCheckExemptReasons[reason]; exempt {
+			assert.Zerof(t, coveredInBand[reason],
+				"reason %q has an mcp-check row but is documented as REST-only (%s): either the row or the exemption is wrong",
+				reason, why)
+			continue
+		}
+		assert.Positivef(t, coveredInBand[reason],
+			"reason %q has no mcp-check scenario in %s: spec 099 FR-016 requires an in-band cell per observable enum code "+
+				"(add one, or document the code in mcpCheckExemptReasons with the design decision that makes it unreachable)",
 			reason, preflightMatrixPath)
 	}
 }

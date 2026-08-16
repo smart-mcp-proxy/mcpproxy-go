@@ -130,8 +130,11 @@ Produced by `buildToolEntry(result, mode, opts)` (new `internal/server/mcp_entry
 ```
 describe_tool(tool_ids: [str])   // 1..5 ids, "<server>:<tool>"
 → { "definitions": [ {full-mode entry}, … ],
-    "errors": [ {"id": "...", "error": "not_found|invisible|…", "remediation": "..."}, … ] }
+    "errors": [ {"id": "...", "error": "not_found|quarantined|…", "remediation": "..."}, … ] }
 ```
+> **Amended by spec 099**: the `invisible` code is retired (out-of-scope ⇒ `not_found`), and the
+> tool gained an optional `check: true` verdict mode with its own 50-id cap. The authoritative
+> shape is [contracts/describe_tool.md](contracts/describe_tool.md).
 - Batch ≤5; >5 ⇒ single clear error naming the limit (no partial dump).
 - Each id resolved through the search visibility pipeline (profile, agent scope, callability,
   quarantine/disabled) before returning a definition (FR-011). Invisible/unknown ⇒ per-id error,

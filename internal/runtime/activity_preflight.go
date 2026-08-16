@@ -32,6 +32,24 @@ type PreflightToolOutcome struct {
 	Reason string
 }
 
+// PreflightArguments is one in-band caller's request AS SENT, before trimming
+// and dedup (spec 099 FR-013).
+//
+// It exists because ids_count is the count of UNIQUE ids — the definition the
+// REST record already uses, and the one that makes the two records mean the same
+// thing — which on its own would make "the agent asked for 12 ids, three of them
+// duplicates" unrecoverable from the log. Nothing here is new data: the ids
+// already appear per-tool, and the filter names are the closed enum
+// describe_tool declares.
+type PreflightArguments struct {
+	// ToolIDs is the RAW array: request order, untrimmed, duplicates intact.
+	// len(ToolIDs) is the raw requested count.
+	ToolIDs []string
+	// Filters names the annotation filters in effect, in declared order. Empty
+	// when the call carried none.
+	Filters []string
+}
+
 // PreflightActivity is one executed preflight, as the served surface hands it to
 // the activity log. Everything here is either an enum value, a count or a tool
 // ID — never a description, argument or hash (FR-014: local activity log only,
@@ -47,6 +65,15 @@ type PreflightActivity struct {
 	// Status overrides the derived activity status. Leave empty to derive it
 	// from Verdict via PreflightActivityStatus.
 	Status string
+	// Surface names the surface that ran the preflight, for surfaces the
+	// Source alone does not identify (spec 099 FR-013:
+	// storage.PreflightSurfaceMCPCheck). Empty for the REST endpoint, whose
+	// metadata then stays exactly as spec 098 shipped it.
+	Surface string
+	// Arguments is the request as the caller sent it (spec 099 FR-013). Set by
+	// the in-band check surface; nil for the REST endpoint, whose metadata then
+	// stays exactly as spec 098 shipped it.
+	Arguments *PreflightArguments
 	// Timestamp defaults to time.Now() when zero.
 	Timestamp time.Time
 	Tools     []PreflightToolOutcome
@@ -153,10 +180,28 @@ func preflightMetadata(rec PreflightActivity) map[string]interface{} {
 		perTool = append(perTool, entry)
 	}
 
-	return map[string]interface{}{
+	metadata := map[string]interface{}{
 		storage.MetadataKeyPreflightVerdict:  rec.Verdict,
 		storage.MetadataKeyPreflightIDsCount: len(rec.Tools),
 		storage.MetadataKeyPreflightReasons:  reasons,
 		storage.MetadataKeyPreflightPerTool:  perTool,
 	}
+	// Absent, not empty, for the REST surface: adding a key to every record it
+	// has written since spec 098 would change a payload nothing asked to change.
+	// The same rule governs the raw arguments below.
+	if rec.Surface != "" {
+		metadata[storage.MetadataKeyPreflightSurface] = rec.Surface
+	}
+	if rec.Arguments != nil {
+		arguments := map[string]interface{}{
+			// Present even when empty: "what was asked for" is the whole point
+			// of the key, and an absent array would read as "not recorded".
+			storage.PreflightArgumentsKeyToolIDs: rec.Arguments.ToolIDs,
+		}
+		if len(rec.Arguments.Filters) > 0 {
+			arguments[storage.PreflightArgumentsKeyFilters] = rec.Arguments.Filters
+		}
+		metadata[storage.MetadataKeyPreflightArguments] = arguments
+	}
+	return metadata
 }

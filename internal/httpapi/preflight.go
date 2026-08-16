@@ -136,8 +136,14 @@ func preflightParams(r *http.Request, req *contracts.PreflightRequest, tools []p
 	}
 	if tier, authCtx := disclosureTier(r); tier == preflight.TierAgentToken {
 		params.Tier = preflight.TierAgentToken
-		params.TokenServers = authCtx.AllowedServers
-		params.TokenProfilePin = authCtx.ProfilePin
+		// authCtx is nil when the request carries no auth context at all. The
+		// tier still narrows to the floor, but there is no token scope to apply:
+		// disclosure and visibility are separate decisions, and inventing a
+		// scope here would turn a missing credential into a deny-all evaluation.
+		if authCtx != nil {
+			params.TokenServers = authCtx.AllowedServers
+			params.TokenProfilePin = authCtx.ProfilePin
+		}
 	}
 	return params
 }
@@ -147,11 +153,34 @@ func preflightParams(r *http.Request, req *contracts.PreflightRequest, tools []p
 // tier, and the tool-listing endpoints use it to decide whether a tool's hash
 // pin may be published (T020, FR-011 + FR-013). The returned AuthContext is
 // non-nil only for the agent-token tier, whose scope the caller needs.
+//
+// Spec 099 FR-018a corrects an inherited defect: the original mapping was
+// "anything that is not an agent token is an operator", which in the SERVER
+// edition handed the operator tier — scope diagnostics and hash pins — to
+// AuthTypeUser, an ordinary OAuth-authenticated tenant user who is not an
+// admin of anything. The rule is now positive rather than residual: only an
+// admin-class context (API key over TCP, the Unix socket, the Windows named
+// pipe — all AuthTypeAdmin — plus the server edition's OAuth admin,
+// AuthTypeAdminUser) is an operator. Every other authenticated type, and any
+// type added later, falls to the agent-token tier, so a new credential kind
+// cannot inherit disclosure by default.
+//
+// A NIL AuthContext is part of "every other type": a request that reached a
+// handler without the auth middleware having run proves nothing about who is
+// calling, so it gets the floor rather than the ceiling. Nothing is lost by
+// that, because every operator path carries an EXPLICIT admin context —
+// apiKeyAuthMiddleware installs auth.AdminContext() for a validated API key and
+// for the OS-authenticated Unix socket / Windows named pipe before the handler
+// runs. The only way to arrive here with no context at all is the middleware's
+// no-config passthrough, where "cannot read the config" is precisely not
+// evidence of admin. Keeping nil on the operator side would preserve the
+// residual-grant shape FR-018a exists to remove.
 func disclosureTier(r *http.Request) (preflight.Tier, *auth.AuthContext) {
-	if authCtx := auth.AuthContextFromContext(r.Context()); authCtx != nil && authCtx.Type == auth.AuthTypeAgent {
-		return preflight.TierAgentToken, authCtx
+	authCtx := auth.AuthContextFromContext(r.Context())
+	if authCtx != nil && authCtx.IsAdmin() {
+		return preflight.TierOperator, nil
 	}
-	return preflight.TierOperator, nil
+	return preflight.TierAgentToken, authCtx
 }
 
 // handlePreflight handles POST /api/v1/preflight

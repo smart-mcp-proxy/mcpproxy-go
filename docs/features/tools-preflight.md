@@ -101,6 +101,67 @@ A failing tool carries the full diagnosis:
 
 Full request/response schema: [REST API](../api/rest-api.md). CLI flag reference: [Management Commands](../cli/management-commands.md).
 
+### In band: `describe_tool` check mode
+
+The CLI and REST surfaces need a harness *outside* the session. An agent already inside an MCP session gates itself with the same evaluator by adding `check: true` to the [`describe_tool`](./search-discovery.md) call it already knows:
+
+```json
+{
+  "name": "describe_tool",
+  "arguments": {
+    "tool_ids": ["gh-ops:sync_issues", "slack:post_message", "gh-ops:nope"],
+    "check": true
+  }
+}
+```
+
+```json
+{
+  "verdict": "blocked",
+  "checked_at": "2026-08-16T09:14:02.117Z",
+  "request_id": "1755331442117-describe_tool-42",
+  "results": [
+    { "id": "gh-ops:sync_issues", "status": "ready" },
+    { "id": "slack:post_message", "status": "unavailable", "reason": "server_quarantined",
+      "retryable": false, "action": "approve",
+      "detail": "Server \"slack\" is quarantined; its tools are withheld pending review.",
+      "remediation": "Review the quarantined server and approve it if it is trusted (Web UI, Quarantine)." },
+    { "id": "gh-ops:nope", "status": "unavailable", "reason": "not_found", "retryable": false,
+      "action": "configure", "detail": "No tool with this id is available.",
+      "remediation": "Check the tool id (format <server>:<tool>) against mcpproxy tools list.",
+      "did_you_mean": ["gh-ops:sync_issues"] }
+  ]
+}
+```
+
+**Check vs. describe.** They answer different questions and it is worth keeping them apart: describe (no `check`) returns *what a tool looks like* — the full JSON Schema, for building arguments after a lossy compact signature. Check returns *whether you may call it*, and no schema at all. Branch on the presence of `verdict`.
+
+**The agent loop it is meant for**: one call before the plan, not one per step.
+
+```text
+plan  → describe_tool{tool_ids: [the 8 ids the plan calls], check: true}
+        verdict "ready"              → execute the plan
+        verdict "degraded_retryable" → wait and re-check (nothing to escalate yet)
+        verdict "blocked"            → tell the user exactly what to approve/enable, in THIS turn
+        verdict "unknown_ids"        → re-run retrieve_tools; an id is wrong or the tool moved
+```
+
+Differences from the out-of-band surfaces, all deliberate:
+
+| | In band (`check: true`) | REST / CLI |
+|---|---|---|
+| Batch cap | **50** ids (verdict-only results are ~30–60 tokens each; the cap exists so the response cannot become a discovery bypass) | 100 |
+| Annotation filters | `filters: {read_only_only, exclude_destructive, exclude_open_world}` — named `filters` because that is the word `retrieve_tools` already teaches agents; the REST body calls the same object `policy` | `policy` |
+| Hash pins | not accepted. `expect_hashes` is a **reserved** field name: sending it is an error, never a silent no-op | `pin_hash` / `--pin` |
+| Disclosure tier | always the [agent-token tier](#disclosure-tiers), whatever the session's credentials | operator tier for API key / socket / named pipe |
+| Scope | the session's own (agent-token `allowed_servers` ∩ profile pin ∩ active profile). There is no `profile` parameter — an agent cannot re-point its own scope by asking | `profile` in the request |
+| Waiting | none. A `degraded_retryable` verdict is the agent's cue to retry on its own schedule rather than hold an MCP call open | `wait_ms` / `--wait` |
+| Failures | request errors and "cannot evaluate" both come back as MCP tool errors that say **no verdict was computed** — never as a verdict | 400 / 503 |
+
+Duplicate ids are deduplicated (one result per unique id, in first-occurrence order); ids are trimmed first, and each result echoes the normalized id. One malformed id is a per-id `not_found`, never a batch failure.
+
+**Where check mode is not available**: `describe_tool` is registered on the default `/mcp` server and the `retrieve_tools` routing mode (`/mcp/call`, `/mcp/p/<slug>`) only. In `code_execution` and direct [routing modes](./routing-modes.md) there is no `describe_tool`, and therefore no in-band check — the interim path there is `POST /api/v1/preflight` from the harness that schedules the session. Registering the built-in on those surfaces is a later phase.
+
 ## The reason taxonomy
 
 A per-tool result is `ready` or `unavailable` with **exactly one** reason from a closed 15-code enum. The enum only ever grows (treat unknown codes as non-retryable). `server_saturated` is reserved for a future revision.
@@ -176,11 +237,14 @@ This turns "the proxy restarted 3 seconds before the cron tick" from a failed ni
 
 Preflight answers with different candor depending on who is asking:
 
-| | Operator tier (API key, Unix socket, named pipe) | Agent-token tier |
+| | Operator tier (API key, Unix socket, named pipe) | Agent-token tier (agent tokens, OAuth users, **and the whole in-band surface**) |
 |---|---|---|
 | Out-of-scope server | `server_not_in_scope` + detail explaining that a session under this profile sees `not_found` | plain `not_found` — byte-indistinguishable from a genuinely unknown id |
+| Unconfigured server | `server_not_configured` | the same plain `not_found`, so a probe cannot enumerate what exists behind a scope |
 | Tool hashes | published on ready results | never |
 | `did_you_mean` | nearest visible ids | only within the token's own scope |
+
+**The in-band surface is always the agent-token tier**, whatever credentials the MCP session presents. `/mcp` is unauthenticated by default and its middleware hands such requests a full admin context for client compatibility, so an auth context in band proves nothing about who is calling — a tier derived from it would be a tier the caller chooses. Operators wanting the full diagnosis (scope names, hashes) use the REST surface over an authenticated channel, where it already exists. In the **server edition**, an ordinary OAuth-authenticated user is also the agent-token tier on every surface: tenant users get verdicts, not scope diagnostics or hash pins.
 
 The agent-token behavior is deliberate **scope-silence**: an out-of-scope probe learns nothing — not even that the server exists. `did_you_mean` suggestions (nearest-name, up to 3) are computed over the caller-visible index only and never name a quarantined server's tools. See [Agent Tokens](./agent-tokens.md) and [Profiles](./profiles.md).
 
@@ -190,7 +254,9 @@ A token's evaluation scope is the intersection of its `allowed_servers`, its `pr
 
 Every executed preflight writes an [activity log](./activity-log.md) record — synchronously, before the 200 is returned. If the record cannot be persisted, the preflight itself fails with 503: a check nobody can audit afterwards would undercut the transparency the feature exists to provide.
 
-The record carries the request ID, the requested-id count, the set verdict, and per-tool reason codes (ids and enum codes only — no descriptions, no arguments, and nothing leaves the machine):
+The same rule holds in band: one check-mode call writes exactly one record (marked `surface: mcp-check`) before the verdict is returned, and a failed write fails the tool call. The `request_id` in the response body is that record's id, so an agent can hand a human the exact handle that finds the run — `mcpproxy activity list --request-id <id>` — without leaving the session.
+
+The record carries the request ID, the requested-id count (unique ids, after dedup), the set verdict, and per-tool reason codes (ids and enum codes only — no descriptions, no upstream tool arguments, and nothing leaves the machine). An in-band record additionally carries the call's own `arguments` — the raw `tool_ids` array as the agent sent it, plus any annotation `filters` — so the raw requested count stays readable next to the deduped one:
 
 ```bash
 RID=$(curl -si -X POST -H "X-API-Key: $API_KEY" http://127.0.0.1:8080/api/v1/preflight \
@@ -277,20 +343,21 @@ Or from any HTTP harness, the same `POST /api/v1/preflight` call shown above, fo
 }
 ```
 
-Note that a preflight is *not* callable from inside the sandbox — scripts cannot reach the REST API, which is exactly why the gate belongs in the harness. For an agent that needs an **in-band** check mid-session today, the interim path is `describe_tool` (batch of up to 5 ids), whose per-id codes report missing or blocked tools; a dedicated in-band check mode is Phase 2 (below).
+Note that a preflight is *not* callable from inside the sandbox — scripts cannot reach the REST API, which is exactly why the gate belongs in the harness. `describe_tool` check mode does not help here either: `code_execution` routing mode carries no `describe_tool` at all, so the harness call above is the path for those sessions.
 
 ## Roadmap (later phases)
 
-v1 is the shared eligibility evaluator + REST + CLI. Deliberately deferred:
+The shared evaluator + REST + CLI shipped first; [in-band check mode](#in-band-describe_tool-check-mode) followed. Deliberately deferred:
 
-- **In-band MCP check mode** on `describe_tool`, so agents can preflight mid-session without leaving the MCP surface.
+- **`describe_tool` (and therefore check mode) in `code_execution` and direct routing modes** — today those sessions preflight from the harness.
+- **In-band hash pins** — the `expect_hashes` field name is reserved and currently rejected; pins stay a REST/CLI concern, where harnesses author them.
 - **`readyz` probe endpoint** and SSE readiness events.
 - **Tool lockfile** (`mcpproxy tools lock/verify`) and registered automation contracts with change-time warnings.
 - **Agent-token-carried required-tools contracts** and an MCP extension for capability negotiation.
 - **Per-user verdicts in the server edition** (`as_user` reserved): v1 verdicts are operator-view, so `oauth_required` reflects global connection state, not the calling user's own token.
 - **`server_saturated`** (queue-saturation verdicts, reserved).
 
-Design background: [issue #969](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/969) and the [spec + research record](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/specs/098-tools-preflight/spec.md) in the repo.
+Design background: [issue #969](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/969) and the spec + research records in the repo — [098 (evaluator, REST, CLI)](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/specs/098-tools-preflight/spec.md) and [099 (in-band check mode)](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/specs/099-describe-check-mode/spec.md).
 
 ## See also
 
