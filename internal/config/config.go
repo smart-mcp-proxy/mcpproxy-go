@@ -416,6 +416,7 @@ type Config struct {
 	CodeExecutionTimeoutMs    int  `json:"code_execution_timeout_ms,omitempty" mapstructure:"code-execution-timeout-ms"`         // Timeout in milliseconds (default: 120000, max: 600000)
 	CodeExecutionMaxToolCalls int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
 	CodeExecutionPoolSize     int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`           // JavaScript runtime pool size (default: 10)
+	CodeExecutionMaxParallel  int  `json:"code_execution_max_parallel,omitempty" mapstructure:"code-execution-max-parallel"`     // Default concurrency for call_tools() batches (1-32, default: 8)
 
 	// ToolResponseSessionRiskWarning controls whether the prose `warning` field
 	// is included in the `session_risk` object returned by `retrieve_tools`.
@@ -1707,6 +1708,7 @@ func DefaultConfig() *Config {
 		CodeExecutionTimeoutMs:    120000, // 2 minutes (120,000ms)
 		CodeExecutionMaxToolCalls: 0,      // Unlimited by default (0 = no limit)
 		CodeExecutionPoolSize:     10,     // 10 JavaScript runtime instances
+		CodeExecutionMaxParallel:  8,      // 8 concurrent upstream calls per call_tools() batch
 
 		// Session risk warning prose disabled by default to reduce token overhead
 		// and LLM distraction in trusted setups (issue #406). Structured risk
@@ -2166,6 +2168,13 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		})
 	}
 
+	if c.CodeExecutionMaxParallel != 0 && (c.CodeExecutionMaxParallel < 1 || c.CodeExecutionMaxParallel > 32) {
+		errors = append(errors, ValidationError{
+			Field:   "code_execution_max_parallel",
+			Message: "must be between 1 and 32 (or 0 for default)",
+		})
+	}
+
 	// Validate routing mode (Spec 031)
 	if c.RoutingMode != "" {
 		validRoutingModes := map[string]bool{
@@ -2429,6 +2438,9 @@ func (c *Config) Validate() error {
 	}
 	if c.CodeExecutionPoolSize <= 0 {
 		c.CodeExecutionPoolSize = 10 // 10 JavaScript runtime instances
+	}
+	if c.CodeExecutionMaxParallel <= 0 {
+		c.CodeExecutionMaxParallel = 8 // 8 concurrent upstream calls per call_tools() batch
 	}
 	// CodeExecutionMaxToolCalls defaults to 0 (unlimited), which is valid
 

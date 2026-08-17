@@ -194,7 +194,9 @@ func TestDescribeTool_VisibilityParityWithRetrieve(t *testing.T) {
 		wantError string // "" = definition expected
 	}{
 		{"github:visible_tool", ""},
-		{"gitlab:scoped_tool", "invisible"},
+		// Spec 099 FR-011: an out-of-scope id is plain not_found — the retired
+		// `invisible` code confirmed that a tool this session may not see exists.
+		{"gitlab:scoped_tool", "not_found"},
 		{"quarry:lingering_tool", "quarantined"},
 		{"github:pending_tool", "pending_approval"},
 		{"github:changed_tool", "changed"},
@@ -230,6 +232,108 @@ func TestDescribeTool_VisibilityParityWithRetrieve(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Whitespace is never significant in a canonical tool id: ids copied out of a
+// transcript with stray padding must resolve to the same definition.
+func TestDescribeTool_TrimsWhitespaceInIDs(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{
+		"github:create_issue ",
+		" github:create_issue",
+		"github: create_issue",
+	})
+
+	assert.Empty(t, resp.Errors, "padded ids must resolve, not error")
+	require.Len(t, resp.Definitions, 3)
+	for _, def := range resp.Definitions {
+		assert.Equal(t, "github:create_issue", def["name"],
+			"the definition always carries the canonical id")
+	}
+}
+
+// Server/tool ids are case-sensitive by design (approval, quarantine and
+// agent-scope stores all key on exact case). A miscased id must therefore NOT
+// resolve, but the remediation must name the canonical id instead of the
+// generic "re-run retrieve_tools" hint.
+func TestDescribeTool_CaseMismatchDidYouMean(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{"GITHUB:create_issue"})
+
+	assert.Empty(t, resp.Definitions, "a miscased id must not silently resolve")
+	require.Len(t, resp.Errors, 1)
+	e := resp.Errors[0]
+	assert.Equal(t, "GITHUB:create_issue", e["id"], "the error echoes the raw id the caller sent")
+	assert.Equal(t, "not_found", e["error"])
+	remediation, _ := e["remediation"].(string)
+	assert.Contains(t, remediation, "case-sensitive")
+	assert.Contains(t, remediation, "did you mean 'github:create_issue'")
+}
+
+// The same holds for a miscased tool segment.
+func TestDescribeTool_ToolCaseMismatchDidYouMean(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{"github:Create_Issue"})
+
+	assert.Empty(t, resp.Definitions)
+	require.Len(t, resp.Errors, 1)
+	remediation, _ := resp.Errors[0]["remediation"].(string)
+	assert.Contains(t, remediation, "did you mean 'github:create_issue'")
+}
+
+// Security invariant: a did-you-mean suggestion may never confirm the
+// existence of a tool this session cannot see. Out-of-scope and quarantined
+// ids keep the generic not-found remediation even when the only difference
+// from a real id is case.
+func TestDescribeTool_CaseMismatchNoScopeLeak(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedVisibilityFixture(t, proxy)
+
+	agentCtx := &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "parity-bot",
+		AllowedServers: []string{"github", "quarry"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite},
+	}
+	ctx := auth.WithAuthContext(context.Background(), agentCtx)
+
+	for _, c := range []struct{ id, leak string }{
+		{"GITLAB:scoped_tool", "gitlab"},    // out of agent scope
+		{"QUARRY:lingering_tool", "quarry"}, // server quarantined
+	} {
+		t.Run(c.id, func(t *testing.T) {
+			resp := callDescribe(t, proxy, ctx, []interface{}{c.id})
+
+			assert.Empty(t, resp.Definitions)
+			require.Len(t, resp.Errors, 1)
+			assert.Equal(t, "not_found", resp.Errors[0]["error"])
+			remediation, _ := resp.Errors[0]["remediation"].(string)
+			assert.Equal(t, describeNotFoundRemediation, remediation,
+				"a suggestion would confirm that a tool the session cannot see exists")
+			assert.NotContains(t, remediation, c.leak)
+		})
+	}
+}
+
+// A genuinely absent tool keeps the generic remediation — no invented
+// suggestion.
+func TestDescribeTool_GenuinelyMissingKeepsGenericRemediation(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{"github:no_such_tool_at_all"})
+
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, "not_found", resp.Errors[0]["error"])
+	remediation, _ := resp.Errors[0]["remediation"].(string)
+	assert.Equal(t, describeNotFoundRemediation, remediation)
+	assert.NotContains(t, remediation, "did you mean")
 }
 
 // T028 (FR-011): describe_tool is registered in the retrieve_tools routing
@@ -269,9 +373,12 @@ func TestDescribeTool_RegisteredInRetrieveToolsModeOnly(t *testing.T) {
 	})
 }
 
-// T028 (FR-011): the describe_tool definition costs ≤150 tokens counted with
-// tiktoken cl100k_base — the same pinned encoder the spec-083 profiler uses,
-// so the budget and the profiler agree.
+// T028 (spec 085 FR-011) / spec 099 FR-015: the describe_tool definition costs
+// ≤describeToolTokenBudget tokens counted with tiktoken cl100k_base — the same
+// pinned encoder the spec-083 profiler uses, so the budget and the profiler
+// agree. The budget rose from 150 to 250 when check mode added two parameters;
+// the exact bytes are additionally pinned by the tools/list goldens, so prose
+// cannot drift silently under the ceiling.
 func TestDescribeTool_DefinitionTokenBudget(t *testing.T) {
 	tool := buildDescribeToolTool()
 	serialized, err := json.Marshal(tool)
@@ -281,16 +388,31 @@ func TestDescribeTool_DefinitionTokenBudget(t *testing.T) {
 	require.NoError(t, err, "cl100k_base encoding must be loadable (bench pins the same encoder)")
 
 	tokens := len(enc.Encode(string(serialized), nil, nil))
-	assert.LessOrEqual(t, tokens, 150,
-		"describe_tool definition must stay within the 150-token budget (FR-011); got %d tokens for %s",
-		tokens, serialized)
+	assert.LessOrEqual(t, tokens, describeToolTokenBudget,
+		"describe_tool definition must stay within the %d-token budget (spec 099 FR-015); got %d tokens for %s",
+		describeToolTokenBudget, tokens, serialized)
 
-	// Schema sanity: single required array-of-strings param.
+	// Schema sanity: one required array-of-strings param plus the two optional
+	// check-mode params, and nothing else — the reserved expect_hashes is NOT
+	// declared (FR-008).
 	assert.Equal(t, "describe_tool", tool.Name)
 	require.Contains(t, tool.InputSchema.Properties, "tool_ids")
 	assert.Equal(t, []string{"tool_ids"}, tool.InputSchema.Required)
 	idsSchema := tool.InputSchema.Properties["tool_ids"].(map[string]any)
 	assert.Equal(t, "array", idsSchema["type"])
+
+	require.Contains(t, tool.InputSchema.Properties, "check")
+	assert.Equal(t, "boolean", tool.InputSchema.Properties["check"].(map[string]any)["type"])
+	require.Contains(t, tool.InputSchema.Properties, "filters")
+	filters := tool.InputSchema.Properties["filters"].(map[string]any)
+	assert.Equal(t, "object", filters["type"])
+	assert.Equal(t, map[string]any{
+		"read_only_only":      map[string]any{"type": "boolean"},
+		"exclude_destructive": map[string]any{"type": "boolean"},
+		"exclude_open_world":  map[string]any{"type": "boolean"},
+	}, filters["properties"], "the three spec-094 annotation filters, and only those (FR-007)")
+	assert.NotContains(t, tool.InputSchema.Properties, describeCheckReservedHashes)
+	assert.Len(t, tool.InputSchema.Properties, 3)
 }
 
 // T029 (FR-012): describe_tool output is byte-identical whether the configured

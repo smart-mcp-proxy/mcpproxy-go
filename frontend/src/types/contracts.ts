@@ -64,6 +64,85 @@ export type RejectionReason = 'queue_full' | 'queue_timeout';
 /** Limiter tier that shed the call (activity metadata rejection_scope). */
 export type RejectionScope = 'server' | 'global';
 
+// Preflight (Spec 098) - generated from internal/contracts/types.go
+export const PreflightStatusReady = 'ready' as const;
+export const PreflightStatusUnavailable = 'unavailable' as const;
+export type PreflightStatus = typeof PreflightStatusReady | typeof PreflightStatusUnavailable;
+
+/**
+ * Closed 15-code failure enum. Additive-only: treat an unknown code as
+ * non-retryable. 'server_saturated' is reserved and not emitted.
+ */
+export type PreflightReason =
+  | 'server_initializing'
+  | 'server_unhealthy'
+  | 'server_disabled'
+  | 'server_quarantined'
+  | 'tool_pending_approval'
+  | 'tool_changed'
+  | 'tool_blocked_by_user'
+  | 'oauth_required'
+  | 'hash_mismatch'
+  | 'server_not_in_scope'
+  | 'tool_denied_by_config'
+  | 'missing_annotation'
+  | 'policy_filtered'
+  | 'not_found'
+  | 'server_not_configured';
+
+/** Set-level aggregate (worst class present); drives the CLI exit code 0/10/11/12. */
+export const PreflightVerdictReady = 'ready' as const;
+export const PreflightVerdictDegradedRetryable = 'degraded_retryable' as const;
+export const PreflightVerdictBlocked = 'blocked' as const;
+export const PreflightVerdictUnknownIds = 'unknown_ids' as const;
+export type PreflightVerdict =
+  | typeof PreflightVerdictReady
+  | typeof PreflightVerdictDegradedRetryable
+  | typeof PreflightVerdictBlocked
+  | typeof PreflightVerdictUnknownIds;
+
+export interface PreflightToolRef {
+  id: string;
+  /** "sha256/v{N}:{hex}" - the schema version distinguishes a proxy hash bump from upstream drift. */
+  pin_hash?: string;
+}
+
+export interface PreflightPolicy {
+  read_only_only?: boolean;
+  exclude_destructive?: boolean;
+  exclude_open_world?: boolean;
+}
+
+export interface PreflightRequest {
+  tools: PreflightToolRef[];
+  profile?: string;
+  policy?: PreflightPolicy;
+  wait_ms?: number;
+}
+
+export interface PreflightToolResult {
+  id: string;
+  status: PreflightStatus;
+  /** Present only when status is 'unavailable'. */
+  reason?: PreflightReason;
+  retryable?: boolean;
+  /** Health-action vocabulary; omitted (not 'none') when the reason has no action. */
+  action?: HealthAction;
+  detail?: string;
+  remediation?: string;
+  /** Operator tier + ready results only; never disclosed to an agent token. */
+  hash?: string;
+  /** Up to 3 nearest caller-visible ids, on not_found only. */
+  did_you_mean?: string[];
+}
+
+export interface PreflightResponse {
+  verdict: PreflightVerdict;
+  checked_at: string; // RFC3339
+  waited_ms?: number;
+  tools: PreflightToolResult[];
+}
+
 export interface Server {
   id: string;
   name: string;
@@ -185,6 +264,10 @@ export interface Tool {
   held_reason?: string;
   held_verdict?: string;
   held_signals?: string[];
+  // The tool's current hash in the preflight pin format "sha256/v{N}:{hex}"
+  // (spec 098 FR-011) — the value to paste into a preflight pin. Operator tier
+  // only: absent for agent-token callers and for tools with no stored hash.
+  hash?: string;
 }
 
 export interface SearchResult {

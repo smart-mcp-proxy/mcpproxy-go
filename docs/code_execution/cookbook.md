@@ -1,3 +1,9 @@
+---
+title: "Code Execution Cookbook"
+sidebar_label: "Cookbook"
+description: "Task-oriented recipes for common code execution patterns."
+---
+
 # Code Execution — Orchestration Cookbook
 
 **TypeScript** recipes for orchestrating multiple upstream MCP tools in a
@@ -19,7 +25,9 @@ annotations and omit `language`.
 > **New to code execution?** Read [overview.md](overview.md) first, then the
 > [api-reference.md](api-reference.md) for the full tool schema. This cookbook
 > assumes you know that `call_tool(server, tool, args)` returns
-> `{ ok: true, result }` or `{ ok: false, error }`, and that the script's
+> `{ ok: true, result }` or `{ ok: false, error }`, that
+> `call_tools(requests, options)` returns one such envelope per request in input
+> order, and that the script's
 > **last expression** becomes the result `value`. A bare top‑level `return`
 > is a **SyntaxError** (`Illegal return statement`) — `return` is only legal
 > inside a function. To early‑exit, wrap the body in an IIFE (see the
@@ -29,7 +37,8 @@ annotations and omit `language`.
 
 1. [When to reach for the cookbook](#when-to-reach-for-the-cookbook)
 2. [The sandbox contract (read this first)](#the-sandbox-contract-read-this-first)
-3. Recipes
+3. [Store a recipe as a script](#store-a-recipe-as-a-script)
+4. Recipes
    - [Recipe 1 — Batch call (one tool, many inputs)](#recipe-1--batch-call-one-tool-many-inputs)
    - [Recipe 2 — Fan‑out + merge (many tools, one object)](#recipe-2--fan-out--merge-many-tools-one-object)
    - [Recipe 3 — Sequential pipeline (chain calls)](#recipe-3--sequential-pipeline-chain-calls)
@@ -40,8 +49,8 @@ annotations and omit `language`.
    - [Recipe 8 — Cursor / pagination walk](#recipe-8--cursor--pagination-walk)
    - [Recipe 9 — Rate‑limit via chunking](#recipe-9--rate-limit-via-chunking)
    - [Recipe 10 — Deduplicate + enrich](#recipe-10--deduplicate--enrich)
-4. [Benchmarks — token & latency](#benchmarks--token--latency)
-5. [Upgrade note — TypeScript GA](#upgrade-note-typescript-ga)
+5. [Benchmarks — token & latency](#benchmarks--token--latency)
+6. [Upgrade note — TypeScript GA](#upgrade-note-typescript-ga)
 
 ---
 
@@ -64,22 +73,80 @@ the #1 source of surprises:
 
 | Capability | Status | Implication for recipes |
 |------------|--------|-------------------------|
-| `call_tool(server, tool, args)` | ✅ | The only way to reach upstream tools. Synchronous — returns when the tool responds. |
+| `call_tool(server, tool, args)` | ✅ | Reaches one upstream tool. Synchronous — returns when the tool responds. |
+| `call_tools(requests, options)` | ✅ | Reaches **independent** upstream tools in parallel: an array of ≤100 `{server, tool, args}` objects in, one `{ok, result}` / `{ok, error}` slot per request out, in input order. Also synchronous. |
 | `input` global | ✅ | Your parameters. Type it with `as` or an `interface` for IDE‑grade safety. |
 | ES2020+ stdlib (`map`/`filter`/`reduce`, `JSON`, `Math`, `Date`) | ✅ | Use it freely for transforms and aggregation. |
 | `console.log` | ✅ | Goes to **server logs**, not the result. Use for debugging. |
 | Top‑level `return` | ❌ | `return` outside a function is a **SyntaxError** (`Illegal return statement`). The result is the script's **last expression**. To early‑exit, wrap the body in an IIFE: `(() => { … return x; })()`. |
 | `setTimeout` / `setInterval` | ❌ | **No wall‑clock sleep.** "Backoff" and "rate‑limit" recipes work by *bounding* and *chunking*, never by sleeping. |
 | `require` / `import` / `fetch` / `fs` | ❌ | No modules, no network, no filesystem. All I/O goes through `call_tool`. |
-| Concurrency | ❌ (sequential) | Tool calls run **one at a time** server‑side. "Fan‑out" saves *round‑trips*, not wall‑clock from parallelism. Be honest about this when estimating latency. |
+| Concurrency | ✅ only via `call_tools` | Loops of `call_tool` run **one at a time**; a `call_tools` batch runs up to `max_parallel` elements at once (default `code_execution_max_parallel`, 8). Sequential loops save *round‑trips*; batches also save wall‑clock. |
 
-Two control knobs you will reach for constantly (set in `options`):
+Control knobs you will reach for constantly (set in `options`):
 
 - `max_tool_calls` — a hard ceiling that aborts the script with
   `MAX_TOOL_CALLS_EXCEEDED`. Always set it on loops so a bad `input` can't fan
-  out unbounded.
+  out unbounded. Each `call_tools` element counts as one call.
 - `timeout_ms` — wall‑clock budget (default 120 000, max 600 000). The
-  transpile step counts toward it (negligibly).
+  transpile step counts toward it (negligibly), and a whole `call_tools` batch
+  lives inside it.
+
+Batch concurrency is **not** an `options` field: it comes from the
+`code_execution_max_parallel` config key (default 8) and is overridden per batch
+with `call_tools(requests, {max_parallel})` (1–32).
+
+> **Check the target server's limits before you fan out.** Per‑server
+> [concurrency limits](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
+> still apply and are never bypassed: a server with `max_concurrent_requests: 1`
+> and `queue_size: 9` serializes a 10‑element batch, while the same server with
+> **no** `queue_size` sheds the overflow as nine per‑slot `queue_full` errors.
+> Set `queue_size` headroom, or match `max_parallel` to the cap.
+
+---
+
+## Store a recipe as a script
+
+Once a recipe below has settled into a workflow you run repeatedly, stop paying
+for its source on every call. Save it as a **stored script** — a `<name>.ts` /
+`<name>.js` file in the `scripts/` directory next to mcpproxy's active config
+file — and invoke it by name:
+
+```bash
+mkdir -p ~/.mcpproxy/scripts
+cp recipe-1.ts ~/.mcpproxy/scripts/user-lookup.ts   # the recipe BODY, no annotation lines
+mcpproxy code scripts list
+mcpproxy code exec --script user-lookup --input='{"usernames":["octocat","torvalds"]}'
+```
+
+```json
+{"script": "user-lookup", "input": {"usernames": ["octocat", "torvalds"]}}
+```
+
+Things to know when converting a recipe:
+
+- **Store the body only.** The `// language:` / `// input:` lines are
+  annotations for this document. The **file extension** replaces the `language`
+  parameter (`.ts` → TypeScript, `.js` → JavaScript), and `input` stays a
+  request parameter — pass it per invocation, exactly as inline.
+- **Nothing else changes.** Same sandbox contract, same `options`
+  (`max_tool_calls`, `timeout_ms`), same `call_tools` batching semantics, same
+  activity records. `script` only changes where the source text came from.
+- **Name it like a token**: 1–64 characters of `A-Za-z0-9_-`, never a path.
+  Files up to 256 KB; both `name.js` and `name.ts` present is ambiguous and
+  rejected.
+- **Edit by atomic replace** (write a temp file, `mv` it over) and the next
+  invocation runs the new content — no daemon restart, so the authoring loop is
+  still "edit, rerun".
+- **Discovery** is the not‑found error: naming a script that does not exist
+  returns the available names (first 20 alphabetically, plus the total), so an
+  agent never needs the list out of band. `mcpproxy code scripts list` shows the
+  full set, including `ambiguous` and `invalid` entries.
+- **Read‑only surface**: nothing writes scripts for you — no tool, no endpoint,
+  no CLI verb. Authoring is the filesystem, deliberately.
+
+Full reference: [overview.md § Stored Scripts](overview.md#stored-scripts) ·
+[api-reference.md § Stored Scripts](api-reference.md#stored-scripts).
 
 ---
 
@@ -110,9 +177,37 @@ read the previous result before issuing the next.
 **Guardrail:** set `options.max_tool_calls` to `usernames.length` (or a sane
 cap) so an oversized input can't run away.
 
+**Parallel variant:** the lookups are independent, so `call_tools` turns the
+sequential loop into one bounded fan‑out — the batch takes about as long as its
+slowest element instead of the sum:
+
+```typescript
+// language: "typescript"
+// input: { "usernames": ["octocat", "torvalds", "gaearon"] }
+const slots = call_tools(
+  (input.usernames as string[]).map((login: string) => ({
+    server: "github", tool: "get_user", args: { username: login },
+  })),
+  { max_parallel: 5 },
+);
+
+const users = slots.map((res: any, i: number) => {
+  const login = (input.usernames as string[])[i];
+  if (!res.ok) return { login, error: res.error.message };
+  const u = res.result as User;
+  return { login, name: u.name, followers: u.followers };
+});
+
+({ users, count: users.length });
+```
+
+Slots come back in input order (`slots[i]` ↔ `requests[i]`), one failing element
+never poisons the rest, and a batch is capped at 100 elements — chunk longer
+lists into several `call_tools` calls.
+
 ---
 
-## Recipe 2 — Fan‑out + merge (many tools, one object)
+## Recipe 2 — Fan‑out + merge (many tools, one object) {#recipe-2--fan-out--merge-many-tools-one-object}
 
 **Problem:** Gather related facts from several *different* tools/servers and
 return one merged object — a "dashboard" call.
@@ -136,8 +231,30 @@ const ci     = call_tool("ci",     "latest_pipeline", { project: input.repo });
 **Replaces:** 3 round‑trips + a final model turn to stitch the pieces together.
 Here the merge happens server‑side; the model sees one tidy object.
 
-**Note on "parallel":** the three calls run sequentially in the sandbox. The win
-is collapsing 4 model turns into 1 — not parallel network I/O.
+**Note on "parallel":** written this way the three calls run sequentially. Since
+none of them depends on another, `call_tools` runs them at once and the merge
+reads the slots by position:
+
+```typescript
+// language: "typescript"
+// input: { "repo": "octocat/Hello-World" }
+const [owner, name] = (input.repo as string).split("/");
+
+const [repo, issues, ci] = call_tools([
+  { server: "github", tool: "get_repo",        args: { owner, repo: name } },
+  { server: "github", tool: "list_issues",     args: { owner, repo: name, state: "open" } },
+  { server: "ci",     tool: "latest_pipeline", args: { project: input.repo } },
+]) as any[];
+
+({
+  repo:       repo.ok   ? { stars: repo.result.stargazers_count } : { error: repo.error.message },
+  openIssues: issues.ok ? issues.result.length                    : null,
+  ci:         ci.ok     ? ci.result.status                        : "unknown",
+});
+```
+
+Now the win is both: 4 model turns collapse into 1, **and** the dashboard costs
+one slow call instead of three.
 
 ---
 
@@ -245,7 +362,7 @@ error each time.
 
 ---
 
-## Recipe 6 — Continue‑on‑error (partial results)
+## Recipe 6 — Continue‑on‑error (partial results) {#recipe-6--continue-on-error-partial-results}
 
 **Problem:** One bad item shouldn't sink the whole batch. Return the successes
 *and* a structured list of failures.
@@ -270,7 +387,7 @@ to restart. The caller gets a complete picture in one result.
 
 ---
 
-## Recipe 7 — Map‑reduce aggregation
+## Recipe 7 — Map‑reduce aggregation {#recipe-7--map-reduce-aggregation}
 
 **Problem:** Fetch many records, then compute a summary the model would
 otherwise have to do token‑by‑token.
@@ -329,7 +446,7 @@ repeat. **Always** bound the loop with `maxPages` *and* set
 
 ---
 
-## Recipe 9 — Rate‑limit via chunking
+## Recipe 9 — Rate‑limit via chunking {#recipe-9--rate-limit-via-chunking}
 
 **Problem:** A downstream tool rejects large bursts. You can't `sleep`, so you
 control pressure by **bounding batch size**, not by waiting.
@@ -361,6 +478,12 @@ not from sleeping between many small ones. If the tool has no bulk variant, cap
 the per‑script call count with `max_tool_calls` and let the agent resume across
 turns. (See [troubleshooting.md](troubleshooting.md) for the
 `setTimeout`‑is‑unavailable rationale.)
+
+**With `call_tools`:** keep `max_parallel` at or below the server's
+`max_concurrent_requests` — a batch wider than the cap does not go faster, it
+just queues (or, with no `queue_size`, sheds the overflow into per‑slot
+`queue_full` errors). The proxy‑side cap is the durable fix; `max_parallel` is
+the script‑side courtesy.
 
 **Replaces:** 100 individual round‑trips with ~10 bulk calls in one script.
 
@@ -397,7 +520,7 @@ issuing one lookup per unique ID. `Set` does the dedupe in‑sandbox.
 ## Benchmarks — token & latency
 
 The numbers behind these recipes come from the reproducible harness in
-[`bench/`](../../bench/README.md), published on every release to the
+[`bench/`](https://github.com/smart-mcp-proxy/mcpproxy-go/tree/main/bench), published on every release to the
 [benchmark dashboard](https://mcpproxy-bench.pages.dev). Reproduce locally with:
 
 ```bash
@@ -432,15 +555,19 @@ wall‑clock. An N‑step orchestration costs:
 
 Each eliminated round‑trip removes a full model turn — its latency, its
 generated tool‑call JSON, and its re‑reading of the intermediate result. For a
-5‑step recipe that is roughly a **5×** reduction in model turns. Server‑side the
-N tool calls still run sequentially (the sandbox is single‑threaded — see [the
-sandbox contract](#the-sandbox-contract-read-this-first)), so `code_execution`
-optimizes the *agent loop*, not raw upstream I/O. Quote round‑trip savings, not
-parallelism, when you describe the win.
+5‑step recipe that is roughly a **5×** reduction in model turns.
+
+Server‑side, sequential `call_tool` steps still run one at a time (the sandbox is
+single‑threaded — see [the sandbox contract](#the-sandbox-contract-read-this-first)),
+so a chained pipeline optimizes the *agent loop*, not raw upstream I/O. Where the
+steps are **independent**, `call_tools` also cuts server‑side wall‑clock: N calls
+cost about `ceil(N / max_parallel) × slowest-call` instead of their sum. Quote
+parallelism only for `call_tools` batches; for chained recipes, quote round‑trip
+savings.
 
 ---
 
-## Upgrade note — TypeScript GA
+## Upgrade note — TypeScript GA {#upgrade-note-typescript-ga}
 
 **Status:** TypeScript code execution (Spec 033) graduates from **preview to
 GA** in v0.46.0 (it shipped in preview in v0.45.0). There is no
@@ -456,7 +583,8 @@ deliberate opt‑in):
   "enable_code_execution": true,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
-  "code_execution_pool_size": 10
+  "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8
 }
 ```
 

@@ -1,3 +1,9 @@
+---
+title: "Release Qualification Gate"
+sidebar_label: "Release Gate"
+description: "Tag-blocking QA harness that produces one machine-readable pass/fail verdict before artifacts are published."
+---
+
 # Release Qualification Gate (Spec 081)
 
 The release qualification gate is a tag-blocking QA harness: on a release tag it

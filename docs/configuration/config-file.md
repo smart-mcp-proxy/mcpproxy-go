@@ -38,6 +38,7 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8,
   "features": {
     "enable_web_ui": true
   },
@@ -139,6 +140,31 @@ Both cadences are configurable globally, and can be overridden per server (see [
 | `code_execution_timeout_ms` | integer | `120000` | Execution timeout in milliseconds |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | VM pool size for code execution |
+| `code_execution_max_parallel` | integer | `8` | Default concurrency for `call_tools()` batches (1-32) |
+
+Scripts call one tool at a time with `call_tool(server, tool, args)`, or fan out
+independent calls with `call_tools(requests, options)`:
+
+```javascript
+var slots = call_tools([
+  {server: "github", tool: "get_pull_request", args: {owner: "acme", repo: "api", pullNumber: 1}},
+  {server: "github", tool: "get_pull_request", args: {owner: "acme", repo: "api", pullNumber: 2}}
+], {max_parallel: 5});
+// slots[i] is {ok: true, result} or {ok: false, error} for requests[i], in input order
+```
+
+`requests` takes up to 100 elements and each one costs a unit of
+`code_execution_max_tool_calls`. Concurrency precedence is `options.max_parallel`
+(1-32) > `code_execution_max_parallel` > built-in 8. The whole batch lives inside
+the execution timeout. Changes to these keys hot-reload and apply to executions
+that start afterwards.
+
+**Batching vs. per-server limits.** The [concurrency limits](#concurrency-limits--request-queueing)
+below still govern every element. A server with `max_concurrent_requests` set and
+**no** `queue_size` sheds everything past the cap, so a 10-element batch against
+`max_concurrent_requests: 1` comes back as 1 result and 9 per-slot `queue_full`
+errors. Give such servers `queue_size` headroom (or lower `max_parallel`) before
+fanning out against them.
 
 ### Update Check Settings
 

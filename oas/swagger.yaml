@@ -62,6 +62,10 @@ components:
         check_server_repo:
           description: Repository detection settings
           type: boolean
+        code_execution_max_parallel:
+          description: 'Default concurrency for call_tools() batches (1-32, default:
+            8)'
+          type: integer
         code_execution_max_tool_calls:
           description: 'Max tool calls per execution (0 = unlimited, default: 0)'
           type: integer
@@ -2032,6 +2036,130 @@ components:
           description: Always true for successful start
           type: boolean
       type: object
+    contracts.PreflightPolicy:
+      properties:
+        exclude_destructive:
+          type: boolean
+        exclude_open_world:
+          type: boolean
+        read_only_only:
+          type: boolean
+      type: object
+    contracts.PreflightReason:
+      type: string
+      x-enum-varnames:
+      - PreflightReasonServerInitializing
+      - PreflightReasonServerUnhealthy
+      - PreflightReasonServerDisabled
+      - PreflightReasonServerQuarantined
+      - PreflightReasonToolPendingApproval
+      - PreflightReasonToolChanged
+      - PreflightReasonToolBlockedByUser
+      - PreflightReasonOAuthRequired
+      - PreflightReasonHashMismatch
+      - PreflightReasonServerNotInScope
+      - PreflightReasonToolDeniedByConfig
+      - PreflightReasonMissingAnnotation
+      - PreflightReasonPolicyFiltered
+      - PreflightReasonNotFound
+      - PreflightReasonServerNotConfigured
+    contracts.PreflightRequest:
+      properties:
+        policy:
+          $ref: '#/components/schemas/contracts.PreflightPolicy'
+        profile:
+          description: 'Profile evaluates under a named profile''s server scope. Unknown:
+            400.'
+          type: string
+        tools:
+          description: |-
+            Tools is 1..100 entries BEFORE dedup; duplicates are collapsed, and
+            duplicate ids carrying different pins are a validation error.
+          items:
+            $ref: '#/components/schemas/contracts.PreflightToolRef'
+          type: array
+          uniqueItems: false
+        wait_ms:
+          description: |-
+            WaitMS polls local state for up to this many milliseconds (cap 10000)
+            while every failure is retryable-class.
+          type: integer
+      type: object
+    contracts.PreflightResponse:
+      properties:
+        checked_at:
+          type: string
+        tools:
+          description: Tools are ordered by first occurrence of each unique id in
+            the request.
+          items:
+            $ref: '#/components/schemas/contracts.PreflightToolResult'
+          type: array
+          uniqueItems: false
+        verdict:
+          $ref: '#/components/schemas/contracts.PreflightVerdict'
+        waited_ms:
+          description: |-
+            WaitedMS is present when wait_ms was requested (0 when the wait
+            semaphore was exhausted and the request resolved immediately).
+          type: integer
+      type: object
+    contracts.PreflightStatus:
+      type: string
+      x-enum-varnames:
+      - PreflightStatusReady
+      - PreflightStatusUnavailable
+    contracts.PreflightToolRef:
+      properties:
+        id:
+          description: |-
+            ID is a canonical "<server>:<tool>" id. A malformed id is answered with a
+            per-ID not_found carrying a format hint, never a request-level error.
+          type: string
+        pin_hash:
+          description: |-
+            PinHash is "sha256/v{N}:{hex}" — the schema version is embedded so a
+            proxy-side hash-algorithm bump is distinguishable from upstream drift.
+          type: string
+      type: object
+    contracts.PreflightToolResult:
+      properties:
+        action:
+          type: string
+        detail:
+          type: string
+        did_you_mean:
+          description: |-
+            DidYouMean carries up to 3 nearest caller-visible ids on not_found. It
+            never crosses a scope boundary and never names a quarantined server's
+            tools.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        hash:
+          description: |-
+            Hash is the tool's current pin ("sha256/v{N}:{hex}") — operator tier,
+            ready results only. Never disclosed to an agent token.
+          type: string
+        id:
+          type: string
+        reason:
+          $ref: '#/components/schemas/contracts.PreflightReason'
+        remediation:
+          type: string
+        retryable:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/contracts.PreflightStatus'
+      type: object
+    contracts.PreflightVerdict:
+      type: string
+      x-enum-varnames:
+      - PreflightVerdictReady
+      - PreflightVerdictDegradedRetryable
+      - PreflightVerdictBlocked
+      - PreflightVerdictUnknownIDs
     contracts.QuarantineStats:
       description: Tool quarantine metrics for this server
       properties:
@@ -2473,6 +2601,19 @@ components:
             available without a second round-trip to the approvals endpoint. Absent
             in the JSON when false (default) to keep responses compact.
           type: boolean
+        hash:
+          description: |-
+            Hash is the tool's current stored hash rendered in the preflight pin
+            format "sha256/v{N}:{hex}" (Spec 098 FR-011), where N is the approval
+            record's HashSchemaVersion. It is the authoring surface for
+            `POST /api/v1/preflight` pins and `mcpproxy tools preflight --pin`:
+            copy the value straight into a pin.
+
+            Disclosure is OPERATOR TIER ONLY — same rule as the preflight per-tool
+            result. The field is omitted for agent-token callers and for tools with
+            no stored hash (no approval record yet, or a record written before
+            hashes existed).
+          type: string
         held_reason:
           description: |-
             HeldReason, HeldVerdict and HeldSignals mirror the same-named fields on
@@ -3234,6 +3375,7 @@ paths:
           - system_stop
           - internal_tool_call
           - config_change
+          - preflight
           type: string
       - description: Filter by server name
         in: query
@@ -3718,6 +3860,33 @@ paths:
       summary: Get annotation coverage report
       tags:
       - annotations
+  /api/v1/code/scripts:
+    get:
+      description: 'List the stored scripts available to the code_execution tool.
+        Scripts are `<name>.js` / `<name>.ts` files in the `scripts/` directory next
+        to the active configuration file. Entries are advisory: `ok` scripts are invocable,
+        `ambiguous` names have both extensions, and `invalid` ones report why (empty,
+        oversized, unreadable, non-regular). Read-only — there is no write surface
+        for stored scripts.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Stored scripts and the directory they were read from
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List stored code-execution scripts
+      tags:
+      - code
   /api/v1/config:
     get:
       description: Retrieves the current MCPProxy configuration including all server
@@ -4525,6 +4694,66 @@ paths:
       summary: Get onboarding wizard state and predicates (Spec 046)
       tags:
       - onboarding
+  /api/v1/preflight:
+    post:
+      description: 'Deterministic, side-effect-free availability check for a caller-supplied
+        list of tool IDs (Spec 098). Performs zero upstream calls and mutates no runtime
+        state. HTTP status reports whether the CHECK executed: a fully blocked set
+        is still 200, with the availability verdict in the body. Every executed preflight
+        writes an activity record before the response is returned.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.PreflightRequest'
+        description: Tool IDs (1-100 before dedup), optional profile, annotation policy
+          filters and wait budget
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Preflight verdict and per-tool results
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Validation error (malformed, oversized, doubled or unknown-field
+            body; empty or oversized tool list; conflicting duplicate pins; unknown
+            profile; wait_ms out of range)
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Missing or invalid credentials
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Runtime unavailable, evaluator infrastructure read failure,
+            or the activity record could not be persisted
+      security:
+      - ApiKeyHeader: []
+      - ApiKeyQuery: []
+      summary: Preflight required tools
+      tags:
+      - tools
   /api/v1/profiles:
     get:
       description: List all configured profiles with their effective servers and indexed

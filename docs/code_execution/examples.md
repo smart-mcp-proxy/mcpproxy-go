@@ -1,3 +1,9 @@
+---
+title: "Code Execution Examples"
+sidebar_label: "Examples"
+description: "Worked end-to-end examples of orchestrating upstream tools with code execution."
+---
+
 # JavaScript Code Execution - Examples
 
 This guide provides working examples demonstrating common use cases for the `code_execution` tool.

@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 const (
@@ -160,12 +161,50 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		startTime := time.Now()
 
+		// Get session ID for activity logging
+		var sessionID string
+		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+			sessionID = sess.SessionID()
+		}
+
+		// Get request ID from context. Direct-mode calls that did not arrive
+		// over an HTTP transport carry none, and every activity this handler
+		// emits — including the agent-token and callability blocks below, which
+		// fire before anything else — needs an id a consumer can correlate on.
+		// Mint one rather than emit anonymously; a transport-supplied id always
+		// wins so the records still line up with the access log.
+		//
+		// Both ids are resolved BEFORE the agent-token gates so those denials
+		// can emit a correlatable policy decision like every other block.
+		requestID := reqcontext.GetRequestID(ctx)
+		if requestID == "" {
+			requestID = mintActivityRequestID(serverName, toolName)
+		}
+
+		// Spec 057 / Profiles v2: the active profile (token pin > URL > session
+		// set_profile) gates direct-mode dispatch exactly as it gates
+		// call_tool_* (mcp.go handleCallToolVariant). It runs independently of
+		// the agent-token gates below so an unauthenticated /mcp/p/<slug>
+		// connection is filtered too, and it runs FIRST so a profile-pinned
+		// token cannot reach a server outside its pin through this routing mode.
+		if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+			errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
+			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+
 		// Check auth context for server access and permissions
 		authCtx := auth.AuthContextFromContext(ctx)
 		if authCtx != nil {
 			// Check server access
 			if !authCtx.CanAccessServer(serverName) {
-				return mcp.NewToolResultError(fmt.Sprintf("Access denied: token does not have access to server '%s'", serverName)), nil
+				errMsg := fmt.Sprintf("Access denied: token does not have access to server '%s'", serverName)
+				// Direct mode denied these silently: no activity record and,
+				// since issue #969, no availability counter either. Emit the
+				// same policy decision the call_tool_* variants emit at the
+				// equivalent gate so the funnel has no blind spot.
+				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
+				return mcp.NewToolResultError(errMsg), nil
 			}
 
 			// Determine required permission from annotations
@@ -176,25 +215,10 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			}
 
 			if !authCtx.HasPermission(requiredPerm) {
-				return mcp.NewToolResultError(fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", requiredPerm, serverName, toolName)), nil
+				errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", requiredPerm, serverName, toolName)
+				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+				return mcp.NewToolResultError(errMsg), nil
 			}
-		}
-
-		// Get session ID for activity logging
-		var sessionID string
-		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
-			sessionID = sess.SessionID()
-		}
-
-		// Get request ID from context. Direct-mode calls that did not arrive
-		// over an HTTP transport carry none, and every activity this handler
-		// emits — including the callability block below, which fires before
-		// anything else — needs an id a consumer can correlate on. Mint one
-		// rather than emit anonymously; a transport-supplied id always wins so
-		// the records still line up with the access log.
-		requestID := reqcontext.GetRequestID(ctx)
-		if requestID == "" {
-			requestID = mintActivityRequestID(serverName, toolName)
 		}
 
 		// Get arguments from the request
@@ -204,8 +228,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		// Enforce direct-mode callability before emitting a tool-started event or
 		// invoking upstream. Direct mode must not bypass disabled, quarantine, or
 		// approval controls enforced by call_tool_* variants.
-		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, enrichedArgs); blocked != nil {
-			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable")
+		// The reason key comes from the gate that actually fired (quarantine,
+		// pending/changed approval, or plain not-callable) rather than from
+		// this one funnel site — see directBlockReasonKey.
+		if blocked, reasonKey := p.directToolCallabilityBlockWithReason(ctx, serverName, toolName, enrichedArgs); blocked != nil {
+			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", reasonKey)
 			return blocked, nil
 		}
 
@@ -496,59 +523,52 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithDestructiveHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(false),
+			// Spec 097: the stub mirrors the live parameter shape — optional
+			// `code`, optional `script` — so a stored-script call reaches this
+			// handler and gets the "enable it" explanation instead of a schema
+			// rejection. Its DESCRIPTIONS stay minimal and disabled-only: a
+			// disabled tool must not advertise a contract it cannot honor.
 			mcp.WithString("code",
-				mcp.Required(),
 				mcp.Description("JavaScript source code to execute."),
+			),
+			mcp.WithString("script",
+				mcp.Description("Name of a stored script to execute."),
 			),
 		)
 		return []mcpserver.ServerTool{{
 			Tool: codeExecutionTool,
-			Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				return mcp.NewToolResultError("Code execution is disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy configuration file."), nil
+			Handler: func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				// Same wording, same typed identity as the handler-level gate:
+				// which surface refused must not change what the caller is told.
+				recordCodeExecRefusal(ctx, config.ErrCodeExecutionDisabled)
+				return mcp.NewToolResultError(config.CodeExecutionDisabledMessage), nil
 			},
 		}}
 	}
 
 	codeExecutionTool := mcp.NewTool("code_execution",
-		mcp.WithDescription("Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. "+
-			"Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations "+
-			"that would require multiple round-trips otherwise.\n\n"+
-			"**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n"+
-			"**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n"+
-			"**Available in code**:\n"+
-			"- `input` global: Your input data passed via the 'input' parameter\n"+
-			"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n"+
-			"- Modern JavaScript (ES2020+): arrow functions, const/let, template literals, destructuring, classes, for-of, "+
-			"optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect "+
-			"(no require(), filesystem, or network access)\n\n"+
-			"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. "+
-			"Types are automatically stripped before execution.\n\n"+
-			"**Important runtime rules**:\n"+
-			"- `call_tool` is strictly SYNCHRONOUS. Do not use `await`.\n"+
-			"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n"+
-			"- The last evaluated expression in your script is automatically returned as the final output.\n\n"+
-			"**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
+		mcp.WithDescription(codeExecutionToolDescription),
 		mcp.WithTitleAnnotation("Code Execution"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
+		// Spec 097: optional `code` + optional `script`; the handler enforces
+		// the exactly-one-of rule (see mcp.go for the same shape).
 		mcp.WithString("code",
-			mcp.Required(),
-			mcp.Description("JavaScript or TypeScript source code (ES2020+) to execute. Supports modern syntax: arrow functions, const/let, template literals, destructuring, "+
-				"optional chaining, nullish coalescing. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. "+
-				"call_tool is SYNCHRONOUS — do not use await. Return value is the last evaluated expression and must be JSON-serializable. "+
-				"Example: `const res = call_tool('github', 'get_user', {username: input.username}); const data = JSON.parse(res.result.content[0].text); ({user: data, timestamp: Date.now()})`"),
+			mcp.Description(codeExecutionCodeDescription),
+		),
+		mcp.WithString("script",
+			mcp.Description(codeExecutionScriptDescription),
 		),
 		mcp.WithString("language",
-			mcp.Description("Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. "+
-				"Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'."),
+			mcp.Description(codeExecutionLanguageDescription),
 			mcp.Enum("javascript", "typescript"),
 		),
 		mcp.WithObject("input",
-			mcp.Description("Input data accessible as global `input` variable in code (default: {})"),
+			mcp.Description(codeExecutionInputDescription),
 		),
 		mcp.WithObject("options",
-			mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
+			mcp.Description(codeExecutionOptionsDescription),
 		),
 	)
 	return []mcpserver.ServerTool{{

@@ -16,6 +16,15 @@ import (
 // buildSetProfileTool constructs the set_profile MCP tool definition (Profiles
 // v2 T2). Factored out so it can be registered on the default server and every
 // routing-mode server (call-tool / code-exec) from one source of truth.
+//
+// The wording below is snapshotted byte-for-byte by the spec-098 FR-015
+// tools/list goldens (testdata/toolslist_goldens/), which were captured from
+// the pre-098 merge base — editing this text is an intentional MCP-surface
+// change that must regenerate them, and is deliberately NOT bundled with
+// unrelated fixes. One nuance it therefore still understates: "back to all
+// servers" is bounded by the caller's credential, so a profile-pinned token
+// that clears its session selection stays inside its pin (handleSetProfile
+// reports the pinned scope, not every server).
 func buildSetProfileTool() mcp.Tool {
 	return mcp.NewTool("set_profile",
 		mcp.WithDescription("Switch the active profile for THIS session. A profile scopes tool discovery "+
@@ -49,15 +58,25 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 
 	cfg := p.currentConfig()
 
-	// Profiles v2 T3 hook: a profile-pinned agent token may not switch away from
-	// its pinned profile. Inert until T3 populates the pin (always "" for now).
-	if pin := profilePinFromContext(ctx); pin != "" && slug != "" && slug != pin {
+	// Profiles v2 T3: a profile-pinned agent token may not switch away from its
+	// pinned profile.
+	pin := profilePinFromContext(ctx)
+	if pin != "" && slug != "" && slug != pin {
 		return mcp.NewToolResultError(fmt.Sprintf("agent token is pinned to profile '%s' and cannot switch to '%s'", pin, slug)), nil
 	}
 
 	// Empty slug clears the session selection (back to all servers).
 	if slug == "" {
 		p.sessionStore.SetActiveProfile(sessionID, "")
+		// A pinned token keeps its pin: clearing only drops the session tier,
+		// which the pin outranks anyway. Report what the session can actually
+		// reach — the pin's servers, or NOTHING when the pinned profile has been
+		// deleted — instead of the full server list, which would advertise a
+		// reach the resolver denies.
+		if pin != "" {
+			pinnedName, pinnedScope := p.resolveActiveProfile(ctx)
+			return setProfileResult(pinnedName, pinnedScope.AllowedServerNames())
+		}
 		return setProfileResult("", allServerNames(cfg))
 	}
 

@@ -1,0 +1,652 @@
+{
+  "spec": "098-tools-preflight (+ 099-describe-check-mode rows)",
+  "requirement": "FR-016 (098) / FR-016 (099)",
+  "description": "Scenario-keyed sabotage matrix for the required-tools preflight. Each scenario names one deliberately induced proxy state, the SURFACE it is observed on, the disclosure TIER it is observed at, and the EXACT per-tool verdict it must produce: status, reason, retryable and action (an omitted action means the reason carries none). The set-level verdict and CLI exit code are the ones a single-tool request of that shape must report. A request that is REJECTED rather than evaluated carries request_error instead of a verdict, and a row on the mcp-plain surface carries plain_error, that surface's per-id error code, because plain describe_tool has its own vocabulary. internal/server/preflight_e2e_test.go drives the REST rows against a real mcpproxy binary, internal/server/preflight_mcp_check_matrix_test.go drives every mcp-check and mcp-plain row, and reflection checks fail if any code of the 15-code enum has no REST row or no mcp-check row (excepting the two codes that are REST-only by design).",
+  "surfaces": {
+    "e2e": "induced against a running mcpproxy binary with sabotaged fixture upstreams, observed over POST /api/v1/preflight",
+    "state-injected": "induced by injecting the connection-state snapshot the runtime cannot be forced into deterministically from outside",
+    "mcp-check": "observed in band through describe_tool with check:true (spec 099); always the agent-token tier",
+    "mcp-plain": "observed in band through describe_tool WITHOUT check, whose per-id vocabulary is not_found|quarantined|pending_approval|changed|disabled"
+  },
+  "scenarios": [
+    {
+      "scenario": "all_ready",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "none: indexed, approved tool on an enabled, healthy, trusted server \u2014 asserted both unfiltered and under each of the three annotation filters, since a fully annotated tool must survive all of them",
+      "expect": {
+        "status": "ready",
+        "verdict": "ready",
+        "exit_code": 0
+      }
+    },
+    {
+      "scenario": "quarantine_flip",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "POST /api/v1/servers/{server}/quarantine on a previously healthy, indexed server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_quarantined",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "tool_definition_drift",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "rewrite the upstream tool's description in the fixture tools file, then restart the server so the proxy re-lists it (rug-pull guard trips)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_changed",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "new_tool_after_baseline",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "add a tool to the fixture tools file after the trusted server's baseline was auto-approved, then restart the server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_pending_approval",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "tool_blocked_by_user",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "POST /api/v1/servers/{server}/tools/block for one tool",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_blocked_by_user",
+        "retryable": false,
+        "action": "enable",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "config_denial",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "server configured with disabled_tools containing the requested tool",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_denied_by_config",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "server_disable",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "server configured with enabled:false",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_disabled",
+        "retryable": false,
+        "action": "enable",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "upstream_killed",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "arm the fixture's fail-switch file, SIGKILL the upstream process, then force a reconnect: the restarted fixture exits immediately, so the server settles in a stable non-connected state",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_unhealthy",
+        "retryable": true,
+        "action": "view_logs",
+        "verdict": "degraded_retryable",
+        "exit_code": 10
+      }
+    },
+    {
+      "scenario": "mid_indexing",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "restart an already-indexed server with a long initialize delay, so it sits in connecting/discovering while its tools remain in the shared index; see never_indexed_while_connecting for the case where the tool was never indexed at all \u2014 the connection-state verdict wins there too",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_initializing",
+        "retryable": true,
+        "verdict": "degraded_retryable",
+        "exit_code": 10
+      }
+    },
+    {
+      "scenario": "missing_annotation_read_only_only",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "policy.read_only_only against a tool whose upstream definition declares no annotations",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "missing_annotation_exclude_destructive",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "policy.exclude_destructive against a tool with no destructiveHint and no read-only hint",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "missing_annotation_exclude_open_world",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "policy.exclude_open_world against a tool with no openWorldHint",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "policy_filtered_read_only_only",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "policy.read_only_only against a tool explicitly annotated readOnlyHint:false",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "policy_filtered_exclude_destructive",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "policy.exclude_destructive against a tool explicitly annotated destructiveHint:true",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "policy_filtered_exclude_open_world",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "policy.exclude_open_world against a tool explicitly annotated openWorldHint:true",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "unknown_tool_id",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "misspelled tool name on a configured, healthy server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "unknown_server",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "tool id naming a server that is not configured at all",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_not_configured",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "hash_mismatch",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "pin_hash at the current schema version whose digest does not match the tool's stored hash",
+      "expect": {
+        "status": "unavailable",
+        "reason": "hash_mismatch",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "hash_mismatch_schema_version_bump",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "pin_hash carrying the tool's CURRENT digest under a different hash schema version (simulates a proxy-side hash-algorithm bump)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "hash_mismatch",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "pending_auth",
+      "surface": "state-injected",
+      "tier": "operator",
+      "sabotage": "connection-state snapshot reports the deferred-OAuth PendingAuth state for the server",
+      "expect": {
+        "status": "unavailable",
+        "reason": "oauth_required",
+        "retryable": false,
+        "action": "login",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "profile_out_of_scope_operator",
+      "surface": "e2e",
+      "tier": "operator",
+      "sabotage": "preflight under a profile whose server list excludes the requested tool's server, called with the operator API key",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_not_in_scope",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "profile_out_of_scope_agent_token",
+      "surface": "e2e",
+      "tier": "agent_token",
+      "sabotage": "same out-of-scope request as profile_out_of_scope_operator, called with an agent token whose allowed_servers excludes the server: scope-silence maps it to a plain not_found, byte-indistinguishable from an absent tool",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "never_indexed_while_connecting",
+      "surface": "state-injected",
+      "tier": "operator",
+      "sabotage": "a configured, enabled server that has NEVER been indexed, with the connection-state snapshot reporting connecting: existence is unknowable while the server is not Ready, so the connection verdict wins over not_found (FR-005 \u2014 corrects the note the mid_indexing row used to carry)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_initializing",
+        "retryable": true,
+        "verdict": "degraded_retryable",
+        "exit_code": 10
+      }
+    },
+    {
+      "scenario": "mcp_check_all_ready",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "none: indexed, approved tool on an enabled, healthy, trusted server, checked in band with describe_tool check:true",
+      "expect": {
+        "status": "ready",
+        "verdict": "ready",
+        "exit_code": 0
+      }
+    },
+    {
+      "scenario": "mcp_check_quarantine",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "the requested tool's server is quarantined, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_quarantined",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_server_disabled",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "the requested tool's server is configured enabled:false, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_disabled",
+        "retryable": false,
+        "action": "enable",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_tool_pending_approval",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "the tool carries a spec-032 approval record in the pending state, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_pending_approval",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_tool_changed",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "the tool's approval record is in the changed (rug-pull) state, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_changed",
+        "retryable": false,
+        "action": "approve",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_tool_blocked_by_user",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "the tool's approval record is disabled by the user, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_blocked_by_user",
+        "retryable": false,
+        "action": "enable",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_tool_denied_by_config",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "the server's disabled_tools denylist contains the requested tool, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_denied_by_config",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_unknown_tool_id",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "misspelled tool name on a configured, in-scope server, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "mcp_check_malformed_id",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "an id with no '<server>:<tool>' separator: a per-id verdict with a format hint, never a batch failure, checked in band",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "mcp_check_unknown_server",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "tool id naming a server that is not configured at all: at the in-band tier server_not_configured collapses to a plain not_found, byte-indistinguishable from an unknown id (spec 099 FR-009)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "mcp_check_out_of_scope",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "tool on a server outside the session's scope (agent-token allowed_servers or active profile): server_not_in_scope collapses to the SAME not_found, so a probe cannot learn what sits behind the scope (spec 099 FR-009/SC-007)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
+    },
+    {
+      "scenario": "mcp_check_oauth_required",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "connection-state snapshot reports the deferred-OAuth PendingAuth state for the server, projected onto the in-band payload",
+      "expect": {
+        "status": "unavailable",
+        "reason": "oauth_required",
+        "retryable": false,
+        "action": "login",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_server_unhealthy",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "connection-state snapshot reports the server in the error state, projected onto the in-band payload",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_unhealthy",
+        "retryable": true,
+        "action": "view_logs",
+        "verdict": "degraded_retryable",
+        "exit_code": 10
+      }
+    },
+    {
+      "scenario": "mcp_check_server_initializing",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "connection-state snapshot reports the server connecting while its tools are still indexed, projected onto the in-band payload",
+      "expect": {
+        "status": "unavailable",
+        "reason": "server_initializing",
+        "retryable": true,
+        "verdict": "degraded_retryable",
+        "exit_code": 10
+      }
+    },
+    {
+      "scenario": "mcp_check_missing_annotation_read_only_only",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "filters.read_only_only against a tool whose upstream definition declares no annotations",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_missing_annotation_exclude_destructive",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "filters.exclude_destructive against a tool whose upstream definition declares no annotations",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_missing_annotation_exclude_open_world",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "filters.exclude_open_world against a tool whose upstream definition declares no annotations",
+      "expect": {
+        "status": "unavailable",
+        "reason": "missing_annotation",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_policy_filtered_read_only_only",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "filters.read_only_only against a tool explicitly annotated as unsafe for that filter",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_policy_filtered_exclude_destructive",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "filters.exclude_destructive against a tool explicitly annotated as unsafe for that filter",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_policy_filtered_exclude_open_world",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "filters.exclude_open_world against a tool explicitly annotated as unsafe for that filter",
+      "expect": {
+        "status": "unavailable",
+        "reason": "policy_filtered",
+        "retryable": false,
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_cap_boundary_50",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "exactly 50 raw ids in one check-mode call: all 50 are evaluated and every ready tool answers ready (the cap applies to the raw array, before trimming and dedup)",
+      "expect": {
+        "status": "ready",
+        "verdict": "ready",
+        "exit_code": 0
+      }
+    },
+    {
+      "scenario": "mcp_check_cap_exceeded_51",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "51 raw ids in one check-mode call",
+      "expect": {
+        "request_error": "too many tool_ids: 51 (max 50 with check:true)"
+      }
+    },
+    {
+      "scenario": "mcp_check_filters_without_check",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "a `filters` object sent without check:true \u2014 silently ignoring it would let an agent believe a safety filter was applied when it was not",
+      "expect": {
+        "request_error": "'filters' requires 'check': true"
+      }
+    },
+    {
+      "scenario": "mcp_check_expect_hashes_reserved",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "the reserved `expect_hashes` field sent in any shape: rejected rather than ignored, so in-band pins stay additive (spec 099 FR-008)",
+      "expect": {
+        "request_error": "'expect_hashes' is reserved"
+      }
+    },
+    {
+      "scenario": "mcp_plain_out_of_scope",
+      "surface": "mcp-plain",
+      "tier": "agent_token",
+      "sabotage": "describe_tool WITHOUT check for a tool on a server outside the session's scope: the retired `invisible` code is replaced by not_found, whose remediation was already the shared not-found text (spec 099 FR-011)",
+      "expect": {
+        "plain_error": "not_found"
+      }
+    }
+  ],
+  "rest_only_reasons": {
+    "hash_mismatch": "in-band hash pins were trimmed from spec 099 v1 (FR-008): nothing in band can request a pin, so nothing in band can fail one",
+    "server_not_in_scope": "the whole in-band surface is the agent-token tier (spec 099 FR-009), where this collapses to not_found",
+    "server_not_configured": "the whole in-band surface is the agent-token tier (spec 099 FR-009), where this collapses to not_found \u2014 see mcp_check_unknown_server, which asserts the collapse"
+  }
+}

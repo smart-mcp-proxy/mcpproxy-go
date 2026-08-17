@@ -29,6 +29,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -44,7 +45,51 @@ import (
 const (
 	asyncToggleTimeout = 5 * time.Second
 	secretTypeKeyring  = "keyring"
+
+	// defaultAPIRequestTimeout bounds an ordinary /api/v1 request.
+	defaultAPIRequestTimeout = 60 * time.Second
+
+	// codeExecPath is the one REST route that runs caller-supplied code.
+	codeExecPath = "/api/v1/code/exec"
+
+	// codeExecRequestTimeout is the parent deadline for POST /api/v1/code/exec.
+	// The handler derives the precise budget from the caller's timeout_ms, but
+	// a context only ever shrinks against its parent, so the parent has to
+	// cover the longest execution the code_execution tool accepts (600000ms)
+	// plus slack for request and response IO. Under the blanket 60s deadline
+	// every longer execution was cancelled at 60s regardless of what the
+	// caller asked for.
+	codeExecRequestTimeout = 630 * time.Second
 )
+
+// longRunningAPIBudgets lists the /api/v1 paths that need more than
+// defaultAPIRequestTimeout, keyed by request path.
+func longRunningAPIBudgets() map[string]time.Duration {
+	return map[string]time.Duration{
+		codeExecPath: codeExecRequestTimeout,
+	}
+}
+
+// apiRequestTimeout builds the /api/v1 request-deadline middleware. Paths
+// listed in budgets get their own deadline; everything else gets
+// defaultBudget. Each budget's handler chain is built once at setup rather
+// than per request.
+func apiRequestTimeout(defaultBudget time.Duration, budgets map[string]time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		fallback := middleware.Timeout(defaultBudget)(next)
+		wrapped := make(map[string]http.Handler, len(budgets))
+		for path, budget := range budgets {
+			wrapped[path] = middleware.Timeout(budget)(next)
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if handler, ok := wrapped[r.URL.Path]; ok {
+				handler.ServeHTTP(w, r)
+				return
+			}
+			fallback.ServeHTTP(w, r)
+		})
+	}
+}
 
 // ServerController defines the interface for core server functionality
 type ServerController interface {
@@ -70,6 +115,15 @@ type ServerController interface {
 	UpdateServer(ctx context.Context, serverName string, updates *config.ServerConfig) error
 	EnableServer(serverName string, enabled bool) error
 	GetToolApprovalStatus(serverName, toolName string) (string, error)
+	// RunPreflight evaluates a required-tools preflight against local state
+	// only (Spec 098). The core owns the index/storage/stateview wiring; this
+	// interface is the only way the REST layer reaches it — same precedent as
+	// GetToolApprovalStatus above.
+	RunPreflight(ctx context.Context, params preflight.Params) (preflight.Outcome, error)
+	// RecordPreflight persists one preflight run synchronously and returns the
+	// write error, so the handler can answer 503 when the durable record
+	// required by FR-014 could not be written.
+	RecordPreflight(rec internalRuntime.PreflightActivity) error
 	RestartServer(serverName string) error
 	ForceReconnectAllServers(reason string) error
 	GetDockerRecoveryStatus() *storage.DockerRecoveryState
@@ -252,6 +306,16 @@ type Server struct {
 	// override a live MCP session's set_profile selection.
 	activeProfileMu sync.RWMutex
 	activeProfile   string
+
+	// preflightWaitSem is the dedicated wait budget for POST /api/v1/preflight
+	// (Spec 098 FR-012): a buffered channel used as a non-blocking semaphore, so
+	// a flood of waiting preflights degrades to immediate answers instead of
+	// queueing. nil (a Server not built by NewServer) reads as "exhausted",
+	// which is the safe direction.
+	preflightWaitSem chan struct{}
+	// preflightPollOverride lowers the 250 ms poll floor. Tests set it; nothing
+	// in production does.
+	preflightPollOverride time.Duration
 }
 
 // usageCacheEntry is one cached usage response with its expiry.
@@ -315,11 +379,12 @@ func NewServer(controller ServerController, logger *zap.SugaredLogger, obs *obse
 	}
 
 	s := &Server{
-		controller:    controller,
-		logger:        logger,
-		httpLogger:    httpLogger,
-		router:        chi.NewRouter(),
-		observability: obs,
+		controller:       controller,
+		logger:           logger,
+		httpLogger:       httpLogger,
+		router:           chi.NewRouter(),
+		observability:    obs,
+		preflightWaitSem: make(chan struct{}, preflightWaitSlots),
 	}
 
 	s.setupRoutes()
@@ -467,13 +532,12 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 		}
 	}()
 
-	authCtx := &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      agentToken.Name,
-		TokenPrefix:    agentToken.TokenPrefix,
-		AllowedServers: agentToken.AllowedServers,
-		Permissions:    agentToken.Permissions,
-	}
+	// Built through the shared constructor so every field the MCP path carries
+	// reaches the REST path too — notably ProfilePin, which this path dropped
+	// before Spec 098. Evaluation scope is token scope ∩ token pin ∩ requested
+	// profile (preflight.ResolveScope), so a dropped pin silently widened what
+	// a pinned token could see.
+	authCtx := agentToken.AuthContext()
 	ctx := auth.WithAuthContext(r.Context(), authCtx)
 
 	s.logger.Debug("Agent token authenticated",
@@ -644,8 +708,10 @@ func (s *Server) setupRoutes() {
 
 	// API v1 routes with timeout and authentication middleware
 	s.router.Route("/api/v1", func(r chi.Router) {
-		// Apply timeout and API key authentication middleware to API routes only
-		r.Use(middleware.Timeout(60 * time.Second))
+		// Apply timeout and API key authentication middleware to API routes only.
+		// The deadline is per-route: the long-running routes carry their own
+		// budget, everything else gets defaultAPIRequestTimeout.
+		r.Use(apiRequestTimeout(defaultAPIRequestTimeout, longRunningAPIBudgets()))
 		r.Use(s.apiKeyAuthMiddleware())
 		// Spec 042: Tier 2 telemetry middlewares. Both fetch the registry via
 		// a closure so the registry can be installed after route setup.
@@ -793,8 +859,18 @@ func (s *Server) setupRoutes() {
 		// Tool execution
 		r.Post("/tools/call", s.handleCallTool)
 
+		// Required-tools preflight (Spec 098). POST because the check takes a
+		// body, but it is strictly read-only — zero upstream I/O, zero runtime
+		// mutation — so it carries no requireServerOp gate and agent tokens may
+		// call it (they get the scope-silenced disclosure tier).
+		r.Post("/preflight", s.handlePreflight)
+
 		// Code execution endpoint (for CLI client mode)
 		r.Post("/code/exec", NewCodeExecHandler(s.controller, s.logger).ServeHTTP)
+
+		// Stored scripts (Spec 097). Read-only by design: scripts are authored
+		// in the filesystem, never through the API.
+		r.Get("/code/scripts", s.handleListScripts)
 
 		// Configuration management. Applying/patching config can add, remove,
 		// enable, disable or quarantine upstream servers (mcpServers), so these
@@ -2964,7 +3040,9 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert + enrich (shared with the global tools endpoint, spec 050).
-	typedTools := s.enrichServerTools(serverID, tools)
+	// Hash pins are operator-tier only (Spec 098 T020).
+	tier, _ := disclosureTier(r)
+	typedTools := s.enrichServerTools(serverID, tools, tier == preflight.TierOperator)
 
 	// Sort: pending/changed tools first, then approved
 	sort.SliceStable(typedTools, func(i, j int) bool {
@@ -2985,7 +3063,12 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 // Shared by the per-server tools endpoint and the global tools endpoint
 // (spec 050). ServerName is forced to serverID so the global merge can attribute
 // every tool to its server even if the upstream payload omits server_name.
-func (s *Server) enrichServerTools(serverID string, tools []map[string]interface{}) []contracts.Tool {
+//
+// discloseHash (Spec 098 T020) additionally publishes the approval record's
+// current hash as a preflight pin. Callers derive it from the request's
+// disclosure tier — never pass true unconditionally: the agent-token tier must
+// not receive hashes (FR-013).
+func (s *Server) enrichServerTools(serverID string, tools []map[string]interface{}, discloseHash bool) []contracts.Tool {
 	typedTools := contracts.ConvertGenericToolsToTyped(tools)
 
 	type configDeniedChecker interface {
@@ -3006,6 +3089,13 @@ func (s *Server) enrichServerTools(serverID string, tools []map[string]interface
 			typedTools[i].HeldReason = record.HeldReason
 			typedTools[i].HeldVerdict = record.HeldVerdict
 			typedTools[i].HeldSignals = record.HeldSignals
+			// Hash-pin authoring surface (Spec 098 FR-011). Same guard as the
+			// preflight evaluator: operator tier only, and only when a hash is
+			// actually stored — otherwise the field stays absent instead of
+			// rendering a "sha256/v0:" placeholder.
+			if discloseHash && record.CurrentHash != "" {
+				typedTools[i].Hash = preflight.FormatPin(record.HashSchemaVersion, record.CurrentHash)
+			}
 			enrichedCount++
 		} else if i == 0 {
 			firstErr = err
@@ -3069,6 +3159,10 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 		Tools: make([]contracts.Tool, 0, 256),
 	}
 
+	// Hash pins are operator-tier only (Spec 098 T020).
+	tier, _ := disclosureTier(r)
+	discloseHash := tier == preflight.TierOperator
+
 	for _, srv := range allServers {
 		name, _ := srv["name"].(string)
 		if name == "" {
@@ -3085,7 +3179,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		typed := s.enrichServerTools(name, generic)
+		typed := s.enrichServerTools(name, generic, discloseHash)
 		for i := range typed {
 			if st, ok := usage[name+"\x00"+typed[i].Name]; ok {
 				typed[i].Usage = st.Count

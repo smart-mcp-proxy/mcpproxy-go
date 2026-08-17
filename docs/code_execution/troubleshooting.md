@@ -1,3 +1,9 @@
+---
+title: "Code Execution Troubleshooting"
+sidebar_label: "Troubleshooting"
+description: "Diagnose sandbox errors, timeouts, and unexpected results in code execution."
+---
+
 # JavaScript Code Execution - Troubleshooting
 
 Common issues, error messages, and solutions for the `code_execution` tool.
@@ -9,9 +15,10 @@ Common issues, error messages, and solutions for the `code_execution` tool.
 3. [Runtime Errors](#runtime-errors)
 4. [Timeout Issues](#timeout-issues)
 5. [Tool Call Errors](#tool-call-errors)
-6. [Serialization Errors](#serialization-errors)
-7. [Performance Issues](#performance-issues)
-8. [Debugging Tips](#debugging-tips)
+6. [Stored Script Errors](#stored-script-errors)
+7. [Serialization Errors](#serialization-errors)
+8. [Performance Issues](#performance-issues)
+9. [Debugging Tips](#debugging-tips)
 
 ---
 
@@ -38,6 +45,7 @@ Error: code_execution is disabled in configuration. Set 'enable_code_execution: 
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8,
   "mcpServers": [...]
 }
 ```
@@ -87,6 +95,29 @@ mcpproxy call tool --tool-name=retrieve_tools --json_args='{"query":"code execut
   }
 }
 ```
+
+---
+
+### Error: "code_execution_max_parallel: must be between 1 and 32"
+
+**Symptom**: mcpproxy refuses to load the configuration file:
+```
+config validation failed: code_execution_max_parallel: must be between 1 and 32 (or 0 for default)
+```
+
+**Cause**: `code_execution_max_parallel` is outside the supported range.
+
+**Solution**: Use a value between 1 and 32 (or omit the key / set `0` for the
+default of 8):
+```json
+{
+  "code_execution_max_parallel": 8
+}
+```
+
+The same range applies to the per-batch override —
+`call_tools(requests, {max_parallel: 40})` returns a single `INVALID_ARGS`
+envelope instead of dispatching.
 
 ---
 
@@ -365,6 +396,9 @@ for (var i = 0; i < input.items.length; i++) {
 ```
 
 **Cause**: Code called `call_tool()` more times than `max_tool_calls` allows.
+Every element of a `call_tools()` batch counts as one call too, checked in input
+order — tail elements over the limit come back as per-slot
+`MAX_TOOL_CALLS_EXCEEDED` errors and are never dispatched.
 
 **Solution**:
 
@@ -463,6 +497,249 @@ mcpproxy call tool --tool-name=upstream_servers \
 
 ---
 
+### Error: "call_tools: element N: ..." (INVALID_ARGS)
+
+**Symptom**: `call_tools()` returns a single envelope instead of an array of slots:
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "INVALID_ARGS",
+    "message": "call_tools: element 3: must be an object with server and tool"
+  }
+}
+```
+
+**Cause**: The batch itself is malformed, so nothing was dispatched and no budget
+was consumed. Triggers: `requests` is not an array, an element is not an object
+with non-empty `server`/`tool` strings, a supplied `args` is not an object, the
+array has a sparse hole, `options` is not an object, `max_parallel` is not an
+integer in 1-32, or the batch exceeds 100 elements.
+
+**Solution**: Fix the element the message names, then check the result shape
+before mapping over it:
+```javascript
+var slots = call_tools(requests, {max_parallel: 8});
+if (!Array.isArray(slots)) {
+  // whole batch rejected — slots is {ok:false, error:{...}}
+  ({error: slots.error.message});
+} else {
+  ({results: slots});
+}
+```
+
+For more than 100 items, chunk the array and issue one `call_tools()` per chunk.
+
+---
+
+### Error: "upstream server X is busy: its concurrency limit (N) is saturated (queue_full)"
+
+**Symptom**: A `call_tools()` batch returns one success and many failed slots
+mentioning a concurrency limit:
+```json
+[
+  {"ok": true,  "result": {...}},
+  {"ok": false, "error": {
+    "code": "UPSTREAM_ERROR",
+    "message": "upstream server \"fragile-db\" is busy: its concurrency limit (1) is saturated (queue_full) — please retry shortly"
+  }}
+]
+```
+
+**Cause**: The target server has a per-server concurrency limit
+(`max_concurrent_requests`) with **no** `queue_size`. Batching never bypasses
+those limits: calls over the cap are shed immediately, which is the server's
+configured policy — one shed error per overflow element.
+
+**Solution**: Give the server queue headroom, or lower the batch concurrency to
+match its cap:
+```json
+{
+  "mcpServers": [
+    { "name": "fragile-db", "command": "db-mcp", "max_concurrent_requests": 1, "queue_size": 20 }
+  ]
+}
+```
+```javascript
+// Or match the cap from the script
+call_tools(requests, {max_parallel: 1});
+```
+
+Queued calls wait up to `queue_timeout`, and that wall-clock wait happens inside
+the script's `timeout_ms` budget — size `queue_size` and `timeout_ms` together.
+
+---
+
+## Stored Script Errors
+
+These apply to invocations that name a [stored script](overview.md#stored-scripts)
+(`script: "<name>"`, `--script <name>`) instead of sending `code` inline. One
+command answers most of them:
+
+```bash
+mcpproxy code scripts list   # names, paths, statuses, and the directory that was read
+```
+
+### Error: "Provide exactly one of 'code' or 'script'"
+
+**Symptom**:
+```
+Provide exactly one of 'code' (inline source) or 'script' (the name of a script stored in the 'scripts' directory next to mcpproxy's config file) — not both, not neither.
+```
+
+Over REST the same rule is an HTTP 400 before dispatch:
+```json
+{"ok": false, "error": {"code": "INVALID_REQUEST", "message": "Provide exactly one of 'code' (inline source) or 'script' (the name of a stored script)"}}
+```
+
+**Cause**: The request carried both `code` and `script`, or neither. JSON Schema
+cannot express "exactly one of", so neither field is schema-required and the
+rule is enforced by the tool.
+
+**Solution**: Send one source. On the CLI, `--code`, `--file` and `--script` are
+mutually exclusive (`--code, --file and --script are mutually exclusive`, exit
+code 2).
+
+---
+
+### Error: "stored script X not found"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "fetch-pr" not found in /Users/me/.mcpproxy/scripts. Available scripts (3): daily-report, fetch-prs, triage
+```
+
+Or, with an empty/absent directory:
+```
+Cannot execute stored script: stored script "fetch-pr" not found: no stored scripts in /Users/me/.mcpproxy/scripts (create fetch-pr.js or fetch-pr.ts there)
+```
+
+**Cause**: No `<name>.js` / `<name>.ts` in the scripts directory. Usually a typo
+(names are **case-sensitive**), a file that is not a script (uppercase or other
+extension: `.JS`, `.mjs`, `.jsx` are ignored), or the wrong directory — the
+scripts directory follows the **active config file**, not `--data-dir`.
+
+**Solution**: This error *is* the discovery mechanism — it lists the first 20
+available names alphabetically plus the total, so an MCP client can recover the
+name set from the failed call. For the full picture, including where the daemon
+looked:
+```bash
+mcpproxy code scripts list
+mcpproxy code scripts list --config /etc/mcpproxy/mcp_config.json   # a non-default config
+```
+If the directory in the message is not the one you authored in, start the daemon
+with the config file you meant (`mcpproxy serve --config …`) — with
+`~/.mcpproxy/mcp_config.json` the scripts live in `~/.mcpproxy/scripts/`.
+mcpproxy never creates the directory itself; `mkdir -p` it.
+
+---
+
+### Error: "invalid script name"
+
+**Symptom**:
+```
+Cannot execute stored script: invalid script name "../../etc/passwd": character "." is not allowed (names are 1-64 characters of A-Z, a-z, 0-9, '-' or '_' — a name, never a path)
+```
+
+**Cause**: `script` is a **name**, never a path. Separators, `..`, dots,
+extensions, non-ASCII characters and names longer than 64 characters are
+rejected before the filesystem is touched at all.
+
+**Solution**: Pass the base name only — `fetch-prs`, not `fetch-prs.js`,
+`./fetch-prs.js`, or `/abs/path/fetch-prs.js`.
+
+---
+
+### Error: "stored script X is ambiguous"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "triage" is ambiguous: /Users/me/.mcpproxy/scripts/triage.js and /Users/me/.mcpproxy/scripts/triage.ts both exist — remove one
+```
+
+**Cause**: Both extensions exist for one name — often a leftover after
+converting a script from JavaScript to TypeScript. Ambiguity is never resolved
+silently.
+
+**Solution**: Delete (or rename) one of the two files. `mcpproxy code scripts
+list` flags such names with status `ambiguous` before you hit them at runtime.
+
+---
+
+### Error: "stored script X is oversized / empty / unreadable / non-regular"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "big-report" (/Users/me/.mcpproxy/scripts/big-report.js) is oversized: scripts are limited to 262144 bytes
+```
+
+**Cause**:
+
+| Reason | Meaning |
+|--------|---------|
+| `oversized` | The file exceeds the 256 KB stored-script bound (inline `code` has no such bound; this one exists purely to bound the daemon-side read) |
+| `empty` | Zero bytes — commonly a half-finished redirect (`> script.js`) |
+| `unreadable` | Permissions or an I/O error; the detail carries the OS error |
+| `non-regular` | The path is a symlink, directory, or device — scripts must be regular files |
+
+**Solution**: Split an oversized workflow into several scripts (or move bulk
+data into `input`), finish the write, fix permissions, or replace the symlink
+with the real file. Copy, do not link:
+```bash
+cp /shared/workflows/report.js ~/.mcpproxy/scripts/report.js
+```
+The scripts *directory* itself may be a symlink — it is operator-controlled;
+only the script file may not be.
+
+---
+
+### Error: "stored script X is a .ts file but language Y was requested"
+
+**Symptom**:
+```
+Cannot execute stored script: stored script "daily-report" is a .ts file (typescript) but language "javascript" was requested — omit 'language' or set it to "typescript"
+```
+
+**Cause**: The extension is authoritative for a stored script, and the explicit
+`language` contradicted it.
+
+**Solution**: Omit `language` entirely — the extension decides. (The CLI already
+forwards `--language` only when you set it explicitly, so its `javascript`
+default cannot trigger this.)
+
+---
+
+### Issue: An edited script still runs the old content
+
+**Cause**: Almost always the file was not replaced where the daemon looks, or
+the edit went to a different scripts directory. There is no cache and no
+watcher: every invocation opens and reads the file once, so a completed
+replacement is visible to the very next call — no restart, nothing to flush.
+
+**Solution**: Confirm the path with `mcpproxy code scripts list` (it always
+prints the directory it read), then edit by **atomic replace** so no invocation
+can observe a half-written file:
+```bash
+tmp=$(mktemp ~/.mcpproxy/scripts/.report.XXXXXX)
+cp new-report.js "$tmp" && mv "$tmp" ~/.mcpproxy/scripts/report.js
+```
+Editing **in place** while an invocation is reading is the one unsupported case:
+that run gets whatever the read returned (validated, but unspecified).
+
+---
+
+### Issue: No way to upload or edit a script through the API
+
+**Cause**: Working as designed. v1 has **no write path** for stored scripts — no
+MCP tool, no REST endpoint, no CLI verb creates, updates, or deletes them. Code
+running in the sandbox has no filesystem access either.
+
+**Solution**: Author scripts with your normal filesystem tooling (editor, `scp`,
+configuration management). `GET /api/v1/code/scripts` and `mcpproxy code scripts
+list` are read-only views of the result.
+
+---
+
 ## Serialization Errors
 
 ### Error: "Result contains non-JSON-serializable values"
@@ -555,6 +832,24 @@ for (var i = 0; i < items.length; i++) {
 // Good: 1 batch tool call
 call_tool('api', 'get_batch', {ids: items});
 ```
+
+**Run independent calls in parallel** (when the tool has no bulk variant):
+```javascript
+// Bad: N sequential calls — latency is the sum
+for (var i = 0; i < items.length; i++) {
+  call_tool('api', 'get', {id: items[i]});
+}
+
+// Good: one batch — latency is about the slowest call
+var slots = call_tools(items.map(function (id) {
+  return {server: 'api', tool: 'get', args: {id: id}};
+}), {max_parallel: 8});
+```
+
+Only batch calls that do not depend on each other. Raise
+`code_execution_max_parallel` (or `options.max_parallel`, max 32) if upstreams
+can take the pressure — and check the target server's `max_concurrent_requests` /
+`queue_size` first (see the `queue_full` entry above).
 
 **Cache repeated calls**:
 ```javascript

@@ -225,6 +225,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		cfg.DebugSearch,
 		cfg,
 		rt.SignatureCache(), // Spec 085 FR-008: the ONE Runtime-owned signature cache
+		// Spec 097: the daemon's stored-script authority is the config FILE it
+		// actually loaded, declared here rather than re-derived per request.
+		WithConfigFilePath(server.GetConfigPath()),
 	)
 	// MCP-32: give the MCP proxy access to observability for tool-call metrics
 	// and OTLP spans.
@@ -314,14 +317,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				}
 			}()
 
-			authCtx := &auth.AuthContext{
-				Type:           auth.AuthTypeAgent,
-				AgentName:      agentToken.Name,
-				TokenPrefix:    agentToken.TokenPrefix,
-				AllowedServers: agentToken.AllowedServers,
-				Permissions:    agentToken.Permissions,
-				ProfilePin:     agentToken.ProfilePin,
-			}
+			authCtx := agentToken.AuthContext()
 			ctx := auth.WithAuthContext(r.Context(), authCtx)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -2067,6 +2063,12 @@ func (s *Server) registerHTTPHandlers(mux *http.ServeMux, httpAPIServer http.Han
 	// /events is a long-lived SSE stream: it must escape http.Server.WriteTimeout
 	// (and, being a GET, ReadTimeout) or the connection dies mid-stream (GH #965).
 	mux.Handle("/events", s.streamingNoDeadline(httpAPIServer))
+	// POST /api/v1/code/exec runs caller-supplied code for up to its own
+	// timeout_ms budget (600s), well past both http.Server deadlines: at 120s
+	// by default WriteTimeout destroys the response and ReadTimeout cancels the
+	// request context mid-execution. Unlike the streaming routes this one is a
+	// bounded POST, so it gets a wider deadline rather than none at all.
+	mux.Handle(codeExecAPIPath, s.extendedDeadline(codeExecRequestDeadline, httpAPIServer))
 
 	// Mount health endpoints directly on main mux at root level
 	healthEndpoints := []string{"/healthz", "/readyz", "/livez", "/ready", "/health"}
@@ -2084,6 +2086,48 @@ func (s *Server) registerHTTPHandlers(mux *http.ServeMux, httpAPIServer http.Han
 		mux.Handle("/metrics", httpAPIServer)
 		s.logger.Info("Registered metrics endpoint", zap.String("endpoint", "/metrics"))
 	}
+}
+
+const (
+	// codeExecAPIPath is the REST code-execution endpoint, the one route whose
+	// handler legitimately outlives the process-wide http.Server deadlines.
+	codeExecAPIPath = "/api/v1/code/exec"
+
+	// codeExecRequestDeadline is the wall-clock budget that route gets: the
+	// longest timeout_ms the code_execution tool accepts (600s) plus slack for
+	// reading the request and writing the reply. It matches the router-level
+	// budget in internal/httpapi so neither layer is the one that ends a
+	// legal execution.
+	codeExecRequestDeadline = 630 * time.Second
+)
+
+// extendedDeadline widens the per-request read and write deadlines a route
+// inherits from http.Server.ReadTimeout/WriteTimeout, for handlers that
+// legitimately run longer than the process-wide defaults.
+//
+// Unlike streamingNoDeadline this sets an absolute deadline instead of
+// clearing it: the routes that need it are bounded requests, so they stay
+// bounded — including a deployment that disabled the deadlines entirely, where
+// this caps the route at d. It must likewise be the OUTERMOST wrapper on a
+// route (http.NewResponseController only unwraps ResponseWriters implementing
+// Unwrap), and a controller error is logged at Debug and ignored: failing to
+// relax a deadline must never fail the request.
+func (s *Server) extendedDeadline(d time.Duration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadline := time.Now().Add(d)
+		rc := http.NewResponseController(w)
+		if err := rc.SetWriteDeadline(deadline); err != nil {
+			s.logger.Debug("Could not extend the write deadline for a long-running route",
+				zap.String("path", r.URL.Path),
+				zap.Error(err))
+		}
+		if err := rc.SetReadDeadline(deadline); err != nil {
+			s.logger.Debug("Could not extend the read deadline for a long-running route",
+				zap.String("path", r.URL.Path),
+				zap.Error(err))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // httpServerTimeouts resolves the Read/Write/Idle deadlines applied to the

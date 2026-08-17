@@ -1,3 +1,9 @@
+---
+title: "Verifying Web UI Changes"
+sidebar_label: "Web UI Verification"
+description: "Playwright sweep and HTML report workflow for verifying changes to the Vue Web UI."
+---
+
 # Verifying Web UI changes (Playwright + rich HTML report)
 
 When you modify the Web UI (any Vue file under `frontend/src/`), verify it end-to-end with a Playwright sweep that captures screenshots and packages them into a self-contained HTML report. This is the same workflow used to verify Spec 046 v2 — see `specs/046-local-first-onboarding/verification/` for a worked example.

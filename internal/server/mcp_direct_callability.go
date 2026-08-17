@@ -8,7 +8,9 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 type directCallabilityDecision struct {
@@ -75,21 +77,58 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 // is not callable. It mirrors the call_tool_* policy boundary so direct mode
 // cannot bypass disabled-tool, server-quarantine, or tool-approval controls.
 func (p *MCPProxyServer) directToolCallabilityBlock(ctx context.Context, serverName, toolName string, args map[string]interface{}) *mcp.CallToolResult {
+	result, _ := p.directToolCallabilityBlockWithReason(ctx, serverName, toolName, args)
+	return result
+}
+
+// directToolCallabilityBlockWithReason is directToolCallabilityBlock plus the
+// structured reason key of the gate that fired (issue #969). Direct mode routes
+// server-quarantine, pending approval, changed approval, and plain
+// not-callable through a SINGLE emit site, so without carrying the key out of
+// the evaluator every direct-mode block would be counted as
+// tool_not_callable — the availability reason distribution these counters exist
+// to measure would be wrong for the whole direct surface. Returns ("" ) when
+// the tool is callable.
+func (p *MCPProxyServer) directToolCallabilityBlockWithReason(ctx context.Context, serverName, toolName string, args map[string]interface{}) (*mcp.CallToolResult, string) {
 	// Unit tests historically construct a minimal MCPProxyServer with no
 	// storage. Preserve that narrow behavior; production servers always have
 	// storage and therefore enforce the policy below.
 	if p.storage == nil {
-		return nil
+		return nil, ""
 	}
 
 	decision := newDirectCallabilityEvaluator(p).evaluate(serverName, toolName)
 	if decision.callable {
-		return nil
+		return nil, ""
 	}
 
-	return p.directToolCallabilityResult(ctx, decision, args)
+	return p.directToolCallabilityResult(ctx, decision, args), directBlockReasonKey(decision)
 }
 
+// directBlockReasonKey classifies a direct-mode callability block onto the
+// closed telemetry.BlockReason* enum. The branches mirror
+// directToolCallabilityResult exactly, so the counted reason always matches the
+// payload the caller was handed.
+func directBlockReasonKey(decision directCallabilityDecision) string {
+	switch {
+	case decision.serverConfig != nil && decision.serverConfig.Quarantined:
+		return telemetry.BlockReasonServerQuarantined
+	case decision.approvalStatus == storage.ToolApprovalStatusPending:
+		return telemetry.BlockReasonToolPendingApproval
+	case decision.approvalStatus == storage.ToolApprovalStatusChanged:
+		return telemetry.BlockReasonToolChanged
+	default:
+		// Disabled server, config-denied tool, per-tool disable, and the
+		// storage-error fallback all present as "not callable".
+		return telemetry.BlockReasonToolNotCallable
+	}
+}
+
+// evaluate classifies one direct-mode tool through the SHARED gate primitive
+// (Spec 098 FR-002) so direct mode, the call_tool_* variants, code_execution and
+// stored scripts cannot disagree about what is callable. The memoized storage
+// reads below still exist because this evaluator runs over a whole tool list;
+// only the classification moved.
 func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) directCallabilityDecision {
 	decision := directCallabilityDecision{
 		serverName: serverName,
@@ -106,14 +145,16 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 		return decision
 	}
 	decision.serverConfig = serverConfig
-
-	if !serverConfig.Enabled || serverConfig.Quarantined {
-		return decision
-	}
-
-	if e.proxy.isToolConfigDenied(serverName, toolName, serverConfig) {
-		decision.configDenied = true
-		return decision
+	configDenied := e.proxy.isToolConfigDenied(serverName, toolName, serverConfig)
+	// The server-level gates own the response when they fire, so the fields that
+	// SELECT a more specific refusal — the config-denial wording and the
+	// approval-lock message below — are only surfaced once the server itself is
+	// past them. Pre-098 this was an early return on `!Enabled || Quarantined`;
+	// the flag is the same gate, kept so a disabled server still answers
+	// "server disabled" rather than "tool pending approval".
+	serverGatesPassed := serverConfig.Enabled && !serverConfig.Quarantined
+	if serverGatesPassed {
+		decision.configDenied = configDenied
 	}
 
 	approval, approvalErr := e.getToolApproval(serverName, toolName)
@@ -123,19 +164,33 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 	}
 	decision.approval = approval
 
-	if e.proxy.config != nil && e.proxy.config.IsQuarantineEnabled() && !serverConfig.IsQuarantineSkipped() && approval != nil {
+	// The LIVE config, like evaluateToolGate: a hot-reloaded quarantine_enabled
+	// must take effect on the next call here too, or direct mode would keep
+	// waving through tools the other dispatch paths have started refusing.
+	cfg := e.proxy.currentConfig()
+	quarantineEnabled := cfg == nil || cfg.IsQuarantineEnabled()
+	// approvalStatus drives the RESPONSE shape only, and keeps the pre-098
+	// preference for the pending/changed message over the generic block, so a
+	// refusal reads exactly as it always did.
+	if serverGatesPassed && quarantineEnabled && !serverConfig.IsQuarantineSkipped() && approval != nil {
 		switch approval.Status {
 		case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
 			decision.approvalStatus = approval.Status
-			return decision
 		}
 	}
 
-	if approval != nil && approval.Disabled {
-		return decision
-	}
-
-	decision.callable = true
+	class := preflight.ClassifyTool(preflight.ClassifyInputs{
+		Server: preflight.ServerPolicy{
+			Found:                  true,
+			Enabled:                serverConfig.Enabled,
+			Quarantined:            serverConfig.Quarantined,
+			AutoApproveToolChanges: serverConfig.IsQuarantineSkipped(),
+		},
+		QuarantineEnabled: quarantineEnabled,
+		ConfigDenied:      configDenied,
+		Approval:          approvalStateFor(approval),
+	})
+	decision.callable = class.Callable()
 	return decision
 }
 

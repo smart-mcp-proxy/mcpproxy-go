@@ -96,19 +96,27 @@ func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope 
 // through to "none".
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
 	// 1. Agent-token pin (T3). When present it is authoritative and bounds
-	//    everything below. If the pinned profile was removed from config after
-	//    the token was minted, we warn-skip rather than hard-fail (parity with
-	//    the unknown-server warn-skip): resolution degrades to URL/session/none,
-	//    while the set_profile and /mcp/p/<slug> guards still pin the token by
-	//    its stored slug so it cannot silently widen scope by switching.
+	//    everything below — including the case where the pinned profile has been
+	//    removed from config since the token was minted.
+	//
+	//    A stale pin resolves to a DENY-ALL scope that keeps the removed
+	//    profile's name, never to the next resolver tier. Falling through would
+	//    hand the session the token's own (wider) server scope — precisely the
+	//    privilege widening the pin exists to prevent — and it would do so
+	//    silently, from an operator action (deleting a profile) that reads as a
+	//    restriction. This mirrors resolvePreflightScope
+	//    (internal/server/preflight_glue.go), which intersects an unresolvable
+	//    pin against an empty server set for the same reason, so the session and
+	//    preflight paths cannot disagree about what a pinned token may see.
 	if pin := profilePinFromContext(ctx); pin != "" {
 		if scope := p.profileScopeForSlug(pin); scope != nil {
 			return pin, scope
 		}
 		if p.logger != nil {
-			p.logger.Warn("agent-token profile_pin no longer matches any configured profile; falling through",
+			p.logger.Warn("agent-token profile_pin no longer matches any configured profile; resolving to a deny-all scope",
 				zap.String("profile_pin", pin))
 		}
+		return pin, profile.NewProfileScope(pin, nil)
 	}
 
 	// 2. Explicit URL profile (Spec 057). Authoritative for this request, so it

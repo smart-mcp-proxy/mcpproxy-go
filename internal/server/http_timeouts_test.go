@@ -178,6 +178,79 @@ func TestHTTPWriteTimeoutRealBehavior(t *testing.T) {
 	})
 }
 
+// TestCodeExecRouteEscapesServerDeadlines is the third deadline a REST code
+// execution has to clear. POST /api/v1/code/exec runs caller-supplied code for
+// up to its own timeout_ms budget (600s), which outlives both http.Server
+// deadlines: WriteTimeout caps the whole response, and ReadTimeout cancels the
+// request context mid-handler. Relaxing the chi middleware alone would have
+// left every execution past the configured deadlines dying at the transport.
+func TestCodeExecRouteEscapesServerDeadlines(t *testing.T) {
+	const (
+		handlerDelay = 600 * time.Millisecond
+		serverDeadln = 200 * time.Millisecond // < handlerDelay on purpose
+		completed    = "execution-finished"
+		cancelled    = "execution-cancelled"
+	)
+
+	// Stands in for the chi REST router: slow enough to outlast the server
+	// deadlines, and it reports a cancelled request context rather than
+	// ignoring it.
+	restAPI := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(handlerDelay):
+			fmt.Fprint(w, completed)
+		case <-r.Context().Done():
+			fmt.Fprint(w, cancelled)
+		}
+	})
+
+	mux := http.NewServeMux()
+	(&Server{logger: zap.NewNop()}).registerHTTPHandlers(mux, restAPI)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 60 * time.Second,
+		ReadTimeout:       serverDeadln,
+		WriteTimeout:      serverDeadln,
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	post := func(t *testing.T, path string) (string, error) {
+		t.Helper()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post("http://"+ln.Addr().String()+path, //nolint:noctx // short-lived test client
+			"application/json", strings.NewReader(`{"code":"1"}`))
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		return string(data), err
+	}
+
+	t.Run("an ordinary API route still dies on the server deadlines", func(t *testing.T) {
+		got, err := post(t, "/api/v1/tools/call")
+		if err == nil && got == completed {
+			t.Fatalf("expected the server deadlines to end the request, got %q", got)
+		}
+	})
+
+	t.Run("the code exec route runs past them", func(t *testing.T) {
+		got, err := post(t, "/api/v1/code/exec")
+		if err != nil {
+			t.Fatalf("POST /api/v1/code/exec failed: %v", err)
+		}
+		if got != completed {
+			t.Fatalf("body = %q, want %q", got, completed)
+		}
+	})
+}
+
 // TestStreamingNoDeadlineKeepsGETStreamAlive is the SSE half of the GH #965 fix.
 // A long-lived GET stream is killed by BOTH http.Server deadlines: WriteTimeout
 // caps the whole response, and ReadTimeout (armed when the request is read) fires

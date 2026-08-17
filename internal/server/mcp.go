@@ -26,6 +26,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -143,6 +144,23 @@ type MCPProxyServer struct {
 	// production — telemetryRegistry() then resolves via mainServer.runtime.
 	telemetryRegOverride *telemetry.CounterRegistry
 
+	// preflightRecorder overrides the synchronous preflight activity write
+	// describe_tool check mode depends on (Spec 099 FR-013). Nil in production,
+	// where recordPreflightActivity resolves via mainServer.runtime; tests
+	// install one to observe the record — or to fail it — without standing up a
+	// whole Runtime (mirrors workSessionResolver).
+	preflightRecorder func(runtime.PreflightActivity) error
+
+	// preflightStateSource overrides the connection-state snapshot the
+	// preflight glue reads (Spec 099). Nil in production, where
+	// preflightSnapshot resolves it from the supervisor's StateView; tests
+	// install one so the cells that REQUIRE a live snapshot — the connection
+	// states, and the readable upstream annotations policy_filtered needs —
+	// are driven through the real glue and the real handler instead of around
+	// them (mirrors preflightRecorder). It returns exactly what
+	// preflightSnapshot returns: the state reader and the annotation lookup.
+	preflightStateSource func() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations, error)
+
 	// Routing mode MCP server instances (Spec 031)
 	// Each instance has different tools registered for its routing mode.
 	directServer   *mcpserver.MCPServer // Direct mode: upstream tools with serverName__toolName naming
@@ -177,6 +195,35 @@ type MCPProxyServer struct {
 	// MCP-32: observability manager for tool-call metrics + OTLP tracing. Nil
 	// when observability is disabled; all use sites must nil-guard.
 	observability *observability.Manager
+
+	// Issue #969 (Phase 0): per-session note of the last retrieve_tools call
+	// that carried a spec-094 filter_diagnostics block, used to detect whether
+	// the agent then RELAXED a blamed filter. In-memory only, never persisted,
+	// and it holds no query text or tool identities — only the filter keys the
+	// block already named plus a timestamp. See preflight_telemetry.go.
+	filterDiagMu    sync.Mutex
+	filterDiagNotes map[string]filterDiagNote
+
+	// configFilePath is the ACTIVE configuration FILE this server belongs to,
+	// handed in at construction (Spec 097). It is the authority for anything
+	// derived from the config directory — today the stored-scripts directory.
+	// Empty in constructions that did not declare one; see
+	// activeConfigFilePath() for the fallback order.
+	configFilePath string
+}
+
+// MCPProxyOption customizes an MCPProxyServer at construction time.
+type MCPProxyOption func(*MCPProxyServer)
+
+// WithConfigFilePath declares the ACTIVE configuration FILE path this server
+// serves (Spec 097). Every surface that stands up an MCPProxyServer passes it:
+// the daemon from the runtime config service, the CLI's in-process server from
+// its own --config resolution. It must be the config FILE, never a directory
+// derived from --data-dir, which may be overridden after the file is chosen.
+func WithConfigFilePath(path string) MCPProxyOption {
+	return func(p *MCPProxyServer) {
+		p.configFilePath = path
+	}
 }
 
 // SetObservability wires the observability manager used to record tool-call
@@ -244,6 +291,7 @@ func NewMCPProxyServer(
 	debugSearch bool,
 	config *config.Config,
 	sigCache *toolsig.Cache,
+	opts ...MCPProxyOption,
 ) *MCPProxyServer {
 	// The production path passes the Runtime-owned cache (single owner,
 	// Spec 085 FR-008). Standalone constructions (CLI one-shots, tests) may
@@ -487,6 +535,14 @@ func NewMCPProxyServer(
 		hooks:                hooks,
 	}
 
+	// Apply construction options before anything reads them (tool registration
+	// below already runs against the finished server).
+	for _, opt := range opts {
+		if opt != nil {
+			opt(proxy)
+		}
+	}
+
 	// Let the hooks (registered before the proxy existed) reach it.
 	proxyRef.Store(proxy)
 
@@ -644,9 +700,22 @@ func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, ses
 // event and the record persisted from it are recognisably one thing. Gates that
 // fire before a handler would otherwise mint an id have to mint it earlier
 // rather than pass "" — see mintActivityRequestID.
-func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason string) {
+//
+// reasonKey is the STRUCTURED classification of this decision, declared by the
+// call site from the closed telemetry.BlockReason* enum (issue #969). `reason`
+// is operator-facing prose that embeds server and tool names and must never
+// reach telemetry; reasonKey is what the availability counters aggregate on, so
+// the classification comes from the gate that fired rather than from parsing
+// the message it wrote. A key outside the enum is folded into "other" by the
+// store.
+func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, reasonKey string) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason)
+	}
+	// Issue #969 (Phase 0): availability baseline. Only outright blocks count —
+	// a warning or a redaction still delivered the call.
+	if decision == "blocked" {
+		p.recordAvailabilityBlock(reasonKey)
 	}
 }
 
@@ -910,24 +979,29 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// code_execution - JavaScript/TypeScript code execution for multi-tool orchestration (feature-flagged)
 	if p.config.EnableCodeExecution {
 		codeExecutionTool := mcp.NewTool("code_execution",
-			mcp.WithDescription("Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations that would require multiple round-trips otherwise.\n\n**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n**Available in code**:\n- `input` global: Your input data passed via the 'input' parameter\n- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n- Modern JavaScript (ES2020+): arrow functions, const/let, template literals, destructuring, classes, for-of, optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect (no require(), filesystem, or network access)\n\n**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. Types are automatically stripped before execution.\n\n**Important runtime rules**:\n- `call_tool` is strictly SYNCHRONOUS. Do not use `await`.\n- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n- The last evaluated expression in your script is automatically returned as the final output.\n\n**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
+			mcp.WithDescription(codeExecutionToolDescription),
 			mcp.WithTitleAnnotation("Code Execution"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithReadOnlyHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(true),
+			// Spec 097: `code` is no longer schema-required — a call may supply
+			// `script` instead. JSON Schema cannot express the exactly-one-of
+			// rule, so handleCodeExecution enforces it for every surface.
 			mcp.WithString("code",
-				mcp.Required(),
-				mcp.Description("JavaScript or TypeScript source code (ES2020+) to execute. Supports modern syntax: arrow functions, const/let, template literals, destructuring, optional chaining, nullish coalescing. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. call_tool is SYNCHRONOUS — do not use await. Return value is the last evaluated expression and must be JSON-serializable. Example: `const res = call_tool('github', 'get_user', {username: input.username}); const data = JSON.parse(res.result.content[0].text); ({user: data, timestamp: Date.now()})`"),
+				mcp.Description(codeExecutionCodeDescription),
+			),
+			mcp.WithString("script",
+				mcp.Description(codeExecutionScriptDescription),
 			),
 			mcp.WithString("language",
-				mcp.Description("Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'."),
+				mcp.Description(codeExecutionLanguageDescription),
 				mcp.Enum("javascript", "typescript"),
 			),
 			mcp.WithObject("input",
-				mcp.Description("Input data accessible as global `input` variable in code (default: {})"),
+				mcp.Description(codeExecutionInputDescription),
 			),
 			mcp.WithObject("options",
-				mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
+				mcp.Description(codeExecutionOptionsDescription),
 			),
 		)
 		p.server.AddTool(codeExecutionTool, p.handleCodeExecution)
@@ -1418,6 +1492,20 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	excludeDestructive := request.GetBool("exclude_destructive", false)
 	excludeOpenWorld := request.GetBool("exclude_open_world", false)
 
+	// Issue #969 (Phase 0): filter-diagnostics FOLLOW-THROUGH. If the previous
+	// retrieve_tools call in this session was handed a spec-094 diagnostics
+	// block, this call counts as "followed" when it dropped or relaxed at least
+	// one of the filters that block blamed. The note is consumed either way, so
+	// one block can be followed at most once. Evaluated here — before this call
+	// can write a note of its own. The lookup itself is an in-memory map read
+	// under a dedicated mutex; only the rare positive result reaches the
+	// counter store, whose write shares the cost profile of the activation
+	// counters this handler already bumps unconditionally above.
+	if p.consumeFilterDiagFollowUp(sessionID,
+		activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld), startTime) {
+		p.recordFilterDiagnosticsFollowed()
+	}
+
 	// Build arguments map for activity logging (Spec 024)
 	args := map[string]interface{}{
 		"query": query,
@@ -1456,9 +1544,16 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// servers' tools, so switching costs no re-index. The shared index remains
 	// the allow-all fallback; profileScope still post-filters as defense in depth
 	// (and covers the fallback path below).
+	//
+	// A deny-all scope (an empty profile, or the scope a stale agent-token pin
+	// resolves to) deliberately skips ForProfile: that call lazily CREATES and
+	// caches an on-disk per-profile index, so honoring it would let a request
+	// that is allowed to see nothing leave a new index directory behind — for a
+	// profile that may no longer exist. The post-filter below returns the same
+	// empty result set from the shared index.
 	profileName, profileScope := p.resolveActiveProfile(ctx)
 	searchIndex := p.index
-	if profileName != "" {
+	if profileName != "" && !profileScope.DeniesAll() {
 		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
 			searchIndex = pIdx
 		} else if perr != nil {
@@ -1733,6 +1828,17 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			droppedCount)
 	}
 
+	// Issue #969 (Phase 0): silent-unavailability baseline. droppedCount is the
+	// authoritative tally of locked/quarantined matches this response withheld
+	// (index hits that failed the visibility gate, plus the quarantined
+	// second-pass entries) — out-of-scope servers are excluded upstream, so this
+	// counts only tools the caller could have had. Without include_disabled the
+	// caller never sees them, which is exactly the invisibility preflight exists
+	// to remove. One increment per response, never per tool.
+	if !includeDisabled && droppedCount > 0 {
+		p.recordDiscoveryOmission()
+	}
+
 	// Spec 035 F2: Session risk analysis — analyze all connected servers' tool annotations
 	// to detect the "lethal trifecta" risk combination.
 	//
@@ -1791,10 +1897,66 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
 	}
 
-	// Emit success event with args and response (Spec 024)
+	// A discovery response is a tool response like any other: enforce
+	// tool_response_limit and park the full payload behind a read_cache key.
+	// The record path is PINNED to "tools" rather than inferred: the banner
+	// promises tool entries, and the inference heuristic prefers the array with
+	// the most elements — which here can be the Spec 049 "disabled" list (it
+	// can outnumber the callable results) or, with ≤2 results, an array nested
+	// inside a tool's input schema. Pinning is what makes paginableUnits =
+	// len(mcpTools) the right guard too: it counts units of the same array the
+	// key pages, so the single-record short-circuit (0 or 1 entries: nothing to
+	// subdivide, text flows through unchanged) applies to the right array.
+	// `args` (not activityArgs) is the cache-key derivation input.
+	text := string(jsonResult)
+	var wasTruncated bool
+	if routingMode != config.RoutingModeCodeExecution {
+		// The code-execution surface does not register read_cache (see
+		// buildCodeExecModeTools), so a banner there would point the agent
+		// at an unavailable tool — the same reasoning that pins it to full mode.
+		text, wasTruncated = maybeTruncateAndCacheTextPinned(
+			text,
+			"retrieve_tools",
+			args,
+			len(mcpTools),
+			"tools",
+			p.currentTruncator(),
+			p.cacheManager,
+			p.logger,
+		)
+	}
+	if wasTruncated {
+		p.logger.Info("retrieve_tools output exceeded the response limit and was truncated",
+			zap.String("query", query),
+			zap.Int("tools", len(mcpTools)),
+			zap.Int("full_bytes", len(jsonResult)),
+		)
+	}
+
+	// Issue #969 (Phase 0): baseline engagement counters. Hooked HERE, after
+	// truncation, rather than at the attach site: tool_response_limit can cut
+	// the block back out of the payload (SimpleTruncate is a plain tail cut),
+	// and a block the agent never received is neither an emission to count nor
+	// something a later call can "follow". `emitted` is the denominator the
+	// followed/emitted ratio divides by, so overcounting it would silently
+	// understate engagement — the one number these counters exist to measure.
+	// Counts only; the note is in-memory and identity-free.
+	//
+	// The note is stamped with DELIVERY time (now), not the request's start
+	// time: overlapping calls in one session can finish out of order, so start
+	// time would order the notes wrongly, and a follow-up can only react to a
+	// block that had already reached the agent.
+	if filterDiag != nil && filterDiag.OmittedTotal >= 1 && filterDiagnosticsSurvived(text, wasTruncated) {
+		p.recordFilterDiagnosticsEmitted(filterDiag)
+		p.noteFilterDiagnostics(sessionID, filterDiag, time.Now())
+	}
+
+	// Emit success event with args and response (Spec 024). The FULL response
+	// goes to the activity log — truncation only shapes what the agent sees
+	// (same order handleReadCache uses).
 	p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(text), nil
 }
 
 // handleCallToolRead implements the call_tool_read functionality (Spec 018)
@@ -1845,15 +2007,20 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
 	}
+	// Whitespace is never significant in a canonical id; case is (every gate
+	// below keys on the exact name), so padding is trimmed and nothing else.
+	toolName = strings.TrimSpace(toolName)
 
-	// Parse server and tool name early for activity logging
+	// Parse server and tool name early for activity logging, through the same
+	// splitServerTool the describe_tool path uses: it trims EACH segment, so
+	// "github: create_issue" resolves exactly like "github:create_issue"
+	// instead of missing every exact-name gate below and being dispatched
+	// upstream padded. The canonical id is rebuilt from the trimmed segments
+	// so the validator cache key and every message see the normalized form.
 	var serverName, actualToolName string
-	if strings.Contains(toolName, ":") {
-		parts := strings.SplitN(toolName, ":", 2)
-		if len(parts) == 2 {
-			serverName = parts[0]
-			actualToolName = parts[1]
-		}
+	if parsedServer, parsedTool, ok := splitServerTool(toolName); ok {
+		serverName, actualToolName = parsedServer, parsedTool
+		toolName = parsedServer + ":" + parsedTool
 	}
 
 	// Helper to get session ID for activity logging
@@ -1885,7 +2052,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if logTool == "" {
 			logTool = toolName
 		}
-		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", errMsg)
+		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonIntentInvalid)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -1901,7 +2068,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if logTool == "" {
 			logTool = toolName
 		}
-		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", "Intent validation failed")
+		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", "Intent validation failed", telemetry.BlockReasonIntentRejected)
 		return errResult, nil
 	}
 
@@ -1939,7 +2106,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// filtered, and so a base /mcp session that ran set_profile is bounded too.
 	if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -1948,7 +2115,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// Check server scope
 		if !authCtx.CanAccessServer(serverName) {
 			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 		// Check permission scope — map tool variant to required permission
@@ -1963,7 +2130,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
 			errMsg := fmt.Sprintf("Insufficient permissions: '%s' requires '%s' permission", toolVariant, requiredPerm)
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	}
@@ -1990,7 +2157,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if errResult := p.validateIntentAgainstServer(intent, toolVariant, serverName, actualToolName, annotations); errResult != nil {
 		// Record activity error for server annotation mismatch
 		reason := fmt.Sprintf("Intent rejected: tool variant '%s' conflicts with server annotations for %s:%s", toolVariant, serverName, actualToolName)
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", reason)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", reason, telemetry.BlockReasonIntentRejected)
 		return errResult, nil
 	}
 
@@ -2030,50 +2197,48 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// (e.g. FastMCP's Pydantic validate_call). See #322.
 	activityArgs := injectAuthMetadata(ctx, args)
 
-	// Check if server is quarantined before calling tool
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig.Quarantined {
+	// Spec 098 FR-002: one evaluation of the shared policy gates — server
+	// quarantine, tool-level quarantine (Spec 032) and callability — through the
+	// same classifier the preflight evaluator uses, so a tool dispatch refuses
+	// can never preflight as `ready`. The response SELECTION below keeps the
+	// long-standing dispatch order (quarantine → approval lock → generic block).
+	gate := p.evaluateToolGate(serverName, actualToolName)
+
+	if gate.serverQuarantined() {
 		p.logger.Debug("handleCallToolVariant: server is quarantined",
 			zap.String("server_name", serverName))
 
 		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", "Server is quarantined for security review")
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
 	}
 
-	// Check tool-level quarantine (Spec 032) - only if server is not quarantined
-	if p.config.IsQuarantineEnabled() {
-		if serverConfig != nil && !serverConfig.IsQuarantineSkipped() {
-			if approval, approvalErr := p.storage.GetToolApproval(serverName, actualToolName); approvalErr == nil {
-				if approval.Status == storage.ToolApprovalStatusPending {
-					p.logger.Debug("handleCallToolVariant: tool is pending approval (quarantined)",
-						zap.String("server_name", serverName),
-						zap.String("tool_name", actualToolName))
+	switch gate.lockStatus {
+	case storage.ToolApprovalStatusPending:
+		p.logger.Debug("handleCallToolVariant: tool is pending approval (quarantined)",
+			zap.String("server_name", serverName),
+			zap.String("tool_name", actualToolName))
 
-					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
-						"Tool is pending approval (new unapproved tool)")
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
+			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
 
-					return toolPendingApprovalResult(serverName, actualToolName, approval), nil
-				}
-				if approval.Status == storage.ToolApprovalStatusChanged {
-					p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
-						zap.String("server_name", serverName),
-						zap.String("tool_name", actualToolName))
+		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+	case storage.ToolApprovalStatusChanged:
+		p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
+			zap.String("server_name", serverName),
+			zap.String("tool_name", actualToolName))
 
-					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
-						"Tool description/schema changed since last approval")
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
+			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
 
-					return toolChangedApprovalResult(serverName, actualToolName, approval), nil
-				}
-			}
-		}
+		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
 	}
 
-	if !p.isToolCallable(serverName, actualToolName) {
-		errMsg := p.blockedToolMessage(serverName, actualToolName)
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg)
+	if !gate.callable() {
+		errMsg := gate.blockedMessage()
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2191,10 +2356,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
-	// Derive server ID safely (serverConfig may be nil if storage lookup failed)
+	// Derive server ID safely (the gate's server record is nil when the storage
+	// lookup failed)
 	var serverID string
-	if serverConfig != nil {
-		serverID = storage.GenerateServerID(serverConfig)
+	if gate.serverConfig != nil {
+		serverID = storage.GenerateServerID(gate.serverConfig)
 	}
 
 	// Record tool call for history (even if error)
@@ -2549,14 +2715,17 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Spec 028: Inject auth identity into activity metadata (separate copy for logging only)
 	activityArgs := injectAuthMetadata(ctx, args)
 
-	// Check if server is quarantined before calling tool
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err == nil && serverConfig.Quarantined {
+	// Shared policy gates (Spec 098 FR-002), same primitive as every other
+	// dispatch path.
+	gate := p.evaluateToolGate(serverName, actualToolName)
+	serverConfig := gate.serverConfig
+
+	if gate.serverQuarantined() {
 		p.logger.Debug("handleCallTool: server is quarantined",
 			zap.String("server_name", serverName))
 
 		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", "Server is quarantined for security review")
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
@@ -2565,9 +2734,20 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	p.logger.Debug("handleCallTool: checking connection status",
 		zap.String("server_name", serverName))
 
-	if !p.isToolCallable(serverName, actualToolName) {
-		errMsg := p.blockedToolMessage(serverName, actualToolName)
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg)
+	switch gate.lockStatus {
+	case storage.ToolApprovalStatusPending:
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked",
+			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
+		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+	case storage.ToolApprovalStatusChanged:
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked",
+			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
+		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
+	}
+
+	if !gate.callable() {
+		errMsg := gate.blockedMessage()
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -5055,7 +5235,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	// operators, so surface it as a structured log: it signals the agent is
 	// walking a payload deep enough that even one cache page overflows.
 	if reTruncated {
-		p.logger.Info("read_cache output exceeded the response limit and was recursively truncated-and-cached",
+		p.logger.Info("read_cache output exceeded the response limit and was truncated",
 			zap.String("requested_key", key),
 			zap.Int("offset", offset),
 			zap.Int("limit", limit),
@@ -5453,6 +5633,12 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	// into a string by the IsError branch at the bottom of this function.
 	ctx, shed := withShedCapture(ctx)
 
+	// Spec 097: the same problem for code_execution's refusals — a disabled
+	// feature is a 403 and a missing stored script a 404, but the handler can
+	// only answer with an isError result. Capture the typed refusal so the HTTP
+	// layer classifies it without re-parsing the message.
+	ctx, codeExecRefusal := withCodeExecCapture(ctx)
+
 	// Route to the appropriate handler based on tool name
 	var result *mcp.CallToolResult
 	var err error
@@ -5468,6 +5654,13 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		result, err = p.handleCallToolDestructive(ctx, request)
 	case "retrieve_tools":
 		result, err = p.handleRetrieveTools(ctx, request)
+	case "read_cache":
+		// Truncated responses on this path carry the same "use read_cache"
+		// banner the MCP surface emits, so the follow-up has to be routable
+		// here too — otherwise REST/CLI/Web-UI/tray callers are told to call a
+		// tool that answers "unknown tool: read_cache" (HTTP 500) and the
+		// parked payload is unreachable outside an MCP session.
+		result, err = p.handleReadCache(ctx, request)
 	case "quarantine_security":
 		result, err = p.handleQuarantineSecurity(ctx, request)
 	case "code_execution":
@@ -5500,6 +5693,12 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		}
 		if len(result.Content) > 0 {
 			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
+				// A code_execution refusal keeps its typed identity so the HTTP
+				// layer can answer 403/404/400 (Spec 097). The message stays the
+				// agent-readable one either way.
+				if refusal := codeExecRefusal.take(); refusal != nil {
+					return nil, &codeExecDispatchError{err: refusal, message: textContent.Text}
+				}
 				return nil, fmt.Errorf("%s", textContent.Text)
 			}
 		}
@@ -5666,46 +5865,41 @@ func (p *MCPProxyServer) serverToolCounts(serverName string, toolNames []string)
 }
 
 // classifyServerToolStatus returns "" when the tool is callable, otherwise the
-// disable reason. Mirrors classifyDisabledTool's precedence so the two never
-// drift. The config-denied leg prefers the live runtime signal (the same
-// authority isToolCallable/blockedToolMessage use — config-file disabled_tools
-// only lives in the live config, not always in the storage copy); it falls
-// back to the storage ServerConfig when no runtime is wired (unit tests).
+// disable reason. It delegates to the SHARED gate primitive (Spec 098 FR-002 /
+// research D2), so the discovery-facing status can no longer disagree with what
+// dispatch would actually do. Two divergences of the pre-098 classifier are
+// resolved in dispatch's favor, because dispatch is ground truth:
+//
+//   - the pending/changed gate now honors the quarantine flags (global switch +
+//     per-server trust_mode auto). The old version checked the approval status
+//     unconditionally and therefore reported false "pending_approval" for
+//     auto-approving servers whose tools dispatch happily calls;
+//   - a quarantined SERVER now reports server_quarantined instead of "callable"
+//     — every dispatch path refuses those tools.
+//
+// A genuine approval-read failure keeps the historical behavior here (report
+// callable rather than invent a lock): this surface describes state, it does not
+// gate anything, and the gates themselves still fail closed.
 func (p *MCPProxyServer) classifyServerToolStatus(serverName, toolName string) contracts.DisabledToolStatus {
-	if strings.Contains(toolName, ":") {
-		if parts := strings.SplitN(toolName, ":", 2); len(parts) == 2 {
-			if serverName == "" {
-				serverName = parts[0]
-			}
-			toolName = parts[1]
-		}
-	}
-	sc, err := p.storage.GetUpstreamServer(serverName)
-	if err != nil || sc == nil {
+	gate := p.evaluateToolGate(serverName, toolName)
+	switch gate.class {
+	case preflight.ToolClassServerNotConfigured:
+		return contracts.DisabledStatusUnknown
+	case preflight.ToolClassServerQuarantined:
+		return contracts.DisabledStatusServerQuarantined
+	case preflight.ToolClassServerDisabled:
+		return contracts.DisabledStatusServerDisabled
+	case preflight.ToolClassDeniedByConfig:
+		return contracts.DisabledStatusByConfig
+	case preflight.ToolClassBlockedByUser:
+		return contracts.DisabledStatusByUser
+	case preflight.ToolClassPendingApproval, preflight.ToolClassChanged:
+		return contracts.DisabledStatusPendingApproval
+	case preflight.ToolClassReady:
+		return "" // callable
+	default:
 		return contracts.DisabledStatusUnknown
 	}
-	if !sc.Enabled {
-		return contracts.DisabledStatusServerDisabled
-	}
-	configDenied := false
-	if p.mainServer != nil && p.mainServer.runtime != nil {
-		configDenied = p.mainServer.runtime.IsToolConfigDenied(serverName, toolName)
-	} else {
-		configDenied = !sc.IsToolAllowedByConfig(toolName)
-	}
-	if configDenied {
-		return contracts.DisabledStatusByConfig
-	}
-	if approval, aerr := p.storage.GetToolApproval(serverName, toolName); aerr == nil && approval != nil {
-		if approval.Disabled {
-			return contracts.DisabledStatusByUser
-		}
-		if approval.Status == storage.ToolApprovalStatusPending ||
-			approval.Status == storage.ToolApprovalStatusChanged {
-			return contracts.DisabledStatusPendingApproval
-		}
-	}
-	return "" // callable
 }
 
 // serverToolNames returns the best-available list of a server's tool names:
@@ -6110,7 +6304,7 @@ func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, 
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, d.decision, d.reason)
+	p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, d.decision, d.reason, telemetry.BlockReasonOutputSchema)
 	if d.block {
 		return mcp.NewToolResultError("output schema validation failed: " + d.reason)
 	}

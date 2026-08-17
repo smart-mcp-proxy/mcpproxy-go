@@ -37,6 +37,15 @@ const (
 	// event: acquisition, refresh, injection, or connect (Spec 074 T10). It
 	// carries attribution (UserID, ServerName) and never any token/secret value.
 	ActivityTypeCredentialBroker ActivityType = "credential_broker"
+	// ActivityTypePreflight represents one executed required-tools preflight
+	// (Spec 098 FR-014). The record is written SYNCHRONOUSLY before the
+	// preflight is answered — see runtime.ActivityService.RecordPreflight — so a
+	// caller that got a verdict can always find the run that produced it.
+	//
+	// A preflight is set-scoped, not server-scoped: ServerName and ToolName stay
+	// empty and the per-tool detail lives in Metadata under the MetadataKeyPreflight*
+	// keys. RequestID is the correlation handle (`activity list --request-id`).
+	ActivityTypePreflight ActivityType = "preflight"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -52,6 +61,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeToolQuarantineChange),
 	string(ActivityTypeSecurityScan),
 	string(ActivityTypeCredentialBroker),
+	string(ActivityTypePreflight),
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every
@@ -93,6 +103,57 @@ const (
 	MetadataKeyRejectionLimit = "rejection_limit"
 	// MetadataKeyRejectionRetryAfterMs is the Retry-After hint in milliseconds.
 	MetadataKeyRejectionRetryAfterMs = "rejection_retry_after_ms"
+)
+
+// Metadata keys carried by an ActivityTypePreflight record (spec 098 FR-014,
+// data-model.md "Activity record"). The payload is deliberately small and
+// enum-only: reason CODES and counts, never tool descriptions or arguments.
+const (
+	// MetadataKeyPreflightVerdict is the set-level verdict
+	// (ready|degraded_retryable|blocked|unknown_ids).
+	MetadataKeyPreflightVerdict = "verdict"
+	// MetadataKeyPreflightIDsCount is the number of unique tool ids evaluated.
+	MetadataKeyPreflightIDsCount = "ids_count"
+	// MetadataKeyPreflightReasons is a {reason_code: count} rollup over the
+	// unavailable results — the shape a dashboard or CLI summary reads.
+	MetadataKeyPreflightReasons = "reasons"
+	// MetadataKeyPreflightPerTool is the ordered per-tool detail:
+	// [{id, status, reason?}] using the PreflightPerTool* keys below.
+	MetadataKeyPreflightPerTool = "per_tool"
+	// MetadataKeyPreflightSurface names the surface that ran the preflight when
+	// it is not the REST endpoint — currently only "mcp-check", the in-band
+	// describe_tool check mode (spec 099 FR-013). It is OMITTED for the REST
+	// surface, whose records predate it and stay byte-identical.
+	MetadataKeyPreflightSurface = "surface"
+
+	// MetadataKeyPreflightArguments records the in-band caller's request AS
+	// SENT, so the raw requested-id count stays recoverable from the record
+	// even though MetadataKeyPreflightIDsCount is the UNIQUE count both
+	// surfaces agree on (spec 099 FR-013). It carries the PreflightArgumentsKey*
+	// members below: still ids and enum-valued filter names, never descriptions
+	// or upstream arguments. OMITTED for the REST surface, whose records
+	// predate it and stay byte-identical.
+	MetadataKeyPreflightArguments = "arguments"
+
+	// Keys inside MetadataKeyPreflightArguments.
+	//
+	// PreflightArgumentsKeyToolIDs is the raw tool_ids array: request order,
+	// untrimmed, duplicates intact — len() is the raw requested count.
+	PreflightArgumentsKeyToolIDs = "tool_ids"
+	// PreflightArgumentsKeyFilters lists the annotation filters that were in
+	// effect, in the order describe_tool declares them. Absent when none were.
+	PreflightArgumentsKeyFilters = "filters"
+
+	// PreflightSurfaceMCPCheck marks a record written by describe_tool check
+	// mode. It matches the `surface` value the spec-099 sabotage-matrix rows
+	// carry, so a matrix row and an activity record name the surface the same
+	// way.
+	PreflightSurfaceMCPCheck = "mcp-check"
+
+	// Keys inside one MetadataKeyPreflightPerTool entry.
+	PreflightPerToolKeyID     = "id"
+	PreflightPerToolKeyStatus = "status"
+	PreflightPerToolKeyReason = "reason"
 )
 
 // ActivitySource indicates how the activity was triggered

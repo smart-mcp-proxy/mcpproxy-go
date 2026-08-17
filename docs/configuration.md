@@ -104,7 +104,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum number of tools to return per request (1-1000) |
-| `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited) |
+| `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited). Applies to built-in tools too: an oversize `retrieve_tools` result is truncated and the full payload is retrievable via `read_cache` (except on the code-execution surface, which does not expose `read_cache`) |
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
 | `init_timeout` | duration | `"30s"` | Deadline for an upstream's MCP `initialize` handshake (e.g. `"30s"`, `"120s"`, `"3m"`). Raise this for servers that do legitimate first-run warmup — building a cache/index or prefetching — before they answer `initialize`, so they are not killed mid-startup. Global default; can be overridden per server (see [Server Fields](#server-fields)). Range: `1s`–`30m`; `"0s"`/unset uses the 30s default. |
 
@@ -287,6 +287,14 @@ than a dropped connection: MCP tool calls get an error tool result, the REST
 tool-call endpoint returns `429` with `Retry-After`, and the activity log
 records the call with a `rejected` status carrying the reason (`queue_full` or
 `queue_timeout`) and scope (`server` or `global`).
+
+**Batched sandbox calls.** A `call_tools()` batch from
+[code execution](#code-execution) goes through the same admission path, so these
+limits are never bypassed by batching. A server capped at
+`max_concurrent_requests: 1` with `queue_size: 9` serializes a 10-element batch;
+the same server with **no** `queue_size` returns one result and nine per-slot
+`queue_full` errors. Give servers you fan out against enough `queue_size`
+headroom (or keep `code_execution_max_parallel` at their cap).
 
 **Hot reload.** All limits are hot-reloadable — edit the config file and the new
 values govern subsequent admissions without a restart. Running calls are never
@@ -1162,7 +1170,8 @@ See [Tool Quarantine](features/tool-quarantine.md) for complete details.
   "enable_code_execution": false,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
-  "code_execution_pool_size": 10
+  "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8
 }
 ```
 
@@ -1172,10 +1181,31 @@ See [Tool Quarantine](features/tool-quarantine.md) for complete details.
 | `code_execution_timeout_ms` | integer | `120000` | Default timeout in milliseconds (1-600000, max 10 minutes) |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls per execution (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | Number of JavaScript VM instances in pool (1-100) |
+| `code_execution_max_parallel` | integer | `8` | Default concurrency for `call_tools()` batches (1-32). Hot-reloaded; applies to executions that start after the change |
 
 Code execution supports both JavaScript (ES2020+) and TypeScript. TypeScript code is automatically transpiled via esbuild before execution.
 
-See [Code Execution Documentation](code_execution/overview.md) for complete details.
+Inside a script, `call_tool(server, tool, args)` runs one upstream tool at a time and `call_tools(requests, options)` fans out **independent** calls in parallel:
+
+```javascript
+var slots = call_tools([
+  {server: "github", tool: "get_pull_request", args: {owner: "acme", repo: "api", pullNumber: 1}},
+  {server: "github", tool: "get_pull_request", args: {owner: "acme", repo: "api", pullNumber: 2}}
+], {max_parallel: 5});
+// slots[i] is {ok: true, result} or {ok: false, error} for requests[i]
+```
+
+`requests` holds at most 100 elements; each costs one unit of `code_execution_max_tool_calls` budget. Concurrency precedence is `options.max_parallel` (1-32) > `code_execution_max_parallel` > built-in 8.
+
+> **Batching vs. per-server limits.** [Concurrency limits](#concurrency-limits--request-queueing) still govern each element. A server with `max_concurrent_requests` set and **no** `queue_size` sheds everything over the cap — a 10-element batch against `max_concurrent_requests: 1` returns 1 result and 9 per-slot `queue_full` errors. Give such servers `queue_size` headroom (or lower `max_parallel`) before fanning out against them.
+
+### Stored Scripts
+
+Long workflows do not have to be re-sent inline on every call. A `<name>.js` / `<name>.ts` file placed in the `scripts/` directory **next to this configuration file** (`~/.mcpproxy/scripts/` by default, `<dir-of---config>/scripts/` when `--config` points elsewhere) is invocable by name — `{"script": "<name>", "input": {...}}` over MCP/REST, or `mcpproxy code exec --script <name>`.
+
+There is no configuration key for this: the directory convention is the whole surface, and the scripts directory is never derived from `--data-dir`. Names are 1-64 characters of `A-Za-z0-9_-` (never a path), files are lowercase `.js`/`.ts` up to 256 KB, and each invocation re-reads the file, so an atomic replacement takes effect on the next run with no restart. `mcpproxy code scripts list` (or `GET /api/v1/code/scripts`) lists what exists; nothing writes scripts through any API.
+
+See [Code Execution Documentation](code_execution/overview.md) for complete details, and [Stored Scripts](code_execution/overview.md#stored-scripts) for the authoring rules.
 
 ---
 
@@ -1449,6 +1479,7 @@ Here's a complete configuration example with all major sections:
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
+  "code_execution_max_parallel": 8,
 
   "read_only_mode": false,
   "disable_management": false,

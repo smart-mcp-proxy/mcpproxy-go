@@ -1,3 +1,9 @@
+---
+title: "Adding Servers from Registries"
+sidebar_label: "Registry Add"
+description: "Add an upstream server by registry and server id; the daemon derives the runnable config and quarantines it for review."
+---
+
 # Adding Servers from Registries
 
 MCPProxy can discover MCP servers in known registries and add them as upstream

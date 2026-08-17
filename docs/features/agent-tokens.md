@@ -206,6 +206,7 @@ Server-side enforcement (no client cooperation required):
 - **`set_profile("other")` is rejected** — a pinned token cannot switch its session to a different profile (switching to its own pinned profile, or clearing, is allowed).
 - **`/mcp/p/<other>` returns `403`** — connecting to any profile URL other than the pinned one is forbidden; the pinned profile's own URL works.
 - **The pin is the highest-precedence resolver source**, above an explicit `/mcp/p/<slug>` URL scope and above a session `set_profile` selection.
+- **Every dispatch surface resolves it** — `retrieve_tools`, `describe_tool`, `call_tool_*`, the `code_execution` sandbox, direct-routing mode (`server__tool`) and [preflight](./tools-preflight.md) all bound themselves by the pin, so no routing mode is a way around it.
 
 Resolution precedence (highest wins):
 
@@ -216,7 +217,7 @@ Resolution precedence (highest wins):
 4. none                        (no profile filtering — all allowed servers)
 ```
 
-**Validation & config changes**: the pinned slug must name a configured profile at creation time (creation is rejected otherwise). If the profile is later removed from the configuration, requests are **warn-skipped** rather than hard-failed — the pin still blocks switching away, so the token can never silently widen its scope, but profile filtering falls through to the next precedence tier. Pinning composes with server scoping and permission tiers: a request must satisfy **all** of them.
+**Validation & config changes**: the pinned slug must name a configured profile at creation time (creation is rejected otherwise). If the profile is **later removed** from the configuration, the pin resolves to a **deny-all scope**: the token sees no upstream servers and no tools, on the MCP session path and in [preflight](./tools-preflight.md#disclosure-tiers) alike. The request is logged with a warning naming the removed profile, not hard-failed at the transport. The pin is a restriction the operator applied, so losing the profile it names must never hand the token a wider view than it had the day before — re-create the profile, or re-mint the token against a live one, to restore it. Pinning composes with server scoping and permission tiers: a request must satisfy **all** of them.
 
 The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile Pin field), and is preserved across `token regenerate`.
 

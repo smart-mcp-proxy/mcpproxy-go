@@ -134,6 +134,54 @@ func TestResolveActiveProfile_PinHighestPrecedence(t *testing.T) {
 	require.False(t, scope.Allows("deploy-srv"))
 }
 
+// TestResolveActiveProfile_StalePinDeniesAll is the session-path half of the
+// stale-pin contract (the preflight half is
+// TestRunPreflightStaleTokenPinDeniesRatherThanWidens). A pin naming a profile
+// the operator has since deleted must NOT degrade to the next resolver tier —
+// doing so hands the session the token's own, wider scope, i.e. exactly the
+// privilege widening the pin existed to prevent. It resolves to a deny-all
+// scope that still carries the removed profile's name, so rejections and
+// activity records name it.
+func TestResolveActiveProfile_StalePinDeniesAll(t *testing.T) {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+		},
+	}
+	p := &MCPProxyServer{config: cfg, sessionStore: NewSessionStore(zap.NewNop()), logger: zap.NewNop()}
+
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	base := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-stale"})
+
+	// The token is pinned to "research", which no longer exists, and its own
+	// scope covers BOTH servers — the widening the old warn-skip enabled.
+	pinned := auth.WithAuthContext(base, &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		ProfilePin:     "research",
+		AllowedServers: []string{"research-srv", "deploy-srv"},
+	})
+
+	name, scope := p.resolveActiveProfile(pinned)
+	require.Equal(t, "research", name, "the removed profile's name must survive for logs/rejections")
+	require.NotNil(t, scope, "a stale pin must produce a scope, not fall through to nil (allow-all)")
+	require.True(t, scope.DeniesAll())
+	require.False(t, scope.Allows("research-srv"))
+	require.False(t, scope.Allows("deploy-srv"))
+
+	// The lower resolver tiers must not rescue the pin: neither a session
+	// selection nor an explicit URL scope may re-widen it.
+	p.sessionStore.SetActiveProfile("sess-stale", "deploy")
+	withURL := profile.WithProfileScope(pinned, profile.NewProfileScope("deploy", []string{"deploy-srv"}))
+	name, scope = p.resolveActiveProfile(withURL)
+	require.Equal(t, "research", name)
+	require.NotNil(t, scope)
+	require.False(t, scope.Allows("deploy-srv"), "a stale pin must not be widened by URL or session state")
+}
+
 // TestSessionStore_ActiveProfileLifecycle verifies the per-session profile map
 // is set, read and cleared on session close.
 func TestSessionStore_ActiveProfileLifecycle(t *testing.T) {
