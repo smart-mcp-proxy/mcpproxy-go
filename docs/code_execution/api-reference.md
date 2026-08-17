@@ -1,3 +1,9 @@
+---
+title: "Code Execution API Reference"
+sidebar_label: "API Reference"
+description: "Complete reference for the objects, functions, and limits available inside the code execution sandbox."
+---
+
 # Code Execution - API Reference
 
 Complete reference for the `code_execution` MCP tool (JavaScript and TypeScript).

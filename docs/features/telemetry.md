@@ -1,3 +1,9 @@
+---
+title: "Anonymous Telemetry"
+sidebar_label: "Telemetry"
+description: "What the anonymous daily heartbeat contains, what it never contains, and how to disable it."
+---
+
 # Anonymous Telemetry
 
 MCPProxy collects anonymous usage statistics to help improve the product. This page explains what is collected, what is not, and how to disable it.

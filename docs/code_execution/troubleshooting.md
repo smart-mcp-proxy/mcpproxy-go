@@ -1,3 +1,9 @@
+---
+title: "Code Execution Troubleshooting"
+sidebar_label: "Troubleshooting"
+description: "Diagnose sandbox errors, timeouts, and unexpected results in code execution."
+---
+
 # JavaScript Code Execution - Troubleshooting
 
 Common issues, error messages, and solutions for the `code_execution` tool.

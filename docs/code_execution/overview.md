@@ -1,3 +1,9 @@
+---
+title: "Code Execution Overview"
+sidebar_label: "Overview"
+description: "How the sandboxed JavaScript/TypeScript runtime orchestrates multiple upstream MCP tools in one request."
+---
+
 # Code Execution - Overview
 
 ## What is Code Execution?
@@ -520,7 +526,7 @@ as long as its slowest element instead of the sum of all of them. Rules:
 - Use it only for **independent** calls — chained steps still belong in a
   sequential pipeline (Pattern 1).
 
-> **Per-server limits still apply.** [Concurrency limits](../configuration.md#concurrency-limits--request-queueing)
+> **Per-server limits still apply.** [Concurrency limits](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
 > are enforced inside the call path, never bypassed by batching. A server with
 > `max_concurrent_requests: 1` and `queue_size: 9` serializes a 10-element batch;
 > the same server with **no** `queue_size` sheds the overflow as per-slot

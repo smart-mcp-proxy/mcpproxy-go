@@ -1,3 +1,9 @@
+---
+title: "Profiles"
+sidebar_label: "Profiles"
+description: "Named subsets of upstream servers addressable as permanent URLs, selectable statefully via the set_profile tool."
+---
+
 # In-Proxy Profiles (Spec 057 · Profiles v2)
 
 > Profiles v1 (Spec 057) is **stateless, URL-based**: a request to `/mcp/p/<slug>` is scoped to that profile for that request. Profiles v2 adds **stateful** selection via the `set_profile` tool, a **shared resolver** with a clear precedence, and a **REST surface** for UI clients.

@@ -1,3 +1,9 @@
+---
+title: "Settings Page"
+sidebar_label: "Settings Page"
+description: "The Web UI Configuration page: prioritized form sections over mcpproxy's config, with a raw JSON escape hatch."
+---
+
 # Settings Page (Web UI)
 
 The Web UI **Configuration** page (`/ui/settings`) presents mcpproxy's config as
