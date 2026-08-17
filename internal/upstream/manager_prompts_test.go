@@ -174,3 +174,39 @@ func TestManager_ListPrompts_LogsAndSkipsClientError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, prompts)
 }
+
+// TestManager_GetPrompt_RejectsQuarantinedServer covers the defense-in-depth
+// guard added in PR #973 review (item 5): ListPrompts already excludes
+// quarantined servers from aggregation, but GetPrompt itself must also
+// refuse a call routed to an already-known "server:prompt" name, closing
+// the race window between a quarantine flip and the next
+// servers.changed-driven refresh.
+func TestManager_GetPrompt_RejectsQuarantinedServer(t *testing.T) {
+	m := newTestManager(t)
+
+	addConnectedTestServerWithConfig(t, m, "srv-a", &config.ServerConfig{
+		Name:        "server-a",
+		Enabled:     true,
+		Quarantined: true,
+	}, "greeting")
+
+	_, err := m.GetPrompt(context.Background(), "server-a:greeting", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "quarantined")
+}
+
+// TestManager_GetPrompt_RejectsDisabledServer mirrors the Enabled guard
+// Manager.CallTool enforces (manager.go:1220), which GetPrompt lacked
+// before this fix.
+func TestManager_GetPrompt_RejectsDisabledServer(t *testing.T) {
+	m := newTestManager(t)
+
+	addConnectedTestServerWithConfig(t, m, "srv-a", &config.ServerConfig{
+		Name:    "server-a",
+		Enabled: false,
+	}, "greeting")
+
+	_, err := m.GetPrompt(context.Background(), "server-a:greeting", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disabled")
+}

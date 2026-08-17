@@ -86,6 +86,7 @@ func (m *Manager) GetPrompt(ctx context.Context, name string, args map[string]st
 
 	m.mu.RLock()
 	var targetClient *managed.Client
+	var targetConfig *config.ServerConfig
 	for _, c := range m.clients {
 		if c == nil {
 			continue
@@ -96,6 +97,7 @@ func (m *Manager) GetPrompt(ctx context.Context, name string, args map[string]st
 		}
 		if cfg.Name == serverName {
 			targetClient = c
+			targetConfig = cfg
 			break
 		}
 	}
@@ -103,6 +105,20 @@ func (m *Manager) GetPrompt(ctx context.Context, name string, args map[string]st
 
 	if targetClient == nil {
 		return nil, fmt.Errorf("no client found for server: %s", serverName)
+	}
+
+	// Defense-in-depth (PR #973 review): ListPrompts already excludes
+	// disabled/quarantined servers from the aggregated list, but that only
+	// protects a client that discovers prompts through this proxy. Enforce
+	// the same guards Manager.CallTool applies, so a client that already
+	// knows a qualified prompt name from before a quarantine flip can't
+	// still forward the call during the race window before the next
+	// servers.changed-driven refresh.
+	if !targetConfig.Enabled {
+		return nil, fmt.Errorf("client for server %s is disabled", serverName)
+	}
+	if targetConfig.Quarantined {
+		return nil, fmt.Errorf("server %s is quarantined", serverName)
 	}
 
 	return targetClient.GetPrompt(ctx, promptName, args)
