@@ -55,12 +55,24 @@
   font-size: 14px;
 }
 
-/* Tables: keep Infima's default display:block + overflow-x:auto so wide
-   tables scroll INSIDE the content column instead of sliding under the right
-   TOC (the old display:table override broke this — see the telemetry page).
-   width:100% only makes the scroll container span the column. */
-table {
-  width: 100%;
+/* Markdown tables: this Infima version sets `display: table`, on which its
+   own `overflow: auto` is inert (overflow needs a block container), so wide
+   tables blew past the content column and under the right TOC (telemetry
+   page). display:block turns the table into a real scroll container: narrow
+   tables shrink-wrap, wide ones cap at the column and scroll inside it. */
+.markdown table {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Long code tokens in table cells (JSON examples, hashes) otherwise force a
+   column to its full unbroken width, starving the other columns into
+   multi-line slivers with tall rows. Let them wrap inside cells. */
+.markdown table code {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Better sidebar navigation */
