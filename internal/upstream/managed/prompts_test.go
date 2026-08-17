@@ -94,6 +94,33 @@ func TestClient_ListPrompts_Success(t *testing.T) {
 	assert.Equal(t, "greeting", prompts[0].Name)
 }
 
+// TestClient_SetConfig_PropagatesExposePromptsToCoreClient is the regression
+// test for PR #973 review's P2 finding: coreClient.config is set once at
+// connect time and never reassigned, so a config hot-reload that only
+// flipped expose_prompts left the underlying core.Client enforcing the
+// stale value. managed.Client.SetConfig must push the new ExposePrompts
+// value down to the coreClient without requiring a reconnect.
+func TestClient_SetConfig_PropagatesExposePromptsToCoreClient(t *testing.T) {
+	upstream := newTestPromptManagedUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	mc := connectedManagedTestClient(t, testServer.URL)
+
+	prompts, err := mc.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.NotEmpty(t, prompts, "prompts must be exposed before the toggle")
+
+	updated := config.CopyServerConfig(mc.GetConfig())
+	exposePrompts := false
+	updated.ExposePrompts = &exposePrompts
+	mc.SetConfig(updated)
+
+	prompts, err = mc.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, prompts, "SetConfig must push expose_prompts:false down to the coreClient without a reconnect")
+}
+
 func TestClient_ListPrompts_UpstreamError(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
 	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)

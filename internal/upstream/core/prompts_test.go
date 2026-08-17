@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -18,15 +17,7 @@ import (
 
 func disableOAuthForTest(t *testing.T) {
 	t.Helper()
-	old := os.Getenv("MCPPROXY_DISABLE_OAUTH")
-	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
-	t.Cleanup(func() {
-		if old == "" {
-			os.Unsetenv("MCPPROXY_DISABLE_OAUTH")
-		} else {
-			os.Setenv("MCPPROXY_DISABLE_OAUTH", old)
-		}
-	})
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 }
 
 // newTestPromptUpstream builds a real in-process MCP server. When
@@ -118,6 +109,39 @@ func TestClient_ListPrompts_ExposePromptsFalse_SkipsUpstreamCall(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, prompts)
 	assert.Equal(t, 0, calls, "GetPrompt handler on the upstream should never be invoked by ListPrompts")
+}
+
+// TestClient_SetExposePrompts_TakesEffectWithoutReconnect is the regression
+// test for PR #973 review's P2 finding: c.config is set once in NewClient
+// and never reassigned, so ListPrompts previously kept enforcing whatever
+// ExposePrompts value was in effect when the connection was created — a
+// hot-reloaded toggle only took effect after a reconnect. SetExposePrompts
+// must flip the gate on the same live connection.
+func TestClient_SetExposePrompts_TakesEffectWithoutReconnect(t *testing.T) {
+	calls := 0
+	upstream := newTestPromptUpstream(t, true, &calls)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	prompts, err := c.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.NotEmpty(t, prompts, "prompts must be exposed before the toggle")
+
+	exposePrompts := false
+	c.SetExposePrompts(&exposePrompts)
+
+	prompts, err = c.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, prompts, "SetExposePrompts(false) must take effect on the same live connection")
+
+	exposePromptsTrue := true
+	c.SetExposePrompts(&exposePromptsTrue)
+
+	prompts, err = c.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.NotEmpty(t, prompts, "SetExposePrompts(true) must re-enable prompts without a reconnect")
 }
 
 func TestClient_GetPrompt_ReturnsUpstreamResult(t *testing.T) {

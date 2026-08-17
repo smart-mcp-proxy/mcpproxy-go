@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -31,11 +32,18 @@ import (
 
 // Client implements basic MCP client functionality without state management
 type Client struct {
-	id           string
-	config       *config.ServerConfig
-	globalConfig *config.Config
-	storage      *storage.BoltDB
-	logger       *zap.Logger
+	id     string
+	config *config.ServerConfig
+	// exposePrompts mirrors config.ExposePrompts but can be updated without a
+	// reconnect (PR #973 review, P2): config itself is set once in NewClient
+	// and never reassigned, so ListPrompts/GetPrompt would otherwise keep
+	// enforcing whatever ExposePrompts value was in effect when the
+	// connection was created even after a config hot-reload. Updated via
+	// SetExposePrompts, mirroring managed.Client's cfg pointer swap.
+	exposePrompts atomic.Pointer[bool]
+	globalConfig  *config.Config
+	storage       *storage.BoltDB
+	logger        *zap.Logger
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger
@@ -167,6 +175,7 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 			zap.String("upstream_name", serverConfig.Name),
 		),
 	}
+	c.exposePrompts.Store(resolvedServerConfig.ExposePrompts)
 
 	// Create secure environment manager
 	var envConfig *secureenv.EnvConfig
@@ -746,6 +755,15 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 // GetConfig returns the server configuration
 func (c *Client) GetConfig() *config.ServerConfig {
 	return c.config
+}
+
+// SetExposePrompts updates the ExposePrompts override without requiring a
+// reconnect (PR #973 review, P2). Call this whenever the owning
+// managed.Client's config is refreshed so a hot-reloaded expose_prompts
+// value takes effect immediately instead of only after the connection is
+// torn down and recreated.
+func (c *Client) SetExposePrompts(exposePrompts *bool) {
+	c.exposePrompts.Store(exposePrompts)
 }
 
 // SetOnToolsChangedCallback sets the callback invoked when a notifications/tools/list_changed
