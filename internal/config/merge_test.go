@@ -1167,6 +1167,58 @@ func TestMergeServerConfig_InitTimeout(t *testing.T) {
 	})
 }
 
+// TestMergeServerConfig_ExposePrompts covers the runtime-toggle gap found in
+// PR #973 review: a patch carrying expose_prompts (including an explicit
+// false) sets/replaces the per-server override (and records a diff), while a
+// patch that omits it preserves the existing value.
+func TestMergeServerConfig_ExposePrompts(t *testing.T) {
+	t.Run("patch sets expose_prompts from unset", func(t *testing.T) {
+		base := &ServerConfig{Name: "srv", Enabled: true}
+		exposePrompts := false
+		patch := &ServerConfig{ExposePrompts: &exposePrompts}
+
+		merged, diff, err := MergeServerConfig(base, patch, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if merged.ExposePrompts == nil || *merged.ExposePrompts != exposePrompts {
+			t.Errorf("ExposePrompts: got %v, want %v", merged.ExposePrompts, exposePrompts)
+		}
+		if diff == nil || diff.Modified["expose_prompts"].Path != "expose_prompts" {
+			t.Errorf("expected expose_prompts in diff, got %+v", diff)
+		}
+	})
+
+	t.Run("unrelated patch preserves expose_prompts", func(t *testing.T) {
+		exposePrompts := false
+		base := &ServerConfig{Name: "srv", Enabled: true, ExposePrompts: &exposePrompts}
+		patch := &ServerConfig{Enabled: true, URL: "http://example.com/mcp"}
+
+		merged, _, err := MergeServerConfig(base, patch, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if merged.ExposePrompts == nil || *merged.ExposePrompts != exposePrompts {
+			t.Errorf("ExposePrompts was wiped on unrelated patch: got %v, want %v", merged.ExposePrompts, exposePrompts)
+		}
+	})
+
+	t.Run("patch replaces existing expose_prompts", func(t *testing.T) {
+		old := false
+		base := &ServerConfig{Name: "srv", Enabled: true, ExposePrompts: &old}
+		newVal := true
+		patch := &ServerConfig{ExposePrompts: &newVal}
+
+		merged, _, err := MergeServerConfig(base, patch, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if merged.ExposePrompts == nil || *merged.ExposePrompts != newVal {
+			t.Errorf("ExposePrompts: got %v, want %v", merged.ExposePrompts, newVal)
+		}
+	})
+}
+
 // TestMergeServerConfig_PreservesDisabledToolsOnUnrelatedPatch is the
 // end-to-end regression: patching an unrelated field on a server that has a
 // disabled_tools denylist must not wipe the denylist (it previously did,
