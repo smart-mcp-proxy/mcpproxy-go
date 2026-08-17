@@ -25,13 +25,23 @@ upstream tools (direct routing mode).
 
 ## Non-goals
 
-- Extending prompt capability to the `direct` / `code_execution` / `call_tool`
-  routing-mode MCP server instances. Today only the default `retrieve_tools`
-  server (`p.server`) has `WithPromptCapabilities` wired up at all; the other
-  three don't support prompts and this issue does not change that.
 - A way to force-expose prompts for a server that doesn't advertise
   `Capabilities.Prompts` — the per-server flag can only opt a server *out*,
   not fabricate a capability it doesn't have.
+- Consuming an upstream's `notifications/prompts/list_changed` notification.
+  Re-aggregation only happens on the proxy's own `servers.changed` event
+  (connect/disconnect/config change); if a still-connected upstream adds or
+  removes a prompt without a server-level config change, mcpproxy won't
+  notice until the next `servers.changed`.
+
+> **Update (PR #973 review):** the routing-mode servers (`direct`,
+> `code_execution`, `call_tool`) now also get `WithPromptCapabilities` and
+> the aggregated prompt set — the original non-goal above ("only the default
+> `retrieve_tools` server supports prompts") turned out to make the feature
+> unreachable over Streamable HTTP `/mcp` in every routing mode besides the
+> default, since `config.Validate()` normalizes `routing_mode` away from
+> `retrieve_tools`. See `RefreshPrompts` and `initRoutingModeServers` in
+> `internal/server/mcp_routing.go`.
 
 ## Architecture
 
