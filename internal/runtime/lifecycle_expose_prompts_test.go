@@ -28,12 +28,18 @@ func TestLoadConfiguredServers_EmitsServersChanged_OnExposePromptsFlip(t *testin
 	cfg.Servers[0].ExposePrompts = &exposePrompts
 	require.NoError(t, rt.LoadConfiguredServers(cfg))
 
-	select {
-	case evt := <-sub:
-		assert.Equal(t, EventTypeServersChanged, evt.Type,
-			"an expose_prompts-only change must emit servers.changed so RefreshPrompts re-runs")
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected a servers.changed event after flipping expose_prompts")
+	// Other event types (e.g. activity.quarantine_change from the first load's
+	// async supervisor work) may arrive first; drain until servers.changed shows up.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case evt := <-sub:
+			if evt.Type == EventTypeServersChanged {
+				return
+			}
+		case <-deadline:
+			t.Fatal("expected a servers.changed event after flipping expose_prompts")
+		}
 	}
 }
 
