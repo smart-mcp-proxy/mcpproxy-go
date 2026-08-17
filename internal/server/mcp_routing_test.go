@@ -984,3 +984,45 @@ func TestRefreshPrompts_NoUpstreamClients_RegistersOnlyBuiltins(t *testing.T) {
 	assert.Contains(t, prompts, "setup-new-mcp-server", "built-ins still register when there are no upstream prompts")
 	assert.Len(t, prompts, 2, "only the two built-in prompts should be present")
 }
+
+// TestRefreshPrompts_PopulatesRoutingModeServers is the regression test for
+// PR #973 review's P1 finding: prompts were only ever set on p.server, but
+// /mcp is served via GetMCPServerForMode(cfg.RoutingMode), which after
+// config.Validate() normalizes routing_mode to retrieve_tools almost never
+// resolves back to p.server — so the aggregated prompts feature was
+// unreachable over Streamable HTTP in every non-default routing mode.
+func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	for _, mode := range []string{config.RoutingModeDirect, config.RoutingModeCodeExecution, config.RoutingModeRetrieveTools} {
+		srv := proxy.GetMCPServerForMode(mode)
+		require.NotNil(t, srv, "routing mode %s must have a server instance", mode)
+		prompts := srv.ListPrompts()
+		assert.Contains(t, prompts, "setup-new-mcp-server", "mode %s: built-in prompts must be registered", mode)
+		assert.Contains(t, prompts, "server-a__greeting", "mode %s: aggregated upstream prompt must be registered", mode)
+	}
+}

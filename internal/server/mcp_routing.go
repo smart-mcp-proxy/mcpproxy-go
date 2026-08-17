@@ -569,6 +569,14 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	if p.hooks != nil {
 		opts = append(opts, mcpserver.WithHooks(p.hooks))
 	}
+	// Advertise prompts on every routing-mode server, not just the default
+	// retrieve_tools server: /mcp is served via GetMCPServerForMode, which
+	// after config.Validate() normalizes routing_mode almost never returns
+	// p.server, so without this the aggregated prompts feature is
+	// unreachable over Streamable HTTP (PR #973 review, P1).
+	if p.config.EnablePrompts {
+		opts = append(opts, mcpserver.WithPromptCapabilities(true))
+	}
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
 	// discovery filters and belong only on the direct server (not the shared
@@ -717,7 +725,16 @@ func (p *MCPProxyServer) RefreshPrompts() {
 	}
 
 	all := buildAggregatedServerPrompts(builtins, upstreamPrompts, p.upstreamManager.GetPrompt)
-	p.server.SetPrompts(all...)
+
+	// Set on every routing-mode server (Spec 031), not just the default
+	// retrieve_tools server: /mcp is served via GetMCPServerForMode, which
+	// returns a routing-mode server in every non-default mode (PR #973
+	// review, P1) — those need the same aggregated prompt set.
+	for _, srv := range []*mcpserver.MCPServer{p.server, p.directServer, p.codeExecServer, p.callToolServer} {
+		if srv != nil {
+			srv.SetPrompts(all...)
+		}
+	}
 
 	p.logger.Info("refreshed prompts",
 		zap.Int("upstream_prompt_count", len(upstreamPrompts)),
