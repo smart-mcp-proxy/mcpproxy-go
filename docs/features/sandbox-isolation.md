@@ -1,3 +1,9 @@
+---
+title: "Native Sandbox Isolation"
+sidebar_label: "Sandbox Isolation"
+description: "Isolate stdio MCP servers on Linux without Docker using the Landlock LSM plus resource limits."
+---
+
 # Native Sandbox Isolation (Linux, no Docker)
 
 MCPProxy can isolate a stdio MCP server **without Docker** using the Linux
@@ -65,5 +71,5 @@ stdin/stdout pass straight through with no intervening multiplexer.
 | **macOS / Windows** | Documented **no-op** → effective `none` (Landlock is Linux-only) |
 
 See also: [Docker Isolation](/features/docker-isolation) for the Docker mode, and
-the [non-Docker sandbox spike](/development/sandbox-spike-mcp-34) for the
+the [non-Docker sandbox spike](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/development/sandbox-spike-mcp-34.md) for the
 mechanism evaluation.

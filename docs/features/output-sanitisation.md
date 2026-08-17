@@ -1,3 +1,9 @@
+---
+title: "Output Sanitisation"
+sidebar_label: "Output Sanitisation"
+description: "Spotlight untrusted tool output, redact detected secrets, and strip control sequences at the response chokepoint."
+---
+
 # Output Sanitisation (Spec 054 Track B)
 
 mcpproxy contains untrusted tool output before it reaches your agent. It builds

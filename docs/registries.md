@@ -1,3 +1,9 @@
+---
+title: "MCP Server Registries"
+sidebar_label: "Registries"
+description: "The built-in set of MCP server registries used by search_servers and list_registries."
+---
+
 # MCP Server Registries
 
 mcpproxy discovers MCP servers through a built-in set of registries. Discovery is
@@ -101,7 +107,7 @@ at once — loopback, RFC1918/CGNAT private, link-local **and** the
 so enabling it for a localhost dev registry also re-opens the cloud-metadata SSRF
 vector; enable it only for trusted local/dev use, ideally on hosts with no
 cloud-metadata exposure. The change takes effect on daemon (re)start / config
-reload. See [Configuration](configuration.md#registries).
+reload. See [Configuration](configuration/config-file.md).
 
 Equivalent surfaces:
 

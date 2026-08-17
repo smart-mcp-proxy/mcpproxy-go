@@ -1,3 +1,9 @@
+---
+title: "Server Multi-User Authentication"
+sidebar_label: "Server Multi-User Auth"
+description: "OAuth-based multi-user authentication for the server edition with Google, GitHub, or Microsoft identity providers."
+---
+
 # Server Multi-User Authentication (Spec 024)
 
 Server edition supports OAuth-based multi-user authentication with Google, GitHub, or Microsoft identity providers. All server code is behind `//go:build server`; the personal edition is unaffected.

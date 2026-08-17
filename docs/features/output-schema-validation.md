@@ -1,3 +1,9 @@
+---
+title: "Output-Schema Validation"
+sidebar_label: "Output Schema Validation"
+description: "Verify that a tool's structured response conforms to its declared outputSchema before it reaches the agent."
+---
+
 # Output-Schema Validation (Spec 056 / Security Gateway Track A)
 
 When an upstream MCP tool declares an `outputSchema`, MCPProxy can verify that

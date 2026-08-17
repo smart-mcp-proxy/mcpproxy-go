@@ -1,3 +1,9 @@
+---
+title: "macOS Tray Development"
+sidebar_label: "macOS Tray"
+description: "Build, replace, and verify the Swift macOS tray app in native/macos/."
+---
+
 # macOS Tray App development (`native/macos/`)
 
 ## Building the Tray App

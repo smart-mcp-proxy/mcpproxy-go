@@ -1,3 +1,9 @@
+---
+title: "Observability"
+sidebar_label: "Observability"
+description: "Export Prometheus metrics and OpenTelemetry traces from MCPProxy to your own monitoring stack."
+---
+
 # Observability for mcpproxy
 
 MCPProxy can export operational metrics and distributed traces so you can run it

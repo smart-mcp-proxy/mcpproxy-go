@@ -1,3 +1,9 @@
+---
+title: "Prerelease Builds"
+sidebar_label: "Prerelease Builds"
+description: "Automated prerelease builds from the next branch with signed and notarized macOS installers."
+---
+
 # Prerelease Builds
 
 MCPProxy supports automated prerelease builds from the `next` branch with signed and notarized macOS installers.

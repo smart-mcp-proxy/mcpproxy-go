@@ -1,3 +1,9 @@
+---
+title: "Code Execution Cookbook"
+sidebar_label: "Cookbook"
+description: "Task-oriented recipes for common code execution patterns."
+---
+
 # Code Execution — Orchestration Cookbook
 
 **TypeScript** recipes for orchestrating multiple upstream MCP tools in a
@@ -91,7 +97,7 @@ Batch concurrency is **not** an `options` field: it comes from the
 with `call_tools(requests, {max_parallel})` (1–32).
 
 > **Check the target server's limits before you fan out.** Per‑server
-> [concurrency limits](../configuration.md#concurrency-limits--request-queueing)
+> [concurrency limits](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
 > still apply and are never bypassed: a server with `max_concurrent_requests: 1`
 > and `queue_size: 9` serializes a 10‑element batch, while the same server with
 > **no** `queue_size` sheds the overflow as nine per‑slot `queue_full` errors.
@@ -201,7 +207,7 @@ lists into several `call_tools` calls.
 
 ---
 
-## Recipe 2 — Fan‑out + merge (many tools, one object)
+## Recipe 2 — Fan‑out + merge (many tools, one object) {#recipe-2--fan-out--merge-many-tools-one-object}
 
 **Problem:** Gather related facts from several *different* tools/servers and
 return one merged object — a "dashboard" call.
@@ -356,7 +362,7 @@ error each time.
 
 ---
 
-## Recipe 6 — Continue‑on‑error (partial results)
+## Recipe 6 — Continue‑on‑error (partial results) {#recipe-6--continue-on-error-partial-results}
 
 **Problem:** One bad item shouldn't sink the whole batch. Return the successes
 *and* a structured list of failures.
@@ -381,7 +387,7 @@ to restart. The caller gets a complete picture in one result.
 
 ---
 
-## Recipe 7 — Map‑reduce aggregation
+## Recipe 7 — Map‑reduce aggregation {#recipe-7--map-reduce-aggregation}
 
 **Problem:** Fetch many records, then compute a summary the model would
 otherwise have to do token‑by‑token.
@@ -440,7 +446,7 @@ repeat. **Always** bound the loop with `maxPages` *and* set
 
 ---
 
-## Recipe 9 — Rate‑limit via chunking
+## Recipe 9 — Rate‑limit via chunking {#recipe-9--rate-limit-via-chunking}
 
 **Problem:** A downstream tool rejects large bursts. You can't `sleep`, so you
 control pressure by **bounding batch size**, not by waiting.
@@ -514,7 +520,7 @@ issuing one lookup per unique ID. `Set` does the dedupe in‑sandbox.
 ## Benchmarks — token & latency
 
 The numbers behind these recipes come from the reproducible harness in
-[`bench/`](../../bench/README.md), published on every release to the
+[`bench/`](https://github.com/smart-mcp-proxy/mcpproxy-go/tree/main/bench), published on every release to the
 [benchmark dashboard](https://mcpproxy-bench.pages.dev). Reproduce locally with:
 
 ```bash
@@ -561,7 +567,7 @@ savings.
 
 ---
 
-## Upgrade note — TypeScript GA
+## Upgrade note — TypeScript GA {#upgrade-note-typescript-ga}
 
 **Status:** TypeScript code execution (Spec 033) graduates from **preview to
 GA** in v0.46.0 (it shipped in preview in v0.45.0). There is no

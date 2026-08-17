@@ -1,3 +1,9 @@
+---
+title: "Credential Commands"
+sidebar_label: "Credential Commands"
+description: "Server edition: manage per-user brokered credentials for shared upstream servers."
+---
+
 # Credential CLI Commands (Server Edition)
 
 > **Server edition only.** These commands are built into `mcpproxy-server`

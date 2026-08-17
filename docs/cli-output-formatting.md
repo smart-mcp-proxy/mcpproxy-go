@@ -1,3 +1,9 @@
+---
+title: "CLI Output Formatting"
+sidebar_label: "Output Formatting"
+description: "Machine-readable and human-readable output formats for the MCPProxy CLI."
+---
+
 # CLI Output Formatting
 
 MCPProxy CLI supports multiple output formats for machine-readable and human-readable output.

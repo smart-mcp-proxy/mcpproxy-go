@@ -1,3 +1,9 @@
+---
+title: "IdP Subject Token Storage"
+sidebar_label: "IdP Token Storage"
+description: "Server edition: encrypted persistence of identity-provider tokens for on-behalf-of token exchange."
+---
+
 # IdP Subject Token Storage (Server Edition)
 
 MCPProxy Server edition can persist the IdP (identity-provider) access and refresh
