@@ -795,10 +795,19 @@ func (p *MCPProxyServer) RefreshPrompts() {
 		// scanner before they are ever registered (parity with tool-description
 		// poisoning detection).
 		upstreamPrompts = p.scanAggregatedPrompts(upstreamPrompts)
+		// Spec 100: rug-pull baseline. Detect pending/changed metadata vs the
+		// approved baseline and WITHHOLD those prompts from registration (compose
+		// in series after the TPA scan — scan detects poison, baseline detects
+		// change). A withheld prompt is absent from prompts/list and fails
+		// prompts/get natively; there is no runtime get-time gate.
+		approval := p.checkPromptApprovals(upstreamPrompts)
+		upstreamPrompts = filterBlockedPrompts(upstreamPrompts, approval.blocked)
 		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated, p.logger)
 		p.logger.Info("refreshed prompts",
 			zap.Int("upstream_prompt_count", len(upstreamPrompts)),
-			zap.Int("total_prompt_count", len(all)))
+			zap.Int("total_prompt_count", len(all)),
+			zap.Int("withheld_pending", approval.pending),
+			zap.Int("withheld_changed", approval.changed))
 	} else {
 		// nil upstreamPrompts: the aggregation loop never runs, so the nil
 		// getPrompt is never invoked.
