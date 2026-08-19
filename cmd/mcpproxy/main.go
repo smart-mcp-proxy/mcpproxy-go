@@ -38,6 +38,7 @@ import (
 	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -98,8 +99,15 @@ func main() {
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
 
 	rootCmd := &cobra.Command{
-		Use:     "mcpproxy",
-		Short:   "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
+		Use:   "mcpproxy",
+		Short: "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
+		// Long is shown in `mcpproxy --help`. It carries the project links
+		// (discussion #948) so the way back to the homepage/repo/docs is always
+		// one --help away, no matter how the binary was installed.
+		Long: "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers.\n\n" +
+			"Homepage: " + branding.Homepage + "\n" +
+			"GitHub:   " + branding.Repo + "\n" +
+			"Docs:     " + branding.Docs,
 		Version: version,
 	}
 	rootCmd.SetVersionTemplate(versionLine())

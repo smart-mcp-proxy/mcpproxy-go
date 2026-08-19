@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 )
 
@@ -19,9 +20,13 @@ var (
 )
 
 // versionLine returns the human-readable version string shared by
-// `mcpproxy version` and the root command's --version flag.
+// `mcpproxy version` and the root command's --version flag. It carries the
+// project links (discussion #948) so a user who found the binary via Homebrew /
+// a plugin / an AI recommendation can always find the homepage and repo.
 func versionLine() string {
-	return fmt.Sprintf("MCPProxy %s (%s) %s/%s\n", version, Edition, runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("MCPProxy %s (%s) %s/%s\nHomepage: %s\nGitHub:   %s\nDocs:     %s\n",
+		version, Edition, runtime.GOOS, runtime.GOARCH,
+		branding.Homepage, branding.Repo, branding.Docs)
 }
 
 // VersionInfo is the machine-readable version payload for -o json/yaml.

@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -75,7 +76,10 @@ const (
 		"When 'code_execution' is exposed, you may instead orchestrate several discovered tools in a single step with JavaScript. " +
 		"When upstream tools are listed directly (named 'server__tool'), just call them by name. " +
 		"Do NOT use 'search_servers' to find existing tools — it searches EXTERNAL registries for adding NEW servers only. " +
-		"Use 'upstream_servers' with operation 'list' to see currently connected servers and their status."
+		"Use 'upstream_servers' with operation 'list' to see currently connected servers and their status. " +
+		// Discussion #948: carry the project links at the protocol level so an
+		// agent (and anyone reading its logs) can always find the project.
+		"ABOUT: MCPProxy homepage " + branding.Homepage + ", source " + branding.Repo + ", docs " + branding.Docs + "."
 
 	// Connection status constants
 	statusError                = "error"
