@@ -42,6 +42,9 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		// MCP-3322: surface the per-server init_timeout override so callers can
 		// read back a configured handshake deadline.
 		InitTimeout: cfg.InitTimeout,
+		// F9: surface the per-server prompt-aggregation override so a caller that
+		// PATCHed it can read it back.
+		ExposePrompts: cfg.ExposePrompts,
 		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
 		// caller that PATCHed a limit can read it back.
 		MaxConcurrentRequests: cfg.MaxConcurrentRequests,
@@ -216,6 +219,12 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if autoApprove, ok := generic["auto_approve_tool_changes"].(bool); ok {
 			v := autoApprove
 			server.AutoApproveToolChanges = &v
+		}
+		// F9: prompt-aggregation override is tri-state — only set the pointer when
+		// the key is present so an unset override stays nil.
+		if exposePrompts, ok := generic["expose_prompts"].(bool); ok {
+			v := exposePrompts
+			server.ExposePrompts = &v
 		}
 		// Spec 086: per-server trust tier round-trips as a plain string.
 		if trustMode, ok := generic["trust_mode"].(string); ok {

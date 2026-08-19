@@ -215,6 +215,24 @@ func (m *Manager) GetPrompt(ctx context.Context, name string, args map[string]st
 		return nil, fmt.Errorf("server %s is quarantined", serverName)
 	}
 
+	// Finding F15: match CallTool's reconnect-on-use recovery. A disconnected
+	// server with reconnect_on_use:true is recovered before the call instead of
+	// failing prompts/get outright (the divergence this fixes). The
+	// Enabled/Quarantined guards above run first, so a quarantined server still
+	// returns "quarantined" and is never reconnected here.
+	if !targetClient.IsConnected() {
+		state := targetClient.GetState()
+		if targetClient.IsConnecting() {
+			return nil, fmt.Errorf("server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())
+		}
+		if !m.tryReconnectOnUse(ctx, targetClient, serverName, promptName) {
+			if lastError := targetClient.GetLastError(); lastError != nil {
+				return nil, fmt.Errorf("server '%s' is not connected (state: %s) - connection failed with error: %s", serverName, state.String(), lastError.Error())
+			}
+			return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
+		}
+	}
+
 	result, err := targetClient.GetPrompt(ctx, promptName, args)
 	if err != nil {
 		return nil, err

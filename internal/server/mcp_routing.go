@@ -705,9 +705,23 @@ func buildAggregatedServerPrompts(
 	builtins []mcpserver.ServerPrompt,
 	upstreamPrompts []mcp.Prompt,
 	getPrompt func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error),
+	logger *zap.Logger,
 ) []mcpserver.ServerPrompt {
 	all := make([]mcpserver.ServerPrompt, 0, len(builtins)+len(upstreamPrompts))
 	all = append(all, builtins...)
+
+	// F7: two distinct (server,prompt) pairs can flatten to the same "__" display
+	// name (server "a__b"+prompt "c" and "a"+prompt "b__c" both -> "a__b__c").
+	// mcp-go's SetPrompts is last-writer-wins by map order, so without this the
+	// loser is dropped silently. Config validation rejects ':' in names but keeps
+	// '__' for back-compat, so a residual collision can still occur — keep a
+	// deterministic first-writer-wins guard here so it is LOGGED, never silent.
+	// Built-in names are seeded into the seen-set so an upstream cannot shadow
+	// "setup-new-mcp-server"/"troubleshoot-mcp-server".
+	seen := make(map[string]struct{}, len(all)+len(upstreamPrompts))
+	for i := range all {
+		seen[all[i].Prompt.Name] = struct{}{}
+	}
 
 	for _, qualified := range upstreamPrompts {
 		serverName, promptName, ok := strings.Cut(qualified.Name, ":")
@@ -715,9 +729,22 @@ func buildAggregatedServerPrompts(
 			continue
 		}
 
+		displayName := FormatDirectPromptName(serverName, promptName)
+		if _, dup := seen[displayName]; dup {
+			if logger != nil {
+				logger.Warn("dropping upstream prompt: display-name collision (kept first)",
+					zap.String("server", serverName),
+					zap.String("prompt", promptName),
+					zap.String("display_name", displayName),
+					zap.String("qualified_name", qualified.Name))
+			}
+			continue
+		}
+		seen[displayName] = struct{}{}
+
 		qualifiedName := qualified.Name
 		display := qualified
-		display.Name = FormatDirectPromptName(serverName, promptName)
+		display.Name = displayName
 
 		all = append(all, mcpserver.ServerPrompt{
 			Prompt: display,
@@ -768,14 +795,14 @@ func (p *MCPProxyServer) RefreshPrompts() {
 		// scanner before they are ever registered (parity with tool-description
 		// poisoning detection).
 		upstreamPrompts = p.scanAggregatedPrompts(upstreamPrompts)
-		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated)
+		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated, p.logger)
 		p.logger.Info("refreshed prompts",
 			zap.Int("upstream_prompt_count", len(upstreamPrompts)),
 			zap.Int("total_prompt_count", len(all)))
 	} else {
 		// nil upstreamPrompts: the aggregation loop never runs, so the nil
 		// getPrompt is never invoked.
-		all = buildAggregatedServerPrompts(builtins, nil, nil)
+		all = buildAggregatedServerPrompts(builtins, nil, nil, p.logger)
 		p.logger.Debug("refreshed prompts (upstream aggregation disabled, built-ins only)",
 			zap.Int("total_prompt_count", len(all)))
 	}

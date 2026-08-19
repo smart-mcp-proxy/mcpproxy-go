@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -179,7 +180,7 @@ func TestBuildAggregatedServerPrompts(t *testing.T) {
 		return &mcp.GetPromptResult{Description: "from upstream"}, nil
 	}
 
-	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt)
+	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt, zap.NewNop())
 
 	require.Len(t, all, 2)
 	assert.Equal(t, "setup-new-mcp-server", all[0].Prompt.Name)
@@ -199,7 +200,7 @@ func TestBuildAggregatedServerPrompts(t *testing.T) {
 
 func TestBuildAggregatedServerPrompts_SkipsMalformedNames(t *testing.T) {
 	upstreamPrompts := []mcp.Prompt{{Name: "no-colon-here"}}
-	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil)
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil, zap.NewNop())
 	assert.Empty(t, all)
 }
 
@@ -1113,4 +1114,32 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 		assert.Contains(t, prompts, "setup-new-mcp-server", "mode %s: built-in prompts must be registered", mode)
 		assert.Contains(t, prompts, "server-a__greeting", "mode %s: aggregated upstream prompt must be registered", mode)
 	}
+}
+
+// TestBuildAggregatedServerPrompts_CollisionKeepsFirst covers Finding F7: two
+// distinct (server,prompt) pairs that flatten to the same "server__prompt"
+// display name must be resolved deterministically (first-writer-wins), not
+// silently overwritten, and the drop must be logged.
+func TestBuildAggregatedServerPrompts_CollisionKeepsFirst(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+
+	// "gh" + "issue__create" and "gh__issue" + "create" both flatten to
+	// "gh__issue__create".
+	upstreamPrompts := []mcp.Prompt{
+		{Name: "gh:issue__create", Description: "first"},
+		{Name: "gh__issue:create", Description: "second (collides)"},
+	}
+	fakeGetPrompt := func(_ context.Context, _ string, _ map[string]string) (*mcp.GetPromptResult, error) {
+		return &mcp.GetPromptResult{}, nil
+	}
+
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, logger)
+
+	names := make([]string, len(all))
+	for i, p := range all {
+		names[i] = p.Prompt.Name
+	}
+	assert.Equal(t, []string{"gh__issue__create"}, names, "colliding display name must appear once (first kept)")
+	require.Equal(t, 1, logs.FilterMessage("dropping upstream prompt: display-name collision (kept first)").Len())
 }

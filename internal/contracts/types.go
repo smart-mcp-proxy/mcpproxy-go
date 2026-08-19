@@ -72,8 +72,13 @@ type Server struct {
 	// a duration string (e.g. "120s"); nil/omitted means "inherit the global
 	// default". Surfaced on the GET path so clients can read back a configured
 	// override; PATCH/POST accept it via AddServerRequest.
-	InitTimeout  *config.Duration     `json:"init_timeout,omitempty" swaggertype:"string"`
-	SecurityScan *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
+	InitTimeout *config.Duration `json:"init_timeout,omitempty" swaggertype:"string"`
+	// ExposePrompts mirrors config.ServerConfig.ExposePrompts (F9): the per-server
+	// prompt-aggregation override. Tri-state *bool — nil/omitted means "inherit
+	// default aggregation". Surfaced on GET so a caller that PATCHed the override
+	// can read it back; PATCH/POST accept it via AddServerRequest.
+	ExposePrompts *bool                `json:"expose_prompts,omitempty"`
+	SecurityScan  *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
 	// Spec 044 — structured diagnostic error and stable error code. Both
 	// are populated when the server is in a failed state and the error
 	// has been classified by internal/diagnostics. Healthy servers omit

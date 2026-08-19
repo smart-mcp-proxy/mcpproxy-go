@@ -1164,6 +1164,46 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 	return allTools, nil
 }
 
+// tryReconnectOnUse attempts a single synchronous reconnect for a disconnected
+// client when reconnect_on_use is enabled and the server is eligible (not
+// user-logged-out, not quarantined). It returns true only if the client is
+// connected after the attempt. No manager lock is held here (Spec 093 FR-008):
+// the caller must have snapshotted and released m.mu first so a slow reconnect
+// cannot block server management.
+//
+// Extracted from CallTool's inline reconnect block so GetPrompt can recover a
+// reconnect_on_use server identically for prompts/get (Finding F15). CallTool
+// keeps its own inline copy for now; unifying that hot path is a follow-up.
+func (m *Manager) tryReconnectOnUse(ctx context.Context, client *managed.Client, serverName, target string) bool {
+	cfg := client.GetConfig()
+	if cfg == nil || !cfg.ReconnectOnUse || client.IsUserLoggedOut() || cfg.Quarantined {
+		return false
+	}
+
+	m.logger.Info("reconnect_on_use: attempting reconnect",
+		zap.String("server", serverName),
+		zap.String("target", target),
+		zap.String("state", client.GetState().String()))
+
+	reconnectCtx, reconnectCancel := context.WithTimeout(ctx, 15*time.Second)
+	reconnectErr := client.TryReconnectSync(reconnectCtx)
+	reconnectCancel()
+
+	if reconnectErr != nil {
+		m.logger.Warn("reconnect_on_use: reconnect failed, falling through to error",
+			zap.String("server", serverName),
+			zap.Error(reconnectErr))
+		return false
+	}
+	if client.IsConnected() {
+		m.logger.Info("reconnect_on_use: reconnect succeeded",
+			zap.String("server", serverName),
+			zap.String("target", target))
+		return true
+	}
+	return false
+}
+
 // CallTool calls a tool on the appropriate upstream server
 func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
 	m.logger.Debug("CallTool: starting",

@@ -2228,6 +2228,14 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["auto_approve_tool_changes"] = *serverStatus.Config.AutoApproveToolChanges
 		}
 
+		// F9: surface the per-server expose_prompts override so the REST GET
+		// payload can read back a configured value. Tri-state *bool — only emit
+		// the key when set so the projection stays nil for servers that never
+		// configured it.
+		if serverStatus.Config != nil && serverStatus.Config.ExposePrompts != nil {
+			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
+		}
+
 		// Spec 086: surface the per-server trust tier so the REST GET payload
 		// (and SSE servers.changed embed) can read back the persisted mode, in
 		// parity with its deprecated predecessor auto_approve_tool_changes.
@@ -2417,6 +2425,12 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// StateView path. Tri-state *bool — only emit when set.
 		if srv.AutoApproveToolChanges != nil {
 			serverInfo["auto_approve_tool_changes"] = *srv.AutoApproveToolChanges
+		}
+
+		// F9: per-server expose_prompts override in parity with the StateView
+		// path. Tri-state *bool — only emit when set.
+		if srv.ExposePrompts != nil {
+			serverInfo["expose_prompts"] = *srv.ExposePrompts
 		}
 
 		// Spec 086: per-server trust tier in parity with the StateView path.
