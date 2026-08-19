@@ -30,7 +30,8 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, config.AllowServerRemove)
 
 	// Test prompts default
-	assert.True(t, config.EnablePrompts)
+	assert.True(t, config.EnablePrompts, "built-in prompts stay on by default")
+	assert.False(t, config.AggregateUpstreamPrompts, "upstream aggregation is opt-in (off by default)")
 
 	// Test empty servers list
 	assert.Empty(t, config.Servers)
@@ -90,20 +91,21 @@ func TestConfigValidation(t *testing.T) {
 
 func TestConfigJSONSerialization(t *testing.T) {
 	original := &Config{
-		Listen:            ":9090",
-		DataDir:           "/tmp/test",
-		EnableTray:        false,
-		DebugSearch:       true,
-		TopK:              10,
-		ToolsLimit:        20,
-		ToolResponseLimit: 50000,
-		CallToolTimeout:   Duration(5 * time.Minute),
-		RequireMCPAuth:    true,
-		ReadOnlyMode:      true,
-		DisableManagement: true,
-		AllowServerAdd:    false,
-		AllowServerRemove: false,
-		EnablePrompts:     false,
+		Listen:                   ":9090",
+		DataDir:                  "/tmp/test",
+		EnableTray:               false,
+		DebugSearch:              true,
+		TopK:                     10,
+		ToolsLimit:               20,
+		ToolResponseLimit:        50000,
+		CallToolTimeout:          Duration(5 * time.Minute),
+		RequireMCPAuth:           true,
+		ReadOnlyMode:             true,
+		DisableManagement:        true,
+		AllowServerAdd:           false,
+		AllowServerRemove:        false,
+		EnablePrompts:            false,
+		AggregateUpstreamPrompts: true,
 		Servers: []*ServerConfig{
 			{
 				Name:     "test-server",
@@ -139,6 +141,7 @@ func TestConfigJSONSerialization(t *testing.T) {
 	assert.Equal(t, original.AllowServerAdd, restored.AllowServerAdd)
 	assert.Equal(t, original.AllowServerRemove, restored.AllowServerRemove)
 	assert.Equal(t, original.EnablePrompts, restored.EnablePrompts)
+	assert.Equal(t, original.AggregateUpstreamPrompts, restored.AggregateUpstreamPrompts)
 	assert.Len(t, restored.Servers, 1)
 	assert.Equal(t, original.Servers[0].Name, restored.Servers[0].Name)
 }
@@ -1425,6 +1428,36 @@ func TestServerConfig_ReconnectOnUse(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, server.ReconnectOnUse, restored.ReconnectOnUse)
 	})
+}
+
+func TestServerConfig_ExposePrompts_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		val  *bool
+	}{
+		{"unset", nil},
+		{"true", BoolPtr(true)},
+		{"false", BoolPtr(false)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := ServerConfig{Name: "test", ExposePrompts: tt.val}
+
+			data, err := json.Marshal(original)
+			require.NoError(t, err)
+
+			var decoded ServerConfig
+			require.NoError(t, json.Unmarshal(data, &decoded))
+
+			if tt.val == nil {
+				assert.Nil(t, decoded.ExposePrompts)
+			} else {
+				require.NotNil(t, decoded.ExposePrompts)
+				assert.Equal(t, *tt.val, *decoded.ExposePrompts)
+			}
+		})
+	}
 }
 
 func TestServerConfig_IsToolAllowedByConfig(t *testing.T) {

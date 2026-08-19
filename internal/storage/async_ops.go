@@ -210,6 +210,7 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		MaxConcurrentRequests:    serverConfig.MaxConcurrentRequests,
 		QueueSize:                serverConfig.QueueSize,
 		QueueTimeout:             serverConfig.QueueTimeout,
+		ExposePrompts:            serverConfig.ExposePrompts,
 	}
 	return am.db.SaveUpstream(record)
 }

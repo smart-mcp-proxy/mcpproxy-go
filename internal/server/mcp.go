@@ -551,6 +551,13 @@ func NewMCPProxyServer(
 
 	// Register prompts if enabled
 	if config.EnablePrompts {
+		// Attach the aggregated-prompt auth filter to the default retrieve_tools
+		// server. It closes over `proxy` (needed by resolveActiveProfile), which
+		// did not exist when mcpServer was constructed above; ServerOption is
+		// just func(*MCPServer), so invoking it here is identical to having
+		// passed it to NewMCPServer. Enforced on prompts/list AND prompts/get
+		// (PR #973 review, finding F1).
+		mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
 		proxy.registerPrompts()
 	}
 
@@ -1151,29 +1158,30 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 func (p *MCPProxyServer) registerPrompts() {
 	p.logger.Info("Registering prompts capability")
 
-	// setup-new-mcp-server - Guided workflow for adding MCP servers
-	p.server.AddPrompt(
-		mcp.NewPrompt("setup-new-mcp-server",
-			mcp.WithPromptDescription("Add a new MCP server to mcpproxy. Guides you through configuration for stdio or HTTP servers."),
-			mcp.WithArgument("server_type",
-				mcp.ArgumentDescription("Server type: 'stdio' (local command) or 'http' (remote URL)"),
-			),
-		),
-		p.handleSetupServerPrompt,
-	)
-
-	// troubleshoot-mcp-server - Help with connection issues
-	p.server.AddPrompt(
-		mcp.NewPrompt("troubleshoot-mcp-server",
-			mcp.WithPromptDescription("Diagnose and fix connection issues with MCP servers."),
-			mcp.WithArgument("server_name",
-				mcp.ArgumentDescription("Name of the server experiencing issues"),
-			),
-		),
-		p.handleTroubleshootPrompt,
-	)
+	p.server.AddPrompt(setupServerPrompt(), p.handleSetupServerPrompt)
+	p.server.AddPrompt(troubleshootServerPrompt(), p.handleTroubleshootPrompt)
 
 	p.logger.Info("Prompts registered successfully", zap.Int("count", 2))
+}
+
+// setupServerPrompt describes the built-in setup-new-mcp-server prompt.
+func setupServerPrompt() mcp.Prompt {
+	return mcp.NewPrompt("setup-new-mcp-server",
+		mcp.WithPromptDescription("Add a new MCP server to mcpproxy. Guides you through configuration for stdio or HTTP servers."),
+		mcp.WithArgument("server_type",
+			mcp.ArgumentDescription("Server type: 'stdio' (local command) or 'http' (remote URL)"),
+		),
+	)
+}
+
+// troubleshootServerPrompt describes the built-in troubleshoot-mcp-server prompt.
+func troubleshootServerPrompt() mcp.Prompt {
+	return mcp.NewPrompt("troubleshoot-mcp-server",
+		mcp.WithPromptDescription("Diagnose and fix connection issues with MCP servers."),
+		mcp.WithArgument("server_name",
+			mcp.ArgumentDescription("Name of the server experiencing issues"),
+		),
+	)
 }
 
 // handleSetupServerPrompt handles the setup-new-mcp-server prompt

@@ -158,6 +158,17 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "tool_response_mode")
 	}
 
+	// Upstream prompt aggregation (PR #973 — hot-reloadable, opt-in). Without
+	// this clause a lone aggregate_upstream_prompts toggle computes empty
+	// ChangedFields and is swallowed as "no changes detected", so ApplyConfig
+	// never emits config.reloaded and RefreshPrompts (which reads the live
+	// snapshot) never re-runs. EnablePrompts is deliberately absent: it gates
+	// the prompts CAPABILITY, baked into each server at construction, so
+	// toggling it is a restart concern.
+	if oldCfg.AggregateUpstreamPrompts != newCfg.AggregateUpstreamPrompts {
+		result.ChangedFields = append(result.ChangedFields, "aggregate_upstream_prompts")
+	}
+
 	// Discovery & health-check cadence (spec 074 — hot-reloadable). The health
 	// loop (managed client) and indexing loop (runtime) re-resolve their interval
 	// each cycle, and ApplyConfig propagates the new global config to the upstream

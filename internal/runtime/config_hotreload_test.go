@@ -37,6 +37,30 @@ func TestDetectConfigChanges_Observability(t *testing.T) {
 	assert.False(t, result.RequiresRestart, "cadence change is hot-reloadable")
 }
 
+// TestDetectConfigChanges_AggregateUpstreamPrompts (PR #973): a lone
+// aggregate_upstream_prompts flip must be detected as a hot-reloadable change so
+// ApplyConfig emits config.reloaded and RefreshPrompts (which reads the live
+// snapshot) re-runs. Without this the toggle would be swallowed as "no changes
+// detected" and take effect only on restart.
+func TestDetectConfigChanges_AggregateUpstreamPrompts(t *testing.T) {
+	mk := func(agg bool) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			AggregateUpstreamPrompts: agg,
+		}
+	}
+	t.Run("toggle detected, hot-reloadable", func(t *testing.T) {
+		result := DetectConfigChanges(mk(false), mk(true))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "aggregate_upstream_prompts")
+		assert.False(t, result.RequiresRestart, "aggregation toggle must not require a restart")
+	})
+	t.Run("no change reports nothing", func(t *testing.T) {
+		result := DetectConfigChanges(mk(true), mk(true))
+		assert.NotContains(t, result.ChangedFields, "aggregate_upstream_prompts")
+	})
+}
+
 // TestDetectConfigChanges_DiscoveryHealthIntervals (MCP-1189 / Codex finding #2):
 // a global health_check_interval / tool_discovery_interval edit must be detected
 // as a hot-reloadable change so ApplyConfig propagates the new cadence to the

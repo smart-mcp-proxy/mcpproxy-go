@@ -66,12 +66,13 @@ var (
 	logDir            string
 
 	// Security flags
-	requireMCPAuth    bool
-	readOnlyMode      bool
-	disableManagement bool
-	allowServerAdd    bool
-	allowServerRemove bool
-	enablePrompts     bool
+	requireMCPAuth           bool
+	readOnlyMode             bool
+	disableManagement        bool
+	allowServerAdd           bool
+	allowServerRemove        bool
+	enablePrompts            bool
+	aggregateUpstreamPrompts bool
 
 	// Output formatting flags (global)
 	globalOutputFormat string
@@ -136,6 +137,7 @@ func main() {
 	serverCmd.Flags().BoolVar(&allowServerAdd, "allow-server-add", true, "Allow adding new servers")
 	serverCmd.Flags().BoolVar(&allowServerRemove, "allow-server-remove", true, "Allow removing existing servers")
 	serverCmd.Flags().BoolVar(&enablePrompts, "enable-prompts", true, "Enable prompts for user input")
+	serverCmd.Flags().BoolVar(&aggregateUpstreamPrompts, "aggregate-upstream-prompts", false, "Aggregate upstream servers' MCP prompts into mcpproxy's prompt list (opt-in)")
 
 	// Add search-servers command
 	searchCmd := createSearchServersCommand()
@@ -428,6 +430,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cmdAllowServerAdd, _ := cmd.Flags().GetBool("allow-server-add")
 	cmdAllowServerRemove, _ := cmd.Flags().GetBool("allow-server-remove")
 	cmdEnablePrompts, _ := cmd.Flags().GetBool("enable-prompts")
+	cmdAggregateUpstreamPrompts, _ := cmd.Flags().GetBool("aggregate-upstream-prompts")
 
 	// Load configuration first to get logging settings
 	cfg, err := loadConfig(cmd)
@@ -551,6 +554,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 	if cmd.Flags().Changed("enable-prompts") {
 		cfg.EnablePrompts = cmdEnablePrompts
+	}
+	if cmd.Flags().Changed("aggregate-upstream-prompts") {
+		cfg.AggregateUpstreamPrompts = cmdAggregateUpstreamPrompts
 	}
 
 	logger.Info("Configuration loaded",

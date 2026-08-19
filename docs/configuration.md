@@ -355,6 +355,7 @@ it and none can double-report it.
 {
   "debug_search": false,
   "enable_prompts": true,
+  "aggregate_upstream_prompts": false,
   "check_server_repo": true
 }
 ```
@@ -362,7 +363,8 @@ it and none can double-report it.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `debug_search` | boolean | `false` | Enable debug logging for search operations |
-| `enable_prompts` | boolean | `true` | Enable MCP prompts feature for workflow guidance and interactive assistance with common tasks (finding tools, debugging search, setting up servers, troubleshooting connections) |
+| `enable_prompts` | boolean | `true` | Enable mcpproxy's built-in prompts (setup / troubleshoot workflows) and advertise the MCP `prompts` capability. Governs only the built-ins; upstream aggregation is controlled separately by `aggregate_upstream_prompts`. |
+| `aggregate_upstream_prompts` | boolean | `false` | **Opt-in.** When `true`, aggregate every connected upstream server's MCP prompts into mcpproxy's own `prompts/list` (exposed as `<server>__<prompt>`). Off by default so users are safe until they deliberately enable it. Requires `enable_prompts: true` (the default) to have any effect. Hot-reloadable. The per-server [`expose_prompts`](#per-server-settings) override further filters which servers contribute once this is on. |
 | `check_server_repo` | boolean | `true` | Enable repository detection for MCP servers (shows install commands) |
 
 ---
@@ -414,6 +416,7 @@ it and none can double-report it.
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
 | `quarantined` | boolean | No | Security quarantine status (default: `false` for manually added servers, `true` for LLM-added servers) |
 | `reconnect_on_use` | boolean | No | When `true`, tool calls to a disconnected server trigger an immediate reconnect attempt (15s timeout) before failing (default: `false`) |
+| `expose_prompts` | boolean | No | Per-server override for whether this server's MCP prompts are aggregated into mcpproxy's `prompts/list`. Only takes effect when the global `aggregate_upstream_prompts` master switch is on. Omit to expose prompts whenever the server advertises `Capabilities.Prompts`; `false` opts this server out even if it does. |
 | `toon_output` | string | No | Per-server override for the global [`toon_output`](#toon-output-adaptive-result-encoding): `off`, `adaptive`, or `always`. Non-empty value wins over the global for this server's tools; omit to inherit. See [TOON Output](features/toon-output.md). |
 | `created` | string | No | ISO 8601 timestamp (auto-generated) |
 | `updated` | string | No | ISO 8601 timestamp (auto-updated) |

@@ -136,6 +136,7 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		MaxConcurrentRequests:    serverConfig.MaxConcurrentRequests,
 		QueueSize:                serverConfig.QueueSize,
 		QueueTimeout:             serverConfig.QueueTimeout,
+		ExposePrompts:            serverConfig.ExposePrompts,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -182,6 +183,7 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		MaxConcurrentRequests:    record.MaxConcurrentRequests,
 		QueueSize:                record.QueueSize,
 		QueueTimeout:             record.QueueTimeout,
+		ExposePrompts:            record.ExposePrompts,
 	}, nil
 }
 
@@ -228,6 +230,7 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			MaxConcurrentRequests:    record.MaxConcurrentRequests,
 			QueueSize:                record.QueueSize,
 			QueueTimeout:             record.QueueTimeout,
+			ExposePrompts:            record.ExposePrompts,
 		})
 	}
 

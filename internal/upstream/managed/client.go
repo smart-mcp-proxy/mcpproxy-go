@@ -472,8 +472,17 @@ func (mc *Client) GetConfig() *config.ServerConfig {
 
 // SetConfig atomically swaps the server configuration. Lock-free; callers must
 // not hold mc.mu (they don't need to — the swap is atomic).
+//
+// Also pushes ExposePrompts down to the coreClient (PR #973 review, P2):
+// coreClient.config is set once at connect time and never reassigned, so
+// without this a hot-reloaded expose_prompts value would stay frozen at
+// whatever was in effect when the connection was created, until the next
+// reconnect-forcing change or restart.
 func (mc *Client) SetConfig(config *config.ServerConfig) {
 	mc.cfg.Store(config)
+	if mc.coreClient != nil {
+		mc.coreClient.SetExposePrompts(config.ExposePrompts)
+	}
 }
 
 // GetServerInfo returns server information

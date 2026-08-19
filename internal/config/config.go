@@ -366,6 +366,14 @@ type Config struct {
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
 
+	// AggregateUpstreamPrompts, when true, aggregates every connected upstream
+	// server's advertised MCP prompts into mcpproxy's own prompts/list
+	// (exposed as "<server>__<prompt>"). OFF by default: users are safe by
+	// default and opt in deliberately. EnablePrompts still governs the built-in
+	// prompts + the prompts capability; this flag gates ONLY the upstream
+	// aggregation performed by RefreshPrompts. Hot-reloadable.
+	AggregateUpstreamPrompts bool `json:"aggregate_upstream_prompts" mapstructure:"aggregate-upstream-prompts"`
+
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
 
@@ -620,6 +628,12 @@ type ServerConfig struct {
 	Updated        time.Time        `json:"updated,omitempty" mapstructure:"updated"`
 	Isolation      *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
 	ReconnectOnUse bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+
+	// ExposePrompts overrides whether this server's advertised MCP prompts are
+	// aggregated into mcpproxy's prompts/list. nil (default) inherits the
+	// default-aggregate behavior (included if the server advertises
+	// Capabilities.Prompts); false excludes it regardless of capability.
+	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
 
 	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
 	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
@@ -1653,8 +1667,11 @@ func DefaultConfig() *Config {
 		AllowServerAdd:    true,
 		AllowServerRemove: true,
 
-		// Prompts enabled by default
+		// Prompts enabled by default (built-in prompts + capability)
 		EnablePrompts: true,
+
+		// Upstream prompt aggregation OFF by default (opt-in) — see field doc.
+		AggregateUpstreamPrompts: false,
 
 		// Repository detection enabled by default
 		CheckServerRepo: true,

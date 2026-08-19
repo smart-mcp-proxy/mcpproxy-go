@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -15,6 +16,8 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 func TestParseDirectToolName(t *testing.T) {
@@ -133,6 +136,71 @@ func TestFormatDirectToolName(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestFormatDirectPromptName(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverName string
+		promptName string
+		want       string
+	}{
+		{"simple names", "github", "setup-issue", "github__setup-issue"},
+		{"server with hyphens", "my-server", "greeting", "my-server__greeting"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatDirectPromptName(tt.serverName, tt.promptName)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildAggregatedServerPrompts(t *testing.T) {
+	builtin := mcpserver.ServerPrompt{
+		Prompt: mcp.NewPrompt("setup-new-mcp-server"),
+		Handler: func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{Description: "builtin"}, nil
+		},
+	}
+
+	upstreamPrompts := []mcp.Prompt{
+		{Name: "server-a:greeting", Description: "hi"},
+	}
+
+	var gotCtx context.Context
+	var gotName string
+	var gotArgs map[string]string
+	fakeGetPrompt := func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error) {
+		gotCtx = ctx
+		gotName = name
+		gotArgs = args
+		return &mcp.GetPromptResult{Description: "from upstream"}, nil
+	}
+
+	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt)
+
+	require.Len(t, all, 2)
+	assert.Equal(t, "setup-new-mcp-server", all[0].Prompt.Name)
+	assert.Equal(t, "server-a__greeting", all[1].Prompt.Name)
+	assert.Equal(t, "hi", all[1].Prompt.Description)
+
+	ctx := context.Background()
+	result, err := all[1].Handler(ctx, mcp.GetPromptRequest{
+		Params: mcp.GetPromptParams{Arguments: map[string]string{"k": "v"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "from upstream", result.Description)
+	assert.Equal(t, ctx, gotCtx)
+	assert.Equal(t, "server-a:greeting", gotName)
+	assert.Equal(t, map[string]string{"k": "v"}, gotArgs)
+}
+
+func TestBuildAggregatedServerPrompts_SkipsMalformedNames(t *testing.T) {
+	upstreamPrompts := []mcp.Prompt{{Name: "no-colon-here"}}
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil)
+	assert.Empty(t, all)
 }
 
 func TestDirectToolNameRoundTrip(t *testing.T) {
@@ -827,4 +895,222 @@ func TestDirectModeHandler_CallabilityBlock_PrefersContextRequestID(t *testing.T
 
 	payload := probe.awaitOne(t)
 	assert.Equal(t, "req-from-transport", requestIDOf(t, payload))
+}
+
+// =============================================================================
+// RefreshPrompts (prompt aggregation)
+// =============================================================================
+
+// newTestRefreshPromptsUpstream builds a real in-process MCP server that
+// advertises Capabilities.Prompts and serves one "greeting" prompt.
+func newTestRefreshPromptsUpstream(t *testing.T) *mcpserver.MCPServer {
+	t.Helper()
+	srv := mcpserver.NewMCPServer("test-upstream", "0.0.1",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithPromptCapabilities(true),
+	)
+	srv.AddPrompt(
+		mcp.NewPrompt("greeting", mcp.WithPromptDescription("Say hello")),
+		func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{
+				Messages: []mcp.PromptMessage{
+					{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "hello"}},
+				},
+			}, nil
+		},
+	)
+	return srv
+}
+
+func TestRefreshPrompts_Disabled_NoOp(t *testing.T) {
+	// createTestProxyWithRuntime uses config.DefaultConfig(), which has
+	// EnablePrompts: true, so registerPrompts() already ran at construction.
+	// Clear that baseline so this test can prove RefreshPrompts adds nothing
+	// once prompts are (re-)disabled, rather than merely tolerating leftovers.
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	existing := proxy.server.ListPrompts()
+	names := make([]string, 0, len(existing))
+	for name := range existing {
+		names = append(names, name)
+	}
+	proxy.server.DeletePrompts(names...)
+
+	proxy.config.EnablePrompts = false
+	proxy.RefreshPrompts()
+
+	assert.Empty(t, proxy.server.ListPrompts(), "disabled prompts must not populate the server's prompt set")
+}
+
+func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "setup-new-mcp-server", "built-in prompts must still be registered")
+	require.Contains(t, prompts, "server-a__greeting", "aggregated upstream prompt must be registered under its direct name")
+}
+
+// TestRefreshPrompts_AggregationDisabled_BuiltinsOnly verifies the default
+// safe posture (PR #973 review): with EnablePrompts on but the opt-in
+// aggregate_upstream_prompts flag off, RefreshPrompts serves ONLY the built-ins
+// and never touches upstream servers.
+func TestRefreshPrompts_AggregationDisabled_BuiltinsOnly(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = false // the default — safe posture
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	assert.Contains(t, prompts, "setup-new-mcp-server", "built-ins still register when aggregation is off")
+	assert.NotContains(t, prompts, "server-a__greeting", "upstream prompt must NOT be aggregated when the opt-in flag is off")
+	assert.Len(t, prompts, 2, "only the two built-in prompts are present")
+}
+
+// TestRefreshPrompts_ReadsLiveAggregateFlag is the F4 regression: RefreshPrompts
+// must honor the LIVE config snapshot (currentConfig() -> runtime), not the
+// construction-time p.config, so an aggregate_upstream_prompts toggle takes
+// effect on hot-reload without a restart. We deliberately give proxy.config a
+// stale snapshot that DISAGREES with the live one; if RefreshPrompts read the
+// boot snapshot it would skip aggregation and the assertion would fail.
+func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, rt := createTestProxyWithRuntime(t, nil)
+
+	// Live snapshot (what currentConfig() -> rt.Config() returns) OPTS IN.
+	live := rt.Config()
+	live.EnablePrompts = true
+	live.AggregateUpstreamPrompts = true
+
+	// Construction-time snapshot DISAGREES (aggregation off). If RefreshPrompts
+	// read p.config it would skip aggregation — the assertion below would fail.
+	boot := *live
+	boot.AggregateUpstreamPrompts = false
+	proxy.config = &boot
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "server-a__greeting",
+		"RefreshPrompts must honor the LIVE aggregate flag, not the boot snapshot (F4)")
+}
+
+func TestRefreshPrompts_NoUpstreamClients_RegistersOnlyBuiltins(t *testing.T) {
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.upstreamManager = upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	assert.Contains(t, prompts, "setup-new-mcp-server", "built-ins still register when there are no upstream prompts")
+	assert.Len(t, prompts, 2, "only the two built-in prompts should be present")
+}
+
+// TestRefreshPrompts_PopulatesRoutingModeServers is the regression test for
+// PR #973 review's P1 finding: prompts were only ever set on p.server, but
+// /mcp is served via GetMCPServerForMode(cfg.RoutingMode), which after
+// config.Validate() normalizes routing_mode to retrieve_tools almost never
+// resolves back to p.server — so the aggregated prompts feature was
+// unreachable over Streamable HTTP in every non-default routing mode.
+func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	for _, mode := range []string{config.RoutingModeDirect, config.RoutingModeCodeExecution, config.RoutingModeRetrieveTools} {
+		srv := proxy.GetMCPServerForMode(mode)
+		require.NotNil(t, srv, "routing mode %s must have a server instance", mode)
+		prompts := srv.ListPrompts()
+		assert.Contains(t, prompts, "setup-new-mcp-server", "mode %s: built-in prompts must be registered", mode)
+		assert.Contains(t, prompts, "server-a__greeting", "mode %s: aggregated upstream prompt must be registered", mode)
+	}
 }

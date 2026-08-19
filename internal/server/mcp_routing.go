@@ -63,6 +63,12 @@ func FormatDirectToolName(serverName, toolName string) string {
 	return serverName + DirectModeToolSeparator + toolName
 }
 
+// FormatDirectPromptName formats a server name and prompt name using the
+// same "__" separator convention as FormatDirectToolName.
+func FormatDirectPromptName(serverName, promptName string) string {
+	return FormatDirectToolName(serverName, promptName)
+}
+
 // buildDirectModeTools builds MCP tool definitions for direct mode.
 // Each upstream tool is exposed directly with serverName__toolName naming.
 // Only tools from connected, enabled, non-quarantined servers are included.
@@ -583,6 +589,21 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	if p.hooks != nil {
 		opts = append(opts, mcpserver.WithHooks(p.hooks))
 	}
+	// Advertise prompts on every routing-mode server, not just the default
+	// retrieve_tools server: /mcp is served via GetMCPServerForMode, which
+	// after config.Validate() normalizes routing_mode almost never returns
+	// p.server, so without this the aggregated prompts feature is
+	// unreachable over Streamable HTTP (PR #973 review, P1).
+	if p.config.EnablePrompts {
+		opts = append(opts, mcpserver.WithPromptCapabilities(true))
+		// Enforce agent-token + profile scope on aggregated prompts across every
+		// routing-mode server. mcp-go applies this on BOTH prompts/list and
+		// prompts/get (passesPromptFilters), closing the F1 get-time auth bypass.
+		// Added to the shared opts (before directOpts copies it) so directServer,
+		// codeExecServer and callToolServer all inherit it; p.server gets the
+		// same filter in NewMCPProxyServer, where proxy exists.
+		opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
+	}
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
 	// discovery filters and belong only on the direct server (not the shared
@@ -669,6 +690,100 @@ func (p *MCPProxyServer) RefreshCodeExecModeTools() {
 
 	p.logger.Info("refreshed code execution mode tools",
 		zap.Int("tool_count", len(codeExecTools)))
+}
+
+// buildAggregatedServerPrompts combines built-in prompts with upstream
+// prompts (colon-qualified "serverName:promptName", as returned by
+// Manager.ListPrompts) into the full ServerPrompt set for SetPrompts.
+// getPrompt is invoked with the original colon-qualified name whenever a
+// client requests one of the aggregated prompts — no reverse-parsing of the
+// client-facing "__" name is needed since the handler closure already knows
+// which server it came from. Upstream prompts with a malformed (unqualified)
+// name are skipped.
+func buildAggregatedServerPrompts(
+	builtins []mcpserver.ServerPrompt,
+	upstreamPrompts []mcp.Prompt,
+	getPrompt func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error),
+) []mcpserver.ServerPrompt {
+	all := make([]mcpserver.ServerPrompt, 0, len(builtins)+len(upstreamPrompts))
+	all = append(all, builtins...)
+
+	for _, qualified := range upstreamPrompts {
+		serverName, promptName, ok := strings.Cut(qualified.Name, ":")
+		if !ok {
+			continue
+		}
+
+		qualifiedName := qualified.Name
+		display := qualified
+		display.Name = FormatDirectPromptName(serverName, promptName)
+
+		all = append(all, mcpserver.ServerPrompt{
+			Prompt: display,
+			Handler: func(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return getPrompt(ctx, qualifiedName, request.Params.Arguments)
+			},
+		})
+	}
+
+	return all
+}
+
+// RefreshPrompts rebuilds every routing-mode server's prompt set: the built-in
+// prompts, plus (only when aggregate_upstream_prompts is enabled) every prompt
+// aggregated from connected upstream servers. Should be called when upstream
+// servers change (connect/disconnect) or on config hot-reload. A no-op when
+// prompts are disabled entirely.
+func (p *MCPProxyServer) RefreshPrompts() {
+	// Read the LIVE config snapshot (currentConfig()), never the construction-
+	// time p.config: p.config is never reassigned on hot-reload, so a boot-
+	// snapshot read would make the aggregate_upstream_prompts toggle restart-only
+	// (PR #973 review, finding F4).
+	cfg := p.currentConfig()
+	if cfg == nil || !cfg.EnablePrompts {
+		return
+	}
+
+	builtins := []mcpserver.ServerPrompt{
+		{Prompt: setupServerPrompt(), Handler: p.handleSetupServerPrompt},
+		{Prompt: troubleshootServerPrompt(), Handler: p.handleTroubleshootPrompt},
+	}
+
+	// Upstream aggregation is opt-in (AggregateUpstreamPrompts, default false):
+	// users are safe by default and enable it deliberately. When it is off we
+	// still (re-)set the built-ins on every routing-mode server, which also
+	// clears any previously-aggregated upstream prompts if the flag was flipped
+	// off at runtime.
+	var all []mcpserver.ServerPrompt
+	if cfg.AggregateUpstreamPrompts {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
+		if err != nil {
+			p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
+			return
+		}
+		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.upstreamManager.GetPrompt)
+		p.logger.Info("refreshed prompts",
+			zap.Int("upstream_prompt_count", len(upstreamPrompts)),
+			zap.Int("total_prompt_count", len(all)))
+	} else {
+		// nil upstreamPrompts: the aggregation loop never runs, so the nil
+		// getPrompt is never invoked.
+		all = buildAggregatedServerPrompts(builtins, nil, nil)
+		p.logger.Debug("refreshed prompts (upstream aggregation disabled, built-ins only)",
+			zap.Int("total_prompt_count", len(all)))
+	}
+
+	// Set on every routing-mode server (Spec 031), not just the default
+	// retrieve_tools server: /mcp is served via GetMCPServerForMode, which
+	// returns a routing-mode server in every non-default mode (PR #973
+	// review, P1) — those need the same aggregated prompt set.
+	for _, srv := range []*mcpserver.MCPServer{p.server, p.directServer, p.codeExecServer, p.callToolServer} {
+		if srv != nil {
+			srv.SetPrompts(all...)
+		}
+	}
 }
 
 // GetMCPServerForMode returns the MCP server instance for the given routing mode.

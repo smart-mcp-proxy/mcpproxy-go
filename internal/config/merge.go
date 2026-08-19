@@ -340,6 +340,17 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.InitTimeout = &it
 	}
 
+	// ExposePrompts: same tri-state patch semantics as InitTimeout — a
+	// non-nil pointer sets/replaces the per-server override (including an
+	// explicit false = opt out), nil leaves the base value untouched.
+	if patch.ExposePrompts != nil {
+		v := *patch.ExposePrompts
+		if diff != nil && (base.ExposePrompts == nil || *base.ExposePrompts != v) {
+			diff.Modified["expose_prompts"] = FieldChange{Path: "expose_prompts", From: base.ExposePrompts, To: patch.ExposePrompts}
+		}
+		merged.ExposePrompts = &v
+	}
+
 	// Per-server concurrency overrides (spec 093, FR-020(c)): same tri-state
 	// patch semantics as InitTimeout — a non-nil pointer sets/replaces the
 	// override (including an explicit 0 = opt out), nil leaves the base value.
@@ -661,6 +672,12 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	if src.AuthBroker != nil {
 		broker := *src.AuthBroker
 		dst.AuthBroker = &broker
+	}
+
+	// Copy *bool by value (not pointer) to avoid shared state
+	if src.ExposePrompts != nil {
+		exposePrompts := *src.ExposePrompts
+		dst.ExposePrompts = &exposePrompts
 	}
 
 	// Copy nested structs

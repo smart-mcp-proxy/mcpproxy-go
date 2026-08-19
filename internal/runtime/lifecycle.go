@@ -914,6 +914,15 @@ func extractToolName(fullName string) string {
 	return fullName
 }
 
+// boolPtrEqual reports whether two tri-state *bool overrides carry the same
+// value, treating two nils as equal.
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 // LoadConfiguredServers synchronizes storage and upstream manager from the given or current config.
 // If cfg is nil, it will use the current runtime configuration.
 //
@@ -1001,13 +1010,23 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		// Check if OAuth config changed (requires reconnection)
 		oauthChanged := existsInStorage && config.OAuthConfigChanged(storedServer.OAuth, serverCfg.OAuth)
 
+		// ExposePrompts changed: doesn't need a reconnect (upstream.Manager's
+		// AddServerConfig already refreshes it via managed.Client.SetConfig
+		// regardless of hasChanged), but without counting it here a
+		// hot-reloaded toggle would never emit servers.changed, so
+		// RefreshPrompts would never re-run and the proxy's advertised
+		// prompt set would stay stale until an unrelated change (PR #973
+		// review, P2).
+		exposePromptsChanged := existsInStorage && !boolPtrEqual(storedServer.ExposePrompts, serverCfg.ExposePrompts)
+
 		hasChanged := !existsInStorage ||
 			storedServer.Enabled != serverCfg.Enabled ||
 			storedServer.Quarantined != serverCfg.Quarantined ||
 			storedServer.URL != serverCfg.URL ||
 			storedServer.Command != serverCfg.Command ||
 			storedServer.Protocol != serverCfg.Protocol ||
-			oauthChanged
+			oauthChanged ||
+			exposePromptsChanged
 
 		if hasChanged {
 			changed = true
