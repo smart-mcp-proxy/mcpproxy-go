@@ -137,6 +137,9 @@ type Client struct {
 
 	// Notification callback for tools/list_changed
 	onToolsChanged func(serverName string)
+
+	// Notification callback for prompts/list_changed (F13)
+	onPromptsChanged func(serverName string)
 }
 
 // NewClient creates a new core MCP client
@@ -772,6 +775,15 @@ func (c *Client) SetOnToolsChangedCallback(callback func(serverName string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onToolsChanged = callback
+}
+
+// SetOnPromptsChangedCallback sets the callback invoked when a
+// notifications/prompts/list_changed notification is received from the upstream
+// MCP server (F13). Enables reactive re-aggregation of upstream prompts.
+func (c *Client) SetOnPromptsChangedCallback(callback func(serverName string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onPromptsChanged = callback
 }
 
 // Helper methods

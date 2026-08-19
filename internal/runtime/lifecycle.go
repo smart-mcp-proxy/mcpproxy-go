@@ -141,6 +141,29 @@ func (r *Runtime) StartBackgroundInitialization() {
 			return r.DiscoverAndIndexToolsForServer(ctx, serverName)
 		})
 		r.logger.Info("Tool discovery callback registered on upstream manager")
+
+		// F13: keep the aggregated prompt list fresh when an upstream adds/removes
+		// a prompt at runtime (notifications/prompts/list_changed). Prompts are
+		// aggregated inside the MCP server layer, so we cannot RefreshPrompts from
+		// here — instead publish a debounced EventTypeUpstreamPromptsChanged that
+		// listenForRoutingModeRefresh turns into a single RefreshPrompts on its own
+		// goroutine (no new reentrancy).
+		r.promptsRefresh = newPromptsRefreshDebouncer(promptsRefreshDebounceWindow, r.emitUpstreamPromptsChanged)
+		r.upstreamManager.SetPromptsChangedCallback(func(serverName string) {
+			// Only meaningful while aggregation is on. Read live config so a
+			// hot-reload flip of aggregate_upstream_prompts takes effect without a
+			// restart; short-circuiting here avoids waking the listener (and
+			// re-setting built-ins on every routing-mode server) for a feature
+			// nobody enabled. RefreshPrompts double-guards on the same live flags.
+			cfg := r.Config()
+			if cfg == nil || !cfg.EnablePrompts || !cfg.AggregateUpstreamPrompts {
+				return
+			}
+			r.logger.Debug("upstream prompts/list_changed received; scheduling prompt refresh",
+				zap.String("server", serverName))
+			r.promptsRefresh.trigger()
+		})
+		r.logger.Info("Upstream prompts-changed callback registered on upstream manager")
 	}
 
 	// Watch the config file for external edits (editors, CLI, `jq > tmp && mv`)

@@ -154,33 +154,13 @@ func (c *Client) registerNotificationHandler() {
 	}
 
 	c.client.OnNotification(func(notification mcp.JSONRPCNotification) {
-		// Filter for tools/list_changed notifications only
-		if notification.Method != string(mcp.MethodNotificationToolsListChanged) {
-			return
-		}
-
-		c.logger.Info("Received tools/list_changed notification from upstream server",
-			zap.String("server", c.config.Name))
-
-		// Log capability status for debugging
-		if c.serverInfo != nil && c.serverInfo.Capabilities.Tools != nil && c.serverInfo.Capabilities.Tools.ListChanged {
-			c.logger.Debug("Server advertised tools.listChanged capability",
-				zap.String("server", c.config.Name))
-		} else {
-			c.logger.Warn("Received tools notification from server that did not advertise listChanged capability",
-				zap.String("server", c.config.Name))
-		}
-
-		// Invoke the callback if set
-		c.mu.RLock()
-		callback := c.onToolsChanged
-		c.mu.RUnlock()
-
-		if callback != nil {
-			callback(c.config.Name)
-		} else {
-			c.logger.Debug("No onToolsChanged callback set - notification ignored",
-				zap.String("server", c.config.Name))
+		switch notification.Method {
+		case string(mcp.MethodNotificationToolsListChanged):
+			c.handleToolsListChangedNotification()
+		case string(mcp.MethodNotificationPromptsListChanged):
+			c.handlePromptsListChangedNotification()
+		default:
+			// Ignore all other notifications (logging, resources, progress, ...).
 		}
 	})
 
@@ -190,6 +170,62 @@ func (c *Client) registerNotificationHandler() {
 			zap.String("server", c.config.Name))
 	} else {
 		c.logger.Debug("Server does not advertise tool change notifications support",
+			zap.String("server", c.config.Name))
+	}
+}
+
+// handleToolsListChangedNotification forwards a notifications/tools/list_changed
+// signal to the onToolsChanged callback. serverInfo and the callback are read
+// under the same RLock.
+func (c *Client) handleToolsListChangedNotification() {
+	c.logger.Info("Received tools/list_changed notification from upstream server",
+		zap.String("server", c.config.Name))
+
+	c.mu.RLock()
+	serverInfo := c.serverInfo
+	callback := c.onToolsChanged
+	c.mu.RUnlock()
+
+	if serverInfo != nil && serverInfo.Capabilities.Tools != nil && serverInfo.Capabilities.Tools.ListChanged {
+		c.logger.Debug("Server advertised tools.listChanged capability",
+			zap.String("server", c.config.Name))
+	} else {
+		c.logger.Warn("Received tools notification from server that did not advertise listChanged capability",
+			zap.String("server", c.config.Name))
+	}
+
+	if callback != nil {
+		callback(c.config.Name)
+	} else {
+		c.logger.Debug("No onToolsChanged callback set - notification ignored",
+			zap.String("server", c.config.Name))
+	}
+}
+
+// handlePromptsListChangedNotification mirrors handleToolsListChangedNotification
+// for notifications/prompts/list_changed (F13). It only forwards the signal; the
+// managed/manager/runtime layers debounce and re-aggregate.
+func (c *Client) handlePromptsListChangedNotification() {
+	c.logger.Info("Received prompts/list_changed notification from upstream server",
+		zap.String("server", c.config.Name))
+
+	c.mu.RLock()
+	serverInfo := c.serverInfo
+	callback := c.onPromptsChanged
+	c.mu.RUnlock()
+
+	if serverInfo != nil && serverInfo.Capabilities.Prompts != nil && serverInfo.Capabilities.Prompts.ListChanged {
+		c.logger.Debug("Server advertised prompts.listChanged capability",
+			zap.String("server", c.config.Name))
+	} else {
+		c.logger.Warn("Received prompts notification from server that did not advertise listChanged capability",
+			zap.String("server", c.config.Name))
+	}
+
+	if callback != nil {
+		callback(c.config.Name)
+	} else {
+		c.logger.Debug("No onPromptsChanged callback set - notification ignored",
 			zap.String("server", c.config.Name))
 	}
 }

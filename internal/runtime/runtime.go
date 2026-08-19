@@ -106,6 +106,9 @@ type Runtime struct {
 	indexManager    *index.Manager
 	upstreamManager *upstream.Manager
 	cacheManager    *cache.Manager
+	// promptsRefresh debounces upstream prompts/list_changed notifications into a
+	// single RefreshPrompts fan-out (F13). Nil until lifecycle registration.
+	promptsRefresh *promptsRefreshDebouncer
 	// truncator is swapped on config hot-reload (tool_response_limit) while the
 	// MCP serving path reads it via Truncator(). An atomic.Pointer makes the
 	// swap/read race-free (#861) and independent of r.mu, so the accessor stays
