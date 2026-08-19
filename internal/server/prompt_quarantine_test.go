@@ -162,3 +162,47 @@ func TestApproveAllPrompts(t *testing.T) {
 
 // Guard: the storage record type is what we expect (compile-time contract).
 var _ = storage.PromptApprovalRecord{}
+
+// --- MCP quarantine_security prompt op handlers ---
+
+func TestHandlePromptApprovalOps(t *testing.T) {
+	proxy := manualTrustProxy(t)
+	proxy.checkPromptApprovals([]mcp.Prompt{{Name: "srv:a", Description: "1"}, {Name: "srv:b", Description: "2"}})
+
+	// inspect_prompts reports the two held prompts.
+	insp, err := proxy.handleInspectPromptApprovals(mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]interface{}{"name": "srv"},
+	}})
+	require.NoError(t, err)
+	require.False(t, insp.IsError)
+	body := insp.Content[0].(mcp.TextContent).Text
+	assert.Contains(t, body, "\"pending_count\": 2")
+	assert.Contains(t, body, "\"action_required\": 2")
+
+	// approve_prompt approves one.
+	ap, err := proxy.handleApprovePromptByName(mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]interface{}{"name": "srv", "prompt_name": "a"},
+	}})
+	require.NoError(t, err)
+	assert.False(t, ap.IsError)
+	rec, _ := proxy.storage.GetPromptApproval("srv", "a")
+	assert.Equal(t, promptStatusApproved, rec.Status)
+
+	// approve_all_prompts approves the rest.
+	aa, err := proxy.handleApproveAllPromptsByServer(mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]interface{}{"name": "srv"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, aa.Content[0].(mcp.TextContent).Text, "Approved 1 prompt")
+	recB, _ := proxy.storage.GetPromptApproval("srv", "b")
+	assert.Equal(t, promptStatusApproved, recB.Status)
+}
+
+func TestHandleApprovePromptByName_MissingArgs(t *testing.T) {
+	proxy := manualTrustProxy(t)
+	res, err := proxy.handleApprovePromptByName(mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]interface{}{"name": "srv"},
+	}})
+	require.NoError(t, err)
+	assert.True(t, res.IsError, "missing prompt_name is an error result")
+}

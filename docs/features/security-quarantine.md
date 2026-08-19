@@ -152,6 +152,24 @@ built-in `tpa-descriptions` scanner. Its findings appear in the scan report
 `threat_level`, `confidence`, and the contributing check `signals`. See
 [Tool Scanner](/features/tool-scanner) for the full rule reference.
 
+## Prompt rug-pull baseline (spec 100)
+
+When upstream **prompt aggregation** is enabled (`aggregate_upstream_prompts: true`, off by default), mcpproxy keeps a per-prompt approval baseline that mirrors the tool rug-pull machinery. A trusted server that ships a benign prompt and later mutates its **advertised metadata** (name, description, or argument descriptions) has that changed prompt **withheld from `prompts/list`** until it is approved — closing the gap where a subtler injection that passes the poison scanner could still slip in via a later edit.
+
+- **Scope — metadata only.** The baseline hashes the prompt's advertised metadata, not its `prompts/get` message content (which is materialised fresh per call and has no list-time artifact to baseline). Content is defended separately by output sanitisation and size caps. This is an inherent limit, not a shortcut.
+- **Enforcement is by withholding.** A held prompt is simply not registered, so it is absent from `prompts/list` and `prompts/get` on it fails natively. There is no separate runtime gate.
+- **Trust parity.** A server with `trust_mode: auto` (or `auto_approve_tool_changes: true`) auto-approves its prompt changes; `manual` holds them. Disabling quarantine globally (`quarantine_enabled: false`) auto-approves.
+
+Manage held prompts with the `quarantine_security` MCP tool:
+
+```jsonc
+// see what is held (all servers, or one via "name")
+{ "operation": "inspect_prompts", "name": "github" }
+// approve one held prompt, or all for a server
+{ "operation": "approve_prompt", "name": "github", "prompt_name": "summarize_pr" }
+{ "operation": "approve_all_prompts", "name": "github" }
+```
+
 ## Managing Quarantine
 
 ### View Quarantined Servers

@@ -198,11 +198,11 @@
     "inputSchema": {
       "properties": {
         "name": {
-          "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools)",
+          "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, approve_prompt, approve_all_prompts)",
           "type": "string"
         },
         "operation": {
-          "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled.",
+          "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool, inspect_prompts, approve_prompt, approve_all_prompts. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled. The prompt operations (spec 100) manage aggregated upstream prompts held by the metadata rug-pull baseline: a prompt whose advertised metadata changed since approval is withheld from prompts/list until approved.",
           "enum": [
             "list_quarantined",
             "inspect_quarantined",
@@ -213,8 +213,15 @@
             "block_tool",
             "block_all_tools",
             "enable_tool",
-            "disable_tool"
+            "disable_tool",
+            "inspect_prompts",
+            "approve_prompt",
+            "approve_all_prompts"
           ],
+          "type": "string"
+        },
+        "prompt_name": {
+          "description": "Prompt name (required for approve_prompt; spec 100)",
           "type": "string"
         },
         "tool_name": {
@@ -405,6 +412,10 @@
         "env_json": {
           "description": "Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: MERGES with existing vars (new keys added, existing keys updated).",
           "type": "string"
+        },
+        "expose_prompts": {
+          "description": "Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch.",
+          "type": "boolean"
         },
         "headers_json": {
           "description": "HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated).",
