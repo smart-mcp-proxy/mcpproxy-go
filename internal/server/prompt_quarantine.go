@@ -338,3 +338,80 @@ func (p *MCPProxyServer) ApproveAllPrompts(serverName, approvedBy string) (int, 
 	}
 	return approved, nil
 }
+
+// --- MCP quarantine_security prompt operations (spec 100 FR-7) ---
+
+// handleInspectPromptApprovals returns the prompt approval records for a server
+// (all servers when 'name' is omitted), with pending/changed counts so an agent
+// can see which prompts the rug-pull baseline is withholding.
+func (p *MCPProxyServer) handleInspectPromptApprovals(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if p.storage == nil {
+		return mcp.NewToolResultError("storage unavailable"), nil
+	}
+	serverName := request.GetString("name", "")
+	recs, err := p.storage.ListPromptApprovals(serverName)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to list prompt approvals: %v", err)), nil
+	}
+	type promptView struct {
+		Server      string `json:"server"`
+		Prompt      string `json:"prompt"`
+		Status      string `json:"status"`
+		ChangedFrom string `json:"changed_from,omitempty"`
+	}
+	var pending, changed int
+	views := make([]promptView, 0, len(recs))
+	for _, r := range recs {
+		switch r.Status {
+		case promptStatusPending:
+			pending++
+		case promptStatusChanged:
+			changed++
+		}
+		v := promptView{Server: r.ServerName, Prompt: r.PromptName, Status: r.Status}
+		if r.Status == promptStatusChanged && r.PreviousDescription != "" {
+			v.ChangedFrom = r.PreviousDescription
+		}
+		views = append(views, v)
+	}
+	payload := map[string]interface{}{
+		"prompts":         views,
+		"pending_count":   pending,
+		"changed_count":   changed,
+		"action_required": pending + changed,
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to encode: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(b)), nil
+}
+
+// handleApprovePromptByName approves one held prompt (re-baselines it).
+func (p *MCPProxyServer) handleApprovePromptByName(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+	promptName := request.GetString("prompt_name", "")
+	if promptName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'prompt_name'"), nil
+	}
+	if err := p.ApprovePrompt(serverName, promptName, "mcp"); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to approve prompt '%s': %v", promptName, err)), nil
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Prompt '%s' on server '%s' has been approved.", promptName, serverName)), nil
+}
+
+// handleApproveAllPromptsByServer approves every held prompt for a server.
+func (p *MCPProxyServer) handleApproveAllPromptsByServer(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+	n, err := p.ApproveAllPrompts(serverName, "mcp")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to approve prompts for '%s': %v", serverName, err)), nil
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Approved %d prompt(s) on server '%s'.", n, serverName)), nil
+}

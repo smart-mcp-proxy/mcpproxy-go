@@ -1152,6 +1152,9 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch."),
 				mcp.Enum("auto", "scan", "manual"),
 			),
+			mcp.WithBoolean("expose_prompts",
+				mcp.Description("Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch."),
+			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
 	}
@@ -1166,14 +1169,17 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled."),
-				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "block_tool", "block_all_tools", "enable_tool", "disable_tool"),
+				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool, inspect_prompts, approve_prompt, approve_all_prompts. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled. The prompt operations (spec 100) manage aggregated upstream prompts held by the metadata rug-pull baseline: a prompt whose advertised metadata changed since approval is withheld from prompts/list until approved."),
+				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "block_tool", "block_all_tools", "enable_tool", "disable_tool", "inspect_prompts", "approve_prompt", "approve_all_prompts"),
 			),
 			mcp.WithString("name",
-				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools)"),
+				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, approve_prompt, approve_all_prompts)"),
 			),
 			mcp.WithString("tool_name",
 				mcp.Description("Tool name (required for approve_tool and block_tool operations)"),
+			),
+			mcp.WithString("prompt_name",
+				mcp.Description("Prompt name (required for approve_prompt; spec 100)"),
 			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: quarantineSecurityTool, Handler: p.handleQuarantineSecurity})
@@ -3410,6 +3416,12 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		result, opErr = p.handleSetToolEnabledByName(request, true)
 	case "disable_tool":
 		result, opErr = p.handleSetToolEnabledByName(request, false)
+	case "inspect_prompts":
+		result, opErr = p.handleInspectPromptApprovals(request)
+	case "approve_prompt":
+		result, opErr = p.handleApprovePromptByName(request)
+	case "approve_all_prompts":
+		result, opErr = p.handleApproveAllPromptsByServer(request)
 	default:
 		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown quarantine operation: %s", operation)), nil
@@ -4603,6 +4615,16 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		TrustMode:   trustMode, // spec 086: carry the per-server trust_mode through on create
 	}
 
+	// F9: optional per-server expose_prompts override on add. GetBool can't tell
+	// absent from false, so probe the raw args for presence.
+	if rawArgs := request.GetArguments(); rawArgs != nil {
+		if raw, ok := rawArgs["expose_prompts"]; ok {
+			if b, ok := raw.(bool); ok {
+				serverConfig.ExposePrompts = &b
+			}
+		}
+	}
+
 	// Save to storage
 	if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
@@ -5117,6 +5139,19 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		}
 		v := config.Duration(d)
 		patch.InitTimeout = &v
+	}
+
+	// F9: per-server expose_prompts override. GetBool collapses absent→false, so
+	// detect key presence in the raw args and only set the pointer when the caller
+	// actually provided it (nil = leave unchanged for MergeServerConfig).
+	if args := request.GetArguments(); args != nil {
+		if raw, ok := args["expose_prompts"]; ok {
+			b, ok := raw.(bool)
+			if !ok {
+				return nil, opts, fmt.Errorf("invalid expose_prompts: must be a boolean, got %T", raw)
+			}
+			patch.ExposePrompts = &b
+		}
 	}
 
 	// Handle oauth JSON string - deep merge for nested config
