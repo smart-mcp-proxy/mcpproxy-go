@@ -59,11 +59,28 @@ func (c *Client) ListPrompts(ctx context.Context) ([]mcp.Prompt, error) {
 func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error) {
 	c.mu.RLock()
 	upstreamClient := c.client
+	serverInfo := c.serverInfo
 	transportType := c.transportType
 	c.mu.RUnlock()
 
 	if !c.IsConnected() || upstreamClient == nil {
 		return nil, fmt.Errorf("client not connected")
+	}
+
+	// Mirror the ListPrompts gates (PR #973 review, finding F3): expose_prompts
+	// was enforced only at list time, so a client that cached a prompt name (or
+	// guesses it) could still fetch content from an opted-out server via
+	// prompts/get. Enforce the same capability + expose_prompts checks here.
+	// Unlike ListPrompts these return errors, not (nil, nil): a GetPrompt caller
+	// must get either a result or an error, never a nil result.
+	if serverInfo == nil {
+		return nil, fmt.Errorf("server info not available")
+	}
+	if serverInfo.Capabilities.Prompts == nil {
+		return nil, fmt.Errorf("server %s does not advertise prompts capability", c.config.Name)
+	}
+	if v := c.exposePrompts.Load(); v != nil && !*v {
+		return nil, fmt.Errorf("prompts not exposed for server %s", c.config.Name)
 	}
 
 	// SSE transport requires request serialization to prevent concurrent request issues

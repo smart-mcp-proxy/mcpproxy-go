@@ -946,6 +946,7 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 
 	proxy, _ := createTestProxyWithRuntime(t, nil)
 	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
@@ -973,6 +974,92 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 	require.Contains(t, prompts, "server-a__greeting", "aggregated upstream prompt must be registered under its direct name")
 }
 
+// TestRefreshPrompts_AggregationDisabled_BuiltinsOnly verifies the default
+// safe posture (PR #973 review): with EnablePrompts on but the opt-in
+// aggregate_upstream_prompts flag off, RefreshPrompts serves ONLY the built-ins
+// and never touches upstream servers.
+func TestRefreshPrompts_AggregationDisabled_BuiltinsOnly(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = false // the default — safe posture
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	assert.Contains(t, prompts, "setup-new-mcp-server", "built-ins still register when aggregation is off")
+	assert.NotContains(t, prompts, "server-a__greeting", "upstream prompt must NOT be aggregated when the opt-in flag is off")
+	assert.Len(t, prompts, 2, "only the two built-in prompts are present")
+}
+
+// TestRefreshPrompts_ReadsLiveAggregateFlag is the F4 regression: RefreshPrompts
+// must honor the LIVE config snapshot (currentConfig() -> runtime), not the
+// construction-time p.config, so an aggregate_upstream_prompts toggle takes
+// effect on hot-reload without a restart. We deliberately give proxy.config a
+// stale snapshot that DISAGREES with the live one; if RefreshPrompts read the
+// boot snapshot it would skip aggregation and the assertion would fail.
+func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, rt := createTestProxyWithRuntime(t, nil)
+
+	// Live snapshot (what currentConfig() -> rt.Config() returns) OPTS IN.
+	live := rt.Config()
+	live.EnablePrompts = true
+	live.AggregateUpstreamPrompts = true
+
+	// Construction-time snapshot DISAGREES (aggregation off). If RefreshPrompts
+	// read p.config it would skip aggregation — the assertion below would fail.
+	boot := *live
+	boot.AggregateUpstreamPrompts = false
+	proxy.config = &boot
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "server-a__greeting",
+		"RefreshPrompts must honor the LIVE aggregate flag, not the boot snapshot (F4)")
+}
+
 func TestRefreshPrompts_NoUpstreamClients_RegistersOnlyBuiltins(t *testing.T) {
 	proxy, _ := createTestProxyWithRuntime(t, nil)
 	proxy.config.EnablePrompts = true
@@ -996,6 +1083,7 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 
 	proxy, _ := createTestProxyWithRuntime(t, nil)
 	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)

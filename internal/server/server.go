@@ -489,6 +489,13 @@ func (s *Server) listenForRoutingModeRefresh() {
 			// effect without a restart. Fires on both reload paths, which both
 			// emit config.reloaded.
 			s.reapplyScannerSecurityConfig()
+			// PR #973: aggregate_upstream_prompts is hot-reloadable. RefreshPrompts
+			// reads the live snapshot, so re-run it on config reload to apply a
+			// lone flag flip without a restart. (servers.changed already refreshes
+			// prompts in its own case; config.reloaded fires for a config-only edit.)
+			if s.mcpProxy != nil {
+				s.mcpProxy.RefreshPrompts()
+			}
 		case runtime.EventTypeSecurityScanSettled:
 			// Spec 086 stage 3 (FR-011): a scan-mode server that was quarantined on
 			// add stays quarantined until its baseline scan settles GREEN. React to

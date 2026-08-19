@@ -30,7 +30,8 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, config.AllowServerRemove)
 
 	// Test prompts default
-	assert.True(t, config.EnablePrompts)
+	assert.True(t, config.EnablePrompts, "built-in prompts stay on by default")
+	assert.False(t, config.AggregateUpstreamPrompts, "upstream aggregation is opt-in (off by default)")
 
 	// Test empty servers list
 	assert.Empty(t, config.Servers)
@@ -90,20 +91,21 @@ func TestConfigValidation(t *testing.T) {
 
 func TestConfigJSONSerialization(t *testing.T) {
 	original := &Config{
-		Listen:            ":9090",
-		DataDir:           "/tmp/test",
-		EnableTray:        false,
-		DebugSearch:       true,
-		TopK:              10,
-		ToolsLimit:        20,
-		ToolResponseLimit: 50000,
-		CallToolTimeout:   Duration(5 * time.Minute),
-		RequireMCPAuth:    true,
-		ReadOnlyMode:      true,
-		DisableManagement: true,
-		AllowServerAdd:    false,
-		AllowServerRemove: false,
-		EnablePrompts:     false,
+		Listen:                   ":9090",
+		DataDir:                  "/tmp/test",
+		EnableTray:               false,
+		DebugSearch:              true,
+		TopK:                     10,
+		ToolsLimit:               20,
+		ToolResponseLimit:        50000,
+		CallToolTimeout:          Duration(5 * time.Minute),
+		RequireMCPAuth:           true,
+		ReadOnlyMode:             true,
+		DisableManagement:        true,
+		AllowServerAdd:           false,
+		AllowServerRemove:        false,
+		EnablePrompts:            false,
+		AggregateUpstreamPrompts: true,
 		Servers: []*ServerConfig{
 			{
 				Name:     "test-server",
@@ -139,6 +141,7 @@ func TestConfigJSONSerialization(t *testing.T) {
 	assert.Equal(t, original.AllowServerAdd, restored.AllowServerAdd)
 	assert.Equal(t, original.AllowServerRemove, restored.AllowServerRemove)
 	assert.Equal(t, original.EnablePrompts, restored.EnablePrompts)
+	assert.Equal(t, original.AggregateUpstreamPrompts, restored.AggregateUpstreamPrompts)
 	assert.Len(t, restored.Servers, 1)
 	assert.Equal(t, original.Servers[0].Name, restored.Servers[0].Name)
 }

@@ -596,6 +596,13 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// unreachable over Streamable HTTP (PR #973 review, P1).
 	if p.config.EnablePrompts {
 		opts = append(opts, mcpserver.WithPromptCapabilities(true))
+		// Enforce agent-token + profile scope on aggregated prompts across every
+		// routing-mode server. mcp-go applies this on BOTH prompts/list and
+		// prompts/get (passesPromptFilters), closing the F1 get-time auth bypass.
+		// Added to the shared opts (before directOpts copies it) so directServer,
+		// codeExecServer and callToolServer all inherit it; p.server gets the
+		// same filter in NewMCPProxyServer, where proxy exists.
+		opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
 	}
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
@@ -722,20 +729,18 @@ func buildAggregatedServerPrompts(
 	return all
 }
 
-// RefreshPrompts rebuilds the default server's prompt set: the built-in
-// prompts plus every prompt aggregated from connected upstream servers.
-// Should be called when upstream servers change (connect/disconnect). A
-// no-op when prompts are disabled.
+// RefreshPrompts rebuilds every routing-mode server's prompt set: the built-in
+// prompts, plus (only when aggregate_upstream_prompts is enabled) every prompt
+// aggregated from connected upstream servers. Should be called when upstream
+// servers change (connect/disconnect) or on config hot-reload. A no-op when
+// prompts are disabled entirely.
 func (p *MCPProxyServer) RefreshPrompts() {
-	if !p.config.EnablePrompts {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
-	if err != nil {
-		p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
+	// Read the LIVE config snapshot (currentConfig()), never the construction-
+	// time p.config: p.config is never reassigned on hot-reload, so a boot-
+	// snapshot read would make the aggregate_upstream_prompts toggle restart-only
+	// (PR #973 review, finding F4).
+	cfg := p.currentConfig()
+	if cfg == nil || !cfg.EnablePrompts {
 		return
 	}
 
@@ -744,7 +749,31 @@ func (p *MCPProxyServer) RefreshPrompts() {
 		{Prompt: troubleshootServerPrompt(), Handler: p.handleTroubleshootPrompt},
 	}
 
-	all := buildAggregatedServerPrompts(builtins, upstreamPrompts, p.upstreamManager.GetPrompt)
+	// Upstream aggregation is opt-in (AggregateUpstreamPrompts, default false):
+	// users are safe by default and enable it deliberately. When it is off we
+	// still (re-)set the built-ins on every routing-mode server, which also
+	// clears any previously-aggregated upstream prompts if the flag was flipped
+	// off at runtime.
+	var all []mcpserver.ServerPrompt
+	if cfg.AggregateUpstreamPrompts {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
+		if err != nil {
+			p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
+			return
+		}
+		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.upstreamManager.GetPrompt)
+		p.logger.Info("refreshed prompts",
+			zap.Int("upstream_prompt_count", len(upstreamPrompts)),
+			zap.Int("total_prompt_count", len(all)))
+	} else {
+		// nil upstreamPrompts: the aggregation loop never runs, so the nil
+		// getPrompt is never invoked.
+		all = buildAggregatedServerPrompts(builtins, nil, nil)
+		p.logger.Debug("refreshed prompts (upstream aggregation disabled, built-ins only)",
+			zap.Int("total_prompt_count", len(all)))
+	}
 
 	// Set on every routing-mode server (Spec 031), not just the default
 	// retrieve_tools server: /mcp is served via GetMCPServerForMode, which
@@ -755,10 +784,6 @@ func (p *MCPProxyServer) RefreshPrompts() {
 			srv.SetPrompts(all...)
 		}
 	}
-
-	p.logger.Info("refreshed prompts",
-		zap.Int("upstream_prompt_count", len(upstreamPrompts)),
-		zap.Int("total_prompt_count", len(all)))
 }
 
 // GetMCPServerForMode returns the MCP server instance for the given routing mode.

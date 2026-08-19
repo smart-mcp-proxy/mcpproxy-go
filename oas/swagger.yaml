@@ -32,6 +32,15 @@ components:
         activity_retention_days:
           description: Activity logging settings (RFC-003)
           type: integer
+        aggregate_upstream_prompts:
+          description: |-
+            AggregateUpstreamPrompts, when true, aggregates every connected upstream
+            server's advertised MCP prompts into mcpproxy's own prompts/list
+            (exposed as "<server>__<prompt>"). OFF by default: users are safe by
+            default and opt in deliberately. EnablePrompts still governs the built-in
+            prompts + the prompts capability; this flag gates ONLY the upstream
+            aggregation performed by RefreshPrompts. Hot-reloadable.
+          type: boolean
         allow_private_registry_fetch:
           description: |-
             AllowPrivateRegistryFetch opts out of the registry SSRF guard (MCP-1076,

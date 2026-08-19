@@ -208,6 +208,7 @@ func setupViper() {
 	viper.SetDefault("allow-server-add", true)
 	viper.SetDefault("allow-server-remove", true)
 	viper.SetDefault("enable-prompts", true)
+	viper.SetDefault("aggregate-upstream-prompts", false)
 	viper.SetDefault("check-server-repo", true)
 
 	// TLS defaults

@@ -366,6 +366,14 @@ type Config struct {
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
 
+	// AggregateUpstreamPrompts, when true, aggregates every connected upstream
+	// server's advertised MCP prompts into mcpproxy's own prompts/list
+	// (exposed as "<server>__<prompt>"). OFF by default: users are safe by
+	// default and opt in deliberately. EnablePrompts still governs the built-in
+	// prompts + the prompts capability; this flag gates ONLY the upstream
+	// aggregation performed by RefreshPrompts. Hot-reloadable.
+	AggregateUpstreamPrompts bool `json:"aggregate_upstream_prompts" mapstructure:"aggregate-upstream-prompts"`
+
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
 
@@ -1659,8 +1667,11 @@ func DefaultConfig() *Config {
 		AllowServerAdd:    true,
 		AllowServerRemove: true,
 
-		// Prompts enabled by default
+		// Prompts enabled by default (built-in prompts + capability)
 		EnablePrompts: true,
+
+		// Upstream prompt aggregation OFF by default (opt-in) — see field doc.
+		AggregateUpstreamPrompts: false,
 
 		// Repository detection enabled by default
 		CheckServerRepo: true,

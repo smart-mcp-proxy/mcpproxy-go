@@ -551,6 +551,13 @@ func NewMCPProxyServer(
 
 	// Register prompts if enabled
 	if config.EnablePrompts {
+		// Attach the aggregated-prompt auth filter to the default retrieve_tools
+		// server. It closes over `proxy` (needed by resolveActiveProfile), which
+		// did not exist when mcpServer was constructed above; ServerOption is
+		// just func(*MCPServer), so invoking it here is identical to having
+		// passed it to NewMCPServer. Enforced on prompts/list AND prompts/get
+		// (PR #973 review, finding F1).
+		mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
 		proxy.registerPrompts()
 	}
 

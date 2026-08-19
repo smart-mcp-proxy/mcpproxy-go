@@ -159,6 +159,52 @@ func TestClient_GetPrompt_ReturnsUpstreamResult(t *testing.T) {
 	assert.Equal(t, "hello", textContent.Text)
 }
 
+// TestClient_GetPrompt_ExposePromptsFalse_ReturnsErrorNoUpstreamCall is the
+// PR #973 finding F3 regression: expose_prompts:false was enforced only at
+// list time, so GetPrompt still forwarded to the upstream. It must now fail
+// closed with an error and never dispatch.
+func TestClient_GetPrompt_ExposePromptsFalse_ReturnsErrorNoUpstreamCall(t *testing.T) {
+	calls := 0
+	upstream := newTestPromptUpstream(t, true, &calls)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, config.BoolPtr(false))
+
+	result, err := c.GetPrompt(context.Background(), "greeting", nil)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "not exposed")
+	assert.Equal(t, 0, calls, "opted-out GetPrompt must never reach the upstream prompt handler")
+}
+
+// TestClient_GetPrompt_SetExposePromptsFalse_TakesEffectWithoutReconnect is the
+// GetPrompt twin of TestClient_SetExposePrompts_TakesEffectWithoutReconnect: a
+// hot-reloaded opt-out must gate GetPrompt on the same live connection, not just
+// ListPrompts.
+func TestClient_GetPrompt_SetExposePromptsFalse_TakesEffectWithoutReconnect(t *testing.T) {
+	calls := 0
+	upstream := newTestPromptUpstream(t, true, &calls)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	result, err := c.GetPrompt(context.Background(), "greeting", nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, calls)
+
+	exposePrompts := false
+	c.SetExposePrompts(&exposePrompts)
+
+	result, err = c.GetPrompt(context.Background(), "greeting", nil)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "not exposed")
+	assert.Equal(t, 1, calls, "flip to expose_prompts:false must block GetPrompt without a reconnect")
+}
+
 func unconnectedTestClient(t *testing.T) *Client {
 	t.Helper()
 	cfg := &config.ServerConfig{Name: "test-server", Protocol: "streamable-http", URL: "http://127.0.0.1:1"}
