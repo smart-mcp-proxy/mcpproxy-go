@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
@@ -763,7 +764,11 @@ func (p *MCPProxyServer) RefreshPrompts() {
 			p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
 			return
 		}
-		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.upstreamManager.GetPrompt)
+		// F2 layer 2: drop prompts whose name/description/args trip the TPA
+		// scanner before they are ever registered (parity with tool-description
+		// poisoning detection).
+		upstreamPrompts = p.scanAggregatedPrompts(upstreamPrompts)
+		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated)
 		p.logger.Info("refreshed prompts",
 			zap.Int("upstream_prompt_count", len(upstreamPrompts)),
 			zap.Int("total_prompt_count", len(all)))
@@ -784,6 +789,66 @@ func (p *MCPProxyServer) RefreshPrompts() {
 			srv.SetPrompts(all...)
 		}
 	}
+}
+
+// promptScanText projects a prompt's client-visible metadata (description + every
+// argument name/desc) into one string so a TPA payload hidden in a prompt
+// description OR an argument description is scanned the same way a poisoned tool
+// description is.
+func promptScanText(pr mcp.Prompt) string {
+	var b strings.Builder
+	b.WriteString(pr.Description)
+	for _, a := range pr.Arguments {
+		b.WriteByte('\n')
+		b.WriteString(a.Name)
+		if a.Description != "" {
+			b.WriteByte(' ')
+			b.WriteString(a.Description)
+		}
+	}
+	return b.String()
+}
+
+// scanAggregatedPrompts runs the deterministic, offline TPA scanner over each
+// aggregated upstream prompt's name+description+arguments and DROPS any prompt
+// whose baseline verdict is "dangerous" (hard-tier: hidden-unicode, decoded
+// payload, curated injection/exfiltration phrases). This is the prompt analogue
+// of the tool-description TPA scan. A "warnings"/"clean" verdict is kept
+// (dropping on soft signals would blackhole legitimate prompts). Per-prompt
+// scanning is cheap (offline, cached bundle) and RefreshPrompts is off the
+// request hot path (Finding F2, layer 2).
+func (p *MCPProxyServer) scanAggregatedPrompts(prompts []mcp.Prompt) []mcp.Prompt {
+	if len(prompts) == 0 {
+		return prompts
+	}
+	kept := make([]mcp.Prompt, 0, len(prompts))
+	for _, pr := range prompts {
+		serverName, promptName, ok := strings.Cut(pr.Name, ":")
+		if !ok {
+			kept = append(kept, pr) // malformed name — dropped later by buildAggregatedServerPrompts
+			continue
+		}
+		meta := &config.ToolMetadata{
+			ServerName:  serverName,
+			Name:        promptName,
+			Description: promptScanText(pr),
+		}
+		verdict, findings, _ := scanner.ScanToolMetadataVerdict(serverName, []*config.ToolMetadata{meta}, nil)
+		if verdict == "dangerous" {
+			signals := make([]string, 0, len(findings))
+			for _, f := range findings {
+				signals = append(signals, f.RuleID)
+			}
+			p.logger.Warn("Dropping upstream prompt: poisoned description (TPA scan)",
+				zap.String("server", serverName),
+				zap.String("prompt", promptName),
+				zap.String("verdict", verdict),
+				zap.Strings("tpa_signals", signals))
+			continue
+		}
+		kept = append(kept, pr)
+	}
+	return kept
 }
 
 // GetMCPServerForMode returns the MCP server instance for the given routing mode.

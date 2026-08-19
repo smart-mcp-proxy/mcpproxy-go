@@ -780,6 +780,67 @@ func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetSe
 	}
 }
 
+// emitActivityPromptGet safely emits an upstream prompts/get completion (F10).
+func (p *MCPProxyServer) emitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}) {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		p.mainServer.runtime.EmitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errorMsg, durationMs, arguments, response)
+	}
+}
+
+// getPromptAggregated is the single getter passed to buildAggregatedServerPrompts.
+// It composes the three step-2 security layers around one upstream round-trip
+// (PR #973 review): F12 size caps are applied inside Manager.GetPrompt, then F2
+// sanitises the result, then F10 records an activity row. The request-id is
+// minted ONCE so F2's policy_decision row and F10's prompt_get row correlate
+// under `activity list --request-id`.
+func (p *MCPProxyServer) getPromptAggregated(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error) {
+	start := time.Now()
+
+	var sessionID string
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+	}
+	serverName, promptName, _ := strings.Cut(name, ":")
+	requestID := reqcontext.GetRequestID(ctx)
+	if requestID == "" {
+		requestID = mintCorrelationID("prompts_get", serverName, promptName)
+	}
+
+	// F12 size cap already applied inside Manager.GetPrompt.
+	result, err := p.upstreamManager.GetPrompt(ctx, name, args)
+
+	// F2: sanitise the result (redact/strip/spotlight, or block on critical
+	// secret). Pass the SHARED requestID so the policy_decision row joins the
+	// prompt_get row below.
+	if err == nil && result != nil {
+		if sanitised, blocked := p.applyPromptResultSanitisation(ctx, serverName, promptName, requestID, result); blocked {
+			result, err = nil, fmt.Errorf("prompt output blocked by sanitisation policy")
+		} else {
+			result = sanitised
+		}
+	}
+
+	// F10: record the POST-sanitise outcome (a block is logged as an error row).
+	status, errMsg := storage.ActivityStatusSuccess, ""
+	var response interface{}
+	if err != nil {
+		status, errMsg = storage.ActivityStatusError, err.Error()
+	} else {
+		response = result
+	}
+	var argsForRecord map[string]interface{}
+	if len(args) > 0 {
+		argsForRecord = make(map[string]interface{}, len(args))
+		for k, v := range args {
+			argsForRecord[k] = v
+		}
+	}
+	p.emitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errMsg,
+		time.Since(start).Milliseconds(), argsForRecord, response)
+
+	return result, err
+}
+
 // buildCallToolVariantTool constructs the mcp.Tool definition for a single
 // call_tool_* variant (read/write/destructive). Factored out so both
 // registerTools and schema tests exercise the same builder.
