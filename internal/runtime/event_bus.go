@@ -641,6 +641,14 @@ func (r *Runtime) EmitActivityPromptGet(serverName, promptName, sessionID, reque
 	r.publishEvent(newEvent(EventTypeActivityPromptGet, payload))
 }
 
+// emitUpstreamPromptsChanged signals that a connected upstream changed its
+// advertised prompt list at runtime (F13). Debounced by promptsRefreshDebouncer,
+// so it fires at most once per window regardless of how many upstreams changed.
+// server.listenForRoutingModeRefresh subscribes and calls RefreshPrompts once.
+func (r *Runtime) emitUpstreamPromptsChanged() {
+	r.publishEvent(newEvent(EventTypeUpstreamPromptsChanged, nil))
+}
+
 // EmitActivityConfigChange emits an event when configuration changes (Spec 024).
 // action is one of: server_added, server_removed, server_updated, settings_changed
 // source indicates how the change was triggered: "mcp", "cli", or "api"

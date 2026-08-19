@@ -347,3 +347,40 @@ func TestClient_ListPrompts_EndlessCursorTerminatesAtPageCap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, prompts, maxListPromptsPages, "endless-cursor upstream must terminate at the page cap")
 }
+
+// TestClient_HandlePromptsListChanged_FiresCallback is the F13 wiring test: the
+// core prompts/list_changed handler must invoke the onPromptsChanged callback
+// with the server name. (Real server->client push delivery is covered by manual
+// QA; this asserts the dispatch + callback the proxy relies on.)
+func TestClient_HandlePromptsListChanged_FiresCallback(t *testing.T) {
+	upstream := newTestPromptUpstream(t, true, nil)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	got := make(chan string, 1)
+	c.SetOnPromptsChangedCallback(func(serverName string) {
+		got <- serverName
+	})
+
+	c.handlePromptsListChangedNotification()
+
+	select {
+	case name := <-got:
+		assert.Equal(t, c.config.Name, name)
+	case <-time.After(time.Second):
+		t.Fatal("onPromptsChanged callback did not fire")
+	}
+}
+
+// TestClient_HandlePromptsListChanged_NilCallbackNoPanic ensures the handler is
+// safe when no callback is registered.
+func TestClient_HandlePromptsListChanged_NilCallbackNoPanic(t *testing.T) {
+	upstream := newTestPromptUpstream(t, true, nil)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+	c.handlePromptsListChangedNotification() // must not panic
+}

@@ -496,6 +496,16 @@ func (s *Server) listenForRoutingModeRefresh() {
 			if s.mcpProxy != nil {
 				s.mcpProxy.RefreshPrompts()
 			}
+		case runtime.EventTypeUpstreamPromptsChanged:
+			// F13: an upstream added/removed a prompt at runtime (debounced
+			// notifications/prompts/list_changed). Rebuild only the aggregated
+			// prompt set — RefreshPrompts is a no-op when prompts or aggregation
+			// are disabled. Runs on THIS single listener goroutine, the same one
+			// servers.changed/config.reloaded use, so it never races another
+			// RefreshPrompts (no new reentrancy).
+			if s.mcpProxy != nil {
+				s.mcpProxy.RefreshPrompts()
+			}
 		case runtime.EventTypeSecurityScanSettled:
 			// Spec 086 stage 3 (FR-011): a scan-mode server that was quarantined on
 			// add stays quarantined until its baseline scan settles GREEN. React to

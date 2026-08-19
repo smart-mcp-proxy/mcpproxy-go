@@ -79,6 +79,9 @@ type Client struct {
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
 
+	// Prompts-changed callback for notifications/prompts/list_changed handling (F13)
+	promptsChangedCallback func(serverName string)
+
 	// consecutiveHealthFailures counts back-to-back transient health-check
 	// failures. The state-machine only flips to Error once it reaches
 	// healthCheckFailureThreshold; one success resets it. Hard failures
@@ -219,6 +222,23 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 					zap.String("server", serverName))
 			}
 		}()
+	})
+
+	// Wire core prompts/list_changed notifications to the manager-level callback
+	// (F13). Unlike the tool-discovery callback (which runs a network ListTools
+	// and therefore spawns a goroutine), the manager callback only schedules a
+	// debounced refresh — non-blocking — so no goroutine is needed on mcp-go's
+	// notification goroutine here.
+	coreClient.SetOnPromptsChangedCallback(func(serverName string) {
+		mc.mu.RLock()
+		callback := mc.promptsChangedCallback
+		mc.mu.RUnlock()
+		if callback == nil {
+			mc.logger.Debug("No prompts-changed callback set - notification ignored",
+				zap.String("server", serverName))
+			return
+		}
+		callback(serverName)
 	})
 
 	return mc, nil
@@ -578,6 +598,15 @@ func (mc *Client) SetToolDiscoveryCallback(callback func(ctx context.Context, se
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 	mc.toolDiscoveryCallback = callback
+}
+
+// SetPromptsChangedCallback sets the callback invoked when a
+// notifications/prompts/list_changed notification is received from the upstream
+// server (F13).
+func (mc *Client) SetPromptsChangedCallback(callback func(serverName string)) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.promptsChangedCallback = callback
 }
 
 // acquireListToolsContext claims the in-progress flag for an upstream ListTools

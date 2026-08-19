@@ -50,6 +50,11 @@ const (
 	EventTypeActivityConfigChange EventType = "activity.config_change"
 	// EventTypeActivityPromptGet is emitted when an upstream prompts/get completes (Finding F10).
 	EventTypeActivityPromptGet EventType = "activity.prompt_get.completed"
+	// EventTypeUpstreamPromptsChanged is emitted (debounced) when a connected
+	// upstream sends notifications/prompts/list_changed, so the aggregated prompt
+	// set is rebuilt without waiting for an unrelated servers.changed (F13).
+	// Carries no payload — RefreshPrompts re-aggregates from live state.
+	EventTypeUpstreamPromptsChanged EventType = "upstream.prompts_changed"
 
 	// Spec 026: Sensitive data detection event
 	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.

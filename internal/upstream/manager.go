@@ -129,6 +129,9 @@ type Manager struct {
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
 
+	// Prompts-changed callback for notifications/prompts/list_changed handling (F13)
+	promptsChangedCallback func(serverName string)
+
 	// limiters owns the spec-093 concurrency limiter instances (one per upstream
 	// plus the proxy-wide aggregate). Created once and never replaced — hot
 	// reload republishes limits INTO it so occupancy is shared across
@@ -356,6 +359,16 @@ func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, se
 	m.logger.Debug("Tool discovery callback set on manager")
 }
 
+// SetPromptsChangedCallback sets the callback for triggering aggregated-prompt
+// refresh when an upstream sends notifications/prompts/list_changed (F13). It is
+// passed to all new clients created by the manager.
+func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.promptsChangedCallback = callback
+	m.logger.Debug("Prompts-changed callback set on manager")
+}
+
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
@@ -432,6 +445,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	// Set up tool discovery callback for notifications/tools/list_changed handling
 	if m.toolDiscoveryCallback != nil {
 		client.SetToolDiscoveryCallback(m.toolDiscoveryCallback)
+	}
+
+	// Set up prompts-changed callback for notifications/prompts/list_changed (F13)
+	if m.promptsChangedCallback != nil {
+		client.SetPromptsChangedCallback(m.promptsChangedCallback)
 	}
 
 	// Spec 093: install admission control before the client becomes reachable,
