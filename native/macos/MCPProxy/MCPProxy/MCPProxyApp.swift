@@ -1326,7 +1326,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(stop)
         }
 
+        // Help / project links (discussion #948): a running-app user must always
+        // have a way back to the homepage, docs, and issue tracker.
+        menu.addItem(.separator())
+
+        let docsItem = NSMenuItem(title: "Documentation", action: #selector(openDocumentation), keyEquivalent: "")
+        docsItem.target = self
+        menu.addItem(docsItem)
+
+        let issueItem = NSMenuItem(title: "Report an Issue…", action: #selector(reportIssue), keyEquivalent: "")
+        issueItem.target = self
+        menu.addItem(issueItem)
+
+        let aboutItem = NSMenuItem(title: "About MCPProxy", action: #selector(showAboutPanel), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
         // Quit
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit MCPProxy", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -1618,6 +1635,48 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func openConfigFile() {
         NSWorkspace.shared.open(InstancePaths.configFileURL)
+    }
+
+    // MARK: - Project links (discussion #948)
+
+    @objc private func openDocumentation() {
+        NSWorkspace.shared.open(ProjectLinks.docs)
+    }
+
+    @objc private func reportIssue() {
+        NSWorkspace.shared.open(ProjectLinks.issues)
+    }
+
+    /// Shows the standard About panel (app name + version) with a credits block
+    /// that links back to the homepage, source, and docs — so "About MCPProxy"
+    /// carries the way back to the project, not just a version string.
+    @objc private func showAboutPanel() {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let credits = NSMutableAttributedString()
+        let body: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        credits.append(NSAttributedString(
+            string: "Smart MCP proxy — intelligent tool discovery, token savings, and security quarantine.\n\n",
+            attributes: body))
+        appendLink(to: credits, label: "Homepage", url: ProjectLinks.homepage)
+        credits.append(NSAttributedString(string: "   ", attributes: body))
+        appendLink(to: credits, label: "GitHub", url: ProjectLinks.github)
+        credits.append(NSAttributedString(string: "   ", attributes: body))
+        appendLink(to: credits, label: "Documentation", url: ProjectLinks.docs)
+
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: credits
+        ])
+    }
+
+    private func appendLink(to string: NSMutableAttributedString, label: String, url: URL) {
+        string.append(NSAttributedString(string: label, attributes: [
+            .link: url,
+            .font: NSFont.systemFont(ofSize: 11),
+        ]))
     }
 
     @objc private func openLogsDirectory() {

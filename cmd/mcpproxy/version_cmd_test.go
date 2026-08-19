@@ -21,9 +21,17 @@ func TestVersionCommandTableOutput(t *testing.T) {
 		t.Fatalf("Execute() error: %v", err)
 	}
 
-	want := fmt.Sprintf("MCPProxy %s (%s) %s/%s\n", version, Edition, runtime.GOOS, runtime.GOARCH)
-	if got := buf.String(); got != want {
-		t.Errorf("table output mismatch:\n got: %q\nwant: %q", got, want)
+	got := buf.String()
+	// First line is the canonical version string.
+	wantFirst := fmt.Sprintf("MCPProxy %s (%s) %s/%s", version, Edition, runtime.GOOS, runtime.GOARCH)
+	if !strings.HasPrefix(got, wantFirst+"\n") {
+		t.Errorf("table output should start with %q, got: %q", wantFirst, got)
+	}
+	// Discussion #948: the version output carries the project links.
+	for _, link := range []string{"https://mcpproxy.app", "https://github.com/smart-mcp-proxy/mcpproxy-go", "https://docs.mcpproxy.app"} {
+		if !strings.Contains(got, link) {
+			t.Errorf("version output must contain project link %q, got: %q", link, got)
+		}
 	}
 }
 

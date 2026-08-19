@@ -6,7 +6,7 @@
          state so the content fluidly reclaims space when the sidebar shrinks
          to its icon rail. -->
     <div
-      class="drawer-content grid grid-rows-[auto_1fr] h-screen bg-base-200 transition-[padding] duration-200 ease-out"
+      class="drawer-content grid grid-rows-[auto_1fr_auto] h-screen bg-base-200 transition-[padding] duration-200 ease-out"
       :class="systemStore.sidebarCollapsed ? 'lg:pl-14' : 'lg:pl-64'"
     >
       <!-- Top Header -->
@@ -16,6 +16,9 @@
       <main class="overflow-y-auto p-6">
         <router-view />
       </main>
+
+      <!-- Persistent footer with project links (discussion #948) -->
+      <AppFooter />
     </div>
 
     <!-- Sidebar -->
@@ -43,6 +46,7 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import SidebarNav from '@/components/SidebarNav.vue'
 import TopHeader from '@/components/TopHeader.vue'
+import AppFooter from '@/components/AppFooter.vue'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConnectionStatus from '@/components/ConnectionStatus.vue'
 import AuthErrorModal from '@/components/AuthErrorModal.vue'
