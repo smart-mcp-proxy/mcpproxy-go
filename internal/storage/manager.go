@@ -489,6 +489,43 @@ func (m *Manager) ListToolApprovals(serverName string) ([]*ToolApprovalRecord, e
 	return m.db.ListToolApprovals(serverName)
 }
 
+// --- Prompt approval wrappers (spec 100) ---
+
+// SavePromptApproval upserts a prompt approval record.
+func (m *Manager) SavePromptApproval(record *PromptApprovalRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db.SavePromptApproval(record)
+}
+
+// GetPromptApproval retrieves a prompt approval record by server and prompt name.
+func (m *Manager) GetPromptApproval(serverName, promptName string) (*PromptApprovalRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.db.GetPromptApproval(serverName, promptName)
+}
+
+// ListPromptApprovals returns all prompt approval records for a server (all when empty).
+func (m *Manager) ListPromptApprovals(serverName string) ([]*PromptApprovalRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.db.ListPromptApprovals(serverName)
+}
+
+// DeletePromptApproval deletes a prompt approval record.
+func (m *Manager) DeletePromptApproval(serverName, promptName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db.DeletePromptApproval(serverName, promptName)
+}
+
+// DeleteServerPromptApprovals deletes all prompt approval records for a server.
+func (m *Manager) DeleteServerPromptApprovals(serverName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db.DeleteServerPromptApprovals(serverName)
+}
+
 // DeleteToolApproval deletes a tool approval record
 func (m *Manager) DeleteToolApproval(serverName, toolName string) error {
 	m.mu.Lock()

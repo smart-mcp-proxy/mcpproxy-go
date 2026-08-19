@@ -948,6 +948,8 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 	proxy, _ := createTestProxyWithRuntime(t, nil)
 	proxy.config.EnablePrompts = true
 	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
+	qOff := false
+	proxy.config.QuarantineEnabled = &qOff // spec 100: these tests verify aggregation, not the rug-pull baseline
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
@@ -973,6 +975,46 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 	prompts := proxy.server.ListPrompts()
 	require.Contains(t, prompts, "setup-new-mcp-server", "built-in prompts must still be registered")
 	require.Contains(t, prompts, "server-a__greeting", "aggregated upstream prompt must be registered under its direct name")
+}
+
+// TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen (spec 100) proves the
+// full RefreshPrompts path withholds a first-seen prompt on a quarantine-
+// enforced server, and that approving it registers it on the next refresh.
+func TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		// Server present in config as manual trust + quarantine on (the default).
+		{Name: "server-a", Protocol: "streamable-http", Enabled: true, TrustMode: string(config.TrustModeManual)},
+	})
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name: "server-a", Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "setup-new-mcp-server", "built-ins are always registered")
+	require.NotContains(t, prompts, "server-a__greeting", "a first-seen prompt on a manual server is withheld (rug-pull baseline)")
+
+	// Approve it → it registers on the triggered refresh.
+	require.NoError(t, proxy.ApprovePrompt("server-a", "greeting", "tester"))
+	prompts = proxy.server.ListPrompts()
+	require.Contains(t, prompts, "server-a__greeting", "an approved prompt is registered")
 }
 
 // TestRefreshPrompts_AggregationDisabled_BuiltinsOnly verifies the default
@@ -1028,6 +1070,8 @@ func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
 	live := rt.Config()
 	live.EnablePrompts = true
 	live.AggregateUpstreamPrompts = true
+	qOff := false
+	live.QuarantineEnabled = &qOff // spec 100: verify aggregation, not the rug-pull baseline
 
 	// Construction-time snapshot DISAGREES (aggregation off). If RefreshPrompts
 	// read p.config it would skip aggregation — the assertion below would fail.
@@ -1085,6 +1129,8 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 	proxy, _ := createTestProxyWithRuntime(t, nil)
 	proxy.config.EnablePrompts = true
 	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
+	qOff := false
+	proxy.config.QuarantineEnabled = &qOff // spec 100: these tests verify aggregation, not the rug-pull baseline
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
 	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)

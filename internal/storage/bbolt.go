@@ -87,6 +87,7 @@ func (b *BoltDB) initBuckets() error {
 			ToolStatsBucket,
 			ToolHashBucket,
 			ToolApprovalBucket,
+			PromptApprovalBucket,
 			OAuthTokenBucket,
 			MetaBucket,
 			ActivityRecordsBucket,
@@ -492,6 +493,95 @@ func (b *BoltDB) PruneToolApprovalsNotIn(keep map[string]bool) (int, error) {
 		return nil
 	})
 	return removed, err
+}
+
+// --- Prompt approval CRUD (spec 100, mirrors the tool approval ops 1:1) ---
+
+// SavePromptApproval upserts a prompt approval record.
+func (b *BoltDB) SavePromptApproval(record *PromptApprovalRecord) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(PromptApprovalBucket))
+		data, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(record.Key()), data)
+	})
+}
+
+// GetPromptApproval retrieves a prompt approval record by server and prompt
+// name. Returns ErrPromptApprovalNotFound (wrapped) when no record exists; any
+// other error is a real read failure and MUST NOT be treated as "missing".
+func (b *BoltDB) GetPromptApproval(serverName, promptName string) (*PromptApprovalRecord, error) {
+	var record *PromptApprovalRecord
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(PromptApprovalBucket))
+		key := PromptApprovalKey(serverName, promptName)
+		data := bucket.Get([]byte(key))
+		if data == nil {
+			return fmt.Errorf("%w: %s", ErrPromptApprovalNotFound, key)
+		}
+		record = &PromptApprovalRecord{}
+		return record.UnmarshalBinary(data)
+	})
+	return record, err
+}
+
+// ListPromptApprovals returns all prompt approval records for a server. If
+// serverName is empty, returns all records across all servers.
+func (b *BoltDB) ListPromptApprovals(serverName string) ([]*PromptApprovalRecord, error) {
+	var records []*PromptApprovalRecord
+	prefix := ""
+	if serverName != "" {
+		prefix = serverName + ":"
+	}
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(PromptApprovalBucket))
+		return bucket.ForEach(func(k, v []byte) error {
+			if prefix != "" && !bytes.HasPrefix(k, []byte(prefix)) {
+				return nil
+			}
+			record := &PromptApprovalRecord{}
+			if err := record.UnmarshalBinary(v); err != nil {
+				return err
+			}
+			records = append(records, record)
+			return nil
+		})
+	})
+	return records, err
+}
+
+// DeletePromptApproval deletes a prompt approval record.
+func (b *BoltDB) DeletePromptApproval(serverName, promptName string) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(PromptApprovalBucket))
+		return bucket.Delete([]byte(PromptApprovalKey(serverName, promptName)))
+	})
+}
+
+// DeleteServerPromptApprovals deletes all prompt approval records for a server.
+func (b *BoltDB) DeleteServerPromptApprovals(serverName string) error {
+	prefix := serverName + ":"
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(PromptApprovalBucket))
+		var keysToDelete [][]byte
+		err := bucket.ForEach(func(k, _ []byte) error {
+			if bytes.HasPrefix(k, []byte(prefix)) {
+				keysToDelete = append(keysToDelete, k)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, key := range keysToDelete {
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // Generic operations

@@ -30,7 +30,8 @@ const (
 	ToolStatsBucket       = "toolstats"
 	ToolHashBucket        = "toolhash"
 	ToolApprovalBucket    = "tool_approvals"
-	OAuthTokenBucket      = "oauth_tokens" //nolint:gosec // bucket name, not a credential
+	PromptApprovalBucket  = "prompt_approvals" // spec 100: per-prompt rug-pull baseline
+	OAuthTokenBucket      = "oauth_tokens"     //nolint:gosec // bucket name, not a credential
 	OAuthCompletionBucket = "oauth_completion"
 	MetaBucket            = "meta"
 	CacheBucket           = "cache"
@@ -302,6 +303,57 @@ func (r *ToolApprovalRecord) ClearScanHold() {
 	r.HeldReason = ""
 	r.HeldVerdict = ""
 	r.HeldSignals = nil
+}
+
+// ErrPromptApprovalNotFound is returned by GetPromptApproval when no record
+// exists (wrapped so callers can errors.Is it). A real read/decode failure
+// returns a different error and MUST NOT be treated as "missing".
+var ErrPromptApprovalNotFound = errors.New("prompt approval not found")
+
+// PromptApprovalRecord is the per-(server, prompt) rug-pull baseline for
+// aggregated upstream prompts (spec 100). It is the prompt analogue of
+// ToolApprovalRecord, deliberately parallel — NOT a shared bucket — because the
+// server:tool and server:prompt key spaces would collide and the tool record
+// carries schema/scan fields prompts never use.
+//
+// It baselines ADVERTISED LIST METADATA ONLY (name + description + arguments);
+// get-time prompts/get message content is out of scope and not baselineable
+// here (spec 100 Non-Goals). Previous* fields are retained so a metadata revert
+// is detectable (server swaps a description back → auto re-approve).
+type PromptApprovalRecord struct {
+	ServerName          string    `json:"server_name"`
+	PromptName          string    `json:"prompt_name"`
+	ApprovedHash        string    `json:"approved_hash"`
+	CurrentHash         string    `json:"current_hash"`
+	HashSchemaVersion   uint64    `json:"hash_schema_version,omitempty"`
+	Status              string    `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt          time.Time `json:"approved_at"`
+	ApprovedBy          string    `json:"approved_by"`
+	PreviousDescription string    `json:"previous_description,omitempty"`
+	CurrentDescription  string    `json:"current_description,omitempty"`
+	PreviousArguments   string    `json:"previous_arguments,omitempty"`
+	CurrentArguments    string    `json:"current_arguments,omitempty"`
+	Disabled            bool      `json:"disabled,omitempty"`
+}
+
+// PromptApprovalKey returns the storage key for a prompt approval record.
+func PromptApprovalKey(serverName, promptName string) string {
+	return serverName + ":" + promptName
+}
+
+// Key returns the storage key for this prompt approval record.
+func (r *PromptApprovalRecord) Key() string {
+	return PromptApprovalKey(r.ServerName, r.PromptName)
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler
+func (r *PromptApprovalRecord) MarshalBinary() ([]byte, error) {
+	return json.Marshal(r)
+}
+
+// UnmarshalBinary implements encoding.BinaryUnmarshaler
+func (r *PromptApprovalRecord) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, r)
 }
 
 // ToolApprovalKey returns the storage key for a tool approval record.
