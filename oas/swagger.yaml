@@ -2406,6 +2406,13 @@ components:
           type: object
         error_code:
           type: string
+        expose_prompts:
+          description: |-
+            ExposePrompts mirrors config.ServerConfig.ExposePrompts (F9): the per-server
+            prompt-aggregation override. Tri-state *bool — nil/omitted means "inherit
+            default aggregation". Surfaced on GET so a caller that PATCHed the override
+            can read it back; PATCH/POST accept it via AddServerRequest.
+          type: boolean
         headers:
           additionalProperties:
             type: string
@@ -2922,6 +2929,14 @@ components:
           additionalProperties:
             type: string
           type: object
+        expose_prompts:
+          description: |-
+            ExposePrompts is the per-server override for prompt aggregation (F9):
+            whether this server's advertised MCP prompts are merged into mcpproxy's
+            prompts/list. Tri-state *bool mirroring config.ServerConfig.ExposePrompts —
+            a nil pointer means "leave unchanged" on PATCH (and "inherit the default
+            aggregate behavior" on create); a present value (including false) is applied.
+          type: boolean
         headers:
           additionalProperties:
             type: string

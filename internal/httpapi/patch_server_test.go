@@ -960,3 +960,60 @@ func TestHandleGetServers_ExposesConcurrencyOverrides(t *testing.T) {
 	assert.Equal(t, "45s", resp.Data.Servers[0].QueueTimeout,
 		"queue_timeout must appear in the GET payload as a duration string")
 }
+
+// TestHandlePatchServer_ExposePrompts verifies F9: the per-server expose_prompts
+// override is reachable via PATCH. An explicit false must be mapped into
+// ServerConfig.ExposePrompts (previously the request had no field, so PATCH
+// {"expose_prompts":false} returned 400 "No fields to update"), and omitting it
+// must preserve the existing pointer.
+func TestHandlePatchServer_ExposePrompts(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	t.Run("explicit false is applied and does not 400", func(t *testing.T) {
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name: "github", Protocol: "stdio", Enabled: true,
+			},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		body, _ := json.Marshal(map[string]any{"expose_prompts": false})
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates)
+		require.NotNil(t, mockCtrl.capturedUpdates.ExposePrompts,
+			"expose_prompts from the PATCH body must be mapped into ServerConfig")
+		assert.False(t, *mockCtrl.capturedUpdates.ExposePrompts)
+	})
+
+	t.Run("omitted expose_prompts preserves existing", func(t *testing.T) {
+		existing := true
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name: "github", Protocol: "stdio", Enabled: true,
+				ExposePrompts: &existing,
+			},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		body, _ := json.Marshal(map[string]any{"args": []string{"x"}})
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates)
+		require.NotNil(t, mockCtrl.capturedUpdates.ExposePrompts,
+			"omitted expose_prompts must preserve the existing pointer")
+		assert.True(t, *mockCtrl.capturedUpdates.ExposePrompts)
+	})
+}

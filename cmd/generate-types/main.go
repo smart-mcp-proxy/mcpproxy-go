@@ -233,6 +233,7 @@ export interface PreflightResponse {
   user_logged_out?: boolean; // True if user explicitly logged out (prevents auto-reconnection)
   health?: HealthStatus; // Unified health status calculated by the backend
   trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: manual)
+  expose_prompts?: boolean; // F9 per-server prompt-aggregation override; absent = inherit default aggregation, false = exclude this server's prompts
   security_scan?: SecurityScanSummary; // Latest scan summary (spec 086); ABSENT when no scan has ever run
   // Spec 093 (#955) per-server concurrency overrides. Tri-state: absent =
   // inherit server_concurrency_defaults, 0 = disabled for this server,

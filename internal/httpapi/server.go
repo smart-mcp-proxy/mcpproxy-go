@@ -1585,6 +1585,12 @@ type AddServerRequest struct {
 	// semantics — do NOT collapse to a plain bool, or an omitted field would
 	// silently reset a previously-set value.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// ExposePrompts is the per-server override for prompt aggregation (F9):
+	// whether this server's advertised MCP prompts are merged into mcpproxy's
+	// prompts/list. Tri-state *bool mirroring config.ServerConfig.ExposePrompts —
+	// a nil pointer means "leave unchanged" on PATCH (and "inherit the default
+	// aggregate behavior" on create); a present value (including false) is applied.
+	ExposePrompts *bool `json:"expose_prompts,omitempty"`
 	// TrustMode is the per-server trust tier (spec 086): "auto", "scan", or
 	// "manual". Empty means "leave unchanged" on PATCH (and inherit the migrated
 	// default on create). A non-empty value is applied to ServerConfig.TrustMode
@@ -1768,6 +1774,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// *bool nil-preserve semantics: only set when the caller provided it.
 	if req.AutoApproveToolChanges != nil {
 		serverConfig.AutoApproveToolChanges = req.AutoApproveToolChanges
+	}
+	// F9: carry the per-server prompt-aggregation override through on create.
+	// Pointer-assign (config field is *bool) so an omitted field stays nil =
+	// "inherit default aggregation".
+	if req.ExposePrompts != nil {
+		serverConfig.ExposePrompts = req.ExposePrompts
 	}
 	// Spec 086: carry the per-server trust_mode through on create. Empty means
 	// "not specified" — leave it for the loader's legacy-flag migration to
@@ -2031,6 +2043,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.AutoApproveToolChanges = existingSrv.AutoApproveToolChanges
+	}
+	// F9: expose_prompts is a tri-state *bool — preserve the EXISTING POINTER
+	// (which may be nil = "never set") when the request omits the field, so a
+	// bare PATCH of an unrelated field does not wipe a configured override.
+	if req.ExposePrompts != nil {
+		updates.ExposePrompts = req.ExposePrompts
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.ExposePrompts = existingSrv.ExposePrompts
 	}
 	// Spec 086: trust_mode is a plain string — empty means "leave unchanged", so
 	// preserve the existing value when the request omits it (a bare PATCH of an

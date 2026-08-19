@@ -320,3 +320,51 @@ func TestManager_ListPrompts_PerServerCap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, prompts, maxPromptsPerServer, "per-server prompt count must be capped")
 }
+
+// TestManager_GetPrompt_ReconnectsOnUse is the F15 regression: a disconnected
+// server with reconnect_on_use:true must recover for prompts/get, exactly as
+// CallTool recovers it for tool calls. Before the fix GetPrompt had no reconnect
+// path and this returned a "not connected"-class failure.
+func TestManager_GetPrompt_ReconnectsOnUse(t *testing.T) {
+	m := newTestManager(t)
+	addConnectedTestServerWithConfig(t, m, "srv-a", &config.ServerConfig{
+		Name:           "server-a",
+		Enabled:        true,
+		ReconnectOnUse: true,
+	}, "greeting")
+
+	client, ok := m.GetClient("srv-a")
+	require.True(t, ok)
+
+	// Drop the client into an error state as if the transport died. The live
+	// upstream (kept open by t.Cleanup) is still reachable, so reconnect_on_use
+	// must recover it.
+	client.StateManager.SetError(fmt.Errorf("connection lost"))
+	require.False(t, client.IsConnected())
+
+	result, err := m.GetPrompt(context.Background(), "server-a:greeting", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Messages, 1)
+	assert.True(t, client.IsConnected(), "reconnect_on_use should have reconnected the client for prompts/get")
+}
+
+// TestManager_GetPrompt_NoReconnectWhenDisabledFlag mirrors CallTool's default:
+// with reconnect_on_use unset, a disconnected server fails prompts/get instead
+// of silently reconnecting.
+func TestManager_GetPrompt_NoReconnectWhenDisabledFlag(t *testing.T) {
+	m := newTestManager(t)
+	addConnectedTestServerWithConfig(t, m, "srv-a", &config.ServerConfig{
+		Name:    "server-a",
+		Enabled: true,
+		// ReconnectOnUse defaults to false
+	}, "greeting")
+
+	client, ok := m.GetClient("srv-a")
+	require.True(t, ok)
+	client.StateManager.SetError(fmt.Errorf("connection lost"))
+
+	_, err := m.GetPrompt(context.Background(), "server-a:greeting", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not connected")
+	assert.False(t, client.IsConnected(), "no reconnect should have been attempted")
+}

@@ -2269,6 +2269,20 @@ func (c *Config) ValidateDetailed() []ValidationError {
 				Field:   fieldPrefix + ".name",
 				Message: fmt.Sprintf("duplicate server name: %s", server.Name),
 			})
+		} else if strings.Contains(server.Name, ":") {
+			// F6: ':' is the qualified-name separator for prompt aggregation
+			// ("server:prompt", manager_prompts.go) and tool routing (CallTool's
+			// SplitN ":"). A name containing it makes the first-separator split
+			// route to the wrong server, so such a server's prompts/tools can never
+			// be reached correctly. Reject it — no working config uses ':' since it
+			// has never routed. ('__', the direct-mode display separator, is NOT
+			// hard-rejected here for back-compat: it works in retrieve_tools mode
+			// and any residual display collision is logged + handled deterministically
+			// in buildAggregatedServerPrompts / buildDirectModeTools.)
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".name",
+				Message: fmt.Sprintf("server name %q must not contain ':' (reserved as the server:tool / server:prompt routing separator)", server.Name),
+			})
 		} else {
 			serverNames[server.Name] = true
 		}

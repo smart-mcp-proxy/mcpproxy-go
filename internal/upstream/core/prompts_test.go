@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -276,4 +277,73 @@ func TestClient_GetPrompt_UpstreamError_ReturnsWrappedError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "GetPrompt failed")
+}
+
+// --- Finding F14: bounded pagination ---
+
+// newPaginatedPromptUpstream builds an in-process MCP server advertising `count`
+// prompts and paginating prompts/list at `pageLimit` per page (mcp-go sets
+// NextCursor whenever a page is full), so ListPrompts must follow the cursor
+// across pages to see them all.
+func newPaginatedPromptUpstream(t *testing.T, count, pageLimit int) *mcpserver.MCPServer {
+	t.Helper()
+	srv := mcpserver.NewMCPServer("test-upstream", "0.0.1",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithPromptCapabilities(true),
+		mcpserver.WithPaginationLimit(pageLimit),
+	)
+	for i := 0; i < count; i++ {
+		srv.AddPrompt(
+			mcp.NewPrompt(fmt.Sprintf("p%04d", i), mcp.WithPromptDescription("gen")),
+			func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return &mcp.GetPromptResult{
+					Messages: []mcp.PromptMessage{
+						{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "x"}},
+					},
+				}, nil
+			},
+		)
+	}
+	return srv
+}
+
+func TestClient_ListPrompts_FollowsPaginationAcrossPages(t *testing.T) {
+	upstream := newPaginatedPromptUpstream(t, 5, 2) // 3 pages: [2][2][1]
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	prompts, err := c.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, prompts, 5, "all three pages must be aggregated")
+}
+
+func TestClient_ListPrompts_StopsAtItemCap(t *testing.T) {
+	upstream := newPaginatedPromptUpstream(t, 250, 50) // 5 pages available
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	prompts, err := c.ListPrompts(ctx)
+	require.NoError(t, err)
+	assert.Len(t, prompts, maxListPromptsItems, "must stop at the item cap, not fetch all 250")
+}
+
+func TestClient_ListPrompts_EndlessCursorTerminatesAtPageCap(t *testing.T) {
+	// 60 prompts at 1/page => a NextCursor on every page; the page cap must cut it.
+	upstream := newPaginatedPromptUpstream(t, maxListPromptsPages+10, 1)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	defer testServer.Close()
+
+	c := connectedTestClient(t, testServer.URL, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	prompts, err := c.ListPrompts(ctx)
+	require.NoError(t, err)
+	assert.Len(t, prompts, maxListPromptsPages, "endless-cursor upstream must terminate at the page cap")
 }
