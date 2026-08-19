@@ -3385,6 +3385,7 @@ paths:
           - internal_tool_call
           - config_change
           - preflight
+          - prompt_get
           type: string
       - description: Filter by server name
         in: query

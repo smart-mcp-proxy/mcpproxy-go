@@ -46,6 +46,12 @@ const (
 	// empty and the per-tool detail lives in Metadata under the MetadataKeyPreflight*
 	// keys. RequestID is the correlation handle (`activity list --request-id`).
 	ActivityTypePreflight ActivityType = "preflight"
+
+	// ActivityTypePromptGet represents an upstream prompts/get fetch (Finding F10).
+	// Mirrors the tool-call path: ServerName is the upstream server, ToolName is
+	// the prompt name, Arguments are the prompt arguments (scanned for sensitive
+	// data like tool args), RequestID is the correlation handle.
+	ActivityTypePromptGet ActivityType = "prompt_get"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -62,6 +68,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeSecurityScan),
 	string(ActivityTypeCredentialBroker),
 	string(ActivityTypePreflight),
+	string(ActivityTypePromptGet),
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every

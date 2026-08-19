@@ -125,27 +125,8 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 		if !ok {
 			continue // FR-B5: non-text blocks untouched
 		}
-		txt := tc.Text
-
-		if d.redact && p.sanitisationDetector != nil {
-			redacted, dets := p.sanitisationDetector.Redact(txt)
-			if len(dets) > 0 {
-				txt = redacted
-				redactedCount += len(dets)
-				for _, det := range dets {
-					redactedCats[det.Category] = struct{}{}
-				}
-			}
-		}
-
-		if d.strip {
-			stripped, classes := security.StripControlSequences(txt, stripSet)
-			txt = stripped
-			for _, cl := range classes {
-				strippedClasses[cl] = struct{}{}
-			}
-		}
-
+		txt, n := p.sanitiseTextValue(tc.Text, d, stripSet, redactedCats, strippedClasses)
+		redactedCount += n
 		tc.Text = txt
 		ctr.Content[i] = tc
 	}
@@ -203,6 +184,151 @@ func concatTextBlocks(r *mcp.CallToolResult) string {
 		}
 	}
 	return b.String()
+}
+
+// sanitiseTextValue applies the redact->strip mutation (the same order the tool
+// path uses, D4) to a single text value, using the shared detector + strip
+// config. It accumulates redaction categories / stripped classes into the
+// caller-owned maps and returns the mutated text plus the redaction count for
+// this value. Pure w.r.t. I/O — the caller owns activity emission. This is the
+// per-block body shared by applyOutputSanitisation (CallToolResult) and
+// applyPromptResultSanitisation (GetPromptResult, Finding F2).
+func (p *MCPProxyServer) sanitiseTextValue(
+	txt string, d osDecision, stripSet map[string]bool,
+	redactedCats, strippedClasses map[string]struct{},
+) (string, int) {
+	redactedCount := 0
+	if d.redact && p.sanitisationDetector != nil {
+		redacted, dets := p.sanitisationDetector.Redact(txt)
+		if len(dets) > 0 {
+			txt = redacted
+			redactedCount += len(dets)
+			for _, det := range dets {
+				redactedCats[det.Category] = struct{}{}
+			}
+		}
+	}
+	if d.strip {
+		stripped, classes := security.StripControlSequences(txt, stripSet)
+		txt = stripped
+		for _, cl := range classes {
+			strippedClasses[cl] = struct{}{}
+		}
+	}
+	return txt, redactedCount
+}
+
+// concatPromptText joins the text of a prompt result's messages for critical-
+// secret scanning (block mode). Walks TextContent and the text of any embedded
+// TextResourceContents; binary/image/audio blocks contribute nothing.
+func concatPromptText(r *mcp.GetPromptResult) string {
+	var b strings.Builder
+	appendTxt := func(s string) {
+		if s == "" {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(s)
+	}
+	for i := range r.Messages {
+		switch c := r.Messages[i].Content.(type) {
+		case mcp.TextContent:
+			appendTxt(c.Text)
+		case mcp.EmbeddedResource:
+			if tr, ok := c.Resource.(mcp.TextResourceContents); ok {
+				appendTxt(tr.Text)
+			}
+		}
+	}
+	return b.String()
+}
+
+// applyPromptResultSanitisation is the GetPromptResult analogue of
+// applyOutputSanitisation (Finding F2). Prompt content originates from an
+// upstream server and has no openWorldHint distinction, so it is ALWAYS treated
+// as untrusted. It reuses the same decision core (evaluateOutputSanitisation),
+// the same detector (p.sanitisationDetector) and the same strip/spotlight
+// helpers the tool path uses. Because prompts have no truncation/cache stage,
+// spotlight is applied inline here rather than in a separate post-forward pass.
+//
+// Returns (result, blocked). On block (critical secret + block mode) it emits a
+// policy decision and returns (nil, true); the caller substitutes an error.
+func (p *MCPProxyServer) applyPromptResultSanitisation(
+	ctx context.Context, serverName, promptName, requestID string, result *mcp.GetPromptResult,
+) (*mcp.GetPromptResult, bool) {
+	if result == nil {
+		return result, false
+	}
+	cfg := p.config.OutputSanitisation
+	if cfg == nil {
+		cfg = config.DefaultOutputSanitisationConfig()
+	}
+	const contentTrust = contracts.ContentTrustUntrusted
+	// Fast opt-out: prompt content is untrusted, so strip AND spotlight are both
+	// live inputs here (unlike the tool fast path, which defers spotlight).
+	if !cfg.IsBlock() && !cfg.IsRedact() && !cfg.IsStripEnabled() && !cfg.IsSpotlightEnabled() {
+		return result, false
+	}
+
+	criticalDetected := false
+	if cfg.IsBlock() && p.sanitisationDetector != nil {
+		criticalDetected = hasCriticalDetection(p.sanitisationDetector, concatPromptText(result))
+	}
+	d := evaluateOutputSanitisation(cfg, contentTrust, criticalDetected)
+
+	sessionID := ""
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+	}
+
+	if d.block {
+		p.emitActivityPolicyDecision(serverName, promptName, sessionID, requestID,
+			"blocked", d.reason, telemetry.BlockReasonOutputSanitisation)
+		return nil, true
+	}
+	if !d.redact && !d.strip && !d.spotlight {
+		return result, false
+	}
+
+	redactedCount := 0
+	redactedCats := map[string]struct{}{}
+	strippedClasses := map[string]struct{}{}
+	stripSet := cfg.EnabledStripClasses()
+
+	applyOne := func(txt string) string {
+		txt, n := p.sanitiseTextValue(txt, d, stripSet, redactedCats, strippedClasses)
+		redactedCount += n
+		if d.spotlight {
+			txt = security.SpotlightUntrusted(txt, serverName, promptName)
+		}
+		return txt
+	}
+
+	for i := range result.Messages {
+		switch c := result.Messages[i].Content.(type) {
+		case mcp.TextContent:
+			c.Text = applyOne(c.Text)
+			result.Messages[i].Content = c
+		case mcp.EmbeddedResource:
+			if tr, ok := c.Resource.(mcp.TextResourceContents); ok {
+				tr.Text = applyOne(tr.Text)
+				c.Resource = tr
+				result.Messages[i].Content = c
+			}
+			// BlobResourceContents (binary) untouched — FR-B5 parity.
+		default:
+			// ImageContent / AudioContent untouched — FR-B5 parity.
+		}
+	}
+
+	if redactedCount > 0 || len(strippedClasses) > 0 {
+		action, reason := summariseSanitisation(redactedCount, redactedCats, strippedClasses)
+		p.emitActivityPolicyDecision(serverName, promptName, sessionID, requestID,
+			action, reason, telemetry.BlockReasonOutputSanitisation)
+	}
+	return result, false
 }
 
 // hasCriticalDetection reports whether the detector finds any critical-severity

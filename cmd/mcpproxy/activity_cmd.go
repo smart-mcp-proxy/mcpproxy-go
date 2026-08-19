@@ -88,6 +88,7 @@ func (f *ActivityFilter) Validate() error {
 			"tool_call", "policy_decision", "quarantine_change", "server_change",
 			"system_start", "system_stop", "internal_tool_call", "config_change", // Spec 024: new types
 			string(storage.ActivityTypePreflight), // Spec 098: required-tools preflight
+			string(storage.ActivityTypePromptGet), // Finding F10: prompts/get activity
 		}
 		// Split by comma for multi-type support
 		types := strings.Split(f.Type, ",")

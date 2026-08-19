@@ -619,6 +619,28 @@ func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, t
 	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
 }
 
+// EmitActivityPromptGet emits an event when an upstream prompts/get completes
+// (Finding F10). serverName/promptName identify the prompt, arguments are the
+// prompt inputs, response is the *mcp.GetPromptResult (marshaled by the handler).
+func (r *Runtime) EmitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}) {
+	payload := map[string]any{
+		"server_name":   serverName,
+		"prompt_name":   promptName,
+		"session_id":    sessionID,
+		"request_id":    requestID,
+		"status":        status,
+		"error_message": errorMsg,
+		"duration_ms":   durationMs,
+	}
+	if arguments != nil {
+		payload["arguments"] = arguments
+	}
+	if response != nil {
+		payload["response"] = response
+	}
+	r.publishEvent(newEvent(EventTypeActivityPromptGet, payload))
+}
+
 // EmitActivityConfigChange emits an event when configuration changes (Spec 024).
 // action is one of: server_added, server_removed, server_updated, settings_changed
 // source indicates how the change was triggered: "mcp", "cli", or "api"

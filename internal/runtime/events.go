@@ -48,6 +48,8 @@ const (
 	EventTypeActivityInternalToolCall EventType = "activity.internal_tool_call.completed"
 	// EventTypeActivityConfigChange is emitted when configuration changes (server add/remove/update).
 	EventTypeActivityConfigChange EventType = "activity.config_change"
+	// EventTypeActivityPromptGet is emitted when an upstream prompts/get completes (Finding F10).
+	EventTypeActivityPromptGet EventType = "activity.prompt_get.completed"
 
 	// Spec 026: Sensitive data detection event
 	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.

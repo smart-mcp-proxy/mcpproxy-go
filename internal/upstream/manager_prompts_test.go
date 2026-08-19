@@ -2,15 +2,19 @@ package upstream
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -209,4 +213,110 @@ func TestManager_GetPrompt_RejectsDisabledServer(t *testing.T) {
 	_, err := m.GetPrompt(context.Background(), "server-a:greeting", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "disabled")
+}
+
+// --- Finding F12: size & count caps ---
+
+func TestTruncatePromptText(t *testing.T) {
+	long := strings.Repeat("a", maxPromptResultChars+500)
+	multibyte := strings.Repeat("€", 100) // 300 bytes, 3-byte runes
+
+	tests := []struct {
+		name     string
+		text     string
+		limit    int
+		wantCut  bool
+		wantMark bool
+	}{
+		{"under limit", "small prompt", maxPromptResultChars, false, false},
+		{"exactly at limit", strings.Repeat("a", 10), 10, false, false},
+		{"over limit ascii", long, maxPromptResultChars, true, true},
+		{"limit zero disables", long, 0, false, false},
+		{"negative disables", long, -1, false, false},
+		{"multibyte no split", multibyte, 250, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, cut := truncatePromptText(tt.text, tt.limit)
+			assert.Equal(t, tt.wantCut, cut)
+			assert.True(t, utf8.ValidString(got), "result must be valid UTF-8")
+			assert.Equal(t, tt.wantMark, strings.HasSuffix(got, promptTruncationMarker))
+			if cut {
+				assert.LessOrEqual(t, len(got)-len(promptTruncationMarker), tt.limit)
+			}
+		})
+	}
+}
+
+func TestCapPromptResultSize(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+
+	result := &mcp.GetPromptResult{
+		Messages: []mcp.PromptMessage{
+			{Role: mcp.RoleUser, Content: mcp.TextContent{Type: "text", Text: strings.Repeat("x", maxPromptResultChars+100)}},
+			{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "short"}},
+			{Role: mcp.RoleAssistant, Content: mcp.ImageContent{Type: "image", MIMEType: "image/png", Data: "AAAA"}},
+		},
+	}
+
+	capPromptResultSize(result, maxPromptResultChars, logger, "server-a", "greeting")
+
+	first := result.Messages[0].Content.(mcp.TextContent)
+	assert.True(t, strings.HasSuffix(first.Text, promptTruncationMarker))
+	assert.LessOrEqual(t, len(first.Text)-len(promptTruncationMarker), maxPromptResultChars)
+	assert.Equal(t, "short", result.Messages[1].Content.(mcp.TextContent).Text)
+	assert.IsType(t, mcp.ImageContent{}, result.Messages[2].Content)
+
+	require.Equal(t, 1, logs.FilterMessage("upstream prompt result exceeded size cap; message text truncated").Len())
+}
+
+func TestCapPromptResultSize_NilSafe(t *testing.T) {
+	capPromptResultSize(nil, maxPromptResultChars, zap.NewNop(), "s", "p") // must not panic
+}
+
+// newTestPromptUpstreamServerN registers `count` distinct prompts so tests can
+// exercise the per-server / total count caps.
+func newTestPromptUpstreamServerN(t *testing.T, count int) *mcpserver.MCPServer {
+	t.Helper()
+	srv := mcpserver.NewMCPServer("test-upstream", "0.0.1",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithPromptCapabilities(true),
+	)
+	for i := 0; i < count; i++ {
+		srv.AddPrompt(
+			mcp.NewPrompt(fmt.Sprintf("p%d", i), mcp.WithPromptDescription("test prompt")),
+			func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return &mcp.GetPromptResult{
+					Messages: []mcp.PromptMessage{{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "ok"}}},
+				}, nil
+			},
+		)
+	}
+	return srv
+}
+
+func TestManager_ListPrompts_PerServerCap(t *testing.T) {
+	m := newTestManager(t)
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	upstream := newTestPromptUpstreamServerN(t, maxPromptsPerServer+5)
+	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	t.Cleanup(testServer.Close)
+
+	require.NoError(t, m.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := m.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+
+	prompts, err := m.ListPrompts(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, prompts, maxPromptsPerServer, "per-server prompt count must be capped")
 }

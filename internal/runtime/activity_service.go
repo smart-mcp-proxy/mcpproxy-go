@@ -436,6 +436,8 @@ func (s *ActivityService) handleEvent(evt Event) {
 		s.handleInternalToolCall(evt)
 	case EventTypeActivityConfigChange:
 		s.handleConfigChange(evt)
+	case EventTypeActivityPromptGet:
+		s.handlePromptGet(evt)
 	// Spec 032: Tool-level quarantine events
 	case EventTypeActivityToolQuarantineChange:
 		s.handleToolQuarantineChange(evt)
@@ -906,6 +908,88 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 			zap.String("id", record.ID),
 			zap.String("internal_tool_name", internalToolName),
 			zap.String("status", status))
+	}
+}
+
+// handlePromptGet persists an upstream prompts/get completion (Finding F10).
+// Mirrors handleInternalToolCall (server + prompt name, arguments, response,
+// status, duration, request-id) and additionally runs the sensitive-data
+// detector over the prompt arguments and returned content, which — being
+// upstream-controlled — carry the same injection/secret risk a tool response does.
+func (s *ActivityService) handlePromptGet(evt Event) {
+	serverName := getStringPayload(evt.Payload, "server_name")
+	promptName := getStringPayload(evt.Payload, "prompt_name")
+	sessionID := getStringPayload(evt.Payload, "session_id")
+	requestID := getStringPayload(evt.Payload, "request_id")
+	status := getStringPayload(evt.Payload, "status")
+	errorMsg := getStringPayload(evt.Payload, "error_message")
+	durationMs := getInt64Payload(evt.Payload, "duration_ms")
+	arguments := getMapPayload(evt.Payload, "arguments")
+
+	// Response can be a *mcp.GetPromptResult (or any type) — marshal to JSON,
+	// exactly as handleInternalToolCall does.
+	var responseStr string
+	if resp := evt.Payload["response"]; resp != nil {
+		switch r := resp.(type) {
+		case string:
+			responseStr = r
+		default:
+			if jsonBytes, err := json.Marshal(r); err == nil {
+				responseStr = string(jsonBytes)
+			}
+		}
+	}
+
+	// Name the MCP client on the record so it survives session eviction.
+	metadata := s.withClientInfo(nil, sessionID)
+
+	record := &storage.ActivityRecord{
+		Type:          storage.ActivityTypePromptGet,
+		Source:        storage.ActivitySourceMCP,
+		ServerName:    serverName,
+		ToolName:      promptName,
+		Arguments:     arguments,
+		Response:      responseStr,
+		Status:        status,
+		ErrorMessage:  errorMsg,
+		DurationMs:    durationMs,
+		Timestamp:     evt.Timestamp,
+		SessionID:     sessionID,
+		WorkSessionID: s.resolveWorkSession(sessionID),
+		RequestID:     requestID,
+		Metadata:      metadata,
+	}
+
+	// Server-edition identity, mirroring the tool path.
+	if arguments != nil {
+		if userID, ok := arguments["_auth_user_id"].(string); ok && userID != "" {
+			record.UserID = userID
+		}
+		if userEmail, ok := arguments["_auth_user_email"].(string); ok && userEmail != "" {
+			record.UserEmail = userEmail
+		}
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save prompt get activity",
+			zap.Error(err),
+			zap.String("server_name", serverName),
+			zap.String("prompt_name", promptName))
+		return
+	}
+	s.logger.Debug("Prompt get activity recorded",
+		zap.String("id", record.ID),
+		zap.String("server_name", serverName),
+		zap.String("prompt_name", promptName),
+		zap.String("status", status))
+
+	// Sensitive-data detection (Spec 026), tracked in workersWG like the tool path.
+	if s.detector != nil {
+		s.workersWG.Add(1)
+		go func() {
+			defer s.workersWG.Done()
+			s.runAsyncDetection(record.ID, arguments, responseStr)
+		}()
 	}
 }
 

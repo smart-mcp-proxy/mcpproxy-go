@@ -1115,3 +1115,76 @@ func TestHandlePolicyDecision_LegacyPayloadWithoutRequestID(t *testing.T) {
 	assert.Empty(t, records[0].RequestID, "a missing id stays missing; nothing is synthesised")
 	assert.Equal(t, "blocked", records[0].Status, "the rest of the record is unaffected")
 }
+
+// TestHandlePromptGet_PersistsActivityRecord verifies an upstream prompts/get
+// produces one activity record with the fields incident response needs (F10):
+// server + prompt name, arguments, status, duration, request-id, session.
+func TestHandlePromptGet_PersistsActivityRecord(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    map[string]any
+		wantStatus string
+		wantErrMsg string
+		wantPrompt string
+	}{
+		{
+			name: "success",
+			payload: map[string]any{
+				"server_name": "github",
+				"prompt_name": "summarize_pr",
+				"session_id":  "sess-p1",
+				"request_id":  "req-p1",
+				"status":      "success",
+				"duration_ms": int64(42),
+				"arguments":   map[string]interface{}{"pr": "123"},
+				"response":    `{"messages":[]}`,
+			},
+			wantStatus: "success",
+			wantPrompt: "summarize_pr",
+		},
+		{
+			name: "error",
+			payload: map[string]any{
+				"server_name":   "github",
+				"prompt_name":   "summarize_pr",
+				"session_id":    "sess-p2",
+				"request_id":    "req-p2",
+				"status":        "error",
+				"error_message": "server github is quarantined",
+				"duration_ms":   int64(3),
+			},
+			wantStatus: "error",
+			wantErrMsg: "server github is quarantined",
+			wantPrompt: "summarize_pr",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, cleanup := setupTestStorage(t)
+			defer cleanup()
+
+			svc := NewActivityService(store, zap.NewNop())
+			svc.handleEvent(Event{
+				Type:      EventTypeActivityPromptGet,
+				Timestamp: time.Now().UTC(),
+				Payload:   tt.payload,
+			})
+
+			records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+
+			rec := records[0]
+			assert.Equal(t, storage.ActivityTypePromptGet, rec.Type)
+			assert.Equal(t, storage.ActivitySourceMCP, rec.Source)
+			assert.Equal(t, "github", rec.ServerName)
+			assert.Equal(t, tt.wantPrompt, rec.ToolName)
+			assert.Equal(t, tt.wantStatus, rec.Status)
+			assert.Equal(t, tt.wantErrMsg, rec.ErrorMessage)
+			assert.Equal(t, tt.payload["request_id"], rec.RequestID)
+			assert.Equal(t, tt.payload["session_id"], rec.SessionID)
+			assert.NotZero(t, rec.DurationMs)
+		})
+	}
+}
