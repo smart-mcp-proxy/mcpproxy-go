@@ -45,7 +45,11 @@ func TestTrayListenFromArgs(t *testing.T) {
 		{[]string{"serve", "--listen=0.0.0.0:8181"}, "0.0.0.0:8181"},
 		{[]string{"-l", ":9090"}, ":9090"},
 		{[]string{"-l=:9090"}, ":9090"},
-		{[]string{"--listen"}, ""}, // dangling flag without a value
+		{[]string{"--listen"}, ""},                                    // dangling flag without a value
+		{[]string{"-l"}, ""},                                          // dangling short flag without a value
+		{[]string{"--listen", "--config", "path"}, ""},                // flag value must not be another flag
+		{[]string{"--listen=", "--listen", ":8181"}, ":8181"},         // empty value skipped, scanning continues
+		{[]string{"--listen", "--config", "--listen=:9090"}, ":9090"}, // malformed value skipped, later valid one wins
 	}
 
 	for _, tc := range tcases {

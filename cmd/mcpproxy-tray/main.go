@@ -929,21 +929,31 @@ func shellQuote(arg string) string {
 // entirely, so launchers invoking `mcpproxy-tray serve --listen <addr>`
 // (mirroring the core's serve command) had the listen address silently
 // dropped and the core fell back to the config-file default. Any other
-// arguments remain ignored. Returns "" when no listen flag is present.
+// arguments remain ignored. Malformed occurrences — a dangling flag, an
+// empty value, or a value that is itself another flag (starts with "-") —
+// are skipped and scanning continues, so the first valid listen value wins.
+// Returns "" when no valid listen value is present.
 func trayListenFromArgs(args []string) string {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		var value string
 		switch {
 		case arg == "--listen" || arg == "-l":
-			if i+1 < len(args) {
-				return strings.TrimSpace(args[i+1])
+			if i+1 >= len(args) {
+				continue // dangling flag without a value
 			}
-			return ""
+			value = strings.TrimSpace(args[i+1])
 		case strings.HasPrefix(arg, "--listen="):
-			return strings.TrimSpace(strings.TrimPrefix(arg, "--listen="))
+			value = strings.TrimSpace(strings.TrimPrefix(arg, "--listen="))
 		case strings.HasPrefix(arg, "-l="):
-			return strings.TrimSpace(strings.TrimPrefix(arg, "-l="))
+			value = strings.TrimSpace(strings.TrimPrefix(arg, "-l="))
+		default:
+			continue
 		}
+		if value == "" || strings.HasPrefix(value, "-") {
+			continue // malformed value — keep scanning
+		}
+		return value
 	}
 	return ""
 }
