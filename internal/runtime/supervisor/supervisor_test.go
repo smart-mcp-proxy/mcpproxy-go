@@ -1109,3 +1109,85 @@ func TestSupervisor_RefreshToolsFromDiscovery_StateViewCarriesSchema(t *testing.
 	require.Contains(t, props, "query")
 	require.Contains(t, props, "limit")
 }
+
+// TestSupervisor_Reconcile_RespectsRetryBackoff verifies that periodic
+// reconciliation does not re-dial a failed upstream while the managed client's
+// exponential backoff window is open, after it gave up, or while it is parked
+// in PendingAuth — but does reconnect once the backoff has elapsed.
+func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{
+			{Name: "flaky-server", Enabled: true},
+		},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	supervisor := New(configSvc, mockUpstream, zap.NewNop())
+
+	// First reconciliation - server is added and connected
+	require.NoError(t, supervisor.reconcile(configSvc.Current()))
+	time.Sleep(50 * time.Millisecond)
+
+	setConnectionState := func(connected bool, info *types.ConnectionInfo) {
+		mockUpstream.mu.Lock()
+		defer mockUpstream.mu.Unlock()
+		mockUpstream.connected["flaky-server"] = connected
+		if state, ok := mockUpstream.states["flaky-server"]; ok {
+			state.Connected = connected
+			state.ConnectionInfo = info
+		}
+	}
+	isConnected := func() bool {
+		mockUpstream.mu.Lock()
+		defer mockUpstream.mu.Unlock()
+		return mockUpstream.connected["flaky-server"]
+	}
+
+	// Simulate a connection failure with the backoff window still open:
+	// reconciliation must NOT re-dial.
+	setConnectionState(false, &types.ConnectionInfo{
+		State:         types.StateError,
+		RetryCount:    5,
+		LastRetryTime: time.Now(),
+	})
+	require.NoError(t, supervisor.reconcile(configSvc.Current()))
+	time.Sleep(50 * time.Millisecond)
+	require.False(t, isConnected(), "supervisor re-dialed a failed server inside its backoff window")
+
+	// A server that gave up after max retries must not be re-dialed either.
+	setConnectionState(false, &types.ConnectionInfo{
+		State:         types.StateError,
+		RetryCount:    types.MaxConnectionRetries,
+		GaveUp:        true,
+		LastRetryTime: time.Now().Add(-time.Hour),
+	})
+	require.NoError(t, supervisor.reconcile(configSvc.Current()))
+	time.Sleep(50 * time.Millisecond)
+	require.False(t, isConnected(), "supervisor re-dialed a server that gave up after max retries")
+
+	// A server parked in PendingAuth (waiting for user OAuth login) must not be
+	// re-dialed - each attempt fires real requests at the upstream and cannot
+	// succeed until the user completes the login.
+	setConnectionState(false, &types.ConnectionInfo{
+		State: types.StatePendingAuth,
+	})
+	require.NoError(t, supervisor.reconcile(configSvc.Current()))
+	time.Sleep(50 * time.Millisecond)
+	require.False(t, isConnected(), "supervisor re-dialed a server pending OAuth login")
+
+	// Once the backoff window has elapsed, reconciliation reconnects as before.
+	setConnectionState(false, &types.ConnectionInfo{
+		State:         types.StateError,
+		RetryCount:    3,
+		LastRetryTime: time.Now().Add(-10 * time.Second), // backoff for 3 failures is 4s
+	})
+	require.NoError(t, supervisor.reconcile(configSvc.Current()))
+	time.Sleep(50 * time.Millisecond)
+	require.True(t, isConnected(), "supervisor did not reconnect after the backoff window elapsed")
+}
