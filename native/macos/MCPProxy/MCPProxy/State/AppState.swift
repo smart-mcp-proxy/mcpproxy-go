@@ -461,12 +461,14 @@ final class AppState: ObservableObject {
         case "tool_call":
             return entry.status != "rejected"
         case "internal_tool_call":
-            // Successful internal calls count only for the built-ins the
-            // glance rows (rule 3); failures always count. call_tool_* echoes
-            // never do — their dispatch emitted its own tool_call record.
-            guard !name.hasPrefix("call_tool_") else { return false }
+            // Mirrors GlanceSelection: management built-ins never row (rule 1),
+            // call_tool_* echoes never do (their dispatch emitted its own
+            // tool_call record), and other internal calls row on success only
+            // for the discovery/execution set, on failure always (rule 3).
+            guard !name.hasPrefix("call_tool_"),
+                  !GlanceSelection.managementBuiltIns.contains(name) else { return false }
             return entry.status != "success"
-                || ["retrieve_tools", "describe_tool", "code_execution"].contains(name)
+                || GlanceSelection.glanceInternalTools.contains(name)
         case ActivityEntry.policyDecisionType:
             return entry.status == "blocked" || entry.status == "rejected"
         default:

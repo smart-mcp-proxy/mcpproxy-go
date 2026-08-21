@@ -134,12 +134,16 @@ func TestEmitSubCallActivity_NoProxyIsANoOp(t *testing.T) {
 	})
 }
 
-// A concurrency shed already lands in the activity log via the limiter's
+// A QUEUE shed already lands in the activity log via the limiter's
 // origin-independent observer (spec 093 FR-012) — the sandbox emitter must not
-// add a second record for the same refused call.
-func TestEmitSubCallActivity_SkipsLimiterSheds(t *testing.T) {
-	var limitErr *limiter.LimitError
-	shed := &limiter.LimitError{}
-	require.True(t, errors.As(fmt.Errorf("dispatch: %w", shed), &limitErr),
-		"the emitter's detection must see through wrapping")
+// add a second record for it. server_unavailable never reaches the observer
+// (managed.reportRejection filters it out), so it MUST be recorded here.
+func TestEmitSubCallActivity_SkipsOnlyObservedSheds(t *testing.T) {
+	detect := shedHasCanonicalRecord
+	require.True(t, detect(fmt.Errorf("dispatch: %w", &limiter.LimitError{Reason: limiter.ReasonQueueFull})),
+		"queue_full has a canonical rejected record — skip")
+	require.True(t, detect(&limiter.LimitError{Reason: limiter.ReasonQueueTimeout}))
+	require.False(t, detect(&limiter.LimitError{Reason: limiter.ReasonServerUnavailable}),
+		"server_unavailable has NO canonical record — the sandbox emit is its only witness")
+	require.False(t, detect(errors.New("plain failure")))
 }

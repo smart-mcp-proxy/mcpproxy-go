@@ -108,10 +108,10 @@ func TestUsageAggregate_SuccessfulManagementBuiltinsStayOutOfTheTimeline(t *test
 	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "quarantine_security", Status: storage.ActivityStatusSuccess, Timestamp: ts})
 	assert.Empty(t, agg.Timeline(), "successful management calls are hidden rows, so no bars")
 
-	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "upstream_servers", Status: storage.ActivityStatusError, Timestamp: ts})
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "search_servers", Status: storage.ActivityStatusError, Timestamp: ts})
 	timeline := agg.Timeline()
 	require.Len(t, timeline, 1)
-	assert.EqualValues(t, 1, timeline[0].Calls, "any internal failure IS a glance row")
+	assert.EqualValues(t, 1, timeline[0].Calls, "a non-management internal failure IS a glance row")
 	assert.EqualValues(t, 1, timeline[0].Errors)
 }
 
@@ -133,4 +133,14 @@ func TestUsageAggregate_BlockedToolCallIsARefusalNotAnExecutedCall(t *testing.T)
 	require.Len(t, timeline, 1)
 	assert.EqualValues(t, 1, timeline[0].Calls)
 	assert.EqualValues(t, 1, timeline[0].Errors)
+}
+
+// Management built-ins never row in the glance regardless of status
+// (GlanceSelection rule 1), so even their FAILURES must not bar.
+func TestUsageAggregate_ManagementBuiltinsNeverEnterTheTimeline(t *testing.T) {
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "upstream_servers", Status: storage.ActivityStatusError, Timestamp: ts})
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "quarantine_security", Status: storage.ActivityStatusError, Timestamp: ts})
+	assert.Empty(t, agg.Timeline(), "rule 1 hides these rows whatever their status, so no bars")
 }

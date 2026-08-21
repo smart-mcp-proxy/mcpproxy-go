@@ -303,6 +303,11 @@ func (a *UsageAggregate) applyInternalToolCall(rec *storage.ActivityRecord) {
 	if strings.HasPrefix(rec.ToolName, storage.InternalCallToolPrefix) {
 		return
 	}
+	// Management built-ins never row in the glance, whatever their status
+	// (GlanceSelection rule 1), so they never bar either.
+	if glanceManagementBuiltins[rec.ToolName] {
+		return
+	}
 	if rec.Status == storage.ActivityStatusSuccess && !glanceInternalTools[rec.ToolName] {
 		return
 	}
@@ -313,12 +318,18 @@ func (a *UsageAggregate) applyInternalToolCall(rec *storage.ActivityRecord) {
 
 // glanceInternalTools are the built-ins whose SUCCESSFUL calls appear as rows
 // in the tray glance (GlanceSelection.swift rule 3) and therefore in the
-// timeline. Keep in lockstep with the Swift set and with
-// AppState.countsTowardUsageTimeline.
+// timeline; glanceManagementBuiltins are excluded from the glance entirely
+// (rule 1), success or failure. Keep both in lockstep with the Swift sets and
+// with AppState.countsTowardUsageTimeline.
 var glanceInternalTools = map[string]bool{
 	"retrieve_tools": true,
 	"describe_tool":  true,
 	"code_execution": true,
+}
+
+var glanceManagementBuiltins = map[string]bool{
+	"upstream_servers":    true,
+	"quarantine_security": true,
 }
 
 // applyRejected folds a concurrency-limiter shed into the per-tool Rejected

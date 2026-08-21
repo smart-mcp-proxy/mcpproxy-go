@@ -796,13 +796,15 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName string, ar
 		return
 	}
 
-	// A concurrency shed already produced its canonical "rejected" activity
-	// record at the admission point inside the managed client (spec 093
-	// FR-012, installRejectionObserver) — that seam is origin-independent and
-	// fired for this very call. Emitting a second record here would count one
+	// A queue shed already produced its canonical "rejected" activity record
+	// at the admission point inside the managed client (spec 093 FR-012,
+	// installRejectionObserver) — that seam is origin-independent and fired
+	// for this very call. Emitting a second record here would count one
 	// refused attempt twice, once as rejected and once as an executed error.
-	var limitErr *limiter.LimitError
-	if errors.As(callErr, &limitErr) {
+	// Only queue_full/queue_timeout reach the observer (reportRejection);
+	// server_unavailable is an ordinary error with no canonical record, so it
+	// must fall through and be recorded here like any other failure.
+	if shedHasCanonicalRecord(callErr) {
 		return
 	}
 
@@ -830,6 +832,16 @@ func (u *upstreamToolCaller) emitSubCallRefused(serverName, toolName string, arg
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,
 		"", nil, "", "", 0, 0, "", nil, u.parentCallID)
+}
+
+// shedHasCanonicalRecord reports whether callErr is a limiter shed the
+// admission observer already recorded (managed.reportRejection forwards only
+// queue_full/queue_timeout; server_unavailable travels the ordinary error path
+// and has no canonical record).
+func shedHasCanonicalRecord(callErr error) bool {
+	var limitErr *limiter.LimitError
+	return errors.As(callErr, &limitErr) &&
+		(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout)
 }
 
 // subCallActivityOutcome classifies one sandboxed sub-call for the activity log
