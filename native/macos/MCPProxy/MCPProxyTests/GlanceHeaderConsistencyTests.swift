@@ -176,14 +176,35 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
     }
 
     /// Only what the usage timeline itself counts. A blocked call never
-    /// executed — the core's aggregate excludes it (`UsageAggregate.Apply`) —
-    /// so counting it here would make the header disagree with the poll that
-    /// follows it, in the other direction.
-    func testABlockedCallIsNotAddedToTheCallCount() {
+    /// executed, but it IS a red row in the glance and the core's aggregate now
+    /// counts it in the timeline (`UsageAggregate.applyBlocked`) — so the live
+    /// increment must count it too, or the header lags the bars by one until
+    /// the next poll.
+    func testABlockedCallIsAddedToTheCallCount() {
         let state = Self.connectedState()
         state.updateUsage(timeline: [Self.bucket(calls: 12)], now: Self.now)
-        state.prependGlanceActivity(Self.blockedEntry(), generation: state.connectionGeneration)
-        XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 12)
+        state.prependGlanceActivity(
+            Self.blockedEntry(timestamp: "2027-01-15T08:00:30Z"),
+            generation: state.connectionGeneration
+        )
+        XCTAssertEqual(state.glanceCallsThisHour(now: Self.now), 13)
+    }
+
+    /// The live-increment rule mirrors `UsageAggregate.Apply` case by case:
+    /// internal built-ins count except the `call_tool_*` variant echoes (they
+    /// mirror a dispatch whose own `tool_call` record is also on the stream),
+    /// and a `tool_call` shed by the concurrency limiter never executed.
+    func testLiveIncrementMirrorsTheAggregatesTimelineRule() {
+        XCTAssertTrue(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "internal_tool_call", tool: "code_execution", status: "success")))
+        XCTAssertTrue(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "internal_tool_call", tool: "retrieve_tools", status: "error")))
+        XCTAssertFalse(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "internal_tool_call", tool: "call_tool_read", status: "error")))
+        XCTAssertFalse(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "tool_call", tool: "create_issue", status: "rejected")))
+        XCTAssertTrue(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "tool_call", tool: "create_issue", status: "error")))
     }
 
     /// A live call from the hour that just ended belongs to that hour's bucket,
@@ -273,12 +294,27 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
         UsageBucket(start: AppState.floorToHour(now), calls: calls, errors: 0, totalRespBytes: 0)
     }
 
-    private static func blockedEntry() -> ActivityEntry {
+    private static func typedEntry(type: String, tool: String, status: String) -> ActivityEntry {
+        let json: [String: Any] = [
+            "id": "typed-\(type)-\(tool)-\(status)",
+            "type": type,
+            "status": status,
+            "timestamp": "2027-01-15T08:00:00Z",
+            "request_id": "req-typed-\(tool)-\(status)",
+            "server_name": "github",
+            "tool_name": tool
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: json)
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ActivityEntry.self, from: data)
+    }
+
+    private static func blockedEntry(timestamp: String = "2027-01-15T08:00:00Z") -> ActivityEntry {
         let json: [String: Any] = [
             "id": "blocked-1",
             "type": ActivityEntry.policyDecisionType,
             "status": "blocked",
-            "timestamp": "2027-01-15T08:00:00Z",
+            "timestamp": timestamp,
             "request_id": "req-blocked-1",
             "server_name": "github",
             "tool_name": "create_issue"
