@@ -211,8 +211,10 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(row.title, "github:create_issue — 30s")
     }
 
-    /// FR-004: one failure marks the whole run, with the NEWEST failure's clause.
-    func testAFailureInsideARunMarksTheRowWithTheNewestErrorClause() {
+    /// FR-004: a stretch that changed outcome is two rows, not one — the
+    /// successful call keeps its unmarked row, and the failures get a row of
+    /// their own whose ×N counts failures only, with the NEWEST failure's clause.
+    func testAFailureAfterASuccessBecomesItsOwnRowWithTheNewestErrorClause() {
         let state = Self.busyState()
         state.glanceActivity = [
             Self.entry(id: "n1", server: "jira", tool: "get_issue",
@@ -225,15 +227,22 @@ final class GlanceSectionTests: XCTestCase {
                        timestamp: "2027-01-15T07:58:00Z", session: "sess-n3")
         ]
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[4]
+        let items = section.items(for: state, now: Self.now)
 
-        XCTAssertEqual(row.title, "jira:get_issue ×3 — 30s")
-        XCTAssertEqual(Self.subtitle(of: row), "auth failed",
+        let succeeded = items[4]
+        XCTAssertEqual(succeeded.title, "jira:get_issue — 30s")
+        XCTAssertTrue(succeeded.image === GlanceSection.clearRowImage,
+                      "the successful call must not be marked by the failures beside it")
+
+        let failed = items[5]
+        XCTAssertEqual(failed.title, "jira:get_issue ×2 — 1m",
+                       "the failed row's ×N counts only its own records")
+        XCTAssertEqual(Self.subtitle(of: failed), "auth failed",
                        "the newest failure's clause takes the second line")
-        XCTAssertEqual(row.image?.accessibilityDescription, "failed")
-        XCTAssertEqual(row.toolTip, "jira:get_issue\nauth failed: token expired")
-        XCTAssertEqual(row.accessibilityLabel(),
-                       "jira:get_issue, repeated 3 times, failed: auth failed, 30s ago")
+        XCTAssertEqual(failed.image?.accessibilityDescription, "failed")
+        XCTAssertEqual(failed.toolTip, "jira:get_issue\nauth failed: token expired")
+        XCTAssertEqual(failed.accessibilityLabel(),
+                       "jira:get_issue, repeated 2 times, failed: auth failed, 1m ago")
     }
 
     func testTheRepeatCountIsSpokenNotJustDrawn() {
@@ -299,38 +308,52 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(items[4].representedObject as? String, "sess-o1")
     }
 
-    /// A late status correction on the run's newest record still lands: "same
-    /// run" must not mean "skip the update".
-    func testASameRunStillPicksUpALateFailure() {
+    /// A late status flip on the newest record of a ×3 run now SPLITS that run:
+    /// the record leaves the success run and becomes a failed run of its own.
+    /// That is a row appearing, which resizes an open menu — structural, so it
+    /// waits for close (FR-023) — and the rebuild that follows shows the split.
+    func testALateFailureSplitsTheRunAndIsStructural() {
         let state = Self.burstState()
         let section = Self.makeSection()
-        // One-line rows: with subtitles the late failure would gain a line,
-        // which is the structural case the next test pins.
+        // One-line rows so the assertion below is about the split, not about a
+        // second line arriving with it.
         section.supportsRowSubtitles = false
-        let items = section.items(for: state, now: Self.now)
-
-        state.glanceActivity[0] = Self.entry(
-            id: "j1", server: "jira", tool: "get_issue", status: "error",
-            error: "rate limited: try later",
-            timestamp: "2027-01-15T07:59:30Z", session: "sess-j1")
-
-        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[4].title, "jira:get_issue ×3 · rate limited — 30s")
-        XCTAssertEqual(items[4].image?.accessibilityDescription, "failed")
-    }
-
-    /// With subtitles available, a late failure ADDS the error line — a row
-    /// growing a line resizes the menu, so it is structural and waits for
-    /// close (FR-023), exactly like a run gaining its reason.
-    func testALateFailureGainingItsErrorLineIsStructural() {
-        let state = Self.burstState()
-        let section = Self.makeSection()
         _ = section.items(for: state, now: Self.now)
 
         state.glanceActivity[0] = Self.entry(
             id: "j1", server: "jira", tool: "get_issue", status: "error",
             error: "rate limited: try later",
             timestamp: "2027-01-15T07:59:30Z", session: "sess-j1")
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Self.now),
+                       "2 activity rows becoming 3 is structural")
+
+        let rebuilt = Self.makeSection()
+        rebuilt.supportsRowSubtitles = false
+        let items = rebuilt.items(for: state, now: Self.now)
+        XCTAssertEqual(items[4].title, "jira:get_issue · rate limited — 30s")
+        XCTAssertEqual(items[4].image?.accessibilityDescription, "failed")
+        XCTAssertEqual(items[5].title, "jira:get_issue ×2 — 1m",
+                       "the successes that did not fail keep their own row and count")
+        XCTAssertTrue(items[5].image === GlanceSection.clearRowImage)
+        XCTAssertEqual(items[6].title, "github:create_issue — 3m")
+    }
+
+    /// With subtitles available, a late failure ADDS the error line — a row
+    /// growing a line resizes the menu, so it is structural and waits for
+    /// close (FR-023), exactly like a run gaining its reason. Asserted on a
+    /// single-record row, where the row COUNT is unchanged, so the refusal can
+    /// only come from the line-count preflight.
+    func testALateFailureGainingItsErrorLineIsStructural() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        XCTAssertEqual(items[4].title, "github:create_issue — 30s")
+
+        state.glanceActivity[0] = Self.entry(
+            id: "a", server: "github", tool: "create_issue", status: "error",
+            error: "rate limited: try later",
+            timestamp: "2027-01-15T07:59:30Z", session: "sess-a")
 
         XCTAssertFalse(section.updateInPlace(for: state, now: Self.now))
     }

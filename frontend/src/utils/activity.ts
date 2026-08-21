@@ -130,6 +130,40 @@ const MAX_PREFLIGHT_SUMMARY_REASONS = 3
 export const isPreflightActivity = (activity?: { type?: string } | null): boolean =>
   activity?.type === 'preflight'
 
+// --- code_execution parent / sub-call linkage ------------------------------
+//
+// One `code_execution` call runs a script that may invoke many upstream tools.
+// The activity log records that as a TREE, not a flat list:
+//
+//   internal_tool_call  code_execution   request_id = <parentCallID>
+//     └─ tool_call      github:create_issue   parent_id = <parentCallID>
+//     └─ tool_call      slack:post_message    parent_id = <parentCallID>
+//
+// Both ends are recognisable from a single record, so the table, the widget and
+// the detail drawer all agree on what is a parent and what is a sub-call.
+
+/** Minimal record shape the linkage helpers need. */
+interface ActivityLinkFields {
+  type?: string
+  tool_name?: string
+  parent_id?: string
+  metadata?: Record<string, any> | null
+}
+
+/**
+ * True for the PARENT record of a sandboxed run: the built-in `code_execution`
+ * tool. `metadata.internal_tool_name` is the authoritative field; `tool_name` is
+ * the fallback for records that only carry it there. The `internal_tool_call`
+ * type is required in both cases — an upstream server is free to expose a tool
+ * of its own called "code_execution", and that one fans out into nothing.
+ */
+export const isCodeExecutionActivity = (a?: ActivityLinkFields | null): boolean =>
+  a?.type === 'internal_tool_call' &&
+  (a?.metadata?.internal_tool_name === 'code_execution' || a?.tool_name === 'code_execution')
+
+/** True for a sub-call: a record that names the parent it was dispatched from. */
+export const isChildCall = (a?: ActivityLinkFields | null): boolean => Boolean(a?.parent_id)
+
 /**
  * Read `metadata.reasons` into a DETERMINISTIC order: most frequent first, ties
  * broken alphabetically. Object key order is insertion-dependent, so without the

@@ -447,14 +447,33 @@ final class AppState: ObservableObject {
     /// Whether a live SSE row will show up in the usage timeline's call count
     /// once the poll catches up.
     ///
-    /// The core's aggregate counts records of type `tool_call` and nothing else
-    /// — a blocked policy decision never executed, and an internal (built-in)
-    /// call is not an upstream one (`UsageAggregate.Apply`,
-    /// internal/runtime/usage_aggregate.go). Counting anything wider here would
-    /// swap one disagreement for the opposite one: the header would overshoot
-    /// the rows and then jump BACK at the next poll.
+    /// Mirrors `UsageAggregate.Apply` (internal/runtime/usage_aggregate.go),
+    /// whose timeline matches the glance population: executed `tool_call`s
+    /// (sheds rejected by the concurrency limiter never ran and stay out,
+    /// spec 093), mcpproxy's own internal calls except the `call_tool_*`
+    /// variant echoes (those mirror a dispatch that already emitted its own
+    /// `tool_call` record), and blocked/rejected policy decisions. Anything
+    /// wider or narrower here makes the header disagree with the bars until
+    /// the next poll corrects it.
     static func countsTowardUsageTimeline(_ entry: ActivityEntry) -> Bool {
-        entry.type == "tool_call" && !(entry.toolName ?? "").isEmpty
+        guard let name = entry.toolName, !name.isEmpty else { return false }
+        switch entry.type {
+        case "tool_call":
+            return entry.status != "rejected"
+        case "internal_tool_call":
+            // Mirrors GlanceSelection: management built-ins never row (rule 1),
+            // call_tool_* echoes never do (their dispatch emitted its own
+            // tool_call record), and other internal calls row on success only
+            // for the discovery/execution set, on failure always (rule 3).
+            guard !name.hasPrefix("call_tool_"),
+                  !GlanceSelection.managementBuiltIns.contains(name) else { return false }
+            return entry.status != "success"
+                || GlanceSelection.glanceInternalTools.contains(name)
+        case ActivityEntry.policyDecisionType:
+            return entry.status == "blocked" || entry.status == "rejected"
+        default:
+            return false
+        }
     }
 
     /// Calls recorded on the 24-hour axis ending at `now` — the same window

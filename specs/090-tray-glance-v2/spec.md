@@ -30,7 +30,7 @@ An agent hammers one tool (e.g. 19 consecutive `jira_get_issue` calls) while wor
 1. **Given** the activity feed holds 19 consecutive `jira_get_issue` calls followed by older calls to other tools, **When** the user opens the menu, **Then** the first row reads as one entry with a ×19 count and the remaining rows show the older distinct tools.
 2. **Given** a run of identical calls, **When** the row renders, **Then** its age is the age of the newest call in the run.
 3. **Given** calls to tool A, then tool B, then tool A again, **When** rows render, **Then** the two A episodes remain separate rows (grouping is consecutive-only, preserving the timeline).
-4. **Given** a run of 12 calls where one failed, **When** the row renders, **Then** the row is marked as failed (failure dominates the group) and shows the newest failing call's error clause.
+4. **Given** a stretch of 12 consecutive calls to one tool of which 2 consecutive calls failed, **When** the rows render, **Then** the stretch renders as separate runs at each outcome change — the failures form their own row, marked as failed with a ×2 that counts only them and the newest failing call's error clause, and the surrounding successful calls keep their own unmarked rows.
 5. **Given** a single (non-repeated) call, **When** the row renders, **Then** no count suffix is shown.
 6. **Given** two calls to the same tool separated only by records that never render (management built-ins, collapsed wrapper records), **When** rows render, **Then** the two calls belong to one run — exclusion happens before grouping, so excluded records never split a run.
 
@@ -129,9 +129,10 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 **Row pipeline** (pure, unit-testable, in this exact order):
 
 - **FR-001**: The row pipeline MUST process fetched records in four ordered steps: (1) qualify records (drop management built-ins and other non-qualifying records), (2) collapse wrapper/upstream record pairs sharing a request identity, (3) group maximal runs of consecutive surviving records sharing the same group key, (4) take the first five groups. Records dropped in steps 1–2 MUST NOT split a run in step 3.
-- **FR-002**: The group key MUST be (server, tool, outcome class), where outcome class separates policy blocks from calls: blocked records group only with blocked records; successful and errored calls group together.
+- **FR-002**: The group key MUST be (server, tool, outcome class, status class). Outcome class separates policy blocks from calls: blocked records group only with blocked records. Status class separates outcomes: successes group only with successes, failures only with failures, and records that are neither (still running, or any status the tray does not recognize) only with each other.
 - **FR-003**: A group of N > 1 records MUST render a "×N" suffix; a single-record group renders no suffix.
-- **FR-004**: A grouped row MUST derive its age from the newest record of the run, its reason from the newest record in the run that has one, and its status from the worst outcome in the run, ordered error > success. When a run contains an error, the displayed error clause comes from the newest erroring record.
+- **FR-004**: A grouped row MUST derive its age from the newest record of the run, its reason from the newest record in the run that has one, and its status from the newest record of the run. Runs never mix success and failure (status class is part of the group key, FR-002), so a failed row's ×N counts only failed records and a successful row's ×N counts only successful ones. When a run is a failed run, the displayed error clause comes from its newest record.
+  - Superseded: the original rule was "status from the worst outcome in the run, ordered error > success". One failure anywhere in a stretch of calls to the same tool marked the whole stretch failed while the ×N kept counting the successes, so a row reading "×12, failed" could stand for two failures and ten successful calls. The split above is what makes the mark and the count describe the same records.
 
 **Reason display**:
 
@@ -177,7 +178,7 @@ The Activity (24h) histogram entry sits directly under the summary line, above t
 ### Key Entities
 
 - **Activity record**: One proxied event — a tool call, internal tool call, or policy decision — with server, tool, outcome, timestamp, optional reason (caller intent or policy block reason), optional error message, and a request identity used for wrapper collapse and live/poll reconciliation (absent only on legacy policy records, which are then never collapsed).
-- **Glance run (grouped row)**: A maximal sequence of consecutive qualifying records sharing a group key (server, tool, outcome class), presented as one row with count, newest age, newest available reason, and worst outcome; identified across updates by its oldest record.
+- **Glance run (grouped row)**: A maximal sequence of consecutive qualifying records sharing a group key (server, tool, outcome class, status class), presented as one row with count, newest age, newest available reason, and the outcome every record in it shares; identified across updates by its oldest record.
 - **Client presence**: A deduplicated view of one client application derived from its retained sessions: display name, version, last-activity time, and derived state (active / idle / seen).
 
 ## Success Criteria *(mandatory)*

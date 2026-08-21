@@ -18,9 +18,9 @@ enum GlanceFormatting {
     /// cross and an exclamation mark are three distinct glyphs.
     ///
     /// Keyed on the status *string* rather than a record, because a glance row
-    /// is a run of records and the outcome it shows is the run's worst
-    /// (`GlanceRun.worstStatus`), which may belong to none of the run's other
-    /// records.
+    /// is a run of records and the outcome it shows is the run's own
+    /// (`GlanceRun.status`) — the newest record's, which every other record in
+    /// the run shares, since a run never mixes success and failure.
     /// A block gets a triangle, not a differently-coloured circle: a policy
     /// block and an upstream failure are different events, and the difference
     /// has to survive greyscale and a red-green deficiency (spec 090 FR-011).

@@ -287,6 +287,19 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </span>
+          <!-- Sub-call view: click to leave it and restore the normal list. -->
+          <span
+            v-if="filterParentId"
+            data-test="activity-parent-filter-chip"
+            class="badge badge-sm badge-outline gap-1 cursor-pointer hover:badge-error"
+            :title="`Sub-calls of code_execution ${filterParentId}`"
+            @click="clearParentFilter"
+          >
+            ↳ Sub-calls of {{ shortId(filterParentId) }}
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
           <span v-if="filterAuthType" class="badge badge-sm badge-outline">Auth: {{ filterAuthType === 'admin' ? '🔑 Admin' : '🤖 Agent' }}</span>
@@ -358,6 +371,7 @@
               <tr
                 v-for="activity in paginatedActivities"
                 :key="activity.id"
+                data-test="activity-row"
                 class="hover cursor-pointer"
                 :class="{ 'bg-base-200': selectedActivity?.id === activity.id }"
                 @click="selectActivity(activity)"
@@ -367,9 +381,32 @@
                   <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
                 </td>
                 <td>
-                  <div class="flex items-center gap-2">
-                    <span class="text-lg">{{ getTypeIcon(activity.type) }}</span>
-                    <span class="text-sm">{{ formatType(activity.type) }}</span>
+                  <div class="flex flex-col gap-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-lg">{{ getTypeIcon(activity.type) }}</span>
+                      <span class="text-sm">{{ formatType(activity.type) }}</span>
+                    </div>
+                    <!--
+                      code_execution linkage: a sub-call names the run that
+                      dispatched it, a parent advertises that it fans out. Both
+                      badges are the entry point to the drawer's navigation.
+                    -->
+                    <span
+                      v-if="isChildCall(activity)"
+                      data-test="activity-child-badge"
+                      class="badge badge-xs badge-ghost w-fit"
+                      title="Sub-call dispatched by a code_execution run"
+                    >
+                      ↳ via code_execution
+                    </span>
+                    <span
+                      v-else-if="isCodeExecutionActivity(activity)"
+                      data-test="activity-parent-badge"
+                      class="badge badge-xs badge-accent w-fit"
+                      title="Sandboxed script run — may have dispatched sub-calls"
+                    >
+                      🧩 code_execution
+                    </span>
                   </div>
                 </td>
                 <td>
@@ -569,6 +606,41 @@
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Source:</span>
                 <span class="badge badge-sm badge-outline">{{ selectedActivity.source }}</span>
               </div>
+              <div v-if="selectedActivity.request_id" class="flex gap-2">
+                <span class="text-sm text-base-content/60 w-24 shrink-0">Request ID:</span>
+                <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.request_id }}</code>
+              </div>
+              <div v-if="selectedActivity.parent_id" class="flex gap-2">
+                <span class="text-sm text-base-content/60 w-24 shrink-0">Parent call:</span>
+                <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.parent_id }}</code>
+              </div>
+            </div>
+
+            <!--
+              code_execution call chain. Parent -> children is a parent_id
+              filter (server-side too, so sub-calls beyond the loaded page are
+              included); child -> parent is an exact request_id lookup.
+            -->
+            <div
+              v-if="isCodeExecutionActivity(selectedActivity) || isChildCall(selectedActivity)"
+              class="flex flex-wrap items-center gap-2"
+            >
+              <button
+                v-if="isCodeExecutionActivity(selectedActivity) && selectedActivity.request_id"
+                data-test="activity-view-subcalls"
+                class="btn btn-sm btn-outline"
+                @click="viewSubCalls(selectedActivity)"
+              >
+                ↳ View sub-calls ({{ subCallCount(selectedActivity) }})
+              </button>
+              <button
+                v-if="isChildCall(selectedActivity)"
+                data-test="activity-view-parent"
+                class="btn btn-sm btn-outline"
+                @click="viewParentCall(selectedActivity)"
+              >
+                ↰ View parent call
+              </button>
             </div>
 
             <!-- Sensitive Data Detection (Spec 026) -->
@@ -786,6 +858,8 @@ import {
 import {
   formatPreflightSummary,
   getPreflightVerdictBadgeClass,
+  isChildCall,
+  isCodeExecutionActivity,
   isPreflightActivity,
   preflightIdsCount,
   preflightPerTool,
@@ -816,6 +890,10 @@ const filterAuthType = ref('') // Spec 028: '' | 'admin' | 'agent'
 const filterAgentName = ref('') // Spec 028: filter by agent token name
 const filterStartDate = ref('')
 const filterEndDate = ref('')
+// Sub-call view: the request_id of a code_execution parent. Applied BOTH
+// client-side (so the visible list narrows immediately) and as a server-side
+// query param (so sub-calls beyond the 200 loaded rows are included).
+const filterParentId = ref('')
 
 // Activity types configuration (Spec 024: includes new types)
 const activityTypes = [
@@ -1026,11 +1104,17 @@ const getSessionLabel = (sessionId: string): string => {
 }
 
 const hasActiveFilters = computed(() => {
-  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value
+  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value
 })
 
 const filteredActivities = computed(() => {
   let result = activities.value
+
+  // Sub-calls of one code_execution run. Kept client-side as well as on the
+  // request so the list is correct even if a refresh (SSE, poll) races ahead.
+  if (filterParentId.value) {
+    result = result.filter(a => a.parent_id === filterParentId.value)
+  }
 
   // Multi-type filter (Spec 024): OR logic - show activities matching ANY selected type
   if (selectedTypes.value.length > 0) {
@@ -1122,7 +1206,7 @@ const loadActivities = async () => {
 
   try {
     const [activitiesResponse, summaryResponse] = await Promise.all([
-      api.getActivities({ limit: 200 }),
+      api.getActivities({ limit: 200, parent_id: filterParentId.value || undefined }),
       api.getActivitySummary('24h')
     ])
 
@@ -1155,6 +1239,87 @@ const clearFilters = () => {
   filterStartDate.value = ''
   filterEndDate.value = ''
   currentPage.value = 1
+
+  // The parent filter is the only one narrowed on the SERVER too, so leaving it
+  // needs a refetch — the loaded rows are just this run's sub-calls.
+  const hadParentFilter = Boolean(filterParentId.value)
+  filterParentId.value = ''
+  if (hadParentFilter) void loadActivities()
+}
+
+/** Last 8 chars of a correlation id — enough to recognise, short enough to fit. */
+const shortId = (id: string): string => (id.length > 8 ? `…${id.slice(-8)}` : id)
+
+/** Sub-calls of this run among the rows we hold. */
+const subCallCount = (parent: ActivityRecord): number => {
+  if (!parent.request_id) return 0
+  return activities.value.filter(a => a.parent_id === parent.request_id).length
+}
+
+/**
+ * Parent -> children. Narrows the list to this run's sub-calls and refetches
+ * with `parent_id` so children outside the loaded page come along.
+ */
+const viewSubCalls = async (parent: ActivityRecord) => {
+  if (!parent.request_id) return
+  filterParentId.value = parent.request_id
+  currentPage.value = 1
+  closeDetailDrawer()
+  await loadActivities()
+}
+
+/** Leave the sub-call view and restore the normal list. */
+const clearParentFilter = async () => {
+  if (!filterParentId.value) return
+  filterParentId.value = ''
+  currentPage.value = 1
+  await loadActivities()
+}
+
+/**
+ * Child -> parent. The parent is never a child of itself, so it cannot be in a
+ * parent_id-filtered list: drop the filter, then locate the parent by exact
+ * correlation id — from the loaded rows, else straight from the API (the run may
+ * be older than the 200 rows we hold).
+ */
+const viewParentCall = async (child: ActivityRecord) => {
+  const parentId = child.parent_id
+  if (!parentId) return
+
+  const hadParentFilter = Boolean(filterParentId.value)
+  filterParentId.value = ''
+  currentPage.value = 1
+
+  let parent = activities.value.find(a => a.request_id === parentId)
+  if (hadParentFilter || !parent) {
+    await loadActivities()
+    parent = activities.value.find(a => a.request_id === parentId)
+  }
+
+  if (!parent) {
+    const response = await api.getActivities({ request_id: parentId, limit: 1 })
+    const fetched = response.success ? response.data?.activities?.[0] : undefined
+    if (fetched) {
+      parent = fetched
+      // Splice it in so the row the drawer describes is also in the table.
+      if (!activities.value.some(a => a.id === fetched.id)) {
+        activities.value = [fetched, ...activities.value]
+      }
+    }
+  }
+
+  if (parent) {
+    selectActivity(parent)
+    return
+  }
+
+  // Retention (90 days) can outlive a record's parent; say so instead of
+  // silently doing nothing, but never blank the table over it.
+  systemStore.addToast({
+    type: 'warning',
+    title: 'Parent call not found',
+    message: `No activity record with request id ${parentId} is still available.`,
+  })
 }
 
 // Toggle type filter (Spec 024: multi-select support)
@@ -1209,6 +1374,8 @@ const exportActivities = (format: 'json' | 'csv') => {
     type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
     status: filterStatus.value || undefined,
+    // Exporting from the sub-call view exports that run's sub-calls.
+    parent_id: filterParentId.value || undefined,
   })
   window.open(url, '_blank')
 }

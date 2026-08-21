@@ -41,6 +41,7 @@ var (
 	activityOffset        int
 	activityIntentType    string // Spec 018: Filter by operation type (read, write, destructive)
 	activityRequestID     string // Spec 021: Filter by HTTP request ID for correlation
+	activityParentID      string // Activity transparency: filter to sub-calls of a code_execution parent
 	activityNoIcons       bool   // Disable emoji icons in output
 	activityDetectionType string // Spec 026: Filter by detection type (e.g., "aws_access_key")
 	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
@@ -73,6 +74,7 @@ type ActivityFilter struct {
 	Offset        int
 	IntentType    string // Spec 018: Filter by operation type (read, write, destructive)
 	RequestID     string // Spec 021: Filter by HTTP request ID for correlation
+	ParentID      string // Activity transparency: filter to sub-calls of a code_execution parent
 	SensitiveData *bool  // Spec 026: Filter by sensitive data detection
 	DetectionType string // Spec 026: Filter by detection type
 	Severity      string // Spec 026: Filter by severity level
@@ -227,6 +229,11 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	// Spec 021: Add request_id filter for log correlation
 	if f.RequestID != "" {
 		q.Set("request_id", f.RequestID)
+	}
+	// Activity transparency: parent_id joins a code_execution record to the
+	// sandboxed sub-calls it made (child.parent_id == parent.request_id).
+	if f.ParentID != "" {
+		q.Set("parent_id", f.ParentID)
 	}
 	// Spec 026: Add sensitive data filters
 	if f.SensitiveData != nil {
@@ -856,6 +863,9 @@ Examples:
   # List activity by request ID (for error correlation)
   mcpproxy activity list --request-id abc123-def456
 
+  # List the sub-calls a code_execution made (value = the parent's request_id)
+  mcpproxy activity list --parent-id abc123-def456
+
   # List only activities with sensitive data detected
   mcpproxy activity list --sensitive-data
 
@@ -932,7 +942,10 @@ Examples:
   mcpproxy activity export --format csv --output activity.csv
 
   # Export to stdout for piping
-  mcpproxy activity export --format csv | gzip > activity.csv.gz`,
+  mcpproxy activity export --format csv | gzip > activity.csv.gz
+
+  # Export just the sub-calls of one code_execution
+  mcpproxy activity export --parent-id abc123-def456`,
 		RunE: runActivityExport,
 	}
 )
@@ -962,6 +975,7 @@ func init() {
 	activityListCmd.Flags().IntVar(&activityOffset, "offset", 0, "Pagination offset")
 	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
 	activityListCmd.Flags().StringVar(&activityRequestID, "request-id", "", "Filter by HTTP request ID for log correlation")
+	activityListCmd.Flags().StringVar(&activityParentID, "parent-id", "", "List child tool calls of a code_execution activity (value = the parent record request_id)")
 	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 	// Spec 026: Sensitive data detection filters
 	activityListCmd.Flags().Bool("sensitive-data", false, "Filter to show only activities with sensitive data detected")
@@ -995,6 +1009,7 @@ func init() {
 	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
+	activityExportCmd.Flags().StringVar(&activityParentID, "parent-id", "", "Export only child tool calls of a code_execution activity (value = the parent record request_id)")
 }
 
 // getActivityClient creates an HTTP client for the daemon
@@ -1045,6 +1060,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		Offset:        activityOffset,
 		IntentType:    activityIntentType,
 		RequestID:     activityRequestID,
+		ParentID:      activityParentID,
 		SensitiveData: sensitiveDataPtr,
 		DetectionType: activityDetectionType,
 		Severity:      activitySeverity,
@@ -1147,7 +1163,9 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			sourceIcon,
 			actType,
 			server,
-			tool,
+			// Activity transparency: a sub-call of a code_execution parent is
+			// indented so a mixed list reads as a tree, not a flat run of rows.
+			activityChildToolCell(act, tool),
 			intentStr,
 			sensitiveStr, // Spec 026: Show sensitive data indicator
 			status,
@@ -1433,6 +1451,8 @@ func formatToolCallEvent(event map[string]interface{}, timestamp string) string 
 	statusIcon := formatStatusIcon(status)
 
 	line := fmt.Sprintf("[%s] [%s] %s:%s %s %s", timestamp, sourceIcon, server, tool, statusIcon, formatActivityDuration(int64(durationMs)))
+	// Activity transparency: mark sub-calls made from inside a code_execution.
+	line += formatParentMarker(event)
 	if errMsg != "" {
 		line += " " + errMsg
 	}
@@ -1465,6 +1485,7 @@ func formatInternalToolCallEvent(event map[string]interface{}, timestamp string)
 	}
 
 	line := fmt.Sprintf("[%s] [INT] %s%s %s %s", timestamp, internalTool, target, statusIcon, formatActivityDuration(int64(durationMs)))
+	line += formatParentMarker(event)
 	if errMsg != "" {
 		line += " " + errMsg
 	}
@@ -1547,6 +1568,41 @@ func formatStatusIcon(status string) string {
 	}
 }
 
+// activityChildToolCell renders the TOOL cell for a list row, marking records
+// that are sub-calls of a code_execution parent (ParentID == parent request_id).
+func activityChildToolCell(act map[string]interface{}, tool string) string {
+	if getStringField(act, "parent_id") == "" {
+		return tool
+	}
+	return "└ " + tool
+}
+
+// formatParentMarker renders the short "[child of <parent_id>]" suffix used by
+// `activity watch`, so a sub-call is recognisable in the live stream.
+func formatParentMarker(event map[string]interface{}) string {
+	parentID := getStringField(event, "parent_id")
+	if parentID == "" {
+		return ""
+	}
+	return fmt.Sprintf(" [child of %s]", parentID)
+}
+
+// isCodeExecutionParent reports whether a record is the code_execution activity
+// that sandboxed sub-calls hang off. Only the internal_tool_call record spawns
+// children; a same-named upstream tool_call does not.
+func isCodeExecutionParent(activity map[string]interface{}) bool {
+	if getStringField(activity, "type") != string(storage.ActivityTypeInternalToolCall) {
+		return false
+	}
+	if getStringField(activity, "tool_name") == "code_execution" {
+		return true
+	}
+	if metadata := getMapField(activity, "metadata"); metadata != nil {
+		return getStringField(metadata, "internal_tool_name") == "code_execution"
+	}
+	return false
+}
+
 // runActivityShow implements the activity show command
 func runActivityShow(cmd *cobra.Command, args []string) error {
 	activityID := args[0]
@@ -1621,8 +1677,20 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 	// Spec 098 (SC-005): the request id is how a preflight record is joined to
 	// the tool calls of the same workflow (`activity list --request-id <id>`),
 	// so the detail view has to show it, not just accept it as a filter.
-	if requestID := getStringField(activity, "request_id"); requestID != "" {
+	requestID := getStringField(activity, "request_id")
+	if requestID != "" {
 		fmt.Printf("Request ID:   %s\n", requestID)
+	}
+
+	// Activity transparency: both directions of the code_execution ↔ sub-call
+	// link are navigable from the detail view.
+	//   child  → parent:   the Parent ID line below
+	//   parent → children: the hint below it
+	if parentID := getStringField(activity, "parent_id"); parentID != "" {
+		fmt.Printf("Parent ID:    %s\n", parentID)
+		fmt.Printf("              (sub-call of a code_execution — 'mcpproxy activity list --request-id %s' shows the parent)\n", parentID)
+	} else if isCodeExecutionParent(activity) && requestID != "" {
+		fmt.Printf("\nUse 'mcpproxy activity list --parent-id %s' to see sub-calls.\n", requestID)
 	}
 
 	if errMsg := getStringField(activity, "error_message"); errMsg != "" {
@@ -1779,6 +1847,43 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// activityExportQueryParams builds the export query string from the export
+// flags. Export does NOT go through ActivityFilter.ToQueryParams, so every
+// filter flag has to be wired here as well or it is a silent no-op.
+func activityExportQueryParams() url.Values {
+	q := url.Values{}
+	q.Set("format", activityExportFormat)
+	if activityType != "" {
+		q.Set("type", activityType)
+	}
+	if activityServer != "" {
+		q.Set("server", activityServer)
+	}
+	if activityTool != "" {
+		q.Set("tool", activityTool)
+	}
+	if activityStatus != "" {
+		q.Set("status", activityStatus)
+	}
+	if activitySessionID != "" {
+		q.Set(sessionQueryParam(activitySessionID), activitySessionID)
+	}
+	if activityStartTime != "" {
+		q.Set("start_time", activityStartTime)
+	}
+	if activityEndTime != "" {
+		q.Set("end_time", activityEndTime)
+	}
+	// Activity transparency: export the sub-calls of one code_execution.
+	if activityParentID != "" {
+		q.Set("parent_id", activityParentID)
+	}
+	if activityIncludeBodies {
+		q.Set("include_bodies", "true")
+	}
+	return q
+}
+
 // runActivityExport implements the activity export command
 func runActivityExport(cmd *cobra.Command, _ []string) error {
 	// Setup logger
@@ -1812,34 +1917,7 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 	transport, baseURL := activityTransport(endpoint, logger.Sugar())
 	exportURL := baseURL + "/api/v1/activity/export"
 
-	q := url.Values{}
-	q.Set("format", activityExportFormat)
-	if activityType != "" {
-		q.Set("type", activityType)
-	}
-	if activityServer != "" {
-		q.Set("server", activityServer)
-	}
-	if activityTool != "" {
-		q.Set("tool", activityTool)
-	}
-	if activityStatus != "" {
-		q.Set("status", activityStatus)
-	}
-	if activitySessionID != "" {
-		q.Set(sessionQueryParam(activitySessionID), activitySessionID)
-	}
-	if activityStartTime != "" {
-		q.Set("start_time", activityStartTime)
-	}
-	if activityEndTime != "" {
-		q.Set("end_time", activityEndTime)
-	}
-	if activityIncludeBodies {
-		q.Set("include_bodies", "true")
-	}
-
-	exportURL += "?" + q.Encode()
+	exportURL += "?" + activityExportQueryParams().Encode()
 
 	// Create HTTP request
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

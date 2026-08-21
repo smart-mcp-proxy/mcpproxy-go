@@ -937,6 +937,10 @@ class APIService {
     session_id?: string
     status?: string
     intent_type?: string
+    /** Sub-calls of one code_execution run: the parent record's request_id. */
+    parent_id?: string
+    /** Exact correlation id — used to jump from a sub-call back to its parent. */
+    request_id?: string
     start_time?: string
     end_time?: string
     limit?: number
@@ -988,6 +992,8 @@ class APIService {
     type?: string
     server?: string
     status?: string
+    /** Export only the sub-calls of one code_execution run. */
+    parent_id?: string
     start_time?: string
     end_time?: string
     include_bodies?: boolean

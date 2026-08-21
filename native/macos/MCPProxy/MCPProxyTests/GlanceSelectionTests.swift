@@ -113,6 +113,45 @@ final class GlanceSelectionTests: XCTestCase {
         XCTAssertEqual(rows.first?.displayReason, "Quarantined server")
     }
 
+    // MARK: - code_execution sub-calls (issue C)
+
+    /// A `code_execution` script and the tools it called are separate rows, and
+    /// that is the point: the sub-calls are the transparency the parent row
+    /// cannot give. Rule 4 does not fold them together because every child gets
+    /// a request id of its own — it names the script through `parent_id`, which
+    /// carries the PARENT's request id, not a shared one.
+    func testCodeExecutionSubCallsEachKeepTheirOwnRow() {
+        let parentCallID = "1770000000-sess-code_execution"
+        let rows = GlanceSelection.activityRows(from: [
+            Self.entry(id: "c2", type: "tool_call", server: "jira", tool: "get_issue",
+                       requestId: "child-2", parentId: parentCallID),
+            Self.entry(id: "c1", type: "tool_call", server: "github", tool: "create_issue",
+                       requestId: "child-1", parentId: parentCallID),
+            Self.entry(id: "p", type: "internal_tool_call", tool: "code_execution",
+                       requestId: parentCallID)
+        ])
+
+        XCTAssertEqual(rows.count, 3, "a script's sub-calls must not collapse into its own row")
+        XCTAssertEqual(rows.map(\.newest.id), ["c2", "c1", "p"])
+        XCTAssertEqual(rows.map(\.count), [1, 1, 1])
+        XCTAssertEqual(rows.last?.newest.parentId, nil, "the parent row has no parent of its own")
+        XCTAssertEqual(Set(rows.dropLast().compactMap(\.newest.parentId)), [parentCallID],
+                       "each child names the parent's request id, which is how a row navigates up")
+    }
+
+    /// Two sub-calls to the SAME tool are still one run, like any other pair of
+    /// consecutive identical calls — grouping does not know about parentage.
+    func testConsecutiveSubCallsToOneToolStillGroup() {
+        let parentCallID = "1770000000-sess-code_execution"
+        let rows = GlanceSelection.activityRows(from: [
+            Self.entry(id: "c2", type: "tool_call", server: "jira", tool: "get_issue",
+                       requestId: "child-2", parentId: parentCallID),
+            Self.entry(id: "c1", type: "tool_call", server: "jira", tool: "get_issue",
+                       requestId: "child-1", parentId: parentCallID)
+        ])
+        XCTAssertEqual(rows.map(\.count), [2])
+    }
+
     // MARK: - Helpers
 
     static func entry(
@@ -122,6 +161,7 @@ final class GlanceSelectionTests: XCTestCase {
         tool: String? = nil,
         status: String = "success",
         requestId: String? = nil,
+        parentId: String? = nil,
         decision: String? = nil,
         reason: String? = nil
     ) -> ActivityEntry {
@@ -134,6 +174,7 @@ final class GlanceSelectionTests: XCTestCase {
         if let server { json["server_name"] = server }
         if let tool { json["tool_name"] = tool }
         if let requestId { json["request_id"] = requestId }
+        if let parentId { json["parent_id"] = parentId }
         // A policy decision's own reason sits at the top of metadata, beside the
         // decision — the shape `activity_service.go` persists and the projection
         // whitelist keeps.

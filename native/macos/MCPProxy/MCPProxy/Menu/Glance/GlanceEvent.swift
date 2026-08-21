@@ -89,6 +89,10 @@ enum GlanceEvent {
             timestamp: timestamp,
             sessionId: nonEmptyString(payload["session_id"]),
             requestId: requestId,
+            // Carried live for the same reason the reason is: a child sub-call
+            // of a `code_execution` script must not lose its parent link for
+            // the 30 seconds before the reconciling poll re-ids it.
+            parentId: nonEmptyString(payload["parent_id"]),
             metadata: contextMetadata(from: payload),
             hasSensitiveData: nil,
             detectionTypes: nil,

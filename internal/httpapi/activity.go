@@ -88,6 +88,13 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.RequestID = requestID
 	}
 
+	// Parent ID filter: the sub-calls one code_execution issued. Navigation is
+	// symmetric — parent→children is ?parent_id=<parent request_id>, and
+	// child→parent is ?request_id=<child parent_id>.
+	if parentID := q.Get("parent_id"); parentID != "" {
+		filter.ParentID = parentID
+	}
+
 	// Include call_tool_* internal tool calls (default: exclude the ones a
 	// tool_call record already covers — successful and concurrency-rejected).
 	// Set include_call_tool=true to show every internal tool call.
@@ -135,6 +142,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param status query string false "Filter by status" Enums(success, error, blocked, rejected)
 // @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
 // @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
+// @Param parent_id query string false "Filter by parent call id — returns the sub-calls one code_execution issued"
 // @Param include_call_tool query bool false "Include successful call_tool_* internal tool calls (default: false, excluded to avoid duplicates)"
 // @Param sensitive_data query bool false "Filter by sensitive data detection (true=has detections, false=no detections)"
 // @Param detection_type query string false "Filter by specific detection type (e.g., 'aws_access_key', 'credit_card')"
@@ -311,6 +319,7 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		SessionID:         a.SessionID,
 		WorkSessionID:     a.WorkSessionID,
 		RequestID:         a.RequestID,
+		ParentID:          a.ParentID,
 		Metadata:          a.Metadata,
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
@@ -407,6 +416,7 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		SessionID:         a.SessionID,
 		WorkSessionID:     a.WorkSessionID,
 		RequestID:         a.RequestID,
+		ParentID:          a.ParentID,
 		Metadata:          a.Metadata,
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
@@ -436,6 +446,8 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Param session_id query string false "Filter by MCP transport session ID"
 // @Param work_session_id query string false "Filter by work session (one client, one project, across reconnects)"
 // @Param status query string false "Filter by status"
+// @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
+// @Param parent_id query string false "Filter by parent call id — exports the sub-calls one code_execution issued"
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to export (1-50000, default 10000)"
@@ -496,7 +508,9 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 
 	// Write CSV header if format is CSV
 	if format == "csv" {
-		csvHeader := "id,type,source,server_name,tool_name,status,error_message,duration_ms,timestamp,session_id,request_id,response_truncated\n"
+		// parent_id is APPENDED, never inserted: existing CSV consumers index by
+		// column position, so a new column has to land after the last one.
+		csvHeader := "id,type,source,server_name,tool_name,status,error_message,duration_ms,timestamp,session_id,request_id,response_truncated,parent_id\n"
 		if _, err := w.Write([]byte(csvHeader)); err != nil {
 			s.logger.Errorw("Failed to write CSV header", "error", err)
 			return
@@ -569,6 +583,7 @@ func activityToCSVRow(a *storage.ActivityRecord) string {
 		escapeCSV(a.SessionID),
 		escapeCSV(a.RequestID),
 		strconv.FormatBool(a.ResponseTruncated),
+		escapeCSV(a.ParentID),
 	}, ",") + "\n"
 }
 
@@ -620,26 +635,29 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	endTime := time.Now().UTC()
 	startTime := endTime.Add(-duration)
 
-	// Build filter for the time range
+	// Build filter for the time range.
+	//
+	// Limit stays 0 and the records are STREAMED rather than listed: this is a
+	// counting query over the whole period, and ListActivities runs
+	// ActivityFilter.Validate(), which coerces limit 0 to 50 and caps it at 100.
+	// The summary therefore used to describe the newest 50 records and label the
+	// answer "24h" — on a busy proxy the totals, the status split and the top
+	// server/tool lists were all computed from a few minutes of traffic.
+	// StreamActivities applies the same Matches() filter but treats limit 0 as
+	// "no limit", so the counters see every record in the window.
 	filter := storage.DefaultActivityFilter()
 	filter.StartTime = startTime
 	filter.EndTime = endTime
-	filter.Limit = 0 // Get all records
-
-	// Get all activities in the time range
-	activities, _, err := s.controller.ListActivities(filter)
-	if err != nil {
-		s.logger.Errorw("Failed to list activities for summary", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to get activity summary")
-		return
-	}
+	filter.Limit = 0
 
 	// Calculate summary statistics
 	var totalCount, successCount, errorCount, blockedCount, rejectedCount int
 	serverCounts := make(map[string]int)
 	toolCounts := make(map[string]int)
 
-	for _, a := range activities {
+	// The stream holds a read transaction open until the channel is drained or
+	// closed, so this loop must always run to completion.
+	for a := range s.controller.StreamActivities(filter) {
 		totalCount++
 		switch a.Status {
 		case storage.ActivityStatusSuccess:

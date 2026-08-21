@@ -8,12 +8,19 @@
 import Foundation
 
 /// One rendered activity row: a maximal run of *consecutive* qualifying records
-/// that share a group key (server, tool, outcome class) — spec 090 FR-001…004.
+/// that share a group key (server, tool, outcome class, status class) — spec 090
+/// FR-001…004.
 ///
 /// Consecutive-only is the whole point: the glance is a timeline, and clustering
 /// non-adjacent calls would claim an ordering that never happened. A burst of 19
 /// `jira_get_issue` calls becomes one row; the same tool called again after
 /// something else stays a second row.
+///
+/// A run is also HOMOGENEOUS in outcome: successes and failures never share one.
+/// The row is the count's subject, so "×12, failed" has to mean twelve failures
+/// — and until status class joined the key it did not, because one error in a
+/// stretch of successes marked the whole stretch failed and counted the
+/// successes into it.
 ///
 /// The run is a *view* over the records, not a summary of them: every derived
 /// value names the record it came from, so a row can always be traced back.
@@ -24,15 +31,24 @@ struct GlanceRun: Equatable {
     /// Outcome class is in the key so a policy block never merges into a run of
     /// calls to the same tool (FR-002): "27 blocked attempts" and "27 calls" are
     /// different stories, and blocks are the ones worth reading.
+    ///
+    /// Status class is in it for the same reason one level down (FR-004): "×12
+    /// failed" and "×10 succeeded, ×2 failed" are different stories too, and a
+    /// single key for both told the alarming one about ten calls that were fine.
+    /// The two are separate fields rather than one merged enum because rule 6
+    /// (`qualifies`) asks only whether policy STOPPED the call, and merging
+    /// would make a block indistinguishable from a failure at that gate.
     struct Key: Equatable {
         let server: String
         let tool: String
         let outcomeClass: OutcomeClass
+        let statusClass: StatusClass
 
         init(for entry: ActivityEntry) {
             self.server = entry.serverName ?? ""
             self.tool = entry.toolName ?? ""
             self.outcomeClass = entry.outcomeClass
+            self.statusClass = entry.statusClass
         }
     }
 
@@ -69,14 +85,23 @@ struct GlanceRun: Equatable {
 
     /// The newest failing record in the run, if any. `records` is newest-first,
     /// so `first` is the newest.
+    ///
+    /// Either every record in the run is failing or none is — status class is
+    /// part of the key — so this is the newest record itself on a failed run,
+    /// and nil on every other kind.
     var newestErroring: ActivityEntry? { records.first { $0.status == "error" } }
 
-    /// Worst outcome in the run, error beating success (FR-004). A run with no
-    /// failure reports the newest record's own status, so a call still running
-    /// is never announced as a failure.
-    var worstStatus: String { newestErroring?.status ?? newest.status }
+    /// The status the row renders (FR-004).
+    ///
+    /// The newest record's own, and that is now the whole rule: a run cannot
+    /// mix success and failure, so there is no "worst" to pick. It used to be
+    /// `newestErroring?.status ?? newest.status` — one error anywhere in the
+    /// stretch dominated the row — which is exactly what made a `×12` row of
+    /// mostly-successful calls read as twelve failures.
+    var status: String { newest.status }
 
-    /// The error clause to show, from the NEWEST erroring record (FR-004).
+    /// The error clause to show, from the NEWEST erroring record (FR-004) —
+    /// on a failed run, the newest record.
     var errorMessage: String? { newestErroring?.errorMessage }
 
     /// The reason to show: the newest record in the run that has one (FR-004) —
@@ -147,16 +172,24 @@ enum GlanceSelection {
     /// upstream calls carry distinct ids structurally. A group is therefore a
     /// wrapper plus its upstream partner, never a fan-out.
     ///
-    /// What would invalidate that: `internal/server/mcp_code_execution.go` sets
+    /// The sub-calls a `code_execution` script makes are visible here now, and
+    /// they do NOT break that: `emitSubCallActivity`
+    /// (`internal/server/mcp_code_execution.go`) mints a FRESH correlation id
+    /// per sub-call — the counter suffix in `mintCorrelationIDAt` is what makes
+    /// it unique — and names the script through `parent_id`, which carries the
+    /// parent's request id rather than a shared one. No child shares an id with
+    /// another child or with the parent, so a multi-tool script renders as the
+    /// script's own row plus one row per sub-call (the transparency the feature
+    /// exists for) instead of collapsing to one.
+    ///
+    /// Note the legacy `ToolCallRecord` written beside it still carries
     /// `RequestID: u.executionID` ("Use execution ID as request ID to link
-    /// nested calls") on every nested call a `code_execution` script makes, so
-    /// all of them share ONE id. Those records are currently invisible here —
-    /// the nested caller only writes to the legacy history via
-    /// `storage.RecordToolCall` and emits no activity event. If nested calls
-    /// are ever wired into the activity stream, this function would collapse an
-    /// entire multi-tool script down to a single row. At that point rule 4 must
-    /// narrow to "collapse a wrapper with its upstream partner" rather than
-    /// deduplicating a whole request id.
+    /// nested calls") — one id for the whole script. That is the history table,
+    /// not the activity stream this pipeline reads. Should the ACTIVITY records
+    /// ever be given that shape, this function would collapse an entire script
+    /// down to a single row, and rule 4 would have to narrow to "collapse a
+    /// wrapper with its upstream partner" rather than deduplicating a whole
+    /// request id.
     static func collapseByRequestID(_ entries: [ActivityEntry]) -> [ActivityEntry] {
         var winners: [String: ActivityEntry] = [:]
         for entry in entries {

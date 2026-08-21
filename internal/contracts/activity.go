@@ -47,6 +47,7 @@ type ActivityRecord struct {
 	SessionID         string                 `json:"session_id,omitempty"`                     // MCP transport session ID (regenerated on every reconnect)
 	WorkSessionID     string                 `json:"work_session_id,omitempty"`                // Spec 082: one client, one project, across reconnects
 	RequestID         string                 `json:"request_id,omitempty"`                     // HTTP request ID for correlation
+	ParentID          string                 `json:"parent_id,omitempty"`                      // Correlation id of the parent call (the code_execution whose sandbox issued this sub-call)
 	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`  // Additional context-specific data
 
 	// Sensitive data detection fields (Spec 026)
