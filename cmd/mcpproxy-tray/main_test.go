@@ -34,6 +34,58 @@ func TestBuildShellExecCommand(t *testing.T) {
 	}
 }
 
+func TestTrayListenFromArgs(t *testing.T) {
+	tcases := []struct {
+		args     []string
+		expected string
+	}{
+		{nil, ""},
+		{[]string{"serve"}, ""},
+		{[]string{"serve", "--listen", "0.0.0.0:8181"}, "0.0.0.0:8181"},
+		{[]string{"serve", "--listen=0.0.0.0:8181"}, "0.0.0.0:8181"},
+		{[]string{"-l", ":9090"}, ":9090"},
+		{[]string{"-l=:9090"}, ":9090"},
+		{[]string{"--listen"}, ""},                                    // dangling flag without a value
+		{[]string{"-l"}, ""},                                          // dangling short flag without a value
+		{[]string{"--listen", "--config", "path"}, ""},                // flag value must not be another flag
+		{[]string{"--listen=", "--listen", ":8181"}, ":8181"},         // empty value skipped, scanning continues
+		{[]string{"--listen", "--config", "--listen=:9090"}, ":9090"}, // malformed value skipped, later valid one wins
+	}
+
+	for _, tc := range tcases {
+		if got := trayListenFromArgs(tc.args); got != tc.expected {
+			t.Fatalf("trayListenFromArgs(%v) = %q, expected %q", tc.args, got, tc.expected)
+		}
+	}
+}
+
+func TestBuildCoreArgs_ForwardsCLIListenOverSocketEndpoint(t *testing.T) {
+	t.Setenv("MCPPROXY_TRAY_CONFIG_PATH", "")
+	t.Setenv("MCPPROXY_TRAY_LISTEN", "")
+	t.Setenv("MCPPROXY_TRAY_EXTRA_ARGS", "")
+
+	original := trayCLIListen
+	defer func() { trayCLIListen = original }()
+
+	// Regression: `mcpproxy-tray serve --listen 0.0.0.0:8181` used to drop the
+	// listen flag whenever the tray talked to the core over the unix socket,
+	// so the core fell back to the config default (127.0.0.1:8080).
+	trayCLIListen = "0.0.0.0:8181"
+	args := buildCoreArgs("unix:///tmp/mcpproxy.sock")
+	expected := []string{"serve", "--listen", "0.0.0.0:8181"}
+	if strings.Join(args, " ") != strings.Join(expected, " ") {
+		t.Fatalf("buildCoreArgs with CLI listen = %v, expected %v", args, expected)
+	}
+
+	// Without a CLI listen flag, socket endpoints still get no --listen.
+	trayCLIListen = ""
+	args = buildCoreArgs("unix:///tmp/mcpproxy.sock")
+	expected = []string{"serve"}
+	if strings.Join(args, " ") != strings.Join(expected, " ") {
+		t.Fatalf("buildCoreArgs without CLI listen = %v, expected %v", args, expected)
+	}
+}
+
 func TestNewTrayLogConfig_DarwinUsesConsoleAndRotationDefaults(t *testing.T) {
 	cfg := newTrayLogConfig(platformDarwin, "/tmp/tray-logs")
 

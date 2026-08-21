@@ -47,6 +47,7 @@ var (
 	defaultCoreURL   = "http://127.0.0.1:8080"
 	errNoBundledCore = errors.New("no bundled core binary found")
 	trayAPIKey       = ""                  // API key generated for core communication
+	trayCLIListen    = ""                  // --listen from the tray's own command line (set in main)
 	shutdownComplete = make(chan struct{}) // Signal when shutdown is complete
 	shutdownOnce     sync.Once
 )
@@ -101,6 +102,11 @@ func main() {
 
 	logger.Info("Starting mcpproxy-tray", zap.String("version", version))
 
+	// Pick up a --listen flag from the tray's own command line (launchers
+	// commonly invoke `mcpproxy-tray serve --listen <addr>`, mirroring the
+	// core's serve command). It must be forwarded to the spawned core.
+	trayCLIListen = trayListenFromArgs(os.Args[1:])
+
 	// Check environment variables for configuration
 	coreTimeout := getCoreTimeout()
 	retryDelay := getRetryDelay()
@@ -114,7 +120,8 @@ func main() {
 		zap.Duration("core_timeout", coreTimeout),
 		zap.Duration("retry_delay", retryDelay),
 		zap.Bool("state_debug", stateDebug),
-		zap.Bool("skip_core", shouldSkipCoreLaunch()))
+		zap.Bool("skip_core", shouldSkipCoreLaunch()),
+		zap.String("cli_listen", trayCLIListen))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -824,9 +831,17 @@ func buildCoreArgs(coreURL string) []string {
 		args = append(args, "--config", cfg)
 	}
 
-	// IMPORTANT: Only add --listen for TCP/HTTP connections
-	// Socket/pipe connections should NOT have --listen (core enables socket by default)
-	if !isSocketEndpoint(coreURL) {
+	// An explicit --listen on the tray's own command line is ALWAYS forwarded
+	// to the core, even when the tray talks to the core over a socket/pipe:
+	// the socket only covers tray<->core communication, while the core must
+	// still open the advertised TCP address (otherwise it silently falls back
+	// to the config-file default, typically 127.0.0.1:8080).
+	if cliListen := normalizeListen(strings.TrimSpace(trayCLIListen)); cliListen != "" {
+		args = append(args, "--listen", cliListen)
+	} else if !isSocketEndpoint(coreURL) {
+		// IMPORTANT: Only derive --listen from the core URL / env for TCP/HTTP
+		// connections. Socket/pipe connections should NOT get a derived
+		// --listen (core enables the socket by default).
 		if listen := listenArgFromURL(coreURL); listen != "" {
 			args = append(args, "--listen", listen)
 		} else if listenEnv := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listenEnv != "" {
@@ -907,6 +922,40 @@ func shellQuote(arg string) string {
 	}
 	builder.WriteByte('\'')
 	return builder.String()
+}
+
+// trayListenFromArgs extracts the value of a --listen / -l flag from the
+// tray's command-line arguments. The tray historically ignored its CLI
+// entirely, so launchers invoking `mcpproxy-tray serve --listen <addr>`
+// (mirroring the core's serve command) had the listen address silently
+// dropped and the core fell back to the config-file default. Any other
+// arguments remain ignored. Malformed occurrences — a dangling flag, an
+// empty value, or a value that is itself another flag (starts with "-") —
+// are skipped and scanning continues, so the first valid listen value wins.
+// Returns "" when no valid listen value is present.
+func trayListenFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		var value string
+		switch {
+		case arg == "--listen" || arg == "-l":
+			if i+1 >= len(args) {
+				continue // dangling flag without a value
+			}
+			value = strings.TrimSpace(args[i+1])
+		case strings.HasPrefix(arg, "--listen="):
+			value = strings.TrimSpace(strings.TrimPrefix(arg, "--listen="))
+		case strings.HasPrefix(arg, "-l="):
+			value = strings.TrimSpace(strings.TrimPrefix(arg, "-l="))
+		default:
+			continue
+		}
+		if value == "" || strings.HasPrefix(value, "-") {
+			continue // malformed value — keep scanning
+		}
+		return value
+	}
+	return ""
 }
 
 func listenArgFromURL(raw string) string {
