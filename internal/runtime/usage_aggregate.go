@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -169,11 +170,25 @@ func (a *UsageAggregate) tool(server, toolName string) *ToolUsage {
 	return tu
 }
 
-// Apply folds a single activity record into the aggregate. It accepts executed
-// tool_calls and blocked policy_decisions (the form a policy-prevented tool
-// attempt is persisted as — MCP-835); all other records, and records without a
-// tool name, are ignored. Apply is not safe for concurrent use; it is called
-// only by the owning goroutine (see UsageStore).
+// Apply folds a single activity record into the aggregate. Apply is not safe
+// for concurrent use; it is called only by the owning goroutine (see
+// UsageStore).
+//
+// Two populations live in here and they are NOT the same:
+//
+//   - the per-tool rollup (ToolUsage) describes UPSTREAM TOOLS: calls, latency
+//     percentiles, byte averages, blocked and shed attempts. Only records that
+//     name an upstream tool belong in it.
+//   - the timeline (TimeBucket) describes WHAT THE USER SAW. It must match the
+//     glance row-for-row, or the bars under the list disagree with the list
+//     above them — the single most confusing thing a dashboard can do.
+//
+// The glance shows tool_calls, the internal tool calls that are mcpproxy's own
+// work (retrieve_tools, describe_tool, code_execution, upstream_servers …) and
+// blocked policy decisions, so all three enter the timeline. Internal
+// call_tool_* records are the one exclusion: they mirror a direct dispatch that
+// ALREADY emitted its own tool_call record with the same request id, so
+// counting them too would double every direct call.
 func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 	if rec == nil || rec.ToolName == "" {
 		return
@@ -187,7 +202,11 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 		return
 	case rec.Type == storage.ActivityTypeToolCall:
 		// folded below
-	case rec.Type == storage.ActivityTypePolicyDecision && rec.Status == storage.ActivityStatusBlocked:
+	case rec.Type == storage.ActivityTypeInternalToolCall:
+		a.applyInternalToolCall(rec)
+		return
+	case rec.Type == storage.ActivityTypePolicyDecision &&
+		(rec.Status == storage.ActivityStatusBlocked || rec.Status == storage.ActivityStatusRejected):
 		a.applyBlocked(rec)
 		return
 	default:
@@ -221,16 +240,45 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 
 // applyBlocked folds a policy-blocked attempt into the per-tool Blocked counter.
 // A blocked attempt never executed the tool, so it contributes no Calls,
-// latency, or bytes, and does not enter the executed-call timeline — it only
-// bumps Blocked and LastUsed. This keeps the contract's per-tool `blocked`
-// count non-zero (the field was previously dead) without polluting latency
-// percentiles or byte averages with non-executed attempts.
+// latency, or bytes to the PER-TOOL rollup — it only bumps Blocked and
+// LastUsed, which keeps latency percentiles and byte averages free of attempts
+// that never ran.
+//
+// It does enter the TIMELINE, as a call and as an error. The timeline mirrors
+// the glance, and in the glance a blocked attempt is a red row the user made
+// and did not get: leaving it out made a run that policy refused wholesale
+// render as a flat, empty histogram under a list full of failures.
 func (a *UsageAggregate) applyBlocked(rec *storage.ActivityRecord) {
 	tu := a.tool(rec.ServerName, rec.ToolName)
 	tu.Blocked++
 	if rec.Timestamp.After(tu.LastUsed) {
 		tu.LastUsed = rec.Timestamp
 	}
+	a.countInTimeBucket(rec, true)
+}
+
+// applyInternalToolCall folds one of mcpproxy's OWN tool calls (retrieve_tools,
+// describe_tool, code_execution, upstream_servers, quarantine_security …) into
+// the timeline only.
+//
+// Timeline-only is the point: these records name a BUILT-IN, not an upstream
+// tool — most carry no server at all — so admitting them to the per-tool
+// rollup would invent tool rows that no upstream owns and mix mcpproxy's own
+// latency into upstream percentiles. But the user sees them in the glance, and
+// before this the bars under that list counted none of them: an agent whose
+// traffic was mostly retrieve_tools and code_execution saw an almost empty
+// histogram.
+//
+// call_tool_* records are skipped because the direct dispatch that produced
+// them also emitted a tool_call record for the same call (see
+// handleCallToolVariant, which emits both) — counting both would double it.
+func (a *UsageAggregate) applyInternalToolCall(rec *storage.ActivityRecord) {
+	if strings.HasPrefix(rec.ToolName, storage.InternalCallToolPrefix) {
+		return
+	}
+	// Anything the built-in did not complete is a failed row in the glance,
+	// whether it errored or a policy refused it.
+	a.countInTimeBucket(rec, rec.Status != storage.ActivityStatusSuccess)
 }
 
 // applyRejected folds a concurrency-limiter shed into the per-tool Rejected
@@ -244,7 +292,18 @@ func (a *UsageAggregate) applyRejected(rec *storage.ActivityRecord) {
 	}
 }
 
+// applyTimeBucket counts an executed tool_call in the timeline, classifying it
+// by its own status.
 func (a *UsageAggregate) applyTimeBucket(rec *storage.ActivityRecord) {
+	a.countInTimeBucket(rec, rec.Status == storage.ActivityStatusError)
+}
+
+// countInTimeBucket is applyTimeBucket with the error classification supplied
+// by the caller. The populations that reach the timeline disagree about what
+// counts as a failure — a policy block is one, a built-in that answered
+// "blocked" is one, an upstream tool_call is only one when its status is
+// "error" — so the decision belongs to the admitting path, not here.
+func (a *UsageAggregate) countInTimeBucket(rec *storage.ActivityRecord, isError bool) {
 	start := rec.Timestamp.UTC().Truncate(usageBucketWidth)
 	k := start.Unix()
 	b := a.Buckets[k]
@@ -253,7 +312,7 @@ func (a *UsageAggregate) applyTimeBucket(rec *storage.ActivityRecord) {
 		a.Buckets[k] = b
 	}
 	b.Calls++
-	if rec.Status == "error" {
+	if isError {
 		b.Errors++
 	}
 	if rec.ResponseBytes > 0 {

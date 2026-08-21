@@ -21,6 +21,7 @@ final class GlanceGroupingTests: XCTestCase {
         XCTAssertEqual(runs[0].key.server, "jira-gcore")
         XCTAssertEqual(runs[0].key.tool, "jira_get_issue")
         XCTAssertEqual(runs[0].key.outcomeClass, .call)
+        XCTAssertEqual(runs[0].key.statusClass, .success)
         XCTAssertEqual(runs[1].count, 1)
         XCTAssertEqual(runs[1].newest.id, "gh-0")
     }
@@ -73,9 +74,14 @@ final class GlanceGroupingTests: XCTestCase {
         XCTAssertEqual(runs[0].records.map(\.id), ["newer", "older"])
     }
 
+    /// Both calls fail here on purpose: the wrapper only qualifies when it
+    /// failed, and the surviving upstream record has to share the run's status
+    /// class with `newer` or the split would be the status change, not the
+    /// wrapper — which would prove nothing about rule 4.
     func testACollapsedWrapperDoesNotSplitTheRun() {
         let page = [
-            Self.call(id: "newer", server: "s", tool: "t", requestId: "req-1"),
+            Self.call(id: "newer", server: "s", tool: "t",
+                      status: "error", error: "newer boom", requestId: "req-1"),
             Self.internalCall(id: "wrapper", tool: "call_tool_read",
                               status: "error", requestId: "req-2"),
             Self.call(id: "older", server: "s", tool: "t",
@@ -86,9 +92,13 @@ final class GlanceGroupingTests: XCTestCase {
         XCTAssertEqual(runs[0].records.map(\.id), ["newer", "older"])
     }
 
-    // MARK: - Worst outcome (FR-004)
+    // MARK: - Status class is part of the key (FR-004)
 
-    func testOneFailureInARunMarksTheWholeRunFailed() {
+    /// A stretch of calls to one tool that changed outcome mid-way is NOT one
+    /// run: a row marked failed with a ×12 that counts ten successes claims
+    /// twelve failures. The stretch splits where the outcome changed, so each
+    /// row's count is a count of its own records.
+    func testAMixedOutcomeStretchSplitsIntoOneRunPerStatus() {
         var page: [ActivityEntry] = []
         for i in 0..<4 {
             page.append(Self.call(id: "ok-\(i)", server: "s", tool: "t"))
@@ -101,13 +111,18 @@ final class GlanceGroupingTests: XCTestCase {
             page.append(Self.call(id: "ok-late-\(i)", server: "s", tool: "t"))
         }
 
-        let run = GlanceSelection.activityRows(from: page)[0]
+        let runs = GlanceSelection.activityRows(from: page)
 
-        XCTAssertEqual(run.count, 12)
-        XCTAssertEqual(run.worstStatus, "error", "failure dominates the group")
-        XCTAssertEqual(run.newestErroring?.id, "bad-new")
-        XCTAssertEqual(run.errorMessage, "auth failed: token expired",
-                       "the clause comes from the NEWEST erroring record")
+        XCTAssertEqual(runs.count, 3, "success → failure → success is three runs, not one")
+        XCTAssertEqual(runs.map(\.count), [4, 2, 6],
+                       "a failed run's ×N counts only its own records")
+        XCTAssertEqual(runs.map(\.key.statusClass), [.success, .failure, .success])
+        XCTAssertEqual(runs.map(\.status), ["success", "error", "success"])
+        XCTAssertEqual(runs[1].newestErroring?.id, "bad-new")
+        XCTAssertEqual(runs[1].errorMessage, "auth failed: token expired",
+                       "the clause comes from the NEWEST record of the failing run")
+        XCTAssertNil(runs[0].errorMessage)
+        XCTAssertNil(runs[2].errorMessage)
     }
 
     func testAnAllSuccessRunKeepsTheSuccessStatus() {
@@ -116,21 +131,37 @@ final class GlanceGroupingTests: XCTestCase {
             Self.call(id: "2", server: "s", tool: "t")
         ]
         let run = GlanceSelection.activityRows(from: page)[0]
-        XCTAssertEqual(run.worstStatus, "success")
+        XCTAssertEqual(run.count, 2)
+        XCTAssertEqual(run.status, "success")
         XCTAssertNil(run.newestErroring)
         XCTAssertNil(run.errorMessage)
     }
 
-    /// A call still running is not a failure, and must not be promoted to one
-    /// just because it shares a run with successes.
-    func testARunningRecordDoesNotBecomeAFailure() {
+    /// A call still running is not a failure — and it is not a success either,
+    /// so it does not join the run of finished calls before it.
+    func testARunningRecordDoesNotJoinTheRunOfFinishedCalls() {
         let page = [
             Self.call(id: "running", server: "s", tool: "t", status: "running"),
             Self.call(id: "done", server: "s", tool: "t")
         ]
+        let runs = GlanceSelection.activityRows(from: page)
+        XCTAssertEqual(runs.map(\.count), [1, 1])
+        XCTAssertEqual(runs.map(\.status), ["running", "success"])
+        XCTAssertEqual(runs.map(\.key.statusClass), [.pending, .success])
+        XCTAssertNil(runs[0].newestErroring)
+    }
+
+    /// Consecutive failures at one tool are still one run — the split is by
+    /// outcome, not per record.
+    func testConsecutiveFailuresStayOneRun() {
+        let page = [
+            Self.call(id: "e1", server: "s", tool: "t", status: "error", error: "newest: boom"),
+            Self.call(id: "e2", server: "s", tool: "t", status: "error", error: "older: boom")
+        ]
         let run = GlanceSelection.activityRows(from: page)[0]
-        XCTAssertEqual(run.worstStatus, "running")
-        XCTAssertNil(run.newestErroring)
+        XCTAssertEqual(run.count, 2)
+        XCTAssertEqual(run.status, "error")
+        XCTAssertEqual(run.errorMessage, "newest: boom")
     }
 
     // MARK: - Reason (FR-004)
@@ -244,7 +275,7 @@ final class GlanceGroupingTests: XCTestCase {
         XCTAssertEqual(runs.count, 1)
         XCTAssertEqual(runs[0].count, 27)
         XCTAssertEqual(runs[0].key.outcomeClass, .blocked)
-        XCTAssertEqual(runs[0].worstStatus, "blocked")
+        XCTAssertEqual(runs[0].status, "blocked")
     }
 
     // MARK: - Helpers

@@ -33,6 +33,32 @@ final class GlanceEventTests: XCTestCase {
         XCTAssertEqual(entry.sessionId, "sess-1")
         XCTAssertEqual(entry.requestId, "req-1")
         XCTAssertNil(entry.errorMessage, "empty error_message must not become a failure detail")
+        XCTAssertNil(entry.parentId, "a top-level call has no parent")
+    }
+
+    /// A sub-call made from inside a `code_execution` script carries its own
+    /// request id plus the script's, and the live row must keep the link — the
+    /// reconciling poll is 30 seconds away, and a child that arrives without a
+    /// parent is a row that cannot be navigated back to the script that ran it.
+    func testASubCallPayloadCarriesItsParentID() throws {
+        let json = """
+        {"payload":{"server_name":"github","tool_name":"create_issue",
+        "session_id":"sess-1","request_id":"child-7",
+        "parent_id":"1753800000-sess-1-code_execution","status":"success",
+        "duration_ms":12},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.requestId, "child-7")
+        XCTAssertEqual(entry.parentId, "1753800000-sess-1-code_execution")
+        XCTAssertNotEqual(entry.requestId, entry.parentId,
+                          "a child's own id is fresh, which is what keeps rule 4 from "
+                          + "collapsing a whole script into one row")
+        XCTAssertTrue(GlanceSelection.qualifies(entry),
+                      "sub-calls are ordinary tool calls and get ordinary rows")
     }
 
     /// Internal calls carry `internal_tool_name`, and `target_server` only when

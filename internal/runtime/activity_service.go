@@ -568,6 +568,9 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	// Spec 084 FR-007b: pre-encoding detection scan input; empty means "scan
 	// response as before".
 	detectionText := getStringPayload(evt.Payload, "detection_text")
+	// Correlation id of the parent code_execution call (empty for a top-level
+	// dispatch). First-class on the record so ?parent_id= can filter on it.
+	parentID := getStringPayload(evt.Payload, "parent_id")
 	// Default source to "mcp" if not specified (backwards compatibility)
 	activitySource := storage.ActivitySourceMCP
 	if source != "" {
@@ -620,6 +623,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		SessionID:         sessionID,
 		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
+		ParentID:          parentID,
 		Metadata:          metadata,
 		RequestBytes:      requestBytes,
 		ResponseBytes:     responseBytes,
@@ -908,6 +912,17 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 			zap.String("id", record.ID),
 			zap.String("internal_tool_name", internalToolName),
 			zap.String("status", status))
+
+		// Fold into the usage aggregate so the timeline matches the glance.
+		// Without this the LIVE aggregate skipped every built-in call while a
+		// cold-start rebuild (which re-scans persisted records through the same
+		// Apply) counted them — so the histogram silently changed shape on
+		// restart. Apply itself decides what is admissible: call_tool_* records
+		// are dropped there, because the direct dispatch already emitted a
+		// paired tool_call.
+		if s.usage != nil {
+			s.usage.Apply(record)
+		}
 	}
 }
 

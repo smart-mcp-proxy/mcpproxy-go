@@ -100,6 +100,15 @@ var ValidActivityStatuses = []string{
 	ActivityStatusRejected,
 }
 
+// InternalCallToolPrefix marks the internal_tool_call records that MIRROR a
+// direct upstream dispatch (call_tool_read / _write / _destructive). Every one
+// of them is paired with a tool_call record for the same dispatch, which is why
+// both the list filter and the usage aggregate key off this prefix to avoid
+// counting one call twice. Internal records WITHOUT it (retrieve_tools,
+// describe_tool, code_execution, upstream_servers, quarantine_security …) are
+// mcpproxy's own work and have no paired record.
+const InternalCallToolPrefix = "call_tool_"
+
 // Metadata keys carried by an ActivityStatusRejected record (spec 093 FR-012).
 const (
 	// MetadataKeyRejectionReason is "queue_full" or "queue_timeout".
@@ -195,6 +204,18 @@ type ActivityRecord struct {
 	RequestID         string                 `json:"request_id,omitempty"`         // HTTP request ID for correlation
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`           // Additional context-specific data
 
+	// ParentID is the correlation id of the record that CAUSED this one: today
+	// the code_execution call whose sandbox issued this sub-call. It equals the
+	// parent record's RequestID, so the two directions are one query each:
+	//   parent → children:  /api/v1/activity?parent_id=<parent request_id>
+	//   child  → parent:    /api/v1/activity?request_id=<child parent_id>
+	//
+	// First-class rather than metadata for the same reason as WorkSessionID:
+	// ActivityFilter.Matches compares struct fields, so a value tucked into
+	// Metadata would be stored but not filterable. Empty for every top-level
+	// call and for every record written before this field existed.
+	ParentID string `json:"parent_id,omitempty"`
+
 	// WorkSessionID groups records into one unit of USER WORK (Spec 082): one
 	// client, in one project, under one principal, across reconnects. Unlike
 	// SessionID it survives the client re-initializing, which real clients do
@@ -241,6 +262,10 @@ type ActivityFilter struct {
 	IntentType string    // Filter by intent operation type: read, write, destructive (Spec 018)
 	RequestID  string    // Filter by HTTP request ID for correlation (Spec 021)
 
+	// ParentID selects the CHILDREN of one parent call (exact match on
+	// ActivityRecord.ParentID) — the sub-calls a code_execution script issued.
+	ParentID string
+
 	// WorkSessionID filters by a unit of user work (Spec 082) — one client, one
 	// project, across reconnects. This is what the UI's "Session" filter means;
 	// SessionID above is the raw transport connection.
@@ -255,11 +280,13 @@ type ActivityFilter struct {
 	AgentName string // Filter by agent token name in metadata
 	AuthType  string // Filter by auth type: "admin" or "agent"
 
-	// ExcludeCallToolSuccess filters out call_tool_* internal tool calls that are
-	// already represented by a tool_call record: successful ones (the upstream
-	// call is logged) and rejected ones (the concurrency limiter logged the shed,
-	// spec 093). Failed call_tool_* calls are still shown — they have no
-	// corresponding tool_call entry.
+	// ExcludeCallToolSuccess filters out call_tool_* internal tool calls, which
+	// are always paired with a canonical record carrying the same request_id:
+	// successful and failed ones with the upstream tool_call record
+	// (mcp.go emits both on every dispatched outcome), rejected ones with the
+	// concurrency limiter's shed record (spec 093). Pre-dispatch failures
+	// (arg validation, server not found) emit ONLY a tool_call record, so no
+	// call_tool_* row is ever the sole witness of a call.
 	// Default: true (to avoid duplicate entries in UI/CLI)
 	ExcludeCallToolSuccess bool
 }
@@ -363,18 +390,23 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		return false
 	}
 
+	// Check parent_id filter: the sub-calls one code_execution issued.
+	if f.ParentID != "" && record.ParentID != f.ParentID {
+		return false
+	}
+
 	// Exclude call_tool_* internal tool calls that are already represented by a
 	// canonical tool_call entry, so one dispatch is never counted twice.
 	//
-	// A SUCCESSFUL call_tool_* has the upstream's own tool_call record; a
-	// REJECTED one has the record the concurrency limiter wrote at the shed
-	// (spec 093 FR-012), which every origin produces — the variant handler
-	// merely adds a second, MCP-flavoured row on top of it. Failed call_tool_*
-	// calls stay visible: they have no corresponding tool_call.
+	// A SUCCESSFUL or FAILED call_tool_* has the upstream's own tool_call
+	// record (mcp.go emits both on every dispatched outcome, sharing one
+	// request_id); a REJECTED one has the record the concurrency limiter wrote
+	// at the shed (spec 093 FR-012), which every origin produces — the variant
+	// handler merely adds a second, MCP-flavoured row on top of it. So every
+	// call_tool_* row duplicates a canonical record and is hidden by default.
 	if f.ExcludeCallToolSuccess {
 		if record.Type == ActivityTypeInternalToolCall &&
-			(record.Status == ActivityStatusSuccess || record.Status == ActivityStatusRejected) &&
-			strings.HasPrefix(record.ToolName, "call_tool_") {
+			strings.HasPrefix(record.ToolName, InternalCallToolPrefix) {
 			return false
 		}
 	}

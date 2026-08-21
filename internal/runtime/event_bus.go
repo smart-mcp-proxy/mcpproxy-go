@@ -427,7 +427,9 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // detectionText is the spec-084 pre-encoding sensitive-data scan input (FR-007b);
 // empty means "scan response as before" (feature off / non-call_tool_* paths)
 // toonOutput is the spec-084 per-block encoding decision metadata (FR-010) - optional
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}) {
+// parentID is the correlation id of the parent code_execution call for a
+// sandbox sub-call; empty for every top-level dispatch
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string) {
 	// Spec 042: classify failed tool calls into the upstream error categories.
 	// We never record the error message itself; only a fixed enum value.
 	if status == "error" && errorMsg != "" {
@@ -489,6 +491,13 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 	// feature ran, so off-mode records carry no toon_output metadata (SC-002).
 	if toonOutput != nil {
 		payload["toon_output"] = toonOutput
+	}
+	// Correlation id of the code_execution whose sandbox issued this sub-call.
+	// Only set when there IS a parent, so every top-level dispatch keeps the
+	// payload it emitted before — and the SSE /events stream, which forwards
+	// this map verbatim, carries parent_id for free.
+	if parentID != "" {
+		payload["parent_id"] = parentID
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }

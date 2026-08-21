@@ -161,6 +161,14 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	executionStart := time.Now()
 	parentCallID := mintCorrelationIDAt(executionStart, "code_execution")
 
+	// The execution id IS the parent call id. jsruntime.Execute takes options
+	// BY VALUE and only fills a missing ExecutionID on its own copy, so leaving
+	// this unset left every downstream consumer of options.ExecutionID —
+	// toolCaller.executionID, the parent history record's RequestID and the
+	// nested history records' RequestID — with the empty string, which broke
+	// exactly the correlation those fields exist for.
+	options.ExecutionID = parentCallID
+
 	// Config path for history records (empty when no authority was wired).
 	configPath := p.activeConfigFilePath()
 
@@ -706,6 +714,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
+		u.emitSubCallActivity(serverName, toolName, args, nil, refusal, startTime, duration)
 		return nil, refusal
 	}
 
@@ -716,6 +725,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, err.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration)
+		u.emitSubCallActivity(serverName, toolName, args, nil, err, startTime, duration)
 		return nil, err
 	}
 
@@ -729,6 +739,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	// upstream rejection is a clean success here and an error there.
 	u.recordUpstreamCall(serverName, toolName, startTime, duration, result, err)
 	u.storeToolCallInHistory(serverName, toolName, args, result, err, startTime, duration)
+	u.emitSubCallActivity(serverName, toolName, args, result, err, startTime, duration)
 
 	u.logger.Debug("upstream tool call completed",
 		zap.String("execution_id", u.executionID),
@@ -743,6 +754,85 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	}
 
 	return result, nil
+}
+
+// subCallActivityResponseLimit caps the response text recorded for ONE
+// sandboxed sub-call. One execution can issue up to max_tool_calls of them, so
+// the per-record budget is deliberately far smaller than the 64KB a single
+// direct dispatch is allowed.
+const subCallActivityResponseLimit = 8 * 1024
+
+// emitSubCallActivity records one call issued from inside the JS sandbox as a
+// first-class tool_call activity record.
+//
+// Before this, a sandboxed call reached the in-memory tool list and the legacy
+// tool-call history and nothing else — so the activity log, which is what the
+// tray glance, GET /api/v1/activity and the usage aggregate all read, showed
+// the code_execution wrapper and none of the work it actually did. A script
+// that made twenty upstream calls was one row.
+//
+// Every sub-call gets a FRESH request id and carries ParentID = the parent
+// code_execution's correlation id, which makes navigation one query in each
+// direction:
+//
+//	parent → children:  /api/v1/activity?parent_id=<parent request_id>
+//	child  → parent:    /api/v1/activity?request_id=<child parent_id>
+//
+// The record is emitted on EVERY exit of CallTool — policy refusal, unknown
+// server, and dispatch (success or failure) — because a call the sandbox was
+// refused is exactly the kind of thing the transparency surfaces exist to show.
+//
+// Source is "internal" for the same reason the dispatch context is (Spec 093
+// FR-012): the call was issued by the script, not by whoever started it. No
+// `started` event is emitted: for a nested call it would arrive after the work
+// already finished, and it would double the SSE traffic of a busy script for
+// nothing — started events are never persisted anyway.
+func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration) {
+	// nil in the unit tests that drive the caller directly (see the field
+	// comment on upstreamToolCaller.proxy) — there is no runtime to emit into.
+	if u.proxy == nil {
+		return
+	}
+
+	status, errMsg, responseText, truncated := subCallActivityOutcome(result, callErr)
+
+	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
+	u.proxy.emitActivityToolCallCompleted(
+		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
+		status, errMsg, duration.Milliseconds(), args, responseText, truncated,
+		"", nil, "", "", 0, 0, "", nil, u.parentCallID)
+}
+
+// subCallActivityOutcome classifies one sandboxed sub-call for the activity log
+// and produces the response text to record with it.
+//
+// Split out of emitSubCallActivity so the classification is testable without a
+// runtime to emit into — and so the rule stays in ONE place: never hardcode a
+// status. An upstream that ANSWERED isError:true has failed even though the
+// transport hop succeeded (issue #935), and a Go error wins over the upstream's
+// own text because a call that never completed has no upstream text worth
+// keeping. This is the same precedence nestedCallFailure applies to the legacy
+// history record, so the two cannot disagree about one call.
+func subCallActivityOutcome(result interface{}, callErr error) (status, errMsg, response string, truncated bool) {
+	status, errMsg = activityStatusForResult(result)
+	if callErr != nil {
+		return storage.ActivityStatusError, callErr.Error(), "", false
+	}
+	if result == nil {
+		return status, errMsg, "", false
+	}
+	encoded, mErr := json.Marshal(result)
+	if mErr != nil {
+		return status, errMsg, "", false
+	}
+	response = string(encoded)
+	if len(response) > subCallActivityResponseLimit {
+		// safeTruncateBytes backs the cut up to a rune boundary, so the stored
+		// text is always valid UTF-8.
+		response = response[:safeTruncateBytes(response, subCallActivityResponseLimit)]
+		truncated = true
+	}
+	return status, errMsg, response, truncated
 }
 
 // policyRefusal evaluates the shared per-tool policy gates for a sandboxed call

@@ -969,7 +969,8 @@ final class ModelsTests: XCTestCase {
         id: String = "e",
         type: String,
         status: String,
-        metadata: [String: Any]? = nil
+        metadata: [String: Any]? = nil,
+        extra: [String: Any] = [:]
     ) throws -> ActivityEntry {
         var json: [String: Any] = [
             "id": id,
@@ -978,6 +979,7 @@ final class ModelsTests: XCTestCase {
             "timestamp": "2026-03-23T12:00:00Z"
         ]
         if let metadata { json["metadata"] = metadata }
+        for (key, value) in extra { json[key] = value }
         let data = try JSONSerialization.data(withJSONObject: json)
         return try JSONDecoder().decode(ActivityEntry.self, from: data)
     }
@@ -1059,5 +1061,30 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(try entry(type: "policy_decision", status: "blocked").outcomeClass, .blocked)
         XCTAssertEqual(try entry(type: "policy_decision", status: "block").outcomeClass, .blocked)
         XCTAssertEqual(try entry(type: "policy_decision", status: "warning").outcomeClass, .call)
+    }
+
+    /// The second half of the group key (FR-004): three coarse classes, so a
+    /// success and a failure at the same tool can never share a run.
+    func testStatusClassCoarsensTheStatusIntoThreeGroups() throws {
+        XCTAssertEqual(try entry(type: "tool_call", status: "success").statusClass, .success)
+        XCTAssertEqual(try entry(type: "tool_call", status: "error").statusClass, .failure)
+        XCTAssertEqual(try entry(type: "tool_call", status: "running").statusClass, .pending)
+        XCTAssertEqual(try entry(type: "tool_call", status: "pending").statusClass, .pending)
+        // Everything the core may ever write that is neither of the two known
+        // terminal statuses lands in one bucket, so an unrecognised status
+        // never fragments a run record by record.
+        XCTAssertEqual(try entry(type: "policy_decision", status: "blocked").statusClass, .pending)
+        XCTAssertEqual(try entry(type: "tool_call", status: "something-new").statusClass, .pending)
+    }
+
+    /// A `parent_id` on the wire is the correlation id of the `code_execution`
+    /// call that made this sub-call. It must survive decoding so the tray can
+    /// route a child row back to its parent.
+    func testActivityEntryDecodesParentID() throws {
+        let child = try entry(type: "tool_call", status: "success",
+                              extra: ["parent_id": "1770000000-abc-code_execution"])
+        XCTAssertEqual(child.parentId, "1770000000-abc-code_execution")
+        XCTAssertNil(try entry(type: "tool_call", status: "success").parentId,
+                     "a record with no parent decodes with none")
     }
 }

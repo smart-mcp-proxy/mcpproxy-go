@@ -368,10 +368,15 @@ final class GlanceSection {
     /// and click payload all describe `run`.
     ///
     /// A row shows a *run* — one or more consecutive records of the same
-    /// (server, tool, outcome class) — so what it says is assembled from the
-    /// run, not from one record: the clock and the click payload come from the
-    /// newest record, the mark and the error clause from the worst/newest
-    /// failing one, and the `×N` suffix from how many there are.
+    /// (server, tool, outcome class, status class) — so what it says is
+    /// assembled from the run, not from one record: the clock, the click payload
+    /// and the mark come from the newest record, the error clause from the
+    /// newest failing one, and the `×N` suffix from how many there are.
+    ///
+    /// The run is homogeneous in outcome (status class is part of its key), so
+    /// the mark and the count always describe the same records: a row marked
+    /// failed with `×2` stands for two failures, never for two successes and a
+    /// failure among them.
     ///
     /// When the row has changed run every one of those is written back
     /// unconditionally: with a fixed set of rows each new event shifts which run
@@ -395,7 +400,7 @@ final class GlanceSection {
         let countSuffix = run.count > 1 ? " ×\(run.count)" : ""
         let spokenCount = run.count > 1 ? ", repeated \(run.count) times" : ""
         let age = GlanceFormatting.relativeTime(run.timestamp, now: now)
-        let status = run.worstStatus
+        let status = run.status
         let failed = status != "success"
         let clause = failed ? Self.firstClause(of: run.errorMessage) : nil
 
@@ -465,7 +470,7 @@ final class GlanceSection {
     /// Nil on systems without the subtitle mechanism (FR-005).
     private func subtitleText(for run: GlanceRun) -> String? {
         guard supportsRowSubtitles else { return nil }
-        if run.worstStatus != "success", let clause = Self.firstClause(of: run.errorMessage) {
+        if run.status != "success", let clause = Self.firstClause(of: run.errorMessage) {
             return GlanceFormatting.tailTruncated(clause, limit: GlanceFormatting.reasonBudget)
         }
         guard let reason = run.displayReason else { return nil }
@@ -532,7 +537,8 @@ final class GlanceSection {
     /// This lives here rather than in `GlanceFormatting` because that file is
     /// deliberately AppKit-free (`import Foundation` only) and `NSColor` is not.
     /// Keyed on the status string, not a record: a row stands for a run, and the
-    /// outcome it shows is the run's worst (`GlanceRun.worstStatus`).
+    /// outcome it shows is the run's own (`GlanceRun.status`), which every
+    /// record in the run shares.
     static func statusTint(forStatus status: String) -> NSColor {
         switch status {
         case "success":

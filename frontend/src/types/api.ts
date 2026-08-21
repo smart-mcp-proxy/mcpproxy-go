@@ -763,6 +763,14 @@ export interface ActivityRecord {
   /** Spec 082: one client, one project, across reconnects. Absent on pre-082 records. */
   work_session_id?: string
   request_id?: string
+  /**
+   * Correlation id of the parent `code_execution` call this record was
+   * dispatched from — equal to the parent record's `request_id`. Present only on
+   * sandboxed sub-calls; a top-level call omits it. Navigate parent → children
+   * with `?parent_id=<parent request_id>`, child → parent with
+   * `?request_id=<child parent_id>`.
+   */
+  parent_id?: string
   metadata?: Record<string, any>
   // Spec 026: Sensitive data detection fields
   has_sensitive_data?: boolean

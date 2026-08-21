@@ -264,7 +264,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 				return shedToolResult(limitErr), nil
 			}
 			// Emit error activity
-			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil)
+			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
@@ -344,7 +344,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		// Spec 069 A1: pre-truncation sizes; result was measured before the truncation loop above.
 		routingResponseBytes := rawByteSize(result)
 		routingRequestBytes := rawByteSize(enrichedArgs)
-		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil)
+		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
 
 		return forwarded, nil
 	}

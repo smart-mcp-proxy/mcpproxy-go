@@ -26,11 +26,11 @@ A maximal run of consecutive qualifying records sharing a group key.
 | Field | Type | Rule |
 |-------|------|------|
 | `records` | `[ActivityEntry]` | newest-first, ≥1 |
-| `key` | `(server: String, tool: String, outcomeClass: OutcomeClass)` | grouping key (FR-002) |
+| `key` | `(server: String, tool: String, outcomeClass: OutcomeClass, statusClass: StatusClass)` | grouping key (FR-002); `statusClass` ∈ {success, failure, pending} keeps a run homogeneous in outcome |
 | `count` | `Int` | `records.count`; suffix `×N` rendered when > 1 (FR-003) |
-| `newest` | `ActivityEntry` | supplies age; error clause comes from newest *erroring* record (FR-004) |
+| `newest` | `ActivityEntry` | supplies age and status; on a failed run it is also the newest erroring record, which supplies the error clause (FR-004) |
 | `identity` | `String` | `recordKey(oldest)` — stable across head-extension (FR-024) |
-| `worstStatus` | `String` | error > success within `.call` runs; `.blocked` runs are uniformly blocked (FR-002/004) |
+| `status` | `String` | `newest.status`; every record in the run shares its status class, so there is no worst to pick (FR-004). Was `worstStatus` (error > success within a run) until mixed runs were split |
 | `displayReason` | `String?` | newest record in run having a reason (FR-004) |
 
 Pipeline (FR-001, all in `GlanceSelection`):

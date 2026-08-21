@@ -67,9 +67,14 @@ func TestUsageAggregate_Apply_IgnoresNonToolCalls(t *testing.T) {
 // TestUsageAggregate_Apply_CountsBlockedPolicyDecisions (MCP-835 / Codex
 // finding #2): blocked tool attempts are persisted as policy_decision records,
 // not tool_calls. The aggregate must still count them so the contract's
-// per-tool `blocked` field is non-zero. A blocked attempt never executed, so it
-// contributes ONLY to Blocked (and LastUsed) — not Calls, latency, bytes, or
-// the timeline (which tracks executed calls).
+// per-tool `blocked` field is non-zero. A blocked attempt never executed, so in
+// the PER-TOOL rollup it contributes ONLY to Blocked (and LastUsed) — not
+// Calls, latency or bytes.
+//
+// It does enter the TIMELINE, and as an error: the timeline has to match the
+// glance the user is looking at, and there a blocked attempt is a red row. A
+// run that policy refused wholesale used to render as an empty histogram under
+// a list full of failures.
 func TestUsageAggregate_Apply_CountsBlockedPolicyDecisions(t *testing.T) {
 	agg := newUsageAggregate()
 	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
@@ -89,7 +94,11 @@ func TestUsageAggregate_Apply_CountsBlockedPolicyDecisions(t *testing.T) {
 		latencyTotal += c
 	}
 	assert.Equal(t, int64(0), latencyTotal, "blocked attempts have no latency sample")
-	assert.Empty(t, agg.Buckets, "blocked attempts do not enter the executed-call timeline")
+
+	timeline := agg.Timeline()
+	require.Len(t, timeline, 1, "both attempts fall in the same hourly bucket")
+	assert.Equal(t, int64(2), timeline[0].Calls, "a blocked attempt is a row the user saw")
+	assert.Equal(t, int64(2), timeline[0].Errors, "and it is a FAILED row")
 }
 
 func TestToolUsage_Averages_ExcludeZeroByteCalls(t *testing.T) {

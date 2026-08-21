@@ -998,8 +998,8 @@ func TestActivityFilter_OneRejectedRowPerShed(t *testing.T) {
 	assert.True(t, def.Matches(canonical), "the limiter's rejected row is the canonical one")
 	assert.False(t, def.Matches(variantEcho),
 		"the variant handler's rejected echo duplicates the canonical row and must be hidden by default")
-	assert.True(t, def.Matches(failedVariant),
-		"a failed call_tool_* has no corresponding tool_call and must stay visible")
+	assert.False(t, def.Matches(failedVariant),
+		"a failed call_tool_* duplicates the paired tool_call error record and must be hidden by default")
 
 	// The code_execution and replay origins never reach the variant handler, so
 	// their shed produces the canonical row only — still exactly one.

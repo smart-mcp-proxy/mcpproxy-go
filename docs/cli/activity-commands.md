@@ -60,6 +60,7 @@ mcpproxy activity list [flags]
 | `--status` | | | Filter by status: `success`, `error`, `blocked`, `rejected` (shed by a concurrency limit, see [Concurrency Limits](../configuration/config-file.md#concurrency-limits--request-queueing)) |
 | `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
 | `--request-id` | | | Filter by HTTP request ID for log correlation |
+| `--parent-id` | | | List child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |
 | `--session` | | | Filter by MCP session ID |
 | `--start-time` | | | Filter records after this time (RFC3339) |
@@ -87,6 +88,9 @@ mcpproxy activity list --intent-type destructive --limit 100
 
 # Find activity by request ID (useful for error correlation)
 mcpproxy activity list --request-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+# List the sub-calls one code_execution made (value = the parent's request_id)
+mcpproxy activity list --parent-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 # List activity as JSON
 mcpproxy activity list -o json
@@ -294,6 +298,12 @@ Response:
   URL: https://github.com/owner/repo/issues/123
 ```
 
+**Code execution links:** when the record is a `code_execution` parent, the
+detail view prints a hint (`Use 'mcpproxy activity list --parent-id <request_id>'
+to see sub-calls`). When the record is one of those sub-calls, it prints a
+`Parent ID:` line instead. See
+[Drill into a `code_execution`](#drill-into-a-code_execution).
+
 **Source Values:**
 - `MCP (AI agent via MCP protocol)` - Tool called by AI agent
 - `CLI (CLI command)` - Tool called via `mcpproxy call tool` CLI command
@@ -417,6 +427,7 @@ mcpproxy activity export [flags]
 | `--output` | | | Output file path (stdout if not specified) |
 | `--format` | `-f` | json | Export format: `json`, `csv` |
 | `--include-bodies` | | false | Include full request/response bodies |
+| `--parent-id` | | | Export only child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
 | *(filter flags)* | | | Same filters as `activity list` |
 
 ### Examples
@@ -448,6 +459,9 @@ mcpproxy activity export --type tool_call,internal_tool_call --output tool-calls
 
 # Export config changes for audit
 mcpproxy activity export --type config_change --output config-audit.jsonl
+
+# Export the sub-calls of one code_execution run
+mcpproxy activity export --parent-id a1b2c3d4-e5f6-7890-abcd-ef1234567890 --output sandbox-run.jsonl
 ```
 
 ### Output (JSON - JSON Lines)
@@ -485,6 +499,39 @@ mcpproxy activity list --status error --limit 5
 
 # 2. Get details for specific error
 mcpproxy activity show <id-from-step-1> --include-response
+```
+
+### Drill into a `code_execution`
+
+A `code_execution` call runs a sandboxed script that may call several upstream
+tools. Each of those sub-calls is recorded as its own `tool_call` activity with
+its own `request_id`, plus a `parent_id` pointing at the `request_id` of the
+`code_execution` record that spawned it. That link is what makes a sandboxed run
+auditable instead of a single opaque row.
+
+```bash
+# 1. Spot the code_execution in the list (type internal_tool_call, tool code_execution)
+mcpproxy activity list --type internal_tool_call --limit 20
+
+# 2. Open it — the detail view prints its Request ID and the drill-in hint
+mcpproxy activity show <id-from-step-1>
+
+# 3. List the sub-calls it made, using the parent's request_id
+mcpproxy activity list --parent-id <request-id-from-step-2>
+
+# 4. From any sub-call, walk back up to the parent
+mcpproxy activity show <child-id>                       # prints "Parent ID: ..."
+mcpproxy activity list --request-id <parent-id-from-step-4>
+```
+
+In table output, sub-calls are indented with `└` in the TOOL column, and
+`activity watch` marks them inline with `[child of <parent_id>]`. In JSON output
+the `parent_id` field is present on every child record, so the whole run can be
+reassembled:
+
+```bash
+# All sub-calls of one run as JSON
+mcpproxy activity list --parent-id <parent-request-id> -o json | jq '.activities[] | {tool_name, status, duration_ms}'
 ```
 
 ### Monitor Agent Behavior

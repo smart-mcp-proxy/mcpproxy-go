@@ -64,7 +64,18 @@
                   {{ formatPreflightSummary(activity.metadata) || 'Preflight' }}
                 </span>
               </div>
-              <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
+              <div class="flex items-center gap-2">
+                <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
+                <!-- Sub-call of a code_execution run (see utils/activity). -->
+                <span
+                  v-if="isChildCall(activity)"
+                  data-test="widget-child-badge"
+                  class="badge badge-xs badge-ghost"
+                  title="Sub-call dispatched by a code_execution run"
+                >
+                  ↳ via code_execution
+                </span>
+              </div>
             </div>
           </div>
           <div
@@ -84,7 +95,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
-import { formatPreflightSummary, isPreflightActivity } from '@/utils/activity'
+import { formatPreflightSummary, isChildCall, isPreflightActivity } from '@/utils/activity'
 
 const router = useRouter()
 

@@ -163,6 +163,30 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(state.glanceActivity.first?.status, "error")
     }
 
+    /// …and that correction now moves more than a mark: status is part of the
+    /// group key, so a late flip on one record of a run SPLITS the run. The
+    /// fingerprint has to carry the flip through for the split to happen at all
+    /// — an id-only guard would leave the menu showing one merged row forever.
+    func testALateStatusFlipSplitsTheRunItWasPartOf() throws {
+        let state = AppState()
+        state.coreState = .connected
+        let page = [
+            try Self.activity(id: "a1", type: "tool_call", request: "r1"),
+            try Self.activity(id: "a2", type: "tool_call", request: "r2")
+        ]
+        state.updateGlanceActivity(page)
+        XCTAssertEqual(GlanceSelection.activityRows(from: state.glanceActivity).map(\.count), [2])
+
+        state.updateGlanceActivity([
+            try Self.activity(id: "a1", type: "tool_call", status: "error", request: "r1"),
+            page[1]
+        ])
+
+        let rows = GlanceSelection.activityRows(from: state.glanceActivity)
+        XCTAssertEqual(rows.map(\.count), [1, 1], "the failed record left the successful run")
+        XCTAssertEqual(rows.map(\.status), ["error", "success"])
+    }
+
     // MARK: - Reconcile vs live SSE rows
 
     /// `AppState` is reached through `await`, and the poll suspends on the

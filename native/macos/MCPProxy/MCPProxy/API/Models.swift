@@ -548,6 +548,16 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
     let timestamp: String
     let sessionId: String?
     let requestId: String?
+    /// Correlation id of the `code_execution` call this record is a sub-call of,
+    /// or nil for a top-level record.
+    ///
+    /// It is the PARENT's `requestId` (the core mints one `parentCallID` per
+    /// `code_execution` dispatch and stamps every sandboxed `call_tool` with
+    /// it), so `?parent_id=<parent request_id>` fetches a parent's children and
+    /// `?request_id=<child parent_id>` fetches a child's parent. Children carry
+    /// fresh request ids of their own, which is what keeps rule 4 from
+    /// collapsing a whole script into one row.
+    let parentId: String?
     let metadata: [String: JSONValue]?
     let hasSensitiveData: Bool?
     let detectionTypes: [String]?
@@ -562,6 +572,7 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
         case durationMs = "duration_ms"
         case sessionId = "session_id"
         case requestId = "request_id"
+        case parentId = "parent_id"
         case hasSensitiveData = "has_sensitive_data"
         case detectionTypes = "detection_types"
         case maxSeverity = "max_severity"
@@ -639,12 +650,32 @@ enum OutcomeClass: String, Equatable {
     case blocked
 }
 
+/// How a record *ended*, coarsened to what a row can render (spec 090 FR-004).
+///
+/// The second half of the group key, and the reason it exists: with only
+/// `OutcomeClass` in the key, a stretch of calls to one tool that failed twice
+/// in the middle was ONE run, rendered with the failure mark and a `×N` that
+/// counted the successes too — a row claiming twelve failures where two
+/// happened. Splitting the stretch by status class keeps every run homogeneous,
+/// so a `×N` is always a count of the thing the row is marked as.
+///
+/// Three classes, not one per raw status: `running`, `blocked` and anything
+/// else the core may write are all "not finished the way a row cares about",
+/// and bucketing them keeps an unfamiliar status from fragmenting a run record
+/// by record.
+enum StatusClass: String, Equatable {
+    case success
+    case failure
+    case pending
+}
+
 // MARK: - Glance accessors (spec 090)
 //
 // Derived, no stored fields. They exist so the tray's pure row pipeline reads
-// one vocabulary — `reason`, `outcomeClass` — instead of re-deriving the
-// metadata layout at every call site, and so a live SSE-adapted entry and a
-// polled entry answer identically (`GlanceEvent` populates the same slots).
+// one vocabulary — `reason`, `outcomeClass`, `statusClass` — instead of
+// re-deriving the metadata layout at every call site, and so a live SSE-adapted
+// entry and a polled entry answer identically (`GlanceEvent` populates the same
+// slots).
 extension ActivityEntry {
 
     /// Reason a policy decision gives for itself: `metadata.reason`.
@@ -681,6 +712,21 @@ extension ActivityEntry {
             decision = status
         }
         return ActivityEntry.blockingDecisions.contains(decision) ? .blocked : .call
+    }
+
+    /// Grouping class for the record's outcome (FR-004).
+    ///
+    /// Deliberately parallel to `outcomeClass` rather than folded into it: rule
+    /// 6 (`GlanceSelection.qualifies`) asks "did policy stop this call?", which
+    /// is a question about the record's KIND, while grouping also has to ask
+    /// "how did it end?". One enum answering both would make a blocked record
+    /// and a failed call indistinguishable at the qualification gate.
+    var statusClass: StatusClass {
+        switch status {
+        case "success": return .success
+        case "error": return .failure
+        default: return .pending
+        }
     }
 
     /// Activity record type of a policy decision (`storage.ActivityTypePolicyDecision`).

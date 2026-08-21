@@ -1255,6 +1255,10 @@ components:
         metadata:
           description: Additional context-specific data
           type: object
+        parent_id:
+          description: Correlation id of the parent call (the code_execution whose
+            sandbox issued this sub-call)
+          type: string
         request_id:
           description: HTTP request ID for correlation
           type: string
@@ -3446,6 +3450,12 @@ paths:
         name: request_id
         schema:
           type: string
+      - description: Filter by parent call id — returns the sub-calls one code_execution
+          issued
+        in: query
+        name: parent_id
+        schema:
+          type: string
       - description: 'Include successful call_tool_* internal tool calls (default:
           false, excluded to avoid duplicates)'
         in: query
@@ -3655,6 +3665,17 @@ paths:
       - description: Filter by status
         in: query
         name: status
+        schema:
+          type: string
+      - description: Filter by HTTP request ID for log correlation (Spec 021)
+        in: query
+        name: request_id
+        schema:
+          type: string
+      - description: Filter by parent call id — exports the sub-calls one code_execution
+          issued
+        in: query
+        name: parent_id
         schema:
           type: string
       - description: Filter activities after this time (RFC3339)
