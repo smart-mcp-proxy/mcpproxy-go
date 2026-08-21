@@ -32,6 +32,10 @@ struct ActivityView: View {
     /// (records whose parent_id equals it). Set by "View sub-calls" in the
     /// detail panel; cleared by the filter chip or "View parent call".
     @State private var filterParentId: String?
+    /// Monotonic ticket for loadActivities: only the NEWEST in-flight load may
+    /// publish its results, so a slow unfiltered fetch can never overwrite the
+    /// sub-call view the user just asked for (or vice versa).
+    @State private var loadGeneration = 0
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -96,8 +100,12 @@ struct ActivityView: View {
     // MARK: - Parent/child navigation (code_execution sub-calls)
 
     /// Filter the list down to the children of one code_execution call.
+    /// The parent's own selection is dropped: it is not in the filtered list,
+    /// and keeping it would silently reopen its detail panel the moment the
+    /// chip is cleared and the parent scrolls back in.
     private func showSubCalls(of parentRequestId: String) {
         filterParentId = parentRequestId
+        selectedActivityID = nil
         Task { await loadActivities() }
     }
 
@@ -460,6 +468,8 @@ struct ActivityView: View {
     }
 
     private func loadActivities() async {
+        loadGeneration += 1
+        let ticket = loadGeneration
         isLoading = true
         defer { isLoading = false }
         guard let client = apiClient else {
@@ -469,6 +479,10 @@ struct ActivityView: View {
 
         do {
             let data = try await client.fetchRaw(path: "/api/v1/activity?\(filterQueryString)")
+            // A newer load was issued while this one was in flight (the user
+            // toggled the sub-call chip, changed a filter …) — its answer is
+            // the one the current filter state describes, not this one.
+            guard ticket == loadGeneration else { return }
             let decoder = JSONDecoder()
             if let wrapper = try? decoder.decode(APIResponse<ActivityListResponse>.self, from: data),
                let payload = wrapper.data {
@@ -479,6 +493,7 @@ struct ActivityView: View {
                 totalCount = direct.total
             }
         } catch {
+            guard ticket == loadGeneration else { return }
             activities = appState.recentActivity
         }
     }
@@ -1128,6 +1143,11 @@ struct ActivityDetailView: View {
     /// OUTSIDE string literals, so a semicolon inside 'a; b' never splits.
     /// Scripts that already contain newlines are shown verbatim: their author
     /// formatted them.
+    ///
+    /// DISPLAY-ONLY, deliberately conservative: regex literals and template
+    /// substitutions with nested backticks are not parsed (that needs a real
+    /// tokenizer), so a `/a;b/` regex may gain a line break on screen. The
+    /// Copy button always yields the verbatim original, never this rendering.
     static func formatScriptForDisplay(_ code: String) -> String {
         guard !code.contains("\n") else { return code }
         var out = ""
