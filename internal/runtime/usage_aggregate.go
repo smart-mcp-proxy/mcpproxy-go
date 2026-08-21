@@ -148,11 +148,12 @@ type UsageAggregate struct {
 }
 
 // usageAdmissionVersion identifies the CURRENT admission rule for the
-// aggregate. Bump it whenever Apply changes which records are counted (it
-// started at 2 when internal tool calls and blocked policy decisions joined
-// the timeline), so pre-change snapshots are rebuilt instead of carried
-// forward with hours counted under the old rule.
-const usageAdmissionVersion = 2
+// aggregate. Bump it whenever Apply changes which records are counted (2:
+// internal tool calls and blocked policy decisions joined the timeline; 3:
+// management built-ins excluded again per GlanceSelection rule 1), so
+// pre-change snapshots are rebuilt instead of carried forward with hours
+// counted under the old rule.
+const usageAdmissionVersion = 3
 
 func newUsageAggregate() *UsageAggregate {
 	return &UsageAggregate{
