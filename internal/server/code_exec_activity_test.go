@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
 // jsruntime.Execute takes its options BY VALUE and only fills a missing
@@ -130,4 +132,14 @@ func TestEmitSubCallActivity_NoProxyIsANoOp(t *testing.T) {
 	assert.NotPanics(t, func() {
 		u.emitSubCallActivity("time", "now", nil, nil, errors.New("boom"), time.Now(), time.Millisecond)
 	})
+}
+
+// A concurrency shed already lands in the activity log via the limiter's
+// origin-independent observer (spec 093 FR-012) — the sandbox emitter must not
+// add a second record for the same refused call.
+func TestEmitSubCallActivity_SkipsLimiterSheds(t *testing.T) {
+	var limitErr *limiter.LimitError
+	shed := &limiter.LimitError{}
+	require.True(t, errors.As(fmt.Errorf("dispatch: %w", shed), &limitErr),
+		"the emitter's detection must see through wrapping")
 }

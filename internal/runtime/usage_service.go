@@ -30,6 +30,11 @@ func encodeUsageAggregate(a *UsageAggregate) ([]byte, error) {
 // defaults for any maps absent from the blob.
 func decodeUsageAggregate(data []byte) (*UsageAggregate, error) {
 	agg := newUsageAggregate()
+	// A pre-versioning snapshot has no admission_version field, and Unmarshal
+	// leaves absent fields alone — so the constructor's CURRENT stamp must be
+	// cleared first, or every legacy snapshot would masquerade as current and
+	// skip the rebuild the version check exists for.
+	agg.AdmissionVersion = 0
 	if err := json.Unmarshal(data, agg); err != nil {
 		return nil, err
 	}
@@ -83,6 +88,13 @@ func (s *ActivityService) initUsageFromStorage() {
 	} else if len(data) > 0 {
 		if agg, derr := decodeUsageAggregate(data); derr != nil {
 			s.logger.Warn("Failed to decode usage snapshot; rebuilding from scan", zap.Error(derr))
+		} else if agg.AdmissionVersion != usageAdmissionVersion {
+			// Counted under a different admission rule (e.g. before internal
+			// calls joined the timeline): incremental catch-up cannot fix the
+			// hours it already contains, so rebuild from scratch once.
+			s.logger.Info("Usage snapshot predates the current admission rule; rebuilding from scan",
+				zap.Int("snapshot_version", agg.AdmissionVersion),
+				zap.Int("current_version", usageAdmissionVersion))
 		} else {
 			s.usage.Replace(agg)
 			replayed := s.replayActivitiesSince(agg.UpdatedAt)

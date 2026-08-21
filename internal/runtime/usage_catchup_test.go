@@ -120,3 +120,38 @@ func newUsageTestServiceOn(t *testing.T, mgr *storage.Manager) (*ActivityService
 	t.Helper()
 	return NewActivityService(mgr, zap.NewNop()), mgr
 }
+
+// A snapshot flushed by a build with a DIFFERENT admission rule cannot be
+// patched incrementally — the hours it already contains were counted under the
+// old rule (e.g. no internal calls). The loader must discard it and rebuild
+// from the activity scan, once, so upgraded installs do not carry a 24h
+// histogram that disagrees with the list.
+func TestActivityService_SnapshotLoad_RebuildsWhenTheAdmissionRuleChanged(t *testing.T) {
+	svc, mgr := newUsageTestService(t)
+	base := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	// The store holds an internal call the OLD rule never counted.
+	require.NoError(t, mgr.SaveActivity(&storage.ActivityRecord{
+		Type: storage.ActivityTypeInternalToolCall, ToolName: "code_execution",
+		Status: storage.ActivityStatusSuccess, Timestamp: base,
+	}))
+
+	// A pre-upgrade snapshot: stamped, but with no AdmissionVersion (0).
+	old := newUsageAggregate()
+	old.AdmissionVersion = 0
+	old.UpdatedAt = base.Add(time.Hour)
+	data, err := encodeUsageAggregate(old)
+	require.NoError(t, err)
+	require.NoError(t, mgr.SaveUsageSnapshot(data))
+
+	svc.initUsageFromStorage()
+
+	loaded := svc.UsageSnapshot()
+	require.NotNil(t, loaded)
+	var timelineCalls int64
+	for _, b := range loaded.Timeline() {
+		timelineCalls += b.Calls
+	}
+	assert.EqualValues(t, 1, timelineCalls,
+		"the stale-rule snapshot must be discarded and the internal call rescanned in")
+}

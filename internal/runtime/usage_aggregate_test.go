@@ -41,15 +41,18 @@ func TestUsageAggregate_Apply_CountsAndBytes(t *testing.T) {
 	require.NotNil(t, tu)
 	assert.Equal(t, "github", tu.Server)
 	assert.Equal(t, "search", tu.Tool)
-	assert.Equal(t, int64(5), tu.Calls)
+	// A blocked tool_call never executed (a policy gate refused the dispatch),
+	// so like a blocked policy_decision it takes only the Blocked counter and
+	// a failed timeline bar — not Calls, latency or byte statistics.
+	assert.Equal(t, int64(4), tu.Calls)
 	assert.Equal(t, int64(1), tu.Errors)
 	assert.Equal(t, int64(1), tu.Blocked)
 
-	// Byte sums exclude 0-byte records.
+	// Byte sums exclude 0-byte records and the refused dispatch.
 	assert.Equal(t, int64(1000+2000+500), tu.RespBytesSum)
 	assert.Equal(t, int64(3), tu.SizedRespCalls, "3 records had ResponseBytes>0")
-	assert.Equal(t, int64(200*4), tu.ReqBytesSum, "4 records had RequestBytes>0")
-	assert.Equal(t, int64(4), tu.SizedReqCalls)
+	assert.Equal(t, int64(200*3), tu.ReqBytesSum, "3 executed records had RequestBytes>0")
+	assert.Equal(t, int64(3), tu.SizedReqCalls)
 }
 
 func TestUsageAggregate_Apply_IgnoresNonToolCalls(t *testing.T) {

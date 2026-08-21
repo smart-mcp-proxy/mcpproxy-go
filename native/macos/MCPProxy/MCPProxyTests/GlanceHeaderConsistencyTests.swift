@@ -202,6 +202,12 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
         XCTAssertFalse(AppState.countsTowardUsageTimeline(
             Self.typedEntry(type: "internal_tool_call", tool: "call_tool_read", status: "error")))
         XCTAssertFalse(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "internal_tool_call", tool: "upstream_servers", status: "success")),
+                       "successful management built-ins are not glance rows, so no bar")
+        XCTAssertTrue(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "internal_tool_call", tool: "upstream_servers", status: "error")),
+                      "any internal failure is a glance row")
+        XCTAssertFalse(AppState.countsTowardUsageTimeline(
             Self.typedEntry(type: "tool_call", tool: "create_issue", status: "rejected")))
         XCTAssertTrue(AppState.countsTowardUsageTimeline(
             Self.typedEntry(type: "tool_call", tool: "create_issue", status: "error")))

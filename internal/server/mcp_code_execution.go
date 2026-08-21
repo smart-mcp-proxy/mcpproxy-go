@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -714,7 +716,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
-		u.emitSubCallActivity(serverName, toolName, args, nil, refusal, startTime, duration)
+		u.emitSubCallRefused(serverName, toolName, args, refusal, startTime, duration)
 		return nil, refusal
 	}
 
@@ -794,12 +796,39 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName string, ar
 		return
 	}
 
+	// A concurrency shed already produced its canonical "rejected" activity
+	// record at the admission point inside the managed client (spec 093
+	// FR-012, installRejectionObserver) — that seam is origin-independent and
+	// fired for this very call. Emitting a second record here would count one
+	// refused attempt twice, once as rejected and once as an executed error.
+	var limitErr *limiter.LimitError
+	if errors.As(callErr, &limitErr) {
+		return
+	}
+
 	status, errMsg, responseText, truncated := subCallActivityOutcome(result, callErr)
 
 	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		status, errMsg, duration.Milliseconds(), args, responseText, truncated,
+		"", nil, "", "", 0, 0, "", nil, u.parentCallID)
+}
+
+// emitSubCallRefused records a sandbox sub-call that the policy gate refused
+// before dispatch (quarantined, disabled, approval-locked — spec 098 FR-002).
+// Status is "blocked", not "error": the upstream never saw the call, and the
+// aggregate routes blocked tool_calls off the executed-call statistics
+// (Calls/latency) while still giving the attempt a failed bar in the timeline,
+// the same treatment a direct-path policy_decision gets.
+func (u *upstreamToolCaller) emitSubCallRefused(serverName, toolName string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration) {
+	if u.proxy == nil {
+		return
+	}
+	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
+	u.proxy.emitActivityToolCallCompleted(
+		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
+		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,
 		"", nil, "", "", 0, 0, "", nil, u.parentCallID)
 }
 

@@ -140,12 +140,25 @@ type UsageAggregate struct {
 	Tools     map[string]*ToolUsage `json:"tools"`
 	Buckets   map[int64]*TimeBucket `json:"buckets"` // key = bucket start unix seconds
 	UpdatedAt time.Time             `json:"updated_at"`
+	// AdmissionVersion stamps which population rule built this aggregate. A
+	// persisted snapshot whose stamp differs from usageAdmissionVersion was
+	// counted under a different rule and cannot be patched incrementally —
+	// the loader discards it and rebuilds from a full activity scan instead.
+	AdmissionVersion int `json:"admission_version,omitempty"`
 }
+
+// usageAdmissionVersion identifies the CURRENT admission rule for the
+// aggregate. Bump it whenever Apply changes which records are counted (it
+// started at 2 when internal tool calls and blocked policy decisions joined
+// the timeline), so pre-change snapshots are rebuilt instead of carried
+// forward with hours counted under the old rule.
+const usageAdmissionVersion = 2
 
 func newUsageAggregate() *UsageAggregate {
 	return &UsageAggregate{
-		Tools:   make(map[string]*ToolUsage),
-		Buckets: make(map[int64]*TimeBucket),
+		Tools:            make(map[string]*ToolUsage),
+		Buckets:          make(map[int64]*TimeBucket),
+		AdmissionVersion: usageAdmissionVersion,
 	}
 }
 
@@ -199,6 +212,13 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 		// executed, so it must not inflate Calls, latency percentiles, byte
 		// averages or the executed-call timeline.
 		a.applyRejected(rec)
+		return
+	case rec.Type == storage.ActivityTypeToolCall && rec.Status == storage.ActivityStatusBlocked:
+		// A policy gate refused the dispatch (today: a code_execution sub-call,
+		// emitSubCallRefused). Same shape as a blocked policy_decision: the
+		// upstream never ran it, so it takes the Blocked counter and a failed
+		// bar in the timeline, not the executed-call statistics.
+		a.applyBlocked(rec)
 		return
 	case rec.Type == storage.ActivityTypeToolCall:
 		// folded below
@@ -272,13 +292,33 @@ func (a *UsageAggregate) applyBlocked(rec *storage.ActivityRecord) {
 // call_tool_* records are skipped because the direct dispatch that produced
 // them also emitted a tool_call record for the same call (see
 // handleCallToolVariant, which emits both) — counting both would double it.
+//
+// SUCCESSFUL internal calls count only for the built-ins the glance actually
+// rows (GlanceSelection rule 3: retrieve_tools, describe_tool,
+// code_execution): a successful upstream_servers or quarantine_security call
+// is management chatter the glance hides, and counting it would put bars over
+// hours with no rows. Failures count regardless — any internal failure is a
+// glance row.
 func (a *UsageAggregate) applyInternalToolCall(rec *storage.ActivityRecord) {
 	if strings.HasPrefix(rec.ToolName, storage.InternalCallToolPrefix) {
+		return
+	}
+	if rec.Status == storage.ActivityStatusSuccess && !glanceInternalTools[rec.ToolName] {
 		return
 	}
 	// Anything the built-in did not complete is a failed row in the glance,
 	// whether it errored or a policy refused it.
 	a.countInTimeBucket(rec, rec.Status != storage.ActivityStatusSuccess)
+}
+
+// glanceInternalTools are the built-ins whose SUCCESSFUL calls appear as rows
+// in the tray glance (GlanceSelection.swift rule 3) and therefore in the
+// timeline. Keep in lockstep with the Swift set and with
+// AppState.countsTowardUsageTimeline.
+var glanceInternalTools = map[string]bool{
+	"retrieve_tools": true,
+	"describe_tool":  true,
+	"code_execution": true,
 }
 
 // applyRejected folds a concurrency-limiter shed into the per-tool Rejected
@@ -350,9 +390,10 @@ func (a *UsageAggregate) Timeline() []TimeBucket {
 // clone returns a deep copy safe to publish to readers.
 func (a *UsageAggregate) clone() *UsageAggregate {
 	c := &UsageAggregate{
-		Tools:     make(map[string]*ToolUsage, len(a.Tools)),
-		Buckets:   make(map[int64]*TimeBucket, len(a.Buckets)),
-		UpdatedAt: a.UpdatedAt,
+		Tools:            make(map[string]*ToolUsage, len(a.Tools)),
+		Buckets:          make(map[int64]*TimeBucket, len(a.Buckets)),
+		UpdatedAt:        a.UpdatedAt,
+		AdmissionVersion: a.AdmissionVersion,
 	}
 	for k, tu := range a.Tools {
 		c.Tools[k] = tu.clone()

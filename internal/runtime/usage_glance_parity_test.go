@@ -95,3 +95,42 @@ func TestUsageAggregate_BuiltinsStayOutOfThePerToolRollup(t *testing.T) {
 	require.Len(t, agg.Timeline(), 1)
 	assert.EqualValues(t, 1, agg.Timeline()[0].Calls)
 }
+
+// Successful management built-ins (upstream_servers, quarantine_security, …)
+// are not glance rows — GlanceSelection rule 3 admits only retrieve_tools,
+// describe_tool and code_execution plus any internal failure — so a config
+// sweep must not paint bars over an hour with no visible rows.
+func TestUsageAggregate_SuccessfulManagementBuiltinsStayOutOfTheTimeline(t *testing.T) {
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "upstream_servers", Status: storage.ActivityStatusSuccess, Timestamp: ts})
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "quarantine_security", Status: storage.ActivityStatusSuccess, Timestamp: ts})
+	assert.Empty(t, agg.Timeline(), "successful management calls are hidden rows, so no bars")
+
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "upstream_servers", Status: storage.ActivityStatusError, Timestamp: ts})
+	timeline := agg.Timeline()
+	require.Len(t, timeline, 1)
+	assert.EqualValues(t, 1, timeline[0].Calls, "any internal failure IS a glance row")
+	assert.EqualValues(t, 1, timeline[0].Errors)
+}
+
+// A blocked tool_call (a policy gate refused a code_execution sub-call before
+// dispatch) never executed: like a blocked policy_decision it takes a failed
+// timeline bar and the Blocked counter, never Calls/latency/bytes.
+func TestUsageAggregate_BlockedToolCallIsARefusalNotAnExecutedCall(t *testing.T) {
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search", Status: storage.ActivityStatusBlocked, DurationMs: 3, RequestBytes: 100, Timestamp: ts})
+
+	tu := agg.Tools[toolKey("github", "search")]
+	require.NotNil(t, tu)
+	assert.EqualValues(t, 0, tu.Calls)
+	assert.EqualValues(t, 1, tu.Blocked)
+	assert.EqualValues(t, 0, tu.ReqBytesSum)
+
+	timeline := agg.Timeline()
+	require.Len(t, timeline, 1)
+	assert.EqualValues(t, 1, timeline[0].Calls)
+	assert.EqualValues(t, 1, timeline[0].Errors)
+}
