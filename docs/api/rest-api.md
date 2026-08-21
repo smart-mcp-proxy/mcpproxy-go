@@ -1141,6 +1141,7 @@ List recent MCP sessions.
 |-----------|------|-------------|
 | `limit` | integer | Max sessions (1-100, default: 10) |
 | `offset` | integer | Pagination offset (default: 0) |
+| `parent_id` | string | Return only the sub-calls of one `code_execution` (value = the parent record's `request_id`) |
 | `status` | string | Filter by session status: `active`, `closed`. Any other value returns `400`. |
 
 The `status` filter is applied during the storage walk, **before** the `limit`

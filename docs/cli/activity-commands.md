@@ -224,7 +224,7 @@ Source indicators (`[MCP]`, `[CLI]`, `[API]`) show how the tool call was trigger
 - Automatically reconnects on connection loss (exponential backoff)
 - Exits cleanly on SIGINT (Ctrl+C) or SIGTERM
 - Buffers high-volume events to prevent terminal flooding
-- **Filters out successful `call_tool_*` internal tool calls** to avoid duplicates (they have corresponding `tool_call` entries)
+- **Filters out `call_tool_*` internal tool calls** to avoid duplicates (every dispatch — successful, failed, or shed — has a corresponding `tool_call` or rejection record)
 
 ### Exit Codes
 
@@ -626,7 +626,7 @@ The activity log captures the following event types:
 | `server_change` | Server enable/disable/restart events |
 
 :::note Duplicate Filtering for call_tool_*
-By default, **successful** `call_tool_*` internal tool calls are filtered out from `activity list`, `activity watch`, and the Web UI because they appear as duplicates alongside their corresponding upstream `tool_call` entries. **Failed** `call_tool_*` calls are always shown since they have no corresponding tool call entry.
+By default, all `call_tool_*` internal records are filtered out from `activity list`, `activity watch`, and the Web UI — every dispatch (successful, failed, or shed) has a corresponding upstream `tool_call` or rejection record carrying the same `request_id`, so showing both would double-count the call.
 
 To include all internal tool calls in API responses, use `include_call_tool=true` query parameter.
 :::

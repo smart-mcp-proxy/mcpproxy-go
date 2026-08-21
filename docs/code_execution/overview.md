@@ -203,6 +203,7 @@ Code execution **respects existing MCPProxy security features**:
 - Quarantined servers cannot be called via `call_tool()`
 - Server enable/disable settings are enforced
 - Authentication requirements are preserved
+- Every upstream tool call a script makes is recorded as a first-class activity record with `parent_id` linking it to the `code_execution` run — drill in with `mcpproxy activity list --parent-id <request_id>`; policy-blocked sub-calls are recorded with status `blocked`
 
 ## Getting Started
 

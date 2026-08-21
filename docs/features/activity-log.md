@@ -71,9 +71,9 @@ Internal tool calls log when internal proxy tools are used:
 ```
 
 :::note Duplicate Filtering
-By default, **successful** `call_tool_*` internal tool calls (`call_tool_read`, `call_tool_write`, `call_tool_destructive`) are excluded from activity listings because they appear as duplicates alongside their corresponding upstream `tool_call` entries. **Failed** `call_tool_*` calls are always shown since they have no corresponding upstream tool call entry.
+By default, all `call_tool_*` internal tool calls (`call_tool_read`, `call_tool_write`, `call_tool_destructive`) are excluded from activity listings — every dispatch (successful, failed, or shed) has a corresponding upstream `tool_call` or rejection record carrying the same `request_id`, so showing both would double-count the call.
 
-To include all internal tool calls including successful `call_tool_*`, use `include_call_tool=true` in the API query parameter.
+To include the `call_tool_*` records anyway, use `include_call_tool=true` in the API query parameter.
 :::
 
 ### Config Change Events
@@ -124,6 +124,18 @@ Each tool call record includes:
   }
 }
 ```
+
+#### Sub-calls made by code_execution
+
+Every upstream tool call a sandboxed `code_execution` script makes is recorded
+as a first-class `tool_call` record with its own `request_id` and a `parent_id`
+equal to the parent `code_execution` record's `request_id` (`source` is
+`internal`; a policy-refused sub-call is recorded with status `blocked`).
+Filter with `parent_id=<parent request_id>` to list a script's sub-calls, or
+`request_id=<child's parent_id>` to find the parent — the Web UI drawer, the
+macOS Activity window, and `mcpproxy activity list --parent-id` all expose the
+same navigation (see the "Drill into a code_execution" workflow in the CLI
+activity commands reference).
 
 ### Intent Tracking
 
@@ -294,7 +306,8 @@ GET /api/v1/activity
 | `end_time` | string | Filter before this time (RFC3339) |
 | `limit` | integer | Max records (1-100, default: 50) |
 | `offset` | integer | Pagination offset (default: 0) |
-| `include_call_tool` | boolean | Include successful `call_tool_*` internal tool calls (default: false). By default, successful `call_tool_*` are excluded because they appear as duplicates alongside their upstream `tool_call` entries. Failed `call_tool_*` are always shown. |
+| `include_call_tool` | boolean | Include `call_tool_*` internal tool calls (default: false). Excluded by default because every dispatch has a paired `tool_call` (or rejection) record with the same `request_id`. |
+| `parent_id` | string | Return only the sub-calls one `code_execution` issued (value = the parent record's `request_id`). Child→parent is the reverse lookup: `request_id=<child's parent_id>`. |
 | `exclude_payloads` | boolean | Omit the bulky fields — `arguments`, `response` — and narrow `metadata` to a contextual whitelist (default: false). See below. |
 
 #### `exclude_payloads` and the contextual metadata whitelist
