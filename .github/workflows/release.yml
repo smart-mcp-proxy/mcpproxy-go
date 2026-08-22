@@ -1572,14 +1572,13 @@ jobs:
   # native/macos/MCPProxy/MCPProxy/Services/SparkleFeedURL.swift, and the file
   # names below are the other half of that contract.
   #
-  # TODO(maintainer decision #1 in docs/research/auto-updater-issue-957-2026-08-07.html):
-  # the shipped Info.plist points at https://mcpproxy.app/appcast.xml, which the
-  # WEBSITE repo would have to serve — this repository cannot publish there. Until
-  # that is wired, the feeds are (a) attached to the release and (b) exported as a
-  # workflow artifact (`sparkle-appcast`) for the website repo to consume. The
-  # GitHub-hosted stable URL
+  # The shipped Info.plist points at https://mcpproxy.app/appcast.xml (decision
+  # #1 in docs/research/auto-updater-issue-957-2026-08-07.html). This job feeds
+  # the site via a repository-dispatch below; the feeds are also (a) attached to
+  # the release and (b) exported as a workflow artifact (`sparkle-appcast`) as
+  # backfill sources. The GitHub-hosted stable URL
   #   https://github.com/OWNER/REPO/releases/latest/download/appcast-<arch>.xml
-  # works today as an interim SUFeedURL for the STABLE channel only (it resolves to
+  # works as an alternative SUFeedURL for the STABLE channel only (it resolves to
   # the newest non-prerelease release); set repository variable SPARKLE_FEED_URL to
   # use it. It does NOT serve the beta channel — see prerelease.yml.
   sparkle-appcast:
@@ -1697,11 +1696,16 @@ jobs:
       # Tell mcpproxy.app to serve the freshly uploaded feeds (they are public
       # release assets by now — the site's publish-appcast workflow downloads
       # them from the release, so no artifact plumbing crosses repos).
-      # Non-blocking: the feeds stay downloadable from the release either way,
-      # and the site workflow can be re-run by hand (workflow_dispatch).
+      # This step MUST fail loudly: on v0.60.0 an expired
+      # MARKETING_SITE_DISPATCH_TOKEN made this dispatch 401 under
+      # continue-on-error, the site kept serving the 0.59.0 feed, and Sparkle
+      # told users they were up to date while doctor/tray offered v0.60.0.
+      # Failing here blocks nothing — every release asset (feeds included) is
+      # uploaded by earlier steps; a red job is the recovery signal. Backfill by
+      # re-running this job, or by hand via the site's publish-appcast
+      # workflow_dispatch.
       - name: Publish feeds to mcpproxy.app
         if: steps.appcast.outputs.generated == 'true'
-        continue-on-error: true
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
         with:
           token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
@@ -1713,13 +1717,50 @@ jobs:
       # (see the channel-policy comment above).
       - name: Publish stable item to the beta feeds
         if: steps.appcast.outputs.generated == 'true'
-        continue-on-error: true
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
         with:
           token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
           repository: smart-mcp-proxy/mcpproxy.app-website
           event-type: publish-appcast
           client-payload: '{"version": "${{ github.ref_name }}", "channel": "beta"}'
+
+      # End-to-end freshness check: the dispatch above only queues the site's
+      # publish-appcast workflow — a failed site run, a queued run replaced by
+      # its sibling in the site's concurrency group, or a stale Cloudflare
+      # Pages deploy would still leave the live feed behind. Poll until the
+      # LIVE bytes match what this job generated (the site's own verify step
+      # does the same from its side, but it never runs if the dispatch is
+      # lost). One 15-min deadline SHARED across all feeds: dispatch → site
+      # workflow queue → commit → Pages deploy is ~3-5 min per channel, and a
+      # shared budget keeps a total site outage from holding this macOS runner
+      # for 15 min per file. The beta copies are byte-identical to the stable
+      # feeds (cp above), so this loop verifies both dispatches.
+      - name: Verify live feeds are fresh
+        if: steps.appcast.outputs.generated == 'true'
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( $(date +%s) + 15 * 60 ))
+          FAILED=0
+          for f in appcast-out/*.xml; do
+            NAME=$(basename "$f")
+            WANT=$(shasum -a 256 "$f" | cut -d' ' -f1)
+            OK=""
+            # Check-first: every feed gets at least one probe even after an
+            # earlier feed has exhausted the shared deadline.
+            while :; do
+              GOT=$(curl -fsSL "https://mcpproxy.app/${NAME}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)
+              if [ "$GOT" = "$WANT" ]; then OK=yes; break; fi
+              if [ "$(date +%s)" -ge "$DEADLINE" ]; then break; fi
+              sleep 15
+            done
+            if [ -n "$OK" ]; then
+              echo "✅ https://mcpproxy.app/${NAME} serves the ${GITHUB_REF_NAME} feed"
+            else
+              echo "::error::https://mcpproxy.app/${NAME} still does not serve the ${GITHUB_REF_NAME} feed after 15 minutes — Sparkle users will be offered a stale version"
+              FAILED=1
+            fi
+          done
+          exit "$FAILED"
 
   provenance:
     needs: [release]

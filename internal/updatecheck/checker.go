@@ -209,12 +209,22 @@ func (c *Checker) enabledLocked() bool {
 // MCPPROXY_ALLOW_PRERELEASE_UPDATES=true wins over the config channel
 // (Spec 079 FR-014 precedence: env > config); otherwise channel=rc opts in.
 func (c *Checker) IncludePrereleases() bool {
-	// The running build's own version is authoritative (issue: a stable user
-	// must never be offered an RC; an RC user may be offered stable or the next
-	// RC). This deliberately overrides the config/env opt-in for RELEASED
-	// builds, so a stale `channel: rc` config left over from a
-	// previously-installed RC cannot resurrect RC offers on a stable build.
-	switch versionChannelKind(c.version) {
+	c.mu.RLock()
+	cfgPrerelease := c.cfgPrerelease
+	c.mu.RUnlock()
+	return IncludePrereleasesForBuild(c.version, cfgPrerelease)
+}
+
+// IncludePrereleasesForBuild applies the full channel precedence for a build
+// version. The running build's own version is authoritative (issue: a stable
+// user must never be offered an RC; an RC user may be offered stable or the
+// next RC). This deliberately overrides the config/env opt-in for RELEASED
+// builds, so a stale `channel: rc` config left over from a
+// previously-installed RC cannot resurrect RC offers on a stable build.
+// Shared by the daemon's Checker and `mcpproxy update` so both resolve the
+// same channel (Spec 079 FR-023).
+func IncludePrereleasesForBuild(buildVersion string, cfgPrerelease bool) bool {
+	switch versionChannelKind(buildVersion) {
 	case buildChannelStable:
 		// A stable build never tracks prereleases, whatever the config/env say.
 		return false
@@ -232,9 +242,7 @@ func (c *Checker) IncludePrereleases() bool {
 		if os.Getenv(EnvAllowPrereleaseUpdates) == "true" {
 			return true
 		}
-		c.mu.RLock()
-		defer c.mu.RUnlock()
-		return c.cfgPrerelease
+		return cfgPrerelease
 	}
 }
 
