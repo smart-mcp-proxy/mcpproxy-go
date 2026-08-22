@@ -195,8 +195,14 @@ final class GlanceHeaderConsistencyTests: XCTestCase {
     /// mirror a dispatch whose own `tool_call` record is also on the stream),
     /// and a `tool_call` shed by the concurrency limiter never executed.
     func testLiveIncrementMirrorsTheAggregatesTimelineRule() {
+        XCTAssertFalse(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "internal_tool_call", tool: "code_execution", status: "success")),
+                       "a script that ran bars through its sub-calls; the wrapper would double it")
         XCTAssertTrue(AppState.countsTowardUsageTimeline(
-            Self.typedEntry(type: "internal_tool_call", tool: "code_execution", status: "success")))
+            Self.typedEntry(type: "internal_tool_call", tool: "code_execution", status: "error")),
+                      "a script that died before dispatch has no sub-calls to bar for it")
+        XCTAssertTrue(AppState.countsTowardUsageTimeline(
+            Self.typedEntry(type: "internal_tool_call", tool: "describe_tool", status: "success")))
         XCTAssertTrue(AppState.countsTowardUsageTimeline(
             Self.typedEntry(type: "internal_tool_call", tool: "retrieve_tools", status: "error")))
         XCTAssertFalse(AppState.countsTowardUsageTimeline(

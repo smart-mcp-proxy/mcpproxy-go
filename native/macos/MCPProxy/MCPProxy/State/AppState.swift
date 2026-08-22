@@ -464,7 +464,10 @@ final class AppState: ObservableObject {
             // Mirrors GlanceSelection: management built-ins never row (rule 1),
             // call_tool_* echoes never do (their dispatch emitted its own
             // tool_call record), and other internal calls row on success only
-            // for the discovery/execution set, on failure always (rule 3).
+            // for the discovery set, on failure always (rule 3). A successful
+            // code_execution is therefore out of both the glance and the bars —
+            // its sub-calls are tool_call records that already count — while a
+            // failed one is in.
             guard !name.hasPrefix("call_tool_"),
                   !GlanceSelection.managementBuiltIns.contains(name) else { return false }
             return entry.status != "success"

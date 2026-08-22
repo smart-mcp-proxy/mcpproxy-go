@@ -659,6 +659,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         connectClientForm.dismiss()
     }
 
+    /// The "Add Server..." item, built in one place because it is now rendered
+    /// from two: normally as the first entry of the Servers submenu, and at the
+    /// top level only when there are no servers and therefore no submenu.
+    ///
+    /// `target` is set explicitly — an item in a submenu with a nil target would
+    /// fall back to the responder chain, and the tray has none while the menu is
+    /// open, so the click would silently do nothing.
+    func makeAddServerItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
+        item.target = self
+        return item
+    }
+
     @objc private func showAddServer() {
         showMainWindow()
         // First switch to the Servers tab so ServersView is mounted and
@@ -1070,22 +1083,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(.separator())
         }
 
-        // Quarantine
-        if appState.quarantinedToolsCount > 0 {
-            let quarantineItem = NSMenuItem(
-                title: "\(appState.quarantinedToolsCount) quarantined server(s)",
-                action: nil, keyEquivalent: "")
-            quarantineItem.isEnabled = false
-            quarantineItem.image = NSImage(systemSymbolName: "shield.lefthalf.filled",
-                                            accessibilityDescription: "quarantine")
-            menu.addItem(quarantineItem)
-            menu.addItem(.separator())
-        }
+        // No standalone quarantine line: "N quarantined server(s)" was a
+        // disabled, grey, non-actionable row, and the same fact is already
+        // carried — actionably — by the Needs Attention submenu above. The menu
+        // had grown long enough to scroll, and an informational row that cannot
+        // be clicked is the first thing to spend.
 
         // Servers — as a SUBMENU (not flat list)
         if !appState.servers.isEmpty {
             let serversMenuItem = NSMenuItem(title: "Servers (\(appState.servers.count))", action: nil, keyEquivalent: "")
             let serversSubmenu = NSMenu()
+
+            // "Add Server..." lives HERE, not at the top level: adding a server
+            // is a servers-menu action, and hoisting it out cost a permanent
+            // top-level row in a menu that had started to scroll. The Cmd+N key
+            // equivalent still works from a submenu — AppKit walks the whole menu
+            // tree when matching key equivalents — and still displays beside the
+            // title once the submenu is open.
+            serversSubmenu.addItem(makeAddServerItem())
+            serversSubmenu.addItem(.separator())
 
             for server in appState.servers {
                 let item = NSMenuItem(title: server.name, action: nil, keyEquivalent: "")
@@ -1200,9 +1216,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         // Actions
-        let addServer = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
-        addServer.target = self
-        menu.addItem(addServer)
+        //
+        // "Add Server..." normally lives inside the Servers submenu. The one
+        // exception is a proxy with no servers at all: there is no Servers
+        // submenu to hold it then, and the very user who most needs to add one
+        // would be left without a way to do it from the tray.
+        if appState.servers.isEmpty {
+            menu.addItem(makeAddServerItem())
+        }
 
         // Spec 091 FR-001: the native connect journey, beside Add Server. The
         // item is built by its router so the item and its routing are tested
@@ -1334,9 +1355,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         docsItem.target = self
         menu.addItem(docsItem)
 
-        let issueItem = NSMenuItem(title: "Report an Issue…", action: #selector(reportIssue), keyEquivalent: "")
-        issueItem.target = self
-        menu.addItem(issueItem)
+        // No "Report an Issue…" item: the menu had grown long enough to scroll
+        // on a normal display, and the tracker is still reachable through the
+        // GitHub link in the About panel's credits block.
 
         let aboutItem = NSMenuItem(title: "About MCPProxy", action: #selector(showAboutPanel), keyEquivalent: "")
         aboutItem.target = self
@@ -1641,10 +1662,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc private func openDocumentation() {
         NSWorkspace.shared.open(ProjectLinks.docs)
-    }
-
-    @objc private func reportIssue() {
-        NSWorkspace.shared.open(ProjectLinks.issues)
     }
 
     /// Shows the standard About panel (app name + version) with a credits block
