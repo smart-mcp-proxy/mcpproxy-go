@@ -11,6 +11,14 @@ import {
   filterActivities,
   paginateActivities,
   calculateTotalPages,
+  statusPresentation,
+  intentPresentation,
+  compactSummaryParts,
+  activeFilterChips,
+  activeFilterCount,
+  activityDetailsText,
+  showParentBadgeInTypeColumn,
+  shortId,
   type ActivityRecord,
   type ActivityFilterOptions
 } from '../../src/utils/activity'
@@ -134,6 +142,225 @@ describe('Status Badge Colors', () => {
     it('returns badge-ghost for unknown operation', () => {
       expect(getIntentBadgeClass('unknown')).toBe('badge-ghost')
     })
+  })
+})
+
+// Status treatment: success is the norm and must NOT shout. Colour is reserved
+// for the rows that need a human; everything else is quiet.
+describe('statusPresentation', () => {
+  it('renders success as plain muted text — no pill, no green', () => {
+    const p = statusPresentation('success')
+    expect(p.label).toBe('Success')
+    expect(p.pill).toBe(false)
+    expect(p.tone).toBe('muted')
+    expect(p.className).not.toContain('badge')
+    expect(p.className).not.toContain('success')
+    expect(p.className).toContain('text-base-content/60')
+  })
+
+  it('keeps a red pill for error', () => {
+    const p = statusPresentation('error')
+    expect(p).toMatchObject({ label: 'Error', pill: true, tone: 'error' })
+    expect(p.className).toContain('badge-error')
+  })
+
+  it('keeps an amber pill for blocked', () => {
+    const p = statusPresentation('blocked')
+    expect(p).toMatchObject({ label: 'Blocked', pill: true, tone: 'warning' })
+    expect(p.className).toContain('badge-warning')
+  })
+
+  it('gives rejected a NEUTRAL pill, not the old info blue', () => {
+    const p = statusPresentation('rejected')
+    expect(p).toMatchObject({ label: 'Rejected', pill: true, tone: 'neutral' })
+    expect(p.className).toContain('badge-ghost')
+    expect(p.className).not.toContain('badge-info')
+  })
+
+  it('treats any other status as a neutral oddity, keeping its raw label', () => {
+    const p = statusPresentation('timeout')
+    expect(p).toMatchObject({ label: 'timeout', pill: true, tone: 'neutral' })
+    expect(p.className).toContain('badge-ghost')
+  })
+
+  it('only ever colours statuses that need attention', () => {
+    const coloured = ['success', 'error', 'blocked', 'rejected', 'weird']
+      .filter(s => statusPresentation(s).tone === 'error' || statusPresentation(s).tone === 'warning')
+    expect(coloured).toEqual(['error', 'blocked'])
+  })
+})
+
+// Intent: the REASON is the payload, the operation type is a glyph in front of
+// it. The old cell showed a coloured `read` pill and hid the reason in a tooltip.
+describe('intentPresentation', () => {
+  it('renders glyph + reason and a full hover title', () => {
+    const p = intentPresentation({ operation_type: 'read', reason: 'list open issues' })
+    expect(p.present).toBe(true)
+    expect(p.icon).toBe('📖')
+    expect(p.label).toBe('read')
+    expect(p.reason).toBe('list open issues')
+    expect(p.title).toBe('read — list open issues')
+  })
+
+  it('uses the pencil glyph for write and the warning glyph for destructive', () => {
+    expect(intentPresentation({ operation_type: 'write' }).icon).toBe('✏️')
+    expect(intentPresentation({ operation_type: 'destructive' }).icon).toBe('⚠️')
+  })
+
+  it('falls back to just the glyph when no reason was declared', () => {
+    const p = intentPresentation({ operation_type: 'write' })
+    expect(p.present).toBe(true)
+    expect(p.reason).toBe('')
+    expect(p.title).toBe('write')
+  })
+
+  it('ignores a whitespace-only reason', () => {
+    expect(intentPresentation({ operation_type: 'read', reason: '   ' }).reason).toBe('')
+  })
+
+  it('is absent when no operation type was declared (caller renders a dash)', () => {
+    expect(intentPresentation(undefined).present).toBe(false)
+    expect(intentPresentation(null).present).toBe(false)
+    expect(intentPresentation({}).present).toBe(false)
+    expect(intentPresentation({ reason: 'orphan reason' }).present).toBe(false)
+  })
+})
+
+// Compact header strip: total plus only the counts that want attention.
+describe('compactSummaryParts', () => {
+  it('shows the total plus non-zero attention counts', () => {
+    const parts = compactSummaryParts({
+      total_count: 54,
+      error_count: 6,
+      blocked_count: 1,
+      rejected_count: 0,
+    })
+    expect(parts.map(p => p.label)).toEqual(['54 calls', '6 errors', '1 blocked'])
+    expect(parts.map(p => p.tone)).toEqual(['muted', 'error', 'warning'])
+  })
+
+  it('omits zero counts entirely rather than printing a reassuring "0 errors"', () => {
+    const parts = compactSummaryParts({ total_count: 12, error_count: 0, blocked_count: 0 })
+    expect(parts).toHaveLength(1)
+    expect(parts[0]).toMatchObject({ key: 'total', label: '12 calls', status: '' })
+  })
+
+  it('gives rejected a neutral tone', () => {
+    const parts = compactSummaryParts({ total_count: 3, rejected_count: 2 })
+    expect(parts[1]).toMatchObject({ key: 'rejected', label: '2 rejected', tone: 'neutral' })
+  })
+
+  it('singularises', () => {
+    expect(compactSummaryParts({ total_count: 1, error_count: 1 }).map(p => p.label))
+      .toEqual(['1 call', '1 error'])
+  })
+
+  it('carries the status each segment filters to', () => {
+    const parts = compactSummaryParts({ total_count: 9, error_count: 1, blocked_count: 1 })
+    expect(parts.map(p => p.status)).toEqual(['', 'error', 'blocked'])
+  })
+
+  it('returns nothing when the summary has not loaded', () => {
+    expect(compactSummaryParts(null)).toEqual([])
+    expect(compactSummaryParts(undefined)).toEqual([])
+  })
+})
+
+// Compact-strip active-filter summary: what is narrowing the list is visible
+// even when the filter grid itself is collapsed.
+describe('activeFilterChips', () => {
+  it('is empty when nothing is filtered', () => {
+    expect(activeFilterChips({})).toEqual([])
+    expect(activeFilterCount({})).toBe(0)
+  })
+
+  it('emits one chip per selected type, icon included', () => {
+    const chips = activeFilterChips({ types: ['tool_call', 'preflight'] })
+    expect(chips.map(c => c.label)).toEqual(['🔧 Tool Call', '🛫 Preflight'])
+    expect(chips.map(c => c.kind)).toEqual(['type', 'type'])
+    expect(chips.map(c => c.value)).toEqual(['tool_call', 'preflight'])
+  })
+
+  it('always includes the sub-call chip, shortening the correlation id', () => {
+    const chips = activeFilterChips({ parentId: 'req-parent-abcdefgh' })
+    expect(chips).toHaveLength(1)
+    expect(chips[0].kind).toBe('parent')
+    expect(chips[0].label).toBe(`↳ Sub-calls of ${shortId('req-parent-abcdefgh')}`)
+    expect(chips[0].title).toContain('req-parent-abcdefgh')
+  })
+
+  it('labels the single-value filters', () => {
+    const chips = activeFilterChips({
+      server: 'github',
+      status: 'error',
+      authType: 'agent',
+      agentName: 'claude',
+      sensitiveData: 'true',
+      severity: 'critical',
+      session: 'sess-0123456789',
+      sessionLabel: 'Claude Code · 14:32',
+      startDate: '',
+      endDate: '',
+    })
+    expect(chips.map(c => c.label)).toEqual([
+      'Server: github',
+      'Status: error',
+      'Auth: 🤖 Agent',
+      'Agent: claude',
+      'Sensitive: ⚠️ Detected',
+      'Severity: critical',
+      'Session: Claude Code · 14:32',
+    ])
+  })
+
+  it('falls back to a shortened session id when no label resolved', () => {
+    const chips = activeFilterChips({ session: 'sess-0123456789' })
+    expect(chips[0].label).toBe(`Session: ${shortId('sess-0123456789')}`)
+  })
+
+  it('counts every active filter for the Filters toggle badge', () => {
+    expect(
+      activeFilterCount({ types: ['tool_call', 'preflight'], server: 'github', parentId: 'req-1' })
+    ).toBe(4)
+  })
+
+  it('keys are unique so the chips can drive a v-for', () => {
+    const chips = activeFilterChips({ types: ['tool_call', 'preflight'], server: 'a', status: 'error' })
+    expect(new Set(chips.map(c => c.key)).size).toBe(chips.length)
+  })
+})
+
+// De-duplication of the code_execution marker: one line, once.
+describe('code_execution marker placement', () => {
+  const PARENT_WITH_TOOL_NAME = {
+    type: 'internal_tool_call',
+    tool_name: 'code_execution',
+    metadata: { internal_tool_name: 'code_execution' },
+  }
+
+  it('reads the Details text a row will print', () => {
+    expect(activityDetailsText(PARENT_WITH_TOOL_NAME)).toBe('code_execution')
+    expect(activityDetailsText({ type: 'server_change', metadata: { action: 'enabled' } })).toBe('enabled')
+    expect(activityDetailsText({ type: 'tool_call' })).toBe('')
+    expect(activityDetailsText(null)).toBe('')
+  })
+
+  it('drops the Type-column badge when Details already says code_execution', () => {
+    expect(showParentBadgeInTypeColumn(PARENT_WITH_TOOL_NAME)).toBe(false)
+  })
+
+  it('keeps the Type-column badge when Details would say nothing', () => {
+    expect(
+      showParentBadgeInTypeColumn({
+        type: 'internal_tool_call',
+        metadata: { internal_tool_name: 'code_execution' },
+      })
+    ).toBe(true)
+  })
+
+  it('never badges a non-parent row', () => {
+    expect(showParentBadgeInTypeColumn({ type: 'tool_call', tool_name: 'code_execution' })).toBe(false)
+    expect(showParentBadgeInTypeColumn(null)).toBe(false)
   })
 })
 
@@ -417,5 +644,27 @@ describe('Relative Time Formatting', () => {
       const timestamp = new Date('2023-12-30T12:00:00Z').toISOString()
       expect(formatRelativeTime(timestamp)).toBe('2d ago')
     })
+  })
+})
+
+
+describe('activeFilterChips severity gating', () => {
+  it('does not count a leftover severity as active once sensitive-data is off', () => {
+    const chips = activeFilterChips({
+      types: [],
+      sensitiveData: '',
+      severity: 'critical',
+    })
+    expect(chips.find(c => c.kind === 'severity')).toBeUndefined()
+    expect(activeFilterCount({ types: [], sensitiveData: '', severity: 'critical' })).toBe(0)
+  })
+
+  it('counts severity while sensitive-data is Detected', () => {
+    const chips = activeFilterChips({
+      types: [],
+      sensitiveData: 'true',
+      severity: 'critical',
+    })
+    expect(chips.map(c => c.kind)).toEqual(['sensitive', 'severity'])
   })
 })
