@@ -176,6 +176,10 @@ Examples:
 func newUpdateRunner(out, errOut io.Writer, flags updateFlags) (*updateRunner, error) {
 	version := httpapi.GetBuildVersion()
 	channel := updatecheck.DetectChannel(version)
+	// go-install builds carry the non-semver ldflags default; promote to the
+	// module version exactly like the daemon's checker does, so the channel
+	// precedence below classifies the build identically (FR-023).
+	version = updatecheck.PromoteGoInstallVersion(version, channel)
 
 	execPath, err := resolvedExecutablePath()
 	if err != nil {
@@ -191,7 +195,7 @@ func newUpdateRunner(out, errOut io.Writer, flags updateFlags) (*updateRunner, e
 		currentVersion:     version,
 		channel:            channel,
 		execPath:           execPath,
-		includePrereleases: prereleasePreference(),
+		includePrereleases: prereleasePreference(version),
 		flags:              flags,
 		releases:           &githubReleaseSource{client: client},
 		httpClient:         &http.Client{Timeout: downloadTimeout},
@@ -202,17 +206,21 @@ func newUpdateRunner(out, errOut io.Writer, flags updateFlags) (*updateRunner, e
 }
 
 // prereleasePreference mirrors the checker's precedence (Spec 079 FR-014):
+// the released build's own identity is authoritative, then
 // MCPPROXY_ALLOW_PRERELEASE_UPDATES wins over update_check.channel, so
 // `mcpproxy update` offers exactly what the daemon's nudge offered (FR-023).
-func prereleasePreference() bool {
-	if os.Getenv(updatecheck.EnvAllowPrereleaseUpdates) == "true" {
-		return true
+func prereleasePreference(buildVersion string) bool {
+	cfgPrerelease := false
+	if cfg, err := loadCLIConfig(configFile); err == nil && cfg != nil {
+		cfgPrerelease = cfg.UpdateCheck.IncludePrereleases()
 	}
-	cfg, err := loadCLIConfig(configFile)
-	if err != nil || cfg == nil {
-		return false
-	}
-	return cfg.UpdateCheck.IncludePrereleases()
+	return prereleasePreferenceFor(buildVersion, cfgPrerelease)
+}
+
+// prereleasePreferenceFor is the config-independent core of
+// prereleasePreference, split out for tests.
+func prereleasePreferenceFor(buildVersion string, cfgPrerelease bool) bool {
+	return updatecheck.IncludePrereleasesForBuild(buildVersion, cfgPrerelease)
 }
 
 // resolvedExecutablePath returns the symlink-resolved path of the running

@@ -1200,14 +1200,48 @@ jobs:
           path: appcast-out/*
           if-no-files-found: ignore
 
-      # Same site hand-off as release.yml, beta channel. Non-blocking; the
-      # site workflow is manually re-runnable (workflow_dispatch).
+      # Same site hand-off as release.yml, beta channel. MUST fail loudly (see
+      # the matching comment in release.yml): the mcpproxy.app beta feed is the
+      # ONLY stable URL for the rc channel — GitHub's releases/latest/download
+      # never resolves to a prerelease — so a silently lost dispatch strands
+      # every beta user on the previous RC. All release assets are uploaded
+      # before this step; a red job blocks nothing. Backfill by re-running this
+      # job, or via the site's publish-appcast workflow_dispatch.
       - name: Publish beta feeds to mcpproxy.app
         if: steps.appcast.outputs.generated == 'true'
-        continue-on-error: true
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
         with:
           token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
           repository: smart-mcp-proxy/mcpproxy.app-website
           event-type: publish-appcast
           client-payload: '{"version": "${{ github.ref_name }}", "channel": "beta"}'
+
+      # End-to-end freshness check, mirroring release.yml's: poll until the
+      # live site serves the exact bytes this job generated, on one 15-min
+      # deadline shared across the feeds.
+      - name: Verify live feeds are fresh
+        if: steps.appcast.outputs.generated == 'true'
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( $(date +%s) + 15 * 60 ))
+          FAILED=0
+          for f in appcast-out/*.xml; do
+            NAME=$(basename "$f")
+            WANT=$(shasum -a 256 "$f" | cut -d' ' -f1)
+            OK=""
+            # Check-first: every feed gets at least one probe even after an
+            # earlier feed has exhausted the shared deadline.
+            while :; do
+              GOT=$(curl -fsSL "https://mcpproxy.app/${NAME}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)
+              if [ "$GOT" = "$WANT" ]; then OK=yes; break; fi
+              if [ "$(date +%s)" -ge "$DEADLINE" ]; then break; fi
+              sleep 15
+            done
+            if [ -n "$OK" ]; then
+              echo "✅ https://mcpproxy.app/${NAME} serves the ${GITHUB_REF_NAME} feed"
+            else
+              echo "::error::https://mcpproxy.app/${NAME} still does not serve the ${GITHUB_REF_NAME} feed after 15 minutes — beta users will be offered a stale version"
+              FAILED=1
+            fi
+          done
+          exit "$FAILED"

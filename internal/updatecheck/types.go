@@ -4,7 +4,8 @@ package updatecheck
 import "time"
 
 // VersionInfo represents the current version and update availability.
-// This is stored in-memory only and refreshed on startup + every 4 hours.
+// This is stored in-memory only and refreshed on startup + every
+// DefaultCheckInterval (24h; stretched by backoff after failed checks).
 type VersionInfo struct {
 	// CurrentVersion is the version of the running MCPProxy instance.
 	// Format: semver with "v" prefix (e.g., "v1.2.3") or "development"

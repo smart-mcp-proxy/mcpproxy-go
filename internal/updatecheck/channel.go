@@ -269,6 +269,18 @@ func (d *channelDetector) resolvedExecPath() string {
 // checks. For every other channel, or when build info is unusable, the
 // original version is returned unchanged.
 func promoteGoInstallVersion(version, channel string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
+	return promoteGoInstallVersionImpl(version, channel, readBuildInfo)
+}
+
+// PromoteGoInstallVersion is the production-wired form of
+// promoteGoInstallVersion, shared with `mcpproxy update` so the CLI resolves
+// the same build identity (and therefore the same channel precedence) as the
+// daemon's checker (Spec 079 FR-023).
+func PromoteGoInstallVersion(version, channel string) string {
+	return promoteGoInstallVersionImpl(version, channel, debug.ReadBuildInfo)
+}
+
+func promoteGoInstallVersionImpl(version, channel string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
 	if channel != ChannelGoInstall {
 		return version
 	}
