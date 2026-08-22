@@ -182,3 +182,51 @@ func TestShouldRetry_ResetAfterGaveUp(t *testing.T) {
 
 	assert.True(t, sm.ShouldRetry(), "should retry after manual Reset clears gave-up state")
 }
+
+// TestRetryBackoffDuration tests the exponential backoff schedule
+func TestRetryBackoffDuration(t *testing.T) {
+	tests := []struct {
+		retryCount int
+		expected   time.Duration
+	}{
+		{0, 1 * time.Second},
+		{1, 1 * time.Second},
+		{2, 2 * time.Second},
+		{3, 4 * time.Second},
+		{5, 16 * time.Second},
+		{10, 5 * time.Minute},  // 512s capped at 5min
+		{100, 5 * time.Minute}, // exponent capped, then duration capped
+	}
+
+	for _, tt := range tests {
+		got := RetryBackoffDuration(tt.retryCount)
+		assert.Equal(t, tt.expected, got, "retryCount=%d", tt.retryCount)
+	}
+}
+
+// TestConnectionInfo_ShouldAutoReconnect tests the supervisor-facing retry policy
+func TestConnectionInfo_ShouldAutoReconnect(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name     string
+		info     *ConnectionInfo
+		expected bool
+	}{
+		{"nil info", nil, true},
+		{"disconnected fresh server", &ConnectionInfo{State: StateDisconnected}, true},
+		{"ready server", &ConnectionInfo{State: StateReady}, true},
+		{"pending auth is parked", &ConnectionInfo{State: StatePendingAuth}, false},
+		{"error within backoff window", &ConnectionInfo{State: StateError, RetryCount: 5, LastRetryTime: now.Add(-1 * time.Second)}, false},
+		{"error with backoff elapsed", &ConnectionInfo{State: StateError, RetryCount: 3, LastRetryTime: now.Add(-10 * time.Second)}, true},
+		{"error no failures yet", &ConnectionInfo{State: StateError, RetryCount: 0}, true},
+		{"gave up flag", &ConnectionInfo{State: StateError, GaveUp: true, LastRetryTime: now.Add(-time.Hour)}, false},
+		{"retry count at max", &ConnectionInfo{State: StateError, RetryCount: MaxConnectionRetries, LastRetryTime: now.Add(-time.Hour)}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.info.ShouldAutoReconnect(now))
+		})
+	}
+}
