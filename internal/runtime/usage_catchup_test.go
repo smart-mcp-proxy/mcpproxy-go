@@ -132,7 +132,7 @@ func TestActivityService_SnapshotLoad_RebuildsWhenTheAdmissionRuleChanged(t *tes
 
 	// The store holds an internal call the OLD rule never counted.
 	require.NoError(t, mgr.SaveActivity(&storage.ActivityRecord{
-		Type: storage.ActivityTypeInternalToolCall, ToolName: "code_execution",
+		Type: storage.ActivityTypeInternalToolCall, ToolName: "retrieve_tools",
 		Status: storage.ActivityStatusSuccess, Timestamp: base,
 	}))
 

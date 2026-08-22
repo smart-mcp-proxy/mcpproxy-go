@@ -150,10 +150,11 @@ type UsageAggregate struct {
 // usageAdmissionVersion identifies the CURRENT admission rule for the
 // aggregate. Bump it whenever Apply changes which records are counted (2:
 // internal tool calls and blocked policy decisions joined the timeline; 3:
-// management built-ins excluded again per GlanceSelection rule 1), so
-// pre-change snapshots are rebuilt instead of carried forward with hours
-// counted under the old rule.
-const usageAdmissionVersion = 3
+// management built-ins excluded again per GlanceSelection rule 1; 4: successful
+// code_execution wrappers excluded — their sub-calls are tool_call records that
+// count on their own), so pre-change snapshots are rebuilt instead of carried
+// forward with hours counted under the old rule.
+const usageAdmissionVersion = 4
 
 func newUsageAggregate() *UsageAggregate {
 	return &UsageAggregate{
@@ -197,12 +198,14 @@ func (a *UsageAggregate) tool(server, toolName string) *ToolUsage {
 //     glance row-for-row, or the bars under the list disagree with the list
 //     above them — the single most confusing thing a dashboard can do.
 //
-// The glance shows tool_calls, the internal tool calls that are mcpproxy's own
-// work (retrieve_tools, describe_tool, code_execution, upstream_servers …) and
-// blocked policy decisions, so all three enter the timeline. Internal
-// call_tool_* records are the one exclusion: they mirror a direct dispatch that
-// ALREADY emitted its own tool_call record with the same request id, so
-// counting them too would double every direct call.
+// The glance shows tool_calls, some of the internal tool calls that are
+// mcpproxy's own work (retrieve_tools, describe_tool — plus any internal call
+// that FAILED) and blocked policy decisions, so all three enter the timeline.
+// Internal call_tool_* records are excluded: they mirror a direct dispatch that
+// ALREADY emitted its own tool_call record with the same request id, so counting
+// them too would double every direct call. Successful code_execution records are
+// excluded for the same double-counting reason one level up — see
+// applyInternalToolCall.
 func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 	if rec == nil || rec.ToolName == "" {
 		return
@@ -295,11 +298,14 @@ func (a *UsageAggregate) applyBlocked(rec *storage.ActivityRecord) {
 // handleCallToolVariant, which emits both) — counting both would double it.
 //
 // SUCCESSFUL internal calls count only for the built-ins the glance actually
-// rows (GlanceSelection rule 3: retrieve_tools, describe_tool,
-// code_execution): a successful upstream_servers or quarantine_security call
-// is management chatter the glance hides, and counting it would put bars over
-// hours with no rows. Failures count regardless — any internal failure is a
-// glance row.
+// rows (GlanceSelection rule 3: retrieve_tools, describe_tool): a successful
+// upstream_servers or quarantine_security call is management chatter the glance
+// hides, and counting it would put bars over hours with no rows. A successful
+// code_execution is out for a different reason — the sub-calls its script made
+// are tool_call records that already count, so the wrapper would double them
+// under a name no upstream owns. Failures count regardless — any internal
+// failure is a glance row, and a script that died before dispatching anything
+// has nothing else to represent it.
 func (a *UsageAggregate) applyInternalToolCall(rec *storage.ActivityRecord) {
 	if strings.HasPrefix(rec.ToolName, storage.InternalCallToolPrefix) {
 		return
@@ -319,13 +325,19 @@ func (a *UsageAggregate) applyInternalToolCall(rec *storage.ActivityRecord) {
 
 // glanceInternalTools are the built-ins whose SUCCESSFUL calls appear as rows
 // in the tray glance (GlanceSelection.swift rule 3) and therefore in the
-// timeline; glanceManagementBuiltins are excluded from the glance entirely
-// (rule 1), success or failure. Keep both in lockstep with the Swift sets and
-// with AppState.countsTowardUsageTimeline.
+// timeline: retrieve_tools and describe_tool. code_execution is NOT one of them
+// — it is an internal primitive, and the upstream calls its scripts make are
+// tool_call records that count on their own, so counting the wrapper too would
+// bar a script twice while naming no tool. A FAILED code_execution still counts,
+// through the failure branch in applyInternalToolCall: it has no sub-calls to
+// speak for it.
+//
+// glanceManagementBuiltins are excluded from the glance entirely (rule 1),
+// success or failure. Keep both in lockstep with the Swift sets and with
+// AppState.countsTowardUsageTimeline.
 var glanceInternalTools = map[string]bool{
 	"retrieve_tools": true,
 	"describe_tool":  true,
-	"code_execution": true,
 }
 
 var glanceManagementBuiltins = map[string]bool{

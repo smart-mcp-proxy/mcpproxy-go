@@ -12,11 +12,30 @@ final class GlanceSelectionTests: XCTestCase {
 
     // MARK: - Rule 3
 
-    func testDiscoveryAndExecutionBuiltInsAreIncluded() {
-        for tool in ["retrieve_tools", "code_execution", "describe_tool"] {
+    func testDiscoveryBuiltInsAreIncluded() {
+        for tool in ["retrieve_tools", "describe_tool"] {
             let entry = Self.entry(id: tool, type: "internal_tool_call", tool: tool)
             XCTAssertTrue(GlanceSelection.qualifies(entry), "\(tool) should qualify")
         }
+    }
+
+    /// `code_execution` is an internal primitive, not a call the user made. A
+    /// script that RAN is represented by the upstream calls it issued — those
+    /// are `tool_call` rows of their own — so the wrapper row said only
+    /// "code_execution", naming no server and no tool, while taking one of five
+    /// rows away from the work it hid.
+    func testASuccessfulCodeExecutionWrapperIsExcluded() {
+        let entry = Self.entry(id: "x", type: "internal_tool_call", tool: "code_execution")
+        XCTAssertFalse(GlanceSelection.qualifies(entry),
+                       "a script that ran is shown through its sub-calls, not through its wrapper")
+    }
+
+    /// The exception, through rule 3's failure branch: a script that died of a
+    /// syntax error dispatched nothing, so it has no children to speak for it
+    /// and its own record is the only trace of the attempt.
+    func testAFailedCodeExecutionWrapperIsIncluded() {
+        let entry = Self.entry(id: "x", type: "internal_tool_call", tool: "code_execution", status: "error")
+        XCTAssertTrue(GlanceSelection.qualifies(entry))
     }
 
     func testSuccessfulCallToolWrapperIsExcluded() {
@@ -115,12 +134,13 @@ final class GlanceSelectionTests: XCTestCase {
 
     // MARK: - code_execution sub-calls (issue C)
 
-    /// A `code_execution` script and the tools it called are separate rows, and
-    /// that is the point: the sub-calls are the transparency the parent row
-    /// cannot give. Rule 4 does not fold them together because every child gets
-    /// a request id of its own — it names the script through `parent_id`, which
-    /// carries the PARENT's request id, not a shared one.
-    func testCodeExecutionSubCallsEachKeepTheirOwnRow() {
+    /// The tools a `code_execution` script called each keep a row, and the
+    /// successful wrapper keeps none — that is the whole transparency story: the
+    /// glance shows the REAL work instead of one opaque row that named neither
+    /// server nor tool. Rule 4 does not fold the children together because every
+    /// child gets a request id of its own — it names the script through
+    /// `parent_id`, which carries the PARENT's request id, not a shared one.
+    func testCodeExecutionSubCallsEachKeepTheirOwnRowAndTheWrapperKeepsNone() {
         let parentCallID = "1770000000-sess-code_execution"
         let rows = GlanceSelection.activityRows(from: [
             Self.entry(id: "c2", type: "tool_call", server: "jira", tool: "get_issue",
@@ -131,12 +151,25 @@ final class GlanceSelectionTests: XCTestCase {
                        requestId: parentCallID)
         ])
 
-        XCTAssertEqual(rows.count, 3, "a script's sub-calls must not collapse into its own row")
-        XCTAssertEqual(rows.map(\.newest.id), ["c2", "c1", "p"])
-        XCTAssertEqual(rows.map(\.count), [1, 1, 1])
-        XCTAssertEqual(rows.last?.newest.parentId, nil, "the parent row has no parent of its own")
-        XCTAssertEqual(Set(rows.dropLast().compactMap(\.newest.parentId)), [parentCallID],
+        XCTAssertEqual(rows.count, 2, "a script's sub-calls must not collapse, and its wrapper must not row")
+        XCTAssertEqual(rows.map(\.newest.id), ["c2", "c1"])
+        XCTAssertEqual(rows.map(\.count), [1, 1])
+        XCTAssertEqual(Set(rows.compactMap(\.newest.parentId)), [parentCallID],
                        "each child names the parent's request id, which is how a row navigates up")
+    }
+
+    /// A script that FAILED keeps its row beside whatever it managed to
+    /// dispatch: the failure is the one thing its sub-calls cannot report.
+    func testAFailedCodeExecutionRowsBesideItsSubCalls() {
+        let parentCallID = "1770000000-sess-code_execution"
+        let rows = GlanceSelection.activityRows(from: [
+            Self.entry(id: "p", type: "internal_tool_call", tool: "code_execution",
+                       status: "error", requestId: parentCallID),
+            Self.entry(id: "c1", type: "tool_call", server: "github", tool: "create_issue",
+                       requestId: "child-1", parentId: parentCallID)
+        ])
+
+        XCTAssertEqual(rows.map(\.newest.id), ["p", "c1"])
     }
 
     /// Two sub-calls to the SAME tool are still one run, like any other pair of

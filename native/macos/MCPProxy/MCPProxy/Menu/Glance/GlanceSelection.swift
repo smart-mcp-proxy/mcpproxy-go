@@ -118,8 +118,17 @@ enum GlanceSelection {
     /// Proxy administration built-ins. Never shown, whatever their status.
     static let managementBuiltIns: Set<String> = ["upstream_servers", "quarantine_security"]
 
-    /// Discovery/execution built-ins that are worth a row even on success.
-    static let glanceInternalTools: Set<String> = ["retrieve_tools", "code_execution", "describe_tool"]
+    /// Discovery built-ins that are worth a row even on success.
+    ///
+    /// `code_execution` is deliberately NOT here. It is an internal primitive —
+    /// a wrapper around the upstream calls a script makes — and since those
+    /// sub-calls became `tool_call` records of their own they speak for it far
+    /// better than it did: the glance now shows the REAL work ("jira_get_issue
+    /// ×3") instead of one opaque "code_execution" row that named no server and
+    /// no tool. A FAILED code_execution still rows, through rule 3's failure
+    /// branch below — a script that died of a syntax error has no children to
+    /// speak for it, so its own record is the only trace there is.
+    static let glanceInternalTools: Set<String> = ["retrieve_tools", "describe_tool"]
 
     /// How many rows each list shows.
     static let rowLimit = 5
@@ -148,8 +157,10 @@ enum GlanceSelection {
             return entry.outcomeClass == .blocked
         }
 
-        // Rule 3 — discovery/execution built-ins, plus any internal failure
-        // (a wrapper that died before dispatch has no upstream record).
+        // Rule 3 — discovery built-ins, plus any internal failure (a wrapper
+        // that died before dispatch has no upstream record). A SUCCESSFUL
+        // code_execution falls through both clauses on purpose: its sub-calls
+        // are the rows now.
         if entry.type == "internal_tool_call" {
             return glanceInternalTools.contains(tool) || entry.status != "success"
         }
@@ -178,9 +189,10 @@ enum GlanceSelection {
     /// per sub-call — the counter suffix in `mintCorrelationIDAt` is what makes
     /// it unique — and names the script through `parent_id`, which carries the
     /// parent's request id rather than a shared one. No child shares an id with
-    /// another child or with the parent, so a multi-tool script renders as the
-    /// script's own row plus one row per sub-call (the transparency the feature
-    /// exists for) instead of collapsing to one.
+    /// another child or with the parent, so a multi-tool script renders as one
+    /// row per sub-call (the transparency the feature exists for) instead of
+    /// collapsing to one. The successful wrapper itself never reaches this step
+    /// — rule 3 dropped it — so those rows are the script's whole story.
     ///
     /// Note the legacy `ToolCallRecord` written beside it still carries
     /// `RequestID: u.executionID` ("Use execution ID as request ID to link
