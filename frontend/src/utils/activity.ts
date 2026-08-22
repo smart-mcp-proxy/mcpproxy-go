@@ -504,7 +504,11 @@ export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[
       label: `Sensitive: ${state.sensitiveData === 'true' ? '⚠️ Detected' : 'Clean'}`,
     })
   }
-  if (state.severity) {
+  // Severity only narrows the list while the sensitive-data filter is
+  // "Detected" (the view applies it under that same condition) — a severity
+  // value left behind after switching sensitive-data off must not read as an
+  // active filter.
+  if (state.severity && state.sensitiveData === 'true') {
     chips.push({ kind: 'severity', key: 'severity', label: `Severity: ${state.severity}` })
   }
   if (state.session) {

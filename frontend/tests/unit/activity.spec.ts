@@ -646,3 +646,25 @@ describe('Relative Time Formatting', () => {
     })
   })
 })
+
+
+describe('activeFilterChips severity gating', () => {
+  it('does not count a leftover severity as active once sensitive-data is off', () => {
+    const chips = activeFilterChips({
+      types: [],
+      sensitiveData: '',
+      severity: 'critical',
+    })
+    expect(chips.find(c => c.kind === 'severity')).toBeUndefined()
+    expect(activeFilterCount({ types: [], sensitiveData: '', severity: 'critical' })).toBe(0)
+  })
+
+  it('counts severity while sensitive-data is Detected', () => {
+    const chips = activeFilterChips({
+      types: [],
+      sensitiveData: 'true',
+      severity: 'critical',
+    })
+    expect(chips.map(c => c.kind)).toEqual(['sensitive', 'severity'])
+  })
+})
