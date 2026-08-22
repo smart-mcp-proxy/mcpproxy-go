@@ -6,6 +6,10 @@
 // Activity type labels
 const typeLabels: Record<string, string> = {
   'tool_call': 'Tool Call',
+  'system_start': 'System Start',
+  'system_stop': 'System Stop',
+  'internal_tool_call': 'Internal Tool Call',
+  'config_change': 'Config Change',
   'policy_decision': 'Policy Decision',
   'quarantine_change': 'Quarantine Change',
   'server_change': 'Server Change',
@@ -16,6 +20,10 @@ const typeLabels: Record<string, string> = {
 // Activity type icons
 const typeIcons: Record<string, string> = {
   'tool_call': '🔧',
+  'system_start': '🚀',
+  'system_stop': '🛑',
+  'internal_tool_call': '⚙️',
+  'config_change': '⚡',
   'policy_decision': '🛡️',
   'quarantine_change': '⚠️',
   'server_change': '🔄',
@@ -77,9 +85,86 @@ export const formatStatus = (status: string): string => {
 
 /**
  * Get badge CSS class for status
+ *
+ * @deprecated Prefer {@link statusPresentation}, which also decides whether the
+ * status deserves a pill at all. Kept for the few places that still want a raw
+ * DaisyUI badge modifier.
  */
 export const getStatusBadgeClass = (status: string): string => {
   return statusClasses[status] || 'badge-ghost'
+}
+
+// --- status presentation ----------------------------------------------------
+//
+// The activity table is SCANNED, not read. Success is the norm — roughly 90% of
+// rows — so painting it green makes the whole column shout and buries the two
+// rows that actually need a human. Semantic colour is therefore spent only on
+// states that need attention:
+//
+//   success            plain muted text, no pill      ("this is fine, move on")
+//   error              red pill                       (upstream fault)
+//   blocked            amber pill                     (policy stopped it)
+//   rejected / other   neutral grey pill              (odd, but not an alarm)
+//
+// Both the table column and the dashboard widget render from this one mapping so
+// they cannot drift apart.
+
+/** How loudly a status is allowed to speak. */
+export type StatusTone = 'muted' | 'error' | 'warning' | 'neutral'
+
+export interface StatusPresentation {
+  /** Human label, e.g. "Success". Unknown statuses keep their raw value. */
+  label: string
+  tone: StatusTone
+  /** False = render as plain text (success only); true = render as a pill. */
+  pill: boolean
+  /** Full class list for the rendered element, pill or text. */
+  className: string
+}
+
+const statusPresentations: Record<string, StatusPresentation> = {
+  // No pill, no colour: the default outcome must not compete for attention.
+  success: {
+    label: 'Success',
+    tone: 'muted',
+    pill: false,
+    className: 'text-sm text-base-content/60',
+  },
+  error: {
+    label: 'Error',
+    tone: 'error',
+    pill: true,
+    className: 'badge badge-sm badge-error',
+  },
+  blocked: {
+    label: 'Blocked',
+    tone: 'warning',
+    pill: true,
+    className: 'badge badge-sm badge-warning',
+  },
+  // Spec 093: shed by a concurrency limit. Worth noticing, not worth alarming —
+  // badge-ghost is a neutral chip that reads in both light and dark themes.
+  rejected: {
+    label: 'Rejected',
+    tone: 'neutral',
+    pill: true,
+    className: 'badge badge-sm badge-ghost',
+  },
+}
+
+/**
+ * Pure status -> presentation mapping. Anything unrecognised is an oddity, not
+ * an alarm: neutral grey pill carrying the raw status value.
+ */
+export const statusPresentation = (status: string): StatusPresentation => {
+  const known = statusPresentations[status]
+  if (known) return known
+  return {
+    label: statusLabels[status] || status,
+    tone: 'neutral',
+    pill: true,
+    className: 'badge badge-sm badge-ghost',
+  }
 }
 
 /**
@@ -91,9 +176,64 @@ export const getIntentIcon = (operationType: string): string => {
 
 /**
  * Get badge CSS class for intent operation type
+ *
+ * @deprecated The table renders intent through {@link intentPresentation} (glyph
+ * + reason, no coloured pill). Still used by the detail drawer, where a single
+ * badge has room to be explicit.
  */
 export const getIntentBadgeClass = (operationType: string): string => {
   return intentClasses[operationType] || 'badge-ghost'
+}
+
+// --- intent presentation ----------------------------------------------------
+//
+// Spec 018/024 intent: {operation_type, reason, data_sensitivity}. The old table
+// cell rendered a coloured `read` pill with the glyph crammed inside it (the
+// glyph overflowed the badge box) and hid the REASON — the only part an operator
+// actually wants — behind a tooltip. The reason is the payload; the operation is
+// a one-character prefix.
+
+/** The intent object as it is stored on `metadata.intent`. */
+export interface ActivityIntent {
+  operation_type?: string
+  reason?: string
+  data_sensitivity?: string
+}
+
+export interface IntentPresentation {
+  /** False when the record declared no operation type — render a muted dash. */
+  present: boolean
+  /** Operation glyph: book / pencil / warning. Empty when absent. */
+  icon: string
+  /** Operation type, e.g. "read". Exposed for screen readers, not painted. */
+  label: string
+  /** Declared reason, single line in the cell. Empty when none was given. */
+  reason: string
+  /** Full hover text (`title`), so a truncated reason is still readable. */
+  title: string
+}
+
+const EMPTY_INTENT: IntentPresentation = { present: false, icon: '', label: '', reason: '', title: '' }
+
+/**
+ * Pure intent -> presentation mapping: glyph + reason text, never a colour pill.
+ * A missing operation type means "no intent declared", which the caller renders
+ * as a muted dash rather than a `❓` chip.
+ */
+export const intentPresentation = (intent?: ActivityIntent | null): IntentPresentation => {
+  const operationType = intent?.operation_type
+  if (!operationType) return EMPTY_INTENT
+
+  const reason = (intent?.reason ?? '').trim()
+  return {
+    present: true,
+    icon: getIntentIcon(operationType),
+    label: operationType,
+    reason,
+    // Hover shows the operation too — the glyph alone is ambiguous, and the
+    // reason may be ellipsised in the cell.
+    title: reason ? `${operationType} — ${reason}` : operationType,
+  }
 }
 
 // --- Spec 098: preflight activity records -----------------------------------
@@ -163,6 +303,230 @@ export const isCodeExecutionActivity = (a?: ActivityLinkFields | null): boolean 
 
 /** True for a sub-call: a record that names the parent it was dispatched from. */
 export const isChildCall = (a?: ActivityLinkFields | null): boolean => Boolean(a?.parent_id)
+
+/**
+ * What the table's Details column will print for a record. Extracted so the Type
+ * column can tell whether its `code_execution` marker would be a second copy of
+ * the same six characters on the same row.
+ */
+export const activityDetailsText = (
+  a?: (ActivityLinkFields & { metadata?: Record<string, any> | null }) | null
+): string => {
+  if (!a) return ''
+  if (a.tool_name) return a.tool_name
+  if (isPreflightActivity(a as { type?: string })) {
+    const summary = formatPreflightSummary(a.metadata)
+    if (summary) return summary
+  }
+  const action = a.metadata?.action
+  return action ? String(action) : ''
+}
+
+/**
+ * True when the Type column should still carry the `code_execution` badge: the
+ * record IS a sandbox parent and the Details column is not already saying so.
+ * When this is false the row shows a single quiet puzzle glyph beside the
+ * Details text instead — one marker per row, never the same word twice.
+ */
+export const showParentBadgeInTypeColumn = (
+  a?: (ActivityLinkFields & { metadata?: Record<string, any> | null }) | null
+): boolean => {
+  if (!isCodeExecutionActivity(a)) return false
+  return !activityDetailsText(a).includes('code_execution')
+}
+
+/** Last 8 chars of a correlation id — enough to recognise, short enough to fit. */
+export const shortId = (id: string): string => (id.length > 8 ? `…${id.slice(-8)}` : id)
+
+// --- compact header: counts strip + active-filter chips ---------------------
+//
+// Five stat cards plus an always-open nine-control filter grid pushed the first
+// activity row below the fold. The default view is now one line: the total plus
+// only the counts that want attention, and a Filters button carrying a count of
+// what is currently narrowing the list. The cards and the controls still exist —
+// they just wait until they are asked for.
+
+/** One segment of the compact counts strip. */
+export interface CompactSummaryPart {
+  key: 'total' | 'error' | 'blocked' | 'rejected'
+  label: string
+  tone: StatusTone
+  /** Status value this segment filters to; '' clears the status filter. */
+  status: string
+}
+
+interface ActivitySummaryCounts {
+  total_count?: number
+  error_count?: number
+  blocked_count?: number
+  rejected_count?: number
+}
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
+
+/**
+ * Compact counts strip, e.g. "54 calls · 6 errors · 1 blocked". The total is
+ * always present and muted; a zero attention count is omitted entirely rather
+ * than rendered as a reassuring "0 errors" that costs a line of scanning.
+ */
+export const compactSummaryParts = (
+  summary?: ActivitySummaryCounts | null
+): CompactSummaryPart[] => {
+  if (!summary) return []
+
+  const parts: CompactSummaryPart[] = [
+    {
+      key: 'total',
+      label: plural(summary.total_count ?? 0, 'call', 'calls'),
+      tone: 'muted',
+      status: '',
+    },
+  ]
+
+  if ((summary.error_count ?? 0) > 0) {
+    parts.push({
+      key: 'error',
+      label: plural(summary.error_count as number, 'error', 'errors'),
+      tone: 'error',
+      status: 'error',
+    })
+  }
+  if ((summary.blocked_count ?? 0) > 0) {
+    parts.push({
+      key: 'blocked',
+      label: `${summary.blocked_count} blocked`,
+      tone: 'warning',
+      status: 'blocked',
+    })
+  }
+  if ((summary.rejected_count ?? 0) > 0) {
+    parts.push({
+      key: 'rejected',
+      label: `${summary.rejected_count} rejected`,
+      tone: 'neutral',
+      status: 'rejected',
+    })
+  }
+
+  return parts
+}
+
+/** Every filter the Activity Log can apply, in one plain object. */
+export interface ActivityFilterState {
+  types?: string[]
+  parentId?: string
+  server?: string
+  status?: string
+  authType?: string
+  agentName?: string
+  sensitiveData?: string
+  severity?: string
+  session?: string
+  /** Resolved display label for `session`; falls back to a shortened id. */
+  sessionLabel?: string
+  startDate?: string
+  endDate?: string
+}
+
+/** A dismissable chip in the compact strip. `kind` selects the clear action. */
+export interface ActiveFilterChip {
+  kind:
+    | 'type'
+    | 'parent'
+    | 'server'
+    | 'status'
+    | 'auth'
+    | 'agent'
+    | 'sensitive'
+    | 'severity'
+    | 'session'
+    | 'start'
+    | 'end'
+  /** Unique within one render, so it can key a v-for. */
+  key: string
+  label: string
+  /** Payload the clear action needs (the type value for a type chip). */
+  value?: string
+  title?: string
+}
+
+const localDateLabel = (value: string): string => {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
+/**
+ * The active filters, as chips. Pure and order-stable: types first (they are
+ * multi-select), then the sub-call view, then the single-value filters in the
+ * order the expanded controls present them.
+ */
+export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[] => {
+  const chips: ActiveFilterChip[] = []
+
+  for (const type of state.types ?? []) {
+    chips.push({
+      kind: 'type',
+      key: `type:${type}`,
+      label: `${getTypeIcon(type)} ${formatType(type)}`,
+      value: type,
+    })
+  }
+
+  if (state.parentId) {
+    chips.push({
+      kind: 'parent',
+      key: 'parent',
+      label: `↳ Sub-calls of ${shortId(state.parentId)}`,
+      value: state.parentId,
+      title: `Sub-calls of code_execution ${state.parentId}`,
+    })
+  }
+  if (state.server) {
+    chips.push({ kind: 'server', key: 'server', label: `Server: ${state.server}` })
+  }
+  if (state.status) {
+    chips.push({ kind: 'status', key: 'status', label: `Status: ${state.status}` })
+  }
+  if (state.authType) {
+    chips.push({
+      kind: 'auth',
+      key: 'auth',
+      label: `Auth: ${state.authType === 'admin' ? '🔑 Admin' : '🤖 Agent'}`,
+    })
+  }
+  if (state.agentName) {
+    chips.push({ kind: 'agent', key: 'agent', label: `Agent: ${state.agentName}` })
+  }
+  if (state.sensitiveData) {
+    chips.push({
+      kind: 'sensitive',
+      key: 'sensitive',
+      label: `Sensitive: ${state.sensitiveData === 'true' ? '⚠️ Detected' : 'Clean'}`,
+    })
+  }
+  if (state.severity) {
+    chips.push({ kind: 'severity', key: 'severity', label: `Severity: ${state.severity}` })
+  }
+  if (state.session) {
+    chips.push({
+      kind: 'session',
+      key: 'session',
+      label: `Session: ${state.sessionLabel || shortId(state.session)}`,
+    })
+  }
+  if (state.startDate) {
+    chips.push({ kind: 'start', key: 'start', label: `From: ${localDateLabel(state.startDate)}` })
+  }
+  if (state.endDate) {
+    chips.push({ kind: 'end', key: 'end', label: `To: ${localDateLabel(state.endDate)}` })
+  }
+
+  return chips
+}
+
+/** Badge count for the Filters toggle: how many filters are narrowing the list. */
+export const activeFilterCount = (state: ActivityFilterState): number =>
+  activeFilterChips(state).length
 
 /**
  * Read `metadata.reasons` into a DETERMINISTIC order: most frequent first, ties

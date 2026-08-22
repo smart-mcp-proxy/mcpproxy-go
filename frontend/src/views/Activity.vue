@@ -30,8 +30,115 @@
       </div>
     </div>
 
+    <!--
+      Compact header strip (default view). Five stat cards plus a nine-control
+      filter grid pushed the first activity row below the fold; the default is
+      now ONE line — the total, the counts that want attention, and a Filters
+      toggle. Active filters stay visible as dismissable chips even collapsed,
+      so the list is never silently narrowed.
+    -->
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body py-3 gap-3">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <!-- Counts: total muted; only non-zero error/blocked/rejected speak up. -->
+          <div
+            v-if="summaryParts.length > 0"
+            data-test="activity-compact-summary"
+            class="flex flex-wrap items-center gap-x-2 gap-y-1"
+          >
+            <template v-for="(part, idx) in summaryParts" :key="part.key">
+              <span v-if="idx > 0" class="text-base-content/25" aria-hidden="true">·</span>
+              <button
+                type="button"
+                :data-test="`activity-compact-${part.key}`"
+                :class="[
+                  'text-sm hover:underline underline-offset-2 transition-colors',
+                  summaryToneClass(part.tone),
+                  filterStatus === part.status && part.status !== '' ? 'font-semibold underline' : '',
+                ]"
+                :aria-pressed="filterStatus === part.status"
+                @click="applySummaryFilter(part)"
+              >
+                {{ part.label }}
+              </button>
+            </template>
+          </div>
+
+          <div class="flex-1"></div>
+
+          <!-- Filters toggle — the expanded cards + controls hang off this. -->
+          <button
+            type="button"
+            data-test="activity-filters-toggle"
+            class="btn btn-sm btn-ghost gap-2"
+            :aria-expanded="showFilterPanel"
+            @click="showFilterPanel = !showFilterPanel"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+            Filters
+            <span
+              v-if="activeChips.length > 0"
+              data-test="activity-filters-count"
+              class="badge badge-xs badge-neutral"
+            >
+              {{ activeChips.length }}
+            </span>
+            <svg
+              class="w-3 h-3 transition-transform"
+              :class="showFilterPanel ? 'rotate-180' : ''"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          <!-- Export is not a filter — it belongs on the strip, not inside the grid. -->
+          <div class="dropdown dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-sm btn-outline">
+              <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Export
+            </div>
+            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-lg bg-base-200 rounded-box w-40">
+              <li><a @click="exportActivities('json')">Export as JSON</a></li>
+              <li><a @click="exportActivities('csv')">Export as CSV</a></li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Active filters — always shown, collapsed or not. -->
+        <div
+          v-if="activeChips.length > 0"
+          data-test="activity-active-filters"
+          class="flex flex-wrap items-center gap-2 pt-2 border-t border-base-300"
+        >
+          <span class="text-xs text-base-content/50">Filters:</span>
+          <button
+            v-for="chip in activeChips"
+            :key="chip.key"
+            type="button"
+            :data-test="chipTestId(chip)"
+            class="badge badge-sm badge-ghost gap-1 hover:bg-base-300"
+            :title="chip.title || chip.label"
+            @click="clearChip(chip)"
+          >
+            {{ chip.label }}
+            <svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <button type="button" class="btn btn-xs btn-ghost" @click="clearFilters">Clear all</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Summary Stats — clickable, drive the Status filter (issue #436) -->
-    <div v-if="summary" class="stats shadow bg-base-100 w-full">
+    <div v-if="showFilterPanel && summary" class="stats shadow bg-base-100 w-full">
       <button
         type="button"
         data-test="kpi-card-total"
@@ -50,7 +157,8 @@
         @click="filterStatus = filterStatus === 'success' ? '' : 'success'"
       >
         <div class="stat-title">Success</div>
-        <div class="stat-value text-2xl text-success">{{ summary.success_count }}</div>
+        <!-- Success is the norm — no colour, so Errors/Blocked keep theirs. -->
+        <div class="stat-value text-2xl text-base-content/70">{{ summary.success_count }}</div>
       </button>
       <button
         type="button"
@@ -80,12 +188,13 @@
         @click="filterStatus = filterStatus === 'rejected' ? '' : 'rejected'"
       >
         <div class="stat-title">Rejected</div>
-        <div class="stat-value text-2xl text-info">{{ summary.rejected_count }}</div>
+        <!-- Backpressure, not an alarm: neutral, like its pill. -->
+        <div class="stat-value text-2xl text-base-content/70">{{ summary.rejected_count }}</div>
       </button>
     </div>
 
-    <!-- Filters -->
-    <div class="card bg-base-100 shadow-md">
+    <!-- Filters — rendered only when the compact strip's toggle asks for them. -->
+    <div v-if="showFilterPanel" data-test="activity-filter-panel" class="card bg-base-100 shadow-md">
       <div class="card-body py-4">
         <div class="flex flex-wrap gap-4 items-end">
           <!-- Type Filter (Multi-select dropdown) -->
@@ -254,63 +363,6 @@
           >
             Clear Filters
           </button>
-
-          <!-- Spacer -->
-          <div class="flex-1"></div>
-
-          <!-- Export Dropdown -->
-          <div class="dropdown dropdown-end">
-            <div tabindex="0" role="button" class="btn btn-sm btn-outline">
-              <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              Export
-            </div>
-            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-lg bg-base-200 rounded-box w-40">
-              <li><a @click="exportActivities('json')">Export as JSON</a></li>
-              <li><a @click="exportActivities('csv')">Export as CSV</a></li>
-            </ul>
-          </div>
-        </div>
-
-        <!-- Active Filters Summary -->
-        <div v-if="hasActiveFilters" class="flex flex-wrap gap-2 mt-2 pt-2 border-t border-base-300">
-          <span class="text-xs text-base-content/60">Active filters:</span>
-          <span
-            v-for="type in selectedTypes"
-            :key="type"
-            class="badge badge-sm badge-outline gap-1 cursor-pointer hover:badge-error"
-            @click="toggleTypeFilter(type)"
-          >
-            {{ getTypeIcon(type) }} {{ formatType(type) }}
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </span>
-          <!-- Sub-call view: click to leave it and restore the normal list. -->
-          <span
-            v-if="filterParentId"
-            data-test="activity-parent-filter-chip"
-            class="badge badge-sm badge-outline gap-1 cursor-pointer hover:badge-error"
-            :title="`Sub-calls of code_execution ${filterParentId}`"
-            @click="clearParentFilter"
-          >
-            ↳ Sub-calls of {{ shortId(filterParentId) }}
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </span>
-          <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
-          <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
-          <span v-if="filterAuthType" class="badge badge-sm badge-outline">Auth: {{ filterAuthType === 'admin' ? '🔑 Admin' : '🤖 Agent' }}</span>
-          <span v-if="filterAgentName" class="badge badge-sm badge-outline">Agent: {{ filterAgentName }}</span>
-          <span v-if="filterSensitiveData" class="badge badge-sm badge-outline">
-            Sensitive: {{ filterSensitiveData === 'true' ? '⚠️ Detected' : 'Clean' }}
-          </span>
-          <span v-if="filterSeverity" class="badge badge-sm badge-outline">Severity: {{ filterSeverity }}</span>
-          <span v-if="filterSession" class="badge badge-sm badge-outline">Session: {{ getSessionLabel(filterSession) }}</span>
-          <span v-if="filterStartDate" class="badge badge-sm badge-outline">From: {{ new Date(filterStartDate).toLocaleString() }}</span>
-          <span v-if="filterEndDate" class="badge badge-sm badge-outline">To: {{ new Date(filterEndDate).toLocaleString() }}</span>
         </div>
       </div>
     </div>
@@ -357,7 +409,8 @@
                 </th>
                 <th>Details</th>
                 <th>Sensitive</th>
-                <th>Intent</th>
+                <!-- Intent carries the declared reason, not a 52px icon slot. -->
+                <th class="min-w-[11rem]">Intent</th>
                 <th class="cursor-pointer hover:bg-base-200" @click="sortBy('status')">
                   Status {{ getSortIndicator('status') }}
                 </th>
@@ -389,20 +442,24 @@
                     <!--
                       code_execution linkage: a sub-call names the run that
                       dispatched it, a parent advertises that it fans out. Both
-                      badges are the entry point to the drawer's navigation.
+                      markers are the entry point to the drawer's navigation.
+                      The child badge is CONTEXT, not an alert — ghost, not accent.
+                      The parent badge appears here only when the Details column
+                      is not already printing "code_execution"; otherwise the row
+                      carries a single puzzle glyph beside that text instead.
                     -->
                     <span
                       v-if="isChildCall(activity)"
                       data-test="activity-child-badge"
-                      class="badge badge-xs badge-ghost w-fit"
+                      class="badge badge-xs badge-ghost w-fit font-normal text-base-content/60"
                       title="Sub-call dispatched by a code_execution run"
                     >
                       ↳ via code_execution
                     </span>
                     <span
-                      v-else-if="isCodeExecutionActivity(activity)"
+                      v-else-if="showParentBadgeInTypeColumn(activity)"
                       data-test="activity-parent-badge"
-                      class="badge badge-xs badge-accent w-fit"
+                      class="badge badge-xs badge-ghost w-fit font-normal text-base-content/60"
                       title="Sandboxed script run — may have dispatched sub-calls"
                     >
                       🧩 code_execution
@@ -421,8 +478,21 @@
                   <span v-else class="text-base-content/40">-</span>
                 </td>
                 <td>
-                  <div class="max-w-xs truncate">
-                    <code v-if="activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded">
+                  <div class="max-w-xs truncate flex items-center gap-1.5">
+                    <!--
+                      The parent marker, when the Details text already says
+                      "code_execution": a quiet glyph instead of a second copy of
+                      the word one column to the left.
+                    -->
+                    <span
+                      v-if="isCodeExecutionActivity(activity) && !showParentBadgeInTypeColumn(activity)"
+                      data-test="activity-parent-badge"
+                      class="text-sm opacity-50 shrink-0"
+                      title="Sandboxed script run — may have dispatched sub-calls"
+                    >
+                      🧩
+                    </span>
+                    <code v-if="activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate">
                       {{ activity.tool_name }}
                     </code>
                     <!--
@@ -457,27 +527,42 @@
                   </div>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <!-- Intent column (Spec 024: US5) -->
-                <td>
+                <!--
+                  Intent column (Spec 024: US5). The REASON is what an operator
+                  wants; the operation type is a glyph in front of it. The old
+                  coloured `read` pill spent semantic colour on the most common
+                  case and clipped its own icon.
+                -->
+                <td class="max-w-[18rem]">
                   <div
-                    v-if="activity.metadata?.intent?.operation_type"
-                    class="tooltip tooltip-top"
-                    :data-tip="activity.metadata?.intent?.reason || 'No reason provided'"
+                    v-if="intentOf(activity).present"
+                    data-test="activity-intent"
+                    class="flex items-center gap-1.5 min-w-0"
+                    :title="intentOf(activity).title"
                   >
-                    <span class="badge badge-sm gap-1" :class="getIntentBadgeClass(activity.metadata.intent.operation_type)">
-                      {{ getIntentIcon(activity.metadata.intent.operation_type) }}
-                      {{ activity.metadata.intent.operation_type }}
+                    <span class="text-sm leading-none shrink-0" aria-hidden="true">{{ intentOf(activity).icon }}</span>
+                    <span class="sr-only">{{ intentOf(activity).label }}</span>
+                    <span
+                      v-if="intentOf(activity).reason"
+                      data-test="activity-intent-reason"
+                      class="text-xs text-base-content/70 truncate"
+                    >
+                      {{ intentOf(activity).reason }}
                     </span>
                   </div>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
+                <!--
+                  Status: success is the norm and stays quiet (muted text, no
+                  pill); only error / blocked / oddities get a chip.
+                -->
                 <td>
-                  <div
-                    class="badge badge-sm"
-                    :class="getStatusBadgeClass(activity.status)"
+                  <span
+                    data-test="activity-status"
+                    :class="statusPresentation(activity.status).className"
                   >
-                    {{ formatStatus(activity.status) }}
-                  </div>
+                    {{ statusPresentation(activity.status).label }}
+                  </span>
                 </td>
                 <td>
                   <span v-if="activity.duration_ms !== undefined" class="text-sm">
@@ -570,12 +655,15 @@
               </button>
             </div>
 
-            <!-- Status Badge -->
+            <!-- Status — same quiet-success treatment as the table column. -->
             <div class="flex items-center gap-2">
               <span class="text-sm text-base-content/60">Status:</span>
-              <div class="badge" :class="getStatusBadgeClass(selectedActivity.status)">
-                {{ formatStatus(selectedActivity.status) }}
-              </div>
+              <span
+                data-test="activity-detail-status"
+                :class="statusPresentation(selectedActivity.status).className"
+              >
+                {{ statusPresentation(selectedActivity.status).label }}
+              </span>
             </div>
 
             <!-- Metadata -->
@@ -856,14 +944,26 @@ import {
 // Spec 098: preflight records carry their verdict in metadata; the renderers
 // are shared (and unit-tested) rather than re-derived in the template.
 import {
+  activeFilterChips,
+  compactSummaryParts,
   formatPreflightSummary,
+  formatType,
+  getIntentBadgeClass,
+  getIntentIcon,
   getPreflightVerdictBadgeClass,
+  getTypeIcon,
+  intentPresentation,
   isChildCall,
   isCodeExecutionActivity,
   isPreflightActivity,
   preflightIdsCount,
   preflightPerTool,
   preflightReasonRollup,
+  showParentBadgeInTypeColumn,
+  statusPresentation,
+  type ActiveFilterChip,
+  type CompactSummaryPart,
+  type StatusTone,
 } from '@/utils/activity'
 import JsonViewer from '@/components/JsonViewer.vue'
 
@@ -1107,6 +1207,116 @@ const hasActiveFilters = computed(() => {
   return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value
 })
 
+// --- compact header ---------------------------------------------------------
+
+/**
+ * Whether the stat cards + full filter grid are shown. Persisted per browser so
+ * an operator who wants the controls open keeps them open, while a first visit
+ * lands on the compact strip. localStorage can throw outright (private windows,
+ * blocked site data), so every touch is guarded and falls back to collapsed.
+ */
+const FILTER_PANEL_STORAGE_KEY = 'mcpproxy.activity.filtersExpanded'
+
+const readFilterPanelPref = (): boolean => {
+  try {
+    return window.localStorage.getItem(FILTER_PANEL_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+const showFilterPanel = ref(readFilterPanelPref())
+
+watch(showFilterPanel, expanded => {
+  try {
+    window.localStorage.setItem(FILTER_PANEL_STORAGE_KEY, expanded ? 'true' : 'false')
+  } catch {
+    // Preference is a convenience; never let a storage failure break the page.
+  }
+})
+
+/** "54 calls · 6 errors · 1 blocked" — zeros omitted. */
+const summaryParts = computed(() => compactSummaryParts(summary.value))
+
+/** Only error/blocked spend colour; the total and oddities stay quiet. */
+const summaryToneClass = (tone: StatusTone): string => {
+  switch (tone) {
+    case 'error':
+      return 'text-error font-medium'
+    case 'warning':
+      return 'text-warning font-medium'
+    case 'neutral':
+      return 'text-base-content/70'
+    default:
+      return 'text-base-content/60'
+  }
+}
+
+/** Clicking a count drives the Status filter (issue #436, kept from the cards). */
+const applySummaryFilter = (part: CompactSummaryPart) => {
+  filterStatus.value = filterStatus.value === part.status ? '' : part.status
+}
+
+/** Active filters as dismissable chips — visible whether or not the grid is. */
+const activeChips = computed(() =>
+  activeFilterChips({
+    types: selectedTypes.value,
+    parentId: filterParentId.value,
+    server: filterServer.value,
+    status: filterStatus.value,
+    authType: filterAuthType.value,
+    agentName: filterAgentName.value,
+    sensitiveData: filterSensitiveData.value,
+    severity: filterSeverity.value,
+    session: filterSession.value,
+    sessionLabel: filterSession.value ? getSessionLabel(filterSession.value) : undefined,
+    startDate: filterStartDate.value,
+    endDate: filterEndDate.value,
+  })
+)
+
+/** The sub-call chip keeps its own hook — it is the code_execution exit door. */
+const chipTestId = (chip: ActiveFilterChip): string =>
+  chip.kind === 'parent' ? 'activity-parent-filter-chip' : `activity-filter-chip-${chip.kind}`
+
+const clearChip = (chip: ActiveFilterChip) => {
+  switch (chip.kind) {
+    case 'type':
+      if (chip.value) toggleTypeFilter(chip.value)
+      break
+    case 'parent':
+      void clearParentFilter()
+      break
+    case 'server':
+      filterServer.value = ''
+      break
+    case 'status':
+      filterStatus.value = ''
+      break
+    case 'auth':
+      filterAuthType.value = ''
+      break
+    case 'agent':
+      filterAgentName.value = ''
+      break
+    case 'sensitive':
+      filterSensitiveData.value = ''
+      break
+    case 'severity':
+      filterSeverity.value = ''
+      break
+    case 'session':
+      filterSession.value = ''
+      break
+    case 'start':
+      filterStartDate.value = ''
+      break
+    case 'end':
+      filterEndDate.value = ''
+      break
+  }
+}
+
 const filteredActivities = computed(() => {
   let result = activities.value
 
@@ -1246,9 +1456,6 @@ const clearFilters = () => {
   filterParentId.value = ''
   if (hadParentFilter) void loadActivities()
 }
-
-/** Last 8 chars of a correlation id — enough to recognise, short enough to fit. */
-const shortId = (id: string): string => (id.length > 8 ? `…${id.slice(-8)}` : id)
 
 /** Sub-calls of this run among the rows we hold. */
 const subCallCount = (parent: ActivityRecord): number => {
@@ -1435,60 +1642,8 @@ const formatRelativeTime = (timestamp: string): string => {
   return `${Math.floor(diff / 86400000)}d ago`
 }
 
-const formatType = (type: string): string => {
-  // Spec 024: Include new activity types
-  const typeLabels: Record<string, string> = {
-    'tool_call': 'Tool Call',
-    'system_start': 'System Start',
-    'system_stop': 'System Stop',
-    'internal_tool_call': 'Internal Tool Call',
-    'config_change': 'Config Change',
-    'policy_decision': 'Policy Decision',
-    'quarantine_change': 'Quarantine Change',
-    'server_change': 'Server Change',
-    // Spec 098
-    'preflight': 'Preflight'
-  }
-  return typeLabels[type] || type
-}
-
-const getTypeIcon = (type: string): string => {
-  // Spec 024: Include new activity types
-  const typeIcons: Record<string, string> = {
-    'tool_call': '🔧',
-    'system_start': '🚀',
-    'system_stop': '🛑',
-    'internal_tool_call': '⚙️',
-    'config_change': '⚡',
-    'policy_decision': '🛡️',
-    'quarantine_change': '⚠️',
-    'server_change': '🔄',
-    // Spec 098
-    'preflight': '🛫'
-  }
-  return typeIcons[type] || '📋'
-}
-
-const formatStatus = (status: string): string => {
-  const statusLabels: Record<string, string> = {
-    'success': 'Success',
-    'error': 'Error',
-    'blocked': 'Blocked',
-    'rejected': 'Rejected'
-  }
-  return statusLabels[status] || status
-}
-
-const getStatusBadgeClass = (status: string): string => {
-  const statusClasses: Record<string, string> = {
-    'success': 'badge-success',
-    'error': 'badge-error',
-    'blocked': 'badge-warning',
-    // Spec 093: shed by a concurrency limit (backpressure, not an upstream fault).
-    'rejected': 'badge-info'
-  }
-  return statusClasses[status] || 'badge-ghost'
-}
+// Type / status / intent renderers are imported from @/utils/activity so the
+// table, the dashboard widget and the unit tests share ONE mapping.
 
 const formatDuration = (ms: number): string => {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -1526,23 +1681,9 @@ const getSeverityBadgeClass = (severity?: string): string => {
   return classes[severity || ''] || 'badge-warning'
 }
 
-const getIntentIcon = (operationType: string): string => {
-  const icons: Record<string, string> = {
-    'read': '📖',
-    'write': '✏️',
-    'destructive': '⚠️'
-  }
-  return icons[operationType] || '❓'
-}
-
-const getIntentBadgeClass = (operationType: string): string => {
-  const classes: Record<string, string> = {
-    'read': 'badge-info',
-    'write': 'badge-warning',
-    'destructive': 'badge-error'
-  }
-  return classes[operationType] || 'badge-ghost'
-}
+/** Intent as the table renders it: glyph + reason, no coloured pill. */
+const intentOf = (activity: ActivityRecord) =>
+  intentPresentation(activity.metadata?.intent as Parameters<typeof intentPresentation>[0])
 
 // Check if there's additional metadata beyond what we show in dedicated sections
 const hasAdditionalMetadata = (activity: ActivityRecord): boolean => {

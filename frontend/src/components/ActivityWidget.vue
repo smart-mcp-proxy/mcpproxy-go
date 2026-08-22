@@ -19,7 +19,8 @@
         </div>
         <div class="stat py-2 px-4">
           <div class="stat-title text-xs">Success</div>
-          <div class="stat-value text-lg text-success">{{ summary.success_count }}</div>
+          <!-- Success is the norm — it gets no colour, so Errors can have it. -->
+          <div class="stat-value text-lg text-base-content/70">{{ summary.success_count }}</div>
         </div>
         <div class="stat py-2 px-4">
           <div class="stat-title text-xs">Errors</div>
@@ -67,10 +68,11 @@
               <div class="flex items-center gap-2">
                 <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
                 <!-- Sub-call of a code_execution run (see utils/activity). -->
+                <!-- Context, not an alert: ghost chip, muted text. -->
                 <span
                   v-if="isChildCall(activity)"
                   data-test="widget-child-badge"
-                  class="badge badge-xs badge-ghost"
+                  class="badge badge-xs badge-ghost font-normal text-base-content/60"
                   title="Sub-call dispatched by a code_execution run"
                 >
                   ↳ via code_execution
@@ -78,12 +80,13 @@
               </div>
             </div>
           </div>
-          <div
-            class="badge badge-sm"
-            :class="getStatusBadgeClass(activity.status)"
+          <!-- Same quiet-success treatment as the Activity Log table. -->
+          <span
+            data-test="widget-activity-status"
+            :class="statusPresentation(activity.status).className"
           >
-            {{ activity.status }}
-          </div>
+            {{ statusPresentation(activity.status).label }}
+          </span>
         </div>
       </div>
     </div>
@@ -95,7 +98,12 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
-import { formatPreflightSummary, isChildCall, isPreflightActivity } from '@/utils/activity'
+import {
+  formatPreflightSummary,
+  isChildCall,
+  isPreflightActivity,
+  statusPresentation,
+} from '@/utils/activity'
 
 const router = useRouter()
 
@@ -158,17 +166,6 @@ const getTypeIcon = (type: string): string => {
     'preflight': '🛫'
   }
   return typeIcons[type] || '📋'
-}
-
-const getStatusBadgeClass = (status: string): string => {
-  const statusClasses: Record<string, string> = {
-    'success': 'badge-success',
-    'error': 'badge-error',
-    'blocked': 'badge-warning',
-    // Spec 093: shed by a concurrency limit (backpressure, not an upstream fault).
-    'rejected': 'badge-info'
-  }
-  return statusClasses[status] || 'badge-ghost'
 }
 
 // Lifecycle
