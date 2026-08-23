@@ -6,9 +6,10 @@
 // Fragment file into a shared report directory. The merger compares the
 // fragments against a HARDCODED manifest of expected entries: a missing
 // fragment for a blocking entry is a FAIL (no silent skips, FR-004), and
-// reserved extension slots (web-ui-sweep, macos-smoke, surface-consistency —
-// Spec 081 T2-T4) are recorded as `not-run` with reason
-// "not-implemented-yet" until their stages land.
+// reserved extension slots (macos-smoke, surface-consistency — Spec 081
+// T3/T4) are recorded as `not-run` with reason "not-implemented-yet" until
+// their stages land. The T2 Web UI sweep is a live ADVISORY entry: it runs on
+// tag builds and its failures are reported without blocking the release.
 package gatereport
 
 import (
@@ -101,13 +102,18 @@ const (
 	EntrySuiteServerRace = "suite/server-race"
 	EntrySuiteScanEval   = "suite/scan-eval"
 
-	EntryReservedWebUISweep         = "reserved/web-ui-sweep"
+	// EntryAdvisoryWebUISweep is the Spec 081 T2 Playwright Web UI sweep. It
+	// runs on every tag build but is ADVISORY: a red sweep is reported (and
+	// listed under advisory_failures) without blocking publication.
+	EntryAdvisoryWebUISweep = "advisory/web-ui-sweep"
+
 	EntryReservedMacOSSmoke         = "reserved/macos-smoke"
 	EntryReservedSurfaceConsistency = "reserved/surface-consistency"
 )
 
 // Manifest returns the hardcoded expected-entries manifest: 5 matrix cells +
-// 4 invariants + 4 assembled suite jobs (FR-003) + 3 reserved slots.
+// 4 invariants + 4 assembled suite jobs (FR-003) + 1 advisory entry (the T2
+// Web UI sweep) + 2 reserved slots (T3/T4).
 func Manifest() []ManifestEntry {
 	return []ManifestEntry{
 		{Name: EntryMatrixStdio, Blocking: true},
@@ -126,7 +132,8 @@ func Manifest() []ManifestEntry {
 		{Name: EntrySuiteServerRace, Blocking: true},
 		{Name: EntrySuiteScanEval, Blocking: true},
 
-		{Name: EntryReservedWebUISweep, Blocking: false, Reserved: true},
+		{Name: EntryAdvisoryWebUISweep, Blocking: false},
+
 		{Name: EntryReservedMacOSSmoke, Blocking: false, Reserved: true},
 		{Name: EntryReservedSurfaceConsistency, Blocking: false, Reserved: true},
 	}

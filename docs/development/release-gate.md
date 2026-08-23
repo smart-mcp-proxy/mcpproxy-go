@@ -33,6 +33,7 @@ fragments against a hardcoded manifest and exits per the verdict.
 | `suite-race` | `suite/unit-race`, `suite/server-race` | 25 min | `go test -race ./internal/...` + `go test -tags server -race ./internal/serveredition/...`. |
 | `suite-scan-eval` | `suite/scan-eval` | 10 min | `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` over the detect corpus — runs on **every** tag regardless of changed paths (FR-015). |
 | `matrix-invariants` | `matrix/{stdio,http,sse,docker,oauth}`, `invariant/{activity-request-id,counters,quarantine-flow,upgrade-in-place}` | 20 min | Boots the candidate against five local fixture upstreams (connect → list → call → kill/reconnect) and asserts the US2 invariants against the live instance. |
+| `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2) | 20 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
 | `verdict` | (merges all) | 10 min | `release-gate report` → `gate-report.json` + `$GITHUB_STEP_SUMMARY`; its exit code **is** the gate verdict. |
 
 Every job uploads its fragment with `if: always()`, so a job that dies before
@@ -101,17 +102,44 @@ scripts/gate/build-fixture-image.sh
 ./release-gate report --report-dir ./gate-report
 ```
 
-## Extension slots (T2 / T3 / T4)
+## Web UI sweep (T2) — advisory
 
-The manifest reserves three non-blocking slots, recorded as
+The `web-ui-sweep` job runs the Playwright sweep
+([`e2e/web-ui-sweep`](https://github.com/smart-mcp-proxy/mcpproxy-go/tree/main/e2e/web-ui-sweep),
+see [Web UI verification](web-ui-verification.md)) against the Web UI **served by
+the candidate binary** — embedded frontend, never a dev server — with a live
+`mcpfixture` stdio upstream so the servers/tools screens have real data. It
+covers the servers list, server detail (+ security tab), tools page and its
+search, activity log, and settings, and fails on uncaught page exceptions.
+
+Setup is not duplicated in YAML: the job calls
+[`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),
+the same launcher used by hand (`./scripts/run-web-smoke.sh --show-report`),
+passing `MCPPROXY_BINARY_PATH` / `MCPPROXY_FIXTURE_PATH` from the downloaded
+`gate-candidate` artifact.
+
+It is **advisory**, on purpose while the sweep earns its flake record:
+
+- the job sets `continue-on-error: true`, so its failure never becomes the
+  reusable workflow's conclusion — publishers whose `needs:` list the gate still
+  publish;
+- the driver runs with `--advisory`, so a red sweep is recorded as
+  `advisory-fail` under the non-blocking manifest entry `advisory/web-ui-sweep`
+  and listed in `advisory_failures` — reported, never silent;
+- the Playwright HTML report + server log are uploaded as the
+  `web-ui-sweep-playwright-report` artifact (14 days) for post-mortem.
+
+**Promotion to blocking** is a two-line change: set `Blocking: true` on the
+`advisory/web-ui-sweep` manifest entry and drop `continue-on-error` from the job
+(the FR-016 end state). Do it once the sweep has passed on three consecutive
+release tags with no flaky or infrastructure failure — the same criterion T3
+uses (FR-021).
+
+## Extension slots (T3 / T4)
+
+The manifest reserves two non-blocking slots, recorded as
 `not-run` / `not-implemented-yet` until their stage lands:
 
-- **`reserved/web-ui-sweep` (T2)** — run the existing Playwright Web UI sweep
-  (`docs/development/web-ui-verification.md`) against the candidate binary's
-  **embedded** frontend, with the matrix fixtures as its upstream data
-  (US3, FR-016/017). Add a `web-ui-sweep` job that downloads the `gate-candidate`
-  artifact, serves it, runs the sweep, and writes a `reserved/web-ui-sweep`
-  fragment; then flip that manifest entry to blocking.
 - **`reserved/macos-smoke` (T3)** — a macOS-runner job that launches the tray
   against a running core and uses the `mcpproxy-ui-test` accessibility
   primitives to assert presence, menu items, and state agreement (US4,

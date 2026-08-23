@@ -36,7 +36,7 @@ func TestMerge_AllBlockingPass_VerdictPass_ReservedNotRun(t *testing.T) {
 		t.Fatalf("expected pass verdict, got %s (failures: %v)", r.Verdict, r.BlockingFailures)
 	}
 	// Reserved slots must be recorded, never silently absent (FR-004).
-	for _, name := range []string{EntryReservedWebUISweep, EntryReservedMacOSSmoke, EntryReservedSurfaceConsistency} {
+	for _, name := range []string{EntryReservedMacOSSmoke, EntryReservedSurfaceConsistency} {
 		e := entryByName(t, r, name)
 		if e.Status != StatusNotRun || e.Reason != ReasonNotImplemented {
 			t.Errorf("%s: got status=%s reason=%q, want not-run/%s", name, e.Status, e.Reason, ReasonNotImplemented)
@@ -116,6 +116,68 @@ func TestMerge_AdvisoryFailOnNonBlockingReservedSlot_DoesNotBlock(t *testing.T) 
 	}
 	if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryReservedMacOSSmoke) {
 		t.Errorf("advisory failure must be prominently recorded, got %v", r.AdvisoryFailures)
+	}
+}
+
+// Spec 081 T2: the Web UI sweep is wired as an ADVISORY entry — it is a real
+// manifest entry (no longer a reserved "not-implemented-yet" slot), it never
+// blocks the tag, and every non-green outcome (including a missing fragment,
+// i.e. the job died before uploading) is still reported as an advisory failure.
+func TestManifest_WebUISweep_IsAdvisoryNotReserved(t *testing.T) {
+	var found bool
+	for _, m := range Manifest() {
+		if m.Name != EntryAdvisoryWebUISweep {
+			continue
+		}
+		found = true
+		if m.Blocking {
+			t.Errorf("%s must not block the gate (advisory, T2)", m.Name)
+		}
+		if m.Reserved {
+			t.Errorf("%s must no longer be a reserved slot — the sweep job exists", m.Name)
+		}
+	}
+	if !found {
+		t.Fatalf("manifest is missing the %s entry", EntryAdvisoryWebUISweep)
+	}
+}
+
+func TestMerge_WebUISweepFailure_IsAdvisoryOnly(t *testing.T) {
+	for _, status := range []Status{StatusFail, StatusAdvisoryFail} {
+		frags := passAllBlocking()
+		for i := range frags {
+			if frags[i].Name == EntryAdvisoryWebUISweep {
+				frags[i].Status = status
+				frags[i].Reason = "sweep spec failed"
+			}
+		}
+		r := Merge(frags)
+		if !r.Passed() {
+			t.Fatalf("web-ui sweep %s must not block the gate: %v", status, r.BlockingFailures)
+		}
+		if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryAdvisoryWebUISweep) {
+			t.Errorf("web-ui sweep %s must be reported as an advisory failure, got %v", status, r.AdvisoryFailures)
+		}
+	}
+}
+
+func TestMerge_WebUISweepMissingFragment_IsAdvisoryFailureNotBlocking(t *testing.T) {
+	var kept []Fragment
+	for _, f := range passAllBlocking() {
+		if f.Name != EntryAdvisoryWebUISweep {
+			kept = append(kept, f)
+		}
+	}
+	r := Merge(kept)
+	if !r.Passed() {
+		t.Fatalf("a missing web-ui sweep fragment must not block the gate: %v", r.BlockingFailures)
+	}
+	e := entryByName(t, r, EntryAdvisoryWebUISweep)
+	if e.Status != StatusFail || e.Reason != ReasonMissingFragment {
+		t.Errorf("got status=%s reason=%q, want fail/%q", e.Status, e.Reason, ReasonMissingFragment)
+	}
+	if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryAdvisoryWebUISweep) {
+		t.Errorf("missing sweep fragment must surface as an advisory failure, got %v", r.AdvisoryFailures)
 	}
 }
 
