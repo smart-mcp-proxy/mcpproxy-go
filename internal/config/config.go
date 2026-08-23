@@ -1944,6 +1944,14 @@ func IsValidTrustMode(s string) bool {
 // loader's env pass.
 const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
 
+// EnvAutoBaselineScan is the environment kill-switch for the automatic,
+// informational Pass-1 baseline scan (`security.auto_baseline_scan`). Like the
+// bundle path, precedence is enforced in the accessor
+// (SecurityConfig.IsAutoBaselineScanEnabled) rather than only in the loader, so
+// a config posted to /api/v1/config/apply cannot defeat the operator's env
+// setting. Accepts "true"/"1" and "false"/"0"; any other value is ignored.
+const EnvAutoBaselineScan = "MCPPROXY_AUTO_BASELINE_SCAN"
+
 // TrustModeNormalization records one per-server trust_mode value that the load
 // path rewrote because it was not in the accepted vocabulary.
 type TrustModeNormalization struct {
@@ -2758,6 +2766,21 @@ type SecurityConfig struct {
 	// baseline scanner runs. A deep-scan failure NEVER changes the baseline verdict
 	// (FR-007/FR-008).
 	DeepScan *DeepScanConfig `json:"deep_scan,omitempty" mapstructure:"deep-scan"`
+
+	// AutoBaselineScan is the kill-switch for the AUTOMATIC, informational
+	// Pass-1 baseline scan: the free in-process TPA scan mcpproxy runs for every
+	// newly admitted server (any trust mode) and, once per installation, over
+	// pre-existing servers that have never been scanned.
+	//
+	// Informational ONLY: the resulting verdict populates the security badge and
+	// the scan summary, and NEVER gates quarantine or approval. The
+	// trust_mode:"scan" admission gate is a separate path and is unaffected by
+	// this flag.
+	//
+	// Default (nil) is ENABLED. Set to false to suppress every automatic scan
+	// (manual scans keep working). Env override: MCPPROXY_AUTO_BASELINE_SCAN,
+	// which wins over this field on every path.
+	AutoBaselineScan *bool `json:"auto_baseline_scan,omitempty" mapstructure:"auto-baseline-scan" swaggertype:"boolean"`
 }
 
 // DeepScanConfig configures the opt-in "deep scan" layer (Spec 077 US3):
@@ -2811,6 +2834,29 @@ func (sc *SecurityConfig) EffectiveTPABundlePath() string {
 		return ""
 	}
 	return sc.TPABundlePath
+}
+
+// IsAutoBaselineScanEnabled reports whether mcpproxy may run the automatic,
+// informational Pass-1 baseline scan (new-server admission scan + the one-shot
+// baseline sweep). Default is ENABLED: a nil SecurityConfig, or an unset
+// auto_baseline_scan, means on — the scan is free, in-process, and drives no
+// gating, so an install that never touched the security block still gets its
+// badges populated.
+//
+// MCPPROXY_AUTO_BASELINE_SCAN outranks the file value on every path (loader,
+// hot-reload, /api/v1/config/apply) because the precedence is resolved here
+// rather than only in the loader's env pass.
+func (sc *SecurityConfig) IsAutoBaselineScanEnabled() bool {
+	switch os.Getenv(EnvAutoBaselineScan) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	if sc == nil || sc.AutoBaselineScan == nil {
+		return true
+	}
+	return *sc.AutoBaselineScan
 }
 
 // DeepScanScanners returns the optional per-scanner allow-list for the deep-scan

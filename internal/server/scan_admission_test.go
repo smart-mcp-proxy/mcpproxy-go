@@ -26,6 +26,11 @@ type fakeSecurityScanner struct {
 	summaries   map[string]*scanner.ScanSummary
 	hasBaseline map[string]bool
 	approveErr  error
+	// scanResult is the summary a StartScan publishes for a server, mimicking
+	// the real service where a completed scan makes GetScanSummary non-nil.
+	// Absent ⇒ the scan leaves the summary nil.
+	scanResult   map[string]*scanner.ScanSummary
+	startScanErr error
 
 	approveCalls   []string
 	startScanCalls []string
@@ -35,6 +40,7 @@ func newFakeSecurityScanner() *fakeSecurityScanner {
 	return &fakeSecurityScanner{
 		summaries:   map[string]*scanner.ScanSummary{},
 		hasBaseline: map[string]bool{},
+		scanResult:  map[string]*scanner.ScanSummary{},
 	}
 }
 
@@ -57,7 +63,14 @@ func (f *fakeSecurityScanner) ApproveServer(_ context.Context, serverName string
 func (f *fakeSecurityScanner) StartScan(_ context.Context, serverName string, _ bool, _ []string, _ string) (*scanner.ScanJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.startScanErr != nil {
+		return nil, f.startScanErr
+	}
 	f.startScanCalls = append(f.startScanCalls, serverName)
+	// Mirror the real service: a scan that ran leaves a readable summary behind.
+	if result, ok := f.scanResult[serverName]; ok {
+		f.summaries[serverName] = result
+	}
 	return nil, nil
 }
 

@@ -107,6 +107,19 @@ type Server struct {
 	admissionScanMu     sync.Mutex
 	admissionScanKicked map[string]bool
 
+	// Informational Pass-1 baseline scanning (see scan_informational.go).
+	// infoScanKnown holds every server name observed since process start, so a
+	// servers.changed carrying a name that is not in it is a NEW admission;
+	// infoScanQueued dedupes the one informational scan per server per process.
+	// Both are guarded by infoScanMu. infoScanRunMu serializes scan EXECUTION
+	// across the admission path and the sweep.
+	infoScanMu            sync.Mutex
+	infoScanKnown         map[string]bool
+	infoScanQueued        map[string]bool
+	infoScanRunMu         sync.Mutex
+	infoScanSettleTimeout time.Duration
+	infoScanSweepDelay    time.Duration
+
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
 	shutdownSignal string
@@ -212,7 +225,18 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		serveErrCh:          make(chan error, 1),
 		observability:       obsManager,
 		admissionScanKicked: make(map[string]bool),
+
+		infoScanKnown:         make(map[string]bool),
+		infoScanQueued:        make(map[string]bool),
+		infoScanSettleTimeout: informationalScanSettleTimeout,
+		infoScanSweepDelay:    baselineSweepStartDelay,
 	}
+	// Record the servers this process started with: they are the baseline
+	// sweep's job, and anything that shows up later is a NEW admission that gets
+	// its own informational scan. Seeded from the startup config (available
+	// synchronously) rather than from the first servers.changed, so the very
+	// first server a fresh install adds still counts as new.
+	server.seedKnownServers(cfg.Servers)
 
 	mcpProxy := NewMCPProxyServer(
 		rt.StorageManager(),
@@ -483,6 +507,11 @@ func (s *Server) listenForRoutingModeRefresh() {
 			// one-shot admission scan for any scan-mode, still-quarantined,
 			// never-scanned server. Idempotent (see maybeStartAdmissionScans).
 			s.maybeStartAdmissionScans(context.Background())
+			// Every NEWLY admitted server, in ANY trust mode, also gets one
+			// INFORMATIONAL Pass-1 baseline scan so its security badge is
+			// populated. It drives no gating and deliberately skips the servers
+			// the scan-mode admission gate above already owns.
+			s.maybeStartInformationalScans(s.informationalScanContext())
 		case runtime.EventTypeConfigReloaded:
 			// Spec 077 US3: config hot-reload (file edit or /api/v1/config/apply)
 			// must re-gate the scanner so a security.deep_scan.* toggle takes
@@ -2498,6 +2527,13 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			mgmtSvc.SetScanSummaryEnricher(&scanSummaryEnricherAdapter{scanner: secService})
 		}
 		s.securityScanner = secService
+		// One-shot post-upgrade baseline sweep: scan enabled servers that have
+		// never been scanned so their badges stop reading "not scanned" on an
+		// install that predates automatic scanning. Backgrounded (never delays
+		// startup), serialized through the informational scan path, cancelled
+		// with the server context, and gated by a persisted marker so it runs
+		// exactly once.
+		go s.runBaselineSweep(ctx)
 	}
 	// Wire server edition multi-user OAuth (no-op in personal edition)
 	wireServerEditionOAuth(s, httpAPIServer)

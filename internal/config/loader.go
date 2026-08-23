@@ -684,6 +684,19 @@ func applyTLSEnvOverrides(cfg *Config) {
 		cfg.Security.TPABundlePath = value
 	}
 
+	// Override the automatic informational baseline-scan kill switch from
+	// environment. Materializes the security block so an install with no
+	// `security` key can still be opted out (or explicitly back in).
+	// IsAutoBaselineScanEnabled re-reads the same variable, so the env value
+	// also wins on paths that never pass through the loader.
+	if value := os.Getenv(EnvAutoBaselineScan); value != "" {
+		if cfg.Security == nil {
+			cfg.Security = &SecurityConfig{}
+		}
+		enabled := value == trueValue || value == "1"
+		cfg.Security.AutoBaselineScan = &enabled
+	}
+
 	// Override retrieve_tools serialization mode from environment (Spec 085).
 	// Explicit MCPPROXY_* alias per the established loader convention; the
 	// value is validated by cfg.Validate() right after these overrides apply.
