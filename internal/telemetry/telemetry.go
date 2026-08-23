@@ -1229,22 +1229,39 @@ func (s *Service) ensureAnonymousID() {
 // (liveConfig) and everything downstream — this rotation included — must act on
 // that same pointer, or a config swap landing mid-heartbeat would rotate the ID
 // on a config the payload never read.
+//
+// The ENTIRE check -> generate -> mutate -> persist-or-rollback sequence runs
+// under s.mu, so it is atomic against both the NotifyConfigChanged pointer swap
+// and a second rotation racing on the same snapshot. That second racer is real,
+// not theoretical: BuildPayload is exported and served from an HTTP handler
+// (internal/httpapi), so a request can build a heartbeat alongside the loop.
+// With two rotations interleaving, one could capture the OTHER's freshly
+// generated id as its "previous" value and restore that on rollback, leaving a
+// never-persisted id in the config the payload then transmits — exactly the
+// identity fragmentation the rollback exists to prevent. Serializing makes the
+// loser observe the winner's refreshed created_at and do nothing.
 func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
-	if cfg == nil || cfg.Telemetry == nil || cfg.Telemetry.AnonymousID == "" {
+	if cfg == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cfg.Telemetry == nil || cfg.Telemetry.AnonymousID == "" {
 		return
 	}
 	createdAtStr := cfg.Telemetry.AnonymousIDCreatedAt
 	if createdAtStr == "" {
 		// Legacy install — initialize without rotating.
 		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig(cfg, "Initialized anonymous_id_created_at")
+		s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at")
 		return
 	}
 	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		// Corrupt timestamp: reset to now without rotating.
 		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig(cfg, "Reset corrupt anonymous_id_created_at")
+		s.persistConfigLocked(cfg, "Reset corrupt anonymous_id_created_at")
 		return
 	}
 	if !createdAt.Before(now) {
@@ -1265,7 +1282,7 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 	prevCreatedAt := cfg.Telemetry.AnonymousIDCreatedAt
 	cfg.Telemetry.AnonymousID = uuid.New().String()
 	cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-	if !s.persistConfig(cfg, "Rotated anonymous_id (annual)") {
+	if !s.persistConfigLocked(cfg, "Rotated anonymous_id (annual)") {
 		// The live config was swapped out from under this snapshot, so the new
 		// id is not on disk. Put the snapshot back the way we found it and let
 		// the next heartbeat rotate the live config instead.
@@ -1293,6 +1310,17 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 // mtime/CAS check), which is a config-layer change, not a telemetry one. The
 // guard narrows the exposure to that gap; it does not eliminate it.
 func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistConfigLocked(cfg, reason)
+}
+
+// persistConfigLocked is persistConfig's body. The caller MUST already hold
+// s.mu. It exists so a caller whose whole check-mutate-persist sequence has to
+// be atomic — maybeRotateAnonymousID, which must not interleave with another
+// rotation — can hold the lock across all of it instead of reacquiring here
+// (s.mu is not reentrant).
+func (s *Service) persistConfigLocked(cfg *config.Config, reason string) bool {
 	if cfg == nil {
 		return false
 	}
@@ -1303,8 +1331,6 @@ func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
 		// callers must not roll their mutation back.
 		return true
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.config != cfg {
 		s.logger.Debug("Skipped telemetry config persist: live config was swapped",
 			zap.String("reason", reason))

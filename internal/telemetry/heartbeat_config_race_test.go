@@ -281,3 +281,65 @@ func TestAdvanceUpgradeFunnelAfterSwap(t *testing.T) {
 		t.Errorf("advance clobbered the live config: listen = %q, want %q", got.Listen, live.Listen)
 	}
 }
+
+// TestConcurrentRotationYieldsOneIdentity pins the round-4 finding. BuildPayload
+// is exported and served from an HTTP handler, so a request can build a
+// heartbeat concurrently with the heartbeat loop — two rotations can race on the
+// same config. Unsynchronized, they interleave: one captures the OTHER's freshly
+// generated id as its "previous" value and restores that on rollback, leaving a
+// never-persisted id in the config the payload then transmits.
+//
+// maybeRotateAnonymousID now runs its whole check → generate → mutate →
+// persist-or-rollback sequence under s.mu, so exactly ONE rotation happens and
+// whatever id ends up in the config is the id that is on disk.
+func TestConcurrentRotationYieldsOneIdentity(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp_config.json")
+
+	original := "00000000-0000-0000-0000-0000000000ff"
+	cfg := &config.Config{
+		Listen:  "127.0.0.1:8080",
+		DataDir: dir,
+		Telemetry: &config.TelemetryConfig{
+			AnonymousID:          original,
+			AnonymousIDCreatedAt: time.Now().UTC().Add(-400 * 24 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	if err := config.SaveConfig(cfg, cfgPath); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	s := &Service{logger: zap.NewNop(), version: "1.0.0", cfgPath: cfgPath, config: cfg}
+	s.resolvedEnabled = true
+
+	const racers = 8
+	var wg sync.WaitGroup
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		go func() {
+			defer wg.Done()
+			s.maybeRotateAnonymousID(cfg, time.Now().UTC())
+		}()
+	}
+	wg.Wait()
+
+	inMemory := cfg.Telemetry.AnonymousID
+	if inMemory == original {
+		t.Fatalf("no rotation happened at all; id is still %q", original)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var onDisk config.Config
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if onDisk.Telemetry == nil || onDisk.Telemetry.AnonymousID != inMemory {
+		// The heartbeat reports the in-memory id, so a mismatch means an id that
+		// is not on disk would be transmitted — the identity fragmentation the
+		// rollback exists to prevent.
+		t.Errorf("in-memory id %q was never persisted (on disk: %+v)", inMemory, onDisk.Telemetry)
+	}
+}
