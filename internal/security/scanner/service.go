@@ -1861,14 +1861,15 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 			}
 		}
 	}
-	for _, reg := range s.registry.List() {
-		if seen[reg.ID] || !reg.InProcess {
+	// InProcessRunnableIDs resolves the predicate under the registry lock:
+	// List() returns the live *ScannerPlugin records that UpdateStatus mutates,
+	// so reading Status out here would race with a concurrent install/pull.
+	for _, id := range s.registry.InProcessRunnableIDs() {
+		if seen[id] {
 			continue
 		}
-		if reg.Status == ScannerStatusInstalled || reg.Status == ScannerStatusConfigured {
-			overview.ScannersInstalled++
-			overview.ScannersEnabled++
-		}
+		overview.ScannersInstalled++
+		overview.ScannersEnabled++
 	}
 
 	// Count scan jobs

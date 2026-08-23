@@ -36,6 +36,10 @@ const (
 	// neverScannedHint is the one-line status carried by list/inspect
 	// responses for a server with no scan on record.
 	neverScannedHint = "never scanned — run scan_server first"
+
+	// scanSummaryStatusRunning is the sentinel ScanSummary.Status the scanner
+	// service reports while a Pass-1 scan is still registered as active.
+	scanSummaryStatusRunning = "scanning"
 )
 
 // securityScanner returns the scanner service backing the scan operations, or
@@ -116,9 +120,17 @@ func (p *MCPProxyServer) awaitScanVerdict(ctx context.Context, svc securityScann
 	for {
 		job, err := svc.GetScanStatus(ctx, serverName)
 		if err == nil && job != nil && scanJobSettled(job.Status) && (jobID == "" || job.ID == jobID) {
-			// The summary is derived from persisted jobs/reports, which the
-			// completion callback writes before flipping the job state.
-			return svc.GetScanSummary(ctx, serverName)
+			// The engine flips the job to a terminal status BEFORE its
+			// completion callback persists the report and BEFORE the job is
+			// dropped from the active map. A summary read inside that window
+			// still answers "scanning", which would be reported here as
+			// status=completed + verdict=scanning — a verdict that reads as a
+			// clean-ish result but is really "not known yet". Keep polling
+			// until the settled job's own verdict is visible, or time out into
+			// the async answer.
+			if summary := svc.GetScanSummary(ctx, serverName); summary != nil && summary.Status != scanSummaryStatusRunning {
+				return summary
+			}
 		}
 
 		if time.Now().After(deadline) {
@@ -227,7 +239,7 @@ func scanStatusLineFrom(summary *scanner.ScanSummary, serverName string) string 
 	if summary == nil {
 		return neverScannedHint
 	}
-	if summary.Status == "scanning" {
+	if summary.Status == scanSummaryStatusRunning {
 		return fmt.Sprintf("scan running for '%s' — re-run get_scan_report shortly", serverName)
 	}
 	line := fmt.Sprintf("last scan verdict: %s (risk %d)", summary.Status, summary.RiskScore)

@@ -93,6 +93,34 @@ func (r *Registry) List() []*ScannerPlugin {
 	return result
 }
 
+// InProcessRunnableIDs returns the IDs of in-process scanners whose status
+// means the engine will actually run them (installed or configured), sorted.
+//
+// It exists so a caller can count the always-on in-process baseline without
+// reading ScannerPlugin fields outside the registry lock: List() hands out the
+// live pointers the registry keeps, and UpdateStatus mutates Status on exactly
+// those records, so an unsynchronized read of reg.Status races with any
+// concurrent install/pull. Resolving the predicate here keeps the read under
+// the same lock as the write.
+func (r *Registry) InProcessRunnableIDs() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.scanners))
+	for id, s := range r.scanners {
+		if s == nil || !s.InProcess {
+			continue
+		}
+		if s.Status == ScannerStatusInstalled || s.Status == ScannerStatusConfigured {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // Get returns a scanner by ID
 func (r *Registry) Get(id string) (*ScannerPlugin, error) {
 	r.mu.RLock()

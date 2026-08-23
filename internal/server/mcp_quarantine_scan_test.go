@@ -112,6 +112,65 @@ func TestQuarantineSecurity_ScanServer_AsyncWhenScanStillRunning(t *testing.T) {
 	assert.NotContains(t, payload, "verdict", "an unfinished scan has no verdict to report")
 }
 
+// TestQuarantineSecurity_ScanServer_NeverReportsScanningAsAVerdict covers the
+// completion window inside the scanner engine: it flips the job to a terminal
+// status BEFORE the completion callback persists the report and before the job
+// leaves the active map, so a summary read in between still answers "scanning".
+// Reporting that pair verbatim would produce status=completed with
+// verdict=scanning — a non-verdict that reads like a result. The wait must keep
+// polling and fall back to the honest async answer.
+func TestQuarantineSecurity_ScanServer_NeverReportsScanningAsAVerdict(t *testing.T) {
+	proxy, fake := scanTestProxy(t, &config.ServerConfig{Name: "github", Enabled: true})
+	fake.setScanResult("github",
+		&scanner.ScanJob{ID: "job-window", ServerName: "github", Status: scanner.ScanJobStatusCompleted},
+		&scanner.ScanSummary{Status: "scanning"})
+
+	// Bound the wait: the loop honours context cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	result, err := proxy.handleQuarantineSecurity(ctx, quarantineRequest(map[string]interface{}{
+		"operation": "scan_server",
+		"name":      "github",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	payload := decodeToolJSON(t, result)
+	assert.Equal(t, "scan started", payload["status"])
+	assert.NotContains(t, payload, "verdict", "'scanning' is not a verdict")
+	assert.Equal(t, "job-window", payload["job_id"])
+}
+
+// TestQuarantineSecurity_ScanServer_WaitsThroughTheCompletionWindow is the
+// other half: once the completion callback lands and the summary carries a real
+// verdict, the still-open call reports it rather than timing out into async.
+func TestQuarantineSecurity_ScanServer_WaitsThroughTheCompletionWindow(t *testing.T) {
+	proxy, fake := scanTestProxy(t, &config.ServerConfig{Name: "github", Enabled: true})
+	fake.setScanResult("github",
+		&scanner.ScanJob{ID: "job-late", ServerName: "github", Status: scanner.ScanJobStatusCompleted},
+		&scanner.ScanSummary{Status: "scanning"})
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		fake.setScanResult("github",
+			&scanner.ScanJob{ID: "job-late", ServerName: "github", Status: scanner.ScanJobStatusCompleted},
+			settledSummary("clean", 0))
+	}()
+
+	result, err := proxy.handleQuarantineSecurity(context.Background(), quarantineRequest(map[string]interface{}{
+		"operation": "scan_server",
+		"name":      "github",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	payload := decodeToolJSON(t, result)
+	assert.Equal(t, "completed", payload["status"])
+	assert.Equal(t, "clean", payload["verdict"])
+	assert.Equal(t, "job-late", payload["job_id"])
+}
+
 // TestQuarantineSecurity_ScanServer_RequiresName pins the argument contract.
 func TestQuarantineSecurity_ScanServer_RequiresName(t *testing.T) {
 	proxy, _ := scanTestProxy(t)

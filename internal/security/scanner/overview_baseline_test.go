@@ -70,3 +70,44 @@ func TestGetOverview_DoesNotDoubleCountPersistedBaseline(t *testing.T) {
 	assert.Equal(t, 1, overview.ScannersEnabled, "the persisted baseline is counted exactly once")
 	assert.Equal(t, 1, overview.ScannersInstalled, "the persisted baseline is counted exactly once")
 }
+
+// TestGetOverview_ConcurrentScannerStatusUpdateIsRaceFree guards the read seam
+// the baseline count added. Registry.List() hands out the live *ScannerPlugin
+// records the registry keeps, and UpdateStatus mutates Status on exactly those
+// records under the registry lock — so counting by reading reg.Status outside
+// the lock is a data race with any concurrent install/pull. GetOverview must
+// resolve the predicate inside the registry instead. Run with -race.
+func TestGetOverview_ConcurrentScannerStatusUpdateIsRaceFree(t *testing.T) {
+	svc := newFreshInstallService(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			status := ScannerStatusInstalled
+			if i%2 == 0 {
+				status = ScannerStatusAvailable
+			}
+			_ = svc.registry.UpdateStatus(inProcessTPAScannerID, status)
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		_, err := svc.GetOverview(context.Background())
+		require.NoError(t, err)
+	}
+	<-done
+}
+
+// TestGetOverview_ToleratesNilRegistry pins the nil-registry contract: other
+// Service methods already guard for it, and the overview must not be the one
+// call that panics on a service built without a registry.
+func TestGetOverview_ToleratesNilRegistry(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	svc := NewService(newMockStorage(), nil, NewDockerRunner(logger), dir, logger)
+
+	overview, err := svc.GetOverview(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, overview.ScannersEnabled)
+}
