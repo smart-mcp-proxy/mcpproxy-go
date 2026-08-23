@@ -140,15 +140,80 @@ func TestInformationalScan_ScanModeAdmissionPathUnchanged(t *testing.T) {
 		assert.Equal(t, []string{"gated"}, fake.startedScans())
 	})
 
-	t.Run("scan-mode server that is NOT quarantined is informational", func(t *testing.T) {
+	// A scan-mode server with NO approval baseline is off-limits to the
+	// informational path even while it is unquarantined. Quarantine is mutable
+	// during the scan and maybeAutoApproveScanSettled re-reads it, so scanning
+	// here would let an operator quarantine that lands mid-scan be silently
+	// reverted by the clean settle — an informational scan causing a gating
+	// state change.
+	t.Run("scan-mode without approval baseline is never informational, quarantined or not", func(t *testing.T) {
 		fake := newFakeSecurityScanner()
 		fake.scanResult["srv"] = &scanner.ScanSummary{Status: "clean"}
+		s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeScan))
+
+		s.maybeStartInformationalScans(context.Background())
+		s.runBaselineSweep(context.Background())
+		time.Sleep(50 * time.Millisecond)
+
+		assert.Empty(t, fake.startedScans(), "the settle handler could still act on this server")
+		assert.Empty(t, fake.approvedServers())
+	})
+
+	// Once a server HAS an approval baseline the settle handler bails on it
+	// unconditionally, so it is safe to give it an informational badge.
+	t.Run("scan-mode WITH approval baseline is informational", func(t *testing.T) {
+		fake := newFakeSecurityScanner()
+		fake.scanResult["srv"] = &scanner.ScanSummary{Status: "clean"}
+		fake.hasBaseline["srv"] = true
 		s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeScan))
 
 		s.maybeStartInformationalScans(context.Background())
 		waitForStartedScans(t, fake, []string{"srv"})
 		assert.Empty(t, fake.approvedServers())
 	})
+}
+
+// A new server whose scan fails to START must stay retryable: the admission path
+// records it as "known" before attempting the scan, so releasing the claim has
+// to un-know it too — otherwise no later servers.changed could ever pick it up
+// and (once the one-shot sweep marker is burned) nothing would scan it again.
+func TestInformationalScan_FailedStartRetriesOnNextServersChanged(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	fake.startScanErr = errors.New("server unreachable")
+	s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeManual))
+
+	s.maybeStartInformationalScans(context.Background())
+	require.Eventually(t, func() bool {
+		s.infoScanMu.Lock()
+		defer s.infoScanMu.Unlock()
+		return !s.infoScanQueued["srv"] && !s.infoScanKnown["srv"]
+	}, 2*time.Second, 5*time.Millisecond)
+
+	fake.mu.Lock()
+	fake.startScanErr = nil
+	fake.mu.Unlock()
+
+	// The next servers.changed sees it as new again and retries — no sweep needed.
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"srv"})
+}
+
+// An unreadable store must never be mistaken for "nothing to sweep". Both
+// storage reads in runBaselineSweep (the marker, then the inventory) fail closed
+// on the same invariant: no scans start and the one-shot marker is left unset so
+// the next start retries. A closed BBolt handle fails the marker read first, so
+// this exercises that guard; the inventory read is guarded identically, which
+// matters because listStoredServers collapses a read error into an empty slice —
+// the sweep therefore calls ListUpstreamServers directly.
+func TestBaselineSweep_UnreadableStoreNeverBurnsMarker(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("a", config.TrustModeManual))
+
+	require.NoError(t, s.runtime.StorageManager().Close())
+
+	s.runBaselineSweep(context.Background())
+
+	assert.Empty(t, fake.startedScans(), "an unreadable store must not scan anything")
 }
 
 // (d) Disabled servers are skipped by both paths — a scan would have to start
@@ -263,7 +328,7 @@ func TestInformationalScan_FailedStartIsRetryable(t *testing.T) {
 	fake.startScanErr = nil
 	fake.mu.Unlock()
 
-	// The server is no longer "new", so the sweep is what retries it.
+	// The sweep is the other retry route (it never consulted the known-set).
 	s.runBaselineSweep(context.Background())
 	assert.Equal(t, []string{"srv"}, fake.startedScans())
 }
@@ -307,7 +372,12 @@ func TestScanModeAdmissionOwns(t *testing.T) {
 		{"nil", nil, false, false},
 		{"scan+quarantined+no baseline", &config.ServerConfig{TrustMode: "scan", Quarantined: true}, false, true},
 		{"scan+quarantined+baseline (re-quarantine)", &config.ServerConfig{TrustMode: "scan", Quarantined: true}, true, false},
-		{"scan+not quarantined", &config.ServerConfig{TrustMode: "scan"}, false, false},
+		// Quarantine is mutable while a scan is in flight and the settle handler
+		// re-reads it, so an unquarantined scan-mode server with no approval
+		// baseline is STILL the gating path's — otherwise an operator quarantine
+		// landing mid-scan would let the clean settle unquarantine it again.
+		{"scan+not quarantined+no baseline (settle could still act)", &config.ServerConfig{TrustMode: "scan"}, false, true},
+		{"scan+not quarantined+baseline (settle bails)", &config.ServerConfig{TrustMode: "scan"}, true, false},
 		{"manual+quarantined", &config.ServerConfig{TrustMode: "manual", Quarantined: true}, false, false},
 		{"empty trust mode (manual) + quarantined", &config.ServerConfig{Quarantined: true}, false, false},
 	}

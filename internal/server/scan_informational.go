@@ -58,14 +58,26 @@ func isTerminalScanStatus(status string) bool {
 }
 
 // scanModeAdmissionOwns reports whether the spec-086 trust_mode:"scan" admission
-// gate is responsible for this server's baseline scan. Those servers must NOT be
-// picked up by the informational path: the gating path already scans them, and
-// double-scanning would race the settle-driven auto-approval.
+// gate — and the settle-driven auto-approval behind it — is responsible for this
+// server. Those servers must NOT be picked up by the informational path.
+//
+// The predicate deliberately does NOT look at sc.Quarantined, even though the
+// gating path itself does. Quarantine is MUTABLE while a scan is in flight, and
+// maybeAutoApproveScanSettled re-reads it when the scan settles: a scan-mode
+// server that is unquarantined when we claim it, and is quarantined by the
+// operator before the clean verdict lands, would be silently unquarantined by
+// the settle handler — an informational scan causing a gating state change.
+// Keying only on the IMMUTABLE-for-this-purpose pair (trust mode, prior approval
+// baseline) closes that window: a scan-mode server without an approval baseline
+// is exactly the set the settle handler can act on, so the informational path
+// never touches it in any quarantine state. Scan-mode servers that already have
+// an approval baseline are safe (the settle handler bails on them) and stay
+// eligible for an informational badge.
 func scanModeAdmissionOwns(sc *config.ServerConfig, hasApprovalBaseline bool) bool {
 	if sc == nil {
 		return false
 	}
-	return sc.EffectiveTrustMode() == config.TrustModeScan && sc.Quarantined && !hasApprovalBaseline
+	return sc.EffectiveTrustMode() == config.TrustModeScan && !hasApprovalBaseline
 }
 
 // informationalScansEnabled resolves the security.auto_baseline_scan kill switch
@@ -202,10 +214,17 @@ func (s *Server) claimInformationalScan(ctx context.Context, sc *config.ServerCo
 
 // releaseInformationalScan drops a claim so a later servers.changed can retry a
 // scan that failed to start.
+//
+// It must forget the server in BOTH maps. maybeStartInformationalScans records a
+// name in infoScanKnown at the moment it decides the server is new, before the
+// scan is attempted; dropping only the infoScanQueued claim would leave the
+// server permanently "not new", so no later servers.changed could ever retry it
+// and (once the one-shot sweep marker is burned) nothing would scan it again.
 func (s *Server) releaseInformationalScan(name string) {
 	s.infoScanMu.Lock()
 	defer s.infoScanMu.Unlock()
 	delete(s.infoScanQueued, name)
+	delete(s.infoScanKnown, name)
 }
 
 // startInformationalScan claims and runs one informational scan in the
@@ -318,7 +337,16 @@ func (s *Server) runBaselineSweep(ctx context.Context) {
 		return
 	}
 
-	servers := s.listStoredServers()
+	// Read the inventory DIRECTLY rather than through listStoredServers, which
+	// collapses "storage read failed" into an empty slice. An empty slice is the
+	// sweep's "nothing to do" signal and burns the one-shot marker — so a
+	// transient storage error would permanently mark a sweep that never looked
+	// at a single server. Fail closed: skip this start, retry on the next one.
+	servers, err := sm.ListUpstreamServers()
+	if err != nil {
+		s.logger.Warn("baseline sweep: could not list servers, skipping (marker left unset)", zap.Error(err))
+		return
+	}
 	scanned := 0
 	findings := 0
 	failed := 0

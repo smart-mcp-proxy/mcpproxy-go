@@ -21,6 +21,7 @@ const (
 	DefaultDataDir = ".mcpproxy"
 	ConfigFileName = "mcp_config.json"
 	trueValue      = "true"
+	falseValue     = "false"
 )
 
 // LoadFromFile loads configuration from a specific file
@@ -689,11 +690,23 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// `security` key can still be opted out (or explicitly back in).
 	// IsAutoBaselineScanEnabled re-reads the same variable, so the env value
 	// also wins on paths that never pass through the loader.
-	if value := os.Getenv(EnvAutoBaselineScan); value != "" {
+	// Only the documented vocabulary overrides. An unrecognized value (typo,
+	// "yes", "maybe") must be IGNORED, matching IsAutoBaselineScanEnabled — a
+	// bare `value != ""` check would have materialized `false` here and silently
+	// turned automatic scanning off for a config that had explicitly enabled it,
+	// because the accessor then reads the overwritten field rather than the env.
+	switch os.Getenv(EnvAutoBaselineScan) {
+	case trueValue, "1":
+		enabled := true
 		if cfg.Security == nil {
 			cfg.Security = &SecurityConfig{}
 		}
-		enabled := value == trueValue || value == "1"
+		cfg.Security.AutoBaselineScan = &enabled
+	case falseValue, "0":
+		enabled := false
+		if cfg.Security == nil {
+			cfg.Security = &SecurityConfig{}
+		}
 		cfg.Security.AutoBaselineScan = &enabled
 	}
 
