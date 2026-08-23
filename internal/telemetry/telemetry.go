@@ -924,19 +924,30 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 // Called only on successful heartbeat send. Reads the live config through
 // liveConfig for the same reason buildHeartbeat does: this runs on the
 // heartbeat loop, concurrently with the NotifyConfigChanged pointer swap.
+//
+// The cursor is NOT self-healing on a skipped write: leaving it unadvanced
+// makes the next heartbeat report the same previous_version again, so one
+// upgrade is counted twice. If the config was swapped between the read and the
+// guarded write, redo the advance against the new live config. Two attempts is
+// enough — a second swap in the same window leaves the cursor for the next
+// heartbeat, which is the pre-existing (rare, bounded) double-report.
 func (s *Service) advanceUpgradeFunnel() {
-	cfg := s.liveConfig()
-	if cfg == nil {
-		return
+	for attempt := 0; attempt < 2; attempt++ {
+		cfg := s.liveConfig()
+		if cfg == nil {
+			return
+		}
+		if cfg.Telemetry == nil {
+			cfg.Telemetry = &config.TelemetryConfig{}
+		}
+		if cfg.Telemetry.LastReportedVersion == s.version {
+			return
+		}
+		cfg.Telemetry.LastReportedVersion = s.version
+		if s.persistConfig(cfg, "Advanced last_reported_version") {
+			return
+		}
 	}
-	if cfg.Telemetry == nil {
-		cfg.Telemetry = &config.TelemetryConfig{}
-	}
-	if cfg.Telemetry.LastReportedVersion == s.version {
-		return
-	}
-	cfg.Telemetry.LastReportedVersion = s.version
-	s.persistConfig(cfg, "Advanced last_reported_version")
 }
 
 // BuildPayload renders the heartbeat payload at the current point in time.
@@ -1244,15 +1255,28 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 		return
 	}
 
-	// Rotate.
-	newID := uuid.New().String()
-	cfg.Telemetry.AnonymousID = newID
+	// Rotate. The caller reports cfg's anonymous_id in the payload it is
+	// building, so the rotation must be all-or-nothing: an id that was never
+	// written to disk must never be transmitted, or one annual rotation would
+	// show up as TWO identities (this heartbeat's unpersisted id, then the id
+	// the next heartbeat rotates the live config to) and fragment the install's
+	// telemetry continuity.
+	prevID := cfg.Telemetry.AnonymousID
+	prevCreatedAt := cfg.Telemetry.AnonymousIDCreatedAt
+	cfg.Telemetry.AnonymousID = uuid.New().String()
 	cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-	s.persistConfig(cfg, "Rotated anonymous_id (annual)")
+	if !s.persistConfig(cfg, "Rotated anonymous_id (annual)") {
+		// The live config was swapped out from under this snapshot, so the new
+		// id is not on disk. Put the snapshot back the way we found it and let
+		// the next heartbeat rotate the live config instead.
+		cfg.Telemetry.AnonymousID = prevID
+		cfg.Telemetry.AnonymousIDCreatedAt = prevCreatedAt
+	}
 }
 
 // persistConfig writes cfg to disk, but ONLY while cfg is still the service's
-// live config.
+// live config. It reports whether the write actually happened, so callers can
+// undo or retry a mutation that was never persisted.
 //
 // This writes the WHOLE config file, so a write must never be issued against a
 // pointer the daemon has already swapped out: the heartbeat path works from a
@@ -1261,24 +1285,37 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 // the user's change back on disk. The liveness check and the write share one
 // s.mu hold so the swap cannot slip between them.
 //
-// Skipping is safe: every caller's mutation is idempotent, so the next
-// heartbeat re-evaluates it against the new config and persists then.
-func (s *Service) persistConfig(cfg *config.Config, reason string) {
-	if s.cfgPath == "" || cfg == nil {
-		return
+// KNOWN RESIDUAL WINDOW (pre-existing, not closed here): the daemon's config
+// writers save the new file BEFORE calling NotifyConfigChanged, so between
+// those two steps s.config still points at the old config and a write issued
+// here would pass the liveness check and land on top of the just-saved file.
+// Closing that needs single-writer ownership of the config file (or a
+// mtime/CAS check), which is a config-layer change, not a telemetry one. The
+// guard narrows the exposure to that gap; it does not eliminate it.
+func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
+	if cfg == nil {
+		return false
+	}
+	if s.cfgPath == "" {
+		// No config FILE backs this service (in-memory/CLI use). There is no
+		// on-disk state for the in-memory mutation to be inconsistent with, so
+		// report success: this is "nothing to persist", not a failed write, and
+		// callers must not roll their mutation back.
+		return true
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.config != cfg {
 		s.logger.Debug("Skipped telemetry config persist: live config was swapped",
 			zap.String("reason", reason))
-		return
+		return false
 	}
 	if err := config.SaveConfig(cfg, s.cfgPath); err != nil {
 		s.logger.Debug("Failed to persist telemetry config", zap.String("reason", reason), zap.Error(err))
-		return
+		return false
 	}
 	s.logger.Debug("Persisted telemetry config", zap.String("reason", reason))
+	return true
 }
 
 // IsValidSemverVersion reports whether a build version is a released (semver)

@@ -213,4 +213,71 @@ func TestRotationOnStaleSnapshotDoesNotClobber(t *testing.T) {
 		t.Errorf("rotation on a stale snapshot clobbered the live config: listen = %q, want %q",
 			got.Listen, live.Listen)
 	}
+
+	// Round-3 finding: the rotation must also be all-or-nothing in memory. The
+	// caller reports cfg's anonymous_id in the payload it is building, so an id
+	// that was never written to disk must never be transmitted — otherwise one
+	// annual rotation becomes two identities (this unpersisted id, then the one
+	// the next heartbeat rotates the live config to).
+	if stale.Telemetry.AnonymousID != "00000000-0000-0000-0000-00000000000a" {
+		t.Errorf("unpersisted rotation left a new id on the snapshot: %q — this heartbeat would transmit an id that is not on disk",
+			stale.Telemetry.AnonymousID)
+	}
+}
+
+// TestAdvanceUpgradeFunnelAfterSwap pins the round-3 finding that the upgrade
+// cursor is NOT self-healing on a skipped write: leaving last_reported_version
+// unadvanced makes the next heartbeat report the same previous_version again,
+// double-counting one upgrade. advanceUpgradeFunnel therefore redoes the
+// advance against the new live config when the guarded write was skipped.
+//
+// This asserts the END-STATE contract after a config swap — the live config is
+// the one advanced and persisted, and it is not clobbered by the stale one. The
+// skip-then-retry branch itself is covered by advanceUpgradeFunnel's loop over
+// persistConfig's return value, whose false path is pinned by
+// TestPersistConfigSkipsSwappedSnapshot.
+func TestAdvanceUpgradeFunnelAfterSwap(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp_config.json")
+
+	stale := &config.Config{
+		Listen:    "127.0.0.1:8080",
+		DataDir:   dir,
+		Telemetry: &config.TelemetryConfig{AnonymousID: "anon", LastReportedVersion: "0.9.0"},
+	}
+	live := &config.Config{
+		Listen:    "127.0.0.1:7777",
+		DataDir:   dir,
+		Telemetry: &config.TelemetryConfig{AnonymousID: "anon", LastReportedVersion: "0.9.0"},
+	}
+
+	s := &Service{logger: zap.NewNop(), version: "1.0.0", cfgPath: cfgPath, config: stale}
+	s.resolvedEnabled = true
+
+	if err := config.SaveConfig(live, cfgPath); err != nil {
+		t.Fatalf("SaveConfig(live): %v", err)
+	}
+	// The user's config apply lands before the post-send funnel advance runs.
+	s.NotifyConfigChanged(live)
+
+	s.advanceUpgradeFunnel()
+
+	if live.Telemetry.LastReportedVersion != "1.0.0" {
+		t.Errorf("in-memory live config not advanced: %q, want 1.0.0", live.Telemetry.LastReportedVersion)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var got config.Config
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Telemetry == nil || got.Telemetry.LastReportedVersion != "1.0.0" {
+		t.Errorf("upgrade cursor not persisted: %+v — the next heartbeat would re-report the same upgrade", got.Telemetry)
+	}
+	if got.Listen != live.Listen {
+		t.Errorf("advance clobbered the live config: listen = %q, want %q", got.Listen, live.Listen)
+	}
 }
