@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -55,6 +56,12 @@ const (
 	// its "known" mark and is left to a manual scan.
 	maxInformationalScanAttempts = 3
 )
+
+// errInformationalScansDisabled is returned when the security.auto_baseline_scan
+// kill switch was turned off after a scan was queued but before it ran. It is a
+// clean skip, not a failure: the caller releases the claim so the server is
+// picked up again if the flag comes back.
+var errInformationalScansDisabled = errors.New("informational baseline scans are disabled")
 
 // isTerminalScanStatus reports whether a scan summary status means the scan has
 // finished (successfully or not). "scanning" and "not_scanned" are transient.
@@ -234,6 +241,16 @@ func (s *Server) claimInformationalScan(ctx context.Context, sc *config.ServerCo
 // Bounded by maxInformationalScanAttempts: past the cap the "known" mark stays,
 // which retires the server from the automatic path instead of retrying a broken
 // upstream on every servers.changed.
+// unclaimInformationalScan reverses a claim WITHOUT counting a failed attempt.
+// Used when the scan was skipped for a reason that says nothing about the server
+// (the kill switch flipped while it was queued).
+func (s *Server) unclaimInformationalScan(name string) {
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	delete(s.infoScanQueued, name)
+	delete(s.infoScanKnown, name)
+}
+
 func (s *Server) releaseInformationalScan(name string) {
 	s.infoScanMu.Lock()
 	defer s.infoScanMu.Unlock()
@@ -269,6 +286,13 @@ func (s *Server) startInformationalScan(ctx context.Context, sc *config.ServerCo
 			s.logger.Debug("informational baseline scan did not run",
 				zap.String("server", name),
 				zap.Error(err))
+			// A kill-switch skip is not a failed attempt: it must not consume one
+			// of the server's bounded retries, or toggling the flag off and on
+			// would silently retire servers that never actually failed a scan.
+			if errors.Is(err, errInformationalScansDisabled) {
+				s.unclaimInformationalScan(name)
+				return
+			}
 			s.releaseInformationalScan(name)
 		}
 	}()
@@ -284,6 +308,16 @@ func (s *Server) runInformationalScan(ctx context.Context, name string) (int, er
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	// Re-read the kill switch HERE, not only where the scan was queued. A queued
+	// scan can sit behind infoScanRunMu for minutes while earlier scans settle,
+	// and the sweep waits out its startup delay first — so an operator who sets
+	// security.auto_baseline_scan:false in that window would otherwise still see
+	// the automatic scans they just switched off fire one by one. The documented
+	// contract is that the flag is read live at each decision point; this is the
+	// last decision point before a scan actually starts.
+	if !s.informationalScansEnabled() {
+		return 0, errInformationalScansDisabled
 	}
 	if _, err := s.securityScanner.StartScan(ctx, name, false, nil, ""); err != nil {
 		return 0, err
@@ -347,6 +381,13 @@ func (s *Server) runBaselineSweep(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+	// Re-read the kill switch after the startup delay: the operator has had 45
+	// seconds to disable automatic scanning, and the sweep must honour that
+	// rather than acting on the value it read before waiting.
+	if !s.informationalScansEnabled() {
+		s.logger.Debug("baseline sweep: disabled during startup delay, skipping (marker left unset)")
+		return
+	}
 	state, err := sm.LoadBaselineSweepState()
 	if err != nil {
 		// Unknown marker state: do NOT sweep. Re-running the sweep on every
@@ -384,6 +425,16 @@ func (s *Server) runBaselineSweep(ctx context.Context) {
 			continue
 		}
 		n, err := s.runInformationalScan(ctx, sc.Name)
+		if errors.Is(err, errInformationalScansDisabled) {
+			// The operator disabled automatic scanning mid-sweep. Abandon the
+			// sweep WITHOUT marking it done — treating the remaining servers as
+			// "failed" would still burn the marker whenever an earlier server had
+			// already scanned, and they were never actually examined.
+			s.unclaimInformationalScan(sc.Name)
+			s.logger.Info("baseline sweep abandoned: automatic scanning was disabled; will resume if re-enabled",
+				zap.Int("servers_scanned", scanned))
+			return
+		}
 		if err != nil {
 			failed++
 			s.releaseInformationalScan(sc.Name)

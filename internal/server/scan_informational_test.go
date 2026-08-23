@@ -391,6 +391,81 @@ func TestInformationalScan_KillSwitch(t *testing.T) {
 	waitForStartedScans(t, fake, []string{"gated"})
 }
 
+// The kill switch is documented as read live "at each decision point". A queued
+// scan can sit behind infoScanRunMu for minutes, so the LAST decision point —
+// immediately before StartScan — has to re-read it too, or an operator who
+// disables automatic scanning still watches the queue drain into their upstreams.
+func TestInformationalScan_KillSwitchCheckedAtExecutionTime(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeManual))
+
+	// Flip the switch after the scan would have been queued. The env override is
+	// resolved inside IsAutoBaselineScanEnabled, so it takes effect immediately.
+	t.Setenv(config.EnvAutoBaselineScan, "false")
+
+	n, err := s.runInformationalScan(context.Background(), "srv")
+	require.ErrorIs(t, err, errInformationalScansDisabled)
+	assert.Zero(t, n)
+	assert.Empty(t, fake.startScanAttempts(), "a disabled scan must never reach StartScan")
+}
+
+// A kill-switch skip says nothing about the server, so it must not consume one
+// of its bounded retries — otherwise toggling the flag off and on would retire
+// servers that never failed a scan.
+func TestInformationalScan_KillSwitchSkipDoesNotConsumeRetries(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeManual))
+
+	t.Setenv(config.EnvAutoBaselineScan, "false")
+	for i := 0; i < maxInformationalScanAttempts+2; i++ {
+		s.maybeStartInformationalScans(context.Background())
+		require.Eventually(t, func() bool {
+			s.infoScanMu.Lock()
+			defer s.infoScanMu.Unlock()
+			return !s.infoScanQueued["srv"] && !s.infoScanKnown["srv"]
+		}, 2*time.Second, 5*time.Millisecond)
+	}
+
+	s.infoScanMu.Lock()
+	attempts := s.infoScanAttempts["srv"]
+	s.infoScanMu.Unlock()
+	assert.Zero(t, attempts, "kill-switch skips are not failed attempts")
+
+	// Re-enabling must still scan it.
+	t.Setenv(config.EnvAutoBaselineScan, "true")
+	fake.scanResult["srv"] = &scanner.ScanSummary{Status: "clean"}
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"srv"})
+}
+
+// Disabling automatic scanning DURING the sweep's startup delay must stop it,
+// and must leave the one-shot marker unset so it resumes if re-enabled.
+func TestBaselineSweep_KillSwitchDuringStartupDelay(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("a", config.TrustModeManual))
+	s.infoScanSweepDelay = 300 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runBaselineSweep(context.Background())
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	t.Setenv(config.EnvAutoBaselineScan, "false")
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweep did not return")
+	}
+
+	assert.Empty(t, fake.startScanAttempts(), "the sweep must re-read the flag after its delay")
+	state, err := s.runtime.StorageManager().LoadBaselineSweepState()
+	require.NoError(t, err)
+	assert.Nil(t, state, "an abandoned sweep must not burn the one-shot marker")
+}
+
 func TestScanModeAdmissionOwns(t *testing.T) {
 	tests := []struct {
 		name        string
