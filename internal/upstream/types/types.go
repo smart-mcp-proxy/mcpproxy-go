@@ -67,6 +67,52 @@ type ConnectionInfo struct {
 	GaveUp           bool            `json:"gave_up"` // True when max retries exceeded
 }
 
+// RetryBackoffDuration returns the exponential backoff to wait after the given
+// number of consecutive connection failures: 1s, 2s, 4s, ... capped at 5 minutes.
+func RetryBackoffDuration(retryCount int) time.Duration {
+	// Ensure retry count is valid and within safe range to avoid overflow
+	exponent := retryCount - 1
+	if exponent < 0 {
+		exponent = 0
+	}
+	if exponent > 30 { // Cap at 30 to prevent overflow in 64-bit systems
+		exponent = 30
+	}
+	backoffDuration := time.Duration(1<<uint(exponent)) * time.Second //nolint:gosec // exponent is bounds-checked above
+	maxBackoff := 5 * time.Minute
+	if backoffDuration > maxBackoff {
+		backoffDuration = maxBackoff
+	}
+	return backoffDuration
+}
+
+// ShouldAutoReconnect reports whether an automatic (supervisor-driven) reconnect
+// attempt is appropriate given the connection's failure history. It returns false
+// while the exponential backoff window from the last failure has not elapsed,
+// after the client has given up (MaxConnectionRetries), and for servers parked in
+// PendingAuth — redialing cannot succeed until the user completes the OAuth login,
+// and each attempt costs real requests against the upstream. Manual reconnects,
+// login flows, and reconnect-on-use are not subject to this policy.
+func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
+	if ci == nil {
+		return true
+	}
+	switch ci.State {
+	case StatePendingAuth:
+		return false
+	case StateError:
+		if ci.GaveUp || ci.RetryCount >= MaxConnectionRetries {
+			return false
+		}
+		if ci.RetryCount == 0 {
+			return true
+		}
+		return now.Sub(ci.LastRetryTime) >= RetryBackoffDuration(ci.RetryCount)
+	default:
+		return true
+	}
+}
+
 // StateManager manages the state transitions for an upstream connection
 type StateManager struct {
 	mu               sync.RWMutex
@@ -253,22 +299,7 @@ func (sm *StateManager) ShouldRetry() bool {
 		return true
 	}
 
-	// Calculate exponential backoff
-	// Ensure retry count is valid and within safe range to avoid overflow
-	retryCount := sm.retryCount - 1
-	if retryCount < 0 {
-		retryCount = 0
-	}
-	if retryCount > 30 { // Cap at 30 to prevent overflow in 64-bit systems
-		retryCount = 30
-	}
-	backoffDuration := time.Duration(1<<uint(retryCount)) * time.Second //nolint:gosec // retryCount is bounds-checked above
-	maxBackoff := 5 * time.Minute
-	if backoffDuration > maxBackoff {
-		backoffDuration = maxBackoff
-	}
-
-	return time.Since(sm.lastRetryTime) >= backoffDuration
+	return time.Since(sm.lastRetryTime) >= RetryBackoffDuration(sm.retryCount)
 }
 
 // IsState checks if the current state matches the given state
