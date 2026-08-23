@@ -223,14 +223,39 @@ echo "server ready at $BASE_URL"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$REPO_ROOT/tmp/playwright-browsers}"
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
 
-if [[ ! -x "$SWEEP_DIR/node_modules/.bin/playwright" ]]; then
-  # `npm ci` against the COMMITTED e2e/web-ui-sweep/package-lock.json, never a
-  # bare `npm install`: this runs during release qualification, and resolving the
-  # mutable `^1.49.0` range there would execute whatever Playwright and its
-  # transitive deps published since the last review. The lockfile pins exact
-  # versions + integrity hashes; bump it deliberately with `npm install`.
-  echo "installing @playwright/test into $SWEEP_DIR (npm ci, locked)"
-  npm ci --prefix "$SWEEP_DIR"
+# `npm ci` against the COMMITTED e2e/web-ui-sweep/package-lock.json, never a
+# bare `npm install`: this runs during release qualification, and resolving the
+# mutable `^1.49.0` range there would execute whatever Playwright and its
+# transitive deps published since the last review. The lockfile pins exact
+# versions + integrity hashes; bump it deliberately with `npm install`.
+#
+# The install is skipped only when what is on disk ALREADY MATCHES the lockfile.
+# A mere "is playwright present?" check would let a stale tree — e.g. one an
+# older revision of this script installed with an unlocked `npm install` — keep
+# serving an unreviewed version forever. Comparing versions keeps the hand-run
+# fast path (no registry round-trip when nothing changed) without weakening that.
+locked_playwright_version() {
+  node -p "require('$SWEEP_DIR/package-lock.json').packages['node_modules/@playwright/test'].version" 2>/dev/null || true
+}
+installed_playwright_version() {
+  node -p "require('$SWEEP_DIR/node_modules/@playwright/test/package.json').version" 2>/dev/null || true
+}
+
+LOCKED_PW=$(locked_playwright_version)
+if [[ -z "$LOCKED_PW" ]]; then
+  echo "cannot read the pinned @playwright/test version from $SWEEP_DIR/package-lock.json" >&2
+  exit 1
+fi
+
+if [[ ! -x "$SWEEP_DIR/node_modules/.bin/playwright" || "$(installed_playwright_version)" != "$LOCKED_PW" ]]; then
+  echo "installing @playwright/test@${LOCKED_PW} into $SWEEP_DIR (npm ci, locked)"
+  # cd rather than `npm ci --prefix`: --prefix has a long history of version-
+  # dependent behaviour for `ci` specifically, and this runs during release
+  # qualification — an install that silently resolves against the repo root
+  # instead of the sweep's lockfile is not a failure mode worth risking.
+  (cd "$SWEEP_DIR" && npm ci)
+else
+  echo "@playwright/test@${LOCKED_PW} already installed (matches lockfile)"
 fi
 
 PLAYWRIGHT_BIN="$SWEEP_DIR/node_modules/.bin/playwright"
