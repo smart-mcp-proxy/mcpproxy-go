@@ -936,11 +936,7 @@ func (s *Service) advanceUpgradeFunnel() {
 		return
 	}
 	cfg.Telemetry.LastReportedVersion = s.version
-	if s.cfgPath != "" {
-		if err := config.SaveConfig(cfg, s.cfgPath); err != nil {
-			s.logger.Debug("Failed to persist last_reported_version", zap.Error(err))
-		}
-	}
+	s.persistConfig(cfg, "Advanced last_reported_version")
 }
 
 // BuildPayload renders the heartbeat payload at the current point in time.
@@ -1255,12 +1251,27 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 	s.persistConfig(cfg, "Rotated anonymous_id (annual)")
 }
 
-// persistConfig writes cfg to disk. The config is a parameter for the same
-// reason as maybeRotateAnonymousID: callers on the heartbeat path hold a
-// snapshot of the live pointer and must persist THAT, not whatever s.config
-// happens to point at by the time the write runs.
+// persistConfig writes cfg to disk, but ONLY while cfg is still the service's
+// live config.
+//
+// This writes the WHOLE config file, so a write must never be issued against a
+// pointer the daemon has already swapped out: the heartbeat path works from a
+// snapshot (liveConfig), and if NotifyConfigChanged installs a newer config
+// while that heartbeat is in flight, saving the snapshot would silently roll
+// the user's change back on disk. The liveness check and the write share one
+// s.mu hold so the swap cannot slip between them.
+//
+// Skipping is safe: every caller's mutation is idempotent, so the next
+// heartbeat re-evaluates it against the new config and persists then.
 func (s *Service) persistConfig(cfg *config.Config, reason string) {
 	if s.cfgPath == "" || cfg == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.config != cfg {
+		s.logger.Debug("Skipped telemetry config persist: live config was swapped",
+			zap.String("reason", reason))
 		return
 	}
 	if err := config.SaveConfig(cfg, s.cfgPath); err != nil {
