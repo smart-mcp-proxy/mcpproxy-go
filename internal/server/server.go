@@ -702,15 +702,30 @@ func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerC
 	}()
 }
 
-// findServerConfig returns the live ServerConfig for serverName from the current
-// config snapshot, or nil if absent. Read-only lookup over the immutable
-// snapshot — safe to call from event-loop goroutines.
+// findServerConfig returns the live ServerConfig for serverName, or nil if
+// absent.
+//
+// Reads from STORAGE, not runtime.Config().Servers. The snapshot Config() hands
+// back is shared and lock-free, and its ServerConfig structs are mutated in
+// place by other goroutines — so ranging it from this background event-loop
+// goroutine is a genuine data race (the same hazard maybeStartAdmissionScans
+// documents, and one the race detector reports against this function's only
+// caller, maybeAutoApproveScanSettled, once anything actually settles a scan).
+// ListUpstreamServers is serialized against SaveUpstreamServer by the storage
+// manager mutex and returns fresh copies.
 func (s *Server) findServerConfig(serverName string) *config.ServerConfig {
-	cfg := s.runtime.Config()
-	if cfg == nil {
+	sm := s.runtime.StorageManager()
+	if sm == nil {
 		return nil
 	}
-	for _, sc := range cfg.Servers {
+	servers, err := sm.ListUpstreamServers()
+	if err != nil {
+		s.logger.Debug("findServerConfig: failed to list servers",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return nil
+	}
+	for _, sc := range servers {
 		if sc != nil && sc.Name == serverName {
 			return sc
 		}
