@@ -313,9 +313,10 @@ fails closed to `manual`.
 Independently of `trust_mode`, MCPProxy runs the free in-process Pass-1 TPA scan
 so every server ends up with a security verdict instead of an empty badge:
 
-- **On admission** — a newly added, enabled server gets one baseline scan in any
-  trust mode. Servers the `scan`-mode admission gate already owns are skipped so
-  nothing is scanned twice.
+- **On admission** — a newly added, enabled server gets one baseline scan. Servers
+  with `trust_mode: "scan"` are skipped entirely: that mode's own admission gate
+  scans them, and routing an informational verdict into its settle-driven
+  auto-approval could change quarantine state.
 - **Once per installation** — a background sweep at startup scans enabled servers
   that have never been scanned (for installs that predate this behaviour). It is
   serialized, never delays startup, is cancelled on shutdown, and a persisted

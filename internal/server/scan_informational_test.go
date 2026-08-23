@@ -140,37 +140,38 @@ func TestInformationalScan_ScanModeAdmissionPathUnchanged(t *testing.T) {
 		assert.Equal(t, []string{"gated"}, fake.startedScans())
 	})
 
-	// A scan-mode server with NO approval baseline is off-limits to the
-	// informational path even while it is unquarantined. Quarantine is mutable
-	// during the scan and maybeAutoApproveScanSettled re-reads it, so scanning
-	// here would let an operator quarantine that lands mid-scan be silently
-	// reverted by the clean settle — an informational scan causing a gating
-	// state change.
-	t.Run("scan-mode without approval baseline is never informational, quarantined or not", func(t *testing.T) {
-		fake := newFakeSecurityScanner()
-		fake.scanResult["srv"] = &scanner.ScanSummary{Status: "clean"}
-		s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeScan))
+	// EVERY scan-mode server belongs to the gating path, in every quarantine
+	// state and with or without an approval baseline. Both of the settle
+	// handler's gates are mutable while a scan is in flight and it re-reads them
+	// at settle time: an operator quarantine landing mid-scan, or a POST
+	// .../reject (RejectServer deletes the integrity baseline) landing mid-scan,
+	// would each let a clean informational verdict unquarantine the server.
+	for _, tc := range []struct {
+		name        string
+		quarantined bool
+		hasBaseline bool
+	}{
+		{"unquarantined, no baseline", false, false},
+		{"unquarantined, has baseline", false, true},
+		{"quarantined, has baseline (re-quarantine)", true, true},
+	} {
+		t.Run("scan-mode is never informational: "+tc.name, func(t *testing.T) {
+			fake := newFakeSecurityScanner()
+			fake.scanResult["srv"] = &scanner.ScanSummary{Status: "clean"}
+			fake.hasBaseline["srv"] = tc.hasBaseline
+			srv := enabledServer("srv", config.TrustModeScan)
+			srv.Quarantined = tc.quarantined
+			s := newInformationalTestServer(t, fake, nil, srv)
 
-		s.maybeStartInformationalScans(context.Background())
-		s.runBaselineSweep(context.Background())
-		time.Sleep(50 * time.Millisecond)
+			s.maybeStartInformationalScans(context.Background())
+			s.runBaselineSweep(context.Background())
+			time.Sleep(50 * time.Millisecond)
 
-		assert.Empty(t, fake.startedScans(), "the settle handler could still act on this server")
-		assert.Empty(t, fake.approvedServers())
-	})
-
-	// Once a server HAS an approval baseline the settle handler bails on it
-	// unconditionally, so it is safe to give it an informational badge.
-	t.Run("scan-mode WITH approval baseline is informational", func(t *testing.T) {
-		fake := newFakeSecurityScanner()
-		fake.scanResult["srv"] = &scanner.ScanSummary{Status: "clean"}
-		fake.hasBaseline["srv"] = true
-		s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeScan))
-
-		s.maybeStartInformationalScans(context.Background())
-		waitForStartedScans(t, fake, []string{"srv"})
-		assert.Empty(t, fake.approvedServers())
-	})
+			assert.Empty(t, fake.startScanAttempts(),
+				"an informational verdict must never be able to reach the settle handler")
+			assert.Empty(t, fake.approvedServers())
+		})
+	}
 }
 
 // A new server whose scan fails to START must stay retryable: the admission path
@@ -474,20 +475,20 @@ func TestScanModeAdmissionOwns(t *testing.T) {
 		want        bool
 	}{
 		{"nil", nil, false, false},
+		// Every quarantine/baseline combination of a scan-mode server belongs to
+		// the gating path: both of the settle handler's gates are mutable while a
+		// scan is in flight, so no static snapshot of them is safe to scan on.
 		{"scan+quarantined+no baseline", &config.ServerConfig{TrustMode: "scan", Quarantined: true}, false, true},
-		{"scan+quarantined+baseline (re-quarantine)", &config.ServerConfig{TrustMode: "scan", Quarantined: true}, true, false},
-		// Quarantine is mutable while a scan is in flight and the settle handler
-		// re-reads it, so an unquarantined scan-mode server with no approval
-		// baseline is STILL the gating path's — otherwise an operator quarantine
-		// landing mid-scan would let the clean settle unquarantine it again.
-		{"scan+not quarantined+no baseline (settle could still act)", &config.ServerConfig{TrustMode: "scan"}, false, true},
-		{"scan+not quarantined+baseline (settle bails)", &config.ServerConfig{TrustMode: "scan"}, true, false},
+		{"scan+quarantined+baseline (re-quarantine, reject can delete it)", &config.ServerConfig{TrustMode: "scan", Quarantined: true}, true, true},
+		{"scan+not quarantined+no baseline", &config.ServerConfig{TrustMode: "scan"}, false, true},
+		{"scan+not quarantined+baseline", &config.ServerConfig{TrustMode: "scan"}, true, true},
 		{"manual+quarantined", &config.ServerConfig{TrustMode: "manual", Quarantined: true}, false, false},
+		{"auto+quarantined", &config.ServerConfig{TrustMode: "auto", Quarantined: true}, false, false},
 		{"empty trust mode (manual) + quarantined", &config.ServerConfig{Quarantined: true}, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, scanModeAdmissionOwns(tt.sc, tt.hasBaseline))
+			assert.Equal(t, tt.want, scanModeAdmissionOwns(tt.sc))
 		})
 	}
 }

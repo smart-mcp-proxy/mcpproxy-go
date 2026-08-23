@@ -78,23 +78,31 @@ func isTerminalScanStatus(status string) bool {
 // gate — and the settle-driven auto-approval behind it — is responsible for this
 // server. Those servers must NOT be picked up by the informational path.
 //
-// The predicate deliberately does NOT look at sc.Quarantined, even though the
-// gating path itself does. Quarantine is MUTABLE while a scan is in flight, and
-// maybeAutoApproveScanSettled re-reads it when the scan settles: a scan-mode
-// server that is unquarantined when we claim it, and is quarantined by the
-// operator before the clean verdict lands, would be silently unquarantined by
-// the settle handler — an informational scan causing a gating state change.
-// Keying only on the IMMUTABLE-for-this-purpose pair (trust mode, prior approval
-// baseline) closes that window: a scan-mode server without an approval baseline
-// is exactly the set the settle handler can act on, so the informational path
-// never touches it in any quarantine state. Scan-mode servers that already have
-// an approval baseline are safe (the settle handler bails on them) and stay
-// eligible for an informational badge.
-func scanModeAdmissionOwns(sc *config.ServerConfig, hasApprovalBaseline bool) bool {
+// The rule is deliberately the blunt one: EVERY trust_mode:"scan" server belongs
+// to the gating path, whatever its quarantine state or approval history.
+//
+// Narrower predicates were tried and are unsafe, because every input the settle
+// handler gates on is MUTABLE while a scan is in flight, and
+// maybeAutoApproveScanSettled re-reads all of them when the verdict lands:
+//
+//   - Quarantine: a scan-mode server unquarantined at claim time that the
+//     operator quarantines mid-scan gets silently unquarantined by the clean
+//     settle.
+//   - Approval baseline: a scan-mode server WITH a baseline (which the settle
+//     handler would normally bail on) loses it if the operator rejects the
+//     server mid-scan — POST .../reject calls RejectServer, which deletes the
+//     integrity baseline — and the clean settle then auto-approves the very
+//     server that was just rejected.
+//
+// Since the informational path's whole contract is that it can never cause a
+// gating state change, it simply never scans a server the settle handler could
+// act on. Scan-mode servers still get their verdict from the gating path's own
+// admission scan, or from a manual scan.
+func scanModeAdmissionOwns(sc *config.ServerConfig) bool {
 	if sc == nil {
 		return false
 	}
-	return sc.EffectiveTrustMode() == config.TrustModeScan && !hasApprovalBaseline
+	return sc.EffectiveTrustMode() == config.TrustModeScan
 }
 
 // informationalScansEnabled resolves the security.auto_baseline_scan kill switch
@@ -212,8 +220,9 @@ func (s *Server) claimInformationalScan(ctx context.Context, sc *config.ServerCo
 	if summary := s.securityScanner.GetScanSummary(ctx, sc.Name); summary != nil {
 		return false
 	}
-	// Leave the gating admission path's servers alone (no double scan).
-	if scanModeAdmissionOwns(sc, s.securityScanner.HasApprovalBaseline(sc.Name)) {
+	// Leave the gating admission path's servers alone: no double scan, and no
+	// way for an informational verdict to reach the settle-driven auto-approval.
+	if scanModeAdmissionOwns(sc) {
 		return false
 	}
 
@@ -286,10 +295,15 @@ func (s *Server) startInformationalScan(ctx context.Context, sc *config.ServerCo
 			s.logger.Debug("informational baseline scan did not run",
 				zap.String("server", name),
 				zap.Error(err))
-			// A kill-switch skip is not a failed attempt: it must not consume one
-			// of the server's bounded retries, or toggling the flag off and on
-			// would silently retire servers that never actually failed a scan.
-			if errors.Is(err, errInformationalScansDisabled) {
+			// A skip that says nothing about the SERVER is not a failed attempt
+			// and must not consume one of its bounded retries. Two such skips:
+			// the kill switch flipping while the scan sat in the queue, and the
+			// server context being cancelled (shutdown) before StartScan ran. If
+			// either counted, toggling the flag — or a shutdown draining a queue
+			// on a Server object that is later restarted in-process — would
+			// silently retire servers that never actually failed a scan.
+			if errors.Is(err, errInformationalScansDisabled) || errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
 				s.unclaimInformationalScan(name)
 				return
 			}
