@@ -921,17 +921,23 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 }
 
 // advanceUpgradeFunnel persists the current version as last_reported_version.
-// Called only on successful heartbeat send.
+// Called only on successful heartbeat send. Reads the live config through
+// liveConfig for the same reason buildHeartbeat does: this runs on the
+// heartbeat loop, concurrently with the NotifyConfigChanged pointer swap.
 func (s *Service) advanceUpgradeFunnel() {
-	if s.config.Telemetry == nil {
-		s.config.Telemetry = &config.TelemetryConfig{}
-	}
-	if s.config.Telemetry.LastReportedVersion == s.version {
+	cfg := s.liveConfig()
+	if cfg == nil {
 		return
 	}
-	s.config.Telemetry.LastReportedVersion = s.version
+	if cfg.Telemetry == nil {
+		cfg.Telemetry = &config.TelemetryConfig{}
+	}
+	if cfg.Telemetry.LastReportedVersion == s.version {
+		return
+	}
+	cfg.Telemetry.LastReportedVersion = s.version
 	if s.cfgPath != "" {
-		if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
+		if err := config.SaveConfig(cfg, s.cfgPath); err != nil {
 			s.logger.Debug("Failed to persist last_reported_version", zap.Error(err))
 		}
 	}
