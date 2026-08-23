@@ -156,6 +156,8 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 					assertCallToolVariantDelta(t, surface, name, preM, curM)
 				case name == "code_execution":
 					assertCodeExecutionDelta(t, surface, preM, curM)
+				case name == "quarantine_security":
+					assertQuarantineSecurityDelta(t, surface, preM, curM)
 				default:
 					assert.Equal(t, preM, curM,
 						"surface %s: tool %q must be byte-identical to the pre-feature snapshot (SC-003)", surface, name)
@@ -258,6 +260,78 @@ func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[strin
 		"surface %s: retrieve_tools description must reference describe_tool (spec 085 FR-014)", surface)
 	assert.Contains(t, strings.ToLower(curDesc), "signature",
 		"surface %s: retrieve_tools description must reference compact signatures (spec 085 FR-014)", surface)
+}
+
+// quarantineScanOperations are the operations that made TPA scanning reachable
+// from quarantine_security — the surface agents already use for held servers.
+var quarantineScanOperations = []string{"scan_server", "get_scan_report"}
+
+// assertQuarantineSecurityDelta: quarantine_security may grow the two scan
+// operations and the prose that documents them, and NOTHING else. In
+// particular it takes no new parameter — both operations reuse `name` — so the
+// parameter SET and every parameter schema except `operation` must be
+// byte-identical to the pre-feature snapshot.
+func assertQuarantineSecurityDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	preProps, curProps := schemaProps(preM), schemaProps(curM)
+	require.NotNil(t, curProps, "surface %s: quarantine_security lost its inputSchema", surface)
+	assert.Equal(t, sortedKeys(preProps), sortedKeys(curProps),
+		"surface %s: the scan operations reuse existing parameters — none may be added", surface)
+
+	for p, preSchema := range preProps {
+		if p == "operation" {
+			continue
+		}
+		if p == "name" {
+			// `name` is now required for the scan ops too, so its description
+			// lists them; the rest of its schema must not move.
+			preName, _ := preSchema.(map[string]interface{})
+			curName, _ := curProps[p].(map[string]interface{})
+			require.NotNil(t, curName, "surface %s: quarantine_security lost its name parameter", surface)
+			assert.Equal(t, preName["type"], curName["type"], "surface %s: name stays a string", surface)
+			for _, op := range quarantineScanOperations {
+				assert.Contains(t, curName["description"], op,
+					"surface %s: name must document that %s requires it", surface, op)
+			}
+			continue
+		}
+		assert.Equal(t, preSchema, curProps[p],
+			"surface %s: pre-feature quarantine_security parameter %q must be preserved unchanged", surface, p)
+	}
+
+	// The operation enum grows by exactly the scan operations, appended after
+	// every pre-feature value in its original order.
+	preOp, _ := preProps["operation"].(map[string]interface{})
+	curOp, _ := curProps["operation"].(map[string]interface{})
+	require.NotNil(t, curOp, "surface %s: quarantine_security lost its operation parameter", surface)
+	preEnum, _ := preOp["enum"].([]interface{})
+	curEnum, _ := curOp["enum"].([]interface{})
+	wantEnum := append([]interface{}{}, preEnum...)
+	for _, op := range quarantineScanOperations {
+		wantEnum = append(wantEnum, op)
+	}
+	assert.Equal(t, wantEnum, curEnum,
+		"surface %s: the operation enum grows by exactly %v", surface, quarantineScanOperations)
+
+	// Annotations and required list unchanged.
+	assert.Equal(t, preM["annotations"], curM["annotations"],
+		"surface %s: quarantine_security annotations unchanged", surface)
+	preSchema, _ := preM["inputSchema"].(map[string]interface{})
+	curSchema, _ := curM["inputSchema"].(map[string]interface{})
+	assert.Equal(t, preSchema["required"], curSchema["required"],
+		"surface %s: quarantine_security required params unchanged", surface)
+
+	// The tool description must actually advertise scanning — the discovery
+	// gap this change exists to close (the tool never mentioned scanning, so
+	// agents never found the scanner).
+	curDesc, _ := curM["description"].(string)
+	assert.Contains(t, strings.ToLower(curDesc), "scan",
+		"surface %s: quarantine_security description must mention scanning", surface)
+	for _, op := range quarantineScanOperations {
+		assert.Contains(t, curDesc, op,
+			"surface %s: quarantine_security description must name %s", surface, op)
+	}
 }
 
 // FR-009: the three registrations are built independently, which is exactly

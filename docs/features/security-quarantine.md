@@ -172,6 +172,28 @@ Manage held prompts with the `quarantine_security` MCP tool:
 
 ## Managing Quarantine
 
+### Scan a Server for TPAs (MCP)
+
+The `quarantine_security` tool can also run and read the TPA scan, so an agent
+reviewing a held server does not have to leave for the CLI or web UI:
+
+```jsonc
+// run the offline baseline scan (in-process, no Docker required)
+{ "operation": "scan_server", "name": "github" }
+// read the latest verdict + findings
+{ "operation": "get_scan_report", "name": "github" }
+```
+
+`scan_server` answers with the verdict when the scan settles quickly, otherwise
+with the job id and `"status": "scan started"` — poll `get_scan_report` for the
+result. Every `list_quarantined`, `inspect_quarantined` and `inspect_tools`
+response also carries a one-line `scan_status`, so a server nobody ever scanned
+reads as `never scanned — run scan_server first` instead of looking clean.
+
+The optional Docker-based deep scanners are a separate layer: they run only when
+[deep scan](/features/security-scanner-plugins) is enabled, and when they are
+unavailable they are skipped without changing the baseline verdict.
+
 ### View Quarantined Servers
 
 **Web UI:**

@@ -1840,16 +1840,34 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 	overview := &SecurityOverview{}
 
 	// Count installed scanners. ScannersInstalled is the total number of
-	// scanners persisted in storage; ScannersEnabled is the subset the engine
-	// will actually run (status installed or configured). UI uses
-	// ScannersEnabled to decide whether to show scan-trigger buttons.
+	// scanners the proxy holds an install record for; ScannersEnabled is the
+	// subset the engine will actually run (status installed or configured). UI
+	// uses ScannersEnabled to decide whether to show scan-trigger buttons.
+	//
+	// Both counts have to include the in-process baseline scanner
+	// (tpa-descriptions), which is always installed+enabled and lives in the
+	// in-memory registry — nothing persists it to BBolt until a Docker scanner
+	// is installed. Counting storage alone reported 0/0 on a fresh install and
+	// hid the web UI's "Scan All Servers" button on exactly the installs that
+	// have never scanned anything.
+	seen := make(map[string]bool)
 	scanners, err := s.storage.ListScanners()
 	if err == nil {
 		overview.ScannersInstalled = len(scanners)
 		for _, sc := range scanners {
+			seen[sc.ID] = true
 			if sc.Status == ScannerStatusInstalled || sc.Status == ScannerStatusConfigured {
 				overview.ScannersEnabled++
 			}
+		}
+	}
+	for _, reg := range s.registry.List() {
+		if seen[reg.ID] || !reg.InProcess {
+			continue
+		}
+		if reg.Status == ScannerStatusInstalled || reg.Status == ScannerStatusConfigured {
+			overview.ScannersInstalled++
+			overview.ScannersEnabled++
 		}
 	}
 

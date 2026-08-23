@@ -33,14 +33,24 @@ import (
 //     DELIBERATELY, once, so the new definition — including its prose — is
 //     pinned byte-for-byte and a later edit shows up as a reviewable diff
 //     rather than drifting silently under the token budget.
-//  2. The regenerated goldens differ from the frozen pre-099 capture
-//     (testdata/toolslist_goldens/pre099/) in EXACTLY one tool entry,
-//     describe_tool, on exactly those two surfaces. Every other tool, and the
-//     whole code_execution surface, is byte-equal — which is why that surface
-//     has no pre099 copy at all: its golden was never regenerated.
+//  2. The regenerated goldens differ from the frozen pre-feature capture
+//     (testdata/toolslist_goldens/pre099/) in EXACTLY the tool entries the
+//     shipped features were allowed to move — see toolsListAllowedDelta. Every
+//     other tool on every surface is byte-equal.
 //
 // A failure in (1) with no accompanying spec is a regression, not a golden to
 // refresh. A failure in (2) means a change reached further than it claimed.
+//
+// The enumerated delta currently covers two features:
+//
+//   - describe_tool (spec 099), on the two retrieve_tools-carrying surfaces;
+//   - quarantine_security, which gained the scan_server / get_scan_report
+//     operations so TPA scanning is reachable from the surface agents already
+//     use. It carries no new PARAMETER — the two operations reuse `name` — so
+//     the delta is the operation enum plus the prose that documents it. It is
+//     registered on all three surfaces, which is why code_execution_mode now
+//     has a frozen copy too (a byte-for-byte snapshot of its previous golden,
+//     which had never moved since the spec-098 capture).
 //
 // Surfaces covered (the three routing modes that expose a static, built-in
 // tool set):
@@ -57,9 +67,10 @@ import (
 const (
 	toolsListGoldenDir = "toolslist_goldens"
 
-	// toolsListPre099Dir holds the FROZEN pre-099 capture of the two surfaces
-	// spec 099 was allowed to move. It is never regenerated: it is the baseline
-	// the enumerated delta is measured against.
+	// toolsListPre099Dir holds the FROZEN pre-feature capture of the surfaces
+	// an enumerated delta is measured against. It is never regenerated: it is
+	// the baseline, not a mirror of the current surface. (Named for spec 099,
+	// the first feature that needed it.)
 	toolsListPre099Dir = "pre099"
 
 	// toolsListGoldenWriteEnv, when set to a directory, makes this test WRITE
@@ -166,29 +177,35 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 	}
 }
 
-// toolsListPre099Surfaces maps a surface to the tool entries spec 099 was
-// allowed to change on it (FR-014). A surface absent from this map may not move
-// at all — code_execution_mode is deliberately absent.
-var toolsListPre099Surfaces = map[string][]string{
-	"default_server":      {"describe_tool"},
-	"retrieve_tools_mode": {"describe_tool"},
+// toolsListAllowedDelta maps a surface to the tool entries the shipped features
+// were allowed to change on it, measured against the frozen pre-feature
+// capture. Every surface with a frozen copy appears here; adding a name to a
+// list is a deliberate, reviewable act.
+//
+//   - describe_tool        — spec 099 (FR-014), retrieve_tools surfaces only.
+//   - quarantine_security  — scan_server / get_scan_report operations, on every
+//     surface that registers the tool (all three).
+var toolsListAllowedDelta = map[string][]string{
+	"default_server":      {"describe_tool", "quarantine_security"},
+	"retrieve_tools_mode": {"describe_tool", "quarantine_security"},
+	"code_execution_mode": {"quarantine_security"},
 }
 
-// TestToolsListSnapshot_Spec099DeltaIsExactlyDescribeTool is the FR-014 gate:
-// the goldens moved, and this is the enumeration of how far.
-func TestToolsListSnapshot_Spec099DeltaIsExactlyDescribeTool(t *testing.T) {
-	for surface, allowed := range toolsListPre099Surfaces {
+// TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens
+// moved, and this is the enumeration of how far.
+func TestToolsListSnapshot_DeltaIsEnumerated(t *testing.T) {
+	for surface, allowed := range toolsListAllowedDelta {
 		surface, allowed := surface, allowed
 		t.Run(surface, func(t *testing.T) {
 			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre099Dir, surface+".json"))
 			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
 
-			// The tool SET is unchanged: 099 adds parameters to an existing
-			// built-in, it does not register or retire one.
+			// The tool SET is unchanged: these features extend existing
+			// built-ins, they do not register or retire one.
 			assert.Equal(t, sortedToolNames(before), sortedToolNames(after),
-				"surface %s: spec 099 adds no tool and removes none", surface)
+				"surface %s: no tool may be added or removed", surface)
 
-			changed := make([]string, 0, 1)
+			changed := make([]string, 0, len(allowed))
 			for name, pre := range before {
 				post, ok := after[name]
 				if !ok {
@@ -199,15 +216,19 @@ func TestToolsListSnapshot_Spec099DeltaIsExactlyDescribeTool(t *testing.T) {
 				}
 			}
 			sort.Strings(changed)
-			assert.Equal(t, allowed, changed,
-				"surface %s: spec 099 may change describe_tool and nothing else", surface)
+			sortedAllowed := append([]string(nil), allowed...)
+			sort.Strings(sortedAllowed)
+			assert.Equal(t, sortedAllowed, changed,
+				"surface %s: only the enumerated tools may change", surface)
 		})
 	}
 
-	// The one surface that had no delta to enumerate: it must still match the
-	// spec-098 merge-base bytes, so it never needed a pre099 copy.
-	assert.NotContains(t, toolsListPre099Surfaces, "code_execution_mode",
-		"code_execution mode carries no describe_tool and must not move (FR-002/FR-014)")
+	// Every surface with a golden carries a frozen baseline to measure against:
+	// a surface silently dropping out of the map would stop being gated.
+	for _, surface := range toolsListGoldenSurfaces {
+		assert.Contains(t, toolsListAllowedDelta, surface,
+			"surface %s must be covered by the enumerated-delta gate", surface)
+	}
 }
 
 func decodeToolsListGolden(t *testing.T, path string) map[string]json.RawMessage {

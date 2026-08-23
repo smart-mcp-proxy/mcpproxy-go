@@ -62,10 +62,25 @@ type securityScannerService interface {
 	GetScanSummary(ctx context.Context, serverName string) *scanner.ScanSummary
 	ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error
 	StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*scanner.ScanJob, error)
+	// GetScanStatus / GetScanReport back the quarantine_security scan
+	// operations (scan_server / get_scan_report): an agent that just triggered
+	// a scan needs the job's terminal state and the verdict that came out of it.
+	GetScanStatus(ctx context.Context, serverName string) (*scanner.ScanJob, error)
+	GetScanReport(ctx context.Context, serverName string) (*scanner.AggregatedReport, error)
 	HasApprovalBaseline(serverName string) bool
 	ApplySecurityConfig(sec *config.SecurityConfig)
 	SetIsolationMode(mode string)
 	DeepScanEnabled() bool
+}
+
+// securityScannerSvc returns the security scanner service, or nil when the
+// process runs without one (scanner disabled, or a test harness that never
+// wired one up). Callers MUST nil-check.
+func (s *Server) securityScannerSvc() securityScannerService {
+	if s == nil {
+		return nil
+	}
+	return s.securityScanner
 }
 
 // Server wraps the MCP proxy server with all its dependencies

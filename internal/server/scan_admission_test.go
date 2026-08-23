@@ -27,6 +27,17 @@ type fakeSecurityScanner struct {
 	hasBaseline map[string]bool
 	approveErr  error
 
+	// Scan-surface fixtures (quarantine_security scan_server /
+	// get_scan_report). jobs/reports are keyed by server name; startScanErr
+	// and reportErr let a test drive the failure branches.
+	jobs         map[string]*scanner.ScanJob
+	reports      map[string]*scanner.AggregatedReport
+	startScanErr error
+	reportErr    error
+	// onStartScan runs inside StartScan, so a test can make the scan "settle"
+	// (publish a completed job + summary) exactly when it is triggered.
+	onStartScan func(serverName string)
+
 	approveCalls   []string
 	startScanCalls []string
 }
@@ -35,7 +46,18 @@ func newFakeSecurityScanner() *fakeSecurityScanner {
 	return &fakeSecurityScanner{
 		summaries:   map[string]*scanner.ScanSummary{},
 		hasBaseline: map[string]bool{},
+		jobs:        map[string]*scanner.ScanJob{},
+		reports:     map[string]*scanner.AggregatedReport{},
 	}
+}
+
+// setScanResult publishes a settled scan for a server: the job the status poll
+// sees and the summary the verdict is read from.
+func (f *fakeSecurityScanner) setScanResult(serverName string, job *scanner.ScanJob, summary *scanner.ScanSummary) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobs[serverName] = job
+	f.summaries[serverName] = summary
 }
 
 func (f *fakeSecurityScanner) GetScanSummary(_ context.Context, serverName string) *scanner.ScanSummary {
@@ -56,9 +78,44 @@ func (f *fakeSecurityScanner) ApproveServer(_ context.Context, serverName string
 
 func (f *fakeSecurityScanner) StartScan(_ context.Context, serverName string, _ bool, _ []string, _ string) (*scanner.ScanJob, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.startScanCalls = append(f.startScanCalls, serverName)
-	return nil, nil
+	err := f.startScanErr
+	hook := f.onStartScan
+	f.mu.Unlock()
+
+	// The hook may publish the settled job, so read it back afterwards.
+	if hook != nil {
+		hook(serverName)
+	}
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.jobs[serverName], nil
+}
+
+func (f *fakeSecurityScanner) GetScanStatus(_ context.Context, serverName string) (*scanner.ScanJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	job, ok := f.jobs[serverName]
+	if !ok {
+		return nil, errors.New("no scan job")
+	}
+	return job, nil
+}
+
+func (f *fakeSecurityScanner) GetScanReport(_ context.Context, serverName string) (*scanner.AggregatedReport, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reportErr != nil {
+		return nil, f.reportErr
+	}
+	report, ok := f.reports[serverName]
+	if !ok {
+		return nil, errors.New("no scan found")
+	}
+	return report, nil
 }
 
 func (f *fakeSecurityScanner) HasApprovalBaseline(serverName string) bool {

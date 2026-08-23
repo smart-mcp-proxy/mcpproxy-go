@@ -41,8 +41,15 @@ func GetSecurityCommand() *cobra.Command {
 		Long: `Commands for managing security scanners, scanning MCP servers,
 and reviewing scan results.
 
-Security scanners run as Docker containers and analyze upstream MCP servers
-for vulnerabilities, tool poisoning attacks, and other security issues.
+Scanning works out of the box: the offline baseline scanner is built into
+mcpproxy, runs in-process on every scan, and needs no Docker and no setup. It
+analyzes tool descriptions and schemas for tool poisoning attacks (TPAs),
+prompt injection, and data exfiltration.
+
+Deep scanners are the optional extra layer. They run as Docker containers for
+source and dependency analysis (CVEs, secrets), so they need Docker plus
+"deep scan" enabled — and when they are unavailable they are skipped, never
+blocking the baseline verdict.
 
 Examples:
   mcpproxy security scanners
