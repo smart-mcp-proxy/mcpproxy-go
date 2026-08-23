@@ -102,6 +102,12 @@ type anonymityScanEnvelope struct {
 	// whose availability_block_reasons_24h map must be closed-enum reason keys
 	// → non-negative counts. Same not-a-pointer reasoning as TPAScanner.
 	Preflight json.RawMessage `json:"preflight"`
+
+	// Schema v9 structural check: the trust-tier histogram must be keyed
+	// exclusively by the fixed auto|scan|manual enum with non-negative integer
+	// counts — a producer-side regression that let a server name in as a map
+	// key must not reach the wire. Same not-a-pointer reasoning as TPAScanner.
+	TrustModeDistribution json.RawMessage `json:"trust_mode_distribution"`
 }
 
 // v7FieldViolation builds the violation for a Spec 080 field that broke its
@@ -232,8 +238,12 @@ func v8FieldViolation(field, reason string) *AnonymityViolation {
 }
 
 // tpaScannerScalarKeys is the fixed set of non-negative-integer keys allowed
-// in the tpa_scanner sub-object.
-var tpaScannerScalarKeys = []string{"scans_completed", "scans_failed", "scans_with_findings"}
+// in the tpa_scanner sub-object. The last two are the schema-v9 funnel
+// counters; adding a key here is the deliberate act that widens the whitelist.
+var tpaScannerScalarKeys = []string{
+	"scans_completed", "scans_failed", "scans_with_findings",
+	"tool_change_gate_scans", "prompt_scans",
+}
 
 // scanV8TPAScanner asserts the schema-v8 tpa_scanner sub-object (if present)
 // carries counts and fixed enum keys ONLY: an object whose keys are
@@ -296,6 +306,48 @@ func scanV8TPAScanner(raw json.RawMessage) *AnonymityViolation {
 		}
 		msg := json.RawMessage(v)
 		if viol := scanNonNegativeInt(&msg, "tpa_scanner.findings."+sev, v8FieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// trustModeFieldViolation builds the violation for a schema-v9
+// trust_mode_distribution field that broke its documented shape (fixed enum
+// keys, non-negative integer counts).
+func trustModeFieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "trust_mode_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("trust mode field %s %s", field, reason),
+	}
+}
+
+// scanTrustModeDistribution asserts the schema-v9 trust_mode_distribution
+// sub-object (if present) is an object keyed EXCLUSIVELY by the fixed
+// auto|scan|manual enum with non-negative integer counts. This is the wire-form
+// backstop for buildTrustModeDistribution: the histogram is derived from
+// per-server config, so a regression there is exactly the kind that would leak
+// a server name as a map key.
+func scanTrustModeDistribution(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	// Same nil-map guard as tpa_scanner: `null` unmarshals into a nil map, and
+	// the field — when present — is required to be a real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return trustModeFieldViolation("trust_mode_distribution", "must be an object")
+	}
+	for key, v := range obj {
+		if !IsTrustModeKey(key) {
+			// The rejected key is deliberately NOT echoed into the violation —
+			// it is the very thing this rule exists to keep out of the logs.
+			return trustModeFieldViolation("trust_mode_distribution",
+				"carries a key outside the fixed trust-tier enum")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "trust_mode_distribution."+key, trustModeFieldViolation); viol != nil {
 			return viol
 		}
 	}
@@ -483,6 +535,9 @@ func isPreflightAllowedKey(key string) bool {
 //     non-negative integer counts (keys drawn from preflightAllowedKeys) whose
 //     availability_block_reasons_24h map is keyed exclusively by the closed
 //     availability-block reason enum.
+//  8. trust_mode_distribution (schema v9), if present, is not an object keyed
+//     exclusively by the fixed auto|scan|manual trust-tier enum with
+//     non-negative integer counts.
 //
 // The implementation never logs the payload — it only reports which rule
 // tripped and the offending pattern (a small literal). Callers should log at
@@ -556,6 +611,12 @@ func ScanForPII(payloadJSON []byte) error {
 	// Rule 7: preflight counters must be closed-enum reason keys → non-negative
 	// ints, and every scalar a non-negative count.
 	if v := scanPreflightCounters(env.Preflight); v != nil {
+		return v
+	}
+
+	// Rule 8: trust_mode_distribution (schema v9) must be fixed-enum trust-tier
+	// keys → non-negative integer counts.
+	if v := scanTrustModeDistribution(env.TrustModeDistribution); v != nil {
 		return v
 	}
 

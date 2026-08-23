@@ -96,7 +96,28 @@ import (
 // the shape on the wire form (rule "v8_field_invalid"): tpa_scanner must be
 // an object whose keys are whitelisted, whose scalar values are non-negative
 // integers, and whose findings keys are members of the severity enum.
-const SchemaVersion = 8
+// Schema v9 makes the TPA funnel measurable. Two additions:
+//
+//   - tpa_scanner.tool_change_gate_scans / tpa_scanner.prompt_scans: delta
+//     counters for the two SYNCHRONOUS detection paths that run for ordinary
+//     users — the trust_mode:scan tool-change gate
+//     (internal/runtime.scanChangeIsClean) and the aggregated-prompt poisoning
+//     filter (internal/server.scanAggregatedPrompts). Neither emitted anything
+//     before v9, so the v8 job counters alone made the fleet look like it never
+//     scanned. Same window and reset semantics as every other registry counter
+//     (zeroed only after an accepted send), and the whole tpa_scanner
+//     sub-object is still omitted when every counter — v8 and v9 — is zero.
+//   - trust_mode_distribution: a STATE field (not a delta), the count of
+//     configured servers per config.ServerConfig.EffectiveTrustMode(), keyed by
+//     the fixed auto|scan|manual enum and computed fresh at heartbeat build
+//     time. It is the denominator the gate counter needs: gate scans are only
+//     possible on servers in "scan" mode.
+//
+// Anonymity posture is unchanged: non-negative integer counts and fixed enum
+// keys only. ScanForPII re-asserts both shapes on the wire form (rules
+// "v8_field_invalid" for the widened tpa_scanner whitelist and
+// "trust_mode_field_invalid" for the histogram).
+const SchemaVersion = 9
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -290,6 +311,15 @@ type HeartbeatPayload struct {
 	// non-negative counts keyed by the fixed severity enum only; never a
 	// scanned server name, scanner id, rule id, or finding title.
 	TPAScanner *TPAScannerStats `json:"tpa_scanner,omitempty"`
+
+	// Schema v9: count of configured servers per effective trust tier, keyed
+	// exclusively by the fixed auto|scan|manual enum (all three keys always
+	// present, even at zero — the protocol-counts convention). A STATE field,
+	// recomputed from the live config on every heartbeat and never reset. It
+	// gives the tpa_scanner gate counter its denominator: only servers in
+	// "scan" mode can produce a tool-change gate scan at all. No PII: counts
+	// only, no server names, no raw config strings.
+	TrustModeDistribution map[string]int `json:"trust_mode_distribution,omitempty"`
 }
 
 // OnboardingSnapshot is the data the telemetry service needs to populate
@@ -968,6 +998,11 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// "auto") so operators can spot mis-typed config without polluting the
 	// telemetry cardinality.
 	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(s.config, s.logger)
+
+	// Schema v9: fixed-key histogram over cfg.Servers by EffectiveTrustMode.
+	// Computed fresh each heartbeat so a mid-window trust-tier change is
+	// reflected on the next send (state, not a delta counter).
+	payload.TrustModeDistribution = buildTrustModeDistribution(s.config)
 
 	// Spec 044: ground-truth environment classification. Cached after first
 	// call so repeated heartbeats do not re-probe the filesystem.
