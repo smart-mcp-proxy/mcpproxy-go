@@ -129,6 +129,17 @@ It is **advisory**, on purpose while the sweep earns its flake record:
 - the Playwright HTML report + server log are uploaded as the
   `web-ui-sweep-playwright-report` artifact (14 days) for post-mortem.
 
+> **Do not rename that artifact casually.** The gate is a *reusable* workflow, so
+> its artifacts land in the publisher's own run, and `release.yml` /
+> `prerelease.yml` build their release assets by globbing every `*.tar.gz` /
+> `*.zip` out of *all* run artifacts. A Playwright report stores its traces as
+> `playwright-report/data/<sha>.zip` (retained on failure — exactly what an
+> advisory sweep tolerates), so both publishers exclude
+> `*/web-ui-sweep-playwright-report/*` from that glob by name. Renaming the
+> artifact without updating both publishers would publish unnamed trace zips as
+> public release assets;
+> `TestPublishersDoNotShipSweepArtifacts` guards this.
+
 **Promotion to blocking** is a two-line change: set `Blocking: true` on the
 `advisory/web-ui-sweep` manifest entry and drop `continue-on-error` from the job
 (the FR-016 end state). Do it once the sweep has passed on three consecutive

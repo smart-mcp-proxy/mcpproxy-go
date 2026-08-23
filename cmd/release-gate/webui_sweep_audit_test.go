@@ -102,3 +102,45 @@ func yamlFlatten(n *yaml.Node) string {
 	walk(n)
 	return b.String()
 }
+
+// sweepArtifactName is the advisory job's Playwright artifact. It lands in the
+// SAME workflow run as the publishers (the gate is a reusable workflow the
+// publishers call via `uses:`), so anything the publishers glob out of "all
+// artifacts" can pick it up.
+const sweepArtifactName = "web-ui-sweep-playwright-report"
+
+// TestPublishersDoNotShipSweepArtifacts guards a sharp edge introduced by
+// wiring the sweep into the gate: release.yml / prerelease.yml download EVERY
+// artifact of the run and copy every *.tar.gz / *.zip they find into the
+// published release assets. A Playwright HTML report contains its traces as
+// `playwright-report/data/<sha>.zip`, and traces are retained on failure —
+// exactly the case the advisory job is designed to tolerate. Without an
+// exclusion, a red (or merely flaky-then-green) sweep on a tag attaches
+// unnamed trace zips to the public release.
+func TestPublishersDoNotShipSweepArtifacts(t *testing.T) {
+	for _, name := range []string{"release.yml", "prerelease.yml"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join("..", "..", ".github", "workflows", name)
+			wf := parseWorkflow(t, path)
+
+			var checked int
+			for jobName, job := range wf.Jobs {
+				for _, s := range job.Steps {
+					// The indiscriminate archive collector: `find dist -name "*.zip" ...`
+					if !strings.Contains(s.Run, `-name "*.zip"`) {
+						continue
+					}
+					checked++
+					if !strings.Contains(s.Run, sweepArtifactName) {
+						t.Errorf("%s job %q collects every *.zip into the release assets without excluding %q; "+
+							"a failed advisory sweep would publish Playwright trace zips as release files:\n%s",
+							name, jobName, sweepArtifactName, s.Run)
+					}
+				}
+			}
+			if checked == 0 {
+				t.Fatalf("%s: found no archive-collection step to audit (did the publisher change shape?)", name)
+			}
+		})
+	}
+}

@@ -77,7 +77,12 @@ LISTEN="${BASE_URL#http://}"
 SWEEP_DIR="$REPO_ROOT/e2e/web-ui-sweep"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO_ROOT/tmp/web-smoke-artifacts}"
 REPORT_DIR="$ARTIFACT_DIR/playwright-report"
-API_KEY="${MCPPROXY_API_KEY:-web-sweep-key}"
+# Always a fresh throwaway key, NEVER $MCPPROXY_API_KEY: the sweep puts the key
+# in every navigation URL, and Playwright stores those URLs in the HTML report
+# and failure traces. Honouring an ambient MCPPROXY_API_KEY would copy a
+# developer's real key into tmp/web-smoke-artifacts (and, in CI, an uploaded
+# artifact). The instance is throwaway, so its key may as well be too.
+API_KEY="web-sweep-$(date +%s)-$$"
 # The sweep's server-dependent checks run only when a fixture upstream exists.
 SWEEP_SERVER_NAME=""
 
@@ -99,6 +104,13 @@ cleanup() {
     kill "$SERVER_PID" >/dev/null 2>&1 || true
     wait "$SERVER_PID" >/dev/null 2>&1 || true
   fi
+  # Preserve the server log before the temp dir goes away. Doing this in the
+  # trap (not only on the happy path) is what makes an EARLY failure —
+  # readiness timeout, npm/Chromium install blowing up under `set -e` —
+  # diagnosable from the uploaded artifact instead of only from the CI console.
+  if [[ -f "$LOG_PATH" ]]; then
+    cp "$LOG_PATH" "$ARTIFACT_DIR/server.log" 2>/dev/null || true
+  fi
   rm -rf "$TMPDIR_SWEEP"
 }
 trap cleanup EXIT
@@ -111,6 +123,16 @@ if [[ -n "$FIXTURE_PATH" ]]; then
     echo "MCPPROXY_FIXTURE_PATH is not executable: $FIXTURE_PATH" >&2
     exit 1
   fi
+  # The config below is a heredoc, not JSON-encoded output: a path containing a
+  # quote, a backslash or a newline would silently produce a malformed (or
+  # subtly different) config rather than an error. Reject it loudly instead of
+  # taking on a jq/python dependency for a path that is normally boring.
+  case "$FIXTURE_PATH" in
+    *'"'* | *\\* | *$'\n'*)
+      echo "MCPPROXY_FIXTURE_PATH contains a quote, backslash or newline and cannot be embedded in the sweep config: $FIXTURE_PATH" >&2
+      exit 1
+      ;;
+  esac
   SWEEP_SERVER_NAME="sweep-stdio"
   SERVERS_JSON=$(cat <<JSON
 [
@@ -158,15 +180,35 @@ JSON
 
 # HEADLESS/DO_NOT_TRACK: a QA sweep must never open a browser for OAuth nor
 # emit production telemetry (same rule the gate driver applies).
-HEADLESS=1 DO_NOT_TRACK=1 "$BINARY_PATH" serve \
+# MCPPROXY_API_KEY is pinned to the generated throwaway key, NOT inherited: the
+# env var outranks the config file ("source": "environment variable"), so a
+# developer with their own key exported would otherwise leave the server
+# demanding that key while the sweep probes with this one — a 46s readiness
+# timeout with nothing but 401s in the log.
+HEADLESS=1 DO_NOT_TRACK=1 MCPPROXY_API_KEY="$API_KEY" "$BINARY_PATH" serve \
   --config "$CONFIG_PATH" --listen "$LISTEN" >"$LOG_PATH" 2>&1 &
 SERVER_PID=$!
 
 echo "mcpproxy started (PID ${SERVER_PID}); waiting for readiness at ${BASE_URL}..."
 
 attempt=0
-until curl -sS -o /dev/null -w '%{http_code}' \
+# --connect-timeout/--max-time are load-bearing, not decoration: a process that
+# holds the port but never answers (a hung instance, a half-open socket) makes an
+# untimed curl block forever, and the liveness check below would never get a turn
+# — the job would sit until its 20-minute timeout instead of failing in seconds.
+until curl -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' \
     -H "X-API-Key: ${API_KEY}" "$BASE_URL/api/v1/servers" | grep -q '^200$'; do
+  # Fail fast if the candidate already exited (port in use → exit code 2, bad
+  # config → 4, DB locked → 3). Without this the loop would burn the full
+  # timeout, and — worse — a leftover instance of a PREVIOUS sweep listening on
+  # the same port could answer 200 and the sweep would silently exercise that
+  # stale binary instead of the candidate.
+  if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    wait "$SERVER_PID" >/dev/null 2>&1 || true
+    echo "mcpproxy exited before becoming ready at ${BASE_URL} (is ${LISTEN} already in use?)" >&2
+    cat "$LOG_PATH" >&2
+    exit 1
+  fi
   sleep 1
   attempt=$((attempt + 1))
   if [[ $attempt -gt 45 ]]; then
@@ -182,9 +224,13 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$REPO_ROOT/tmp/play
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
 
 if [[ ! -x "$SWEEP_DIR/node_modules/.bin/playwright" ]]; then
-  # Installs the @playwright/test range from e2e/web-ui-sweep/package.json.
-  echo "installing @playwright/test into $SWEEP_DIR"
-  npm install --prefix "$SWEEP_DIR" --no-save --package-lock=false
+  # `npm ci` against the COMMITTED e2e/web-ui-sweep/package-lock.json, never a
+  # bare `npm install`: this runs during release qualification, and resolving the
+  # mutable `^1.49.0` range there would execute whatever Playwright and its
+  # transitive deps published since the last review. The lockfile pins exact
+  # versions + integrity hashes; bump it deliberately with `npm install`.
+  echo "installing @playwright/test into $SWEEP_DIR (npm ci, locked)"
+  npm ci --prefix "$SWEEP_DIR"
 fi
 
 PLAYWRIGHT_BIN="$SWEEP_DIR/node_modules/.bin/playwright"
