@@ -239,6 +239,42 @@ func TestQuarantineSecurity_GetScanReport_ReturnsVerdictAndFindings(t *testing.T
 	assert.Contains(t, payload["scan_status"], "warnings")
 }
 
+// TestQuarantineSecurity_GetScanReport_LabelsPreviousFindingsWhileScanning:
+// the summary and the report are independent latest-by-server reads, so while a
+// new scan runs the report is still the PREVIOUS job's. Its findings must be
+// labelled as such, never presented as the running scan's result.
+func TestQuarantineSecurity_GetScanReport_LabelsPreviousFindingsWhileScanning(t *testing.T) {
+	proxy, fake := scanTestProxy(t, &config.ServerConfig{Name: "github", Enabled: true})
+	fake.setScanResult("github",
+		&scanner.ScanJob{ID: "job-new", ServerName: "github", Status: scanner.ScanJobStatusRunning},
+		&scanner.ScanSummary{Status: "scanning"})
+	fake.reports["github"] = &scanner.AggregatedReport{
+		JobID:      "job-old",
+		ServerName: "github",
+		Verdict:    "warnings",
+		RiskScore:  30,
+		Findings: []scanner.ScanFinding{{
+			RuleID:  "TPA-2026-0001",
+			Title:   "Hidden instructions in tool description",
+			Scanner: "tpa-descriptions",
+		}},
+	}
+
+	result, err := proxy.handleQuarantineSecurity(context.Background(), quarantineRequest(map[string]interface{}{
+		"operation": "get_scan_report",
+		"name":      "github",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	payload := decodeToolJSON(t, result)
+	assert.Contains(t, payload["scan_status"], "scan running")
+	assert.Equal(t, "job-old", payload["job_id"])
+	assert.Contains(t, payload, "findings_from",
+		"findings from an older job must say which scan they came from")
+	assert.Contains(t, payload["findings_from"], "previous")
+}
+
 // TestQuarantineSecurity_GetScanReport_NeverScanned is the honest empty state:
 // no report is NOT a clean verdict.
 func TestQuarantineSecurity_GetScanReport_NeverScanned(t *testing.T) {

@@ -204,6 +204,13 @@ func (p *MCPProxyServer) handleGetScanReport(ctx context.Context, request mcp.Ca
 			response["verdict"] = report.Verdict
 			response["risk_score"] = report.RiskScore
 		}
+		// The summary and the report are two independent latest-by-server
+		// reads. While a scan is running the summary says "scanning" but the
+		// report is still the PREVIOUS job's — attaching its findings unlabelled
+		// would read as the running scan's result. Name whose findings these are.
+		if summary != nil && summary.Status == scanSummaryStatusRunning {
+			response["findings_from"] = "the previous completed scan — a new scan is still running; re-run get_scan_report for its verdict"
+		}
 		response["findings_total"] = len(report.Findings)
 		findings := make([]map[string]interface{}, 0, scanReportMaxFindings)
 		for i, f := range report.Findings {
