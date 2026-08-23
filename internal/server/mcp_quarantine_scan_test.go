@@ -171,6 +171,78 @@ func TestQuarantineSecurity_ScanServer_WaitsThroughTheCompletionWindow(t *testin
 	assert.Equal(t, "job-late", payload["job_id"])
 }
 
+// TestQuarantineSecurity_ScanServer_Pass2DoesNotMaskTheBaselineVerdict: with
+// deep scan enabled, a completed Pass 1 auto-starts the Pass-2 supply-chain
+// audit, which becomes the server's ACTIVE job. Polling the generic scan status
+// would then see a job whose id never matches the one scan_server started and
+// time out into "scan started" — hiding a baseline verdict that was already
+// available. The wait polls Pass 1 specifically.
+func TestQuarantineSecurity_ScanServer_Pass2DoesNotMaskTheBaselineVerdict(t *testing.T) {
+	proxy, fake := scanTestProxy(t, &config.ServerConfig{Name: "github", Enabled: true})
+	// The ACTIVE job for this server is the Pass-2 audit; Pass 1 is the job
+	// scan_server started and the one whose verdict it promised.
+	fake.setScanResult("github",
+		&scanner.ScanJob{ID: "job-pass2", ServerName: "github", Status: scanner.ScanJobStatusRunning},
+		settledSummary("clean", 0))
+	fake.setPassJob("github", scanner.ScanPassSecurityScan,
+		&scanner.ScanJob{ID: "job-pass1", ServerName: "github", Status: scanner.ScanJobStatusRunning})
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		fake.setPassJob("github", scanner.ScanPassSecurityScan,
+			&scanner.ScanJob{ID: "job-pass1", ServerName: "github", Status: scanner.ScanJobStatusCompleted})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := proxy.handleQuarantineSecurity(ctx, quarantineRequest(map[string]interface{}{
+		"operation": "scan_server",
+		"name":      "github",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	payload := decodeToolJSON(t, result)
+	assert.Equal(t, "completed", payload["status"],
+		"the Pass-2 audit running in the background must not hide the settled baseline")
+	assert.Equal(t, "clean", payload["verdict"])
+	assert.Equal(t, "job-pass1", payload["job_id"], "scan_server reports the Pass-1 job it started")
+}
+
+// TestQuarantineSecurity_GetScanReport_LabelsPartialFindingsOfTheRunningScan is
+// the other half of the findings-provenance label: per-scanner reports are
+// persisted as each scanner finishes, so a running scan's own partial output
+// can be what GetScanReport returns. Calling that "the previous scan" is just as
+// wrong as leaving it unlabelled.
+func TestQuarantineSecurity_GetScanReport_LabelsPartialFindingsOfTheRunningScan(t *testing.T) {
+	proxy, fake := scanTestProxy(t, &config.ServerConfig{Name: "github", Enabled: true})
+	fake.setScanResult("github",
+		&scanner.ScanJob{ID: "job-live", ServerName: "github", Status: scanner.ScanJobStatusRunning},
+		&scanner.ScanSummary{Status: "scanning"})
+	fake.reports["github"] = &scanner.AggregatedReport{
+		JobID:      "job-live",
+		ServerName: "github",
+		Findings: []scanner.ScanFinding{{
+			RuleID:  "TPA-2026-0001",
+			Scanner: "tpa-descriptions",
+		}},
+	}
+
+	result, err := proxy.handleQuarantineSecurity(context.Background(), quarantineRequest(map[string]interface{}{
+		"operation": "get_scan_report",
+		"name":      "github",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	payload := decodeToolJSON(t, result)
+	assert.Equal(t, "job-live", payload["job_id"])
+	assert.Contains(t, payload["findings_from"], "currently running",
+		"a running job's own partial findings must not be labelled as a previous scan's")
+	assert.NotContains(t, payload["findings_from"], "previous")
+}
+
 // TestQuarantineSecurity_ScanServer_RequiresName pins the argument contract.
 func TestQuarantineSecurity_ScanServer_RequiresName(t *testing.T) {
 	proxy, _ := scanTestProxy(t)

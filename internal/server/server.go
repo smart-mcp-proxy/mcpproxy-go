@@ -66,6 +66,11 @@ type securityScannerService interface {
 	// operations (scan_server / get_scan_report): an agent that just triggered
 	// a scan needs the job's terminal state and the verdict that came out of it.
 	GetScanStatus(ctx context.Context, serverName string) (*scanner.ScanJob, error)
+	// GetScanStatusByPass resolves ONE pass's job. scan_server must poll Pass 1
+	// specifically: GetScanStatus answers with whatever job is active for the
+	// server, and a completed Pass 1 auto-starts the Pass-2 deep audit, which
+	// would otherwise mask the baseline verdict the caller is waiting for.
+	GetScanStatusByPass(ctx context.Context, serverName string, pass int) (*scanner.ScanJob, error)
 	GetScanReport(ctx context.Context, serverName string) (*scanner.AggregatedReport, error)
 	HasApprovalBaseline(serverName string) bool
 	ApplySecurityConfig(sec *config.SecurityConfig)

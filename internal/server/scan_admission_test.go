@@ -30,7 +30,11 @@ type fakeSecurityScanner struct {
 	// Scan-surface fixtures (quarantine_security scan_server /
 	// get_scan_report). jobs/reports are keyed by server name; startScanErr
 	// and reportErr let a test drive the failure branches.
-	jobs         map[string]*scanner.ScanJob
+	jobs map[string]*scanner.ScanJob
+	// passJobs pins a job for one specific (server, pass) pair, so a test can
+	// make the ACTIVE job differ from the Pass-1 job — the shape produced when
+	// a completed Pass 1 auto-starts the Pass-2 deep audit.
+	passJobs     map[passKey]*scanner.ScanJob
 	reports      map[string]*scanner.AggregatedReport
 	startScanErr error
 	reportErr    error
@@ -47,8 +51,23 @@ func newFakeSecurityScanner() *fakeSecurityScanner {
 		summaries:   map[string]*scanner.ScanSummary{},
 		hasBaseline: map[string]bool{},
 		jobs:        map[string]*scanner.ScanJob{},
+		passJobs:    map[passKey]*scanner.ScanJob{},
 		reports:     map[string]*scanner.AggregatedReport{},
 	}
+}
+
+// passKey addresses one (server, scan pass) pair in the fake.
+type passKey struct {
+	server string
+	pass   int
+}
+
+// setPassJob pins the job a per-pass lookup resolves to, independently of the
+// job the generic status lookup returns.
+func (f *fakeSecurityScanner) setPassJob(serverName string, pass int, job *scanner.ScanJob) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.passJobs[passKey{server: serverName, pass: pass}] = job
 }
 
 // setScanResult publishes a settled scan for a server: the job the status poll
@@ -92,12 +111,34 @@ func (f *fakeSecurityScanner) StartScan(_ context.Context, serverName string, _ 
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// StartScan starts Pass 1 and hands back THAT job, so prefer a pinned
+	// Pass-1 job when a test has made the passes differ.
+	if job, ok := f.passJobs[passKey{server: serverName, pass: scanner.ScanPassSecurityScan}]; ok && job != nil {
+		return job, nil
+	}
 	return f.jobs[serverName], nil
 }
 
 func (f *fakeSecurityScanner) GetScanStatus(_ context.Context, serverName string) (*scanner.ScanJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	job, ok := f.jobs[serverName]
+	if !ok {
+		return nil, errors.New("no scan job")
+	}
+	return job, nil
+}
+
+// GetScanStatusByPass mirrors the service: a per-pass lookup. The fake keys one
+// job per server, so pass 1 resolves to it and any other pass falls through to
+// the same job — enough to exercise the "poll Pass 1, not whatever is active"
+// contract, with passJobs available when a test needs the two to differ.
+func (f *fakeSecurityScanner) GetScanStatusByPass(_ context.Context, serverName string, pass int) (*scanner.ScanJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if job, ok := f.passJobs[passKey{server: serverName, pass: pass}]; ok {
+		return job, nil
+	}
 	job, ok := f.jobs[serverName]
 	if !ok {
 		return nil, errors.New("no scan job")

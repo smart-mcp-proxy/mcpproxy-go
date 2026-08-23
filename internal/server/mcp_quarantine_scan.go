@@ -118,7 +118,13 @@ func (p *MCPProxyServer) awaitScanVerdict(ctx context.Context, svc securityScann
 	defer ticker.Stop()
 
 	for {
-		job, err := svc.GetScanStatus(ctx, serverName)
+		// Pass 1 (the offline baseline) is the pass scan_server started and the
+		// only one whose verdict this call promises. GetScanStatus answers with
+		// whatever job is ACTIVE for the server, and a completed Pass 1
+		// auto-starts the Pass-2 deep audit when deep scan is on — that Pass-2
+		// job's id never matches, so polling the generic status would time out
+		// on a baseline verdict that was already sitting there.
+		job, err := svc.GetScanStatusByPass(ctx, serverName, scanner.ScanPassSecurityScan)
 		if err == nil && job != nil && scanJobSettled(job.Status) && (jobID == "" || job.ID == jobID) {
 			// The engine flips the job to a terminal status BEFORE its
 			// completion callback persists the report and BEFORE the job is
@@ -142,6 +148,18 @@ func (p *MCPProxyServer) awaitScanVerdict(ctx context.Context, svc securityScann
 		case <-ticker.C:
 		}
 	}
+}
+
+// runningScanJobID returns the id of the server's current Pass-1 job while it
+// is still running, or "" when there is none (or it cannot be resolved). It is
+// how get_scan_report tells a partial report of the running scan apart from the
+// previous scan's finished one.
+func (p *MCPProxyServer) runningScanJobID(ctx context.Context, svc securityScannerService, serverName string) string {
+	job, err := svc.GetScanStatusByPass(ctx, serverName, scanner.ScanPassSecurityScan)
+	if err != nil || job == nil || scanJobSettled(job.Status) {
+		return ""
+	}
+	return job.ID
 }
 
 func scanJobSettled(status string) bool {
@@ -205,11 +223,18 @@ func (p *MCPProxyServer) handleGetScanReport(ctx context.Context, request mcp.Ca
 			response["risk_score"] = report.RiskScore
 		}
 		// The summary and the report are two independent latest-by-server
-		// reads. While a scan is running the summary says "scanning" but the
-		// report is still the PREVIOUS job's — attaching its findings unlabelled
-		// would read as the running scan's result. Name whose findings these are.
+		// reads, so while a scan is running these findings are NOT a settled
+		// verdict — and they may come from either job: per-scanner reports are
+		// persisted as each scanner finishes, so the report can be the running
+		// job's partial output, or still the previous job's. Attaching them
+		// unlabelled would read as the running scan's finished result, so name
+		// which of the two they actually are.
 		if summary != nil && summary.Status == scanSummaryStatusRunning {
-			response["findings_from"] = "the previous completed scan — a new scan is still running; re-run get_scan_report for its verdict"
+			if runningID := p.runningScanJobID(ctx, svc, serverName); runningID != "" && runningID == report.JobID {
+				response["findings_from"] = "the scan currently running — partial results, re-run get_scan_report for the final verdict"
+			} else {
+				response["findings_from"] = "the previous completed scan — a new scan is still running; re-run get_scan_report for its verdict"
+			}
 		}
 		response["findings_total"] = len(report.Findings)
 		findings := make([]map[string]interface{}, 0, scanReportMaxFindings)
