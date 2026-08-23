@@ -229,33 +229,45 @@ mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
 # transitive deps published since the last review. The lockfile pins exact
 # versions + integrity hashes; bump it deliberately with `npm install`.
 #
-# The install is skipped only when what is on disk ALREADY MATCHES the lockfile.
-# A mere "is playwright present?" check would let a stale tree — e.g. one an
-# older revision of this script installed with an unlocked `npm install` — keep
-# serving an unreviewed version forever. Comparing versions keeps the hand-run
-# fast path (no registry round-trip when nothing changed) without weakening that.
-locked_playwright_version() {
-  node -p "require('$SWEEP_DIR/package-lock.json').packages['node_modules/@playwright/test'].version" 2>/dev/null || true
-}
-installed_playwright_version() {
-  node -p "require('$SWEEP_DIR/node_modules/@playwright/test/package.json').version" 2>/dev/null || true
+# The install is skipped only when what is on disk was installed FROM THE CURRENT
+# lockfile. A mere "is playwright present?" check would let a stale tree — e.g.
+# one an older revision of this script installed with an unlocked `npm install` —
+# keep serving an unreviewed version forever; checking only @playwright/test's
+# version would still miss a lockfile that moved a transitive dependency. So the
+# hash of the whole lockfile is stamped into node_modules after a successful
+# `npm ci`, and any drift re-runs it. This keeps the hand-run fast path (no
+# registry round-trip when nothing changed) without weakening the pinning.
+#
+# The path goes through process.argv, never string interpolation into the JS —
+# a repo checked out under a path containing a quote would otherwise produce
+# invalid JavaScript and a silently empty result.
+lock_hash() {
+  node -e 'const c=require("crypto"),f=require("fs");process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$1" 2>/dev/null || true
 }
 
-LOCKED_PW=$(locked_playwright_version)
-if [[ -z "$LOCKED_PW" ]]; then
-  echo "cannot read the pinned @playwright/test version from $SWEEP_DIR/package-lock.json" >&2
+LOCK_STAMP="$SWEEP_DIR/node_modules/.sweep-lock-sha256"
+WANT_LOCK_HASH=$(lock_hash "$SWEEP_DIR/package-lock.json")
+if [[ -z "$WANT_LOCK_HASH" ]]; then
+  echo "cannot hash $SWEEP_DIR/package-lock.json — is the lockfile committed?" >&2
   exit 1
 fi
 
-if [[ ! -x "$SWEEP_DIR/node_modules/.bin/playwright" || "$(installed_playwright_version)" != "$LOCKED_PW" ]]; then
-  echo "installing @playwright/test@${LOCKED_PW} into $SWEEP_DIR (npm ci, locked)"
+HAVE_LOCK_HASH=""
+if [[ -f "$LOCK_STAMP" ]]; then
+  HAVE_LOCK_HASH=$(cat "$LOCK_STAMP")
+fi
+
+if [[ ! -x "$SWEEP_DIR/node_modules/.bin/playwright" || "$HAVE_LOCK_HASH" != "$WANT_LOCK_HASH" ]]; then
+  echo "installing the locked @playwright/test into $SWEEP_DIR (npm ci)"
   # cd rather than `npm ci --prefix`: --prefix has a long history of version-
   # dependent behaviour for `ci` specifically, and this runs during release
   # qualification — an install that silently resolves against the repo root
   # instead of the sweep's lockfile is not a failure mode worth risking.
   (cd "$SWEEP_DIR" && npm ci)
+  # After npm ci, which wipes node_modules (and with it any previous stamp).
+  printf '%s' "$WANT_LOCK_HASH" >"$LOCK_STAMP"
 else
-  echo "@playwright/test@${LOCKED_PW} already installed (matches lockfile)"
+  echo "@playwright/test already installed from the current lockfile"
 fi
 
 PLAYWRIGHT_BIN="$SWEEP_DIR/node_modules/.bin/playwright"
