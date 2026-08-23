@@ -27,7 +27,7 @@ func TestIDRotatesAfter365Days(t *testing.T) {
 	svc.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Add(-400 * 24 * time.Hour).Format(time.RFC3339)
 	originalID := svc.config.Telemetry.AnonymousID
 
-	svc.maybeRotateAnonymousID(time.Now().UTC())
+	svc.maybeRotateAnonymousID(svc.config, time.Now().UTC())
 
 	if svc.config.Telemetry.AnonymousID == originalID {
 		t.Error("expected anonymous ID to rotate after 400 days")
@@ -46,7 +46,7 @@ func TestIDDoesNotRotateBefore365Days(t *testing.T) {
 	svc.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
 	originalID := svc.config.Telemetry.AnonymousID
 
-	svc.maybeRotateAnonymousID(time.Now().UTC())
+	svc.maybeRotateAnonymousID(svc.config, time.Now().UTC())
 
 	if svc.config.Telemetry.AnonymousID != originalID {
 		t.Error("expected anonymous ID to remain unchanged before 365 days")
@@ -58,7 +58,7 @@ func TestLegacyInstallInitializesCreatedAtWithoutRotating(t *testing.T) {
 	svc.config.Telemetry.AnonymousIDCreatedAt = "" // Legacy install: no created_at
 	originalID := svc.config.Telemetry.AnonymousID
 
-	svc.maybeRotateAnonymousID(time.Now().UTC())
+	svc.maybeRotateAnonymousID(svc.config, time.Now().UTC())
 
 	if svc.config.Telemetry.AnonymousID != originalID {
 		t.Error("legacy install must NOT rotate the ID, only initialize created_at")
@@ -75,7 +75,7 @@ func TestClockSkewFutureCreatedAtDoesNotRotate(t *testing.T) {
 	originalID := svc.config.Telemetry.AnonymousID
 	originalCreated := svc.config.Telemetry.AnonymousIDCreatedAt
 
-	svc.maybeRotateAnonymousID(time.Now().UTC())
+	svc.maybeRotateAnonymousID(svc.config, time.Now().UTC())
 
 	if svc.config.Telemetry.AnonymousID != originalID {
 		t.Error("future created_at must not trigger rotation")
@@ -90,7 +90,7 @@ func TestCorruptCreatedAtIsResetWithoutRotating(t *testing.T) {
 	svc.config.Telemetry.AnonymousIDCreatedAt = "not-a-real-timestamp"
 	originalID := svc.config.Telemetry.AnonymousID
 
-	svc.maybeRotateAnonymousID(time.Now().UTC())
+	svc.maybeRotateAnonymousID(svc.config, time.Now().UTC())
 
 	if svc.config.Telemetry.AnonymousID != originalID {
 		t.Error("corrupt created_at must not trigger rotation")

@@ -944,12 +944,34 @@ func (s *Service) BuildPayload() HeartbeatPayload {
 	return s.buildHeartbeat()
 }
 
+// liveConfig returns the service's current *config.Config, read under s.mu.
+// NotifyConfigChanged replaces the pointer wholesale when the live config is
+// reloaded, so every read outside that critical section must go through here:
+// an unsynchronized read of the field is a data race with the swap.
+//
+// Callers get the pointer, not a deep copy — the pointed-to config is still
+// shared with the rest of the daemon and must be treated as read-only.
+func (s *Service) liveConfig() *config.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.config
+}
+
 func (s *Service) buildHeartbeat() HeartbeatPayload {
-	// Spec 042: rotate the anonymous ID if it's older than 365 days.
-	s.maybeRotateAnonymousID(time.Now().UTC())
+	// Take ONE snapshot of the live config pointer under s.mu and read only that
+	// below. NotifyConfigChanged swaps s.config wholesale on a reload, so an
+	// unsynchronized read of the field races that swap; snapshotting also means a
+	// reload landing mid-build cannot splice fields from two different configs
+	// into one payload. The lock is released immediately — nothing below may hold
+	// it, because preflightSink() takes the same non-reentrant mutex.
+	cfg := s.liveConfig()
+
+	// Spec 042: rotate the anonymous ID if it's older than 365 days. Runs on the
+	// snapshot, so the rotated ID is the one this payload reports.
+	s.maybeRotateAnonymousID(cfg, time.Now().UTC())
 
 	payload := HeartbeatPayload{
-		AnonymousID:    s.config.GetAnonymousID(),
+		AnonymousID:    cfg.GetAnonymousID(),
 		Version:        s.version,
 		Edition:        s.edition,
 		OS:             runtime.GOOS,
@@ -965,10 +987,10 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		MachineID: resolveMachineID(),
 	}
 
-	if s.config.Telemetry != nil {
-		payload.AnonymousIDCreatedAt = s.config.Telemetry.AnonymousIDCreatedAt
-		payload.PreviousVersion = s.config.Telemetry.LastReportedVersion
-		payload.LastStartupOutcome = s.config.Telemetry.LastStartupOutcome
+	if cfg.Telemetry != nil {
+		payload.AnonymousIDCreatedAt = cfg.Telemetry.AnonymousIDCreatedAt
+		payload.PreviousVersion = cfg.Telemetry.LastReportedVersion
+		payload.LastStartupOutcome = cfg.Telemetry.LastStartupOutcome
 	}
 
 	if s.stats != nil {
@@ -984,7 +1006,7 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// Spec 042: feature-flag snapshot. Schema v3: BuildFeatureFlagSnapshot
 	// does not probe Docker — we splice the runtime probe result in here
 	// so the snapshot helper stays cheap and side-effect-free.
-	payload.FeatureFlags = BuildFeatureFlagSnapshot(s.config)
+	payload.FeatureFlags = BuildFeatureFlagSnapshot(cfg)
 	if s.stats != nil && payload.FeatureFlags != nil {
 		payload.FeatureFlags.DockerAvailable = s.stats.IsDockerAvailable()
 		// Schema v5 (MCP-2745): coarse docker-CLI resolution branch (the #696
@@ -997,12 +1019,12 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// unknown values at debug level via the service logger (bucketed into
 	// "auto") so operators can spot mis-typed config without polluting the
 	// telemetry cardinality.
-	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(s.config, s.logger)
+	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(cfg, s.logger)
 
 	// Schema v9: fixed-key histogram over cfg.Servers by EffectiveTrustMode.
 	// Computed fresh each heartbeat so a mid-window trust-tier change is
 	// reflected on the next send (state, not a delta counter).
-	payload.TrustModeDistribution = buildTrustModeDistribution(s.config)
+	payload.TrustModeDistribution = buildTrustModeDistribution(cfg)
 
 	// Spec 044: ground-truth environment classification. Cached after first
 	// call so repeated heartbeats do not re-probe the filesystem.
@@ -1050,8 +1072,8 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		// into the same root it hands the core, and MCPPROXY_HOME moves both
 		// (GH #936).
 		dataDir := ""
-		if s.config != nil {
-			dataDir = s.config.DataDir
+		if cfg != nil {
+			dataDir = cfg.DataDir
 		}
 		s.autostartReader = AutostartReaderForDataDir(dataDir)
 		payload.AutostartEnabled = s.autostartReader.Read()
@@ -1158,7 +1180,7 @@ func (s *Service) ensureAnonymousID() {
 		// Spec 042: legacy installs need created_at initialized for rotation.
 		if s.config.Telemetry != nil && s.config.Telemetry.AnonymousIDCreatedAt == "" {
 			s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-			s.persistConfig("Initialized anonymous_id_created_at for legacy install")
+			s.persistConfig(s.config, "Initialized anonymous_id_created_at for legacy install")
 		}
 		return
 	}
@@ -1188,22 +1210,28 @@ func (s *Service) ensureAnonymousID() {
 // maybeRotateAnonymousID rotates the anonymous ID once it's older than 365
 // days. Spec 042 (User Story 8). Clock skew (created_at in the future) is
 // treated as "not yet expired".
-func (s *Service) maybeRotateAnonymousID(now time.Time) {
-	if s.config.Telemetry == nil || s.config.Telemetry.AnonymousID == "" {
+//
+// cfg is passed in rather than read off s.config so the caller's snapshot is
+// the one mutated and persisted: buildHeartbeat resolves the live config once
+// (liveConfig) and everything downstream — this rotation included — must act on
+// that same pointer, or a config swap landing mid-heartbeat would rotate the ID
+// on a config the payload never read.
+func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
+	if cfg == nil || cfg.Telemetry == nil || cfg.Telemetry.AnonymousID == "" {
 		return
 	}
-	createdAtStr := s.config.Telemetry.AnonymousIDCreatedAt
+	createdAtStr := cfg.Telemetry.AnonymousIDCreatedAt
 	if createdAtStr == "" {
 		// Legacy install — initialize without rotating.
-		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig("Initialized anonymous_id_created_at")
+		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfig(cfg, "Initialized anonymous_id_created_at")
 		return
 	}
 	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		// Corrupt timestamp: reset to now without rotating.
-		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig("Reset corrupt anonymous_id_created_at")
+		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfig(cfg, "Reset corrupt anonymous_id_created_at")
 		return
 	}
 	if !createdAt.Before(now) {
@@ -1216,16 +1244,20 @@ func (s *Service) maybeRotateAnonymousID(now time.Time) {
 
 	// Rotate.
 	newID := uuid.New().String()
-	s.config.Telemetry.AnonymousID = newID
-	s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-	s.persistConfig("Rotated anonymous_id (annual)")
+	cfg.Telemetry.AnonymousID = newID
+	cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+	s.persistConfig(cfg, "Rotated anonymous_id (annual)")
 }
 
-func (s *Service) persistConfig(reason string) {
-	if s.cfgPath == "" {
+// persistConfig writes cfg to disk. The config is a parameter for the same
+// reason as maybeRotateAnonymousID: callers on the heartbeat path hold a
+// snapshot of the live pointer and must persist THAT, not whatever s.config
+// happens to point at by the time the write runs.
+func (s *Service) persistConfig(cfg *config.Config, reason string) {
+	if s.cfgPath == "" || cfg == nil {
 		return
 	}
-	if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
+	if err := config.SaveConfig(cfg, s.cfgPath); err != nil {
 		s.logger.Debug("Failed to persist telemetry config", zap.String("reason", reason), zap.Error(err))
 		return
 	}
