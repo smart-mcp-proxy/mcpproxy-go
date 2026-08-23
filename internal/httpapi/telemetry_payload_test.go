@@ -127,8 +127,9 @@ func TestHandleGetTelemetryPayload_RendersV7Fields(t *testing.T) {
 	require.True(t, resp.Success)
 	require.NotNil(t, resp.Data)
 
-	// Tracks telemetry.SchemaVersion — v8 added the tpa_scanner block; the
-	// v7 fields below must keep rendering regardless (FR-014: additive only).
+	// Tracks telemetry.SchemaVersion — v8 added the tpa_scanner block and v9
+	// the TPA funnel counters + trust_mode_distribution; the v7 fields below
+	// must keep rendering regardless (FR-014: additive only).
 	assert.Equal(t, float64(telemetry.SchemaVersion), resp.Data["schema_version"])
 	assert.Equal(t, true, resp.Data["wizard_shown"])
 	assert.Equal(t, "completed_external", resp.Data["wizard_connect_step"])
