@@ -198,6 +198,35 @@ func TestInformationalScan_FailedStartRetriesOnNextServersChanged(t *testing.T) 
 	waitForStartedScans(t, fake, []string{"srv"})
 }
 
+// The retry above must be BOUNDED. StartScan fails outright for a server it
+// cannot connect to, and that path costs ~60s inside StartScan while holding the
+// serialization mutex — retrying it on every servers.changed for a permanently
+// broken upstream would stall the queue and respawn the process endlessly.
+func TestInformationalScan_RetriesAreCapped(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	fake.startScanErr = errors.New("server is disconnected")
+	s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeManual))
+
+	for i := 0; i < maxInformationalScanAttempts+2; i++ {
+		s.maybeStartInformationalScans(context.Background())
+		require.Eventually(t, func() bool {
+			s.infoScanMu.Lock()
+			defer s.infoScanMu.Unlock()
+			return !s.infoScanQueued["srv"]
+		}, 2*time.Second, 5*time.Millisecond)
+	}
+
+	// Every attempt reached StartScan (each returns the error), but no more than
+	// the cap, and the server is retired rather than re-queued forever.
+	assert.Len(t, fake.startScanAttempts(), maxInformationalScanAttempts,
+		"retries must stop at the cap")
+
+	s.infoScanMu.Lock()
+	retired := s.infoScanKnown["srv"]
+	s.infoScanMu.Unlock()
+	assert.True(t, retired, "a retired server must stay marked known")
+}
+
 // An unreadable store must never be mistaken for "nothing to sweep". Both
 // storage reads in runBaselineSweep (the marker, then the inventory) fail closed
 // on the same invariant: no scans start and the one-shot marker is left unset so

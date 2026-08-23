@@ -34,6 +34,9 @@ type fakeSecurityScanner struct {
 
 	approveCalls   []string
 	startScanCalls []string
+	// startScanTries records EVERY StartScan entry, including the ones that
+	// return startScanErr, so retry-capping can be asserted.
+	startScanTries []string
 }
 
 func newFakeSecurityScanner() *fakeSecurityScanner {
@@ -63,6 +66,7 @@ func (f *fakeSecurityScanner) ApproveServer(_ context.Context, serverName string
 func (f *fakeSecurityScanner) StartScan(_ context.Context, serverName string, _ bool, _ []string, _ string) (*scanner.ScanJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.startScanTries = append(f.startScanTries, serverName)
 	if f.startScanErr != nil {
 		return nil, f.startScanErr
 	}
@@ -94,6 +98,13 @@ func (f *fakeSecurityScanner) startedScans() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.startScanCalls...)
+}
+
+// startScanAttempts counts every StartScan entry, failures included.
+func (f *fakeSecurityScanner) startScanAttempts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.startScanTries...)
 }
 
 // newAdmissionTestServer builds a Server whose runtime config carries the given

@@ -116,6 +116,7 @@ type Server struct {
 	infoScanMu            sync.Mutex
 	infoScanKnown         map[string]bool
 	infoScanQueued        map[string]bool
+	infoScanAttempts      map[string]int
 	infoScanRunMu         sync.Mutex
 	infoScanSettleTimeout time.Duration
 	infoScanSweepDelay    time.Duration
@@ -228,6 +229,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 
 		infoScanKnown:         make(map[string]bool),
 		infoScanQueued:        make(map[string]bool),
+		infoScanAttempts:      make(map[string]int),
 		infoScanSettleTimeout: informationalScanSettleTimeout,
 		infoScanSweepDelay:    baselineSweepStartDelay,
 	}

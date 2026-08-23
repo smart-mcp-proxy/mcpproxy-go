@@ -44,6 +44,16 @@ const (
 	// cannot export its tool definitions and fails outright, which would burn
 	// the one-shot marker on an empty result.
 	baselineSweepStartDelay = 45 * time.Second
+	// maxInformationalScanAttempts caps how many times one server's informational
+	// scan may be retried per process. StartScan fails outright for a server it
+	// cannot connect to ("no source files available and server is disconnected"),
+	// and that failure path costs up to ~60s inside StartScan (EnsureConnected +
+	// a 30s connection wait, twice) while holding infoScanRunMu. Retrying is
+	// worth it for a server that was merely still connecting; retrying forever on
+	// every servers.changed for a permanently broken one would stall the queue
+	// and respawn the upstream process endlessly. After the cap the server keeps
+	// its "known" mark and is left to a manual scan.
+	maxInformationalScanAttempts = 3
 )
 
 // isTerminalScanStatus reports whether a scan summary status means the scan has
@@ -220,10 +230,24 @@ func (s *Server) claimInformationalScan(ctx context.Context, sc *config.ServerCo
 // scan is attempted; dropping only the infoScanQueued claim would leave the
 // server permanently "not new", so no later servers.changed could ever retry it
 // and (once the one-shot sweep marker is burned) nothing would scan it again.
+//
+// Bounded by maxInformationalScanAttempts: past the cap the "known" mark stays,
+// which retires the server from the automatic path instead of retrying a broken
+// upstream on every servers.changed.
 func (s *Server) releaseInformationalScan(name string) {
 	s.infoScanMu.Lock()
 	defer s.infoScanMu.Unlock()
 	delete(s.infoScanQueued, name)
+	if s.infoScanAttempts == nil {
+		s.infoScanAttempts = make(map[string]int)
+	}
+	s.infoScanAttempts[name]++
+	if s.infoScanAttempts[name] >= maxInformationalScanAttempts {
+		s.logger.Debug("informational baseline scan retired after repeated start failures",
+			zap.String("server", name),
+			zap.Int("attempts", s.infoScanAttempts[name]))
+		return
+	}
 	delete(s.infoScanKnown, name)
 }
 
