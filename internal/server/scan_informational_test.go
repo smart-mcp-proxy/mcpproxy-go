@@ -326,6 +326,35 @@ func TestBaselineSweep_CancelledDoesNotPersistMarker(t *testing.T) {
 	assert.Nil(t, state)
 }
 
+// Cancellation is shutdown, not a scan failure. runInformationalScan must report
+// it as a context error so BOTH callers route it to the uncounted unclaim rather
+// than spending one of the server's bounded retries on a scan that never ran.
+func TestInformationalScan_CancellationIsNotAFailedAttempt(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("srv", config.TrustModeManual))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	n, err := s.runInformationalScan(ctx, "srv")
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, n)
+	assert.Empty(t, fake.startScanAttempts(), "a cancelled scan must never reach StartScan")
+
+	// The two release paths must differ exactly in whether they charge an attempt.
+	s.unclaimInformationalScan("srv")
+	s.infoScanMu.Lock()
+	afterUnclaim := s.infoScanAttempts["srv"]
+	s.infoScanMu.Unlock()
+	assert.Zero(t, afterUnclaim, "unclaim must not charge an attempt")
+
+	s.releaseInformationalScan("srv")
+	s.infoScanMu.Lock()
+	afterRelease := s.infoScanAttempts["srv"]
+	s.infoScanMu.Unlock()
+	assert.Equal(t, 1, afterRelease, "release charges exactly one attempt")
+}
+
 // A sweep where every candidate failed (e.g. servers still connecting) must not
 // burn the one-shot marker — the next start has to retry.
 func TestBaselineSweep_AllScansFailedKeepsMarkerUnset(t *testing.T) {

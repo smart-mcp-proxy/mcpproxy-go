@@ -449,6 +449,14 @@ func (s *Server) runBaselineSweep(ctx context.Context) {
 				zap.Int("servers_scanned", scanned))
 			return
 		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Shutdown, not a scan failure. Same rule as the admission path: an
+			// uncounted unclaim, so draining the sweep on shutdown cannot spend a
+			// server's bounded retries on scans that never ran. The loop's own
+			// ctx.Err() checks handle abandoning without burning the marker.
+			s.unclaimInformationalScan(sc.Name)
+			continue
+		}
 		if err != nil {
 			failed++
 			s.releaseInformationalScan(sc.Name)
