@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,10 +19,27 @@ import (
 // removes the directory. It leaks for the life of the process, and
 // quarantine_security's scan_server makes that path agent-reachable in a loop.
 func TestStartScan_CleansUpTempDirWhenEngineRejectsScan(t *testing.T) {
-	// Isolate os.MkdirTemp("") so the assertion counts only this test's dirs.
+	// Point os.MkdirTemp("") at a scratch dir. Which variable wins is
+	// platform-specific (TMPDIR on unix, TMP/TEMP on Windows), so set all three
+	// and then read back os.TempDir() rather than asserting any one of them
+	// took effect — and count only OUR prefix, so the assertion is still exact
+	// even if the process temp dir is shared.
 	tmpRoot := t.TempDir()
 	t.Setenv("TMPDIR", tmpRoot)
-	require.Equal(t, tmpRoot, os.TempDir(), "precondition: os.TempDir must follow TMPDIR")
+	t.Setenv("TMP", tmpRoot)
+	t.Setenv("TEMP", tmpRoot)
+
+	countScanTempDirs := func() int {
+		entries, err := os.ReadDir(os.TempDir())
+		require.NoError(t, err)
+		n := 0
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "mcpproxy-scan-tools-") {
+				n++
+			}
+		}
+		return n
+	}
 
 	dir := t.TempDir()
 	logger := zap.NewNop()
@@ -45,8 +63,7 @@ func TestStartScan_CleansUpTempDirWhenEngineRejectsScan(t *testing.T) {
 	}
 	svc.engine.mu.Unlock()
 
-	before, err := os.ReadDir(tmpRoot)
-	require.NoError(t, err)
+	before := countScanTempDirs()
 
 	for i := 0; i < 3; i++ {
 		job, err := svc.StartScan(context.Background(), "busy-srv", false, nil, "")
@@ -54,9 +71,6 @@ func TestStartScan_CleansUpTempDirWhenEngineRejectsScan(t *testing.T) {
 		assert.Nil(t, job)
 	}
 
-	after, err := os.ReadDir(tmpRoot)
-	require.NoError(t, err)
-
-	assert.Len(t, after, len(before),
+	assert.Equal(t, before, countScanTempDirs(),
 		"a rejected scan must not leave its tool-definition temp dir behind")
 }
