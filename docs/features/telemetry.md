@@ -55,6 +55,10 @@ A heartbeat goes out 5 minutes after start (so short-lived processes stay quiet)
 
 The shutdown heartbeat exists because the windowed counters live in memory and are cleared only after the endpoint accepts a send. Without it, everything an install did after its 5-minute heartbeat was discarded whenever the process exited before the 24-hour tick — which is most desktop sessions. It is skipped when telemetry is disabled or opted out, and when nothing has been recorded since the last accepted heartbeat. It is hard-bounded to a few seconds, so an unreachable endpoint can never delay quitting, and because counters are cleared only on an accepted send, a failed shutdown flush simply leaves the counts for the next run rather than dropping them.
 
+Delivery is therefore **at-least-once**, not exactly-once. If a send is cut off after the endpoint accepted it but before mcpproxy sees the response, the counts stay pending locally and are re-sent — a lost response is indistinguishable from a lost request. Receivers should treat a heartbeat as idempotent per `(anonymous_id, timestamp)`. Retrying is the deliberate choice: the alternative is silently discarding the window, which is the problem the shutdown heartbeat was added to solve.
+
+Two housekeeping steps are deliberately *not* performed by the shutdown heartbeat — the 365-day anonymous-ID rotation and the one-shot `installer` launch-source attribution. Both are consumed when the payload is built rather than when it is accepted, so running them for a send that may never land would spend state a normal run still has. The next start performs both.
+
 ## What is NOT collected
 
 The following is **never** collected:

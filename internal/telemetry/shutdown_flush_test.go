@@ -25,22 +25,39 @@ import (
 //   - flush sends exactly once and resets the counters (2xx),
 //   - a dead endpoint cannot hang shutdown, and its counters are RETAINED,
 //   - opted-out / disabled installs send nothing at all,
-//   - a periodic tick racing Stop never causes the same counts to be sent twice.
+//   - an ACCEPTED periodic tick leaves the flush nothing to send, and an
+//     unconfirmed one is joined and re-sent (delivery is at-least-once).
 
-// heartbeatRecorder is a test endpoint that captures every heartbeat payload.
+// heartbeatRecorder is a test endpoint that captures every usage heartbeat.
+//
+// It must distinguish heartbeats from opt-out beacons: the beacon deliberately
+// reuses the SAME /heartbeat ingest path (MCP-2482) and is told apart only by
+// its `event` field. Counting it as a heartbeat would make the opt-out test
+// assert on whichever of two goroutines happened to win.
 type heartbeatRecorder struct {
 	mu       sync.Mutex
 	payloads []HeartbeatPayload
+	beacons  []OptOutBeacon
 	status   int // response status; 0 means 200
 }
 
 func (h *heartbeatRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
+
+	var beacon OptOutBeacon
+	isBeacon := json.Unmarshal(body, &beacon) == nil && beacon.Event == OptOutEvent
+
 	var p HeartbeatPayload
-	_ = json.Unmarshal(body, &p)
+	if !isBeacon {
+		_ = json.Unmarshal(body, &p)
+	}
 
 	h.mu.Lock()
-	h.payloads = append(h.payloads, p)
+	if isBeacon {
+		h.beacons = append(h.beacons, beacon)
+	} else {
+		h.payloads = append(h.payloads, p)
+	}
 	status := h.status
 	h.mu.Unlock()
 
@@ -54,6 +71,12 @@ func (h *heartbeatRecorder) count() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.payloads)
+}
+
+func (h *heartbeatRecorder) beaconCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.beacons)
 }
 
 // mcpTotal sums surface_requests.mcp across every received payload. Because
@@ -233,10 +256,23 @@ func TestFlushOnStopSkippedWhenOptedOut(t *testing.T) {
 	cancel()
 	svc.Stop()
 
-	// Only the opt-out beacon may ever reach the endpoint, and it goes to
-	// /opt-out — never /heartbeat.
+	// NotifyConfigChanged fires the opt-out beacon from its own goroutine, and
+	// that beacon POSTs to the SAME /heartbeat ingest path (MCP-2482) — so
+	// asserting straight after Stop would race it. Wait for the beacon to land
+	// first; only then is "no usage heartbeat arrived" a settled fact rather
+	// than a statement about which goroutine was faster.
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.beaconCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("opt-out beacon never reached the endpoint")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The beacon carries ONLY the anonymous id + event marker. No usage payload
+	// may ever follow an opt-out, shutdown flush included.
 	if got := rec.count(); got != 0 {
-		t.Fatalf("heartbeats sent after opt-out: got %d, want 0", got)
+		t.Fatalf("usage heartbeats sent after opt-out: got %d, want 0", got)
 	}
 }
 
@@ -275,29 +311,86 @@ func TestFlushOnStopSkippedWhenTelemetryDisabled(t *testing.T) {
 	}
 }
 
-// TestFlushOnStopNoDoubleSendWithPeriodicTick: the periodic tick and Stop race.
-// The tick's send is held open while Stop is invoked, so Stop joins a send that
-// is still in flight. Whatever the interleaving, the counts recorded must be
-// transmitted exactly once in total — the accepted tick resets the registry, so
-// the flush must find nothing left to report.
-func TestFlushOnStopNoDoubleSendWithPeriodicTick(t *testing.T) {
+// TestFlushOnStopSkippedAfterAnAcceptedTick: once a periodic tick has been
+// ACCEPTED (2xx ⇒ Reset), the shutdown flush must find nothing left to report
+// and send nothing. This is the no-double-send guarantee the flush actually
+// makes — it is a property of the counter contract, not of send timing.
+func TestFlushOnStopSkippedAfterAnAcceptedTick(t *testing.T) {
+	clearTelemetryEnv(t)
+
+	rec := &heartbeatRecorder{}
+	server := httptest.NewServer(rec)
+	defer server.Close()
+
+	svc := newFlushTestService(t, server.URL)
+	svc.initialDelay = 5 * time.Millisecond // the first heartbeat fires promptly
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc.Registry().RecordSurface(SurfaceMCP)
+	svc.Registry().RecordSurface(SurfaceMCP)
+	go svc.Start(ctx)
+
+	// Wait for the tick AND its post-2xx reset — that reset is what makes the
+	// rest of this test deterministic.
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.count() == 0 || svc.Registry().HasPendingCounters() {
+		if time.Now().After(deadline) {
+			t.Fatal("first heartbeat never arrived (or never reset the registry)")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	svc.Stop()
+
+	if got := rec.count(); got != 1 {
+		t.Fatalf("heartbeats received: got %d, want 1 (the flush must skip after an accepted tick)", got)
+	}
+	if got := rec.mcpTotal(); got != 2 {
+		t.Fatalf("surface_requests.mcp transmitted: got %d, want 2", got)
+	}
+}
+
+// TestFlushOnStopJoinsAndResendsAnAbortedTick pins the two things that DO hold
+// when Stop lands on a send that is still in flight:
+//
+//   - Stop joins it (the loop is never left running behind shutdown), and
+//   - delivery is AT-LEAST-ONCE. The aborted send never observed a 2xx, so the
+//     counters stay pending and the flush re-sends them. If the endpoint had in
+//     fact accepted that aborted request, it would see the window twice — that
+//     is undecidable client-side and is the deliberate trade against the
+//     alternative, which is losing the window entirely (the bug the flush
+//     exists to fix). Receivers dedup per (anonymous_id, timestamp).
+//
+// The blocked first request records NOTHING, standing in for exactly that case:
+// a request the client could not confirm.
+func TestFlushOnStopJoinsAndResendsAnAbortedTick(t *testing.T) {
 	clearTelemetryEnv(t)
 
 	rec := &heartbeatRecorder{}
 	inFlight := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+
 	var seen atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if seen.Add(1) == 1 {
+			// The tick's send: hold it open until the test releases it, and
+			// never record it — its outcome is unobservable to the client.
 			close(inFlight)
 			<-release
+			w.WriteHeader(http.StatusOK)
+			return
 		}
 		rec.ServeHTTP(w, r)
 	}))
 	defer server.Close()
 
 	svc := newFlushTestService(t, server.URL)
-	svc.initialDelay = 5 * time.Millisecond // the first heartbeat fires promptly
+	svc.initialDelay = 5 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -319,20 +412,21 @@ func TestFlushOnStopNoDoubleSendWithPeriodicTick(t *testing.T) {
 		close(stopReturned)
 	}()
 
-	time.Sleep(20 * time.Millisecond)
-	close(release)
-
 	select {
 	case <-stopReturned:
 	case <-time.After(10 * time.Second):
-		t.Fatal("Stop did not return")
+		t.Fatal("Stop did not return while a tick was in flight")
 	}
+	unblock()
 
+	if got := rec.count(); got != 1 {
+		t.Fatalf("heartbeats recorded: got %d, want 1 (the flush re-sending the unconfirmed window)", got)
+	}
 	if got := rec.mcpTotal(); got != 2 {
-		t.Fatalf("surface_requests.mcp transmitted across all heartbeats: got %d, want 2 (no double-send)", got)
+		t.Fatalf("surface_requests.mcp re-sent by the flush: got %d, want 2", got)
 	}
 	if svc.Registry().HasPendingCounters() {
-		t.Fatal("counters survived an accepted send")
+		t.Fatal("counters were not reset after the accepted shutdown flush")
 	}
 }
 

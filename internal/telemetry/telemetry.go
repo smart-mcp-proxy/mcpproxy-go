@@ -762,8 +762,18 @@ func (s *Service) SetOnboardingProvider(fn func() *OnboardingSnapshot) {
 // falls through to the runtime detector — this preserves liveness of the
 // heartbeat pipeline at the cost of losing the "installer" classification
 // for this one cycle.
-func (s *Service) resolveLaunchSource() LaunchSource {
-	if s.activationStore != nil && s.activationDB != nil {
+//
+// consumeInstallerPending is false ONLY on the graceful-shutdown flush. Clearing
+// the flag happens at BUILD time, before the send is known to have been
+// accepted, which is a deliberate trade-off for the long-running loop (a crash
+// mid-send must not re-emit "installer" forever). On the shutdown flush that
+// trade-off inverts: the process is about to exit, so a flush that fails —
+// offline machine, 4s timeout — would destroy an attribution that previously
+// survived intact into the next run. The flush therefore leaves the flag ALONE
+// and reports the runtime-detected source; the next run's first heartbeat still
+// claims "installer" exactly once.
+func (s *Service) resolveLaunchSource(consumeInstallerPending bool) LaunchSource {
+	if consumeInstallerPending && s.activationStore != nil && s.activationDB != nil {
 		pending, err := s.activationStore.IsInstallerPending(s.activationDB)
 		if err == nil && pending {
 			// Clear the flag synchronously so a crash before the HTTP POST
@@ -921,6 +931,16 @@ func (s *Service) Stop() {
 // timed-out flush drops nothing (the next run reports the same counts) and an
 // accepted flush cannot double-count with a later start.
 //
+// Delivery is AT-LEAST-ONCE, exactly as it already is between ticks. When a send
+// is aborted after the endpoint accepted it but before the client observed the
+// 2xx — the app context is cancelled a moment into an in-flight tick, say — the
+// counters stay pending and this flush re-sends them, so the endpoint can see
+// the same window twice. That is undecidable client-side (a lost response is
+// indistinguishable from a lost request) and is the pre-existing retry semantic
+// of Reset-on-2xx; the alternative is dropping the window entirely, which is the
+// bug this flush exists to fix. Receivers must treat heartbeats as idempotent
+// per (anonymous_id, timestamp) rather than assume exactly-once.
+//
 // Skipped when: Start never armed it (telemetry disabled by env/config, dev
 // build), the user opted out, telemetry was turned off mid-run, or nothing has
 // been recorded since the last accepted send.
@@ -930,10 +950,12 @@ func (s *Service) Stop() {
 // instantly. It is hard-bounded by flushTimeout so a dead endpoint cannot hang
 // shutdown.
 //
-// Anonymous-id rotation is suppressed here (rotateAnonymousID=false): rotation
-// rewrites the whole config file, and shutdown — with the daemon's other config
-// writers winding down — is the worst moment to take that risk for a once-a-year
-// housekeeping step. The next run's first heartbeat rotates instead.
+// Build-time one-shot side effects are suppressed here (consumeOneShots=false):
+// the 365-day anonymous-id rotation, which rewrites the whole config file at the
+// worst possible moment (the daemon's other config writers are winding down),
+// and the installer_heartbeat_pending flag, which is cleared at build time and
+// would be destroyed by a flush that never lands. Both fire on the next run's
+// first heartbeat instead. See buildHeartbeatWithOneShots.
 func (s *Service) flushFinalHeartbeat() {
 	s.flushOnce.Do(func() {
 		if !s.flushEligible.Load() {
@@ -959,24 +981,24 @@ func (s *Service) flushFinalHeartbeat() {
 
 		s.logger.Debug("Flushing final telemetry heartbeat on shutdown",
 			zap.Duration("timeout", timeout))
-		s.sendHeartbeatWithRotation(ctx, false)
+		s.sendHeartbeatWithOneShots(ctx, false)
 	})
 }
 
 func (s *Service) sendHeartbeat(ctx context.Context) {
-	s.sendHeartbeatWithRotation(ctx, true)
+	s.sendHeartbeatWithOneShots(ctx, true)
 }
 
-// sendHeartbeatWithRotation is sendHeartbeat's body. rotateAnonymousID is false
+// sendHeartbeatWithOneShots is sendHeartbeat's body. consumeOneShots is false
 // only on the shutdown-flush path; see flushFinalHeartbeat.
-func (s *Service) sendHeartbeatWithRotation(ctx context.Context, rotateAnonymousID bool) {
+func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots bool) {
 	// MCP-2482: once the user has opted out, no further telemetry is emitted —
 	// even if the long-running heartbeat loop is still ticking.
 	if s.optedOut.Load() {
 		return
 	}
 
-	payload := s.buildHeartbeatWithRotation(rotateAnonymousID)
+	payload := s.buildHeartbeatWithOneShots(consumeOneShots)
 
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -1146,13 +1168,25 @@ func (s *Service) telemetryCursor(cfg *config.Config) (anonID, createdAt, previo
 }
 
 func (s *Service) buildHeartbeat() HeartbeatPayload {
-	return s.buildHeartbeatWithRotation(true)
+	return s.buildHeartbeatWithOneShots(true)
 }
 
-// buildHeartbeatWithRotation is buildHeartbeat's body. rotateAnonymousID is
-// false only on the shutdown-flush path, which must not rewrite the config file
-// while the daemon is tearing down; see flushFinalHeartbeat.
-func (s *Service) buildHeartbeatWithRotation(rotateAnonymousID bool) HeartbeatPayload {
+// buildHeartbeatWithOneShots is buildHeartbeat's body.
+//
+// consumeOneShots gates every side effect this build performs on state that
+// only fires ONCE and is consumed at build time rather than on a 2xx:
+//   - the 365-day anonymous-id rotation (rewrites the config FILE), and
+//   - the installer_heartbeat_pending flag (BBolt one-shot, see
+//     resolveLaunchSource).
+//
+// It is false only on the shutdown-flush path. Both effects are irreversible
+// the moment they run, so performing them for a send that may never be accepted
+// — the flush runs while the daemon tears down, on a 4s budget, possibly
+// offline — would destroy state that previously survived intact into the next
+// run. The next run's first heartbeat performs both instead. Everything else in
+// this build (BBolt reads, funnel activity marking, counter snapshots) is
+// idempotent or reset-on-2xx and is therefore unconditional.
+func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayload {
 	// Take ONE snapshot of the live config pointer under s.mu and read only that
 	// below. NotifyConfigChanged swaps s.config wholesale on a reload, so an
 	// unsynchronized read of the field races that swap; snapshotting also means a
@@ -1163,7 +1197,7 @@ func (s *Service) buildHeartbeatWithRotation(rotateAnonymousID bool) HeartbeatPa
 
 	// Spec 042: rotate the anonymous ID if it's older than 365 days. Runs on the
 	// snapshot, so the rotated ID is the one this payload reports.
-	if rotateAnonymousID {
+	if consumeOneShots {
 		s.maybeRotateAnonymousID(cfg, time.Now().UTC())
 	}
 
@@ -1261,7 +1295,7 @@ func (s *Service) buildHeartbeatWithRotation(rotateAnonymousID bool) HeartbeatPa
 	// the installer_heartbeat_pending flag set at process startup when
 	// MCPPROXY_LAUNCHED_BY=installer was observed. Otherwise the runtime
 	// detector result (tray/login_item/cli/unknown) is emitted.
-	payload.LaunchSource = string(s.resolveLaunchSource())
+	payload.LaunchSource = string(s.resolveLaunchSource(consumeOneShots))
 
 	// Spec 044 (T051): AutostartEnabled. Tri-state; nil when the tray sidecar
 	// is absent/unreachable/malformed (Linux always falls here).
