@@ -3,6 +3,7 @@
 package main
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,10 @@ func TestCoreURLFromListen(t *testing.T) {
 		{"IPv6 wildcard dials loopback", "http", "[::]:8181", "http://127.0.0.1:8181"},
 		{"explicit host is dialed as given", "https", "192.168.1.10:8181", "https://192.168.1.10:8181"},
 		{"IPv6 host keeps brackets", "http", "[::1]:8181", "http://[::1]:8181"},
+		// A zone must be percent-escaped in a URL, otherwise url.Parse rejects
+		// the result with "invalid URL escape" and every later parse of the
+		// core URL fails.
+		{"IPv6 zone is percent-escaped", "http", "[fe80::1%en0]:8181", "http://[fe80::1%25en0]:8181"},
 		{"garbage yields no URL", "http", "not a listen addr", ""},
 	}
 
@@ -144,6 +149,31 @@ func TestCoreURLFromListen(t *testing.T) {
 				t.Fatalf("coreURLFromListen(%q, %q) = %q, expected %q", tc.protocol, tc.listen, got, tc.expected)
 			}
 		})
+	}
+}
+
+// TestCoreURLFromListen_AlwaysParseable is the invariant behind the escaping:
+// whatever coreURLFromListen returns must survive url.Parse, because the tray
+// re-parses the core URL for health checks, listenArgFromURL and the
+// port-conflict handler.
+func TestCoreURLFromListen_AlwaysParseable(t *testing.T) {
+	listens := []string{
+		"8181", "127.0.0.1:8181", "localhost:8181", "192.168.1.10:8181",
+		":8181", "0.0.0.0:8181", "[::]:8181", "[::1]:8181", "[fe80::1%en0]:8181",
+	}
+
+	for _, listen := range listens {
+		got := coreURLFromListen("http", listen)
+		if got == "" {
+			t.Fatalf("coreURLFromListen(http, %q) returned no URL", listen)
+		}
+		u, err := url.Parse(got)
+		if err != nil {
+			t.Fatalf("url.Parse(coreURLFromListen(http, %q) = %q): %v", listen, got, err)
+		}
+		if u.Port() != "8181" {
+			t.Fatalf("coreURLFromListen(http, %q) = %q, port = %q, expected 8181", listen, got, u.Port())
+		}
 	}
 }
 

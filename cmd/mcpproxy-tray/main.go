@@ -1059,7 +1059,13 @@ func coreURLFromListen(protocol, listen string) string {
 		host = loopbackHost
 	}
 
-	return protocol + "://" + net.JoinHostPort(host, port)
+	// Build via url.URL rather than concatenating: an IPv6 zone must be
+	// percent-escaped in a URL ("fe80::1%en0" -> "fe80::1%25en0"). Plain
+	// concatenation emits a string that url.Parse rejects outright with
+	// "invalid URL escape", which would break every later parse of the core
+	// URL (health checks, listenArgFromURL, the port-conflict handler).
+	u := url.URL{Scheme: protocol, Host: net.JoinHostPort(host, port)}
+	return u.String()
 }
 
 // Legacy process termination removed - replaced by monitor.ProcessMonitor
