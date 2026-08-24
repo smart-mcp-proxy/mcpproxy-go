@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // TestRefreshOAuthToken_DynamicOAuthDiscovery tests that RefreshOAuthToken works
@@ -256,8 +257,24 @@ func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
 	// Park the client exactly as a deferred-OAuth connect failure would.
 	client.StateManager.SetPendingAuth(errors.New("OAuth authentication required for parked-server: login available via Web UI"))
 
+	// A triggered scan calls RetryConnection, which reconnects in the background
+	// (the dial is refused immediately, but not synchronously). Wait for the
+	// client to settle back into a state the scan considers before the next leg,
+	// otherwise a leg can land while it is still Connecting and be skipped for a
+	// reason the test is not about.
+	settled := func() {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			st := client.GetState()
+			return st == types.StatePendingAuth || st == types.StateError
+		}, 30*time.Second, 10*time.Millisecond, "client never settled into a scannable state")
+	}
 	// Pretend the per-server rate limit has expired so it cannot mask the result.
-	expireRateLimit := func() { manager.tokenReconnect["parked-server"] = time.Now().Add(-time.Minute) }
+	expireRateLimit := func() {
+		t.Helper()
+		settled()
+		manager.tokenReconnect["parked-server"] = time.Now().Add(-time.Minute)
+	}
 
 	expireRateLimit()
 	manager.scanForNewTokens()
@@ -281,8 +298,9 @@ func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
 
 	// A re-login that happens to persist a byte-identical token is still a new
 	// write, and this scan is the fallback wake when the CLI could not record an
-	// OAuth completion event — it must not be swallowed.
-	time.Sleep(2 * time.Millisecond) // ensure a distinct Updated stamp
+	// OAuth completion event — it must not be swallowed. SaveOAuthToken stamps
+	// Updated with the wall clock, so give it a distinct instant.
+	time.Sleep(2 * time.Millisecond)
 	saveToken("fresh-token")
 	expireRateLimit()
 	manager.scanForNewTokens()
