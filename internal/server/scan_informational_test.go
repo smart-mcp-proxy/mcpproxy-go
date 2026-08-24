@@ -399,6 +399,39 @@ func TestBaselineSweep_AllScansFailedKeepsMarkerUnset(t *testing.T) {
 	assert.Nil(t, state, "a sweep that scanned nothing must stay retryable")
 }
 
+// A PARTIALLY failing sweep must also stay retryable. Burning the marker as
+// soon as one server scanned stranded the rest: the marker outlives the process,
+// so a server that was merely still connecting would never be swept again.
+func TestBaselineSweep_PartialFailureKeepsMarkerUnset(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	fake.startScanErrByServer = map[string]error{"b": errors.New("server is disconnected")}
+	fake.scanResult["a"] = &scanner.ScanSummary{Status: "clean"}
+	s := newInformationalTestServer(t, fake, nil,
+		enabledServer("a", config.TrustModeManual),
+		enabledServer("b", config.TrustModeManual))
+
+	s.runBaselineSweep(context.Background())
+	require.Equal(t, []string{"a"}, fake.startedScans(), "a scanned, b failed to start")
+
+	state, err := s.runtime.StorageManager().LoadBaselineSweepState()
+	require.NoError(t, err)
+	assert.Nil(t, state, "a sweep with any failed candidate must stay retryable")
+
+	// Once b's transient failure clears, the retried sweep finishes and marks.
+	fake.mu.Lock()
+	fake.startScanErrByServer = nil
+	fake.mu.Unlock()
+	fake.scanResult["b"] = &scanner.ScanSummary{Status: "clean"}
+
+	s.runBaselineSweep(context.Background())
+	assert.ElementsMatch(t, []string{"a", "b"}, fake.startedScans(),
+		"the retry scans only the server that still has no summary")
+
+	state, err = s.runtime.StorageManager().LoadBaselineSweepState()
+	require.NoError(t, err)
+	require.NotNil(t, state, "a sweep with no failures marks itself done")
+}
+
 // A scan that fails to start releases its claim so a later servers.changed can
 // retry it.
 func TestInformationalScan_FailedStartIsRetryable(t *testing.T) {

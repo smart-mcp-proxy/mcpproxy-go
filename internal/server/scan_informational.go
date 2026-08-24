@@ -98,6 +98,30 @@ func isTerminalScanStatus(status string) bool {
 // gating state change, it simply never scans a server the settle handler could
 // act on. Scan-mode servers still get their verdict from the gating path's own
 // admission scan, or from a manual scan.
+//
+// KNOWN RESIDUAL WINDOW (cross-model review, PR #1031). The predicate is
+// evaluated when the scan is CLAIMED, but the settle handler re-reads
+// everything — including the trust mode itself — when the verdict lands. So a
+// server informationally scanned as manual/auto that the operator switches to
+// trust_mode:"scan" AND quarantines while the scan is in flight can still reach
+// maybeAutoApproveScanSettled and be auto-approved by that clean verdict. No
+// predicate here can close it: the decision belongs to the settle handler, and
+// this path has no say once StartScan has been issued.
+//
+// Not closed in this change because the only real fix is scan PROVENANCE — the
+// settle handler acting solely on scans the gating path itself started — which
+// means threading a scan id through the runtime event payload
+// (publishScanSettled carries server_name/status/findings only) and into
+// spec-086's gating path, whose semantics this change deliberately leaves
+// untouched. The window is narrow and the outcome is policy-consistent (a
+// scan-mode + quarantined + no-baseline + clean server is exactly what spec 086
+// auto-approves), and ApproveServer(force=false) still re-gates independently.
+//
+// KNOWN COVERAGE GAP, same review: a trust_mode:"scan" server that is NOT
+// quarantined (e.g. quarantine_enabled:false globally) is scanned by NEITHER
+// path — this one skips all scan-mode servers, and the gating path only handles
+// quarantined ones. Narrowing this predicate to match is what the two bullets
+// above rule out, so closing that gap also needs provenance.
 func scanModeAdmissionOwns(sc *config.ServerConfig) bool {
 	if sc == nil {
 		return false
@@ -108,7 +132,7 @@ func scanModeAdmissionOwns(sc *config.ServerConfig) bool {
 // informationalScansEnabled resolves the security.auto_baseline_scan kill switch
 // (default ON) against the live config, and requires a scanner service.
 func (s *Server) informationalScansEnabled() bool {
-	if s.securityScanner == nil {
+	if s.securityScannerSvc() == nil {
 		return false
 	}
 	var sec *config.SecurityConfig
@@ -227,7 +251,8 @@ func (s *Server) maybeStartInformationalScans(ctx context.Context) {
 // qualifies, claims it so no other path scans it again this process. Returns
 // false (without claiming) when the server must be skipped.
 func (s *Server) claimInformationalScan(ctx context.Context, sc *config.ServerConfig) bool {
-	if sc == nil || sc.Name == "" || s.securityScanner == nil {
+	scanSvc := s.securityScannerSvc()
+	if sc == nil || sc.Name == "" || scanSvc == nil {
 		return false
 	}
 	// Disabled servers are never scanned: the scan would have to start the
@@ -237,7 +262,7 @@ func (s *Server) claimInformationalScan(ctx context.Context, sc *config.ServerCo
 	}
 	// Already scanned (or a scan is in flight): GetScanSummary returns nil only
 	// when no scan job exists at all — the one "never scanned" signal.
-	if summary := s.securityScanner.GetScanSummary(ctx, sc.Name); summary != nil {
+	if summary := scanSvc.GetScanSummary(ctx, sc.Name); summary != nil {
 		return false
 	}
 	// Leave the gating admission path's servers alone: no double scan, and no
@@ -353,17 +378,21 @@ func (s *Server) runInformationalScan(ctx context.Context, name string) (int, er
 	if !s.informationalScansEnabled() {
 		return 0, errInformationalScansDisabled
 	}
-	if _, err := s.securityScanner.StartScan(ctx, name, false, nil, ""); err != nil {
+	scanSvc := s.securityScannerSvc()
+	if scanSvc == nil {
+		return 0, errInformationalScansDisabled
+	}
+	if _, err := scanSvc.StartScan(ctx, name, false, nil, ""); err != nil {
 		return 0, err
 	}
-	return s.waitForInformationalScan(ctx, name), nil
+	return s.waitForInformationalScan(ctx, scanSvc, name), nil
 }
 
 // waitForInformationalScan blocks until the server's scan summary reaches a
 // terminal status (or the timeout / shutdown fires) and returns its finding
 // count. A timeout is not an error: the scan keeps running in the background,
 // the wait only exists to serialize the queue.
-func (s *Server) waitForInformationalScan(ctx context.Context, name string) int {
+func (s *Server) waitForInformationalScan(ctx context.Context, scanSvc securityScannerService, name string) int {
 	timeout := s.infoScanSettleTimeout
 	if timeout <= 0 {
 		return 0
@@ -374,7 +403,7 @@ func (s *Server) waitForInformationalScan(ctx context.Context, name string) int 
 	defer ticker.Stop()
 
 	for {
-		if summary := s.securityScanner.GetScanSummary(ctx, name); summary != nil && isTerminalScanStatus(summary.Status) {
+		if summary := scanSvc.GetScanSummary(ctx, name); summary != nil && isTerminalScanStatus(summary.Status) {
 			if summary.FindingCounts != nil {
 				return summary.FindingCounts.Total
 			}
@@ -494,11 +523,22 @@ func (s *Server) runBaselineSweep(ctx context.Context) {
 		return
 	}
 
-	// Burn the one-shot marker only when the sweep actually achieved something:
-	// scanned at least one server, or had nothing to scan at all. A sweep where
-	// every candidate failed (servers still connecting, unreachable) is left
-	// unmarked so the next start retries it.
-	if scanned > 0 || failed == 0 {
+	// Burn the one-shot marker only when the sweep actually FINISHED its job —
+	// no candidate failed. "Nothing to scan at all" (failed == 0, scanned == 0)
+	// still counts as finished.
+	//
+	// The weaker rule "scanned > 0 || failed == 0" stranded the failures: in a
+	// mixed sweep where A scanned and B was still connecting, the marker was
+	// burned on A's success and B never got a baseline scan on any later start.
+	// (Within THIS process B is still retried — releaseInformationalScan clears
+	// its known-mark for the next servers.changed — but that dies with the
+	// process, and the marker is what outlives it.)
+	//
+	// Retrying is cheap and self-limiting: the next sweep's only candidates are
+	// servers that still have no scan summary, so everything already scanned is
+	// skipped by claimInformationalScan. A permanently unscannable server costs
+	// one failed StartScan per start, in the background, off the startup path.
+	if failed == 0 {
 		if err := sm.SaveBaselineSweepState(&storage.BaselineSweepState{
 			Version:        httpapi.GetBuildVersion(),
 			CompletedAt:    time.Now(),

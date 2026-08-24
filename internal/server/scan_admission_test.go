@@ -31,6 +31,10 @@ type fakeSecurityScanner struct {
 	// Absent ⇒ the scan leaves the summary nil.
 	scanResult   map[string]*scanner.ScanSummary
 	startScanErr error
+	// startScanErrByServer fails StartScan for specific servers only, so a
+	// PARTIALLY failing sweep can be exercised. Takes precedence over
+	// startScanErr for the servers it names.
+	startScanErrByServer map[string]error
 
 	approveCalls   []string
 	startScanCalls []string
@@ -67,6 +71,9 @@ func (f *fakeSecurityScanner) StartScan(_ context.Context, serverName string, _ 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startScanTries = append(f.startScanTries, serverName)
+	if err, ok := f.startScanErrByServer[serverName]; ok {
+		return nil, err
+	}
 	if f.startScanErr != nil {
 		return nil, f.startScanErr
 	}
