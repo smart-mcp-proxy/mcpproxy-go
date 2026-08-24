@@ -773,8 +773,10 @@ func (s *Service) Start(ctx context.Context) {
 		return
 	}
 
-	// Skip if telemetry is disabled
-	if !s.config.IsTelemetryEnabled() {
+	// Skip if telemetry is disabled. Read the config through liveConfig: Start
+	// runs on its own goroutine, so touching the field directly races the
+	// NotifyConfigChanged pointer swap.
+	if startCfg := s.liveConfig(); startCfg == nil || !startCfg.IsTelemetryEnabled() {
 		s.logger.Info("Telemetry disabled by configuration")
 		return
 	}
@@ -933,21 +935,40 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 // heartbeat, which is the pre-existing (rare, bounded) double-report.
 func (s *Service) advanceUpgradeFunnel() {
 	for attempt := 0; attempt < 2; attempt++ {
-		cfg := s.liveConfig()
-		if cfg == nil {
-			return
-		}
-		if cfg.Telemetry == nil {
-			cfg.Telemetry = &config.TelemetryConfig{}
-		}
-		if cfg.Telemetry.LastReportedVersion == s.version {
-			return
-		}
-		cfg.Telemetry.LastReportedVersion = s.version
-		if s.persistConfig(cfg, "Advanced last_reported_version") {
+		if s.advanceUpgradeFunnelOnce() {
 			return
 		}
 	}
+}
+
+// advanceUpgradeFunnelOnce runs ONE resolve -> check -> mutate -> persist pass
+// and reports whether the cursor is settled (nothing to do, or the advance was
+// written). It holds s.mu across the whole pass for two reasons:
+//
+//   - the mutation writes cfg.Telemetry, which buildHeartbeat reads (via
+//     telemetryCursor) and maybeRotateAnonymousID writes. Mutating it outside
+//     the mutex is a genuine data race with a concurrent BuildPayload — that
+//     path is exported and served from an HTTP handler (internal/httpapi), so a
+//     `telemetry show-payload` request lands on the heartbeat loop's post-send
+//     advance. Proven under -race by TestAdvanceUpgradeFunnelConfigRace.
+//   - the liveness check inside persistConfigLocked has to be atomic with the
+//     mutation it is guarding, exactly as in maybeRotateAnonymousID.
+func (s *Service) advanceUpgradeFunnelOnce() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.config
+	if cfg == nil {
+		return true
+	}
+	if cfg.Telemetry == nil {
+		cfg.Telemetry = &config.TelemetryConfig{}
+	}
+	if cfg.Telemetry.LastReportedVersion == s.version {
+		return true
+	}
+	cfg.Telemetry.LastReportedVersion = s.version
+	return s.persistConfigLocked(cfg, "Advanced last_reported_version")
 }
 
 // BuildPayload renders the heartbeat payload at the current point in time.
@@ -970,6 +991,30 @@ func (s *Service) liveConfig() *config.Config {
 	return s.config
 }
 
+// telemetryCursor reads the four cfg.Telemetry scalars the heartbeat reports,
+// in one hold of s.mu. Every writer of these fields — maybeRotateAnonymousID
+// and advanceUpgradeFunnelOnce — mutates them under the same mutex, so the read
+// side must take it too: a locked write paired with an unlocked read is still a
+// data race. Taking all four in one pass also means the reported id and its
+// created_at can never straddle a rotation.
+//
+// cfg is the caller's snapshot (see liveConfig); a nil cfg or nil cfg.Telemetry
+// yields empty strings, which is what a fresh install reports anyway.
+func (s *Service) telemetryCursor(cfg *config.Config) (anonID, createdAt, previousVersion, lastStartupOutcome string) {
+	if cfg == nil {
+		return "", "", "", ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg.Telemetry == nil {
+		return "", "", "", ""
+	}
+	return cfg.Telemetry.AnonymousID,
+		cfg.Telemetry.AnonymousIDCreatedAt,
+		cfg.Telemetry.LastReportedVersion,
+		cfg.Telemetry.LastStartupOutcome
+}
+
 func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// Take ONE snapshot of the live config pointer under s.mu and read only that
 	// below. NotifyConfigChanged swaps s.config wholesale on a reload, so an
@@ -983,8 +1028,15 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// snapshot, so the rotated ID is the one this payload reports.
 	s.maybeRotateAnonymousID(cfg, time.Now().UTC())
 
+	// Read every cfg.Telemetry-derived scalar in ONE locked pass. These four
+	// fields are written under s.mu by maybeRotateAnonymousID (anonymous id +
+	// created_at) and advanceUpgradeFunnelOnce (last_reported_version), both of
+	// which can run on another goroutine while this payload is being built —
+	// reading them unlocked is a data race, not merely a torn view.
+	anonID, anonCreatedAt, prevVersion, lastStartupOutcome := s.telemetryCursor(cfg)
+
 	payload := HeartbeatPayload{
-		AnonymousID:    cfg.GetAnonymousID(),
+		AnonymousID:    anonID,
 		Version:        s.version,
 		Edition:        s.edition,
 		OS:             runtime.GOOS,
@@ -1000,11 +1052,9 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		MachineID: resolveMachineID(),
 	}
 
-	if cfg.Telemetry != nil {
-		payload.AnonymousIDCreatedAt = cfg.Telemetry.AnonymousIDCreatedAt
-		payload.PreviousVersion = cfg.Telemetry.LastReportedVersion
-		payload.LastStartupOutcome = cfg.Telemetry.LastStartupOutcome
-	}
+	payload.AnonymousIDCreatedAt = anonCreatedAt
+	payload.PreviousVersion = prevVersion
+	payload.LastStartupOutcome = lastStartupOutcome
 
 	if s.stats != nil {
 		payload.ServerCount = s.stats.GetServerCount()
@@ -1188,36 +1238,75 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	return payload
 }
 
+// ensureAnonymousID gives the install an anonymous id, generating and
+// persisting one on first run. Start() launches on its own goroutine
+// (runtime/lifecycle.go `go r.telemetryService.Start(...)`), so this runs
+// concurrently with the daemon's config-reload path: reading s.config unlocked
+// races NotifyConfigChanged's pointer swap, and saving it directly would write
+// a whole config file that may already be stale. Both hazards are handled the
+// same way as maybeRotateAnonymousID — one locked pass, persisted only while
+// the snapshot is still live — retried once if the pointer moved underneath.
 func (s *Service) ensureAnonymousID() {
-	if s.config.GetAnonymousID() != "" {
+	for attempt := 0; attempt < 2; attempt++ {
+		if s.ensureAnonymousIDOnce() {
+			return
+		}
+	}
+}
+
+// ensureAnonymousIDOnce runs ONE locked resolve -> check -> mutate -> persist
+// pass and reports whether the id is settled (already present, or written).
+// It returns false only when the live config was swapped out from under the
+// snapshot, which is the caller's cue to redo the work against the new one.
+func (s *Service) ensureAnonymousIDOnce() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.config
+	if cfg == nil {
+		return true
+	}
+	if cfg.Telemetry == nil {
+		cfg.Telemetry = &config.TelemetryConfig{}
+	}
+
+	if cfg.Telemetry.AnonymousID != "" {
 		// Spec 042: legacy installs need created_at initialized for rotation.
-		if s.config.Telemetry != nil && s.config.Telemetry.AnonymousIDCreatedAt == "" {
-			s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-			s.persistConfig(s.config, "Initialized anonymous_id_created_at for legacy install")
+		if cfg.Telemetry.AnonymousIDCreatedAt != "" {
+			return true
 		}
-		return
+		cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
+		if !s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at for legacy install") && s.config != cfg {
+			cfg.Telemetry.AnonymousIDCreatedAt = ""
+			return false
+		}
+		return true
 	}
 
-	// Generate a new UUIDv4
 	newID := uuid.New().String()
+	cfg.Telemetry.AnonymousID = newID
+	cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	// Persist to config
-	if s.config.Telemetry == nil {
-		s.config.Telemetry = &config.TelemetryConfig{}
+	if s.persistConfigLocked(cfg, "Generated anonymous telemetry ID") {
+		s.logger.Info("Generated and persisted anonymous telemetry ID",
+			zap.String("id", newID))
+		return true
 	}
-	s.config.Telemetry.AnonymousID = newID
-	s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	// Save config to disk
-	if s.cfgPath != "" {
-		if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
-			s.logger.Warn("Failed to persist anonymous telemetry ID",
-				zap.Error(err))
-		} else {
-			s.logger.Info("Generated and persisted anonymous telemetry ID",
-				zap.String("id", newID))
-		}
+	if s.config != cfg {
+		// The live config moved on: this id is neither on disk nor in the
+		// config the daemon now reads. Undo it so the snapshot cannot hand out
+		// an identity nothing else will ever agree with, and retry against the
+		// new live config.
+		cfg.Telemetry.AnonymousID = ""
+		cfg.Telemetry.AnonymousIDCreatedAt = ""
+		return false
 	}
+	// A genuine write failure on the still-live config. Keep the in-memory id
+	// (pre-existing behaviour) so this process at least reports one stable
+	// identity for its lifetime.
+	s.logger.Warn("Failed to persist anonymous telemetry ID; continuing with in-memory id",
+		zap.String("id", newID))
+	return true
 }
 
 // maybeRotateAnonymousID rotates the anonymous ID once it's older than 365
