@@ -137,6 +137,12 @@ func (s *Server) informationalScanContext() context.Context {
 // was already configured. Seeding from the startup config (rather than from the
 // first servers.changed) is what makes "the very first server a fresh install
 // adds" count as new.
+//
+// DISABLED servers are deliberately NOT seeded — see the note on
+// maybeStartInformationalScans. They are not the sweep's job either (the sweep
+// skips them), so recording them here would strand them: enabling one later
+// would look like a server that had "already been seen" and it would never be
+// scanned by either path.
 func (s *Server) seedKnownServers(servers []*config.ServerConfig) {
 	s.infoScanMu.Lock()
 	defer s.infoScanMu.Unlock()
@@ -144,7 +150,7 @@ func (s *Server) seedKnownServers(servers []*config.ServerConfig) {
 		s.infoScanKnown = make(map[string]bool, len(servers))
 	}
 	for _, sc := range servers {
-		if sc != nil && sc.Name != "" {
+		if sc != nil && sc.Name != "" && sc.Enabled {
 			s.infoScanKnown[sc.Name] = true
 		}
 	}
@@ -172,6 +178,15 @@ func (s *Server) listStoredServers() []*config.ServerConfig {
 // and gets one informational baseline scan, regardless of trust mode. Servers
 // that were already configured at startup are the baseline sweep's job and are
 // only recorded here.
+//
+// A DISABLED server is neither scanned nor recorded as "known". Recording it
+// would be a permanent strand: claimInformationalScan refuses to scan a disabled
+// server (the scan would have to start it to export tool definitions), so a
+// server admitted disabled and enabled minutes later would look like one that
+// had already been seen — the admission path would skip it as not-new and the
+// sweep, being one-shot and marker-gated, would never come back for it. Its
+// badge would read "not scanned" forever. Leaving it unrecorded costs one map
+// lookup per servers.changed and lets the enable act as the admission.
 func (s *Server) maybeStartInformationalScans(ctx context.Context) {
 	if !s.informationalScansEnabled() {
 		return
@@ -188,6 +203,11 @@ func (s *Server) maybeStartInformationalScans(ctx context.Context) {
 	}
 	for _, sc := range servers {
 		if sc == nil || sc.Name == "" {
+			continue
+		}
+		// Not recorded, not scanned: a disabled server stays "unseen" so that
+		// enabling it later is what admits it. See the note above.
+		if !sc.Enabled {
 			continue
 		}
 		if s.infoScanKnown[sc.Name] {

@@ -265,6 +265,36 @@ func TestInformationalScan_DisabledServersSkipped(t *testing.T) {
 	assert.Equal(t, 0, state.ServersScanned)
 }
 
+// A disabled server must not be STRANDED by being skipped: because a skipped
+// server is neither scanned nor recorded as "known", enabling it later is what
+// admits it. Before this was fixed the skip still marked the server known, so
+// the admission path treated the enable as "already seen" and the one-shot,
+// marker-gated sweep never came back — its badge read "not scanned" forever.
+func TestInformationalScan_DisabledServerScannedOnceEnabled(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	fake.scanResult["srv"] = &scanner.ScanSummary{Status: "clean"}
+	sc := &config.ServerConfig{Name: "srv", TrustMode: string(config.TrustModeManual), Enabled: false}
+	s := newInformationalTestServer(t, fake, nil, sc)
+	// Present at process start AND disabled: the seed must not claim it either.
+	s.seedKnownServers([]*config.ServerConfig{sc})
+
+	s.maybeStartInformationalScans(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	require.Empty(t, fake.startedScans(), "a disabled server is never scanned")
+
+	// The operator enables it; servers.changed fires again.
+	sc.Enabled = true
+	require.NoError(t, s.runtime.StorageManager().SaveUpstreamServer(sc))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"srv"})
+
+	// Still exactly one scan, and still informational.
+	s.maybeStartInformationalScans(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, []string{"srv"}, fake.startedScans())
+	assert.Empty(t, fake.approvedServers())
+}
+
 // (c) The sweep runs once; the persisted marker prevents any re-run, even for a
 // fresh process whose in-memory dedupe maps are empty.
 func TestBaselineSweep_RunsOnceThenMarkerBlocksRerun(t *testing.T) {
