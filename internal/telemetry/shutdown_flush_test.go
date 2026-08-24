@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -428,6 +429,60 @@ func TestFlushOnStopJoinsAndResendsAnAbortedTick(t *testing.T) {
 	if svc.Registry().HasPendingCounters() {
 		t.Fatal("counters were not reset after the accepted shutdown flush")
 	}
+}
+
+// TestOptOutBeaconReadsAnonymousIDUnderLock covers the second half of the
+// s.endpoint drive-by. NotifyConfigChanged replaces s.config under s.mu, and
+// GetAnonymousID dereferences cfg.Telemetry — a pointer that
+// ensureAnonymousIDOnce / advanceUpgradeFunnelOnce also install under s.mu. The
+// opt-out beacon read both unlocked, two lines above the now-locked endpoint
+// read. Fails under -race without liveAnonymousID().
+func TestOptOutBeaconReadsAnonymousIDUnderLock(t *testing.T) {
+	clearTelemetryEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	svc := newFlushTestService(t, server.URL)
+
+	// Every config stays ENABLED, so no enabled->disabled transition fires and
+	// this test drives the reader/writer pair directly rather than through the
+	// beacon's own goroutine.
+	stop := make(chan struct{})
+	var reloads sync.WaitGroup
+	reloads.Add(1)
+	go func() {
+		defer reloads.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			svc.NotifyConfigChanged(&config.Config{
+				Telemetry: &config.TelemetryConfig{
+					AnonymousID: fmt.Sprintf("test-uuid-%d", i),
+					Endpoint:    server.URL,
+				},
+				RoutingMode: "retrieve_tools",
+			})
+		}
+	}()
+
+	ctx := context.Background()
+	for i := 0; i < 100; i++ {
+		if err := svc.SendOptOutBeacon(ctx); err != nil {
+			t.Fatalf("SendOptOutBeacon: %v", err)
+		}
+		if !svc.EmitOptOutBeacon(ctx) {
+			t.Fatal("EmitOptOutBeacon reported no send attempt despite a live anonymous id")
+		}
+	}
+
+	close(stop)
+	reloads.Wait()
 }
 
 // TestFlushOnStopCapturesActivityAfterFirstHeartbeat is the regression the

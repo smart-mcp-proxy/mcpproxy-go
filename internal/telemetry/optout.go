@@ -79,7 +79,7 @@ func (s *Service) EmitOptOutBeacon(ctx context.Context) bool {
 	if disabled, _ := IsDisabledByEnv(); disabled {
 		return false
 	}
-	if s.config.GetAnonymousID() == "" {
+	if s.liveAnonymousID() == "" {
 		return false
 	}
 	if err := s.SendOptOutBeacon(ctx); err != nil {
@@ -98,7 +98,7 @@ func (s *Service) EmitOptOutBeacon(ctx context.Context) bool {
 // caller-supplied URL, so this never sends to an arbitrary, request-derived
 // host.
 func (s *Service) SendOptOutBeacon(ctx context.Context) error {
-	anonID := s.config.GetAnonymousID()
+	anonID := s.liveAnonymousID()
 	if anonID == "" {
 		// Nothing to dedup on — never send an identity-less beacon.
 		return errors.New("opt-out beacon skipped: no anonymous_id")

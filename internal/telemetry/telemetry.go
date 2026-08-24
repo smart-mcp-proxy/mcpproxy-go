@@ -1143,6 +1143,30 @@ func (s *Service) liveEndpoint() string {
 	return s.endpoint
 }
 
+// liveAnonymousID returns the anonymous install id from the service's current
+// config, read under s.mu — the same lock NotifyConfigChanged takes to swap
+// s.config, and the same one ensureAnonymousIDOnce / advanceUpgradeFunnelOnce
+// take to install cfg.Telemetry on a config that arrived without one.
+//
+// Snapshotting the pointer and dereferencing it after unlocking would NOT be
+// enough, for exactly the reason telemetryEnabledLive documents:
+// GetAnonymousID reads cfg.Telemetry, so the whole read has to happen inside
+// the critical section. The opt-out beacon read it unlocked in both of its
+// eligibility gates — two lines above the endpoint read this PR moved under the
+// lock — which the race detector confirms (see
+// TestOptOutBeaconReadsAnonymousIDUnderLock).
+//
+// config.GetAnonymousID only reads config fields, so calling it under the lock
+// cannot re-enter the Service.
+func (s *Service) liveAnonymousID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.config == nil {
+		return ""
+	}
+	return s.config.GetAnonymousID()
+}
+
 // telemetryCursor reads the four cfg.Telemetry scalars the heartbeat reports,
 // in one hold of s.mu. Every writer of these fields — maybeRotateAnonymousID
 // and advanceUpgradeFunnelOnce — mutates them under the same mutex, so the read
