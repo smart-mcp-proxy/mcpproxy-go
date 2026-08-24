@@ -2,12 +2,16 @@
 
 **Feature Branch**: `058-mcp-2026-upgrade`
 **Created**: 2026-05-28
-**Status**: Draft (BLOCKED — see Dependency Gate)
+**Status**: Draft — READY FOR PLANNING (dependency gate CLEARED 2026-08-12; spec revised 2026-08-24)
 **Input**: User description: "MCP protocol upgrade to the 2026-07-28 spec revision"
 
-## Dependency Gate *(read first)*
+## Dependency Gate *(CLEARED 2026-08-12)*
 
-This feature **cannot begin implementation** until the upstream MCP client/server library (`github.com/mark3labs/mcp-go`) ships support for protocol revision `2026-07-28`. As of 2026-05-28 the pinned library (v0.54.0) and the latest published release (v0.54.1) both target only `2025-11-25`; no `2026-07-28` constant exists in the library. This spec captures the full upgrade scope now so execution can start immediately once the gate clears. A scheduled tracking agent watches the library and the spec's RC→final status and notifies the maintainer when the gate opens.
+**The gate has cleared.** `github.com/mark3labs/mcp-go` **v1.0.0-beta.1** (released 2026-08-12, mark3labs/mcp-go#951) ships full `2026-07-28` support with per-request protocol-era detection: both protocol eras are served concurrently on one endpoint, modern (stateless) requests synthesize legacy session state so existing `ClientSessionFromContext`-based handlers keep working, client-side `initialize` is capped at `2025-11-25`, and a conformance suite pins legacy byte-compatibility. The stable v0.x line (latest v0.58.0, 2026-08-11) does **not** include this support. mcpproxy currently pins **v0.57.0** (an earlier revision of this paragraph said v0.54.0; the pin has moved since).
+
+A compile probe against v1.0.0-beta.1 produced **zero compile errors** on both editions, a clean `go vet`, and exactly **2 unit-test failures** — `TestProfile_SetProfileSessionScoped` and `TestProfile_SetProfileUnknown` (`internal/server/profile_integration_test.go`) — which is precisely the Spec-057 tension flagged in the Cross-Spec Reconciliation section below.
+
+**Merge constraint:** a v1.0.0-beta.x library pin MUST NOT merge to main unless either (a) mcp-go v1.0.0 stable has shipped, or (b) the client-facing Streamable HTTP transport is pinned legacy-only per FR-028. (Gate history: opened 2026-05-28 against v0.54.x; tracked weekly on issue #532 until cleared.)
 
 ## Cross-Spec Reconciliation *(read at plan time)*
 
@@ -17,7 +21,11 @@ This feature **cannot begin implementation** until the upstream MCP client/serve
 > - **Option A — treat the profile URL path as request-carried identity.** Each request line carries the slug, so arguably it is *not* connection state. But a client that opens a stream to `/mcp/p/<slug>` binds the profile to that endpoint, which is closer to connection state than to `_meta` identity, and FR-014 forbids relying on a long-lived GET stream — so profile routing must remain correct in a purely stateless, request-scoped model.
 > - **Option B — move profile selection into `_meta`/a header** (e.g. a `profile` field in per-request `_meta`), demoting or deprecating the `/mcp/p/<slug>` path form for `2026-07-28` clients while keeping it for `2025-11-25` clients during the deprecation window.
 >
-> **Action for plan.md:** pick A or B explicitly, add an acceptance scenario proving per-profile filtering (Spec 057) works under the stateless model without per-connection list variation, and confirm `GET`/`DELETE` on `/mcp/p/<slug>` follow FR-014. Do not implement 058 without resolving this — building FR-012 naively would break shipped per-profile routing. (028 needs no change; 057 does.)
+> **Update 2026-08-24 — this decision is now the MANDATORY FIRST TASK.** Under mcp-go v1.0.0-beta.1 the upgraded client library defaults to the stateless `2026-07-28` era, so no `Mcp-Session-Id` is bound and session-scoped `set_profile` fails with "set_profile requires an active MCP session; no session id is bound to this request" (`internal/server/profile_tool.go`, session resolved via `ClientSessionFromContext` in `profile_resolver.go`). The A/B choice can no longer be deferred as a plan-time detail: it is the first implementation task, and its acceptance criteria are the two tests that currently fail under beta.1 — `TestProfile_SetProfileSessionScoped` and `TestProfile_SetProfileUnknown` in `internal/server/profile_integration_test.go`.
+>
+> The audit is broader than `set_profile`: every `ClientSessionFromContext` call site (~21 across `internal/server` — the `describe_tool` session cache, the `code_execution` session, output sanitisation, request routing, and profile resolution) must be reviewed for correctness under the stateless era, not just the profile path.
+>
+> **Action for plan.md:** pick A or B explicitly (A: treat the `/mcp/p/<slug>` URL path as request-carried identity; B: profile in `_meta`/header), add an acceptance scenario proving per-profile filtering (Spec 057) works under the stateless model without per-connection list variation, and confirm `GET`/`DELETE` on `/mcp/p/<slug>` follow FR-014. Do not implement 058 without resolving this — building FR-012 naively would break shipped per-profile routing. (028 needs no change; 057 does.)
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -116,6 +124,8 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 
 ### Functional Requirements
 
+> **Scope note (2026-08-24, post-gate):** mcp-go v1.0.0-beta.1 itself implements protocol-era detection, `server/discover`, `GET`/`DELETE` endpoint handling, MRTR bridging, and legacy byte-compatibility (conformance-tested upstream). FR-001–FR-006 and FR-014–FR-016 are therefore **adopt-and-verify** requirements — configure the library correctly and prove the behavior with mcpproxy-level tests — rather than build-from-scratch work. mcpproxy-specific engineering concentrates on FR-007–FR-010 (proxy header forwarding on both hops), FR-012/FR-013 plus the Spec-057 Option A/B decision (see Cross-Spec Reconciliation), FR-019 (`WithCacheHints`/`WithMethodCacheHints` configuration), FR-022 (trace context → activity log), FR-025, and FR-028.
+
 **Protocol negotiation & handshake**
 
 - **FR-001**: mcpproxy MUST advertise `2026-07-28` as a supported protocol version to connecting clients and MUST continue to support `2025-11-25` during the deprecation window.
@@ -123,12 +133,12 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 - **FR-003**: mcpproxy MUST accept per-request identity/version metadata (`_meta`: protocolVersion, clientInfo, clientCapabilities) in lieu of an `initialize`/`initialized` handshake for `2026-07-28` clients.
 - **FR-004**: mcpproxy MUST retain backward-compatible handling of the legacy `initialize`/`initialized` handshake for clients that still use it.
 - **FR-005**: mcpproxy MUST negotiate protocol versions independently on its client-facing side and its upstream-facing side, translating between versions when they differ.
-- **FR-006**: mcpproxy MUST return the spec-defined unsupported-protocol error when a client requests a version it cannot serve.
+- **FR-006**: mcpproxy MUST return the spec-defined unsupported-protocol error (`-32022`, `UNSUPPORTED_PROTOCOL_VERSION`) when a client requests a version it cannot serve. *(Final spec renumbering: `2026-07-28` reserves `-32020`…`-32099` for MCP-defined errors — `-32020` header mismatch, `-32021` missing required client capability, `-32022` unsupported protocol version.)*
 
 **Routing headers & metadata**
 
 - **FR-007**: mcpproxy MUST set `Mcp-Method` and `MCP-Protocol-Version` on every request/notification it forwards upstream, and `Mcp-Name` on `tools/call`, `resources/read`, and `prompts/get`.
-- **FR-008**: mcpproxy MUST validate that incoming `MCP-Protocol-Version` (and related required headers) match the request body `_meta`, returning the header-mismatch error (`-32001`) on disagreement and not forwarding the request.
+- **FR-008**: mcpproxy MUST validate that incoming `MCP-Protocol-Version` (and related required headers) match the request body `_meta`, returning the header-mismatch error (`-32020`, `HEADER_MISMATCH` per SEP-2243 — the RC-era `-32001` was renumbered in the final spec) on disagreement and not forwarding the request.
 - **FR-009**: mcpproxy MUST support `x-mcp-header` param-to-header mirroring, copying designated tool params into `Mcp-Param-*` headers and Base64-encoding non-ASCII values.
 - **FR-010**: mcpproxy MUST reject or flag tools that declare an invalid `x-mcp-header` mapping rather than forwarding them.
 
@@ -147,11 +157,11 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 **Subscriptions & error codes**
 
 - **FR-017**: mcpproxy MUST route resource update subscriptions via `subscriptions/listen` instead of `resources/subscribe`/`unsubscribe`.
-- **FR-018**: mcpproxy MUST emit `-32602` for resource-not-found conditions and MUST translate an upstream's legacy `-32002` to `-32602` when bridging.
+- **FR-018**: mcpproxy MUST emit `-32602` (Invalid Params) for resource-not-found conditions on the `2026-07-28` era and MUST translate an upstream's legacy `-32002` to `-32602` when bridging across eras. *(Verified against mcp-go v1.0.0-beta.1: the final spec aligns resource-not-found with JSON-RPC `INVALID_PARAMS`; `-32002` remains emitted to, and accepted from, legacy-era peers only, so translation applies at era boundaries.)*
 
 **Additive feature adoption**
 
-- **FR-019**: mcpproxy MUST include `ttlMs` and a `cacheScope` (`public`/`private`) on list/read responses, choosing `private` for identity-scoped content and `public` for shared content.
+- **FR-019**: mcpproxy MUST include `ttlMs` and a `cacheScope` (`public`/`private`) on list/read responses, choosing `private` for identity-scoped content and `public` for shared content (configured via mcp-go's `WithCacheHints`/`WithMethodCacheHints` server options).
 - **FR-020**: mcpproxy MUST produce deterministic ordering for `tools/list` results given unchanged state.
 - **FR-021**: mcpproxy MUST treat tool input/output schemas as JSON Schema 2020-12 by default and MUST NOT auto-dereference external `$ref`s.
 - **FR-022**: mcpproxy MUST capture W3C/OTel trace context (`traceparent`/`tracestate`/`baggage`) from request `_meta` into activity-log records for cross-hop correlation.
@@ -165,7 +175,8 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 **Compatibility & rollout**
 
 - **FR-026**: The personal edition's existing tool-discovery/curation behavior MUST remain functionally unchanged from the connecting agent's perspective after the upgrade.
-- **FR-027**: The upgrade MUST be gated behind the availability of `2026-07-28` support in the underlying MCP library; the codebase MUST NOT switch its negotiated default to `2026-07-28` until that support exists and is verified.
+- **FR-027**: The upgrade MUST be gated behind the availability of `2026-07-28` support in the underlying MCP library; the codebase MUST NOT switch its negotiated default to `2026-07-28` until that support exists and is verified. *(Availability satisfied by mcp-go v1.0.0-beta.1 as of 2026-08-12; "verified" additionally requires the FR-028 intermediate state or v1.0.0 stable before the client-facing default changes.)*
+- **FR-028** *(added 2026-08-24 — safe intermediate state)*: Until the Spec-057 Option A/B reconciliation is implemented and its acceptance tests pass, the client-facing Streamable HTTP transport MUST be pinned to legacy protocol versions only via `server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...)`. A v1.0.0-beta.x pin of `mcp-go` MUST NOT merge to main without either mcp-go v1.0.0 stable or this pin in place.
 
 ### Key Entities
 
@@ -195,7 +206,14 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 - **Library-first adoption**: The upgrade rides on `mcp-go` adding `2026-07-28`; mcpproxy will not hand-roll the protocol primitives unless the library stalls indefinitely. Hand-rolling is explicitly out of scope for this spec.
 - **mcpproxy remains tool-centric**: Resources/prompts/sampling proxying stays as-is (largely unimplemented); MRTR and subscription work is scoped to correct framing, not to newly proxying capabilities mcpproxy doesn't proxy today.
 - **`cacheScope` selection**: identity-scoped content defaults to `private`; globally shared content defaults to `public`.
-- **RC may shift before final**: The `2026-07-28` revision is a release candidate; details (field names, codes) may change before final. Plan/tasks should re-validate against the finalized spec when the gate clears.
+- **RC may shift before final — RESOLVED (2026-08-24)**: The `2026-07-28` revision went FINAL on 2026-07-28. This spec's FRs have been re-validated against the final spec as implemented by mcp-go v1.0.0-beta.1; the RC→final deltas affecting this document were the error-code renumbering now encoded in FR-006/FR-008/FR-018.
+
+## Risks & Watch Items *(added 2026-08-24)*
+
+- **OAuth "authorization hardening" churn between beta.1 and v1.0.0**: mcp-go v1.0.0-beta.1 explicitly left the OAuth surface untouched, but names authorization hardening (issuer-keyed credentials, CIMD) as the next v1.x workstream. mcpproxy's OAuth integration is load-bearing there — `internal/oauth/persistent_token_store.go` (implements `client.TokenStore`), `internal/oauth/config.go` (`client.OAuthConfig`), and the three near-duplicate authorize-URL emission paths in `internal/upstream/core/connection_oauth.go`. Mitigation: keep the feature branch rebased onto each beta and re-run the `internal/oauth` test suite on every library bump.
+- **Frozen tool-surface goldens**: `CallToolResult` gains `resultType` / `ttlMs` / `cacheScope` fields in beta.1 (legacy clients are pinned not to receive them). The three frozen tool-surface golden tests must be re-verified as part of the dependency bump.
+- **Schema dialect shift**: Spec 056's output-schema validation must be re-verified under JSON Schema 2020-12 as the default dialect (FR-021).
+- **Beta churn**: watch for v1.0.0-beta.2+ and v1.0.0 stable; re-run the compile/test probe on each bump before rebasing the branch.
 
 ## Out of Scope
 
