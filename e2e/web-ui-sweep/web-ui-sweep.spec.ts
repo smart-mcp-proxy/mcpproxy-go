@@ -75,11 +75,23 @@ test('tools page lists upstream tools and search narrows them', async ({ page })
   const rows = page.locator('[data-test="tool-row"]')
   // Tool indexing runs in the background after the upstream connects.
   await expect.poll(() => rows.count(), { timeout: 30_000 }).toBeGreaterThan(0)
-  const before = await rows.count()
 
   await page.locator('[data-test="tools-search"]').fill('echo')
-  await expect.poll(() => rows.count(), { timeout: 10_000 }).toBeLessThanOrEqual(before)
-  await expect(rows.first()).toContainText(/echo/i)
+  // Assert on the SURVIVORS, not on the row count. "count <= before" passed
+  // vacuously when the search did nothing at all (the unfiltered set is already
+  // <= itself, and the first row happened to match), and a strict "<" would race
+  // the background indexer — `before` can be sampled mid-render. Requiring every
+  // remaining row to match is race-free and catches a dead search box: the
+  // fixture's non-matching tool (`ping`) would still be listed.
+  await expect
+    .poll(
+      async () => {
+        const texts = await rows.allTextContents()
+        return texts.length > 0 && texts.every((t) => /echo/i.test(t))
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true)
   expect(errors, `uncaught page errors on /tools: ${errors.join(' | ')}`).toHaveLength(0)
 })
 

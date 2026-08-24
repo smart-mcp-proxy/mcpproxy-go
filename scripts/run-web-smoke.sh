@@ -82,7 +82,17 @@ REPORT_DIR="$ARTIFACT_DIR/playwright-report"
 # and failure traces. Honouring an ambient MCPPROXY_API_KEY would copy a
 # developer's real key into tmp/web-smoke-artifacts (and, in CI, an uploaded
 # artifact). The instance is throwaway, so its key may as well be too.
-API_KEY="web-sweep-$(date +%s)-$$"
+#
+# Throwaway, but NOT guessable. The key it protects is the instance's full REST
+# admin API, which can register a stdio upstream — i.e. run an arbitrary command
+# as whoever launched the sweep. 127.0.0.1 is reachable by every local account,
+# so a key derived from the clock and the PID (a search space of seconds x pids)
+# is brute-forceable for the minute the sweep is up. 24 random bytes are not.
+API_KEY="web-sweep-$(node -e 'process.stdout.write(require("crypto").randomBytes(24).toString("hex"))')"
+if [[ ${#API_KEY} -lt 32 ]]; then
+  echo "failed to generate a random API key for the throwaway instance" >&2
+  exit 1
+fi
 # The sweep's server-dependent checks run only when a fixture upstream exists.
 SWEEP_SERVER_NAME=""
 
