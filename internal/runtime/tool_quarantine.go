@@ -18,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
@@ -195,6 +196,10 @@ func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata
 	// full-coverage verdict — a fail-open. See ScanToolMetadataVerdict's peerTools
 	// contract.
 	peers := r.collectPeerToolMetadata(serverName)
+	// Schema v9: count the gate INVOCATION (not the outcome) before the
+	// verdict branches below — this synchronous path is the TPA detection most
+	// installs actually exercise, and it emitted nothing until now. Nil-safe.
+	telemetry.RecordTPAToolChangeGateScanOn(r.TelemetryRegistry())
 	verdict, findings, coverageOK := scanner.ScanToolMetadataVerdict(serverName, []*config.ToolMetadata{tool}, peers)
 	if coverageOK && verdict == "clean" {
 		return true, nil

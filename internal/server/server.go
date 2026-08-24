@@ -78,14 +78,21 @@ type securityScannerService interface {
 	DeepScanEnabled() bool
 }
 
-// securityScannerSvc returns the security scanner service, or nil when the
-// process runs without one (scanner disabled, or a test harness that never
-// wired one up). Callers MUST nil-check.
+// securityScannerSvc returns the published scanner service, or nil while the
+// HTTP startup path has not wired one yet. Every read of s.securityScanner from
+// outside the constructor must go through here — see the field comment.
 func (s *Server) securityScannerSvc() securityScannerService {
-	if s == nil {
-		return nil
-	}
+	s.securityScannerMu.RLock()
+	defer s.securityScannerMu.RUnlock()
 	return s.securityScanner
+}
+
+// setSecurityScanner publishes the scanner service to the event-listener
+// goroutine and the HTTP handlers.
+func (s *Server) setSecurityScanner(svc securityScannerService) {
+	s.securityScannerMu.Lock()
+	defer s.securityScannerMu.Unlock()
+	s.securityScanner = svc
 }
 
 // Server wraps the MCP proxy server with all its dependencies
@@ -118,7 +125,16 @@ type Server struct {
 	startTime time.Time
 
 	// Spec 039: Security scanner service (for scan summaries in server list)
-	securityScanner securityScannerService
+	// securityScanner is published LATE — startCustomHTTPServer constructs the
+	// scanner service long after NewServerWithConfigPath has already started the
+	// event-listener goroutine. That goroutine reads this field on every
+	// servers.changed / scan-settled event, so the publish and the reads are
+	// concurrent and must be synchronized: guard both with securityScannerMu and
+	// reach the field only through securityScannerSvc()/setSecurityScanner().
+	// A dedicated mutex, not s.mu, so it can never participate in a lock cycle
+	// with the broader server lifecycle lock.
+	securityScannerMu sync.RWMutex
+	securityScanner   securityScannerService
 
 	// Spec 086 stage 3 (FR-011): tracks scan-mode servers for which a one-shot
 	// admission baseline scan has already been triggered this process, so the
@@ -126,6 +142,20 @@ type Server struct {
 	// admissionScanMu.
 	admissionScanMu     sync.Mutex
 	admissionScanKicked map[string]bool
+
+	// Informational Pass-1 baseline scanning (see scan_informational.go).
+	// infoScanKnown holds every server name observed since process start, so a
+	// servers.changed carrying a name that is not in it is a NEW admission;
+	// infoScanQueued dedupes the one informational scan per server per process.
+	// Both are guarded by infoScanMu. infoScanRunMu serializes scan EXECUTION
+	// across the admission path and the sweep.
+	infoScanMu            sync.Mutex
+	infoScanKnown         map[string]bool
+	infoScanQueued        map[string]bool
+	infoScanAttempts      map[string]int
+	infoScanRunMu         sync.Mutex
+	infoScanSettleTimeout time.Duration
+	infoScanSweepDelay    time.Duration
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
@@ -232,7 +262,19 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		serveErrCh:          make(chan error, 1),
 		observability:       obsManager,
 		admissionScanKicked: make(map[string]bool),
+
+		infoScanKnown:         make(map[string]bool),
+		infoScanQueued:        make(map[string]bool),
+		infoScanAttempts:      make(map[string]int),
+		infoScanSettleTimeout: informationalScanSettleTimeout,
+		infoScanSweepDelay:    baselineSweepStartDelay,
 	}
+	// Record the servers this process started with: they are the baseline
+	// sweep's job, and anything that shows up later is a NEW admission that gets
+	// its own informational scan. Seeded from the startup config (available
+	// synchronously) rather than from the first servers.changed, so the very
+	// first server a fresh install adds still counts as new.
+	server.seedKnownServers(cfg.Servers)
 
 	mcpProxy := NewMCPProxyServer(
 		rt.StorageManager(),
@@ -503,6 +545,11 @@ func (s *Server) listenForRoutingModeRefresh() {
 			// one-shot admission scan for any scan-mode, still-quarantined,
 			// never-scanned server. Idempotent (see maybeStartAdmissionScans).
 			s.maybeStartAdmissionScans(context.Background())
+			// Every NEWLY admitted server, in ANY trust mode, also gets one
+			// INFORMATIONAL Pass-1 baseline scan so its security badge is
+			// populated. It drives no gating and deliberately skips the servers
+			// the scan-mode admission gate above already owns.
+			s.maybeStartInformationalScans(s.informationalScanContext())
 		case runtime.EventTypeConfigReloaded:
 			// Spec 077 US3: config hot-reload (file edit or /api/v1/config/apply)
 			// must re-gate the scanner so a security.deep_scan.* toggle takes
@@ -561,7 +608,8 @@ func shouldAutoApproveScanSettled(mode config.TrustMode, quarantined bool, verdi
 // if there is no scan report, so a stale or buggy verdict still cannot
 // unquarantine a dangerous or unscanned server.
 func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName string) {
-	if serverName == "" || s.securityScanner == nil {
+	scanSvc := s.securityScannerSvc()
+	if serverName == "" || scanSvc == nil {
 		return
 	}
 	sc := s.findServerConfig(serverName)
@@ -580,13 +628,13 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 	// unquarantined at least once, so this quarantine is a deliberate operator
 	// re-quarantine (or a rug-pull re-quarantine), NOT the initial admission —
 	// never silently override that by auto-approving on a later clean settle.
-	if s.securityScanner.HasApprovalBaseline(serverName) {
+	if scanSvc.HasApprovalBaseline(serverName) {
 		s.logger.Debug("scan-mode server has a prior approval baseline; not auto-approving on settle (respect operator re-quarantine)",
 			zap.String("server", serverName))
 		return
 	}
 	verdict := ""
-	if summary := s.securityScanner.GetScanSummary(ctx, serverName); summary != nil {
+	if summary := scanSvc.GetScanSummary(ctx, serverName); summary != nil {
 		verdict = summary.Status
 	}
 	if !shouldAutoApproveScanSettled(mode, sc.Quarantined, verdict) {
@@ -595,7 +643,7 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 			zap.String("verdict", verdict))
 		return
 	}
-	if err := s.securityScanner.ApproveServer(ctx, serverName, false, "scan-auto"); err != nil {
+	if err := scanSvc.ApproveServer(ctx, serverName, false, "scan-auto"); err != nil {
 		// ApproveServer's own hard-tier/missing-report gate can reject; that is the
 		// intended fail-closed outcome, not a fatal error. Log and leave quarantined.
 		s.logger.Warn("auto-approve of scan-mode server after green scan was rejected",
@@ -616,7 +664,7 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 // plus the "already scanned" verdict guard keep the servers.changed stream from
 // restarting an in-flight or completed scan.
 func (s *Server) maybeStartAdmissionScans(ctx context.Context) {
-	if s.securityScanner == nil {
+	if s.securityScannerSvc() == nil {
 		return
 	}
 	// Read servers from storage (RLock-guarded, returns fresh ServerConfig copies)
@@ -650,7 +698,8 @@ func (s *Server) maybeStartAdmissionScans(ctx context.Context) {
 // goroutine so the event loop is never blocked; a launch failure clears the
 // kicked flag so a later servers.changed can retry.
 func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerConfig) {
-	if sc == nil || s.securityScanner == nil {
+	scanSvc := s.securityScannerSvc()
+	if sc == nil || scanSvc == nil {
 		return
 	}
 	if sc.EffectiveTrustMode() != config.TrustModeScan || !sc.Quarantined {
@@ -659,13 +708,13 @@ func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerC
 	// Already scanned (scanning/clean/failed/…): the admission scan already ran
 	// or a manual scan is in flight. GetScanSummary returns nil only when no
 	// scan job exists yet — the sole "never scanned" signal.
-	if summary := s.securityScanner.GetScanSummary(ctx, sc.Name); summary != nil {
+	if summary := scanSvc.GetScanSummary(ctx, sc.Name); summary != nil {
 		return
 	}
 	// A prior approval baseline means this is a re-quarantine of a server that
 	// was already admitted once, not a first-time admission — do not re-scan or
 	// auto-approve it (aligns with the settle handler's admission-window gate).
-	if s.securityScanner.HasApprovalBaseline(sc.Name) {
+	if scanSvc.HasApprovalBaseline(sc.Name) {
 		return
 	}
 	name := sc.Name
@@ -680,7 +729,7 @@ func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerC
 	s.logger.Info("triggering admission baseline scan for scan-mode server (spec 086 FR-011)",
 		zap.String("server", name))
 	go func() {
-		if _, err := s.securityScanner.StartScan(ctx, name, false, nil, ""); err != nil {
+		if _, err := scanSvc.StartScan(ctx, name, false, nil, ""); err != nil {
 			s.logger.Warn("admission baseline scan failed to start; will retry on next servers.changed",
 				zap.String("server", name),
 				zap.Error(err))
@@ -691,15 +740,45 @@ func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerC
 	}()
 }
 
-// findServerConfig returns the live ServerConfig for serverName from the current
-// config snapshot, or nil if absent. Read-only lookup over the immutable
-// snapshot — safe to call from event-loop goroutines.
+// findServerConfig returns the live ServerConfig for serverName, or nil if
+// absent.
+//
+// Reads from STORAGE, not runtime.Config().Servers. The snapshot Config() hands
+// back is shared and lock-free, and its ServerConfig structs are mutated in
+// place by other goroutines — so ranging it from this background event-loop
+// goroutine is a genuine data race (the same hazard maybeStartAdmissionScans
+// documents, and one the race detector reports against this function's only
+// caller, maybeAutoApproveScanSettled, once anything actually settles a scan).
+// ListUpstreamServers is serialized against SaveUpstreamServer by the storage
+// manager mutex and returns fresh copies.
+//
+// TRADE-OFF (cross-model review, PR #1031). Storage is not a strictly better
+// source: Runtime.ApplyConfig publishes the new config and emits
+// config.reloaded / servers.changed BEFORE the goroutine it spawns reaches
+// LoadConfiguredServers, so for that window storage still holds the PREVIOUS
+// records. A scan settling inside it resolves the old policy — e.g. a server
+// the operator just moved off trust_mode:"scan" can still be seen as scan-mode
+// and quarantined here, and auto-approved on a clean verdict.
+//
+// Storage is still the right read: the alternative races (the config snapshot's
+// ServerConfig structs are mutated in place, which the race detector reports
+// against this function), and a sub-second staleness window on a fail-closed
+// path is a smaller defect than undefined behaviour. Closing it properly means
+// making ApplyConfig synchronize storage before it emits — a change to the
+// config-apply pipeline, not to this reader.
 func (s *Server) findServerConfig(serverName string) *config.ServerConfig {
-	cfg := s.runtime.Config()
-	if cfg == nil {
+	sm := s.runtime.StorageManager()
+	if sm == nil {
 		return nil
 	}
-	for _, sc := range cfg.Servers {
+	servers, err := sm.ListUpstreamServers()
+	if err != nil {
+		s.logger.Debug("findServerConfig: failed to list servers",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return nil
+	}
+	for _, sc := range servers {
 		if sc != nil && sc.Name == serverName {
 			return sc
 		}
@@ -730,18 +809,19 @@ func (s *Server) reapplyScannerSecurityConfig() {
 	// there is no scanner Service at all — the scan gate still runs (spec 086
 	// FR-019 hot-reload).
 	configureTPABundle(cfg, s.logger)
-	if s.securityScanner == nil {
+	scanSvc := s.securityScannerSvc()
+	if scanSvc == nil {
 		return
 	}
 	if cfg == nil {
 		return
 	}
-	s.securityScanner.ApplySecurityConfig(cfg.Security)
+	scanSvc.ApplySecurityConfig(cfg.Security)
 	if cfg.DockerIsolation != nil {
-		s.securityScanner.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
+		scanSvc.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
 	}
 	s.logger.Debug("Re-applied security scanner config on hot-reload",
-		zap.Bool("deep_scan_enabled", s.securityScanner.DeepScanEnabled()))
+		zap.Bool("deep_scan_enabled", scanSvc.DeepScanEnabled()))
 }
 
 // Start starts the MCP proxy server
@@ -1261,8 +1341,8 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		// Spec 039: Add security scan summary if available
-		if s.securityScanner != nil {
-			scanSummary := s.securityScanner.GetScanSummary(context.Background(), serverStatus.Name)
+		if scanSvc := s.securityScannerSvc(); scanSvc != nil {
+			scanSummary := scanSvc.GetScanSummary(context.Background(), serverStatus.Name)
 			if scanSummary != nil {
 				serverMap["security_scan"] = scanSummary
 			}
@@ -2517,7 +2597,14 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		if mgmtSvc, ok := s.runtime.GetManagementService().(management.Service); ok && mgmtSvc != nil {
 			mgmtSvc.SetScanSummaryEnricher(&scanSummaryEnricherAdapter{scanner: secService})
 		}
-		s.securityScanner = secService
+		s.setSecurityScanner(secService)
+		// One-shot post-upgrade baseline sweep: scan enabled servers that have
+		// never been scanned so their badges stop reading "not scanned" on an
+		// install that predates automatic scanning. Backgrounded (never delays
+		// startup), serialized through the informational scan path, cancelled
+		// with the server context, and gated by a persisted marker so it runs
+		// exactly once.
+		go s.runBaselineSweep(ctx)
 	}
 	// Wire server edition multi-user OAuth (no-op in personal edition)
 	wireServerEditionOAuth(s, httpAPIServer)

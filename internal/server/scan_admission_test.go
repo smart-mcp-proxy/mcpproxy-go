@@ -26,6 +26,15 @@ type fakeSecurityScanner struct {
 	summaries   map[string]*scanner.ScanSummary
 	hasBaseline map[string]bool
 	approveErr  error
+	// scanResult is the summary a StartScan publishes for a server, mimicking
+	// the real service where a completed scan makes GetScanSummary non-nil.
+	// Absent ⇒ the scan leaves the summary nil.
+	scanResult   map[string]*scanner.ScanSummary
+	startScanErr error
+	// startScanErrByServer fails StartScan for specific servers only, so a
+	// PARTIALLY failing sweep can be exercised. Takes precedence over
+	// startScanErr for the servers it names.
+	startScanErrByServer map[string]error
 
 	// Scan-surface fixtures (quarantine_security scan_server /
 	// get_scan_report). jobs/reports are keyed by server name; startScanErr
@@ -34,22 +43,25 @@ type fakeSecurityScanner struct {
 	// passJobs pins a job for one specific (server, pass) pair, so a test can
 	// make the ACTIVE job differ from the Pass-1 job — the shape produced when
 	// a completed Pass 1 auto-starts the Pass-2 deep audit.
-	passJobs     map[passKey]*scanner.ScanJob
-	reports      map[string]*scanner.AggregatedReport
-	startScanErr error
-	reportErr    error
+	passJobs  map[passKey]*scanner.ScanJob
+	reports   map[string]*scanner.AggregatedReport
+	reportErr error
 	// onStartScan runs inside StartScan, so a test can make the scan "settle"
 	// (publish a completed job + summary) exactly when it is triggered.
 	onStartScan func(serverName string)
 
 	approveCalls   []string
 	startScanCalls []string
+	// startScanTries records EVERY StartScan entry, including the ones that
+	// return startScanErr, so retry-capping can be asserted.
+	startScanTries []string
 }
 
 func newFakeSecurityScanner() *fakeSecurityScanner {
 	return &fakeSecurityScanner{
 		summaries:   map[string]*scanner.ScanSummary{},
 		hasBaseline: map[string]bool{},
+		scanResult:  map[string]*scanner.ScanSummary{},
 		jobs:        map[string]*scanner.ScanJob{},
 		passJobs:    map[passKey]*scanner.ScanJob{},
 		reports:     map[string]*scanner.AggregatedReport{},
@@ -97,12 +109,23 @@ func (f *fakeSecurityScanner) ApproveServer(_ context.Context, serverName string
 
 func (f *fakeSecurityScanner) StartScan(_ context.Context, serverName string, _ bool, _ []string, _ string) (*scanner.ScanJob, error) {
 	f.mu.Lock()
-	f.startScanCalls = append(f.startScanCalls, serverName)
-	err := f.startScanErr
+	f.startScanTries = append(f.startScanTries, serverName)
+	err, targeted := f.startScanErrByServer[serverName]
+	if !targeted {
+		err = f.startScanErr
+	}
+	if err == nil {
+		f.startScanCalls = append(f.startScanCalls, serverName)
+		// Mirror the real service: a scan that ran leaves a readable summary behind.
+		if result, ok := f.scanResult[serverName]; ok {
+			f.summaries[serverName] = result
+		}
+	}
 	hook := f.onStartScan
 	f.mu.Unlock()
 
-	// The hook may publish the settled job, so read it back afterwards.
+	// The hook may publish the settled job, so read it back afterwards. It runs
+	// on the failure path too, so a test can observe a rejected start.
 	if hook != nil {
 		hook(serverName)
 	}
@@ -112,7 +135,8 @@ func (f *fakeSecurityScanner) StartScan(_ context.Context, serverName string, _ 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// StartScan starts Pass 1 and hands back THAT job, so prefer a pinned
-	// Pass-1 job when a test has made the passes differ.
+	// Pass-1 job when a test has made the passes differ. Tests that never pin a
+	// job get a nil job back, matching the fire-and-forget admission paths.
 	if job, ok := f.passJobs[passKey{server: serverName, pass: scanner.ScanPassSecurityScan}]; ok && job != nil {
 		return job, nil
 	}
@@ -179,6 +203,13 @@ func (f *fakeSecurityScanner) startedScans() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.startScanCalls...)
+}
+
+// startScanAttempts counts every StartScan entry, failures included.
+func (f *fakeSecurityScanner) startScanAttempts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.startScanTries...)
 }
 
 // newAdmissionTestServer builds a Server whose runtime config carries the given

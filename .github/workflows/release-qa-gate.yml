@@ -16,9 +16,13 @@ name: Release QA Gate
 # manually against any ref (workflow_dispatch — a dry run that publishes
 # nothing and never counts as qualification for a later tag, FR-001a).
 #
-# T2/T3/T4 extension slots (reserved manifest entries, recorded as
+# T2 landed as an ADVISORY entry — it runs on every tag build and is reported,
+# but cannot block publication (`continue-on-error` + a non-blocking manifest
+# entry):
+#   advisory/web-ui-sweep        — T2 Playwright sweep against the candidate
+#
+# T3/T4 extension slots (reserved manifest entries, recorded as
 # not-run/"not-implemented-yet" until their stage lands):
-#   reserved/web-ui-sweep        — T2 Playwright sweep against the candidate
 #   reserved/macos-smoke         — T3 macOS tray smoke (advisory, FR-019/020)
 #   reserved/surface-consistency — T4 REST/CLI/Web-UI/tray state agreement
 # See docs/development/release-gate.md.
@@ -375,6 +379,76 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  # T2 (US3, FR-016): Playwright Web UI sweep against the Web UI served by the
+  # CANDIDATE binary (embedded frontend, not a dev server), with a live stdio
+  # mcpfixture upstream so the servers/tools screens have real data.
+  #
+  # ADVISORY, deliberately: `continue-on-error: true` keeps a red sweep out of
+  # this reusable workflow's conclusion, so a publisher whose job `needs:` the
+  # gate still publishes. The sweep is nonetheless REPORTED — the driver runs it
+  # with --advisory, which records `advisory/web-ui-sweep` as `advisory-fail`,
+  # and the verdict job lists it under advisory_failures. Promote to blocking by
+  # flipping that manifest entry to Blocking:true and dropping continue-on-error.
+  #
+  # Setup is not reinvented here: scripts/run-web-smoke.sh is the same launcher
+  # used by hand (docs/development/web-ui-verification.md) — it boots a
+  # throwaway instance, installs Chromium, and runs e2e/web-ui-sweep.
+  # ---------------------------------------------------------------------------
+  web-ui-sweep:
+    name: Web UI sweep (advisory)
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true  # advisory: never blocks the tag (FR-019 pattern)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Node.js  # the sweep installs @playwright/test + Chromium
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download candidate binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: gate-candidate
+          path: dist-bin
+
+      - name: Stage binaries
+        run: chmod +x dist-bin/*
+
+      - name: Run Web UI sweep
+        env:
+          MCPPROXY_BINARY_PATH: ${{ github.workspace }}/dist-bin/mcpproxy
+          MCPPROXY_FIXTURE_PATH: ${{ github.workspace }}/dist-bin/mcpfixture
+          ARTIFACT_DIR: ${{ github.workspace }}/tmp/web-smoke-artifacts
+        run: |
+          ./dist-bin/release-gate run-suite \
+            --name advisory/web-ui-sweep --advisory --report-dir "${GATE_REPORT_DIR}" \
+            -- bash scripts/run-web-smoke.sh
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: web-ui-sweep-playwright-report
+          path: tmp/web-smoke-artifacts/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload report fragment
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gate-fragment-web-ui-sweep
+          path: ${{ env.GATE_REPORT_DIR }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
   # Merge every fragment against the hardcoded gatereport manifest → one
   # verdict. Runs even if upstream jobs failed (if: always()) so a missing
   # blocking fragment is recorded as a FAIL (FR-004, fail-closed) rather than
@@ -383,7 +457,7 @@ jobs:
   # ---------------------------------------------------------------------------
   verdict:
     name: Gate verdict
-    needs: [build-candidate, suite-api-e2e, suite-race, suite-scan-eval, matrix-invariants]
+    needs: [build-candidate, suite-api-e2e, suite-race, suite-scan-eval, matrix-invariants, web-ui-sweep]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10

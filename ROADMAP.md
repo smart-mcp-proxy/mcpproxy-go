@@ -105,15 +105,17 @@ graph LR
   release_qa_gate_matrix --> release_qa_gate_consistency
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class release_qa_gate_matrix done;
-  class release_qa_gate_playwright,release_qa_gate_macos,release_qa_gate_consistency todo;
+  class release_qa_gate_playwright in_review;
+  class release_qa_gate_macos,release_qa_gate_consistency todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags | 🟢 Done | #819 |
-| T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only) | ⚪ Todo | — |
+| T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only) | 🟡 In review | — |
 | T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app) | ⚪ Todo | — |
 | T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states) | ⚪ Todo | — |
 
@@ -801,3 +803,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [097-stored-scripts](./specs/097-stored-scripts/) | `in-flight` | 13/14 (93%) |
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 26/33 (79%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
+| [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |

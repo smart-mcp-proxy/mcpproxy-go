@@ -760,6 +760,22 @@ components:
     config.SecurityConfig:
       description: Security scanner settings (Spec 039)
       properties:
+        auto_baseline_scan:
+          description: |-
+            AutoBaselineScan is the kill-switch for the AUTOMATIC, informational
+            Pass-1 baseline scan: the free in-process TPA scan mcpproxy runs for every
+            newly admitted server (any trust mode) and, once per installation, over
+            pre-existing servers that have never been scanned.
+
+            Informational ONLY: the resulting verdict populates the security badge and
+            the scan summary, and NEVER gates quarantine or approval. The
+            trust_mode:"scan" admission gate is a separate path and is unaffected by
+            this flag.
+
+            Default (nil) is ENABLED. Set to false to suppress every automatic scan
+            (manual scans keep working). Env override: MCPPROXY_AUTO_BASELINE_SCAN,
+            which wins over this field on every path.
+          type: boolean
         deep_scan:
           $ref: '#/components/schemas/config.DeepScanConfig'
         integrity_check_interval:

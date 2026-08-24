@@ -1157,13 +1157,13 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 	}
 	job, err := s.engine.StartScan(ctx, req, callback)
 	if err != nil {
-		// The engine rejected the scan before it ever called the callback, so
-		// nothing will ever run the cleanup the callback owns — release the
-		// tool-definition temp dir / extracted source here or it survives for
-		// the life of the process. Every engine error path returns before
-		// OnScanStarted, so this cannot double-free. Reachable in a loop now
-		// that scan_server is an agent-callable MCP operation: each call that
-		// lands while a scan is already in progress takes exactly this path.
+		// The callback owns resolvedCleanup, but the engine only ever invokes
+		// the callback for a scan it ACCEPTED. Every rejection path here —
+		// "scan already in progress", scanner resolution failure, no scanners
+		// installed — returns before OnScanStarted, so the temp source
+		// directory prepared above would be orphaned on disk. Release it on the
+		// way out; the automatic baseline paths retry, and the concurrent-scan
+		// rejection is exactly what they hit when they race a manual scan.
 		if resolvedCleanup != nil {
 			resolvedCleanup()
 		}

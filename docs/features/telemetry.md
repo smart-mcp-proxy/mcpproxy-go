@@ -10,7 +10,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 8** (`schema_version: 8` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 9** (`schema_version: 9` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -38,7 +38,8 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `active_days_30d` | `5` | Distinct UTC days with process activity in the trailing 30 days (schema v7). Only the count — never the per-day breakdown |
 | `previous_shutdown` | `clean` | How the previous process instance ended — fixed enum `clean` / `crash`, absent on first run (schema v7) |
 | `last_error_code` | `MCPX_DOCKER_CLI_NOT_FOUND` | Most recent stable `MCPX_*` diagnostic code (schema v7). Enum code only, never error text |
-| `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2}}` | Security/TPA scanner activity (schema v8) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan ran |
+| `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2},"tool_change_gate_scans":6,"prompt_scans":11}` | Security/TPA scanner activity (schema v8, extended in v9) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan of any kind ran |
+| `trust_mode_distribution` | `{"auto":1,"scan":3,"manual":8}` | Configured servers per effective trust tier (schema v9) — fixed enum keys `auto`/`scan`/`manual`, counts only. Never server names |
 | `feature_flags.deep_scan_enabled` | `false` | Whether the opt-in deep-scan layer is turned on (schema v8) |
 | `preflight` | `{"filter_diag_emitted_24h":3,"availability_block_24h":2,"availability_block_reasons_24h":{"server_quarantined":2},"discovery_omission_24h":5}` | Preflight baseline counters (issue #969) — counts only, reason map keyed by a fixed enum. Omitted entirely when nothing was counted. See below |
 
@@ -161,9 +162,25 @@ Schema v8 adds two purely **additive** signals so we can see whether the TPA / s
 
 The decision lives in the scanner package (`scanCallbackAdapter.countsForTelemetry` in `internal/security/scanner/service.go`), which is the only layer that knows a job's pass and dry-run status; it calls the single-purpose `EmitSecurityScanTelemetry` emitter hook, implemented on `Runtime` (`internal/runtime/event_bus.go`) as the only caller of the counter API. The UI-facing scan events (`EmitSecurityScanCompleted` / `EmitSecurityScanFailed`) deliberately record nothing — they fire per scanner and per pass.
 
-The whole `tpa_scanner` object is **omitted** when every counter is zero, so an install that never scans emits a payload shape-identical to v7. The anonymity scanner (`internal/telemetry/anonymity.go`, rule `v8_field_invalid`) re-asserts the contract on the serialized payload before every send: whitelisted keys, non-negative integers, and severity-enum keys only — a producer-side regression that leaked a server name or rule id as a map key would block the heartbeat rather than transmit it.
+The whole `tpa_scanner` object is **omitted** when every counter is zero (v9 counters included), so an install that never scans emits a payload shape-identical to v7. The anonymity scanner (`internal/telemetry/anonymity.go`, rule `v8_field_invalid`) re-asserts the contract on the serialized payload before every send: whitelisted keys, non-negative integers, and severity-enum keys only — a producer-side regression that leaked a server name or rule id as a map key would block the heartbeat rather than transmit it.
 
 **Never transmitted**: the scanned server's name, the scanner id, rule ids, finding titles or descriptions, matched content, file paths, and scan error messages.
+
+## Schema v9 — making the TPA funnel measurable
+
+The v8 counters above only see **scan jobs**, which most installs never start. Two TPA detection paths run *synchronously, for ordinary users* and emitted nothing at all, so the fleet read as "the scanner never runs". Schema v9 adds a counter for each, plus the denominator they need.
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `tpa_scanner.tool_change_gate_scans` | non-negative integer | One per changed tool put through the synchronous `trust_mode: scan` gate (`internal/runtime.scanChangeIsClean`) since the last accepted heartbeat | Counts gate **invocations**, not outcomes. Whether the change was auto-approved or held, which server it was, and which checks matched are never accepted by the counter API |
+| `tpa_scanner.prompt_scans` | non-negative integer | One per aggregated upstream **prompt** put through the poisoning filter (`internal/server.scanAggregatedPrompts`) in the same window | Same posture: invocation count only — never the prompt name, the server, or the verdict |
+| `trust_mode_distribution` | map, **fixed enum keys only** (`auto`/`scan`/`manual`) → non-negative integer | Every heartbeat: configured servers grouped by `ServerConfig.EffectiveTrustMode()` | Three-value enum plus counts. Server names and raw config strings never reach the map |
+
+`trust_mode_distribution` is a **state** field, not a delta counter: it is recomputed from the live config on every heartbeat and never reset, and all three keys are always present (zero included) so consumers can rely on the shape. It is the denominator for `tool_change_gate_scans` — only servers resolving to `scan` can produce a gate scan at all — and the first fleet-wide view of which trust tier installs actually sit in. `EffectiveTrustMode()` is the single resolution point, so an empty (inherit) mode, a typo'd mode, and the legacy `auto_approve_tool_changes` / `skip_quarantine` fields all fold into one of the three tiers before counting.
+
+The two new counters share the window and reset semantics of every other registry counter — zeroed only after an accepted (2xx) heartbeat. **Do not sum them with the v8 job counters**: the units differ (one changed tool / one prompt vs. one scan job).
+
+The anonymity scanner enforces both shapes on the wire form: the v9 counters widen the `tpa_scanner` key whitelist (rule `v8_field_invalid`), and `trust_mode_distribution` gets its own rule `trust_mode_field_invalid` — fixed trust-tier keys with non-negative integer counts, or the heartbeat is blocked.
 
 ## Preflight baseline counters (issue #969)
 

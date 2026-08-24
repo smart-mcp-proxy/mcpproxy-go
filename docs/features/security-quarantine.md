@@ -330,6 +330,25 @@ a full-config apply is never blocked by a legacy value it did not introduce.
 Should an unvalidated value ever reach the runtime anyway, resolution still
 fails closed to `manual`.
 
+### Automatic informational baseline scan
+
+Independently of `trust_mode`, MCPProxy runs the free in-process Pass-1 TPA scan
+so every server ends up with a security verdict instead of an empty badge:
+
+- **On admission** — a newly added, enabled server gets one baseline scan. Servers
+  with `trust_mode: "scan"` are skipped entirely: that mode's own admission gate
+  scans them, and routing an informational verdict into its settle-driven
+  auto-approval could change quarantine state.
+- **Once per installation** — a background sweep at startup scans enabled servers
+  that have never been scanned (for installs that predate this behaviour). It is
+  serialized, never delays startup, is cancelled on shutdown, and a persisted
+  marker keeps it one-shot.
+
+These scans are **informational**: the verdict fills in the scan summary and the
+UI badge and never quarantines, approves, or blocks anything. Disable with
+`security.auto_baseline_scan: false` (env: `MCPPROXY_AUTO_BASELINE_SCAN`).
+The `trust_mode: "scan"` gate above is a separate path and is unaffected.
+
 ### Signature bundle (offline TPA corpus)
 
 The `scan` mode runs an offline TPA signature corpus (the tpa-db
