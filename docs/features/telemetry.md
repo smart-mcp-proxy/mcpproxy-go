@@ -49,6 +49,12 @@ The `docker_cli_source` field is likewise a **fixed enum** (`path`, `bundled`, `
 
 Docker isolation failures surface in `error_code_counts_24h` via three stable diagnostic codes (schema v5): `MCPX_DOCKER_CLI_NOT_FOUND` (isolation requested but the `docker` binary is unresolved — issue #696), `MCPX_DOCKER_EXEC_NOT_FOUND` (the image lacks the interpreter the server needs, e.g. `uvx` missing in `python:3.11`), and `MCPX_DOCKER_OCI_RUNTIME` (OCI runtime / architecture-mismatch failures).
 
+## When heartbeats are sent
+
+A heartbeat goes out 5 minutes after start (so short-lived processes stay quiet), then once every 24 hours, and **once more on graceful shutdown**.
+
+The shutdown heartbeat exists because the windowed counters live in memory and are cleared only after the endpoint accepts a send. Without it, everything an install did after its 5-minute heartbeat was discarded whenever the process exited before the 24-hour tick — which is most desktop sessions. It is skipped when telemetry is disabled or opted out, and when nothing has been recorded since the last accepted heartbeat. It is hard-bounded to a few seconds, so an unreachable endpoint can never delay quitting, and because counters are cleared only on an accepted send, a failed shutdown flush simply leaves the counts for the next run rather than dropping them.
+
 ## What is NOT collected
 
 The following is **never** collected:

@@ -122,7 +122,7 @@ func (s *Service) SendOptOutBeacon(ctx context.Context) error {
 	// require a host, and issue the request against the re-serialized URL. This
 	// mirrors validateRegistryURL and guarantees a malformed/non-http endpoint
 	// can never aim the beacon at, e.g., file:// or a schemeless host.
-	beaconURL, err := validateTelemetryURL(strings.TrimRight(s.endpoint, "/") + "/heartbeat")
+	beaconURL, err := validateTelemetryURL(strings.TrimRight(s.liveEndpoint(), "/") + "/heartbeat")
 	if err != nil {
 		return err
 	}

@@ -462,11 +462,35 @@ type Service struct {
 	startMu sync.Mutex
 	started bool
 	stopped bool
+
+	// Graceful-shutdown flush. Counters live in memory and are only reset after
+	// an ACCEPTED send, so everything recorded after the last accepted heartbeat
+	// (in practice: everything after the 5-minute first heartbeat, for any
+	// process that does not survive to the 24h tick) was previously dropped on
+	// exit. Stop now performs ONE final send after joining the loop.
+	//
+	// flushEligible is set by Start once it has passed every emission gate
+	// (env / config / semver) and ensured the anonymous id — i.e. exactly when a
+	// heartbeat from this process would have been legitimate. Stop consults it
+	// so a disabled or dev build never sends on shutdown.
+	//
+	// flushOnce keeps the flush single-shot across the idempotent Stop.
+	// flushTimeout is overridable in tests; see shutdownFlushTimeout.
+	flushEligible atomic.Bool
+	flushOnce     sync.Once
+	flushTimeout  time.Duration
 }
 
 // optOutBeaconTimeout bounds the best-effort opt-out beacon send so a slow or
 // unreachable endpoint never delays the config save that triggered it.
 const optOutBeaconTimeout = 5 * time.Second
+
+// shutdownFlushTimeout hard-bounds the final heartbeat sent on graceful
+// shutdown. It is deliberately much shorter than the HTTP client's own 10s
+// timeout: a dead or blackholed endpoint must never turn a user's quit into a
+// visible hang. The send is best-effort — on timeout the counters are simply
+// retained (no 2xx ⇒ no Reset) and the next run reports them.
+const shutdownFlushTimeout = 4 * time.Second
 
 // New creates a new telemetry service.
 func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logger) *Service {
@@ -485,6 +509,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		envDisabledReason: envReason,
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
+		flushTimeout:      shutdownFlushTimeout,
 		resolvedEnabled:   EffectiveTelemetryEnabled(cfg),
 		done:              make(chan struct{}),
 	}
@@ -813,8 +838,15 @@ func (s *Service) Start(ctx context.Context) {
 	// leaks before they leave the machine. Idempotent.
 	PopulateBlockedValues()
 
+	// Every emission gate above has passed and the anonymous id exists, so a
+	// heartbeat from this process is legitimate from here on. Arm the
+	// graceful-shutdown flush (see flushFinalHeartbeat): even if the process
+	// exits before the initial delay elapses, whatever it recorded is worth one
+	// bounded final send.
+	s.flushEligible.Store(true)
+
 	s.logger.Info("Telemetry service starting",
-		zap.String("endpoint", s.endpoint),
+		zap.String("endpoint", s.liveEndpoint()),
 		zap.Duration("initial_delay", s.initialDelay),
 		zap.Duration("interval", s.heartbeatInterval))
 
@@ -856,6 +888,15 @@ func (s *Service) Start(ctx context.Context) {
 // Runtime.Close relies on this so no telemetry BBolt write can land after
 // the clean-shutdown marker resolves or after the DB closes (Spec 080
 // FR-010, review round 6).
+//
+// After the loop has been joined, Stop performs ONE bounded final heartbeat
+// (flushFinalHeartbeat) so counters recorded since the last accepted send are
+// not lost on exit. Doing it AFTER the join — not from a second goroutine
+// racing the loop — is what keeps the "the loop owns sends" invariant intact:
+// at that point there is provably no other sender, so the send+reset path
+// cannot interleave with a tick. Runtime.Close calls Stop while the BBolt
+// handle is still open and before the clean-shutdown marker resolves, so the
+// flush's buildHeartbeat writes are still legal there.
 func (s *Service) Stop() {
 	s.startMu.Lock()
 	s.stopped = true
@@ -867,16 +908,75 @@ func (s *Service) Stop() {
 	// Start ran (or is running): its defer guarantees done closes on every
 	// exit path, including the disabled-by-env/config early returns.
 	<-s.done
+
+	s.flushFinalHeartbeat()
+}
+
+// flushFinalHeartbeat sends at most one final heartbeat on the graceful
+// shutdown path. Called by Stop AFTER the heartbeat loop has exited, so it is
+// never concurrent with a tick.
+//
+// It reuses sendHeartbeat's send+reset path verbatim, which is what preserves
+// the counter contract: counters are zeroed ONLY on a 2xx, so a failed or
+// timed-out flush drops nothing (the next run reports the same counts) and an
+// accepted flush cannot double-count with a later start.
+//
+// Skipped when: Start never armed it (telemetry disabled by env/config, dev
+// build), the user opted out, telemetry was turned off mid-run, or nothing has
+// been recorded since the last accepted send.
+//
+// The send runs on a FRESH context, not the loop's: Runtime.Close cancels the
+// app context before calling Stop, so a derived context would abort the flush
+// instantly. It is hard-bounded by flushTimeout so a dead endpoint cannot hang
+// shutdown.
+//
+// Anonymous-id rotation is suppressed here (rotateAnonymousID=false): rotation
+// rewrites the whole config file, and shutdown — with the daemon's other config
+// writers winding down — is the worst moment to take that risk for a once-a-year
+// housekeeping step. The next run's first heartbeat rotates instead.
+func (s *Service) flushFinalHeartbeat() {
+	s.flushOnce.Do(func() {
+		if !s.flushEligible.Load() {
+			return
+		}
+		if s.optedOut.Load() {
+			return
+		}
+		if !s.telemetryEnabledLive() {
+			return
+		}
+		if !s.registry.HasPendingCounters() {
+			s.logger.Debug("Skipping telemetry shutdown flush: no counters recorded since the last accepted heartbeat")
+			return
+		}
+
+		timeout := s.flushTimeout
+		if timeout <= 0 {
+			timeout = shutdownFlushTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		s.logger.Debug("Flushing final telemetry heartbeat on shutdown",
+			zap.Duration("timeout", timeout))
+		s.sendHeartbeatWithRotation(ctx, false)
+	})
 }
 
 func (s *Service) sendHeartbeat(ctx context.Context) {
+	s.sendHeartbeatWithRotation(ctx, true)
+}
+
+// sendHeartbeatWithRotation is sendHeartbeat's body. rotateAnonymousID is false
+// only on the shutdown-flush path; see flushFinalHeartbeat.
+func (s *Service) sendHeartbeatWithRotation(ctx context.Context, rotateAnonymousID bool) {
 	// MCP-2482: once the user has opted out, no further telemetry is emitted —
 	// even if the long-running heartbeat loop is still ticking.
 	if s.optedOut.Load() {
 		return
 	}
 
-	payload := s.buildHeartbeat()
+	payload := s.buildHeartbeatWithRotation(rotateAnonymousID)
 
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -905,7 +1005,7 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 		return
 	}
 
-	url := s.endpoint + "/heartbeat"
+	url := s.liveEndpoint() + "/heartbeat"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		s.logger.Debug("Failed to create heartbeat request", zap.Error(err))
@@ -1008,6 +1108,19 @@ func (s *Service) liveConfig() *config.Config {
 	return s.config
 }
 
+// liveEndpoint returns the service's current telemetry endpoint, read under
+// s.mu. NotifyConfigChanged rewrites s.endpoint on a live config reload, so
+// every read must take the same lock the write does — an unlocked read is a
+// data race, not merely a stale value. The shutdown flush made this reachable in
+// practice (it sends after the loop has been joined, i.e. from whichever
+// goroutine called Stop), and it is equally reachable from the feedback and
+// opt-out-beacon paths.
+func (s *Service) liveEndpoint() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endpoint
+}
+
 // telemetryCursor reads the four cfg.Telemetry scalars the heartbeat reports,
 // in one hold of s.mu. Every writer of these fields — maybeRotateAnonymousID
 // and advanceUpgradeFunnelOnce — mutates them under the same mutex, so the read
@@ -1033,6 +1146,13 @@ func (s *Service) telemetryCursor(cfg *config.Config) (anonID, createdAt, previo
 }
 
 func (s *Service) buildHeartbeat() HeartbeatPayload {
+	return s.buildHeartbeatWithRotation(true)
+}
+
+// buildHeartbeatWithRotation is buildHeartbeat's body. rotateAnonymousID is
+// false only on the shutdown-flush path, which must not rewrite the config file
+// while the daemon is tearing down; see flushFinalHeartbeat.
+func (s *Service) buildHeartbeatWithRotation(rotateAnonymousID bool) HeartbeatPayload {
 	// Take ONE snapshot of the live config pointer under s.mu and read only that
 	// below. NotifyConfigChanged swaps s.config wholesale on a reload, so an
 	// unsynchronized read of the field races that swap; snapshotting also means a
@@ -1043,7 +1163,9 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 
 	// Spec 042: rotate the anonymous ID if it's older than 365 days. Runs on the
 	// snapshot, so the rotated ID is the one this payload reports.
-	s.maybeRotateAnonymousID(cfg, time.Now().UTC())
+	if rotateAnonymousID {
+		s.maybeRotateAnonymousID(cfg, time.Now().UTC())
+	}
 
 	// Read every cfg.Telemetry-derived scalar in ONE locked pass. These four
 	// fields are written under s.mu by maybeRotateAnonymousID (anonymous id +
