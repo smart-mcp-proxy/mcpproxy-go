@@ -1148,6 +1148,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 	}
 	job, err := s.engine.StartScan(ctx, req, callback)
 	if err != nil {
+		// The callback owns resolvedCleanup, but the engine only ever invokes
+		// the callback for a scan it ACCEPTED. Every rejection path here —
+		// "scan already in progress", scanner resolution failure, no scanners
+		// installed — returns before OnScanStarted, so the temp source
+		// directory prepared above would be orphaned on disk. Release it on the
+		// way out; the automatic baseline paths retry, and the concurrent-scan
+		// rejection is exactly what they hit when they race a manual scan.
+		if resolvedCleanup != nil {
+			resolvedCleanup()
+		}
 		return nil, err
 	}
 
