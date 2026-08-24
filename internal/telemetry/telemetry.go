@@ -623,13 +623,30 @@ func (s *Service) preflightSink() (PreflightCounterStore, *bbolt.DB) {
 	if s.optedOut.Load() {
 		return nil, nil
 	}
-	s.mu.Lock()
-	cfg := s.config
-	s.mu.Unlock()
-	if !EffectiveTelemetryEnabled(cfg) {
+	if !s.telemetryEnabledLive() {
 		return nil, nil
 	}
 	return s.preflightStore, s.preflightDB
+}
+
+// telemetryEnabledLive resolves EffectiveTelemetryEnabled against the live
+// config with s.mu held for the WHOLE evaluation.
+//
+// Snapshotting the pointer and then dereferencing it after unlocking is NOT
+// enough: config.IsTelemetryEnabled reads cfg.Telemetry, and both
+// ensureAnonymousIDOnce and advanceUpgradeFunnelOnce install that pointer on a
+// config that arrived without a telemetry block (`cfg.Telemetry =
+// &config.TelemetryConfig{}`) while holding s.mu. A locked write paired with an
+// unlocked read is still a data race — the request path (Record*) and the
+// heartbeat loop hit exactly that pair on a fresh install. Proven under -race
+// by TestPreflightSinkTelemetryPointerRace.
+//
+// EffectiveTelemetryEnabled only reads env vars and config fields, so calling
+// it under the lock cannot re-enter the Service.
+func (s *Service) telemetryEnabledLive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return EffectiveTelemetryEnabled(s.config)
 }
 
 // preflightDebug logs a counter-persistence failure without ever propagating it
@@ -773,10 +790,10 @@ func (s *Service) Start(ctx context.Context) {
 		return
 	}
 
-	// Skip if telemetry is disabled. Read the config through liveConfig: Start
-	// runs on its own goroutine, so touching the field directly races the
-	// NotifyConfigChanged pointer swap.
-	if startCfg := s.liveConfig(); startCfg == nil || !startCfg.IsTelemetryEnabled() {
+	// Skip if telemetry is disabled. Resolved under s.mu (telemetryEnabledLive):
+	// Start runs on its own goroutine, so both the s.config pointer read and the
+	// cfg.Telemetry dereference behind it race the config-reload path.
+	if !s.telemetryEnabledLive() {
 		s.logger.Info("Telemetry disabled by configuration")
 		return
 	}
