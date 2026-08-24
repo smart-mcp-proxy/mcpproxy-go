@@ -490,10 +490,11 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot, ac
 					plan.Actions[name] = ActionNone
 				} else if actual, ok := actualStates[name]; ok && !actual.ConnectionInfo.ShouldAutoReconnect(time.Now()) {
 					// Respect the client's retry policy: exponential backoff after
-					// consecutive failures, gave-up after MaxConnectionRetries, and
-					// PendingAuth servers waiting on user OAuth login. Without this
-					// gate the periodic 30s reconciliation re-dials a dead upstream
-					// forever, hammering the remote server (~3 requests per tick).
+					// consecutive failures, the coarse OAuth ladder, half-hourly
+					// probes once the client gave up, and PendingAuth servers
+					// parked waiting on user OAuth login. Without this gate the
+					// periodic 30s reconciliation re-dials a dead upstream forever,
+					// hammering the remote server (~3 requests per tick).
 					s.logger.Debug("Skipping auto-reconnect (backoff/pending-auth)",
 						zap.String("server", name),
 						zap.String("state", actual.ConnectionInfo.State.String()),

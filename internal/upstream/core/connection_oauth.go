@@ -69,10 +69,17 @@ func (e *ErrOAuthPending) Code() diagnostics.Code {
 	return diagnostics.OAuthLoginRequired
 }
 
-// IsOAuthPending checks if an error is an ErrOAuthPending
+// IsOAuthPending checks if an error is (or wraps) an ErrOAuthPending.
+//
+// It MUST unwrap: the pending error is raised inside an auth strategy and then
+// wrapped twice on its way out — connectHTTP/connectSSE add "all authentication
+// strategies failed, last error: %w" and Connect adds "failed to connect: %w".
+// With a bare type assertion the check therefore never fired in production, and
+// every login-blocked server fell through to the generic error path and was
+// re-dialed instead of parked (#1013).
 func IsOAuthPending(err error) bool {
-	_, ok := err.(*ErrOAuthPending)
-	return ok
+	var pending *ErrOAuthPending
+	return errors.As(err, &pending)
 }
 
 // OAuthStartResult contains the result of initiating an OAuth flow.

@@ -2,6 +2,8 @@ package upstream
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -12,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	uptransport "github.com/mark3labs/mcp-go/client/transport"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -113,6 +116,12 @@ type Manager struct {
 	// cannot write due to DB lock). Prevents rapid retrigger loops.
 	tokenReconnect map[string]time.Time
 
+	// tokenFingerprints records which persisted token each server was last
+	// retried with, so the scan fires on a NEW token rather than on the mere
+	// presence of the stale one it already failed with (#1013). Same goroutine
+	// as tokenReconnect (the OAuth event monitor), so it needs no extra lock.
+	tokenFingerprints map[string]string
+
 	// Context for shutdown coordination
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -185,17 +194,18 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *storage.BoltDB, secretResolver *secret.Resolver, storageMgr *storage.Manager) *Manager {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
-		clients:         make(map[string]*managed.Client),
-		logger:          logger,
-		storage:         boltStorage,
-		notificationMgr: NewNotificationManager(),
-		secretResolver:  secretResolver,
-		tokenReconnect:  make(map[string]time.Time),
-		lastSweptAt:     make(map[string]time.Time),
-		shutdownCtx:     shutdownCtx,
-		shutdownCancel:  shutdownCancel,
-		storageMgr:      storageMgr,
-		limiters:        limiter.NewRegistry(),
+		clients:           make(map[string]*managed.Client),
+		logger:            logger,
+		storage:           boltStorage,
+		notificationMgr:   NewNotificationManager(),
+		secretResolver:    secretResolver,
+		tokenReconnect:    make(map[string]time.Time),
+		tokenFingerprints: make(map[string]string),
+		lastSweptAt:       make(map[string]time.Time),
+		shutdownCtx:       shutdownCtx,
+		shutdownCancel:    shutdownCancel,
+		storageMgr:        storageMgr,
+		limiters:          limiter.NewRegistry(),
 	}
 	manager.globalConfig.Store(globalConfig)
 	// Spec 093: publish the initial limit generation. With no limits configured
@@ -1469,11 +1479,18 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
-		if client.GetState() == types.StateError && !client.ShouldRetry() {
-			info := client.GetConnectionInfo()
+		// Same retry policy the supervisor's reconcile honors: plain backoff,
+		// the coarse OAuth ladder, half-hourly probes after give-up, and no
+		// redial at all for a server parked awaiting login. ConnectAll runs on
+		// every config reload, so gating only on StateError+ShouldRetry (as it
+		// used to) let a reload re-dial servers their own client had paused
+		// (#1013). A user-driven config change for THIS server still reconnects
+		// it — the supervisor plans ActionReconnect, which bypasses the gate.
+		if info := client.GetConnectionInfo(); !info.ShouldAutoReconnect(time.Now()) {
 			m.logger.Debug("Client backoff active, skipping connect attempt",
 				zap.String("id", id),
 				zap.String("name", client.GetConfig().Name),
+				zap.String("state", info.State.String()),
 				zap.Int("retry_count", info.RetryCount),
 				zap.Time("last_retry_time", info.LastRetryTime))
 			continue
@@ -2175,14 +2192,38 @@ func (m *Manager) scanForNewTokens() {
 			continue
 		}
 
-		m.logger.Info("Detected persisted OAuth token; triggering reconnect",
+		// Only a token we have NOT already retried with is news. The failing
+		// server usually still has its (expired/revoked/rejected) token in the
+		// store, so triggering on mere presence redialed it every scan — a 5s
+		// loop that outpaces the supervisor's and defeats the PendingAuth park
+		// (#1013). The fingerprint changes exactly when a login/refresh writes a
+		// new token, which is the event this scan exists to catch.
+		fingerprint := tokenFingerprint(tok)
+		if seen, ok := m.tokenFingerprints[id]; ok && seen == fingerprint {
+			continue
+		}
+
+		m.logger.Info("Detected new persisted OAuth token; triggering reconnect",
 			zap.String("server", cfg.Name),
 			zap.Time("token_expires_at", tok.ExpiresAt))
 
-		// Remember trigger time and retry connection
+		// Remember trigger time + which token we tried, then retry connection
 		m.tokenReconnect[id] = now
+		m.tokenFingerprints[id] = fingerprint
 		_ = m.RetryConnection(cfg.Name)
 	}
+}
+
+// tokenFingerprint identifies a persisted OAuth token without retaining it: a
+// truncated SHA-256 over the access token, refresh token and expiry, so a
+// refreshed or re-issued token compares different while the same stale token
+// compares equal. Never log or persist the raw token to make this comparison.
+func tokenFingerprint(tok *uptransport.Token) string {
+	if tok == nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(tok.AccessToken + "\x00" + tok.RefreshToken + "\x00" + tok.ExpiresAt.UTC().Format(time.RFC3339Nano)))
+	return hex.EncodeToString(sum[:8])
 }
 
 // StartManualOAuth performs an in-process OAuth flow for the given server.

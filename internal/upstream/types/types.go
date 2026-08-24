@@ -331,10 +331,15 @@ func (sm *StateManager) SetPendingAuth(err error) {
 	callback := sm.onStateChange
 	sm.mu.Unlock()
 
-	// Dispatched in a goroutine like SetError's: callers hold the managed client's
-	// mutex across this call, and consumers may call back into the client.
+	// Dispatched synchronously, like TransitionTo (which delivered this very
+	// state before) and unlike SetError: a detached goroutine can be scheduled
+	// after a subsequent Connecting/Ready callback, which would surface a stale
+	// "sign in required" prompt right after a successful login. The registered
+	// consumers only log and hand off to notification handlers that are
+	// themselves goroutine-dispatched, and they never take the managed client's
+	// mutex — the same reason TransitionTo can already run under it.
 	if callback != nil {
-		go callback(oldState, StatePendingAuth, &info)
+		callback(oldState, StatePendingAuth, &info)
 	}
 }
 
