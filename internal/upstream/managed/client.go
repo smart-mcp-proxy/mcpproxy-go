@@ -274,7 +274,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// that died silently (e.g., HTTP server timeout). Without this, core client
 	// rejects the connect attempt with "client already connected" error.
 	currentState := mc.StateManager.GetState()
-	if currentState == types.StateError || currentState == types.StateDisconnected {
+	if currentState == types.StateError || currentState == types.StateDisconnected || currentState == types.StatePendingAuth {
 		mc.logger.Debug("Disconnecting core client before reconnect to clear stale state",
 			zap.String("server", mc.GetConfig().Name),
 			zap.String("from_state", currentState.String()))
@@ -318,9 +318,11 @@ func (mc *Client) Connect(ctx context.Context) error {
 		if core.IsOAuthPending(connectErr) {
 			mc.logger.Info("⏳ OAuth authentication pending user action",
 				zap.String("server", mc.GetConfig().Name))
-			// Transition to PendingAuth state instead of Error
-			mc.StateManager.TransitionTo(types.StatePendingAuth)
-			mc.StateManager.SetError(connectErr)
+			// Park in PendingAuth. SetPendingAuth (not TransitionTo + SetError:
+			// SetError forces StateError and would immediately undo the park, so
+			// the supervisor kept redialing a login-blocked server every 30s —
+			// #1013).
+			mc.StateManager.SetPendingAuth(connectErr)
 			return fmt.Errorf("OAuth authentication pending: %w", connectErr)
 		}
 		// Check if this is an OAuth authorization requirement (not an error)

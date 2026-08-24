@@ -2156,8 +2156,10 @@ func (m *Manager) scanForNewTokens() {
 		}
 
 		state := c.GetState()
-		// Focus on Error state likely due to OAuth/authorization
-		if state != types.StateError {
+		// Focus on states that a freshly persisted token can unblock: a plain
+		// Error (likely OAuth/authorization) and PendingAuth, where the client is
+		// parked waiting for exactly this token (#1013).
+		if state != types.StateError && state != types.StatePendingAuth {
 			continue
 		}
 

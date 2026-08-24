@@ -1160,16 +1160,30 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	require.False(t, isConnected(), "supervisor re-dialed a failed server inside its backoff window")
 
-	// A server that gave up after max retries must not be re-dialed either.
+	// A server that gave up after max retries must not be re-dialed either,
+	// until the give-up probe interval has elapsed (see below).
 	setConnectionState(false, &types.ConnectionInfo{
 		State:         types.StateError,
 		RetryCount:    types.MaxConnectionRetries,
 		GaveUp:        true,
-		LastRetryTime: time.Now().Add(-time.Hour),
+		LastRetryTime: time.Now().Add(-time.Minute),
 	})
 	require.NoError(t, supervisor.reconcile(configSvc.Current()))
 	time.Sleep(50 * time.Millisecond)
 	require.False(t, isConnected(), "supervisor re-dialed a server that gave up after max retries")
+
+	// An OAuth-classified failure is paced by the OAuth ladder, which bumps
+	// OAuthRetryCount and never RetryCount — without that gate it reads as
+	// "no failures yet" and is re-dialed on every tick forever (#1013).
+	setConnectionState(false, &types.ConnectionInfo{
+		State:            types.StateError,
+		IsOAuthError:     true,
+		OAuthRetryCount:  2,
+		LastOAuthAttempt: time.Now().Add(-time.Minute),
+	})
+	require.NoError(t, supervisor.reconcile(configSvc.Current()))
+	time.Sleep(50 * time.Millisecond)
+	require.False(t, isConnected(), "supervisor re-dialed a server inside its OAuth backoff window")
 
 	// A server parked in PendingAuth (waiting for user OAuth login) must not be
 	// re-dialed - each attempt fires real requests at the upstream and cannot
@@ -1190,4 +1204,17 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 	require.NoError(t, supervisor.reconcile(configSvc.Current()))
 	time.Sleep(50 * time.Millisecond)
 	require.True(t, isConnected(), "supervisor did not reconnect after the backoff window elapsed")
+
+	// A given-up server is still probed once per GaveUpProbeInterval, so an
+	// outage longer than the retry ladder (sleep, VPN, maintenance) self-heals
+	// instead of leaving the upstream silently dead until a human notices.
+	setConnectionState(false, &types.ConnectionInfo{
+		State:         types.StateError,
+		RetryCount:    types.MaxConnectionRetries,
+		GaveUp:        true,
+		LastRetryTime: time.Now().Add(-types.GaveUpProbeInterval - time.Minute),
+	})
+	require.NoError(t, supervisor.reconcile(configSvc.Current()))
+	time.Sleep(50 * time.Millisecond)
+	require.True(t, isConnected(), "supervisor never probes a given-up server again")
 }
