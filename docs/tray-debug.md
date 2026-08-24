@@ -176,7 +176,7 @@ The tray launches `mcpproxy serve` when it detects that no core is running. You 
 
 - `MCPPROXY_CORE_URL` – full base URL the tray should connect to (e.g. `http://localhost:8085`). This also controls the health checks.
 - `MCPPROXY_CORE_PATH` – custom path to the mcpproxy core binary (defaults to bundled binary or PATH lookup).
-- `MCPPROXY_TRAY_LISTEN` / `MCPPROXY_TRAY_PORT` – override the port passed to `--listen` when the tray launches the core (formats accepted: `:8085` or `8085`).
+- `MCPPROXY_TRAY_LISTEN` / `MCPPROXY_TRAY_PORT` – override the address passed to `--listen` when the tray launches the core (formats accepted: `127.0.0.1:8085`, `:8085` or `8085`). The host is never widened: a pinned host is forwarded as written, and a bare port (`8085`) binds loopback. A `--listen` on the tray's own command line takes precedence over both; when it is set and the port is busy, the tray reports the conflict instead of moving the core to another port.
 - `MCPPROXY_TRAY_CONFIG_PATH` – absolute path to the `mcp_config.json` the tray should hand to the core via `--config`.
 - `MCPPROXY_TRAY_EXTRA_ARGS` – optional additional CLI arguments (whitespace separated) appended after `serve`.
 - `MCPPROXY_TRAY_SKIP_CORE` – set to `1` to prevent the tray from launching the core automatically (useful when attaching to an external instance).
