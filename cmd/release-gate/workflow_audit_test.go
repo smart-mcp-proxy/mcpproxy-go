@@ -66,15 +66,17 @@ type workflow struct {
 }
 
 type job struct {
-	Needs needsList `yaml:"needs"`
-	Uses  string    `yaml:"uses"`
-	If    yaml.Node `yaml:"if"`
-	Steps []step    `yaml:"steps"`
+	Needs           needsList `yaml:"needs"`
+	Uses            string    `yaml:"uses"`
+	If              yaml.Node `yaml:"if"`
+	ContinueOnError yaml.Node `yaml:"continue-on-error"`
+	Steps           []step    `yaml:"steps"`
 }
 
 type step struct {
-	Uses string `yaml:"uses"`
-	Run  string `yaml:"run"`
+	Uses string    `yaml:"uses"`
+	Run  string    `yaml:"run"`
+	With yaml.Node `yaml:"with"`
 }
 
 // needsList decodes `needs:` which may be a scalar (`needs: build`) or a

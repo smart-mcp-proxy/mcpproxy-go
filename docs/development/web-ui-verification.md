@@ -8,6 +8,20 @@ description: "Playwright sweep and HTML report workflow for verifying changes to
 
 When you modify the Web UI (any Vue file under `frontend/src/`), verify it end-to-end with a Playwright sweep that captures screenshots and packages them into a self-contained HTML report. This is the same workflow used to verify Spec 046 v2 — see `specs/046-local-first-onboarding/verification/` for a worked example.
 
+## The standing sweep (one command)
+
+The core-screen sweep is committed and scripted — run it before you hand-roll anything:
+
+```bash
+./scripts/run-web-smoke.sh --show-report   # boots a throwaway instance, runs e2e/web-ui-sweep
+```
+
+The launcher builds `./mcpproxy` if needed, serves a throwaway instance on `127.0.0.1:18080` under a freshly generated throwaway API key (your own `MCPPROXY_API_KEY` is deliberately ignored — the key ends up in report URLs and traces), installs Chromium from the committed `e2e/web-ui-sweep/package-lock.json` via `npm ci`, and runs [`e2e/web-ui-sweep/web-ui-sweep.spec.ts`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/e2e/web-ui-sweep/web-ui-sweep.spec.ts) — servers list, server detail (+ security tab), tools page and search, activity log, settings — failing on uncaught page exceptions. Pass `MCPPROXY_FIXTURE_PATH=$(go build -o /tmp/mcpfixture ./cmd/mcpfixture && echo /tmp/mcpfixture)` to register a live stdio upstream so the server- and tool-dependent checks run instead of skipping. The HTML report lands in `tmp/web-smoke-artifacts/playwright-report/`.
+
+The release QA gate runs this exact script on every tag as its **advisory** `web-ui-sweep` job — see [Release Gate](release-gate.md#web-ui-sweep-t2--advisory). Extend the committed sweep when you add a screen worth guarding on releases; use the ad-hoc pattern below for the deeper, spec-specific verification that ships beside a spec.
+
+## Ad-hoc, spec-specific verification
+
 The pattern, in order:
 
 1. **Stand up a fresh mcpproxy.** Use a throwaway data-dir so persisted state doesn't bleed between runs:

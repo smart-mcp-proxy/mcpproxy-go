@@ -449,8 +449,9 @@ epics:
         depends_on: []
       - id: release-qa-gate-playwright
         title: "T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only)"
-        status: todo
+        status: in_review
         priority: P2
+        note: "Landed ADVISORY, not blocking (FR-016 wants blocking eventually). The sweep itself is now committed (e2e/web-ui-sweep: servers list, server detail + security tab, tools page + search, activity log, settings; uncaught page exceptions fail it) and scripts/run-web-smoke.sh — previously dead, it pointed at a spec file that lives in a gitignored dir — is its single launcher for both `./scripts/run-web-smoke.sh` by hand and the gate's `web-ui-sweep` job. Advisory is enforced twice: continue-on-error on the job (a failing job inside a reusable workflow would otherwise become the workflow_call conclusion the publishers gate on) and a non-blocking manifest entry advisory/web-ui-sweep (renamed from reserved/web-ui-sweep) whose failures land in advisory_failures via the new `release-gate run-suite --advisory` flag. Promotion to blocking = Blocking:true + drop continue-on-error, after 3 consecutive clean tags."
         depends_on: [release-qa-gate-matrix]
       - id: release-qa-gate-macos
         title: "T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app)"
