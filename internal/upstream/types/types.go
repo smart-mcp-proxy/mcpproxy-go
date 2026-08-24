@@ -86,13 +86,40 @@ func RetryBackoffDuration(retryCount int) time.Duration {
 	return backoffDuration
 }
 
+// OAuthRetryBackoffDuration returns the (much longer) backoff to wait after the
+// given number of consecutive OAuth failures: 5min, 15min, 1h, 4h, then 24h.
+// An OAuth failure cannot be resolved by redialing quickly — it needs a token
+// refresh or a human completing a login — so its ladder is deliberately coarse.
+func OAuthRetryBackoffDuration(oauthRetryCount int) time.Duration {
+	switch {
+	case oauthRetryCount <= 1:
+		return 5 * time.Minute
+	case oauthRetryCount <= 2:
+		return 15 * time.Minute
+	case oauthRetryCount <= 3:
+		return 1 * time.Hour
+	case oauthRetryCount <= 4:
+		return 4 * time.Hour
+	default:
+		return 24 * time.Hour // Max backoff for OAuth: 24 hours
+	}
+}
+
+// GaveUpProbeInterval is how often a given-up server is still probed by the
+// periodic reconciliation. After MaxConnectionRetries consecutive failures the
+// client stops its own retry ladder, but "never again" would leave an upstream
+// silently dead after any outage longer than the ladder (laptop sleep, VPN drop,
+// overnight maintenance) until a human notices and reconnects by hand — a failed
+// upstream is invisible to the operator (#1013). One probe every 30 minutes keeps
+// that self-healing at ~48 requests/day instead of ~2880.
+const GaveUpProbeInterval = 30 * time.Minute
+
 // ShouldAutoReconnect reports whether an automatic (supervisor-driven) reconnect
 // attempt is appropriate given the connection's failure history. It returns false
-// while the exponential backoff window from the last failure has not elapsed,
-// after the client has given up (MaxConnectionRetries), and for servers parked in
-// PendingAuth — redialing cannot succeed until the user completes the OAuth login,
-// and each attempt costs real requests against the upstream. Manual reconnects,
-// login flows, and reconnect-on-use are not subject to this policy.
+// while a backoff window from the last failure has not elapsed and for servers
+// parked in PendingAuth — redialing cannot succeed until the user completes the
+// OAuth login, and each attempt costs real requests against the upstream. Manual
+// reconnects, login flows, and reconnect-on-use are not subject to this policy.
 func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 	if ci == nil {
 		return true
@@ -101,8 +128,16 @@ func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 	case StatePendingAuth:
 		return false
 	case StateError:
-		if ci.GaveUp || ci.RetryCount >= MaxConnectionRetries {
+		// OAuth-classified failures are paced by SetOAuthError's coarse ladder,
+		// which bumps OAuthRetryCount and NOT RetryCount. Without this branch such
+		// a server reads as RetryCount==0 ("no failures yet") and is re-dialed on
+		// every 30s reconcile tick forever — exactly the storm this gate exists to
+		// stop, for the error class (#1013) that triggered it.
+		if ci.IsOAuthError && !ci.oauthBackoffElapsed(now) {
 			return false
+		}
+		if ci.GaveUp || ci.RetryCount >= MaxConnectionRetries {
+			return now.Sub(ci.LastRetryTime) >= GaveUpProbeInterval
 		}
 		if ci.RetryCount == 0 {
 			return true
@@ -111,6 +146,14 @@ func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 	default:
 		return true
 	}
+}
+
+// oauthBackoffElapsed reports whether the OAuth ladder allows another attempt.
+func (ci *ConnectionInfo) oauthBackoffElapsed(now time.Time) bool {
+	if ci.OAuthRetryCount == 0 {
+		return true
+	}
+	return now.Sub(ci.LastOAuthAttempt) >= OAuthRetryBackoffDuration(ci.OAuthRetryCount)
 }
 
 // StateManager manages the state transitions for an upstream connection
@@ -253,6 +296,53 @@ func (sm *StateManager) SetError(err error) {
 	}
 }
 
+// SetPendingAuth parks the connection in StatePendingAuth with the deferred-OAuth
+// error attached. It exists because the obvious spelling — TransitionTo(StatePendingAuth)
+// followed by SetError(err) — silently undoes itself: SetError forces StateError
+// unconditionally, so the PendingAuth state survived microseconds and every consumer
+// (health, notifications, the supervisor's reconnect gate) saw a plain error and
+// kept redialing a server that cannot connect until a human logs in (#1013).
+//
+// RetryCount is deliberately NOT bumped: a parked server is not retrying, so there
+// is no ladder to advance and nothing to "give up" on. The wake paths are explicit
+// user action (login, manual reconnect, reconnect-on-use) and the persisted-token
+// scan in Manager.scanForNewTokens.
+func (sm *StateManager) SetPendingAuth(err error) {
+	sm.mu.Lock()
+
+	oldState := sm.currentState
+	sm.currentState = StatePendingAuth
+	sm.lastError = err
+	sm.lastRetryTime = time.Now()
+
+	info := ConnectionInfo{
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
+		GaveUp:           sm.retryCount >= MaxConnectionRetries,
+	}
+
+	callback := sm.onStateChange
+	sm.mu.Unlock()
+
+	// Dispatched synchronously, like TransitionTo (which delivered this very
+	// state before) and unlike SetError: a detached goroutine can be scheduled
+	// after a subsequent Connecting/Ready callback, which would surface a stale
+	// "sign in required" prompt right after a successful login. The registered
+	// consumers only log and hand off to notification handlers that are
+	// themselves goroutine-dispatched, and they never take the managed client's
+	// mutex — the same reason TransitionTo can already run under it.
+	if callback != nil {
+		callback(oldState, StatePendingAuth, &info)
+	}
+}
+
 // SetServerInfo sets the server information
 func (sm *StateManager) SetServerInfo(name, version string) {
 	sm.mu.Lock()
@@ -326,11 +416,15 @@ func (sm *StateManager) ValidateTransition(from, to ConnectionState) error {
 	// Define valid transitions
 	validTransitions := map[ConnectionState][]ConnectionState{
 		StateDisconnected:   {StateConnecting},
-		StateConnecting:     {StateAuthenticating, StateDiscovering, StateReady, StateError, StateDisconnected}, // Allow direct to Ready for OAuth flows
-		StateAuthenticating: {StateConnecting, StateDiscovering, StateReady, StateError, StateDisconnected},
+		StateConnecting:     {StateAuthenticating, StateDiscovering, StateReady, StateError, StateDisconnected, StatePendingAuth}, // Allow direct to Ready for OAuth flows
+		StateAuthenticating: {StateConnecting, StateDiscovering, StateReady, StateError, StateDisconnected, StatePendingAuth},
 		StateDiscovering:    {StateReady, StateError, StateDisconnected},
 		StateReady:          {StateError, StateDisconnected},
 		StateError:          {StateConnecting, StateDisconnected},
+		// A parked server leaves PendingAuth when the user logs in / reconnects
+		// (StateConnecting), is disabled (StateDisconnected), or a later attempt
+		// fails for a non-auth reason (StateError).
+		StatePendingAuth: {StateConnecting, StateDisconnected, StateError},
 	}
 
 	allowed, exists := validTransitions[from]
@@ -468,21 +562,7 @@ func (sm *StateManager) ShouldRetryOAuth() bool {
 	}
 
 	// OAuth has much longer backoff intervals: 5min, 15min, 1h, 4h, 24h
-	var backoffDuration time.Duration
-	switch {
-	case sm.oauthRetryCount <= 1:
-		backoffDuration = 5 * time.Minute
-	case sm.oauthRetryCount <= 2:
-		backoffDuration = 15 * time.Minute
-	case sm.oauthRetryCount <= 3:
-		backoffDuration = 1 * time.Hour
-	case sm.oauthRetryCount <= 4:
-		backoffDuration = 4 * time.Hour
-	default:
-		backoffDuration = 24 * time.Hour // Max backoff for OAuth: 24 hours
-	}
-
-	return time.Since(sm.lastOAuthAttempt) >= backoffDuration
+	return time.Since(sm.lastOAuthAttempt) >= OAuthRetryBackoffDuration(sm.oauthRetryCount)
 }
 
 // IsOAuthError returns true if the last error was OAuth-related

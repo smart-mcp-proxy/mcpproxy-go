@@ -170,6 +170,19 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Detail:     input.LastError,
 			Action:     action,
 		}
+	case "pending auth", "pending_auth":
+		// Parked awaiting user login (#1013): the client stopped redialing on
+		// purpose, so this never "resolves on its own" — it is always an
+		// attention item with a Sign-in CTA, regardless of OAuthRequired (a
+		// header-auth server whose token expired is parked the same way).
+		level, action, summary := oauthAttentionState(input.LastError)
+		return &contracts.HealthStatus{
+			Level:      level,
+			AdminState: StateEnabled,
+			Summary:    summary,
+			Detail:     input.LastError,
+			Action:     action,
+		}
 	case "connecting", "idle":
 		return &contracts.HealthStatus{
 			Level:      LevelHealthy,

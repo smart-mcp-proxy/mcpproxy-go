@@ -162,6 +162,12 @@ func StateChangeNotifier(nm *NotificationManager, serverName string) func(oldSta
 			if oldState == types.StateConnecting {
 				nm.NotifyOAuthRequired(serverName)
 			}
+		case types.StatePendingAuth:
+			// Parked awaiting user login: the connection attempt is over and only a
+			// human can move it forward, so surface the login prompt once.
+			if oldState != types.StatePendingAuth {
+				nm.NotifyOAuthRequired(serverName)
+			}
 		case types.StateDisconnected:
 			if oldState == types.StateReady {
 				nm.NotifyServerDisconnected(serverName, info.LastError)

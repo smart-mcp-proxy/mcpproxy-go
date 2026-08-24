@@ -5723,6 +5723,11 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 					return "ready", "Server connected and ready"
 				case types.StateError:
 					return "error", fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+				case types.StatePendingAuth:
+					// Parked awaiting user login (#1013): waiting out the monitor
+					// timeout would just stall the caller — nothing will change
+					// until a human signs in.
+					return statusError, fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
 				case types.StateDisconnected:
 					// If server is explicitly disconnected and enabled is false, return disabled
 					for _, serverConfig := range p.config.Servers {

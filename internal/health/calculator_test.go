@@ -221,6 +221,38 @@ func TestCalculateHealth_OAuthLoginRequired(t *testing.T) {
 	}
 }
 
+// TestCalculateHealth_PendingAuthParked verifies that a server parked in
+// PendingAuth (the client stopped redialing until a human signs in, #1013) is an
+// attention item with a Sign-in CTA — not a silently healthy server. The state
+// string arrives as ConnectionState.String() ("Pending Auth"), possibly
+// lowercased by the supervisor's stateview.
+func TestCalculateHealth_PendingAuthParked(t *testing.T) {
+	loginErr := "OAuth authentication required for github: login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command"
+
+	for _, state := range []string{"Pending Auth", "pending auth", "pending_auth"} {
+		// First-time sign-in: amber, actionable.
+		result := CalculateHealth(HealthCalculatorInput{
+			Name:      "test-server",
+			Enabled:   true,
+			State:     state,
+			LastError: loginErr,
+		}, nil)
+		assert.Equal(t, LevelDegraded, result.Level, "state=%s", state)
+		assert.Equal(t, "Sign-in required", result.Summary, "state=%s", state)
+		assert.Equal(t, ActionLogin, result.Action, "state=%s", state)
+
+		// A broken stored token stays red.
+		reauth := CalculateHealth(HealthCalculatorInput{
+			Name:      "test-server",
+			Enabled:   true,
+			State:     state,
+			LastError: "OAuth authentication required for slack: server error with stored token - re-login available via Web UI",
+		}, nil)
+		assert.Equal(t, LevelUnhealthy, reauth.Level, "state=%s", state)
+		assert.Equal(t, ActionLogin, reauth.Action, "state=%s", state)
+	}
+}
+
 // TestCalculateHealth_OAuthReauthRequired verifies that a server whose stored
 // token broke (re-auth needed) stays unhealthy/red with a login action — it was
 // working before, so this is a regression the user should treat as red (MCP-1820).
