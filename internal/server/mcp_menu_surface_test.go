@@ -156,6 +156,8 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 					assertCallToolVariantDelta(t, surface, name, preM, curM)
 				case name == "code_execution":
 					assertCodeExecutionDelta(t, surface, preM, curM)
+				case name == "quarantine_security":
+					assertQuarantineSecurityDelta(t, surface, preM, curM)
 				default:
 					assert.Equal(t, preM, curM,
 						"surface %s: tool %q must be byte-identical to the pre-feature snapshot (SC-003)", surface, name)
@@ -258,6 +260,104 @@ func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[strin
 		"surface %s: retrieve_tools description must reference describe_tool (spec 085 FR-014)", surface)
 	assert.Contains(t, strings.ToLower(curDesc), "signature",
 		"surface %s: retrieve_tools description must reference compact signatures (spec 085 FR-014)", surface)
+}
+
+// quarantineScanOperations are the operations that made TPA scanning reachable
+// from quarantine_security — the surface agents already use for held servers.
+var quarantineScanOperations = []string{"scan_server", "get_scan_report"}
+
+// schemaWithout copies a JSON-schema fragment minus the named keys, so a
+// comparison can freeze "everything except the parts this feature is allowed to
+// move". A nil fragment copies to an empty map, so a lost parameter compares
+// unequal to a present one instead of silently matching.
+func schemaWithout(schema map[string]interface{}, drop ...string) map[string]interface{} {
+	out := make(map[string]interface{}, len(schema))
+	for k, v := range schema {
+		out[k] = v
+	}
+	for _, k := range drop {
+		delete(out, k)
+	}
+	return out
+}
+
+// assertQuarantineSecurityDelta: quarantine_security may grow the two scan
+// operations and the prose that documents them, and NOTHING else. In
+// particular it takes no new parameter — both operations reuse `name` — so the
+// parameter SET and every parameter schema except `operation` must be
+// byte-identical to the pre-feature snapshot.
+func assertQuarantineSecurityDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	preProps, curProps := schemaProps(preM), schemaProps(curM)
+	require.NotNil(t, curProps, "surface %s: quarantine_security lost its inputSchema", surface)
+	assert.Equal(t, sortedKeys(preProps), sortedKeys(curProps),
+		"surface %s: the scan operations reuse existing parameters — none may be added", surface)
+
+	for p, preSchema := range preProps {
+		if p == "operation" {
+			continue
+		}
+		if p == "name" {
+			// `name` is now required for the scan ops too, so its description
+			// lists them; EVERY other key of its schema must be byte-equal.
+			// Comparing only `type` here would let a later regeneration slip a
+			// new `pattern`, `enum` or `default` onto the parameter unnoticed —
+			// the exact drift these frozen goldens exist to catch.
+			preName, _ := preSchema.(map[string]interface{})
+			curName, _ := curProps[p].(map[string]interface{})
+			require.NotNil(t, curName, "surface %s: quarantine_security lost its name parameter", surface)
+			assert.Equal(t, schemaWithout(preName, "description"), schemaWithout(curName, "description"),
+				"surface %s: only name's description may move — every other constraint is frozen", surface)
+			for _, op := range quarantineScanOperations {
+				assert.Contains(t, curName["description"], op,
+					"surface %s: name must document that %s requires it", surface, op)
+			}
+			continue
+		}
+		assert.Equal(t, preSchema, curProps[p],
+			"surface %s: pre-feature quarantine_security parameter %q must be preserved unchanged", surface, p)
+	}
+
+	// The operation enum grows by exactly the scan operations, appended after
+	// every pre-feature value in its original order.
+	preOp, _ := preProps["operation"].(map[string]interface{})
+	curOp, _ := curProps["operation"].(map[string]interface{})
+	require.NotNil(t, curOp, "surface %s: quarantine_security lost its operation parameter", surface)
+	preEnum, _ := preOp["enum"].([]interface{})
+	curEnum, _ := curOp["enum"].([]interface{})
+	wantEnum := append([]interface{}{}, preEnum...)
+	for _, op := range quarantineScanOperations {
+		wantEnum = append(wantEnum, op)
+	}
+	assert.Equal(t, wantEnum, curEnum,
+		"surface %s: the operation enum grows by exactly %v", surface, quarantineScanOperations)
+
+	// …and the REST of the operation schema is frozen. Checking only the enum
+	// would let `type` change, or a new constraint appear beside it, on the one
+	// parameter this feature is allowed to touch — the widest blind spot the
+	// helper could have.
+	assert.Equal(t, schemaWithout(preOp, "enum", "description"), schemaWithout(curOp, "enum", "description"),
+		"surface %s: apart from the enum and its prose, operation's schema is frozen", surface)
+
+	// Annotations and required list unchanged.
+	assert.Equal(t, preM["annotations"], curM["annotations"],
+		"surface %s: quarantine_security annotations unchanged", surface)
+	preSchema, _ := preM["inputSchema"].(map[string]interface{})
+	curSchema, _ := curM["inputSchema"].(map[string]interface{})
+	assert.Equal(t, preSchema["required"], curSchema["required"],
+		"surface %s: quarantine_security required params unchanged", surface)
+
+	// The tool description must actually advertise scanning — the discovery
+	// gap this change exists to close (the tool never mentioned scanning, so
+	// agents never found the scanner).
+	curDesc, _ := curM["description"].(string)
+	assert.Contains(t, strings.ToLower(curDesc), "scan",
+		"surface %s: quarantine_security description must mention scanning", surface)
+	for _, op := range quarantineScanOperations {
+		assert.Contains(t, curDesc, op,
+			"surface %s: quarantine_security description must name %s", surface, op)
+	}
 }
 
 // FR-009: the three registrations are built independently, which is exactly

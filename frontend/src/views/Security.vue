@@ -7,12 +7,16 @@
         <p class="text-base-content/70 mt-1">Configure security scanner plugins and review scan results</p>
       </div>
       <div class="flex gap-2">
-        <div
-          v-if="(overview?.scanners_enabled ?? overview?.scanners_installed ?? 0) > 0"
-          class="tooltip"
-          :data-tip="!overview?.docker_available ? 'Docker is required to run security scanners' : ''"
-        >
-          <button @click="startScanAll" :disabled="loading || scanAllRunning || !overview?.docker_available" class="btn btn-primary">
+        <!-- The offline baseline scanner is built in and always runs, so this
+             action is never gated on Docker or on an installed deep scanner
+             (mirrors the per-server Scan Now button, spec 088 FR-016). -->
+        <div class="tooltip" :data-tip="scanAllTooltip(overview?.docker_available)">
+          <button
+            @click="startScanAll"
+            :disabled="loading || scanAllRunning"
+            class="btn btn-primary"
+            data-test="scan-all-button"
+          >
             <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
             {{ scanAllRunning ? 'Scanning...' : 'Scan All Servers' }}
           </button>
@@ -151,12 +155,13 @@
       </div>
     </div>
 
-    <!-- Docker unavailable warning (only after overview has loaded) -->
-    <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning">
+    <!-- Docker unavailable warning (only after overview has loaded). Scanning
+         still works: only the optional deep scanners need Docker. -->
+    <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning" data-test="docker-unavailable-alert">
       <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
       </svg>
-      <span>Docker is not running. Security scanners require Docker to analyze MCP servers.</span>
+      <span>Docker is not running, so the optional deep scanners are skipped. The built-in offline baseline scan still runs.</span>
     </div>
 
     <!-- Docker isolation nudge: show only when Docker is available, global
@@ -513,7 +518,7 @@ import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerSt
 import { useSystemStore } from '@/stores/system'
 import { scanReportPath } from '@/utils/serverRoute'
 import { formatSignatureBundle } from '@/utils/signatureBundle'
-import { deepScanSummary, enabledDockerScanners, scannerWontRun } from './security/deepScanState'
+import { deepScanSummary, enabledDockerScanners, scanAllTooltip, scannerWontRun } from './security/deepScanState'
 
 const systemStore = useSystemStore()
 
