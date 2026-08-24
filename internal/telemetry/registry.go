@@ -130,6 +130,13 @@ type CounterRegistry struct {
 	// tpaFindings is keyed ONLY by the fixed severity enum (see
 	// tpaSeverityKeys); unknown keys are dropped by RecordTPAScanCompleted.
 	tpaFindings map[string]int64
+
+	// Schema v9: TPA funnel counters for the two SYNCHRONOUS detection paths
+	// that run for ordinary users (the trust_mode:scan tool-change gate and
+	// the aggregated-prompt poisoning filter). Guarded by mu for the same
+	// reason as the v8 scalars — one consistent sample per Snapshot.
+	tpaToolChangeGateScans int64
+	tpaPromptScans         int64
 }
 
 // NewCounterRegistry creates an empty registry. All counters start at zero.
@@ -211,6 +218,24 @@ func RecordTPAScanFailedOn(reg *CounterRegistry) {
 		return
 	}
 	reg.RecordTPAScanFailed()
+}
+
+// RecordTPAToolChangeGateScanOn calls reg.RecordTPAToolChangeGateScan() if
+// reg is non-nil (schema v9).
+func RecordTPAToolChangeGateScanOn(reg *CounterRegistry) {
+	if reg == nil {
+		return
+	}
+	reg.RecordTPAToolChangeGateScan()
+}
+
+// RecordTPAPromptScanOn calls reg.RecordTPAPromptScan() if reg is non-nil
+// (schema v9).
+func RecordTPAPromptScanOn(reg *CounterRegistry) {
+	if reg == nil {
+		return
+	}
+	reg.RecordTPAPromptScan()
 }
 
 // RecordBuiltinTool increments the counter for the named built-in tool.
@@ -313,6 +338,26 @@ func (r *CounterRegistry) RecordTPAScanFailed() {
 	r.mu.Unlock()
 }
 
+// RecordTPAToolChangeGateScan records ONE synchronous trust_mode:scan
+// tool-change gate scan (schema v9). Invocation count only: the server, the
+// tool, the verdict, and the matched check ids are never accepted here — the
+// gate's outcome stays local (it is already visible to the operator on the
+// tool-approval record).
+func (r *CounterRegistry) RecordTPAToolChangeGateScan() {
+	r.mu.Lock()
+	r.tpaToolChangeGateScans++
+	r.mu.Unlock()
+}
+
+// RecordTPAPromptScan records ONE aggregated-upstream-prompt poisoning scan
+// (schema v9), counted per prompt scanned. Invocation count only — never the
+// prompt name, the server name, or whether the prompt was dropped.
+func (r *CounterRegistry) RecordTPAPromptScan() {
+	r.mu.Lock()
+	r.tpaPromptScans++
+	r.mu.Unlock()
+}
+
 // RecordDoctorRun aggregates the structured doctor check results into the
 // registry's doctor counter. Each result increments either Pass or Fail for
 // its check name.
@@ -357,6 +402,10 @@ type RegistrySnapshot struct {
 	TPAScansFailed       int64            `json:"tpa_scans_failed"`
 	TPAScansWithFindings int64            `json:"tpa_scans_with_findings"`
 	TPAFindings          map[string]int64 `json:"tpa_findings"`
+
+	// Schema v9: TPA funnel counters for the two synchronous detection paths.
+	TPAToolChangeGateScans int64 `json:"tpa_tool_change_gate_scans"`
+	TPAPromptScans         int64 `json:"tpa_prompt_scans"`
 }
 
 // TPAScannerStats projects the schema-v8 scanner counters out of the snapshot,
@@ -364,9 +413,11 @@ type RegistrySnapshot struct {
 // sub-object entirely (same posture as Diagnostics).
 func (s RegistrySnapshot) TPAScannerStats() *TPAScannerStats {
 	stats := &TPAScannerStats{
-		ScansCompleted:    s.TPAScansCompleted,
-		ScansFailed:       s.TPAScansFailed,
-		ScansWithFindings: s.TPAScansWithFindings,
+		ScansCompleted:      s.TPAScansCompleted,
+		ScansFailed:         s.TPAScansFailed,
+		ScansWithFindings:   s.TPAScansWithFindings,
+		ToolChangeGateScans: s.TPAToolChangeGateScans,
+		PromptScans:         s.TPAPromptScans,
 	}
 	for sev, n := range s.TPAFindings {
 		if n == 0 {
@@ -430,6 +481,8 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 	snap.TPAScansCompleted = r.tpaScansCompleted
 	snap.TPAScansFailed = r.tpaScansFailed
 	snap.TPAScansWithFindings = r.tpaScansWithFindings
+	snap.TPAToolChangeGateScans = r.tpaToolChangeGateScans
+	snap.TPAPromptScans = r.tpaPromptScans
 	for k, v := range r.tpaFindings {
 		snap.TPAFindings[k] = v
 	}
@@ -461,6 +514,8 @@ func (r *CounterRegistry) Reset() {
 	r.tpaScansFailed = 0
 	r.tpaScansWithFindings = 0
 	r.tpaFindings = make(map[string]int64)
+	r.tpaToolChangeGateScans = 0
+	r.tpaPromptScans = 0
 }
 
 // bucketUpstream maps an upstream tool call count to its log bucket label.

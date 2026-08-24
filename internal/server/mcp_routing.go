@@ -869,6 +869,10 @@ func (p *MCPProxyServer) scanAggregatedPrompts(prompts []mcp.Prompt) []mcp.Promp
 			Name:        promptName,
 			Description: promptScanText(pr),
 		}
+		// Schema v9: one counter increment per PROMPT actually put through the
+		// scanner (malformed names short-circuit above and are not counted).
+		// Invocation count only — never the prompt, the server, or the verdict.
+		telemetry.RecordTPAPromptScanOn(p.telemetryRegistry())
 		verdict, findings, _ := scanner.ScanToolMetadataVerdict(serverName, []*config.ToolMetadata{meta}, nil)
 		if verdict == "dangerous" {
 			signals := make([]string, 0, len(findings))

@@ -24,15 +24,21 @@ func IsTPASeverity(sev string) bool {
 	return ok
 }
 
-// TPAScannerStats is the schema-v8 security-scanner sub-object of the
-// heartbeat payload. It answers "is the TPA / security scanner actually
-// running in the fleet, does it fail, and does it find anything?" using
-// counts alone.
+// TPAScannerStats is the security-scanner sub-object of the heartbeat
+// payload. It answers "is the TPA / security scanner actually running in the
+// fleet, does it fail, and does it find anything?" using counts alone.
 //
-// Unit of measure: ONE NON-DEEP-SCAN (PASS 1) SCAN JOB. The Pass-2 deep
-// supply-chain audit and dry-run jobs are not counted, and a job with several
-// failing scanners counts once — see internal/security/scanner
+// Unit of measure for the v8 job counters (ScansCompleted/ScansFailed/
+// ScansWithFindings/Findings): ONE NON-DEEP-SCAN (PASS 1) SCAN JOB. The
+// Pass-2 deep supply-chain audit and dry-run jobs are not counted, and a job
+// with several failing scanners counts once — see internal/security/scanner
 // (scanCallbackAdapter.countsForTelemetry), the only producer.
+//
+// The v9 funnel counters (ToolChangeGateScans/PromptScans) have a DIFFERENT
+// unit — one synchronous scan of one changed tool / one aggregated prompt —
+// and different producers. They exist because those two paths run for
+// ordinary users who never start a scan job, so the v8 counters alone read as
+// "the fleet never scans". Do not sum the two groups.
 //
 // Privacy contract (enforced by ScanForPII, rule "v8_field_invalid"):
 //   - every value is a non-negative integer count;
@@ -53,6 +59,21 @@ type TPAScannerStats struct {
 	// Findings is the per-severity finding total across all completed scans
 	// in the window. Sparse: severities with a zero total are omitted.
 	Findings map[string]int64 `json:"findings,omitempty"`
+
+	// ToolChangeGateScans (schema v9) is the number of SYNCHRONOUS trust_mode:
+	// scan tool-change gate scans in the window — one per changed tool put
+	// through internal/runtime.scanChangeIsClean. Unlike the job counters
+	// above, this path runs inline on the config/tool-refresh hot path for
+	// ordinary users, so it is the first TPA counter most installs ever move.
+	// It counts gate INVOCATIONS, not outcomes: whether the gate approved or
+	// held the change is deliberately not transmitted.
+	ToolChangeGateScans int64 `json:"tool_change_gate_scans"`
+	// PromptScans (schema v9) is the number of aggregated upstream PROMPTS put
+	// through the poisoning filter in the window — one per prompt scanned by
+	// internal/server.scanAggregatedPrompts, counted per prompt (not per
+	// refresh). Same posture as ToolChangeGateScans: invocations only, never
+	// the prompt name, the server, or the verdict.
+	PromptScans int64 `json:"prompt_scans"`
 }
 
 // isZero reports whether nothing at all was recorded, in which case the
@@ -62,6 +83,9 @@ func (t *TPAScannerStats) isZero() bool {
 		return true
 	}
 	if t.ScansCompleted != 0 || t.ScansFailed != 0 || t.ScansWithFindings != 0 {
+		return false
+	}
+	if t.ToolChangeGateScans != 0 || t.PromptScans != 0 {
 		return false
 	}
 	for _, n := range t.Findings {
