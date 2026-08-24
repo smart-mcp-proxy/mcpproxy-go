@@ -263,6 +263,49 @@ func TestBuildCoreArgs_LoopbackListenIsNotWidened(t *testing.T) {
 	}
 }
 
+// TestUnparseableListenSources covers the loudness regression found in
+// cross-model review: before this change an unparseable explicit listen made
+// resolveCoreURL produce an unparseable core URL, so buildCoreArgs fell through
+// to the env value and the core died on a bad --listen. Now the core URL is a
+// valid default, so the bad value would be dropped without a trace — and if a
+// core is already up on the default the tray silently attaches to it.
+func TestUnparseableListenSources(t *testing.T) {
+	t.Run("valid listens are not reported", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TRAY_LISTEN", "127.0.0.1:9000")
+		for _, listen := range []string{"", "8181", "127.0.0.1:8181", ":8181", "0.0.0.0:8181", "[::1]:8181"} {
+			if got := unparseableListenSources(listen); len(got) != 0 {
+				t.Fatalf("unparseableListenSources(%q) = %v, expected none", listen, got)
+			}
+		}
+	})
+
+	t.Run("a host without a port is reported", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TRAY_LISTEN", "")
+		got := unparseableListenSources("localhost")
+		if len(got) != 1 || got[0].name != "--listen" || got[0].value != "localhost" {
+			t.Fatalf("unparseableListenSources(\"localhost\") = %v, expected one --listen entry", got)
+		}
+	})
+
+	t.Run("both sources are reported independently", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TRAY_LISTEN", "not a listen addr")
+		got := unparseableListenSources("127.0.0.1")
+		if len(got) != 2 {
+			t.Fatalf("unparseableListenSources = %v, expected 2 entries", got)
+		}
+		if got[0].name != "--listen" || got[1].name != "MCPPROXY_TRAY_LISTEN" {
+			t.Fatalf("unexpected sources: %v", got)
+		}
+	})
+
+	t.Run("whitespace-only values are treated as unset", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TRAY_LISTEN", "   ")
+		if got := unparseableListenSources("  "); len(got) != 0 {
+			t.Fatalf("unparseableListenSources with blank values = %v, expected none", got)
+		}
+	})
+}
+
 // TestPinnedCoreListen documents which listen sources are treated as a user
 // contract that must not be silently moved on a port conflict.
 func TestPinnedCoreListen(t *testing.T) {

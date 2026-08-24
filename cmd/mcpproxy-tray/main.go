@@ -134,6 +134,17 @@ func main() {
 	coreURL := resolveCoreURL(trayCLIListen)
 	logger.Info("Resolved core URL", zap.String("core_url", coreURL))
 
+	// An explicitly configured listen address that cannot be parsed must not
+	// pass unnoticed. resolveCoreURL falls through to the default endpoint for
+	// such a value, and if a core is already listening there the tray attaches
+	// to it — looking as though it honoured an address it actually ignored.
+	for _, src := range unparseableListenSources(trayCLIListen) {
+		logger.Warn("Ignoring unparseable listen address - falling back to the default core endpoint",
+			zap.String("source", src.name),
+			zap.String("value", src.value),
+			zap.String("core_url", coreURL))
+	}
+
 	// Determine if we're using socket/pipe communication (which doesn't need API key)
 	usingSocketCommunication := isSocketEndpoint(coreURL)
 
@@ -469,6 +480,33 @@ func resolveCoreURL(cliListen string) string {
 
 	// Priority 3: Fall back to TCP (HTTP/HTTPS)
 	return resolveCoreTCPURL(cliListen)
+}
+
+// listenSource names where an explicitly configured listen address came from.
+type listenSource struct {
+	name  string
+	value string
+}
+
+// unparseableListenSources reports every explicitly configured listen address
+// that is set but cannot be turned into an endpoint the tray can dial. Such a
+// value is silently dropped by resolveCoreTCPURL's fall-through (and then by
+// buildCoreArgs, which derives --listen from the resulting default core URL),
+// so callers surface it instead of letting the tray pretend it was honoured.
+func unparseableListenSources(cliListen string) []listenSource {
+	var bad []listenSource
+	for _, src := range []listenSource{
+		{"--listen", cliListen},
+		{"MCPPROXY_TRAY_LISTEN", os.Getenv("MCPPROXY_TRAY_LISTEN")},
+	} {
+		if strings.TrimSpace(src.value) == "" {
+			continue
+		}
+		if coreURLFromListen("http", src.value) == "" {
+			bad = append(bad, src)
+		}
+	}
+	return bad
 }
 
 // resolveCoreTCPURL builds the TCP endpoint for the core, honouring (in order)
