@@ -266,6 +266,21 @@ func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[strin
 // from quarantine_security — the surface agents already use for held servers.
 var quarantineScanOperations = []string{"scan_server", "get_scan_report"}
 
+// schemaWithout copies a JSON-schema fragment minus the named keys, so a
+// comparison can freeze "everything except the parts this feature is allowed to
+// move". A nil fragment copies to an empty map, so a lost parameter compares
+// unequal to a present one instead of silently matching.
+func schemaWithout(schema map[string]interface{}, drop ...string) map[string]interface{} {
+	out := make(map[string]interface{}, len(schema))
+	for k, v := range schema {
+		out[k] = v
+	}
+	for _, k := range drop {
+		delete(out, k)
+	}
+	return out
+}
+
 // assertQuarantineSecurityDelta: quarantine_security may grow the two scan
 // operations and the prose that documents them, and NOTHING else. In
 // particular it takes no new parameter — both operations reuse `name` — so the
@@ -285,11 +300,15 @@ func assertQuarantineSecurityDelta(t *testing.T, surface string, preM, curM map[
 		}
 		if p == "name" {
 			// `name` is now required for the scan ops too, so its description
-			// lists them; the rest of its schema must not move.
+			// lists them; EVERY other key of its schema must be byte-equal.
+			// Comparing only `type` here would let a later regeneration slip a
+			// new `pattern`, `enum` or `default` onto the parameter unnoticed —
+			// the exact drift these frozen goldens exist to catch.
 			preName, _ := preSchema.(map[string]interface{})
 			curName, _ := curProps[p].(map[string]interface{})
 			require.NotNil(t, curName, "surface %s: quarantine_security lost its name parameter", surface)
-			assert.Equal(t, preName["type"], curName["type"], "surface %s: name stays a string", surface)
+			assert.Equal(t, schemaWithout(preName, "description"), schemaWithout(curName, "description"),
+				"surface %s: only name's description may move — every other constraint is frozen", surface)
 			for _, op := range quarantineScanOperations {
 				assert.Contains(t, curName["description"], op,
 					"surface %s: name must document that %s requires it", surface, op)
@@ -313,6 +332,13 @@ func assertQuarantineSecurityDelta(t *testing.T, surface string, preM, curM map[
 	}
 	assert.Equal(t, wantEnum, curEnum,
 		"surface %s: the operation enum grows by exactly %v", surface, quarantineScanOperations)
+
+	// …and the REST of the operation schema is frozen. Checking only the enum
+	// would let `type` change, or a new constraint appear beside it, on the one
+	// parameter this feature is allowed to touch — the widest blind spot the
+	// helper could have.
+	assert.Equal(t, schemaWithout(preOp, "enum", "description"), schemaWithout(curOp, "enum", "description"),
+		"surface %s: apart from the enum and its prose, operation's schema is frozen", surface)
 
 	// Annotations and required list unchanged.
 	assert.Equal(t, preM["annotations"], curM["annotations"],
