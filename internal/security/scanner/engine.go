@@ -147,8 +147,10 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 	// Check for existing scan
 	e.mu.Lock()
 	if existing, ok := e.activeScans[req.ServerName]; ok {
+		// Snapshot: the running scan keeps writing to the live record.
+		snapshot := existing.clone()
 		e.mu.Unlock()
-		return existing, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, existing.ID)
+		return snapshot, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, snapshot.ID)
 	}
 
 	// Determine which scanners to use. The Docker-scanner skip (MCP-34.4)
@@ -190,15 +192,19 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 	}
 
 	e.activeScans[req.ServerName] = job
+	// Snapshot before releasing the lock: from here on the scan goroutines own
+	// the live record, so neither the callback nor the caller may hold it.
+	started := job.clone()
+	returned := job.clone()
 	e.mu.Unlock()
 
-	callback.OnScanStarted(job)
+	callback.OnScanStarted(started)
 
 	// Run scanners in background with detached context
 	// (the HTTP request context may be cancelled after the response is sent)
 	go e.executeScan(context.Background(), job, resolved, req, callback)
 
-	return job, nil
+	return returned, nil
 }
 
 // CancelScan cancels a running scan for a server
@@ -216,11 +222,30 @@ func (e *Engine) CancelScan(serverName string) error {
 	return nil
 }
 
-// GetActiveJob returns the active scan job for a server, if any
+// GetActiveJob returns a snapshot of the active scan job for a server, or nil
+// when no scan is running.
+//
+// It MUST be a snapshot: the scan goroutines keep writing Status, CompletedAt
+// and ScannerStatuses on the live record until the job leaves activeScans, so
+// handing the live pointer to a REST reader (GET /api/v1/security/scan/status,
+// which JSON-encodes it) is a data race.
 func (e *Engine) GetActiveJob(serverName string) *ScanJob {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.activeScans[serverName]
+	job, ok := e.activeScans[serverName]
+	if !ok {
+		return nil
+	}
+	return job.clone()
+}
+
+// snapshotJob copies a job under the engine lock so it can be handed to a scan
+// callback (which persists and JSON-encodes it) while sibling scanner
+// goroutines are still updating the live record.
+func (e *Engine) snapshotJob(job *ScanJob) *ScanJob {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return job.clone()
 }
 
 // resolvedScanner pairs a plugin with a precomputed error that will cause
@@ -383,7 +408,10 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 			defer wg.Done()
 
 			scanner := item.plugin
-			callback.OnScannerStarted(job, scanner.ID)
+			// Every callback gets a snapshot: the adapter persists and
+			// JSON-encodes the job while sibling goroutines are still writing
+			// ScannerStatuses on the live record.
+			callback.OnScannerStarted(e.snapshotJob(job), scanner.ID)
 
 			// Fast-fail for prefailed scanners (e.g. missing Docker image).
 			// We still emit started/failed callbacks so the UI sees the
@@ -395,7 +423,7 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 					zap.String("reason", item.prefail),
 				)
 				e.updateScannerStatus(job, scanner.ID, ScanJobStatusFailed, time.Now(), time.Now(), item.prefail, 0)
-				callback.OnScannerFailed(job, scanner.ID, fmt.Errorf("%s", item.prefail))
+				callback.OnScannerFailed(e.snapshotJob(job), scanner.ID, fmt.Errorf("%s", item.prefail))
 				return
 			}
 
@@ -411,7 +439,7 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 				e.updateScannerStatus(job, scanner.ID, ScanJobStatusFailed, time.Time{}, time.Now(), err.Error(), 0)
 				// Store logs even on failure
 				e.setScannerLogs(job, scanner.ID, scanLogs)
-				callback.OnScannerFailed(job, scanner.ID, err)
+				callback.OnScannerFailed(e.snapshotJob(job), scanner.ID, err)
 				return
 			}
 
@@ -424,19 +452,21 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 
 			e.updateScannerStatus(job, scanner.ID, ScanJobStatusCompleted, time.Time{}, time.Now(), "", len(report.Findings))
 			e.setScannerLogs(job, scanner.ID, scanLogs)
-			callback.OnScannerCompleted(job, scanner.ID, report)
+			callback.OnScannerCompleted(e.snapshotJob(job), scanner.ID, report)
 		}(i, rs)
 	}
 
 	wg.Wait()
 
-	// Check if job was cancelled
+	// Read the cancellation flag, decide the terminal status and write it in a
+	// SINGLE locked section. The job is still in activeScans at this point, so
+	// a concurrent GetActiveJob (REST scan-status) can be snapshotting it while
+	// we write — doing this outside the lock is a data race.
 	e.mu.Lock()
 	if job.Status == ScanJobStatusCancelled {
 		e.mu.Unlock()
 		return
 	}
-	e.mu.Unlock()
 
 	// Determine final status
 	allFailed := true
@@ -446,18 +476,22 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 			break
 		}
 	}
-
-	if allFailed && len(scanners) > 0 {
+	failed := allFailed && len(scanners) > 0
+	if failed {
 		job.Status = ScanJobStatusFailed
 		job.Error = "all scanners failed"
-		job.CompletedAt = time.Now()
-		callback.OnScanFailed(job, fmt.Errorf("all scanners failed"))
+	} else {
+		job.Status = ScanJobStatusCompleted
+	}
+	job.CompletedAt = time.Now()
+	final := job.clone()
+	e.mu.Unlock()
+
+	if failed {
+		callback.OnScanFailed(final, fmt.Errorf("all scanners failed"))
 		return
 	}
-
-	job.Status = ScanJobStatusCompleted
-	job.CompletedAt = time.Now()
-	callback.OnScanCompleted(job, reports)
+	callback.OnScanCompleted(final, reports)
 }
 
 // runSingleScanner executes one scanner and returns its report plus execution logs

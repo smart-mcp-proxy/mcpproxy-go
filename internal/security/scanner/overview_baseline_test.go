@@ -72,11 +72,10 @@ func TestGetOverview_DoesNotDoubleCountPersistedBaseline(t *testing.T) {
 }
 
 // TestGetOverview_ConcurrentScannerStatusUpdateIsRaceFree guards the read seam
-// the baseline count added. Registry.List() hands out the live *ScannerPlugin
-// records the registry keeps, and UpdateStatus mutates Status on exactly those
-// records under the registry lock — so counting by reading reg.Status outside
-// the lock is a data race with any concurrent install/pull. GetOverview must
-// resolve the predicate inside the registry instead. Run with -race.
+// the baseline count added: counting enabled in-process scanners must stay
+// synchronized against a concurrent install/pull flipping Status under the
+// registry lock. GetOverview resolves the predicate inside the registry
+// (InProcessRunnableIDs) instead of reading fields out of band. Run with -race.
 func TestGetOverview_ConcurrentScannerStatusUpdateIsRaceFree(t *testing.T) {
 	svc := newFreshInstallService(t)
 
