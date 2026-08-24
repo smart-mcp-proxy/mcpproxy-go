@@ -135,11 +135,15 @@ func main() {
 	logger.Info("Resolved core URL", zap.String("core_url", coreURL))
 
 	// An explicitly configured listen address that cannot be parsed must not
-	// pass unnoticed. resolveCoreURL falls through to the default endpoint for
-	// such a value, and if a core is already listening there the tray attaches
-	// to it — looking as though it honoured an address it actually ignored.
+	// pass unnoticed: it cannot contribute to the core URL, so resolution falls
+	// through to the next source (another listen setting, or the default). If a
+	// core is already listening on whatever that resolves to, the tray attaches
+	// to it and looks as though it honoured the address. Report the offending
+	// value and the endpoint that actually won, without claiming which source
+	// that was or that the value went unused — a bad CLI --listen is still
+	// forwarded to the core by buildCoreArgs.
 	for _, src := range unparseableListenSources(trayCLIListen) {
-		logger.Warn("Ignoring unparseable listen address - falling back to the default core endpoint",
+		logger.Warn("Listen address cannot be parsed into an endpoint the tray can dial - it did not determine the core URL",
 			zap.String("source", src.name),
 			zap.String("value", src.value),
 			zap.String("core_url", coreURL))
@@ -490,9 +494,10 @@ type listenSource struct {
 
 // unparseableListenSources reports every explicitly configured listen address
 // that is set but cannot be turned into an endpoint the tray can dial. Such a
-// value is silently dropped by resolveCoreTCPURL's fall-through (and then by
-// buildCoreArgs, which derives --listen from the resulting default core URL),
-// so callers surface it instead of letting the tray pretend it was honoured.
+// value cannot win resolveCoreTCPURL's precedence chain, so resolution falls
+// through to the next source and buildCoreArgs then derives --listen from the
+// core URL that source produced. Callers surface these values instead of
+// letting the tray look as though it honoured an address it could not use.
 func unparseableListenSources(cliListen string) []listenSource {
 	var bad []listenSource
 	for _, src := range []listenSource{
