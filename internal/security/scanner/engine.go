@@ -207,7 +207,14 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 	return returned, nil
 }
 
-// CancelScan cancels a running scan for a server
+// CancelScan cancels a running scan for a server.
+//
+// A job stays in activeScans for a short window AFTER executeScan has written
+// its terminal status — the completion callback persists the report and emits
+// the completion event inside that window. Cancelling there must fail rather
+// than succeed: the terminal outcome has already been cloned and is on its way
+// to storage, so flipping Status to cancelled would leave the API reporting a
+// cancellation that the stored job contradicts.
 func (e *Engine) CancelScan(serverName string) error {
 	e.mu.Lock()
 	job, ok := e.activeScans[serverName]
@@ -215,11 +222,34 @@ func (e *Engine) CancelScan(serverName string) error {
 		e.mu.Unlock()
 		return fmt.Errorf("no active scan for server %s", serverName)
 	}
+	if job.Status == ScanJobStatusCompleted || job.Status == ScanJobStatusFailed ||
+		job.Status == ScanJobStatusCancelled {
+		status := job.Status
+		e.mu.Unlock()
+		return fmt.Errorf("scan for server %s already finished (status: %s)", serverName, status)
+	}
 	job.Status = ScanJobStatusCancelled
 	job.CompletedAt = time.Now()
 	delete(e.activeScans, serverName)
 	e.mu.Unlock()
 	return nil
+}
+
+// clearActiveJob releases the activeScans slot held by `job`, and ONLY if that
+// job still holds it.
+//
+// The identity check is load-bearing. CancelScan drops a job from activeScans
+// while its scanner goroutines are still running, so a replacement scan for the
+// same server can take the slot before the cancelled scan unwinds. Deleting by
+// server name alone would then evict the replacement — leaving a running scan
+// invisible to GetActiveJob and letting StartScan accept a second concurrent
+// scan of the same server.
+func (e *Engine) clearActiveJob(serverName string, job *ScanJob) {
+	e.mu.Lock()
+	if current, ok := e.activeScans[serverName]; ok && current == job {
+		delete(e.activeScans, serverName)
+	}
+	e.mu.Unlock()
 }
 
 // GetActiveJob returns a snapshot of the active scan job for a server, or nil
@@ -390,11 +420,7 @@ func (e *Engine) resolveScanners(requestedIDs []string, isolationMode string) ([
 // immediately and skipped — this keeps missing-image scanners visible in
 // the aggregated scan report instead of being silently dropped.
 func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resolvedScanner, req ScanRequest, callback ScanCallback) {
-	defer func() {
-		e.mu.Lock()
-		delete(e.activeScans, req.ServerName)
-		e.mu.Unlock()
-	}()
+	defer e.clearActiveJob(req.ServerName, job)
 
 	var (
 		reports []*ScanReport
