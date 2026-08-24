@@ -180,26 +180,33 @@ func TestRefreshOAuthToken_ServerNotFound(t *testing.T) {
 }
 
 // TestTokenFingerprint verifies the identity used to decide whether a persisted
-// token is NEW: the same token must compare equal (so the scan does not redial),
-// a refreshed/re-issued one must not.
+// token is NEW: the same untouched token must compare equal (so the scan does
+// not redial), any re-issue must not.
 func TestTokenFingerprint(t *testing.T) {
 	expires := time.Now().Add(time.Hour).UTC()
+	written := time.Now().UTC()
 	base := &uptransport.Token{AccessToken: "at", RefreshToken: "rt", ExpiresAt: expires}
+	fp := tokenFingerprint(base, written)
 
-	assert.Equal(t, tokenFingerprint(base), tokenFingerprint(&uptransport.Token{
+	assert.Equal(t, fp, tokenFingerprint(&uptransport.Token{
 		AccessToken: "at", RefreshToken: "rt", ExpiresAt: expires,
-	}), "same token must fingerprint the same")
+	}, written), "same token, same write: must fingerprint the same")
 
-	assert.NotEqual(t, tokenFingerprint(base), tokenFingerprint(&uptransport.Token{
+	assert.NotEqual(t, fp, tokenFingerprint(&uptransport.Token{
 		AccessToken: "at2", RefreshToken: "rt", ExpiresAt: expires,
-	}), "a new access token must fingerprint differently")
+	}, written), "a new access token must fingerprint differently")
 
-	assert.NotEqual(t, tokenFingerprint(base), tokenFingerprint(&uptransport.Token{
+	assert.NotEqual(t, fp, tokenFingerprint(&uptransport.Token{
 		AccessToken: "at", RefreshToken: "rt", ExpiresAt: expires.Add(time.Minute),
-	}), "a refreshed expiry must fingerprint differently")
+	}, written), "a refreshed expiry must fingerprint differently")
 
-	assert.NotContains(t, tokenFingerprint(base), "at", "the fingerprint must not carry the token")
-	assert.Empty(t, tokenFingerprint(nil))
+	// A provider may re-issue a byte-identical token; the write stamp is what
+	// keeps that from silently suppressing the wake.
+	assert.NotEqual(t, fp, tokenFingerprint(base, written.Add(time.Second)),
+		"a token rewritten identically must still fingerprint differently")
+
+	assert.NotContains(t, fp, "at", "the fingerprint must not carry the token")
+	assert.Empty(t, tokenFingerprint(nil, written))
 }
 
 // TestScanForNewTokens_OnlyOnNewToken pins the fix for the 5s redial loop: the
@@ -271,4 +278,14 @@ func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
 	manager.scanForNewTokens()
 	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
 		"scan did not wake the parked server when a new token appeared")
+
+	// A re-login that happens to persist a byte-identical token is still a new
+	// write, and this scan is the fallback wake when the CLI could not record an
+	// OAuth completion event — it must not be swallowed.
+	time.Sleep(2 * time.Millisecond) // ensure a distinct Updated stamp
+	saveToken("fresh-token")
+	expireRateLimit()
+	manager.scanForNewTokens()
+	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
+		"scan ignored an identically-rewritten token")
 }

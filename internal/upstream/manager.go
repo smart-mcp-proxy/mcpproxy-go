@@ -2198,7 +2198,17 @@ func (m *Manager) scanForNewTokens() {
 		// loop that outpaces the supervisor's and defeats the PendingAuth park
 		// (#1013). The fingerprint changes exactly when a login/refresh writes a
 		// new token, which is the event this scan exists to catch.
-		fingerprint := tokenFingerprint(tok)
+		//
+		// The write timestamp is part of the identity, not just the token
+		// content: a provider re-issuing a byte-identical token would otherwise
+		// leave the fingerprint unchanged and permanently suppress this wake —
+		// and for a CLI login that could not persist its completion event, this
+		// scan is the only one left.
+		var writtenAt time.Time
+		if rec, recErr := m.storage.GetOAuthToken(oauth.GenerateServerKey(cfg.Name, cfg.URL)); recErr == nil && rec != nil {
+			writtenAt = rec.Updated
+		}
+		fingerprint := tokenFingerprint(tok, writtenAt)
 		if seen, ok := m.tokenFingerprints[id]; ok && seen == fingerprint {
 			continue
 		}
@@ -2215,14 +2225,20 @@ func (m *Manager) scanForNewTokens() {
 }
 
 // tokenFingerprint identifies a persisted OAuth token without retaining it: a
-// truncated SHA-256 over the access token, refresh token and expiry, so a
-// refreshed or re-issued token compares different while the same stale token
-// compares equal. Never log or persist the raw token to make this comparison.
-func tokenFingerprint(tok *uptransport.Token) string {
+// truncated SHA-256 over the access token, refresh token, expiry and the time
+// the record was last written, so any re-issue compares different while the
+// same untouched token compares equal. Never log or persist the raw token to
+// make this comparison.
+func tokenFingerprint(tok *uptransport.Token, writtenAt time.Time) string {
 	if tok == nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(tok.AccessToken + "\x00" + tok.RefreshToken + "\x00" + tok.ExpiresAt.UTC().Format(time.RFC3339Nano)))
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		tok.AccessToken,
+		tok.RefreshToken,
+		tok.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		writtenAt.UTC().Format(time.RFC3339Nano),
+	}, "\x00")))
 	return hex.EncodeToString(sum[:8])
 }
 
