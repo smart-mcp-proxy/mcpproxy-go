@@ -2131,7 +2131,10 @@ func TestGetScanSummary_OverwritesNilSentinelOnRealScan(t *testing.T) {
 		t.Fatalf("SaveScanJob: %v", err)
 	}
 	real := &ScanSummary{Status: "clean", LastScanAt: &now}
-	svc.cacheScanSummary("later-scanned", real)
+	svc.summaryCacheMu.RLock()
+	realGen := svc.summaryCacheGen["later-scanned"]
+	svc.summaryCacheMu.RUnlock()
+	svc.cacheScanSummary("later-scanned", real, realGen)
 
 	// Subsequent GetScanSummary returns the real summary, not the nil sentinel.
 	if got := svc.GetScanSummary(context.Background(), "later-scanned"); got == nil || got.Status != "clean" {
