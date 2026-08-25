@@ -80,10 +80,23 @@ pinned by the direct built-in golden, captured with the default
 | Id state for this session | definition mode | `check: true` |
 |---|---|---|
 | Listed, ready | full definition | `ready` |
-| Listed, pending/changed/quarantined/disabled (non-agent sessions retain these) | full snapshot-backed definition — a listed tool is never undescribable | informative verdict (`pending_approval` / `changed` / `quarantined` / `disabled`) |
+| Listed, but pending / changed / tool-level-disabled (non-agent sessions retain **these** — see the note below) | full snapshot-backed definition — a listed tool is never undescribable | informative verdict (`pending_approval` / `changed` / `disabled`) |
+| On a **server-level** quarantined or disabled server | never listed on this surface (see note) → `not_found` | `not_found` |
 | Omitted from this session's listing — any reason: token server scope, operation-permission tier, profile scope, agent callability, or nonexistence | `not_found` + standard remediation | `not_found` |
 | Removed between list and describe | per-id `not_found`, batch not failed | `not_found` |
 | Malformed id | per-id `not_found` + format remediation | same |
+
+**Note — server-level vs tool-level states.** The spec's Edge Cases say a
+non-agent direct listing "retains tools that are pending, changed, quarantined or
+disabled". On this surface that is true only of the **tool-level** states:
+`DiscoverTools` drops a server before its tools are ever projected — `if
+!snapshot.enabled { continue }` and the quarantined-server skip
+(`internal/upstream/manager.go:1128-1138`) — so a tool on a quarantined or
+disabled *server* is never in the direct catalog and therefore answers
+`not_found` here in both modes, exactly like any other unlisted id. Only
+pending / changed / tool-level-disabled entries reach the listing and get the
+informative verdict. This narrowing does not weaken FR-011; it is the same
+parity rule applied to a state the listing never had.
 
 No reason code, remediation variant, **suggestion**, or timing may confirm the
 existence of an id this session's listing omitted. That explicitly covers both

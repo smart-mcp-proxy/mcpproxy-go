@@ -28,8 +28,13 @@ Technical approach, grounded in the code:
   `MCPProxyServer`; it absorbs today's `directToolPermissions` map and becomes the
   single source for (1) listing rendering in both modes, (2) signature lookup, (3)
   direct-surface `describe_tool` resolution, (4) pre-dispatch validation — the
-  handler closure captures its own entry's schema+hash at build time, so entry and
-  handler are rebuilt atomically and can never diverge (research.md R9). The
+  handler closure captures its own entry's schema+hash at build time, so a
+  dispatch can never validate against a definition other than the one its own
+  registration advertised (research.md R9). That covers handler↔schema; the
+  catalog swap and `SetTools` are still two publications, so the filter/resolver
+  skew window is closed separately by R13's three rules (catalog published
+  first, filters deny on catalog miss, describe requires registry membership as
+  well as catalog visibility). The
   catalog build iterates a sorted tool list with a logged first-writer-wins guard
   for `__` display-name collisions (mirror of the F7 prompt guard), so dispatch
   registration and describe resolution agree deterministically.
@@ -115,7 +120,7 @@ Technical approach, grounded in the code:
 | Principle | Assessment |
 |-----------|------------|
 | **I. Performance at Scale** | PASS. BM25 search and indexing untouched. The direct rebuild already runs on upstream changes; deferred rendering *removes* per-entry schema unmarshal work and reads signatures via a pure cache lookup. Pre-dispatch validation is memoized per tool hash (existing validator). |
-| **II. Actor-Based Concurrency** | PASS (with one justified primitive). The catalog is written only on the single routing-refresh listener goroutine and read on request paths — an immutable snapshot behind an `atomic.Pointer` swap, replacing the existing mutex-guarded `directToolPermissions` map with the same read-mostly pattern Spec 085 justified for the signature cache. See Complexity Tracking. |
+| **II. Actor-Based Concurrency** | PASS (with one justified primitive). The catalog is written only on the single routing-refresh listener goroutine and read on request paths — an immutable snapshot behind an `atomic.Pointer` swap, replacing the existing mutex-guarded `directToolPermissions` map with the same read-mostly pattern Spec 085 justified for the signature cache. The catalog swap and mcp-go's `SetTools` remain two publications and cannot be made one transaction (mcp-go owns its registry read), so the resulting skew window is closed by ordering + deny-on-miss + registry-membership rules rather than papered over — D13/R13, with an interleaving test. See Complexity Tracking. |
 | **III. Configuration-Driven Architecture** | PASS. One JSON config field with env override, serve flag, validation, and hot-reload (FR-001/FR-014); default preserves today's behavior; no tray state. |
 | **IV. Security by Default** | PASS. Serialization never changes membership (FR-008/FR-016): all discovery filters run before rendering. describe_tool on the direct surface applies listing-parity visibility *including the operation-permission tier the existing resolver lacks*, and never emits an existence-confirming reason code **or suggestion** for an id this session's listing omitted (FR-011). Parity is enforced on both sides (D10): the listing filters resolve through the catalog instead of re-parsing `__`, and both suggestion channels (`did_you_mean`, case-correction) are catalog-gated or suppressed — closing four concrete parity defects that exist in this tree today — three disclosure paths plus a wrong-safety-hint path (a listed destructive tool describing as `call_with: "read"`) — rather than opening any. Quarantine/approval gates on dispatch are untouched; validation is fail-open, never blocking a call a schemaless proxy would allow. |
 | **V. Test-Driven Development** | PASS. Every behavior lands test-first; the golden gates make surface drift a failing test by construction (see Test strategy). |
@@ -141,6 +146,8 @@ Resolved in [research.md](research.md); recorded here as the plan of record:
 | D10 | Parity is closed on every side: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__`; the definition assembly takes a catalog-supplied annotations override on this surface (`buildFullToolEntry` otherwise reads annotations from the StateView, not from the entry passed in, so a listed pending destructive tool would describe as `call_with: "read"`); and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
 | D11 | Direct-server instructions = `resolveInstructions(cfg.Instructions)` + blank line + the deferral legend, so an operator's configured `instructions` is not lost on the direct surface | R4 |
 | D12 | `buildDirectModeTools` splits into a pure `buildDirectCatalog` + `renderDirectTools` pair so the unit matrix can drive a fixture toolset (`upstream.Manager` is concrete and only lists connected clients) | R12 |
+| D13 | The catalog swap and `SetTools` are two publications and cannot be one transaction, so the skew window is closed by rule rather than denied: catalog published first; filters **deny** on catalog miss (built-ins matched by an explicit name set, never by "absent from the catalog"); describe requires `directServer.GetTool(name) != nil` **and** catalog visibility; catalog carries a `generation` counter | R13 |
+| D14 | Direct check-mode adapter canonicalizes `server__tool` → `server:tool` before `preflight.Evaluate` (which accepts colon ids only, so direct ids would otherwise all answer `not_found`), gates invisibility itself without consulting the evaluator, and restores the caller's original id + ordering in the response and the activity record | R10 |
 
 ### Config interaction matrix (D1 applied)
 
@@ -253,10 +260,14 @@ draft of research.md R2):
    spec 099. `code_execution_mode.json` and the frozen `pre099/` baseline are
    **never regenerated** — the enumerated-delta comparison against `pre099/` is
    what proves the change reached exactly as far as claimed.
-3. `TestRetrieveToolsFullMode_GoldenByteIdentity` (`mcp_entry_builder_test.go`,
-   `testdata/retrieve_full_default.golden.json`, byte-exact): **passes
-   unregenerated by construction** — `buildFullToolEntry` is not modified
-   (`output_schema` lands at the describe_tool definition-assembly seam only, D2).
+3. `TestRetrieveToolsFullMode_GoldenByteIdentity` (`mcp_entry_builder_test.go:116`,
+   byte-exact): it pins **two** goldens, not one — `retrieve_full_default.golden.json`
+   (subtest `default`) and `retrieve_full_stats.golden.json` (subtest
+   `include_stats`). **Both pass unregenerated by construction**:
+   `buildFullToolEntry`'s logic is not modified (`output_schema` lands at the
+   describe_tool definition-assembly seam only, D2; the D10 annotations override
+   is an unused optional argument on this path), and describe_tool passes
+   `toolEntryOpts{}`, so the stats branch is never reached from the new code.
 4. **`TestDescribeToolPlainCorpus_ByteIdenticalWithOneEnumeratedDelta`** (`describe_plain_corpus_test.go`,
    `testdata/describe_plain_corpus/pre099.json`): replays 18 plain-mode
    `describe_tool` calls and pins each **response body** byte-for-byte, allowing
@@ -343,7 +354,9 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
   declared; **a listed pending/changed destructive tool describes with its real
   annotations and `call_with: "destructive"`** — the case where the StateView
   annotation lookup would otherwise return nil and silently downgrade the safety
-  hint to `read` (D10).
+  hint to `read` (D10); **a `server__tool` id under `check:true` returns its
+  verdict under the id the caller sent** — the canonicalization + restore path of
+  D14, which without it answers `not_found` for every direct id.
 - **Listing↔describe parity, both directions** (D10): with a server whose name
   contains `__`, the listing filters and the describe resolver agree on the same
   entry — asserted by comparing the session's rendered `tools/list` name set
@@ -356,6 +369,10 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
   catalog-backed resolver.
 - **Instructions** (D11): a custom `instructions` config value still appears on the
   direct server's `initialize`, with the deferral legend appended, in both modes.
+- **Publication skew** (D13): a rebuild paused between the catalog swap and
+  `SetTools`, with a concurrent scoped `tools/list` and `describe_tool` for both
+  an added and a removed tool — no describable-but-unlisted id, and no stale
+  entry served past the permission-tier gate, in either window.
 - Validation: missing-required → `invalid_params` with embedded full schema + hint
   in both modes; validates against stored schema (stale full-mode client scenario);
   fail-open on uncompilable schema; non-argument failures unchanged (FR-012/013).

@@ -67,7 +67,8 @@ go test -race ./internal/toolsig/... ./internal/config/... ./internal/runtime/..
 
 Golden rules: only `toolslist_goldens/{default_server,retrieve_tools_mode}.json`
 are regenerated (once, FR-009 prose); `pre099/`, `code_execution_mode.json`,
-`tools_list_prefeature.golden.json`, `retrieve_full_default.golden.json`, and
+`tools_list_prefeature.golden.json`, **both** `retrieve_full_default.golden.json`
+and `retrieve_full_stats.golden.json` (one test pins both), and
 `describe_plain_corpus/pre099.json` must pass **unregenerated** — the
 describe-corpus prose movement is absorbed by adding named substitutions to
 `describePlainDelta`, not by rewriting its golden. The new

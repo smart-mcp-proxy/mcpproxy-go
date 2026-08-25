@@ -210,6 +210,59 @@ cache with (`runtime/lifecycle.go:874`, which skips hashless tools). `Peek` and
 the warm path therefore agree by construction; no hash is recomputed in the
 direct rebuild.
 
+## R13 — Two publications, one generation: closing the catalog/registry skew window
+
+**Finding** (cross-model review, verified): the catalog pointer swap and
+`SetTools` are two separate publications — `RefreshDirectModeTools` builds the
+tools (publishing the catalog) and *then* calls
+`p.directServer.SetTools(...)` (`mcp_routing.go:666-673`). An `atomic.Pointer`
+makes the catalog swap atomic; it does **not** make catalog-plus-mcp-go-registry
+a single transaction, and mcp-go's registry read happens inside its own
+`ListTools` path where no lock of ours can span it. So the first draft's claim
+that entry and handler "are rebuilt atomically and can never diverge" is only
+half true, and FR-017's "no window exposes one without the other" is not
+satisfied by the pointer alone.
+
+**What IS already atomic**: handler ↔ its own schema/hash. The handler closes
+over its `directCatalogEntry`, so a dispatch can never validate against a
+definition other than the one its own registration advertised, regardless of
+skew. That half of FR-017 needs no further mechanism.
+
+**What skews**: the request-time *filters* and the *describe resolver*, which
+read the published pointer independently of which registry generation produced
+the list they are filtering. Enumerating both orderings:
+
+| Window | catalog published first (chosen) | `SetTools` first |
+|---|---|---|
+| Tool removed in the new generation | listing still shows it (old registry), filter finds no catalog entry | not listed; describe would resolve from the old catalog → describable-but-unlisted |
+| Tool added in the new generation | not listed; describe resolves → describable-but-unlisted | listed, filter finds no old catalog entry |
+
+**Decision** — three rules that make every cell safe, rather than pretending the
+window does not exist:
+
+1. **Catalog is published first**, so the filters always enforce the newer,
+   narrower truth.
+2. **Filters deny on catalog miss.** A name absent from the current catalog is
+   dropped, NOT passed through. Pass-through is reserved for built-ins and is
+   matched against an explicit built-in name set (today: `describe_tool`), never
+   inferred from "not in the catalog" — otherwise a stale upstream entry in the
+   old registry would skip the permission-tier gate entirely, turning the skew
+   window into a scope leak. (This corrects the fall-through wording in D10.)
+3. **Describe requires registry membership as well as catalog visibility.**
+   Before returning a definition the direct resolver checks
+   `p.directServer.GetTool(displayName) != nil` (mcp-go
+   `server/server.go:1023`, an O(1) read of the very map the listing is served
+   from). Catalog visibility ∧ registry presence closes describable-but-unlisted
+   in *both* orderings, and it strengthens rather than weakens FR-017's
+   "membership is decided by the direct-surface snapshot, not index presence" —
+   the registry is the listing's own source, not the index.
+
+The catalog carries a monotonically increasing `generation` so the skew is
+observable in logs and assertable in tests. **Test**: a rebuild that pauses
+between the two publications, with a concurrent scoped `tools/list` and
+`describe_tool` for both an added and a removed tool, asserting no
+describable-but-unlisted id and no unfiltered stale entry in either window.
+
 ## R11 — The `{"type":"object"}` placeholder needs `RawInputSchema` (verified empirically)
 
 **Finding** (probe run against mcp-go v0.57.0 in this tree): the plan's first
@@ -390,9 +443,11 @@ catalog:
    `a__b`/`c` — so describe can return a definition for a tool the same session's
    listing dropped, which is precisely the FR-011 violation this decision exists
    to prevent. **Decision**: both filters resolve through the catalog's
-   `byDisplayName` map (falling through unchanged when the name is not a catalog
-   entry, preserving today's behavior for built-ins), so listing and describe
-   agree by construction. This makes `mcp_direct_scope.go` and
+   `byDisplayName` map and **deny on a catalog miss**, so listing and describe
+   agree by construction. Built-ins keep passing through, but matched against an
+   explicit built-in name set (today `describe_tool`) — never inferred from
+   "absent from the catalog", which during the R13 skew window would let a stale
+   upstream entry skip the permission-tier gate entirely. This makes `mcp_direct_scope.go` and
    `mcp_direct_callability.go` in-scope files, and retires
    `lookupDirectToolPermission`'s separate map in favor of the catalog entry's
    `requiredPermission` (FR-017).
@@ -419,6 +474,29 @@ catalog:
    itself. Suppressing `did_you_mean` on this surface is the fallback only if
    that reader turns out to be load-bearing for a verdict path. A test asserts a
    read-scoped token receives no suggestion naming a destructive tool.
+
+   **The same adapter must canonicalize the id, or check mode is broken for
+   every direct id** (cross-model review, verified): ids reach the evaluator
+   untouched — `normalizeDescribeCheckIDs` forwards them verbatim
+   (`mcp_describe_check.go:192-204`) and `RunPreflightForSession` hands them
+   straight to `preflight.Evaluate` (`preflight_glue.go:182-188`) — and the
+   evaluator accepts colon ids ONLY: `splitToolID` is a
+   `strings.SplitN(id, ":", 2)` (`evaluator.go:500-510`) and `evaluateOne`
+   turns a non-split id into `not_found` with `detailMalformedID`
+   (`evaluator.go:205-212`). So `github__create_issue` under `check:true` would
+   answer `not_found` today no matter what the id gate does. The direct
+   check-mode adapter therefore MUST, per id, in this order: (1) resolve the id
+   against the catalog by display name or canonical name; (2) apply the
+   listing-parity gates, answering plain `not_found` for anything invisible
+   **without** consulting the evaluator; (3) canonicalize the survivors to
+   `server:tool` before `Evaluate`; (4) restore the caller's original id string
+   and the requested ordering in both the response entries and the activity
+   record, so an agent that sent `server__tool` gets `server__tool` back. No
+   change to `internal/preflight/evaluator.go` is required under this design —
+   the adapter lives on the server side — which is why the evaluator is
+   deliberately absent from the file-touch list; if implementation finds a
+   verdict path that cannot be expressed through the injected `IndexReader`,
+   adding an evaluator seam becomes a scope change to record, not a silent edit.
 3. **The definition's annotations are not read from the entry you pass in.**
    `buildFullToolEntry` (`mcp_entry_builder.go`) uses `result.Tool` only for
    name/description/inputSchema/server, and resolves annotations through
@@ -448,8 +526,11 @@ catalog:
 the catalog + the same step helpers (`serverInScope`, `evaluateToolGate`,
 `isToolCallable`) with the mode split of FR-011: invisible-to-this-session →
 plain `not_found` in both modes; visible → definition-mode always renders the
-snapshot-backed definition (even pending/changed/quarantined-listed states, which
-non-agent direct listings retain); `check: true` delegates to the shared
+snapshot-backed definition (even pending / changed / tool-level-disabled states,
+which non-agent direct listings retain — **server-level** quarantined or disabled
+servers are dropped by `DiscoverTools` before projection
+(`upstream/manager.go:1128-1138`) and so are simply unlisted and `not_found`
+here, contract §3 note); `check: true` delegates to the shared
 spec-098/099 preflight evaluator for the informative verdict, with the id gate
 swapped to catalog membership so a listed-but-unindexed id is never short-circuited to
 `not_found`. Retrieve-surface semantics untouched: `handleDescribeTool` gains a
