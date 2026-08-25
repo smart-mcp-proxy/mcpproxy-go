@@ -138,7 +138,7 @@ Resolved in [research.md](research.md); recorded here as the plan of record:
 | D7 | FR-011 = catalog-backed direct resolver with listing-parity gates incl. permission tier; plain `not_found` for invisible ids in both modes; snapshot-backed definitions for visible ids; check-mode verdicts via shared preflight evaluator | R10 |
 | D8 | Rollout default = **opt-in, off**; no default flip in this feature (spec Non-Goals; any future flip is its own evidence-gated decision) | spec |
 | D9 | Deferred `inputSchema` is emitted via `mcp.NewToolWithRawSchema` (annotations copied on explicitly); `mcp.NewTool` cannot produce the FR-004 wire shape and mixing the two is a marshal error | R11 |
-| D10 | Parity is closed on BOTH sides: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__`, and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
+| D10 | Parity is closed on every side: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__`; the definition assembly takes a catalog-supplied annotations override on this surface (`buildFullToolEntry` otherwise reads annotations from the StateView, not from the entry passed in, so a listed pending destructive tool would describe as `call_with: "read"`); and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
 | D11 | Direct-server instructions = `resolveInstructions(cfg.Instructions)` + blank line + the deferral legend, so an operator's configured `instructions` is not lost on the direct surface | R4 |
 | D12 | `buildDirectModeTools` splits into a pure `buildDirectCatalog` + `renderDirectTools` pair so the unit matrix can drive a fixture toolset (`upstream.Manager` is concrete and only lists connected clients) | R12 |
 
@@ -196,6 +196,9 @@ internal/
 │   ├── mcp_direct_callability.go    # filterDirectToolsForAgentCallability: same catalog resolution (D10)
 │   ├── mcp_describe_tool.go         # Surface-neutral prose — all FOUR retrieve_tools strings (D5/R5); resolver seam
 │   │                                #   parameter; additive output_schema at definition assembly (D2)
+│   ├── mcp_entry_builder.go         # definition-assembly seam: optional annotations override so the direct surface
+│   │                                #   sources them from the catalog, not the StateView (D10); full-mode retrieve
+│   │                                #   path byte-identical (buildFullToolEntry logic otherwise untouched)
 │   ├── mcp_describe_direct.go       # NEW: catalog-backed direct resolver (both id forms, listing-parity gates incl.
 │   │                                #   permission tier, not_found discipline) + check-mode delegation (D7)
 │   ├── mcp_describe_check.go        # id-gate seam + caller-visible-corpus seam for did_you_mean on the direct
@@ -335,7 +338,10 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
   token → `not_found` for a destructive tool); listed-pending tool → definition in
   definition mode and `pending_approval` under `check:true` (SC-007); removed
   server → per-id not_found without failing the batch; `output_schema` present iff
-  declared.
+  declared; **a listed pending/changed destructive tool describes with its real
+  annotations and `call_with: "destructive"`** — the case where the StateView
+  annotation lookup would otherwise return nil and silently downgrade the safety
+  hint to `read` (D10).
 - **Listing↔describe parity, both directions** (D10): with a server whose name
   contains `__`, the listing filters and the describe resolver agree on the same
   entry — asserted by comparing the session's rendered `tools/list` name set

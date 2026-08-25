@@ -376,9 +376,10 @@ spec names are real in this tree. (The step helpers live in three files, not one
 `serverInScope` in `mcp_visibility.go:150`, `evaluateToolGate` in
 `tool_gate.go:80`, `isToolCallable` in `mcp.go:6068`.)
 
-**Three parity leaks the first draft did not close.** "Listing parity" is not
-achieved by building a correct resolver alone — the *listing* side and two
-suggestion paths must be brought onto the same catalog:
+**Four parity leaks the first draft did not close.** "Listing parity" is not
+achieved by building a correct resolver alone — the *listing* side, the
+definition assembly, and two suggestion paths must all be brought onto the same
+catalog:
 
 1. **The listing filters still re-parse the display name.** Both filters resolve
    `(server, tool)` via `ParseDirectToolName` (first-`__` split;
@@ -410,7 +411,25 @@ suggestion paths must be brought onto the same catalog:
    exist, `did_you_mean` is suppressed on this surface rather than shipped
    unfiltered. A test asserts a read-scoped token receives no suggestion naming a
    destructive tool.
-3. **Definition-mode case-correction suggestions.** `suggestCanonicalToolID`
+3. **The definition's annotations are not read from the entry you pass in.**
+   `buildFullToolEntry` (`mcp_entry_builder.go`) uses `result.Tool` only for
+   name/description/inputSchema/server, and resolves annotations through
+   `p.lookupToolAnnotations` (`mcp.go:6344`), which reads the **StateView
+   snapshot** — not `result.Tool.Annotations`. `call_with` is then derived from
+   whatever that lookup returned, defaulting to `contracts.ToolVariantRead` when
+   it returns nil. So synthesizing a `*config.ToolMetadata` from the catalog and
+   handing it to `buildToolEntry` would still resolve annotations out-of-band,
+   re-introducing the exact index/StateView dependency FR-017 removes — and for
+   the listed-but-unindexed pending/changed tool that SC-007 targets, the
+   definition would come back with **no annotations and `call_with: "read"` for a
+   destructive tool**. That is worse than a missing field: it is a wrong safety
+   hint. **Decision**: the definition-assembly seam takes an optional
+   annotations override, supplied from the catalog entry on the direct surface
+   only; the retrieve_tools surfaces pass nothing and keep the StateView lookup
+   byte-identical (protecting the `retrieve_full_default` golden and the
+   describe_plain_corpus gate). A test asserts a listed pending destructive tool
+   describes with its real annotations and `call_with: "destructive"`.
+4. **Definition-mode case-correction suggestions.** `suggestCanonicalToolID`
    (`mcp_visibility.go:204`) is invoked on the definition-mode not-found path
    (`mcp_describe_tool.go:202-206`) and gates its suggestion with
    `toolVisibleToSession` — the index-backed, permission-tier-blind resolver.
