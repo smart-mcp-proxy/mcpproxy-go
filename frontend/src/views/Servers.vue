@@ -122,14 +122,33 @@
       </div>
     </div>
 
+    <!-- A refresh failed but we still hold a list. Say so without throwing the
+         servers away — the cached grid is still the most useful thing on the
+         page, and the failure is about freshness, not about the servers. This
+         is additive, so it sits outside the state chain below. -->
+    <div
+      v-if="hasServers && serversStore.loading.error"
+      class="alert alert-warning"
+      data-test="servers-refresh-error"
+    >
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <div class="flex-1 text-sm">
+        Couldn't refresh the server list — showing the last known state.
+        <span class="opacity-70">{{ serversStore.loading.error }}</span>
+      </div>
+      <button @click="refreshServers" class="btn btn-sm">Retry</button>
+    </div>
+
     <!-- Loading State -->
     <div v-if="serversStore.loading.loading" class="text-center py-12">
       <span class="loading loading-spinner loading-lg"></span>
       <p class="mt-4">Loading servers...</p>
     </div>
 
-    <!-- Error State -->
-    <div v-else-if="serversStore.loading.error" class="alert alert-error">
+    <!-- Error State: the load failed and we have nothing to fall back on. -->
+    <div v-else-if="serversStore.loading.error && !hasServers" class="alert alert-error">
       <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>

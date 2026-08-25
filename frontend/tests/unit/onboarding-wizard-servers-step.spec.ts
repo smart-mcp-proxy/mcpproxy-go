@@ -310,6 +310,46 @@ describe('OnboardingWizard mounted already-open', () => {
     expect(store.wizardInitialTab).toBe(null)
   })
 
+  it('an open that is still loading when the wizard closes does not stamp its tab', async () => {
+    // Nothing cancels the open sequence's fetches. A close (or a close then a
+    // reopen) mid-flight must not let the old run choose the tab or restart
+    // polling behind the newer state.
+    let releaseState: (v: unknown) => void = () => {}
+    ;(api.getOnboardingState as any).mockReturnValue(
+      new Promise((resolve) => { releaseState = resolve })
+    )
+
+    const router = makeRouter()
+    router.push('/')
+    await router.isReady()
+    const wrapper = mount(OnboardingWizard, {
+      props: { show: true },
+      global: {
+        plugins: [router],
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' },
+          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
+        },
+      },
+    })
+    await flushPromises()
+
+    // Close while the first fetch is still outstanding.
+    await wrapper.setProps({ show: false })
+    await flushPromises()
+
+    // Now let the stale run finish. Its predicates would pick 'servers'
+    // (has_connected_client true, has_configured_server false).
+    releaseState({ success: true, data: onboardingState().data })
+    await flushPromises()
+
+    // The dialog keeps its content in the DOM when closed (only the `open`
+    // attribute goes), so the invariant to check is which tab it is on: the
+    // abandoned run must not have moved it off the default.
+    expect(wrapper.find('[data-test="panel-servers"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="panel-clients"]').exists()).toBe(true)
+  })
+
   it('still initialises (fetches its state) with no request pending', async () => {
     const store = useOnboardingStore()
     store.openWizard()

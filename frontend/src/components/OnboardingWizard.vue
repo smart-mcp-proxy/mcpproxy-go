@@ -827,7 +827,15 @@ const serverCountLabel = computed(() => {
 // request must never outlive the open it was made for (a wizard torn down
 // mid-load would otherwise leak it into the next plain open), and reading it
 // after five round-trips would let a second open consume the same request.
+//
+// `openSeq` makes each run abandonable. Nothing cancels the fetches below, so
+// a close (or a close-then-reopen) while one is in flight would otherwise let
+// the old run finish and stamp its tab over the new one — and call
+// startPolling() on a wizard that is no longer open, leaving a 5s poll running
+// until unmount. Every run checks it still owns the wizard before it writes.
+let openSeq = 0
 async function onOpened() {
+  const seq = ++openSeq
   const requested = onboarding.consumeWizardInitialTab()
   serverAddedJustNow.value = false
   connectMessage.value = ''
@@ -854,6 +862,8 @@ async function onOpened() {
     fetchImportSources(),
     fetchRecentActivity(),
   ])
+  // Superseded (or closed) while we were loading — leave the wizard alone.
+  if (seq !== openSeq || !props.show) return
   activeTab.value = pickInitialTab(requested)
   startPolling()
 }
@@ -868,6 +878,8 @@ watch(() => props.show, (open) => {
   if (open) {
     void onOpened()
   } else {
+    // Retire any in-flight open so it cannot resurrect polling behind us.
+    openSeq++
     stopPolling()
   }
 }, { immediate: true })
@@ -926,7 +938,12 @@ function stopPolling() {
   }
 }
 
-onUnmounted(() => stopPolling())
+onUnmounted(() => {
+  // Same reason as the close path: an open still awaiting its fetches must not
+  // start a poll on a component that no longer exists.
+  openSeq++
+  stopPolling()
+})
 
 async function fetchClients() {
   loadingClients.value = true

@@ -188,3 +188,46 @@ describe('useServersStore — securityApproveServer (F-04)', () => {
     expect(api.unquarantineServer).not.toHaveBeenCalled()
   })
 })
+
+describe('useServersStore — a successful list clears a stale error', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  const srv = { name: 'srv', protocol: 'http' as const, enabled: true, connected: true, tool_count: 1 }
+
+  it('clears loading.error once a list arrives', async () => {
+    // `loading.error` was write-only: a silent background refresh sets it and
+    // nothing ever cleared it, so one transient blip pinned an error on the
+    // Servers page for the rest of the session.
+    const store = useServersStore()
+
+    ;(api.getServers as any).mockResolvedValue({ success: false, error: 'network down' })
+    await store.fetchServers(true)
+    expect(store.loading.error).toBe('network down')
+
+    ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [srv] } })
+    await store.fetchServers(true)
+
+    expect(store.loading.error).toBeNull()
+    expect(store.servers).toHaveLength(1)
+    expect(store.loaded).toBe(true)
+  })
+
+  it('still records a failure that happens after a successful load', async () => {
+    // Clearing on success must not make errors unreportable afterwards.
+    const store = useServersStore()
+
+    ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [srv] } })
+    await store.fetchServers(true)
+    expect(store.loading.error).toBeNull()
+
+    ;(api.getServers as any).mockResolvedValue({ success: false, error: 'network down' })
+    await store.fetchServers(true)
+
+    expect(store.loading.error).toBe('network down')
+    // …and the servers we already hold are still there to fall back on.
+    expect(store.servers).toHaveLength(1)
+  })
+})

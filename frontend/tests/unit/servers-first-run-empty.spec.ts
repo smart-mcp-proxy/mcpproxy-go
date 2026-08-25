@@ -198,6 +198,33 @@ describe('Servers first-run empty state (F3)', () => {
     expect(router.currentRoute.value.path).toBe('/')
   })
 
+  it('keeps showing the grid when a refresh fails, with a non-blocking notice', async () => {
+    // A background refresh failure is about freshness, not about the servers.
+    // Replacing a usable grid with a full-page error loses more than it says.
+    const { wrapper } = await mountServers()
+    const store = useServersStore()
+    store.servers = [server('alpha')]
+    store.loaded = true
+    store.loading = { loading: false, error: 'network down' }
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="servers-refresh-error"]').exists()).toBe(true)
+    expect(wrapper.findAll('.server-card')).toHaveLength(1)
+    expect(wrapper.find('.alert-error').exists()).toBe(false)
+  })
+
+  it('still blocks with the full error when the load failed and there is no fallback', async () => {
+    const { wrapper } = await mountServers()
+    const store = useServersStore()
+    store.servers = []
+    store.loaded = false
+    store.loading = { loading: false, error: 'network down' }
+    await flushPromises()
+
+    expect(wrapper.find('.alert-error').text()).toContain('Failed to load servers')
+    expect(wrapper.find('[data-test="servers-refresh-error"]').exists()).toBe(false)
+  })
+
   it('falls back to the filter/search empty state once servers exist', async () => {
     const { wrapper } = await mountServers()
     const store = useServersStore()

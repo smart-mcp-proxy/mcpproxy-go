@@ -111,6 +111,11 @@ export const useServersStore = defineStore('servers', () => {
     // Smart merge preserves object references and avoids unnecessary re-renders
     servers.value = mergeServers(servers.value, list)
     loaded.value = true
+    // A list that arrived is proof the previous failure is over. Without this
+    // an error is write-only: silent background refreshes set it and nothing
+    // ever clears it, so one transient blip pins an error banner on the
+    // Servers page for the rest of the session.
+    loading.value.error = null
   }
 
   // Actions
