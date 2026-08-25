@@ -552,12 +552,21 @@ const scanDisabledReason = computed(() =>
     : 'Enable the server first — a scan inspects a running server'
 )
 
-// Audit F12: the plain-language half of the error. health.summary is already
-// the mapped phrase ("Host not found"); fall back to the raw chain's own last
-// segment — the root cause — rather than to the whole wrapped chain.
+// Audit F12: the plain-language half of the error.
+//
+// health.summary is the mapped phrase ("Host not found") — but ONLY while the
+// server is administratively enabled. For a disabled or quarantined server the
+// calculator short-circuits and summary describes the admin state instead
+// ("Quarantined for review"), which says nothing about why the connection
+// failed and would merely restate the banner directly below. Fall through to
+// the structured diagnostic, then to the raw chain's last segment — the root
+// cause — rather than to the whole wrapped chain.
 const errorSummary = computed(() => {
-  const summary = props.server.health?.summary
-  if (summary) return summary
+  const health = props.server.health
+  if (health?.summary && health.admin_state === 'enabled') return health.summary
+  const diagnosticMessage = props.server.diagnostic?.user_message
+  if (diagnosticMessage) return diagnosticMessage
+  if (health?.summary && !health.admin_state) return health.summary
   const raw = props.server.last_error ?? ''
   const segments = raw.split(': ')
   return segments[segments.length - 1] || raw

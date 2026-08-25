@@ -130,6 +130,50 @@ describe('ServerCard — error dump is collapsed (audit F12)', () => {
     const wrapper = mountCard(makeServer({ last_error: 'outer: inner: the real cause' }))
     expect(wrapper.find('[data-test="server-card-error-summary"]').text()).toBe('the real cause')
   })
+
+  // For a quarantined or disabled server the health calculator short-circuits
+  // and summary describes the ADMIN state, not the failure. Using it here would
+  // print "Quarantined for review" in a red error alert sitting directly above
+  // the quarantine banner that already says exactly that.
+  it('does not restate the admin state as the error on a quarantined server', () => {
+    const wrapper = mountCard(
+      makeServer({
+        quarantined: true,
+        last_error: 'failed to connect: stdio transport: transport error: transport closed',
+        health: {
+          level: 'healthy',
+          admin_state: 'quarantined',
+          summary: 'Quarantined for review',
+          action: 'approve',
+        },
+        diagnostic: {
+          code: 'MCPX_STDIO_EXIT_BEFORE_INITIALIZE',
+          severity: 'error',
+          user_message: 'The stdio server process exited before completing the MCP initialize handshake.',
+        },
+      } as Partial<Server>)
+    )
+
+    const summary = wrapper.find('[data-test="server-card-error-summary"]').text()
+    expect(summary).not.toContain('Quarantined')
+    expect(summary).toContain('exited before completing')
+  })
+
+  it('falls back to the root cause on a quarantined server with no diagnostic', () => {
+    const wrapper = mountCard(
+      makeServer({
+        quarantined: true,
+        last_error: 'failed to connect: transport error: transport closed',
+        health: {
+          level: 'healthy',
+          admin_state: 'quarantined',
+          summary: 'Quarantined for review',
+          action: 'approve',
+        },
+      } as Partial<Server>)
+    )
+    expect(wrapper.find('[data-test="server-card-error-summary"]').text()).toBe('transport closed')
+  })
 })
 
 // Audit F11: a name that does not resolve is an address problem. Restart
