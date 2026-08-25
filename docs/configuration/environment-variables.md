@@ -131,7 +131,7 @@ The tray application doesn't read the config file directly. It launches the core
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_TRAY_PORT` | Port for tray-launched core | `8080` |
-| `MCPPROXY_TRAY_LISTEN` | Listen address for core (e.g., `:8080`) | - |
+| `MCPPROXY_TRAY_LISTEN` | Listen address for core (e.g., `127.0.0.1:8080`; a bare port binds loopback) | - |
 | `MCPPROXY_CORE_URL` | Full URL override (e.g., `http://127.0.0.1:30080`) | - |
 | `MCPPROXY_CORE_PATH` | Custom path to mcpproxy core binary | - |
 | `MCPPROXY_TRAY_CONFIG_PATH` | Custom config file path for core | - |
