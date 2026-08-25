@@ -291,11 +291,29 @@ listed surface appears in `toolsListAllowedDelta` (`:228`). Direct mode has no
 pre-feature baseline and cannot have one — its built-in did not exist — so adding
 it to that slice fails both assertions.
 
-**Byte-stability (FR-015/SC-004)**: capture a direct-mode fixture golden from the
-merge-base commit (throwaway worktree of `origin/main`, same
-write-env-then-compare procedure `toolslist_snapshot_test.go` documents) over a
-fixed fixture toolset; assert deferral-off rendering is byte-identical modulo the
-appended `describe_tool` entry.
+**Byte-stability (FR-015/SC-004)**: the naive form of this — "copy a test file
+into a throwaway worktree of `origin/main` and drive `buildDirectModeTools` with a
+fixture toolset" — is **not runnable at the merge-base**, because the D12 pure
+seam does not exist there and `DiscoverTools` only returns tools from connected
+clients (research.md R12). Two workable forms, in preference order:
+
+1. **Live stdio fixture** (portable across commits): the capture test connects a
+   real fixture upstream over stdio, reusing the harness already in this package
+   (`preflight_e2e_test.go` + `testdata/preflight_fixture_server.js`), then
+   serializes the direct `tools/list`. That runs unchanged at the merge-base and
+   on this branch, so the write-env-then-compare procedure
+   `toolslist_snapshot_test.go` documents applies verbatim. Heavier (needs Node),
+   so it carries the same build-tag/skip treatment as the other fixture E2Es.
+2. **Same-tree differential** (fallback, if 1 is judged too heavy): over one
+   fixture `[]*config.ToolMetadata`, render through the untouched `NewTool` full
+   path and through the new `renderDirectTools` in `full` mode, and assert the
+   marshalled bytes are equal entry-for-entry. This proves the FR-015 property
+   (full mode is unchanged) without a cross-commit capture, but it cannot catch a
+   regression that lives in the shared code both sides call — so it is the
+   fallback, not the default.
+
+Either way the assertion is the same: deferral-off rendering is byte-identical to
+pre-feature output modulo the appended `describe_tool` entry.
 
 **Unit (test-first, per constitution V)** — the core matrix. All of it drives the
 pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
