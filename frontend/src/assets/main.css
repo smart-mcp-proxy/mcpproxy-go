@@ -101,13 +101,14 @@
   .link-warning { color: var(--tone-warning); }
   .link-error { color: var(--tone-error); }
 
-  /* Faded body text: the alpha ramp below /80 never cleared AA on any surface,
-     so every step of it resolves to the muted colour instead. */
+  /* Faded body text: /60 and below never cleared AA on base-200/300 (the
+     audit measured 2.51:1 for `/40` on white), so those steps resolve to the
+     muted colour. `/70` and up already pass and keep their own value, so the
+     "secondary" and "tertiary" levels stay visually distinct. */
   .text-base-content\/30,
   .text-base-content\/40,
   .text-base-content\/50,
-  .text-base-content\/60,
-  .text-base-content\/70 {
+  .text-base-content\/60 {
     color: var(--tone-muted);
   }
 }
