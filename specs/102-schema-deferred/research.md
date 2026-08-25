@@ -62,7 +62,8 @@ information reachable, `describe_tool` definitions gain an additive
   are updated to enumerate the new field.
 - **Correction — a response-bytes golden DOES exist.** An earlier draft of this
   decision claimed "no golden pins describe_tool *response* bytes". That is
-  false: `TestDescribeToolPlainCorpus_*` (`describe_plain_corpus_test.go`,
+  false: `TestDescribeToolPlainCorpus_ByteIdenticalWithOneEnumeratedDelta`
+  (`describe_plain_corpus_test.go`,
   golden `testdata/describe_plain_corpus/pre099.json`) replays 18 plain-mode
   `describe_tool` calls and compares each **response body byte for byte**,
   permitting only the substitutions enumerated in `describePlainDelta`; its doc
