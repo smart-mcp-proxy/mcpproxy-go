@@ -1294,9 +1294,16 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			OAuthConfigErr: health.ExtractOAuthConfigError(serverStatus.LastError),
 		}
 
-		// Check if OAuth is required for this server
-		if serverStatus.Config != nil && serverStatus.Config.OAuth != nil {
-			healthInput.OAuthRequired = true
+		// Check if OAuth is required for this server, and whether it is even
+		// addressed by a URL. HasEndpointURL gates the "Edit URL" remedy: a
+		// stdio server emits the same address phrases from its own failed
+		// network calls but has no URL field to send the user to. Every
+		// CalculateHealth call site must supply it or the surfaces disagree.
+		if serverStatus.Config != nil {
+			healthInput.HasEndpointURL = serverStatus.Config.URL != ""
+			if serverStatus.Config.OAuth != nil {
+				healthInput.OAuthRequired = true
+			}
 		}
 
 		// T032: Wire refresh state into health calculation (Spec 023)
