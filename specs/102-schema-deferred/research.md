@@ -422,6 +422,11 @@ tool list, keeps the first writer, and logs a warning — mirroring the F7 promp
 guard (`buildAggregatedServerPrompts`) — so describe and dispatch agree on the
 kept entry by construction.
 
+**Scope of the atomicity this buys**: handler ↔ its own schema/hash, which is
+what consumer (4) needs. It does NOT make the catalog swap and `SetTools` one
+transaction — see [R13](#r13--two-publications-one-generation-closing-the-catalogregistry-skew-window)
+for the filter/resolver skew window and the three rules that close it.
+
 ## R10 — Direct-surface describe_tool visibility parity (FR-011)
 
 **Finding**: the direct listing's filters are `filterDirectModeToolsForAuth`
