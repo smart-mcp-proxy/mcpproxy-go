@@ -102,13 +102,11 @@ the direct server instance** — a static string set via
 `initRoutingModeServers` (`mcp_routing.go:619`), present in BOTH serialization
 modes, phrased conditionally so it is true in both:
 
-> "Some tool descriptions end with a compact signature `(param*:type, …)` —
-> `*` = required, `~` = collapsed/lossy. When a signature is present, the listed
-> inputSchema is a placeholder; flat signatures are directly callable, and
-> `describe_tool` returns the full schema for any listed tool."
-
-(Exact wording finalized at implementation; budgeted and pinned by the new
-direct-surface built-in gate — see plan §Test strategy.)
+The single reference wording lives in
+[contracts/direct-deferred-surface.md §2](contracts/direct-deferred-surface.md)
+— it is not restated here, so the two documents cannot drift. Exact bytes are
+finalized at implementation and pinned by the new direct-surface built-in gate
+(plan §Test strategy).
 
 **Rationale**:
 - The `describe_tool`-description channel is budget-capped
