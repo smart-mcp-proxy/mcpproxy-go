@@ -140,6 +140,18 @@ def parse_ts(text: str) -> dict[str, dict]:
     forward to the end of that object (tracked by brace depth)."""
     out: dict[str, dict] = {}
     text = strip_comments(text, block_comments=True)
+    # A `key:` whose value is not a string literal (a constant, a template
+    # literal, a computed name) is invisible to the scan below — the field
+    # would go missing from BOTH sides of the comparison and the gate would
+    # pass while the tray could not edit it. Refuse rather than skip.
+    for stray in re.finditer(r"\bkey:\s*(?!['\"])(\S+)", text):
+        token = stray.group(1)
+        # `key: string` in the SettingsField interface is a TYPE position, not a
+        # field declaration.
+        if re.fullmatch(r"(string|number|boolean|any|unknown)[;,)]?", token):
+            continue
+        sys.exit(f"[parity] TS field key is not a string literal: key: {token} "
+                 "-- this parser cannot see it; either inline the literal or teach this script")
     for m in re.finditer(r"\bkey:\s*['\"]([^'\"]+)['\"]", text):
         key = m.group(1)
         if key in out:

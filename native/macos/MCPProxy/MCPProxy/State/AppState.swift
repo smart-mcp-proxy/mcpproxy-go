@@ -78,6 +78,17 @@ final class AppState: ObservableObject {
     // MARK: - Profiles (Profiles v2 T5)
     /// Configured profiles for the tray profile switcher.
     @Published var profiles: [ProfileSummary] = []
+
+    /// A session the Activity Log should scope itself to as soon as it exists
+    /// (F10 — a tray glance row's hand-off).
+    ///
+    /// A notification alone cannot carry this: a window created BY the click
+    /// subscribes its `onReceive` observers only once the view appears, so a
+    /// post made now lands on the floor — the same trap `showMainWindow(tab:)`
+    /// documents for the sidebar tab. ActivityView consumes and clears this on
+    /// appear; the notification still covers the already-open window, and
+    /// whichever arrives first clears it for the other.
+    @Published var pendingActivitySessionFilter: String?
     /// Server-level default active profile slug; empty means "all servers".
     @Published var activeProfile: String = ""
 

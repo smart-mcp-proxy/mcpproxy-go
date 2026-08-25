@@ -243,6 +243,13 @@ struct ActivityView: View {
             }
         }
         .task {
+            // A glance row that opened this window left its session here (F10);
+            // consume it before the first load so the list is never briefly
+            // unfiltered.
+            if let pending = appState.pendingActivitySessionFilter, !pending.isEmpty {
+                appState.pendingActivitySessionFilter = nil
+                filterSessionId = pending
+            }
             await loadSummary()
             await loadActivities()
         }
@@ -256,6 +263,9 @@ struct ActivityView: View {
         // F10: a tray glance row hands over the session it was derived from.
         .onReceive(NotificationCenter.default.publisher(for: .activityFilter)) { note in
             guard let sessionId = note.object as? String, !sessionId.isEmpty else { return }
+            // This view is live, so the hand-off is settled here — clear the
+            // pending value so a later-appearing view does not re-apply it.
+            appState.pendingActivitySessionFilter = nil
             showSession(sessionId)
         }
     }

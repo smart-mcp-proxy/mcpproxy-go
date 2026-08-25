@@ -1875,13 +1875,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// filter, which is what makes a glance row parent↔child navigable.
     @objc private func openActivityForSession(_ sender: NSMenuItem) {
         let sessionId = sender.representedObject as? String
+        // Published BEFORE the window is built, so a view created by this very
+        // click picks the filter up on appear. A delayed notification would be
+        // a race: too early and nothing is subscribed, too late and the user
+        // has already read an unfiltered log.
+        if let sessionId, !sessionId.isEmpty {
+            appState.pendingActivitySessionFilter = sessionId
+        }
         showMainWindow(tab: Self.glanceActivityDestination)
         guard let sessionId, !sessionId.isEmpty else { return }
-        // After the tab switch: a window created for this click seeds its own
-        // selection at init, and the filter must land on the view that exists.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            NotificationCenter.default.post(name: .activityFilter, object: sessionId)
-        }
+        // Covers the already-open window, whose observers are live now.
+        NotificationCenter.default.post(name: .activityFilter, object: sessionId)
     }
 
     /// Where a glance row click lands. A constant so tests can pin the
