@@ -295,8 +295,9 @@ test('contrast AA: buttons and links on a coloured alert, hovered', async ({ pag
   // measures nothing meaningful, because Tailwind only compiles the classes it
   // finds in the source — an injected `.btn-link` inherits plain `.btn` styling
   // and reports a failure that cannot occur in the product.
-  let measured = 0
+  const measured: Record<string, number> = {}
   for (const theme of THEMES) {
+    measured[theme] = 0
     for (const route of ['/', '/servers'] as const) {
       await goto(page, route, theme)
       const targets = page.locator(
@@ -334,9 +335,10 @@ test('contrast AA: buttons and links on a coloured alert, hovered', async ({ pag
           return {
             ratio: Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100,
             label: (el.textContent || '').trim().slice(0, 30),
+            isGhost: (el as HTMLElement).classList.contains('btn-ghost'),
           }
         })
-        measured++
+        if (result.isGhost) measured[theme]++
         expect(
           result.ratio,
           `${theme} ${route}: "${result.label}" inside a coloured alert measures ${result.ratio}:1 while hovered`,
@@ -344,7 +346,14 @@ test('contrast AA: buttons and links on a coloured alert, hovered', async ({ pag
       }
     }
   }
-  expect(measured, 'no ghost/link controls inside a coloured alert were found').toBeGreaterThan(0)
+  // Per theme, and specifically a ghost button — the variant daisyUI repaints
+  // on hover. An ordinary link passing in one theme is not coverage.
+  for (const theme of THEMES) {
+    expect(
+      measured[theme],
+      `no hovered .btn-ghost inside a coloured alert was measured in ${theme}`,
+    ).toBeGreaterThan(0)
+  }
 })
 
 // ---------------------------------------------------------------------------

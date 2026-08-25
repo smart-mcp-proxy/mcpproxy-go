@@ -57,6 +57,12 @@ describe('house date/time format', () => {
     expect(formatDateTime('2026-02-28T12:00:00')).toBe('2026-02-28 12:00:00')
   })
 
+  it('does not remap two-digit years to the 1900s', () => {
+    // `new Date(50, 0, 1)` is 1950 — a legacy quirk of the multi-argument form.
+    expect(formatDate('0050-01-01')).toBe('0050-01-01')
+    expect(formatDate('0001-01-01')).toBe('0001-01-01')
+  })
+
   it('never renders "Invalid Date" for missing or broken input', () => {
     for (const value of [null, undefined, '', 'not-a-date']) {
       expect(formatDateTime(value)).toBe('-')

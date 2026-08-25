@@ -41,6 +41,9 @@ function toDate(value: string | number | Date | null | undefined): Date | null {
       // and printing it with local getters shifts it a day west of UTC.
       if (text.length === 10) {
         const d = new Date(year, month - 1, day)
+        // `new Date(50, 0, 1)` is 1950: the two-argument-plus form remaps years
+        // 0-99 for legacy reasons, so the year is restated explicitly.
+        d.setFullYear(year)
         return Number.isNaN(d.getTime()) ? null : d
       }
     }
@@ -53,7 +56,7 @@ function toDate(value: string | number | Date | null | undefined): Date | null {
 export function formatDate(value: string | number | Date | null | undefined, fallback = '-'): string {
   const d = toDate(value)
   if (!d) return fallback
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return `${pad(d.getFullYear(), 4)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
 /** `06:51:38` — local wall-clock time. */
