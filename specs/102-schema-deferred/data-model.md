@@ -28,7 +28,7 @@ pointer swap; never mutated after publication.
 | `outputSchemaJSON` | string | optional; describe `output_schema` source |
 | `hash` | string | Spec-032 SHA-256 — `toolsig.Cache.Peek` key + validator memo key |
 | `annotations` | `*config.ToolAnnotations` | listing + `call_with`/permission derivation |
-| `requiredPermission` | string | `requiredPermissionForDirectTool(annotations)` — absorbs today's `directToolPermissions` map. Used by the **describe resolver** only. The *listing filters* must NOT read it: they derive the tier from each filtered `mcp.Tool`'s own `Annotations` via `contracts.DeriveCallWith`, exactly as dispatch does (`mcp_routing.go:211-213`), so the tier always belongs to the generation actually registered (R13 rule 3) |
+| `requiredPermission` | string | `requiredPermissionForDirectTool(annotations)` — absorbs today's `directToolPermissions` map, and is the tier **only where no registered entry is in hand**. Wherever one is (the listing filter's `mcp.Tool`, the describe resolver's `GetTool` result) the tier is derived from *that* entry's own `Annotations` via `contracts.DeriveCallWith`, exactly as dispatch does (`mcp_routing.go:211-213`), so it always belongs to the generation actually registered (R13 rules 3–4) |
 
 **Invariants**
 - Entry and its dispatch handler are built from the same `directCatalogEntry` in
@@ -44,8 +44,14 @@ pointer swap; never mutated after publication.
   `directServer.GetTool(name) != nil` as well as catalog visibility).
 - Membership is decided by this snapshot, not index presence: listed ⇒ describable
   (definition mode) and validatable; unlisted ⇒ `not_found`, even if indexed.
-- Collisions (`a` + `b__c` vs `a__b` + `c`): deterministic sorted iteration,
-  first writer kept, loser logged — describe and dispatch agree by construction.
+- Collisions (`a` + `b__c` vs `a__b` + `c`): **both entries withheld**, warning
+  logs both origins — an ambiguous display name is never served, so listing,
+  describe and dispatch agree by construction. Not first-writer-wins: that still
+  lets one name denote different origins across a rebuild (R13 rule 5).
+- A display name resolved from the catalog is used only after its rendered
+  description matches the registered `mcp.Tool.Description`; a mismatch means the
+  two publications disagree for that name, and the entry is withheld (filter
+  denies, describe answers `not_found`) rather than served from either side.
 
 ## 2. Deferred tool entry — FR-004
 
@@ -96,11 +102,13 @@ preflight evaluator.
 direct tool filters (`filterDirectModeToolsForAuth`,
 `filterDirectToolsForAgentCallability`) resolve display names through
 `byDisplayName` rather than `ParseDirectToolName`'s first-`__` split — for the
-`(server, tool)` split ONLY. The permission tier is **not** read off the catalog
-entry there; it comes from the filtered `mcp.Tool`'s own `Annotations` (R13 rule
-3), because during the two-publication window a same-name entry's annotations may
-already belong to the newer generation while the catalog still holds the older
-one. Without the catalog-backed split, a server whose name contains
+`(server, tool)` identity ONLY, and only after the description discriminator
+confirms the catalog entry and the registered entry are the same generation. The
+permission tier is **not** read off the catalog entry there; it comes from the
+filtered `mcp.Tool`'s own `Annotations` (R13 rule 3), because during the
+two-publication window a same-name entry's annotations may already belong to the
+newer generation while the catalog still holds the older one. Without the
+catalog-backed identity, a server whose name contains
 `__` is evaluated as a different (nonexistent) server by the listing and as the
 real pair by describe, producing a describable-but-unlisted id — the exact FR-011
 disclosure the catalog exists to prevent.

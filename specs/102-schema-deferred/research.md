@@ -271,7 +271,7 @@ The plan therefore does not promise a single transaction; it promises a
 > No request observes a state less restrictive than **both** generations, and no
 > request receives a definition for a name the registry is not currently serving.
 
-**Decision** — four rules that deliver that property:
+**Decision** — five rules that deliver that property:
 
 1. **`SetTools` runs first, the catalog is published immediately after**, in the
    same function with nothing between them. Note what this forbids: the *builder*
@@ -315,28 +315,58 @@ The plan therefore does not promise a single transaction; it promises a
    from). Catalog visibility ∧ registry presence closes describable-but-unlisted
    in *both* orderings, and it strengthens rather than weakens FR-017's
    "membership is decided by the direct-surface snapshot, not index presence" —
-   the registry is the listing's own source, not the index.
+   the registry is the listing's own source, not the index. The describe
+   resolver's permission tier likewise comes from that **registered** entry's
+   annotations (`GetTool` returns the `ServerTool`), never from the catalog's
+   `requiredPermission`, for the same generation-correctness reason as rule 3.
+5. **A display name never denotes two origins — within a generation, or across
+   the window.** Two mechanisms, because the hazard has two shapes:
+   - *Within* a generation: display-name collisions (`a` + `b__c` vs `a__b` + `c`)
+     are **withheld — neither entry is registered** — with a warning naming both
+     pairs, replacing the first-writer-wins guard the earlier draft proposed. The
+     spec sanctions this explicitly ("MUST resolve a colliding id deterministically
+     **or report it** rather than guess", Edge Cases), and it is strictly safer
+     than today's behavior, which is not merely non-deterministic but *undefined*:
+     `buildDirectModeTools` appends both entries and `SetTools` collapses them
+     last-writer-wins into a map whose input order comes from a map iteration over
+     `m.clients`. Cost: two genuinely colliding tools become unreachable via the
+     direct surface until an operator renames one — a documented, logged,
+     pathological case, and the canonical `server:tool` route is unaffected.
+   - *Across* the window: a name can still change origin without ever colliding —
+     server A removed and server B added in one reconcile, where B's tool flattens
+     to A's old display name. Neither generation has a collision, yet the old
+     catalog's `(server, tool)` would be used to scope-check the new registered
+     entry. Closed by a **generation discriminator**: both the listing filters and
+     the describe resolver compare the catalog entry's rendered description
+     against the registered `mcp.Tool.Description` and **fail closed** (deny /
+     `not_found`) on a mismatch. One string comparison, no wire change, and it
+     subsumes the same-name schema-change case too — a mismatched pair is simply
+     never served rather than served half-and-half.
 
-**Residual, accepted and documented** (cross-model review round 3): for the few
-instructions between `SetTools` and the catalog publish, a display name that
-exists in *both* generations but whose definition changed — a schema edit, or a
-flipped `__` collision winner — describes as the **previous** generation while
-the registry already serves the new one. This is not a disclosure (the name is
-visible in both) and not a dispatch hazard (the handler carries its own schema,
-R9). It is also the *more* consistent answer for the caller: the previous
-generation's definition is what that session's own listing advertised, since the
-`tools/list_changed` notification `SetTools` emits has not yet been acted on. The
-notification bounds the window from the client's side; the ordering bounds it to
-microseconds on the server's.
+**Residual, after rule 5** (narrowed in cross-model review round 5, which showed
+the round-3 residual was too generous): a mismatched pair is no longer served at
+all. During the window a same-name entry whose definition changed is **withheld**
+— the filters drop it and describe answers `not_found` — rather than answered
+from the stale generation. So the residual is availability, not correctness: for
+the few instructions between `SetTools` and the publish, a changed tool is
+briefly invisible to scoped sessions and undescribable. That direction is safe
+(fail-closed), self-correcting on the very next instruction, and bounded from the
+client's side by the `tools/list_changed` notification `SetTools` has already
+emitted. What is explicitly NOT residual any more: no session can be scope-checked
+against one origin and dispatched to another, and no read-scoped token can obtain
+a destructive tool's definition, in any interleaving.
 
 The catalog carries a monotonically increasing `generation` so the skew is
 observable in logs and assertable in tests. **Tests** — a rebuild paused between
 the two publications, with a concurrent scoped `tools/list` and `describe_tool`,
-covering four cases, not two: an **added** name, a **removed** name, a
-**same-name schema update**, and a **flipped collision winner**. Assertions: no
-describable-but-unlisted id; no entry served past the permission-tier gate; and
-for the two same-name cases, that the definition returned is one of the two
-generations and never a mix of both.
+covering five cases: an **added** name, a **removed** name, a **same-name schema
+update**, a **same-name origin flip** (server A removed and server B added in one
+reconcile, B's tool flattening to A's old display name), and a **within-generation
+collision** (both entries withheld, warning logged, neither listed nor
+describable, in both generations). Assertions: no describable-but-unlisted id; no
+entry scope-checked against one origin while its handler dispatches to another;
+no read-scoped token receiving a destructive tool's definition; and no definition
+that mixes two generations.
 
 ## R14 — The direct surface is never initialized eagerly (FR-009/FR-014 gap)
 
@@ -529,9 +559,12 @@ signature `Peek` by entry hash, (3) direct-surface describe_tool resolution
 validation — the handler closure captures its own entry's `ParamsJSON`+`Hash` at
 build time, so it validates against exactly what it advertised. Collisions
 (`a`+`b__c` vs `a__b`+`c`): the catalog build iterates a deterministically sorted
-tool list, keeps the first writer, and logs a warning — mirroring the F7 prompt
-guard (`buildAggregatedServerPrompts`) — so describe and dispatch agree on the
-kept entry by construction.
+tool list and **withholds every colliding display name** — neither pair is
+registered — logging a warning that names both origins. (An earlier draft kept
+the first writer, mirroring the F7 prompt guard; round 5 showed that still lets
+one display name denote different origins across a rebuild. See R13 rule 5.)
+Describe and dispatch therefore agree by construction, because an ambiguous name
+is never served at all.
 
 **Scope of the atomicity this buys**: handler ↔ its own schema/hash, which is
 what consumer (4) needs. It does NOT make the catalog swap and `SetTools` one

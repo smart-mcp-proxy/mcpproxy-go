@@ -36,9 +36,11 @@ Technical approach, grounded in the code:
   publish, filters deny on catalog miss, the permission tier derived from the
   entry's own annotations, describe requiring registry membership as well as
   catalog visibility) — a stated safety property, not a claim of atomicity. The
-  catalog build iterates a sorted tool list with a logged first-writer-wins guard
-  for `__` display-name collisions (mirror of the F7 prompt guard), so dispatch
-  registration and describe resolution agree deterministically.
+  catalog build iterates a sorted tool list and **withholds** every `__`
+  display-name collision outright, logging both origins, so an ambiguous name is
+  never served and dispatch registration, listing and describe resolution cannot
+  disagree (D13 rule 5; today's code is undefined here, not merely
+  non-deterministic).
 - **Deferred rendering** reuses the Spec-085 signature machinery read-only: a new
   non-compiling `toolsig.Cache.Peek(hash)` (research.md R6) serves index-warmed
   signatures with observable misses — a miss lists the entry without a signature,
@@ -145,14 +147,14 @@ Resolved in [research.md](research.md); recorded here as the plan of record:
 | D3 | describe_tool batch cap stays 5 (50 for `check:true`) on every surface | R3 |
 | D4 | FR-007 channel = static instructions on the direct server, both modes, conditionally phrased; `initialize` delta enumerated (composition with the operator's `instructions` key: D11) | R4 |
 | D5 | FR-009 prose = surface-neutral rewrite of ALL FOUR retrieve_tools strings (description, both param descriptions, the two shared remediation constants), single builder kept; one-time regen of the two describe_tool-bearing goldens plus named `describePlainDelta` substitutions | R5 |
-| D6 | FR-017 = immutable `directCatalog` snapshot, atomic swap, deterministic collision guard; handlers capture their own schema | R9 |
+| D6 | FR-017 = immutable `directCatalog` snapshot, atomic swap, **colliding display names withheld** (not first-writer-wins — D13 rule 5); handlers capture their own schema | R9 |
 | D7 | FR-011 = catalog-backed direct resolver with listing-parity gates incl. permission tier; plain `not_found` for invisible ids in both modes; snapshot-backed definitions for visible ids; check-mode verdicts via shared preflight evaluator | R10 |
 | D8 | Rollout default = **opt-in, off**; no default flip in this feature (spec Non-Goals; any future flip is its own evidence-gated decision) | spec |
 | D9 | Deferred `inputSchema` is emitted via `mcp.NewToolWithRawSchema` (annotations copied on explicitly); `mcp.NewTool` cannot produce the FR-004 wire shape and mixing the two is a marshal error | R11 |
 | D10 | Parity is closed on every side: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__` (the tier itself comes from the filtered entry's own annotations — D13 rule 3, not the catalog); the definition assembly takes a catalog-supplied annotations override on this surface (`buildFullToolEntry` otherwise reads annotations from the StateView, not from the entry passed in, so a listed pending destructive tool would describe as `call_with: "read"`); and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
 | D11 | Direct-server instructions = operator's `cfg.Instructions` when non-empty + blank line + the deferral legend, so an operator's configured `instructions` is not lost on the direct surface (fallback when empty: D16, not `resolveInstructions`) | R4 |
 | D12 | `buildDirectModeTools` splits into a pure `buildDirectCatalog` + `renderDirectTools` pair so the unit matrix can drive a fixture toolset (`upstream.Manager` is concrete and only lists connected clients) | R12 |
-| D13 | The catalog swap and `SetTools` cannot be one transaction (`mcp.Tool`'s only free-form field marshals to `_meta`, and mcp-go snapshots its tool map before our filters run), so the plan promises a safety property, not atomicity: **`SetTools` first, catalog published immediately after**; filters **deny** on catalog miss (built-ins by explicit name set; a *nil* catalog is not a miss); the **permission tier is derived from the registered entry's own annotations**, never from the catalog, so it is generation-correct by construction; describe requires `directServer.GetTool(name) != nil` **and** catalog visibility; `generation` counter; residual same-name staleness enumerated and tested | R13 |
+| D13 | The catalog swap and `SetTools` cannot be one transaction (`mcp.Tool`'s only free-form field marshals to `_meta`, and mcp-go snapshots its tool map before our filters run), so the plan promises a safety property, not atomicity. Five rules: **`SetTools` first, catalog published immediately after**; filters **deny** on catalog miss (built-ins by explicit name set; a *nil* catalog is not a miss); the **permission tier comes from the registered entry's own annotations** on BOTH the filter and the describe path, never from the catalog; describe requires `directServer.GetTool(name) != nil` **and** catalog visibility; and **a display name never denotes two origins** — colliding names are withheld outright (spec-sanctioned "report it"), and a catalog-vs-registry description mismatch fails closed, so an origin flip or schema change is withheld rather than served stale. `generation` counter + five interleaving tests | R13 |
 | D14 | Direct check-mode adapter canonicalizes `server__tool` → `server:tool` before `preflight.Evaluate` (which accepts colon ids only, so direct ids would otherwise all answer `not_found`), gates invisibility itself without consulting the evaluator, **projects the evaluator's `status`/`reason`/`action`/`retryable` through untouched** (check mode's vocabulary is `status:"unavailable"` + `tool_pending_approval`/`tool_changed`/… — never definition mode's), and restores the caller's original id + ordering in the response and the activity record | R10, contract §3 |
 | D15 | `initRoutingModeServers` performs one **initial direct rebuild** before the listeners are wired — the direct server registers nothing today (`mcp_routing.go:651-653`), so composing the built-in into rebuild construction alone would still leave FR-009 false until the first `servers.changed`, and would leave the catalog nil so the first unrelated reload churns every client | R14 |
 | D16 | One helper `resolveDirectInstructions(custom string)`: custom when non-empty, else a **direct-specific default**, then the legend. Not `resolveInstructions` — its `defaultInstructions` names `retrieve_tools` and `call_tool_*`. The direct default names ONLY what this surface exposes: `server__tool` calling, `describe_tool`, and the ABOUT links — no `upstream_servers`, which is registered by the code-exec and call-tool builders only (`mcp_routing.go:398`, `:507`), never by `buildDirectModeTools` | R4/D11 |
@@ -360,7 +362,8 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
   without `errToolSchemaConflict`.
 - Set identity full↔deferred: same names, count, annotations, ordering source
   (FR-008), incl. under agent-token and profile filters (SC-005, FR-016).
-- Catalog: collision determinism (both flattening directions), atomic swap, entry↔
+- Catalog: colliding display names withheld in both flattening directions (neither
+  listed, neither describable, warning names both origins), atomic swap, entry↔
   handler schema capture, `describe_tool` survives `SetTools` refresh (FR-018).
 - Direct describe: both id forms resolve identically through the registration
   mapping (incl. a server name containing `__`); permission-tier gate (read-scoped
@@ -386,12 +389,15 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
 - **Instructions** (D11): a custom `instructions` config value still appears on the
   direct server's `initialize`, with the deferral legend appended, in both modes.
 - **Publication skew** (D13): a rebuild paused between `SetTools` and the catalog
-  publish, with a concurrent scoped `tools/list` and `describe_tool`, over **four**
-  cases — an added name, a removed name, a same-name schema update, and a flipped
-  `__` collision winner. Assertions: no describable-but-unlisted id; no entry
-  served past the permission-tier gate (which is derived from the entry's own
-  annotations, so a read→destructive change cannot slip through); and for the two
-  same-name cases the definition returned is one whole generation, never a mix.
+  publish, with a concurrent scoped `tools/list` and `describe_tool`, over **five**
+  cases — an added name, a removed name, a same-name schema update, a same-name
+  **origin flip** (server A removed and server B added in one reconcile, B's tool
+  flattening to A's old display name), and a within-generation collision.
+  Assertions: no describable-but-unlisted id; no entry scope-checked against one
+  origin while its handler dispatches to another; no read-scoped token receiving a
+  destructive tool's definition (the tier comes from the registered entry's own
+  annotations on both paths); and no definition mixing two generations — a
+  mismatched pair is withheld, never served stale.
 - **Initial registration** (D15/R14): on a freshly initialized proxy with **zero**
   upstream servers, `p.directServer` already lists `describe_tool` before any
   `servers.changed` fires; and an unrelated `config.reloaded` on that proxy
