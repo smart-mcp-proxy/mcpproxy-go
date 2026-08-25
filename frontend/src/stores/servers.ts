@@ -9,6 +9,14 @@ export const useServersStore = defineStore('servers', () => {
   const servers = ref<Server[]>([])
   const loading = ref<LoadingState>({ loading: false, error: null })
 
+  // True once a server list has been fetched successfully at least once — the
+  // only reliable way to tell "no servers configured" from "we don't know yet".
+  // `servers` starts empty, and `loading.error` cannot stand in for this: it is
+  // shared state that any caller (including silent background refreshes and
+  // other components fetching concurrently) can write, and a success never
+  // clears it.
+  const loaded = ref(false)
+
   // Computed
   const serverCount = computed(() => ({
     total: servers.value.length,
@@ -87,17 +95,35 @@ export const useServersStore = defineStore('servers', () => {
     return result.sort((a, b) => a.name.localeCompare(b.name))
   }
 
+  // The server list has three independent writers: a fetch from any component
+  // (App.vue and Dashboard.vue both issue one on mount), a silent background
+  // refresh, and the Spec 047 SSE full-list payload. None of them cancel the
+  // others, so every write takes a ticket in issue order and a response that
+  // was already in flight when a newer list was applied is dropped — otherwise
+  // a stale list can resurrect servers the user just deleted, or blank out ones
+  // they just added.
+  let issueSeq = 0
+  let appliedSeq = 0
+
+  function applyServerList(list: Server[], ticket: number) {
+    if (ticket < appliedSeq) return
+    appliedSeq = ticket
+    // Smart merge preserves object references and avoids unnecessary re-renders
+    servers.value = mergeServers(servers.value, list)
+    loaded.value = true
+  }
+
   // Actions
   async function fetchServers(silent = false) {
     if (!silent) {
       loading.value = { loading: true, error: null }
     }
+    const ticket = ++issueSeq
 
     try {
       const response = await api.getServers()
       if (response.success && response.data) {
-        // Use smart merge to preserve object references and avoid unnecessary re-renders
-        servers.value = mergeServers(servers.value, response.data.servers)
+        applyServerList(response.data.servers, ticket)
       } else {
         loading.value.error = response.error || 'Failed to fetch servers'
       }
@@ -309,8 +335,14 @@ export const useServersStore = defineStore('servers', () => {
     try {
       const response = await api.deleteServer(serverName)
       if (response.success) {
-        // Remove server from local state
-        servers.value = servers.value.filter(s => s.name !== serverName)
+        // Removing the server locally is itself an authoritative list state, so
+        // it claims the newest ticket: a GET that was already in flight when the
+        // delete landed would otherwise pass the sequencing check and restore
+        // the server the user just deleted.
+        applyServerList(
+          servers.value.filter(s => s.name !== serverName),
+          ++issueSeq
+        )
         return true
       } else {
         throw new Error(response.error || 'Failed to delete server')
@@ -370,7 +402,9 @@ export const useServersStore = defineStore('servers', () => {
     // when running against an older core that publishes notify-only events.
     const payload = customEvent.detail?.payload
     if (payload && Array.isArray(payload.servers)) {
-      servers.value = mergeServers(servers.value, payload.servers as Server[])
+      // Authoritative and newer than anything currently in flight, so it takes
+      // the newest ticket — and it counts as a successful load in its own right.
+      applyServerList(payload.servers as Server[], ++issueSeq)
       return
     }
 
@@ -392,6 +426,7 @@ export const useServersStore = defineStore('servers', () => {
     // State
     servers,
     loading,
+    loaded,
 
     // Computed
     serverCount,
