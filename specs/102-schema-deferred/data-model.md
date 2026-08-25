@@ -13,7 +13,7 @@ pointer swap; never mutated after publication.
 | Field | Type | Source | Consumers |
 |---|---|---|---|
 | `entries` | ordered slice of `directCatalogEntry` | sorted DiscoverTools projection | listing rendering (order source) |
-| `byDisplayName` | map display name → entry | built with first-writer-wins collision guard (logged) | describe_tool direct-id resolution; = the registration mapping |
+| `byDisplayName` | map display name → entry | one pass over the sorted projection; **colliding names are withheld** — neither entry is registered, warning logs both origins (R13 rule 5) | describe_tool direct-id resolution + the listing filters' `(server, tool)` identity; = the registration mapping |
 | `byCanonical` | map `server:tool` → entry | same pass | describe_tool canonical-id resolution |
 | `serializationMode` | `full` \| `deferred` | live config at build time | FR-014 rebuild guard (compare vs live effective mode) |
 

@@ -339,34 +339,67 @@ The plan therefore does not promise a single transaction; it promises a
      entry. Closed by a **generation discriminator**: both the listing filters and
      the describe resolver compare the catalog entry's rendered description
      against the registered `mcp.Tool.Description` and **fail closed** (deny /
-     `not_found`) on a mismatch. One string comparison, no wire change, and it
-     subsumes the same-name schema-change case too — a mismatched pair is simply
-     never served rather than served half-and-half.
+     `not_found`) on a mismatch. One string comparison, no wire change.
 
-**Residual, after rule 5** (narrowed in cross-model review round 5, which showed
-the round-3 residual was too generous): a mismatched pair is no longer served at
-all. During the window a same-name entry whose definition changed is **withheld**
-— the filters drop it and describe answers `not_found` — rather than answered
-from the stale generation. So the residual is availability, not correctness: for
-the few instructions between `SetTools` and the publish, a changed tool is
-briefly invisible to scoped sessions and undescribable. That direction is safe
-(fail-closed), self-correcting on the very next instruction, and bounded from the
-client's side by the `tools/list_changed` notification `SetTools` has already
-emitted. What is explicitly NOT residual any more: no session can be scope-checked
-against one origin and dispatched to another, and no read-scoped token can obtain
-a destructive tool's definition, in any interleaving.
+   **What the discriminator does NOT catch** (cross-model review round 6,
+   correcting an over-broad claim in the round-5 draft that it "subsumes" the
+   schema-change case): a **schema-only** change leaves the description
+   identical. The direct description is `fmt.Sprintf("[%s] %s", ServerName,
+   Description)` (`mcp_routing.go:95`) in full mode, and in deferred mode the
+   appended signature is lossy by design, so a nested-property edit can render
+   the same `~`. No field on the registered `mcp.Tool` reliably encodes the
+   schema in *both* modes either — deferred advertises the same
+   `{"type":"object"}` placeholder for every tool — and `Tool.Meta` is
+   wire-visible, so a hash stamp is closed off by FR-015 (see the top of this
+   section). The identity/origin hazards ARE fully closed; the schema-only one is
+   not, and it is recorded as a residual rather than papered over.
+
+**Residual, stated exactly** (rounds 5 and 6). Two different things happen in the
+window, and only one of them is still open:
+
+- *Anything the discriminator sees* — an origin flip, a description change, a
+  signature change — is **withheld**: the filters drop it and describe answers
+  `not_found`, rather than being answered from the stale generation. That is
+  availability loss, not correctness loss: fail-closed, self-correcting on the
+  next instruction, and bounded from the client's side by the
+  `tools/list_changed` notification `SetTools` has already emitted.
+- *A schema-only change* passes the discriminator, so for those few instructions
+  `describe_tool` may return the **previous** generation's schema for a name
+  whose registered handler already carries the new one. **This is the one
+  residual the design does not eliminate.** Its blast radius is small and,
+  importantly, is absorbed by a mechanism this very feature ships: dispatch is
+  never wrong (the handler validates against the schema it captured, R9), so an
+  agent that acted on the stale definition is rejected by the pre-dispatch
+  validator with the **correct** schema embedded (FR-012/FR-013) and succeeds on
+  one retry — precisely the US3/SC-003 self-healing path. Cost: one extra round
+  trip, in a microsecond window, for a tool whose schema changed mid-refresh.
+
+What is explicitly NOT residual any more: no session can be scope-checked against
+one origin and dispatched to another; no read-scoped token can obtain a
+destructive tool's definition; and no display name can denote two origins, in any
+interleaving.
+
+**This residual is a second, narrower narrowing of FR-017's "no window exposes
+one without the other" and is recorded in plan §Complexity Tracking for the
+maintainer's assent at the tasks stage**, alongside the transaction narrowing —
+it is not to be discovered later in a task.
 
 The catalog carries a monotonically increasing `generation` so the skew is
 observable in logs and assertable in tests. **Tests** — a rebuild paused between
 the two publications, with a concurrent scoped `tools/list` and `describe_tool`,
 covering five cases: an **added** name, a **removed** name, a **same-name schema
-update**, a **same-name origin flip** (server A removed and server B added in one
-reconcile, B's tool flattening to A's old display name), and a **within-generation
-collision** (both entries withheld, warning logged, neither listed nor
-describable, in both generations). Assertions: no describable-but-unlisted id; no
+update** (description-visible), a **same-name origin flip** (server A removed and
+server B added in one reconcile, B's tool flattening to A's old display name), a
+**within-generation collision** (both entries withheld, warning logged, neither
+listed nor describable, in both generations), and — the case the discriminator
+cannot see — a **schema-only change with the description and rendered signature
+held byte-identical**, asserting the documented residual behaves as claimed: the
+stale definition may be returned, dispatch still validates against the new
+schema, and the resulting `invalid_params` error carries the NEW schema so one
+retry succeeds. Assertions across the set: no describable-but-unlisted id; no
 entry scope-checked against one origin while its handler dispatches to another;
-no read-scoped token receiving a destructive tool's definition; and no definition
-that mixes two generations.
+no read-scoped token receiving a destructive tool's definition; and no case where
+a stale definition leads to a call that *succeeds* against the wrong schema.
 
 ## R14 — The direct surface is never initialized eagerly (FR-009/FR-014 gap)
 
@@ -469,7 +502,9 @@ functions the tests drive directly:
 ```go
 func (p *MCPProxyServer) buildDirectCatalog(tools []*config.ToolMetadata, mode string) *directCatalog
 func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.ServerTool
-func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool // DiscoverTools → buildDirectCatalog → renderDirectTools → publish
+func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool // DiscoverTools → buildDirectCatalog → renderDirectTools
+// NOTE: publication is NOT here. RefreshDirectModeTools (and the D15 initial
+// rebuild) publishes the catalog AFTER its SetTools call — R13 rule 1.
 ```
 
 The unit matrix feeds `buildDirectCatalog` a fixture `[]*config.ToolMetadata`
