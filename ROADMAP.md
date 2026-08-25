@@ -43,8 +43,12 @@ graph LR
   scanner_simplification["Scanner simplification (deterministic d…"]
   tpa_db["tpa-db: versioned TPA signature databas…"]
   remote_access_tunnel["Remote access tunnel (feature-flagged M…"]
+  schema_deferred["Deferred-schema serialization for the d…"]
+  token_bench["Token-efficiency benchmark: measured sa…"]
+  tool_graph["Tool co-occurrence graph (experimental,…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
+  discovery_eval_harness["Discovery-quality eval harness (Spec 06…"]
 
   scanner_v2 --> sandbox_isolation
   ux_audit --> action_log_transparency
@@ -54,22 +58,24 @@ graph LR
   tpa_db --> remote_access_tunnel
   ux_audit --> remote_access_tunnel
   analytics_dashboard --> remote_access_tunnel
+  schema_deferred --> token_bench
+  analytics_dashboard --> tool_graph
   telemetry_identity --> telemetry_v7_churn
+  token_bench --> discovery_eval_harness
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,scanner_simplification done;
-  class analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
+  class analytics_dashboard,schema_deferred,telemetry_identity,telemetry_v7_churn in_progress;
   class tpa_db in_review;
-  class ux_audit,action_log_transparency,remote_access_tunnel todo;
+  class ux_audit,action_log_transparency,remote_access_tunnel,token_bench,tool_graph,discovery_eval_harness todo;
 ```
 
-**Independent epics** (16) — no cross-epic prerequisites; each stands alone:
+**Independent epics** (14) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
-- 🔵 **Deferred-schema serialization for the direct tools/list surface (spec 102)** — In progress · P1
 - 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P3
 - 🟡 **Windows native tray app** — In review · P2
 - ⚪ **Planning/docs truth automation** — Todo · P2
@@ -79,7 +85,6 @@ graph LR
 - ⚫ **SDK v1 migration** — Todo · P3 · parked
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
-- ⚪ **Discovery-quality eval harness (Spec 065 second half)** — Todo · P3
 - 🟢 **Upgrade awareness & guided update** — Done · P0
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
@@ -343,6 +348,34 @@ graph LR
 </details>
 
 <details>
+<summary>⚪ Token-efficiency benchmark: measured savings, published results — Todo · P1</summary>
+
+> Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix.
+
+```mermaid
+graph LR
+  token_bench_harness["Replay harness: activity-log sessions re-run…"]
+  token_bench_public["Run public suites locally (τ-bench / BFCL / M…"]
+  token_bench_blog["Publish results + methodology on mcpproxy.app…"]
+  token_bench_telemetry["Heartbeat v10: per-tool_response_mode token c…"]
+
+  token_bench_harness --> token_bench_public
+  token_bench_public --> token_bench_blog
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class token_bench_harness,token_bench_public,token_bench_blog,token_bench_telemetry todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries | ⚪ Todo | — |
+| Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results | ⚪ Todo | — |
+| Publish results + methodology on mcpproxy.app/blog | ⚪ Todo | — |
+| Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation | ⚪ Todo | — |
+
+</details>
+
+<details>
 <summary>⚪ Remote access tunnel (feature-flagged MVP, spec 089) — Todo · P2</summary>
 
 > One-button Web UI exposure of /mcp via external tunnel binary (cloudflared quick tunnel first) so Claude custom connectors (all tiers incl. Free, syncs to iOS/Android) can reach local MCP servers (e.g. Obsidian) — behind a feature flag, off by default, mandatory OAuth 2.1+PKCE+DCR gate, per-server exposure allowlist, remote-origin activity logging. Research: docs/research/remote-access-tunnel-research-2026-07-29.html (25/25 claims verified; niche unoccupied — Docker MCP Gateway lacks it). Sequenced after tpa-db (+ shipped scanner work 086-088), macOS tray redesign (ux-audit) and analytics-dashboard per owner decision 2026-07-29. No hosted relay/payments in MVP.
@@ -370,6 +403,35 @@ graph LR
 | cloudflared quick-tunnel orchestration (detect/launch/supervise/parse URL) + feature flag + never-auto-start | ⚪ Todo | — |
 | Per-server exposure allowlist (default none; quarantined non-exposable; hot-reload) | ⚪ Todo | — |
 | Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Tool co-occurrence graph (experimental, feature-flagged) — Todo · P2</summary>
+
+> Local-only co-occurrence graph mined from the activity log: suggests likely-next tools to agents and surfaces usage-chain analytics. Everything sits behind experimental.tool_graph, off by default — nothing leaves the machine.
+
+```mermaid
+graph LR
+  tool_graph_core["Co-occurrence graph from the activity log + r…"]
+  tool_graph_ranking["Session-aware rank boost in retrieve_tools"]
+  tool_graph_mining["Workflow mining: frequent chains → suggested…"]
+  tool_graph_analytics["Usage-chain analytics on the dashboard/stats…"]
+
+  tool_graph_core --> tool_graph_ranking
+  tool_graph_core --> tool_graph_mining
+  tool_graph_core --> tool_graph_analytics
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class tool_graph_core,tool_graph_ranking,tool_graph_mining,tool_graph_analytics todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Co-occurrence graph from the activity log + related_tools hint in call_tool responses (flag-gated) | ⚪ Todo | — |
+| Session-aware rank boost in retrieve_tools | ⚪ Todo | — |
+| Workflow mining: frequent chains → suggested stored scripts (spec 097 synergy) | ⚪ Todo | — |
+| Usage-chain analytics on the dashboard/stats page | ⚪ Todo | — |
 
 </details>
 
@@ -420,7 +482,7 @@ Spec: [054-mcp-security-gateway](./specs/054-mcp-security-gateway/)
 <details>
 <summary>⚪ Discovery-quality eval harness (Spec 065 second half) — Todo · P3</summary>
 
-> Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness.
+> SUPERSEDED — folded into token-bench-harness: the token-efficiency replay harness re-runs real sessions under every mode combo and measures retrieval recall on the same corpus, so a separate discovery-quality harness would duplicate it. Kept here as a pointer (the id is a stable depends_on target); do not build standalone. Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness.
 
 Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 
@@ -686,7 +748,9 @@ graph LR
 | Windows native tray app `MCP-43` | In review | P2 | — |  |  |
 | Web UI + macOS app UX audit | Todo | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | P1 | — |  |  |
+| Token-efficiency benchmark: measured savings, published results | Todo | P1 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
+| Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
 | Planning/docs truth automation | Todo | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
