@@ -188,6 +188,20 @@
       </p>
     </div>
 
+    <!-- Nothing to show and no list has arrived. This view does not fetch on
+         mount — App.vue and the Dashboard do — so on a direct load there is a
+         window where `loading` is still false and `servers` is still empty,
+         and neither empty state is true yet. Say "not yet" rather than pick
+         one of them and be wrong. Servers we already hold are a list by
+         definition, so this never gates the grid below. -->
+    <div
+      v-else-if="!hasServers && !serversStore.loaded"
+      class="text-center py-12"
+      data-test="servers-pending"
+    >
+      <span class="loading loading-spinner loading-lg"></span>
+    </div>
+
     <!-- Filter/search empty state: servers exist, none match the current view. -->
     <div v-else-if="filteredServers.length === 0" class="text-center py-12" data-test="servers-filter-empty">
       <svg class="w-24 h-24 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">

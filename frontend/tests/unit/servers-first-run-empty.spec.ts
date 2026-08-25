@@ -140,6 +140,34 @@ describe('Servers first-run empty state (F3)', () => {
     expect(wrapper.find('[data-test="servers-first-run-empty"]').exists()).toBe(false)
   })
 
+  it('does not claim "nothing matched" either, before a list has arrived', async () => {
+    // This view does not fetch on mount, so `loading` can be false while the
+    // list is still unknown. Neither empty state is true then; showing one
+    // would tell the user something false about their own setup.
+    const { wrapper } = await mountServers()
+    const store = useServersStore()
+    store.servers = []
+    store.loaded = false
+    store.loading = { loading: false, error: null }
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="servers-filter-empty"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="servers-pending"]').exists()).toBe(true)
+  })
+
+  it('renders servers it already holds even if the load flag was never set', async () => {
+    // Servers in hand are a list by definition — the pending state must never
+    // stand between the user and a grid we can already draw.
+    const { wrapper } = await mountServers()
+    const store = useServersStore()
+    store.servers = [server('alpha'), server('beta')]
+    store.loaded = false
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="servers-pending"]').exists()).toBe(false)
+    expect(wrapper.findAll('.server-card')).toHaveLength(2)
+  })
+
   it('opening the add-server modal shows it', async () => {
     const { wrapper } = await mountServers()
     const store = useServersStore()

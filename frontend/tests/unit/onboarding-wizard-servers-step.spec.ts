@@ -147,6 +147,27 @@ describe('OnboardingWizard servers step (F19)', () => {
       expect(router.currentRoute.value.path).toBe('/repositories')
     })
 
+    it('emits close BEFORE the route changes, not after', async () => {
+      // `dismiss()` awaits its mark-skipped calls before emitting. If the route
+      // moved first it would unmount the Dashboard that owns the open flag, and
+      // the late emit could find nothing left to clear it — the wizard would
+      // spring back open on return. Sample the emit state from inside the
+      // navigation itself, which is the only way to see the real ordering.
+      const { wrapper, router } = await openServersTab([])
+
+      let closeAlreadyEmitted: boolean | null = null
+      router.beforeEach(() => {
+        closeAlreadyEmitted = Boolean(wrapper.emitted('close'))
+        return true
+      })
+
+      await wrapper.find('[data-test="nothing-to-import-registry"]').trigger('click')
+      await flushPromises()
+
+      expect(closeAlreadyEmitted, 'navigation started before close was emitted').toBe(true)
+      expect(router.currentRoute.value.path).toBe('/repositories')
+    })
+
     it('still exposes the security choice', async () => {
       const { wrapper } = await openServersTab([])
 
@@ -208,6 +229,16 @@ describe('OnboardingWizard servers step (F19)', () => {
       expect(wrapper.find('[data-test="wizard-back"]').exists()).toBe(true)
     })
 
+    it('keeps a Close, so the step is never a trap', async () => {
+      // A step whose only exits are "import" strands the user, and the
+      // committed e2e sweep dismisses an auto-opened wizard through exactly
+      // this control — on a fresh instance the wizard can land here.
+      const { wrapper } = await openServersTab(['memory'])
+      const close = wrapper.find('[data-test="close-wizard"]')
+      expect(close.exists()).toBe(true)
+      expect(close.attributes('disabled')).toBeUndefined()
+    })
+
     it('Back returns to the previous step', async () => {
       const { wrapper } = await openServersTab(['memory'])
 
@@ -228,5 +259,65 @@ describe('OnboardingWizard servers step (F19)', () => {
     // The request is one-shot: a later plain open must not be redirected.
     expect(store.wizardInitialTab).toBe(null)
     expect(wrapper.find('[data-test="panel-servers"]').exists()).toBe(true)
+  })
+})
+
+// The Servers page's import link flips the store flag and THEN routes to the
+// Dashboard — which is the component that mounts the wizard. So the wizard can
+// come into existence with `show` already true, and never see a change to
+// watch. It must still initialise, and still honour the requested step.
+describe('OnboardingWizard mounted already-open', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    ;(api.getActivities as any).mockResolvedValue({ success: true, data: { activities: [] } })
+    ;(api.getConfig as any).mockResolvedValue({ success: true, data: {} })
+    ;(api.getDockerStatus as any).mockResolvedValue({ success: true, data: { available: true } })
+    ;(api.getConnectStatus as any).mockResolvedValue({ success: true, data: { clients: [] } })
+    ;(api.getCanonicalConfigPaths as any).mockResolvedValue({ success: true, data: { paths: [] } })
+    ;(api.getOnboardingState as any).mockResolvedValue(onboardingState())
+    ;(api.markOnboardingState as any).mockResolvedValue(onboardingState())
+  })
+
+  async function mountAlreadyOpen() {
+    const router = makeRouter()
+    router.push('/')
+    await router.isReady()
+    const wrapper = mount(OnboardingWizard, {
+      // Already open at mount — no false→true transition ever happens.
+      props: { show: true },
+      global: {
+        plugins: [router],
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' },
+          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
+        },
+      },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('lands on the requested step and consumes the request', async () => {
+    const store = useOnboardingStore()
+    store.openWizard('servers')
+
+    const wrapper = await mountAlreadyOpen()
+
+    expect(wrapper.find('[data-test="panel-servers"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="panel-clients"]').exists()).toBe(false)
+    // Not left behind to hijack the next plain open.
+    expect(store.wizardInitialTab).toBe(null)
+  })
+
+  it('still initialises (fetches its state) with no request pending', async () => {
+    const store = useOnboardingStore()
+    store.openWizard()
+
+    await mountAlreadyOpen()
+
+    expect(api.getOnboardingState).toHaveBeenCalled()
+    expect(api.getConnectStatus).toHaveBeenCalled()
+    expect(store.wizardInitialTab).toBe(null)
   })
 })

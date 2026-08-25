@@ -530,6 +530,10 @@
                without review stays available, as a link — the cost of choosing
                it should be a deliberate read, not a symmetric coin flip. -->
           <div class="flex items-center gap-3">
+            <!-- Every step offers a way out, this one included: the sweep and
+                 the header ✕ both depend on it, and a step whose only exits are
+                 "import" is a trap. -->
+            <button class="btn btn-ghost btn-sm" @click="dismiss" data-test="close-wizard">Close</button>
             <button
               class="btn btn-link btn-sm px-1 no-underline hover:underline text-base-content/70"
               :disabled="selectedCount === 0 || importBusyAny"
@@ -818,42 +822,60 @@ const serverCountLabel = computed(() => {
 })
 
 // Open lifecycle: refresh state, fetch clients + config, start polling.
-watch(() => props.show, async (open) => {
+//
+// The caller's tab request is read FIRST, before any await. Two reasons: a
+// request must never outlive the open it was made for (a wizard torn down
+// mid-load would otherwise leak it into the next plain open), and reading it
+// after five round-trips would let a second open consume the same request.
+async function onOpened() {
+  const requested = onboarding.consumeWizardInitialTab()
+  serverAddedJustNow.value = false
+  connectMessage.value = ''
+  // Backup lines are session-scoped (Spec 078 US2): don't replay backup
+  // rows from connects performed in a previous wizard session.
+  for (const k of Object.keys(connectBackups)) delete connectBackups[k]
+  copiedBackupClient.value = null
+  // Spec 078 US1: previews are session-scoped too — don't replay a stale
+  // confirm/cancel panel from a previous wizard session.
+  for (const k of Object.keys(previews)) delete previews[k]
+  for (const k of Object.keys(previewErrors)) delete previewErrors[k]
+  // Spec 078 US3: undo is session-scoped (it reverts the connect performed
+  // in THIS wizard session) — a reopened wizard starts without undo state.
+  for (const k of Object.keys(undoPreviews)) delete undoPreviews[k]
+  for (const k of Object.keys(undoOpen)) delete undoOpen[k]
+  // The requested tab applies immediately so the wizard never paints the
+  // wrong step while the fetches below are in flight.
+  if (requested) activeTab.value = requested
+  await onboarding.fetchState()
+  await Promise.all([
+    fetchClients(),
+    fetchSecurityState(),
+    fetchDockerStatus(),
+    fetchImportSources(),
+    fetchRecentActivity(),
+  ])
+  activeTab.value = pickInitialTab(requested)
+  startPolling()
+}
+
+// `immediate` matters: an opener can set `wizardOpen` BEFORE this component
+// exists — the Servers page's import link flips the store flag and then routes
+// to the Dashboard, which is what mounts the wizard. A plain watcher would not
+// fire for that (`show` is already true at mount), leaving the wizard rendered
+// but never initialised. This replaces the old onMounted fallback, which
+// kicked off the fetches but skipped the tab choice entirely.
+watch(() => props.show, (open) => {
   if (open) {
-    serverAddedJustNow.value = false
-    connectMessage.value = ''
-    // Backup lines are session-scoped (Spec 078 US2): don't replay backup
-    // rows from connects performed in a previous wizard session.
-    for (const k of Object.keys(connectBackups)) delete connectBackups[k]
-    copiedBackupClient.value = null
-    // Spec 078 US1: previews are session-scoped too — don't replay a stale
-    // confirm/cancel panel from a previous wizard session.
-    for (const k of Object.keys(previews)) delete previews[k]
-    for (const k of Object.keys(previewErrors)) delete previewErrors[k]
-    // Spec 078 US3: undo is session-scoped (it reverts the connect performed
-    // in THIS wizard session) — a reopened wizard starts without undo state.
-    for (const k of Object.keys(undoPreviews)) delete undoPreviews[k]
-    for (const k of Object.keys(undoOpen)) delete undoOpen[k]
-    await onboarding.fetchState()
-    await Promise.all([
-      fetchClients(),
-      fetchSecurityState(),
-      fetchDockerStatus(),
-      fetchImportSources(),
-      fetchRecentActivity(),
-    ])
-    activeTab.value = pickInitialTab()
-    startPolling()
+    void onOpened()
   } else {
     stopPolling()
   }
-})
+}, { immediate: true })
 
-function pickInitialTab(): TabID {
+function pickInitialTab(requested: TabID | null): TabID {
   // An explicit request from the opener wins — "Import from your AI client
   // configs" on the Servers page means that step, not whichever one the
-  // predicates would have chosen. Consumed here so it applies once.
-  const requested = onboarding.consumeWizardInitialTab()
+  // predicates would have chosen.
   if (requested) return requested
   if (!onboarding.hasConnectedClient) return 'clients'
   if (!onboarding.hasConfiguredServer) return 'servers'
@@ -874,10 +896,13 @@ function goBack() {
 
 // Leaving the wizard for the registry: the wizard is a modal owned by the
 // Dashboard, so it has to close before the route changes or it would hang over
-// the registry page.
-function goToRegistry() {
-  dismiss()
-  void router.push('/repositories')
+// the registry page. The await is load-bearing — `dismiss()` awaits its
+// mark-skipped calls before it emits `close`, and routing away first unmounts
+// the Dashboard that owns the `wizardOpen` flag, so the emit could land with
+// nothing left to clear it and the wizard would spring back open on return.
+async function goToRegistry() {
+  await dismiss()
+  await router.push('/repositories')
 }
 
 function startPolling() {
@@ -1368,18 +1393,10 @@ async function dismiss() {
   emit('close')
 }
 
-onMounted(() => {
-  // If wizard is already open at mount time (rare; usually opened reactively
-  // via :show), kick off initial load.
-  if (props.show) {
-    void onboarding.fetchState()
-    void fetchClients()
-    void fetchSecurityState()
-    void fetchDockerStatus()
-    void fetchImportSources()
-    startPolling()
-  }
-})
+// NOTE: no onMounted open-fallback here. The `immediate` watcher above already
+// covers "already open at mount time", and covers it completely — the old
+// fallback started the fetches but never chose the tab, so a wizard opened
+// that way landed on Clients regardless of what the opener asked for.
 
 // --- ClientRow component ------------------------------------------------
 // Inlined as a functional component to keep this file self-contained while
