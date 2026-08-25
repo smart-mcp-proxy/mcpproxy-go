@@ -1094,6 +1094,33 @@ func getInt64Payload(payload map[string]any, key string) int64 {
 	return 0
 }
 
+// getSeverityCountsPayload reads a {severity: count} rollup out of an event
+// payload, whichever concrete map the producer used: map[string]int (the
+// in-process path, from scanCallbackAdapter.OnScanCompleted) or the
+// map[string]interface{} a JSON round-trip would produce, with numbers arriving
+// as float64. ok reports whether the KEY was present, which is a different
+// question from whether the rollup is empty — an empty rollup is a clean scan,
+// an absent one is silence.
+func getSeverityCountsPayload(payload map[string]any, key string) (map[string]interface{}, bool) {
+	raw, present := payload[key]
+	if !present || raw == nil {
+		return nil, false
+	}
+
+	switch counts := raw.(type) {
+	case map[string]int:
+		out := make(map[string]interface{}, len(counts))
+		for severity, count := range counts {
+			out[severity] = count
+		}
+		return out, true
+	case map[string]interface{}:
+		return counts, true
+	default:
+		return nil, false
+	}
+}
+
 func getMapPayload(payload map[string]any, key string) map[string]interface{} {
 	if v, ok := payload[key]; ok {
 		if m, ok := v.(map[string]interface{}); ok {
@@ -1282,7 +1309,16 @@ func (s *ActivityService) handleSecurityScanSettled(evt Event) {
 	errMsg := getStringPayload(evt.Payload, "error")
 
 	metadata := map[string]interface{}{}
-	if findingsSummary := getMapPayload(evt.Payload, "findings_summary"); findingsSummary != nil {
+	// The producer (Runtime.publishScanSettled) puts a map[string]int in the
+	// payload, so the map[string]interface{} assertion getMapPayload does never
+	// matched and the summary was dropped from EVERY scan record ever written.
+	// Nothing noticed because nothing rendered it; the Activity drawer for a
+	// scan row now does (audit finding F25, #1046), and it distinguishes an
+	// EMPTY summary — a scan that genuinely found nothing — from an ABSENT one,
+	// which is not evidence of anything. Getting that distinction right requires
+	// the empty map to survive, so this reads the concrete type and keeps the
+	// key even when there is nothing in it.
+	if findingsSummary, ok := getSeverityCountsPayload(evt.Payload, "findings_summary"); ok {
 		metadata["findings_summary"] = findingsSummary
 	}
 

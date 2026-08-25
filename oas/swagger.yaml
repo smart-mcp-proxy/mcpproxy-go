@@ -1343,6 +1343,17 @@ components:
         error_count:
           description: Count of error activities
           type: integer
+        other_count:
+          description: "OtherCount is every record whose status is outside the four-value\nvocabulary
+            above, so that\n\n\tsuccess + error + blocked + rejected + other == total\n\nholds
+            by construction. The status field is a CLOSED vocabulary for tool\ncalls,
+            but the activity log is wider than tool calls: a quarantine change\nstores
+            its ACTION there (\"approved\", \"auto_approved\"), a policy decision\nstores
+            its DECISION (\"allow\"). Those rows were counted in the total and in\nnone
+            of the four buckets, so the Activity Log's own status tiles summed to\nless
+            than the denominator printed beside them — 15+4+0+0 under a \"42\"\n(audit
+            finding F2, #1046). The residual now has a name and a tile."
+          type: integer
         period:
           description: Time period (1h, 24h, 7d, 30d)
           type: string
@@ -2926,8 +2937,18 @@ components:
           type: integer
         last_used:
           type: string
+        p50_exceeds:
+          type: boolean
         p50_ms:
+          description: |-
+            P50Ms and P95Ms are read off a fixed latency histogram, so they are BUCKET
+            BOUNDS, not measured durations: the true percentile is at or below the
+            value, and a client must render it as a bound ("≤ 5 ms"). P50Exceeds /
+            P95Exceeds flip that reading for the unbounded overflow bucket, where the
+            value is the last bound and the truth is above it ("> 10 s").
           type: integer
+        p95_exceeds:
+          type: boolean
         p95_ms:
           type: integer
         rejected:

@@ -76,6 +76,38 @@
 
           <div class="flex-1"></div>
 
+          <!--
+            Repeat folding (F5, #1046). On by default: the table is scanned, and
+            a hundred identical rows carry one row of information. The toggle is
+            the escape hatch for an operator who wants the raw log, and it turns
+            itself off when the table is sorted by something other than time,
+            where "consecutive" means nothing.
+          -->
+          <button
+            type="button"
+            data-test="activity-group-toggle"
+            class="btn btn-sm btn-ghost gap-2"
+            :disabled="!groupingApplies"
+            :aria-pressed="groupRepeats && groupingApplies"
+            :title="groupingApplies
+              ? 'Fold consecutive identical calls into one expandable row. A run never mixes outcomes.'
+              : 'Repeats fold only in time order — sort by Time to use this.'"
+            @click="groupRepeats = !groupRepeats"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7" />
+            </svg>
+            <span :class="groupRepeats && groupingApplies ? '' : 'opacity-60'">Group repeats</span>
+            <span
+              v-if="foldedRowCount > 0"
+              data-test="activity-folded-count"
+              class="badge badge-xs badge-neutral"
+              :title="`${foldedRowCount} repeated rows folded into runs`"
+            >
+              −{{ foldedRowCount }}
+            </span>
+          </button>
+
           <!-- Filters toggle — the expanded cards + controls hang off this. -->
           <button
             type="button"
@@ -147,13 +179,24 @@
       </div>
     </div>
 
-    <!-- Summary Stats — clickable, drive the Status filter (issue #436) -->
+    <!--
+      Summary Stats — clickable, drive the Status filter (issue #436).
+
+      The tiles are a PARTITION of the denominator they sit under: every row in
+      the window lands in exactly one of them, with "Other / internal" holding
+      the rows whose status is not a tool-call outcome (a quarantine action, a
+      policy verdict). They used to add up to less than the total printed beside
+      them — 15+4+0+0 under a 42 (audit finding F2, #1046) — which is the fastest
+      way to make a dashboard untrustworthy. statusBucketTiles owns the list, and
+      a unit test asserts the sum.
+    -->
     <div v-if="showFilterPanel && summary" class="stats shadow bg-base-100 w-full">
       <button
         type="button"
         data-test="kpi-card-total"
         :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === '' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
         :aria-pressed="filterStatus === ''"
+        title="Every row in the last 24h. The tiles to the right split this number; the sub-count is how many of these rows are calls the user made — the figure the Usage tab reports."
         @click="filterStatus = ''"
       >
         <!--
@@ -166,46 +209,18 @@
         <div class="stat-desc">{{ summary.call_count }} calls</div>
       </button>
       <button
+        v-for="tile in statusTiles"
+        :key="tile.status"
         type="button"
-        data-test="kpi-card-success"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'success' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filterStatus === 'success'"
-        @click="filterStatus = filterStatus === 'success' ? '' : 'success'"
+        :data-test="`kpi-card-${tile.status}`"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === tile.status ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filterStatus === tile.status"
+        :title="tile.title"
+        @click="filterStatus = filterStatus === tile.status ? '' : tile.status"
       >
-        <div class="stat-title">Success</div>
-        <!-- Success is the norm — no colour, so Errors/Blocked keep theirs. -->
-        <div class="stat-value text-2xl text-base-content/70">{{ summary.success_count }}</div>
-      </button>
-      <button
-        type="button"
-        data-test="kpi-card-errors"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'error' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filterStatus === 'error'"
-        @click="filterStatus = filterStatus === 'error' ? '' : 'error'"
-      >
-        <div class="stat-title">Errors</div>
-        <div class="stat-value text-2xl text-error">{{ summary.error_count }}</div>
-      </button>
-      <button
-        type="button"
-        data-test="kpi-card-blocked"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'blocked' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filterStatus === 'blocked'"
-        @click="filterStatus = filterStatus === 'blocked' ? '' : 'blocked'"
-      >
-        <div class="stat-title">Blocked</div>
-        <div class="stat-value text-2xl text-warning">{{ summary.blocked_count }}</div>
-      </button>
-      <button
-        type="button"
-        data-test="kpi-card-rejected"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'rejected' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filterStatus === 'rejected'"
-        @click="filterStatus = filterStatus === 'rejected' ? '' : 'rejected'"
-      >
-        <div class="stat-title">Rejected</div>
-        <!-- Backpressure, not an alarm: neutral, like its pill. -->
-        <div class="stat-value text-2xl text-base-content/70">{{ summary.rejected_count }}</div>
+        <div class="stat-title">{{ tile.label }}</div>
+        <!-- Only error and blocked spend colour; success is the norm. -->
+        <div class="stat-value text-2xl" :class="statTileValueClass(tile.tone)">{{ tile.count }}</div>
       </button>
     </div>
 
@@ -282,6 +297,12 @@
               <option value="error">Error</option>
               <option value="blocked">Blocked</option>
               <option value="rejected">Rejected</option>
+              <!--
+                The residual of the status partition (F2): rows whose outcome is
+                not a tool-call status. Selectable, so the "Other / internal"
+                tile behaves like every other tile in the row.
+              -->
+              <option :value="OTHER_STATUS">Other / internal</option>
             </select>
           </div>
 
@@ -380,6 +401,32 @@
             Clear Filters
           </button>
         </div>
+
+        <!--
+          Column legend (F26, #1046). The Intent column paints its word beside
+          the glyph, so this is a reference for it; the Sensitive column has no
+          room for a word, and a column of bare ☢️ / ⚠️ badges is decodable only
+          by someone who already knows the scale. Colour and glyph must never be
+          the only encoding (WCAG 1.4.1).
+        -->
+        <div
+          data-test="activity-legend"
+          class="flex flex-wrap gap-x-6 gap-y-2 pt-3 mt-2 border-t border-base-300 text-xs text-base-content/60"
+        >
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span class="font-medium text-base-content/70">Intent:</span>
+            <span v-for="entry in INTENT_LEGEND" :key="entry.term" :title="entry.description">
+              <span aria-hidden="true">{{ entry.icon }}</span> {{ entry.term }}
+            </span>
+          </div>
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span class="font-medium text-base-content/70">Sensitive data:</span>
+            <span v-for="entry in SENSITIVE_LEGEND" :key="entry.term" :title="entry.description">
+              <span aria-hidden="true">{{ entry.icon }}</span> {{ entry.term }}
+            </span>
+            <span class="opacity-70">— the number is how many detections that row carries.</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -436,24 +483,35 @@
                 <th></th>
               </tr>
             </thead>
+            <!--
+              One template over DISPLAY ROWS, not over records: a collapsed run
+              and an expanded run's members render through the same cells, so
+              there is exactly one copy of this markup to keep correct.
+            -->
             <tbody>
               <tr
-                v-for="activity in paginatedActivities"
-                :key="activity.id"
-                data-test="activity-row"
+                v-for="row in displayRows"
+                :key="row.key"
+                :data-test="row.member ? 'activity-run-member' : 'activity-row'"
                 class="hover cursor-pointer"
-                :class="{ 'bg-base-200': selectedActivity?.id === activity.id }"
-                @click="selectActivity(activity)"
+                :class="{
+                  'bg-base-200': selectedActivity?.id === row.activity.id,
+                  'bg-base-200/30': row.member,
+                }"
+                @click="selectActivity(row.activity)"
               >
-                <td>
-                  <div class="text-sm">{{ formatTimestamp(activity.timestamp) }}</div>
-                  <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
+                <td :class="row.member ? 'pl-8' : ''">
+                  <div class="text-sm">{{ formatTimestamp(row.activity.timestamp) }}</div>
+                  <div class="text-xs text-base-content/60">
+                    {{ formatRelativeTime(row.activity.timestamp) }}
+                    <span v-if="row.runSpan" class="opacity-70">· {{ row.runSpan }}</span>
+                  </div>
                 </td>
                 <td>
                   <div class="flex flex-col gap-1">
                     <div class="flex items-center gap-2">
-                      <span class="text-lg">{{ getTypeIcon(activity.type) }}</span>
-                      <span class="text-sm">{{ formatType(activity.type) }}</span>
+                      <span class="text-lg">{{ getTypeIcon(row.activity.type) }}</span>
+                      <span class="text-sm">{{ formatType(row.activity.type) }}</span>
                     </div>
                     <!--
                       code_execution linkage: a sub-call names the run that
@@ -465,7 +523,7 @@
                       carries a single puzzle glyph beside that text instead.
                     -->
                     <span
-                      v-if="isChildCall(activity)"
+                      v-if="isChildCall(row.activity)"
                       data-test="activity-child-badge"
                       class="badge badge-xs badge-ghost w-fit font-normal text-base-content/60"
                       title="Sub-call dispatched by a code_execution run"
@@ -473,7 +531,7 @@
                       ↳ via code_execution
                     </span>
                     <span
-                      v-else-if="showParentBadgeInTypeColumn(activity)"
+                      v-else-if="showParentBadgeInTypeColumn(row.activity)"
                       data-test="activity-parent-badge"
                       class="badge badge-xs badge-ghost w-fit font-normal text-base-content/60"
                       title="Sandboxed script run — may have dispatched sub-calls"
@@ -484,12 +542,12 @@
                 </td>
                 <td>
                   <router-link
-                    v-if="activity.server_name"
-                    :to="serverDetailPath(activity.server_name)"
+                    v-if="row.activity.server_name"
+                    :to="serverDetailPath(row.activity.server_name)"
                     class="link link-hover font-medium"
                     @click.stop
                   >
-                    {{ activity.server_name }}
+                    {{ row.activity.server_name }}
                   </router-link>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
@@ -501,15 +559,15 @@
                       the word one column to the left.
                     -->
                     <span
-                      v-if="isCodeExecutionActivity(activity) && !showParentBadgeInTypeColumn(activity)"
+                      v-if="isCodeExecutionActivity(row.activity) && !showParentBadgeInTypeColumn(row.activity)"
                       data-test="activity-parent-badge"
                       class="text-sm opacity-50 shrink-0"
                       title="Sandboxed script run — may have dispatched sub-calls"
                     >
                       🧩
                     </span>
-                    <code v-if="activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate">
-                      {{ activity.tool_name }}
+                    <code v-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate">
+                      {{ row.activity.tool_name }}
                     </code>
                     <!--
                       Spec 098: a preflight is set-scoped, so server/tool are
@@ -517,77 +575,129 @@
                       the row readable.
                     -->
                     <span
-                      v-else-if="isPreflightActivity(activity) && formatPreflightSummary(activity.metadata)"
+                      v-else-if="isPreflightActivity(row.activity) && formatPreflightSummary(row.activity.metadata)"
                       class="text-sm"
-                      :title="formatPreflightSummary(activity.metadata)"
+                      :title="formatPreflightSummary(row.activity.metadata)"
                     >
-                      {{ formatPreflightSummary(activity.metadata) }}
+                      {{ formatPreflightSummary(row.activity.metadata) }}
                     </span>
-                    <span v-else-if="activity.metadata?.action" class="text-sm">
-                      {{ activity.metadata.action }}
+                    <span v-else-if="row.activity.metadata?.action" class="text-sm">
+                      {{ row.activity.metadata.action }}
                     </span>
                     <span v-else class="text-base-content/40">-</span>
+                    <!--
+                      The run marker (F5): "×12" is the whole compression, and it
+                      is also the control that undoes it. Ghost, not accent — a
+                      repeat is normal, not an alert.
+                    -->
+                    <button
+                      v-if="row.runCount > 1"
+                      type="button"
+                      data-test="activity-run-count"
+                      class="badge badge-sm badge-ghost shrink-0 gap-1 hover:bg-base-300"
+                      :aria-expanded="isRunExpanded(row.key)"
+                      :title="isRunExpanded(row.key)
+                        ? 'Collapse these repeated calls'
+                        : `${row.runCount} consecutive identical calls — click to expand`"
+                      @click.stop="toggleRun(row.key)"
+                    >
+                      ×{{ row.runCount }}
+                      <span aria-hidden="true">{{ isRunExpanded(row.key) ? '▾' : '▸' }}</span>
+                    </button>
                   </div>
                 </td>
                 <!-- Sensitive Data column (Spec 026) -->
                 <td>
                   <div
-                    v-if="activity.has_sensitive_data"
+                    v-if="row.activity.has_sensitive_data"
                     class="tooltip tooltip-top"
-                    :data-tip="(activity.detection_types || []).join(', ')"
+                    :data-tip="(row.activity.detection_types || []).join(', ')"
                   >
-                    <span class="badge badge-sm gap-1" :class="getSeverityBadgeClass(activity.max_severity)">
-                      {{ getSeverityIcon(activity.max_severity) }}
-                      {{ activity.detection_types?.length || 0 }}
+                    <span class="badge badge-sm gap-1" :class="getSeverityBadgeClass(row.activity.max_severity)">
+                      <span aria-hidden="true">{{ getSeverityIcon(row.activity.max_severity) }}</span>
+                      {{ row.activity.detection_types?.length || 0 }}
+                      <!--
+                        The badge is a glyph and a number; without this the column
+                        is colour+glyph only (F26, #1046 / WCAG 1.4.1). The filter
+                        panel carries the visible legend.
+                      -->
+                      <span class="sr-only">
+                        {{ row.activity.max_severity || 'unknown' }}-severity sensitive data detected
+                      </span>
                     </span>
                   </div>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
                 <!--
                   Intent column (Spec 024: US5). The REASON is what an operator
-                  wants; the operation type is a glyph in front of it. The old
-                  coloured `read` pill spent semantic colour on the most common
-                  case and clipped its own icon.
+                  wants; the operation type is a glyph AND its word in front of
+                  it — the glyph alone was an unlabelled emoji nobody could decode
+                  (F26, #1046). The old coloured `read` pill spent semantic colour
+                  on the most common case and clipped its own icon.
                 -->
                 <td class="max-w-[18rem]">
                   <div
-                    v-if="intentOf(activity).present"
+                    v-if="intentOf(row.activity).present"
                     data-test="activity-intent"
                     class="flex items-center gap-1.5 min-w-0"
-                    :title="intentOf(activity).title"
+                    :title="intentOf(row.activity).title"
                   >
-                    <span class="text-sm leading-none shrink-0" aria-hidden="true">{{ intentOf(activity).icon }}</span>
-                    <span class="sr-only">{{ intentOf(activity).label }}</span>
+                    <span class="text-sm leading-none shrink-0" aria-hidden="true">{{ intentOf(row.activity).icon }}</span>
+                    <span data-test="activity-intent-label" class="text-xs font-medium shrink-0">
+                      {{ intentOf(row.activity).label }}
+                    </span>
                     <span
-                      v-if="intentOf(activity).reason"
+                      v-if="intentOf(row.activity).reason"
                       data-test="activity-intent-reason"
                       class="text-xs text-base-content/70 truncate"
                     >
-                      {{ intentOf(activity).reason }}
+                      {{ intentOf(row.activity).reason }}
+                    </span>
+                    <!--
+                      A folded run shows the LEAD's reason. When members worded
+                      theirs differently the row has to say so rather than let one
+                      reason speak for twelve calls.
+                    -->
+                    <span
+                      v-if="row.reasonsVary"
+                      data-test="activity-run-reasons-vary"
+                      class="text-xs text-base-content/40 shrink-0"
+                      title="Calls in this run declared different reasons — expand to read them"
+                    >
+                      +…
                     </span>
                   </div>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
                 <!--
-                  Status: success is the norm and stays quiet (muted text, no
-                  pill); only error / blocked / oddities get a chip.
+                  Status: success is the norm — ~90% of rows — and gets NO mark at
+                  all, so the two rows that need a human are the only marked ones
+                  in the column (F5, #1046). Screen readers still hear it.
                 -->
                 <td>
                   <span
+                    v-if="statusPresentation(row.activity.status).pill"
                     data-test="activity-status"
-                    :class="statusPresentation(activity.status).className"
+                    :class="statusPresentation(row.activity.status).className"
                   >
-                    {{ statusPresentation(activity.status).label }}
+                    {{ statusPresentation(row.activity.status).label }}
+                  </span>
+                  <span v-else data-test="activity-status" class="sr-only">
+                    {{ statusPresentation(row.activity.status).label }}
                   </span>
                 </td>
                 <td>
-                  <span v-if="activity.duration_ms !== undefined" class="text-sm">
-                    {{ formatDuration(activity.duration_ms) }}
+                  <!-- A run reports the SPAN its members took, not one member's. -->
+                  <span v-if="row.runDuration" class="text-sm" :title="`${row.runCount} calls`">
+                    {{ row.runDuration }}
+                  </span>
+                  <span v-else-if="row.activity.duration_ms !== undefined" class="text-sm">
+                    {{ formatDuration(row.activity.duration_ms) }}
                   </span>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
                 <td>
-                  <button class="btn btn-xs btn-ghost" @click.stop="selectActivity(activity)">
+                  <button class="btn btn-xs btn-ghost" @click.stop="selectActivity(row.activity)">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
                     </svg>
@@ -599,8 +709,16 @@
 
           <!-- Pagination -->
           <div v-if="totalPages > 1" class="flex justify-between items-center mt-4 pt-4 border-t border-base-300">
-            <div class="text-sm text-base-content/60">
-              Showing {{ (currentPage - 1) * pageSize + 1 }}-{{ Math.min(currentPage * pageSize, sortedActivities.length) }} of {{ sortedActivities.length }}
+            <!--
+              The page is a page of RUNS, so the paginator counts runs — and
+              names the rows behind them, because "1-25 of 40" beside a 200-row
+              log would be its own small lie.
+            -->
+            <div class="text-sm text-base-content/60" data-test="activity-pagination-summary">
+              Showing {{ (currentPage - 1) * pageSize + 1 }}-{{ Math.min(currentPage * pageSize, runs.length) }} of {{ runs.length }}
+              <span v-if="foldedRowCount > 0">
+                ({{ sortedActivities.length }} rows, repeats folded)
+              </span>
             </div>
             <div class="join">
               <button
@@ -702,9 +820,32 @@
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Duration:</span>
                 <span class="text-sm">{{ formatDuration(selectedActivity.duration_ms) }}</span>
               </div>
-              <div v-if="selectedActivity.session_id" class="flex gap-2">
+              <!--
+                Sessions links to Activity with "View Activity"; the way back was
+                an id printed as plain text (F25, #1046). Navigation should be
+                bidirectional — the drawer both filters this log to the session
+                and offers the Sessions page that owns it.
+              -->
+              <div v-if="selectedActivity.session_id" class="flex gap-2 items-start">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Session:</span>
-                <code class="text-xs bg-base-200 px-2 py-1 rounded">{{ selectedActivity.session_id }}</code>
+                <div class="flex flex-wrap items-center gap-2 min-w-0">
+                  <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.session_id }}</code>
+                  <button
+                    type="button"
+                    data-test="activity-filter-by-session"
+                    class="btn btn-xs btn-outline"
+                    @click="filterBySession(selectedActivity)"
+                  >
+                    Filter this log
+                  </button>
+                  <router-link
+                    data-test="activity-view-session"
+                    class="btn btn-xs btn-outline"
+                    :to="{ name: 'sessions' }"
+                  >
+                    Open Sessions
+                  </router-link>
+                </div>
               </div>
               <div v-if="selectedActivity.source" class="flex gap-2">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Source:</span>
@@ -800,6 +941,108 @@
                     only available from the explicit export:
                     <code class="font-mono">mcpproxy activity export --include-bodies</code>.
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!--
+              Security scan verdict (F25, #1046). This drawer used to be four
+              fields and 80% whitespace for a scan row — no verdict, no findings,
+              nowhere to go — while the record carried the whole rollup in
+              metadata.findings_summary and a Security page existed to receive
+              the click.
+            -->
+            <div v-if="isSecurityScanActivity(selectedActivity)" data-test="activity-scan-verdict">
+              <h4 class="font-semibold mb-2 flex items-center gap-2">
+                <span aria-hidden="true">🛡️</span>
+                Scan Verdict
+              </h4>
+              <div class="bg-base-200 rounded p-3 space-y-3">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm text-base-content/60">Result:</span>
+                  <span
+                    class="badge badge-sm"
+                    :class="selectedActivity.status === 'error' ? 'badge-error' : 'badge-success'"
+                  >
+                    {{ selectedActivity.status === 'error' ? 'scan failed' : 'scan completed' }}
+                  </span>
+                  <span
+                    v-if="selectedActivity.status !== 'error' && hasScanFindingsSummary(selectedActivity.metadata)"
+                    class="text-sm"
+                    :class="scanFindingsTotal(selectedActivity.metadata) > 0 ? 'text-warning' : 'text-base-content/60'"
+                  >
+                    {{ scanFindingsTotal(selectedActivity.metadata) }}
+                    finding{{ scanFindingsTotal(selectedActivity.metadata) === 1 ? '' : 's' }}
+                  </span>
+                </div>
+                <!--
+                  A FAILED scan can still carry findings: the debouncer keeps
+                  the last non-nil rollup (scan_notify.go), so a storm where
+                  some scanners finished and a later one failed settles as
+                  "failed" with real findings attached. Hiding them would be the
+                  worse error in a security view — they are shown, and told
+                  apart from a rollup that describes the whole scan.
+                -->
+                <div
+                  v-if="scanFindingsRollup(selectedActivity.metadata).length > 0"
+                  class="flex items-center gap-1 flex-wrap"
+                >
+                  <span class="text-sm text-base-content/60">
+                    {{ selectedActivity.status === 'error' ? 'Found before the failure:' : 'By severity:' }}
+                  </span>
+                  <span
+                    v-for="entry in scanFindingsRollup(selectedActivity.metadata)"
+                    :key="entry.severity"
+                    class="badge badge-sm"
+                    :class="getSeverityBadgeClass(entry.severity)"
+                  >
+                    {{ entry.severity }} ×{{ entry.count }}
+                  </span>
+                  <span
+                    v-if="selectedActivity.status === 'error'"
+                    class="text-xs text-base-content/50 basis-full"
+                  >
+                    The scan did not complete, so this is not the whole picture.
+                  </span>
+                </div>
+                <!--
+                  "Clean" and "we don't know" must not read the same. Only a
+                  rollup that is actually present can support the first claim;
+                  an absent one (every record written before the producer's
+                  map[string]int stopped being silently dropped) gets the
+                  second, and a link to the page that can answer it.
+                -->
+                <p
+                  v-else-if="selectedActivity.status !== 'error' && hasScanFindingsSummary(selectedActivity.metadata)"
+                  data-test="activity-scan-clean"
+                  class="text-sm text-base-content/60"
+                >
+                  No findings — the scanners had nothing to report for this server.
+                </p>
+                <p
+                  v-else-if="selectedActivity.status !== 'error'"
+                  data-test="activity-scan-no-summary"
+                  class="text-sm text-base-content/60"
+                >
+                  This record carries no findings summary, which is not the same as a clean
+                  result — open the Security page for the current verdict.
+                </p>
+                <div class="flex flex-wrap gap-2 pt-1">
+                  <router-link
+                    v-if="selectedActivity.server_name"
+                    data-test="activity-scan-open-server"
+                    class="btn btn-sm btn-outline"
+                    :to="serverDetailPath(selectedActivity.server_name)"
+                  >
+                    Open {{ selectedActivity.server_name }}
+                  </router-link>
+                  <router-link
+                    data-test="activity-scan-open-security"
+                    class="btn btn-sm btn-outline"
+                    :to="{ name: 'security' }"
+                  >
+                    Security &amp; scan reports
+                  </router-link>
                 </div>
               </div>
             </div>
@@ -989,21 +1232,34 @@ import {
   activeFilterChips,
   compactSummaryParts,
   formatPreflightSummary,
+  formatRunDuration,
+  formatRunSpan,
   formatType,
   getIntentBadgeClass,
   getIntentIcon,
   getPreflightVerdictBadgeClass,
   getTypeIcon,
+  groupActivityRuns,
   intentPresentation,
   isChildCall,
   isCodeExecutionActivity,
+  isOtherStatus,
   isPreflightActivity,
+  isSecurityScanActivity,
   preflightIdsCount,
   preflightPerTool,
   preflightReasonRollup,
+  hasScanFindingsSummary,
+  scanFindingsRollup,
+  scanFindingsTotal,
   showParentBadgeInTypeColumn,
+  statusBucketTiles,
   statusPresentation,
+  INTENT_LEGEND,
+  OTHER_STATUS,
+  SENSITIVE_LEGEND,
   type ActiveFilterChip,
+  type ActivityRun,
   type CompactSummaryPart,
   type StatusTone,
 } from '@/utils/activity'
@@ -1280,6 +1536,26 @@ watch(showFilterPanel, expanded => {
 /** "54 calls · 6 errors · 1 blocked" — zeros omitted. */
 const summaryParts = computed(() => compactSummaryParts(summary.value))
 
+/**
+ * The status tiles, as a partition of the Events total beside them (F2, #1046).
+ * The list — including whether the "Other / internal" tile is warranted — is
+ * decided in one pure function so a unit test can assert that the tiles sum to
+ * the denominator without mounting anything.
+ */
+const statusTiles = computed(() => statusBucketTiles(summary.value))
+
+/** Only failures spend colour in the tile row, as in the table's Status column. */
+const statTileValueClass = (tone: StatusTone): string => {
+  switch (tone) {
+    case 'error':
+      return 'text-error'
+    case 'warning':
+      return 'text-warning'
+    default:
+      return 'text-base-content/70'
+  }
+}
+
 /** Only error/blocked spend colour; the total and oddities stay quiet. */
 const summaryToneClass = (tone: StatusTone): string => {
   switch (tone) {
@@ -1381,7 +1657,12 @@ const filteredActivities = computed(() => {
   if (filterSession.value) {
     result = result.filter(a => matchesSessionFilter(a, filterSession.value, workSessionIndex.value))
   }
-  if (filterStatus.value) {
+  // "Other / internal" is the residual of the status partition (F2), not a
+  // stored value: it selects every row whose status is outside the tool-call
+  // vocabulary. Applied client-side because there is nothing to ask the API for.
+  if (filterStatus.value === OTHER_STATUS) {
+    result = result.filter(a => isOtherStatus(a.status))
+  } else if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
   }
   // Spec 026: Sensitive data filter
@@ -1444,11 +1725,115 @@ const sortedActivities = computed(() => {
   return result
 })
 
-const totalPages = computed(() => Math.ceil(sortedActivities.value.length / pageSize.value))
+// --- run folding (F5, #1046) -------------------------------------------------
+//
+// Twelve consecutive identical calls produced twelve rows repeating the same
+// timestamp, the same reason and the same word "Success". Consecutive rows that
+// agree on everything the collapsed line prints fold into one expandable run;
+// status is part of the run identity, so a run can never hide the one call that
+// failed. The grouping itself lives in @/utils/activity and is unit-tested.
 
-const paginatedActivities = computed(() => {
+const GROUP_REPEATS_STORAGE_KEY = 'mcpproxy.activity.groupRepeats'
+
+const readGroupRepeatsPref = (): boolean => {
+  try {
+    // Default ON: folding is the point. Only an explicit "false" turns it off.
+    return window.localStorage.getItem(GROUP_REPEATS_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+const groupRepeats = ref(readGroupRepeatsPref())
+
+watch(groupRepeats, on => {
+  try {
+    window.localStorage.setItem(GROUP_REPEATS_STORAGE_KEY, on ? 'true' : 'false')
+  } catch {
+    // A storage failure must never break the table.
+  }
+})
+
+/**
+ * Adjacency only means "repeated" in time order. Sorted by duration or by
+ * server, two neighbouring rows are neighbours by accident, so folding them
+ * would invent a run that never happened.
+ */
+const groupingApplies = computed(() => sortColumn.value === 'timestamp')
+
+/** Run keys the operator has expanded. Cleared whenever the list is refiltered. */
+const expandedRuns = ref(new Set<string>())
+
+const isRunExpanded = (key: string): boolean => expandedRuns.value.has(key)
+
+const toggleRun = (key: string) => {
+  const next = new Set(expandedRuns.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedRuns.value = next
+}
+
+const runs = computed(() =>
+  groupActivityRuns(sortedActivities.value, groupRepeats.value && groupingApplies.value)
+)
+
+/** How many rows the folding removed from the table. 0 when nothing repeated. */
+const foldedRowCount = computed(() => sortedActivities.value.length - runs.value.length)
+
+const totalPages = computed(() => Math.ceil(runs.value.length / pageSize.value))
+
+const paginatedRuns = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
-  return sortedActivities.value.slice(start, start + pageSize.value)
+  return runs.value.slice(start, start + pageSize.value)
+})
+
+/**
+ * One row rendered by the table. A collapsed run, an ordinary row and an
+ * expanded run's members are all this shape, so the cell markup exists once.
+ */
+interface ActivityDisplayRow {
+  key: string
+  activity: ActivityRecord
+  /** >1 only on the lead line of a folded run. */
+  runCount: number
+  /** True for the 2..n members revealed when a run is expanded. */
+  member: boolean
+  /** Duration range across the run; empty for a single row. */
+  runDuration: string
+  /** "over 4m"; empty for a single row or an instantaneous run. */
+  runSpan: string
+  /** The run's members declared different intent reasons. */
+  reasonsVary: boolean
+}
+
+const displayRows = computed((): ActivityDisplayRow[] => {
+  const rows: ActivityDisplayRow[] = []
+  for (const run of paginatedRuns.value as ActivityRun<ActivityRecord>[]) {
+    const folded = run.count > 1
+    rows.push({
+      key: run.key,
+      activity: run.lead,
+      runCount: run.count,
+      member: false,
+      runDuration: folded ? formatRunDuration(run.rows) : '',
+      runSpan: folded ? formatRunSpan(run.rows) : '',
+      reasonsVary: run.reasonsVary,
+    })
+    if (folded && isRunExpanded(run.key)) {
+      for (const activity of run.rows.slice(1)) {
+        rows.push({
+          key: activity.id,
+          activity,
+          runCount: 1,
+          member: true,
+          runDuration: '',
+          runSpan: '',
+          reasonsVary: false,
+        })
+      }
+    }
+  }
+  return rows
 })
 
 // Load activities
@@ -1615,6 +2000,20 @@ const closeDetailDrawer = () => {
   selectedActivity.value = null
 }
 
+/**
+ * Session id -> this log, narrowed to that session. The Sessions page has linked
+ * INTO the Activity Log since Spec 082; the drawer printed the id back as plain
+ * text and offered nothing (F25, #1046). Prefer the work session (Spec 082) and
+ * fall back to the transport id, exactly as the filter itself accepts both.
+ */
+const filterBySession = (activity: ActivityRecord) => {
+  const sessionId = activity.work_session_id || activity.session_id
+  if (!sessionId) return
+  filterSession.value = sessionId
+  currentPage.value = 1
+  closeDetailDrawer()
+}
+
 // Export activities
 const exportActivities = (format: 'json' | 'csv') => {
   const url = api.getActivityExportUrl({
@@ -1622,7 +2021,14 @@ const exportActivities = (format: 'json' | 'csv') => {
     // Spec 024: Pass comma-separated types for multi-type filter
     type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
-    status: filterStatus.value || undefined,
+    // "Other / internal" is a client-side residual, not a stored status: the
+    // export endpoint matches `status` exactly against the closed vocabulary,
+    // so passing it would hand back an empty file. Export unfiltered by status
+    // instead — a wider export is recoverable, an empty one looks like "there
+    // was nothing there".
+    status: filterStatus.value && filterStatus.value !== OTHER_STATUS
+      ? filterStatus.value
+      : undefined,
     // Exporting from the sub-call view exports that run's sub-calls.
     parent_id: filterParentId.value || undefined,
   })
@@ -1754,10 +2160,23 @@ const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown
   return result
 }
 
-// Reset page when filters change
-watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterStartDate, filterEndDate], () => {
+// Reset page when filters change. Expanded runs go with it: run keys are the
+// lead row's id, and after a refilter the row that led a run may not be in the
+// list at all — a stale key would silently expand the wrong run.
+watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterSession, filterStartDate, filterEndDate, sortColumn, sortDirection, groupRepeats], () => {
   currentPage.value = 1
+  expandedRuns.value = new Set()
 }, { deep: true })
+
+// Whatever else moved, the page must exist. Folding on, a wider page size, a
+// filter that matched less than expected — each can shrink the list under a
+// currentPage that was valid a moment ago, and the table then renders nothing
+// at all with no hint why. Clamp on the derived count so every path is covered
+// by one rule rather than by remembering to reset at each call site. (Zero
+// pages means an empty list, which has its own empty state; leave page 1.)
+watch(totalPages, pages => {
+  if (pages > 0 && currentPage.value > pages) currentPage.value = pages
+})
 
 // Clear agent name filter when auth type changes away from "agent"
 watch(filterAuthType, (val) => {

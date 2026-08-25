@@ -112,8 +112,10 @@
                   <!-- Link by WORK session (Spec 082) — that is what the Activity
                        Log groups by. Falling back to the transport id keeps rows
                        written before 082 reachable; the log accepts either.
-                       Audit F36: the label used to wrap onto two clipped lines in
-                       this narrow last column — keep it on one line. -->
+                       whitespace-nowrap: the label wrapped onto two lines inside
+                       a btn-xs in this narrow last column and clipped both of
+                       them (audit finding F36, #1046). -->
+
                   <router-link
                     :to="{ name: 'activity', query: { session: session.work_session_id || session.id } }"
                     class="btn btn-xs btn-primary whitespace-nowrap"

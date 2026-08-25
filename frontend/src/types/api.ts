@@ -520,8 +520,13 @@ export interface UsageToolStat {
   total_req_bytes: number
   avg_req_bytes: number | null
   sized_calls: number
+  // Bucket BOUNDS, not measurements: the true percentile is at or below the
+  // value, except in the unbounded overflow bucket, where *_exceeds flips it to
+  // a floor. Render through formatLatencyBound (audit finding F22, #1046).
   p50_ms: number
+  p50_exceeds: boolean
   p95_ms: number
+  p95_exceeds: boolean
   last_used: string
 }
 
@@ -816,6 +821,12 @@ export interface ActivitySummaryResponse {
   error_count: number
   blocked_count: number
   rejected_count: number
+  // Rows whose status is outside the tool-call vocabulary — a quarantine
+  // change's action, a policy decision's verdict. Present so that
+  // success + error + blocked + rejected + other == total_count, which is what
+  // makes the status tiles a partition instead of four numbers that add up to
+  // less than the denominator printed beside them (audit finding F2, #1046).
+  other_count: number
   // total_count is how many ROWS the log has in the period; call_count is how
   // many of them are calls the user made (the rest — system starts, security
   // scans, quarantine auto-approvals, management chatter — are events). The

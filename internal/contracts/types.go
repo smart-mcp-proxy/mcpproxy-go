@@ -425,21 +425,28 @@ type UsageAggregateResponse struct {
 
 // UsageToolStat is the per-(server,tool) rollup row in UsageAggregateResponse.
 type UsageToolStat struct {
-	Server         string    `json:"server"`
-	Tool           string    `json:"tool"`
-	Calls          int64     `json:"calls"`
-	Errors         int64     `json:"errors"`
-	ErrorRate      float64   `json:"error_rate"`
-	Blocked        int64     `json:"blocked"`
-	Rejected       int64     `json:"rejected"` // spec 093: shed by a concurrency limit; never executed, so excluded from calls/latency
-	TotalRespBytes int64     `json:"total_resp_bytes"`
-	AvgRespBytes   *int64    `json:"avg_resp_bytes"` // null when sized_calls == 0 (only legacy 0-byte calls)
-	TotalReqBytes  int64     `json:"total_req_bytes"`
-	AvgReqBytes    *int64    `json:"avg_req_bytes"` // null when no sized request calls
-	SizedCalls     int64     `json:"sized_calls"`   // calls with known response size (basis for avg_resp_bytes)
-	P50Ms          int64     `json:"p50_ms"`
-	P95Ms          int64     `json:"p95_ms"`
-	LastUsed       time.Time `json:"last_used"`
+	Server         string  `json:"server"`
+	Tool           string  `json:"tool"`
+	Calls          int64   `json:"calls"`
+	Errors         int64   `json:"errors"`
+	ErrorRate      float64 `json:"error_rate"`
+	Blocked        int64   `json:"blocked"`
+	Rejected       int64   `json:"rejected"` // spec 093: shed by a concurrency limit; never executed, so excluded from calls/latency
+	TotalRespBytes int64   `json:"total_resp_bytes"`
+	AvgRespBytes   *int64  `json:"avg_resp_bytes"` // null when sized_calls == 0 (only legacy 0-byte calls)
+	TotalReqBytes  int64   `json:"total_req_bytes"`
+	AvgReqBytes    *int64  `json:"avg_req_bytes"` // null when no sized request calls
+	SizedCalls     int64   `json:"sized_calls"`   // calls with known response size (basis for avg_resp_bytes)
+	// P50Ms and P95Ms are read off a fixed latency histogram, so they are BUCKET
+	// BOUNDS, not measured durations: the true percentile is at or below the
+	// value, and a client must render it as a bound ("≤ 5 ms"). P50Exceeds /
+	// P95Exceeds flip that reading for the unbounded overflow bucket, where the
+	// value is the last bound and the truth is above it ("> 10 s").
+	P50Ms      int64     `json:"p50_ms"`
+	P50Exceeds bool      `json:"p50_exceeds"`
+	P95Ms      int64     `json:"p95_ms"`
+	P95Exceeds bool      `json:"p95_exceeds"`
+	LastUsed   time.Time `json:"last_used"`
 }
 
 // UsageOtherBucket folds the tail of the per-tool list beyond top-N (FR: charts

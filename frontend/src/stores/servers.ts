@@ -18,11 +18,18 @@ export const useServersStore = defineStore('servers', () => {
   const loaded = ref(false)
 
   // Computed
+  // Audit finding F27 (#1046): these counts are printed side by side, so they
+  // have to be answerable as one picture. `disabled` is the count of servers
+  // switched off AND not already counted as quarantined — the Dashboard rail
+  // shows both, and a server that was both read as two separate problems. It is
+  // also asked directly rather than derived as (total − connected − quarantined),
+  // which mislabelled an enabled-but-unreachable server as "disabled".
   const serverCount = computed(() => ({
     total: servers.value.length,
     connected: servers.value.filter(isServerConnected).length,
     enabled: servers.value.filter(s => s.enabled).length,
     quarantined: servers.value.filter(s => s.quarantined).length,
+    disabled: servers.value.filter(s => !s.enabled && !s.quarantined).length,
   }))
 
   const connectedServers = computed(() =>

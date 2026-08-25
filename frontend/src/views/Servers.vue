@@ -61,7 +61,15 @@
       >
         <div class="stat-title">Connected</div>
         <div class="stat-value text-success">{{ serversStore.serverCount.connected }}</div>
-        <div class="stat-desc">{{ Math.round((serversStore.serverCount.connected / serversStore.serverCount.total) * 100) || 0 }}% online</div>
+        <!--
+          Audit finding F27 (#1046): this read "50% online" for 2 connected out
+          of 4 servers, one of which was switched off and one quarantined. A
+          server that is not enabled cannot be online, so counting it in the
+          denominator turns an administrative decision into a health problem.
+          The denominator is the servers that are SUPPOSED to be up, and the tile
+          names it instead of printing a bare percentage.
+        -->
+        <div class="stat-desc" data-test="servers-connected-denominator">{{ connectedSummary }}</div>
       </button>
 
       <button
@@ -323,6 +331,17 @@ function openImportWizard() {
   onboardingStore.openWizard('servers')
   void router.push('/')
 }
+/**
+ * The Connected tile's sub-line: "2 of 3 enabled online" (F27, #1046). The
+ * denominator is the servers that are meant to be up — a disabled server is not
+ * an outage — and it is stated rather than left to be inferred from a
+ * percentage. With nothing enabled there is no ratio to report, only a fact.
+ */
+const connectedSummary = computed(() => {
+  const { connected, enabled } = serversStore.serverCount
+  if (enabled === 0) return 'no servers enabled'
+  return `${connected} of ${enabled} enabled online`
+})
 
 const filteredServers = computed(() => {
   let servers = serversStore.servers
