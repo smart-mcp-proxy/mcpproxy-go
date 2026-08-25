@@ -390,27 +390,34 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
   catalog-backed resolver.
 - **Instructions** (D11): a custom `instructions` config value still appears on the
   direct server's `initialize`, with the deferral legend appended, in both modes.
-- **Publication skew** (D13): a rebuild paused between `SetTools` and the catalog
-  publish, with a concurrent scoped `tools/list` and `describe_tool`, over **five**
-  cases — an added name, a removed name, a same-name schema update, a same-name
-  **origin flip** (server A removed and server B added in one reconcile, B's tool
-  flattening to A's old display name), and a within-generation collision.
-  Plus two cases with **no** rebuild at all, which the discriminator must not
-  mistake for a generation change: a signature-cache **miss→warm** and a
-  **hit→eviction** between registration and a later filter/describe call
-  (`toolsig.Cache.Warm` / `RetainHashes`). Both must leave the tool listed and
-  describable — proving the comparison reads the stored `renderedDescription`
-  rather than re-rendering. Plus a sixth interleaving case the discriminator
-  cannot see: a **schema-only change with the
-  description and rendered signature held byte-identical**, which asserts the
-  documented residual rather than a fix — the stale definition may be returned,
-  dispatch still validates against the new schema, and the `invalid_params` error
-  carries the NEW schema so one retry succeeds (US3/SC-003). Assertions across the
-  set: no describable-but-unlisted id; no entry scope-checked against one origin
-  while its handler dispatches to another; no read-scoped token receiving a
-  destructive tool's definition (the tier comes from the registered entry's own
-  annotations on both paths); and no case where a stale definition leads to a call
-  that *succeeds* against the wrong schema.
+- **Publication skew** (D13) — a rebuild paused between `SetTools` and the catalog
+  publish, with a concurrent scoped `tools/list` and `describe_tool`. Six
+  interleavings, in three groups:
+  1. *Closed by the design* — an added name, a removed name, a same-name
+     **description-visible** change, and a same-name **origin flip** (server A
+     removed and server B added in one reconcile, B's tool flattening to A's old
+     display name). Each must be withheld or served whole, never mixed.
+  2. *Closed by withholding* — a within-generation display-name collision:
+     neither entry listed, neither describable, in both generations, warning
+     naming both origins.
+  3. *The documented residual* — a **schema-only** change with the description
+     and rendered signature held byte-identical. This asserts the accepted
+     behavior, not a fix: the stale definition may be returned, dispatch still
+     validates against the new schema, and the `invalid_params` error carries the
+     NEW schema so one retry succeeds (US3/SC-003).
+
+  Plus two **no-rebuild** cases the discriminator must not mistake for a
+  generation change: a signature-cache **miss→warm** and a **hit→eviction**
+  between registration and a later filter/describe call (`toolsig.Cache.Warm` /
+  `RetainHashes`). Both must leave the tool listed and describable — the proof
+  that the comparison reads the stored `renderedDescription` instead of
+  re-rendering.
+
+  Assertions across the whole set: no describable-but-unlisted id; no entry
+  scope-checked against one origin while its handler dispatches to another; no
+  read-scoped token receiving a destructive tool's definition (the tier comes from
+  the registered entry's own annotations on both paths); and no case where a stale
+  definition leads to a call that *succeeds* against the wrong schema.
 - **Initial registration** (D15/R14): on a freshly initialized proxy with **zero**
   upstream servers, `p.directServer` already lists `describe_tool` before any
   `servers.changed` fires; and an unrelated `config.reloaded` on that proxy
