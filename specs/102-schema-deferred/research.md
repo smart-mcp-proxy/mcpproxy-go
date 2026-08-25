@@ -4,8 +4,10 @@
 
 Resolves the three `[NEEDS CLARIFICATION]` markers in the spec (R1–R3), records the
 channel decision FR-007 demands (R4), and pins the mechanical findings the plan's
-design rests on (R5–R10). Every code reference was verified against this tree
-(base: `origin/main`, post-#1026).
+design rests on (R5–R13). Every code reference was verified against this tree
+(base: `origin/main`, post-#1026). R11–R13 and the D9–D14 decisions were added
+during self-review and two cross-model review rounds; each states the claim it
+corrects.
 
 ---
 

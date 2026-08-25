@@ -69,8 +69,10 @@ Technical approach, grounded in the code:
   tier** + profile + agent callability. Invisible ids answer plain `not_found` in
   both modes; visible ids always get their snapshot-backed definition in
   definition mode, and the informative verdict (`pending_approval`/`changed`/…)
-  under `check: true` via the shared spec-098/099 preflight evaluator
-  (research.md R10). Definitions additively carry `output_schema` when the tool
+  under `check: true` via the shared spec-098/099 preflight evaluator, reached
+  through an adapter that canonicalizes `server__tool` → `server:tool` first
+  (the evaluator accepts colon ids only) and restores the caller's id and
+  ordering on the way back (research.md R10, D14). Definitions additively carry `output_schema` when the tool
   declares one — added at the definition-assembly seam, NOT in
   `buildFullToolEntry`, so full-mode retrieve_tools bytes are untouched (R2).
 - **Pre-dispatch validation** (FR-012/FR-013): `makeDirectModeHandler` calls the
