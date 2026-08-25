@@ -27,6 +27,20 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
+/**
+ * Every currently-open modal, oldest first.
+ *
+ * The keydown listener lives on `document`, and stopPropagation does NOT stop
+ * other listeners already bound to the same node in the same phase — so with
+ * two modals open, both would see Escape and both would close. Only the
+ * topmost entry acts; the ones beneath it ignore the key entirely.
+ */
+const openStack: symbol[] = []
+
+function isTopmost(id: symbol): boolean {
+  return openStack.length > 0 && openStack[openStack.length - 1] === id
+}
+
 export interface ModalA11yOptions {
   /**
    * Selector for the element that should receive focus when the modal opens.
@@ -42,6 +56,7 @@ export function useModalA11y(
   options: ModalA11yOptions = {}
 ) {
   const dialogRef = ref<HTMLElement | null>(null)
+  const id = Symbol('modal-a11y')
   let previouslyFocused: HTMLElement | null = null
 
   function visibleFocusables(): HTMLElement[] {
@@ -79,7 +94,9 @@ export function useModalA11y(
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (!isOpen()) return
+    // A modal underneath another one neither closes on Escape nor fights the
+    // top modal for focus.
+    if (!isOpen() || !isTopmost(id)) return
 
     if (event.key === 'Escape' || event.key === 'Esc') {
       event.preventDefault()
@@ -116,12 +133,16 @@ export function useModalA11y(
   }
 
   function activate() {
+    if (openStack.includes(id)) return
     previouslyFocused = document.activeElement as HTMLElement | null
+    openStack.push(id)
     document.addEventListener('keydown', onKeydown, true)
     void nextTick(() => focusInitial())
   }
 
   function deactivate() {
+    const at = openStack.indexOf(id)
+    if (at !== -1) openStack.splice(at, 1)
     document.removeEventListener('keydown', onKeydown, true)
     const target = previouslyFocused
     previouslyFocused = null

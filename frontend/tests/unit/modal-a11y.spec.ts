@@ -159,6 +159,43 @@ describe('modal accessibility (UX audit F6)', () => {
       wrapper.unmount()
     })
 
+    // The keydown listener lives on `document`, and stopPropagation does not
+    // stop sibling listeners on the same node — so without a topmost check two
+    // open modals would both close on one Escape.
+    it('only the topmost modal reacts to Escape', async () => {
+      const under = mount(AddServerModal, { props: { show: true }, attachTo: document.body })
+      await flushPromises()
+      const over = mount(AddSecretModal, { props: { show: true }, attachTo: document.body })
+      await flushPromises()
+
+      pressEscape()
+      expect(over.emitted('close'), 'the top modal closes').toBeTruthy()
+      expect(under.emitted('close'), 'the one beneath it must not').toBeFalsy()
+
+      // Once the top one is gone, the modal beneath owns Escape again.
+      await over.setProps({ show: false })
+      await flushPromises()
+      pressEscape()
+      expect(under.emitted('close')).toBeTruthy()
+
+      over.unmount()
+      under.unmount()
+    })
+
+    it('restores focus when unmounted while still open', async () => {
+      const trigger = document.createElement('button')
+      document.body.appendChild(trigger)
+      trigger.focus()
+
+      const wrapper = mount(AddSecretModal, { props: { show: false }, attachTo: document.body })
+      await wrapper.setProps({ show: true })
+      await flushPromises()
+      expect(document.activeElement).not.toBe(trigger)
+
+      wrapper.unmount()
+      expect(document.activeElement).toBe(trigger)
+    })
+
     it('moves focus into the dialog on open', async () => {
       const wrapper = mount(AddSecretModal, { props: { show: false }, attachTo: document.body })
       await wrapper.setProps({ show: true })
