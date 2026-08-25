@@ -348,15 +348,19 @@ export const shortId = (id: string): string => (id.length > 8 ? `…${id.slice(-
 
 /** One segment of the compact counts strip. */
 export interface CompactSummaryPart {
-  key: 'total' | 'error' | 'blocked' | 'rejected'
+  key: 'total' | 'calls' | 'error' | 'blocked' | 'rejected'
   label: string
   tone: StatusTone
   /** Status value this segment filters to; '' clears the status filter. */
   status: string
+  /** False for segments that describe the list without narrowing it. */
+  filterable: boolean
 }
 
 interface ActivitySummaryCounts {
   total_count?: number
+  /** Calls the user made — the population the Usage tab counts (F1, #1046). */
+  call_count?: number
   error_count?: number
   blocked_count?: number
   rejected_count?: number
@@ -365,23 +369,51 @@ interface ActivitySummaryCounts {
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
 
 /**
- * Compact counts strip, e.g. "54 calls · 6 errors · 1 blocked". The total is
- * always present and muted; a zero attention count is omitted entirely rather
- * than rendered as a reassuring "0 errors" that costs a line of scanning.
+ * Compact counts strip, e.g. "70 events · 42 calls · 6 errors · 1 blocked".
+ *
+ * "Events" and "calls" are two different questions and this strip used to print
+ * the first under the second's name: the header read "70 calls" for a window
+ * whose rows included security scans, quarantine auto-approvals and a system
+ * start, while the Usage tab — counting only calls — read 42 for the same 24
+ * hours (audit finding F1/F24, #1046). The event total is the paginator's
+ * denominator, so it stays; it just says what it is, and the call count that
+ * matches the Usage tab sits beside it.
+ *
+ * A zero attention count is omitted entirely rather than rendered as a
+ * reassuring "0 errors" that costs a line of scanning.
  */
 export const compactSummaryParts = (
   summary?: ActivitySummaryCounts | null
 ): CompactSummaryPart[] => {
   if (!summary) return []
 
+  const total = summary.total_count ?? 0
+  const calls = summary.call_count
+  // Every row is a call: one segment, and it can say so.
+  const allRowsAreCalls = calls === total
+
   const parts: CompactSummaryPart[] = [
     {
       key: 'total',
-      label: plural(summary.total_count ?? 0, 'call', 'calls'),
+      label: allRowsAreCalls
+        ? plural(total, 'call', 'calls')
+        : plural(total, 'event', 'events'),
       tone: 'muted',
       status: '',
+      filterable: true,
     },
   ]
+
+  // No status selects "calls", so this segment describes rather than filters.
+  if (calls !== undefined && !allRowsAreCalls) {
+    parts.push({
+      key: 'calls',
+      label: plural(calls, 'call', 'calls'),
+      tone: 'muted',
+      status: '',
+      filterable: false,
+    })
+  }
 
   if ((summary.error_count ?? 0) > 0) {
     parts.push({
@@ -389,6 +421,7 @@ export const compactSummaryParts = (
       label: plural(summary.error_count as number, 'error', 'errors'),
       tone: 'error',
       status: 'error',
+      filterable: true,
     })
   }
   if ((summary.blocked_count ?? 0) > 0) {
@@ -397,6 +430,7 @@ export const compactSummaryParts = (
       label: `${summary.blocked_count} blocked`,
       tone: 'warning',
       status: 'blocked',
+      filterable: true,
     })
   }
   if ((summary.rejected_count ?? 0) > 0) {
@@ -405,6 +439,7 @@ export const compactSummaryParts = (
       label: `${summary.rejected_count} rejected`,
       tone: 'neutral',
       status: 'rejected',
+      filterable: true,
     })
   }
 

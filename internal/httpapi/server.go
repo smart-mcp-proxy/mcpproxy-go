@@ -318,17 +318,25 @@ type Server struct {
 	preflightPollOverride time.Duration
 }
 
-// usageCacheEntry is one cached usage response with its expiry.
+// usageCacheEntry is one cached usage response with the time it was stored.
+//
+// It records when the entry was WRITTEN rather than when it expires, because
+// usage_cache_ttl is hot-reloadable and the TTL is the documented bound on how
+// far the Usage figures may lag the Activity Log (F1, #1046). An absolute
+// expiry banked from the old TTL would outlive a lowered one — the operator
+// would tighten the bound and the served answer would ignore it.
 type usageCacheEntry struct {
-	resp    *contracts.UsageAggregateResponse
-	expires time.Time
+	resp   *contracts.UsageAggregateResponse
+	stored time.Time
 }
 
 // usageCacheMaxEntries bounds the usage cache; on overflow it is cleared
 // wholesale (entries are short-lived and the working set is tiny in practice).
 const usageCacheMaxEntries = 64
 
-// getUsageCache returns a non-expired cached response for key, or nil.
+// getUsageCache returns a cached response for key that is still within ttl, or
+// nil. Freshness is judged against the ttl passed in — the one in force NOW —
+// so a hot-reloaded usage_cache_ttl takes effect on the entries already held.
 func (s *Server) getUsageCache(key string, ttl time.Duration) *contracts.UsageAggregateResponse {
 	if ttl <= 0 {
 		return nil
@@ -336,13 +344,14 @@ func (s *Server) getUsageCache(key string, ttl time.Duration) *contracts.UsageAg
 	s.usageCacheMu.Lock()
 	defer s.usageCacheMu.Unlock()
 	entry, ok := s.usageCache[key]
-	if !ok || time.Now().After(entry.expires) {
+	if !ok || time.Since(entry.stored) >= ttl {
 		return nil
 	}
 	return entry.resp
 }
 
-// putUsageCache stores resp under key for ttl.
+// putUsageCache stores resp under key. ttl only gates whether caching happens
+// at all; how long the entry stays fresh is decided at read time.
 func (s *Server) putUsageCache(key string, resp *contracts.UsageAggregateResponse, ttl time.Duration) {
 	if ttl <= 0 {
 		return
@@ -352,7 +361,7 @@ func (s *Server) putUsageCache(key string, resp *contracts.UsageAggregateRespons
 	if s.usageCache == nil || len(s.usageCache) >= usageCacheMaxEntries {
 		s.usageCache = make(map[string]usageCacheEntry)
 	}
-	s.usageCache[key] = usageCacheEntry{resp: resp, expires: time.Now().Add(ttl)}
+	s.usageCache[key] = usageCacheEntry{resp: resp, stored: time.Now()}
 }
 
 // SetTelemetryRegistry attaches the Tier 2 counter registry. Spec 042. Must

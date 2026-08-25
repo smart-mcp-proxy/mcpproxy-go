@@ -231,16 +231,17 @@ describe('compactSummaryParts', () => {
   it('shows the total plus non-zero attention counts', () => {
     const parts = compactSummaryParts({
       total_count: 54,
+      call_count: 42,
       error_count: 6,
       blocked_count: 1,
       rejected_count: 0,
     })
-    expect(parts.map(p => p.label)).toEqual(['54 calls', '6 errors', '1 blocked'])
-    expect(parts.map(p => p.tone)).toEqual(['muted', 'error', 'warning'])
+    expect(parts.map(p => p.label)).toEqual(['54 events', '42 calls', '6 errors', '1 blocked'])
+    expect(parts.map(p => p.tone)).toEqual(['muted', 'muted', 'error', 'warning'])
   })
 
   it('omits zero counts entirely rather than printing a reassuring "0 errors"', () => {
-    const parts = compactSummaryParts({ total_count: 12, error_count: 0, blocked_count: 0 })
+    const parts = compactSummaryParts({ total_count: 12, call_count: 12, error_count: 0, blocked_count: 0 })
     expect(parts).toHaveLength(1)
     expect(parts[0]).toMatchObject({ key: 'total', label: '12 calls', status: '' })
   })
@@ -251,8 +252,10 @@ describe('compactSummaryParts', () => {
   })
 
   it('singularises', () => {
-    expect(compactSummaryParts({ total_count: 1, error_count: 1 }).map(p => p.label))
+    expect(compactSummaryParts({ total_count: 1, call_count: 1, error_count: 1 }).map(p => p.label))
       .toEqual(['1 call', '1 error'])
+    expect(compactSummaryParts({ total_count: 1, call_count: 0 }).map(p => p.label))
+      .toEqual(['1 event', '0 calls'])
   })
 
   it('carries the status each segment filters to', () => {

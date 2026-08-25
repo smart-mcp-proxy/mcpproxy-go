@@ -652,6 +652,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 
 	// Calculate summary statistics
 	var totalCount, successCount, errorCount, blockedCount, rejectedCount int
+	var callCount, callErrorCount int
 	serverCounts := make(map[string]int)
 	toolCounts := make(map[string]int)
 
@@ -659,6 +660,19 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	// closed, so this loop must always run to completion.
 	for a := range s.controller.StreamActivities(filter) {
 		totalCount++
+
+		// "How many rows" (totalCount) and "how many calls" (callCount) are
+		// different questions, and the Activity Log used to print the first
+		// under the second's label while the Usage tab printed the second —
+		// same instance, same window, different numbers (F1, #1046). One shared
+		// definition, in storage, settles it for both surfaces.
+		if counted, isError := storage.CountsAsCall(a); counted {
+			callCount++
+			if isError {
+				callErrorCount++
+			}
+		}
+
 		switch a.Status {
 		case storage.ActivityStatusSuccess:
 			successCount++
@@ -692,16 +706,18 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	topTools := buildTopTools(toolCounts, 5)
 
 	response := contracts.ActivitySummaryResponse{
-		Period:        period,
-		TotalCount:    totalCount,
-		SuccessCount:  successCount,
-		ErrorCount:    errorCount,
-		BlockedCount:  blockedCount,
-		RejectedCount: rejectedCount,
-		TopServers:    topServers,
-		TopTools:      topTools,
-		StartTime:     startTime.Format(time.RFC3339),
-		EndTime:       endTime.Format(time.RFC3339),
+		Period:         period,
+		TotalCount:     totalCount,
+		SuccessCount:   successCount,
+		ErrorCount:     errorCount,
+		BlockedCount:   blockedCount,
+		RejectedCount:  rejectedCount,
+		CallCount:      callCount,
+		CallErrorCount: callErrorCount,
+		TopServers:     topServers,
+		TopTools:       topTools,
+		StartTime:      startTime.Format(time.RFC3339),
+		EndTime:        endTime.Format(time.RFC3339),
 	}
 
 	s.writeSuccess(w, response)
@@ -991,7 +1007,10 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	}
 	resp.Tools = rows
 
-	// Timeline: global buckets trimmed to the window span.
+	// Timeline: global buckets trimmed to the window span. Its sum is also the
+	// window's headline count — computed here, server-side, from the same bars
+	// the response carries, so the tiles and the histogram beneath them agree
+	// and so the Activity Log can print the same number (F1, #1046).
 	for _, b := range snap.Timeline() {
 		if bounded && b.Start.Before(start) {
 			continue
@@ -1002,6 +1021,8 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 			Errors:         b.Errors,
 			TotalRespBytes: b.RespBytesSum,
 		})
+		resp.TotalCalls += b.Calls
+		resp.TotalErrors += b.Errors
 	}
 
 	return resp
