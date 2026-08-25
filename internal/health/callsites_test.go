@@ -21,10 +21,21 @@ import (
 // HasEndpointURL. Mirrors the spirit of TestRefreshStateSync — catch the
 // omission at the seam, in the package that owns the contract.
 func TestCalculateHealthCallSitesSupplyTransportFacts(t *testing.T) {
-	const (
-		callMarker  = "health.CalculateHealth("
-		fieldMarker = "HasEndpointURL"
-	)
+	const callMarker = "health.CalculateHealth("
+
+	// Require an actual assignment, not a mere mention: a struct literal field
+	// ("HasEndpointURL:") or a field write (".HasEndpointURL ="). Matching the
+	// bare identifier would let a passing comment satisfy the guard, which is
+	// exactly the kind of vacuous green this test exists to prevent.
+	fieldMarkers := []string{"HasEndpointURL:", ".HasEndpointURL ="}
+	assignsField := func(text string) bool {
+		for _, marker := range fieldMarkers {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+		return false
+	}
 
 	// Walk the sibling packages under internal/.
 	root := filepath.Join("..")
@@ -53,7 +64,7 @@ func TestCalculateHealthCallSitesSupplyTransportFacts(t *testing.T) {
 		if !strings.Contains(text, callMarker) {
 			return nil
 		}
-		if !strings.Contains(text, fieldMarker) {
+		if !assignsField(text) {
 			missing = append(missing, path)
 		}
 		return nil
@@ -64,10 +75,10 @@ func TestCalculateHealthCallSitesSupplyTransportFacts(t *testing.T) {
 
 	if len(missing) > 0 {
 		t.Errorf(
-			"these files call health.CalculateHealth without supplying %s: %v\n"+
+			"these files call health.CalculateHealth without assigning HasEndpointURL: %v\n"+
 				"Set it from the server's configured URL (empty for stdio). Omitting it\n"+
 				"silently downgrades the Edit URL remedy to Restart on that surface only,\n"+
 				"so surfaces disagree about how to fix the same server.",
-			fieldMarker, missing)
+			missing)
 	}
 }
