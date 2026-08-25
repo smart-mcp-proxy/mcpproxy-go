@@ -73,11 +73,13 @@ let removeAPIListener: (() => void) | null = null
 function handleAuthModalClose() {
   authModal.show = false
   authModal.lastError = ''
+  systemStore.setAuthRequired(false)
 }
 
 function handleAuthModalAuthenticated() {
   authModal.show = false
   authModal.lastError = ''
+  systemStore.setAuthRequired(false)
 
   // Refresh data now that we're authenticated
   systemStore.connectEventSource()
@@ -87,6 +89,7 @@ function handleAuthModalAuthenticated() {
 function handleAuthModalRefresh() {
   authModal.show = false
   authModal.lastError = ''
+  systemStore.setAuthRequired(false)
 
   // Reconnect with potentially new API key
   systemStore.connectEventSource()
@@ -98,6 +101,9 @@ function handleAuthError(event: APIAuthEvent) {
   console.log('Global auth error received:', event)
   authModal.lastError = event.error
   authModal.show = true
+  // Audit F28: one cause, one message. The modal now suppresses the reconnect
+  // toast and the inline load errors it would otherwise compete with.
+  systemStore.setAuthRequired(true)
 }
 
 onMounted(async () => {

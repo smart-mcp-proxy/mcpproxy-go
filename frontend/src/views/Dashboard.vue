@@ -62,6 +62,16 @@
             >
               Configure
             </router-link>
+            <!-- Audit F11: DNS / malformed-URL failures are address problems.
+                 Restart redials the same broken address; Edit URL does not. -->
+            <router-link
+              v-if="server.health?.action === 'edit_url'"
+              :to="`${serverDetailPath(server.name, 'config')}&focus=endpoint`"
+              class="btn btn-xs btn-primary"
+              data-test="attention-edit-url"
+            >
+              Edit URL
+            </router-link>
           </div>
           <div v-if="serversNeedingAttention.length > 3" class="text-xs opacity-60">
             ... and {{ serversNeedingAttention.length - 3 }} more
@@ -192,20 +202,34 @@
       <div class="flex flex-col justify-center items-center lg:items-end space-y-3 py-6 lg:pr-0">
         <h3 class="text-xs font-bold uppercase tracking-widest opacity-40 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
 
-        <!-- Single big clients box -->
-        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]">
+        <!-- Single big clients box. Audit F10: "Connected" is now the same fact
+             /sessions shows — a live MCP session — instead of a flag the
+             content-read-free connect listing can never set. Each live client
+             links to its session row. -->
+        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]" data-test="dashboard-agents-box">
           <div class="card-body py-3 px-4">
-            <div v-if="connectedClientNames.length > 0" class="mb-1">
+            <div v-if="liveClients.length > 0" class="mb-1">
               <div class="flex items-center gap-2 mb-1">
                 <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
                 <span class="text-xs font-bold uppercase tracking-wide opacity-50">Connected</span>
               </div>
-              <div class="text-sm font-medium">{{ connectedClientNames.join(', ') }}</div>
+              <router-link
+                v-for="client in liveClients"
+                :key="client.name"
+                to="/sessions"
+                class="flex items-baseline justify-between gap-2 text-sm link link-hover"
+                :data-test="`dashboard-live-client-${client.name}`"
+              >
+                <span class="font-medium truncate">{{ client.name }}</span>
+                <span class="text-xs opacity-50 shrink-0">{{ formatRelativeTime(client.lastActivity) }}</span>
+              </router-link>
             </div>
-            <div v-if="supportedClientNames.length > 0">
-              <div class="text-xs opacity-40 mt-1">Available: {{ supportedClientNames.join(', ') }}</div>
+            <div v-if="availableClientNames.length > 0">
+              <div class="text-xs opacity-40 mt-1" data-test="dashboard-available-clients">
+                Available: {{ availableClientNames.join(', ') }}
+              </div>
             </div>
-            <div v-if="connectedClientNames.length === 0 && supportedClientNames.length === 0" class="text-sm opacity-50 text-center py-2">
+            <div v-if="liveClients.length === 0 && availableClientNames.length === 0" class="text-sm opacity-50 text-center py-2">
               No clients detected
             </div>
           </div>
@@ -500,6 +524,8 @@ import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
+import { liveClientsFromSessions } from '@/utils/sessionLabel'
+import { formatRelativeTime } from '@/utils/activity'
 
 // Usage view is code-split so chart.js + the usage fetch stay out of the
 // Dashboard's first-paint critical path (Spec 069 SC-004).
@@ -586,12 +612,20 @@ let refreshInterval: ReturnType<typeof setInterval> | null = null
 // --- Client statuses ---
 const clientStatuses = ref<ClientStatus[]>([])
 
-const connectedClientNames = computed(() =>
-  clientStatuses.value.filter(c => c.connected).map(c => c.name)
-)
-const supportedClientNames = computed(() =>
-  clientStatuses.value.filter(c => c.supported && !c.connected && c.exists).map(c => c.name)
-)
+// Audit F10: "Connected" means a live MCP session, the same fact /sessions and
+// the macOS tray render. `ClientStatus.connected` cannot be used here — the
+// stat-only connect listing leaves it false for every client by design.
+const liveClients = computed(() => liveClientsFromSessions(recentSessions.value))
+
+// Everything else installed on this machine that COULD be connected. A client
+// currently holding a live session is not repeated here.
+const availableClientNames = computed(() => {
+  const live = new Set(liveClients.value.map(c => c.name))
+  return clientStatuses.value
+    .filter(c => c.supported && c.exists)
+    .map(c => c.name)
+    .filter(name => !live.has(name))
+})
 
 function clientIcon(client: ClientStatus): string {
   const iconMap: Record<string, string> = {
@@ -689,36 +723,42 @@ watch(() => systemStore.isRunning, (running: boolean) => {
   }
 }, { immediate: true })
 
+// Audit F36: uptime used to be measured from the moment THIS PAGE first saw the
+// core running, so every reload reset it and the hub read "just started"
+// indefinitely — a stuck state, not a fact. The core now reports its own
+// start time (`started_at` on /status and every SSE status frame); the
+// page-local first-seen fallback is kept only for older cores that omit it.
 const uptime = computed(() => {
   if (!systemStore.isRunning) return ''
 
-  // Use the SSE status timestamp as server epoch if available
-  // The status.timestamp is a unix timestamp from the backend
-  const ts = systemStore.status?.timestamp
-  if (ts && ts > 0) {
-    // ts is in seconds — it represents when the status was generated
-    // The server start time ~ ts minus how long it's been running
-    // But we don't have start_time in API, so use the oldest timestamp we've seen
-    const now = Math.floor(Date.now() / 1000)
-    // If firstSeen is set, compute from that
-    if (serverFirstSeen.value) {
-      const diff = Math.floor((Date.now() - serverFirstSeen.value) / 1000)
-      if (diff < 60) return 'just started'
-      if (diff < 3600) return `${Math.floor(diff / 60)}m uptime`
-      if (diff < 86400) return `${Math.floor(diff / 3600)}h uptime`
-      return `${Math.floor(diff / 86400)}d uptime`
-    }
+  const startedAt = systemStore.status?.started_at
+  if (startedAt && startedAt > 0) {
+    return formatUptime(Math.floor(Date.now() / 1000) - startedAt)
+  }
+
+  if (serverFirstSeen.value) {
+    return formatUptime(Math.floor((Date.now() - serverFirstSeen.value) / 1000))
   }
 
   return 'online'
 })
+
+function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'online'
+  if (seconds < 60) return `${Math.max(seconds, 1)}s uptime`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m uptime`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h uptime`
+  return `${Math.floor(seconds / 86400)}d uptime`
+}
 
 // --- Recent Sessions ---
 const recentSessions = ref<any[]>([])
 
 const loadSessions = async () => {
   try {
-    const response = await api.getSessions(5)
+    // status=active + a roomier limit (audit F10): an unfiltered top-5 can be
+    // filled entirely by closed sessions and hide every live client.
+    const response = await api.getSessions(25, 'active')
     if (response.success && response.data) {
       recentSessions.value = response.data.sessions || []
     }

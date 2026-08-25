@@ -171,3 +171,71 @@ export function buildSessionLabels(sessions: SessionLabelInput[]): Map<string, s
   }
   return labels
 }
+
+/**
+ * One AI client currently talking to the proxy, derived from live sessions.
+ *
+ * Audit F10: the Dashboard's "AI Agents" box read `ClientStatus.connected` from
+ * `GET /api/v1/connect`, which is content-read-free by design (Spec 075) and so
+ * reports `connected: false` for every client, always — the box could never say
+ * "Connected" while `/sessions` listed a live one. Sessions are the transport
+ * truth, and they are what the macOS tray already shows, so all three surfaces
+ * agree once they read the same source.
+ */
+export interface LiveClient {
+  /** Display name, mapped through prettyClientName. */
+  name: string
+  /** ISO timestamp of the most recent activity across this client's sessions. */
+  lastActivity: string
+  /** How many live sessions this client holds. */
+  sessionCount: number
+}
+
+/** Minimal shape of a session record needed to derive live clients. */
+export interface LiveClientInput {
+  client_name?: string
+  status?: string
+  last_activity?: string
+}
+
+/**
+ * Collapse live sessions into one row per client, most recently active first.
+ *
+ * Only `status === 'active'` sessions count: the backend closes a session after
+ * 30 minutes idle, so an active one really is a client that is still around.
+ * Sessions with no `client_name` are dropped rather than shown as a blank row.
+ */
+export function liveClientsFromSessions(sessions: LiveClientInput[]): LiveClient[] {
+  const byName = new Map<string, LiveClient>()
+
+  for (const session of sessions) {
+    if (session.status !== 'active') continue
+    const name = prettyClientName(session.client_name)
+    if (!name) continue
+
+    const lastActivity = session.last_activity ?? ''
+    const existing = byName.get(name)
+    if (!existing) {
+      byName.set(name, { name, lastActivity, sessionCount: 1 })
+      continue
+    }
+    existing.sessionCount += 1
+    if (isNewerTimestamp(lastActivity, existing.lastActivity)) {
+      existing.lastActivity = lastActivity
+    }
+  }
+
+  return [...byName.values()].sort((a, b) => {
+    if (a.lastActivity === b.lastActivity) return a.name.localeCompare(b.name)
+    return isNewerTimestamp(a.lastActivity, b.lastActivity) ? -1 : 1
+  })
+}
+
+/** True when `candidate` is a strictly later timestamp than `current`. */
+function isNewerTimestamp(candidate: string, current: string): boolean {
+  const a = Date.parse(candidate)
+  const b = Date.parse(current)
+  if (Number.isNaN(a)) return false
+  if (Number.isNaN(b)) return true
+  return a > b
+}

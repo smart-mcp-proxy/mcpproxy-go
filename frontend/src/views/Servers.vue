@@ -147,8 +147,14 @@
       <p class="mt-4">Loading servers...</p>
     </div>
 
-    <!-- Error State: the load failed and we have nothing to fall back on. -->
-    <div v-else-if="serversStore.loading.error && !hasServers" class="alert alert-error">
+    <!-- Error State: the load failed and we have nothing to fall back on.
+         Audit F28: also suppressed while the Authentication Required modal is
+         up — "Failed to load servers" is that modal's cause restated, and it
+         has no fix of its own to offer. -->
+    <div
+      v-else-if="serversStore.loading.error && !hasServers && !systemStore.authRequired"
+      class="alert alert-error"
+    >
       <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>

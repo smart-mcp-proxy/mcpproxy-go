@@ -3786,6 +3786,11 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			ToolCount:      toolCount,
 			MissingSecret:  health.ExtractMissingSecret(lastError),
 			OAuthConfigErr: health.ExtractOAuthConfigError(lastError),
+			// Gates the "Edit URL" remedy — a stdio server emits the same
+			// address phrases from its own failed network calls but has no URL
+			// to edit. Must be supplied at every CalculateHealth call site or
+			// the REST, MCP and tray surfaces disagree about the remedy.
+			HasEndpointURL: server.URL != "",
 		}
 
 		// T032: Wire refresh state into health calculation (Spec 023)

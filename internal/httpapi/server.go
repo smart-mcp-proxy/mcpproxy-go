@@ -1139,6 +1139,9 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 		"status":         s.controller.GetStatus(),
 		"routing_mode":   routingMode,
 		"timestamp":      time.Now().Unix(),
+		// Unix seconds at which this core process started, so a UI can render a
+		// real uptime instead of guessing from when its own page loaded (F36).
+		"started_at": processStart.Unix(),
 		// MCP-2176: built-in default MCP instructions. The Web UI renders this
 		// as the instructions textarea placeholder so the displayed default
 		// never drifts from the backend's resolveInstructions("") value. Always
@@ -1350,6 +1353,14 @@ var pidFn = os.Getpid
 
 // editionValue identifies the MCPProxy edition (personal or server).
 var editionValue = "personal"
+
+// processStart is captured at package initialization — i.e. when the core
+// process starts — and served as `started_at` on /api/v1/status.
+//
+// Audit F36: the Dashboard used to derive uptime from the first moment the PAGE
+// saw the core running, so it read "just started" on every reload no matter how
+// long the core had actually been up. Uptime is the server's fact to report.
+var processStart = time.Now()
 
 // GetBuildVersion returns the build version from build-time variables.
 // This should be set during build using -ldflags.
@@ -3432,6 +3443,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"upstream_stats": s.controller.GetUpstreamStats(),
 		"status":         s.controller.GetStatus(),
 		"timestamp":      time.Now().Unix(),
+		"started_at":     processStart.Unix(),
 	}
 
 	s.logger.Debug("Sending initial SSE status event", "data", initialStatus)
@@ -3466,6 +3478,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				"upstream_stats": s.controller.GetUpstreamStats(),
 				"status":         status,
 				"timestamp":      time.Now().Unix(),
+				"started_at":     processStart.Unix(),
 			}
 
 			if err := s.writeSSEEvent(w, flusher, canFlush, "status", response); err != nil {
