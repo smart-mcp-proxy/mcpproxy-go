@@ -229,6 +229,22 @@ describe('analytics dashboard as the default landing page', () => {
     expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
   })
 
+  it('clears the chart spinner when the list arrives by SSE before the fetch settles', async () => {
+    serversSpy.mockReturnValue(new Promise(() => {}))
+    const { wrapper } = await mountDashboard('/')
+    expect(wrapper.find('[data-test="dashboard-usage-pending"]').exists()).toBe(true)
+
+    window.dispatchEvent(
+      new CustomEvent('mcpproxy:servers-changed', {
+        detail: { payload: { servers: [{ name: 'srv-a', enabled: true, connected: true }] } },
+      })
+    )
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="dashboard-usage-pending"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
+  })
+
   it('honours the last tab clicked when two clicks land before navigation settles', async () => {
     const { wrapper, router } = await mountDashboard('/')
 

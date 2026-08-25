@@ -95,18 +95,35 @@ export const useServersStore = defineStore('servers', () => {
     return result.sort((a, b) => a.name.localeCompare(b.name))
   }
 
+  // The server list has three independent writers: a fetch from any component
+  // (App.vue and Dashboard.vue both issue one on mount), a silent background
+  // refresh, and the Spec 047 SSE full-list payload. None of them cancel the
+  // others, so every write takes a ticket in issue order and a response that
+  // was already in flight when a newer list was applied is dropped — otherwise
+  // a stale list can resurrect servers the user just deleted, or blank out ones
+  // they just added.
+  let issueSeq = 0
+  let appliedSeq = 0
+
+  function applyServerList(list: Server[], ticket: number) {
+    if (ticket < appliedSeq) return
+    appliedSeq = ticket
+    // Smart merge preserves object references and avoids unnecessary re-renders
+    servers.value = mergeServers(servers.value, list)
+    loaded.value = true
+  }
+
   // Actions
   async function fetchServers(silent = false) {
     if (!silent) {
       loading.value = { loading: true, error: null }
     }
+    const ticket = ++issueSeq
 
     try {
       const response = await api.getServers()
       if (response.success && response.data) {
-        // Use smart merge to preserve object references and avoid unnecessary re-renders
-        servers.value = mergeServers(servers.value, response.data.servers)
-        loaded.value = true
+        applyServerList(response.data.servers, ticket)
       } else {
         loading.value.error = response.error || 'Failed to fetch servers'
       }
@@ -379,7 +396,9 @@ export const useServersStore = defineStore('servers', () => {
     // when running against an older core that publishes notify-only events.
     const payload = customEvent.detail?.payload
     if (payload && Array.isArray(payload.servers)) {
-      servers.value = mergeServers(servers.value, payload.servers as Server[])
+      // Authoritative and newer than anything currently in flight, so it takes
+      // the newest ticket — and it counts as a successful load in its own right.
+      applyServerList(payload.servers as Server[], ++issueSeq)
       return
     }
 

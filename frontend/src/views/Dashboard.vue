@@ -75,7 +75,11 @@
            "no usage data yet" card on a fresh install, only to be replaced by
            the CTA above a moment later. Both requests are issued together in
            onMounted, so this costs no extra round-trip. -->
-      <div v-else-if="!serversFetchSettled" class="flex justify-center py-16" data-test="dashboard-usage-pending">
+      <div
+        v-else-if="!serversFetchSettled && !serversStore.loaded"
+        class="flex justify-center py-16"
+        data-test="dashboard-usage-pending"
+      >
         <span class="loading loading-spinner loading-lg"></span>
       </div>
       <Suspense v-else-if="usageEverActive">
@@ -735,8 +739,9 @@ const loadTokenSavings = async () => {
 // Two different questions, deliberately answered by two different flags:
 //
 // `serversFetchSettled` — has our own initial request finished, successfully or
-// not? It gates the chart mount below, so a failed fetch falls through to the
-// usage panel rather than spinning forever.
+// not? Together with `loaded` it gates the chart mount below, so a failed fetch
+// falls through to the usage panel rather than spinning forever, and an
+// authoritative list arriving by SSE first clears the spinner immediately.
 //
 // `serversStore.loaded` — has a server list ever arrived successfully? Only
 // that justifies telling the user they have no servers. It cannot be inferred
