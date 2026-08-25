@@ -12,6 +12,7 @@ import api from '@/services/api'
 vi.mock('@/services/api', () => ({
   default: {
     getServers: vi.fn(),
+    deleteServer: vi.fn(),
     securityApprove: vi.fn(),
     unquarantineServer: vi.fn(),
   },
@@ -98,6 +99,34 @@ describe('useServersStore — server list write sequencing', () => {
     // An empty authoritative list is still an answer: consumers must be able to
     // tell "no servers configured" from "we don't know yet".
     expect(store.loaded).toBe(true)
+    expect(store.serverCount.total).toBe(0)
+  })
+
+  it('does not let an in-flight fetch restore a server the user just deleted', async () => {
+    // Seed the store with one server.
+    ;(api.getServers as any).mockResolvedValueOnce({
+      success: true,
+      data: { servers: [mkServer('doomed')] },
+    })
+    const store = useServersStore()
+    await store.fetchServers()
+
+    // A refresh starts, then the user deletes the server before it resolves.
+    let resolveRefresh: (v: unknown) => void = () => {}
+    ;(api.getServers as any).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRefresh = resolve
+      })
+    )
+    const refresh = store.fetchServers(true)
+    ;(api.deleteServer as any).mockResolvedValueOnce({ success: true })
+    await store.deleteServer('doomed')
+    expect(store.serverCount.total).toBe(0)
+
+    // The refresh answers with the pre-deletion list.
+    resolveRefresh({ success: true, data: { servers: [mkServer('doomed')] } })
+    await refresh
+
     expect(store.serverCount.total).toBe(0)
   })
 

@@ -335,8 +335,14 @@ export const useServersStore = defineStore('servers', () => {
     try {
       const response = await api.deleteServer(serverName)
       if (response.success) {
-        // Remove server from local state
-        servers.value = servers.value.filter(s => s.name !== serverName)
+        // Removing the server locally is itself an authoritative list state, so
+        // it claims the newest ticket: a GET that was already in flight when the
+        // delete landed would otherwise pass the sequencing check and restore
+        // the server the user just deleted.
+        applyServerList(
+          servers.value.filter(s => s.name !== serverName),
+          ++issueSeq
+        )
         return true
       } else {
         throw new Error(response.error || 'Failed to delete server')
