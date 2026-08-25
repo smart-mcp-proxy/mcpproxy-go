@@ -248,6 +248,13 @@ window does not exist:
    inferred from "not in the catalog" — otherwise a stale upstream entry in the
    old registry would skip the permission-tier gate entirely, turning the skew
    window into a scope leak. (This corrects the fall-through wording in D10.)
+   **One explicit exception**: a *nil* catalog pointer — never published yet —
+   is not a miss, it is "no catalog", and the filters keep today's
+   `ParseDirectToolName` behavior for it. Otherwise a pre-init request, and every
+   hand-constructed test proxy that calls the filters directly
+   (`mcp_routing_test.go`, `toon_surface_isolation_test.go`), would see the whole
+   listing denied. An *empty published* catalog is a real generation and does
+   deny; only the nil pointer falls back.
 3. **Describe requires registry membership as well as catalog visibility.**
    Before returning a definition the direct resolver checks
    `p.directServer.GetTool(displayName) != nil` (mcp-go
