@@ -27,6 +27,11 @@ func TestParseRetryAfter(t *testing.T) {
 		{"http date in past", now.Add(-time.Minute).Format(http.TimeFormat), 0, false},
 		{"malformed", "soon please", 0, false},
 		{"float seconds are malformed per RFC 7231", "12.5", 0, false},
+		// RFC 7231 puts no ceiling on delta-seconds, and the naive
+		// `time.Duration(seconds) * time.Second` overflows int64 nanoseconds past
+		// ~292 years — turning a huge header into a tiny or negative delay.
+		{"seconds beyond the cap clamp instead of overflowing", "99999999999999", MaxRetryAfterDelay, true},
+		{"seconds beyond int64 are malformed", "99999999999999999999999999", 0, false},
 	}
 
 	for _, tt := range tests {
@@ -70,6 +75,26 @@ func TestRetryAfterRecorder_CapsAndKeepsFurthestDeadline(t *testing.T) {
 	rec.Clear()
 	if !rec.Deadline().IsZero() {
 		t.Fatalf("Clear should drop the deadline, got %v", rec.Deadline())
+	}
+}
+
+// TestParseRetryAfter_DistantHTTPDateStaysSane guards the other overflow-shaped
+// input: a date centuries out saturates time.Duration rather than wrapping, and
+// the recorder still clamps it to the cap.
+func TestParseRetryAfter_DistantHTTPDateStaysSane(t *testing.T) {
+	now := time.Now()
+	delay, ok := ParseRetryAfter("Mon, 01 Jan 2999 00:00:00 GMT", now)
+	if !ok {
+		t.Fatal("a valid future HTTP-date must parse")
+	}
+	if delay <= 0 {
+		t.Fatalf("delay = %v, want a positive duration", delay)
+	}
+
+	rec := NewRetryAfterRecorder()
+	rec.Record(now, delay, http.StatusTooManyRequests)
+	if got, want := rec.Deadline(), now.Add(MaxRetryAfterDelay); !got.Equal(want) {
+		t.Fatalf("deadline = %v, want the capped %v", got, want)
 	}
 }
 

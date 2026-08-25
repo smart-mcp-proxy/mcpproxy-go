@@ -610,6 +610,13 @@ func (sm *StateManager) ShouldRetryOAuth() bool {
 		return false
 	}
 
+	// A rate-limit window outranks the OAuth ladder too (#1040): an upstream
+	// that answered 429 will answer 429 to the token exchange as well, and the
+	// OAuth ladder can be shorter than the window the upstream asked for.
+	if !sm.retryAfter.IsZero() && time.Now().Before(sm.retryAfter) {
+		return false
+	}
+
 	if !sm.isOAuthError || sm.currentState != StateError {
 		return false
 	}

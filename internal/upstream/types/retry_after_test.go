@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConnectionInfo_ShouldAutoReconnect_RetryAfter pins the 429 park window
@@ -88,6 +89,25 @@ func TestStateManager_SetRetryAfter(t *testing.T) {
 	sm.SetRetryAfter(time.Now().Add(time.Hour))
 	sm.Reset()
 	assert.True(t, sm.GetConnectionInfo().RetryAfter.IsZero(), "Reset must clear the park window")
+}
+
+// TestStateManager_SetRetryAfter_GatesTheOAuthLadderToo: the OAuth ladder is a
+// separate reconnect path (the monitoring loop consults ShouldRetryOAuth), and
+// its rungs can be shorter than the window a rate-limited upstream asked for.
+func TestStateManager_SetRetryAfter_GatesTheOAuthLadderToo(t *testing.T) {
+	// An OAuth failure whose ladder rung (5 min for the first retry) has long
+	// since elapsed — built directly so the test does not have to wait it out.
+	sm := &StateManager{
+		currentState:     StateError,
+		lastError:        errors.New("request failed with status 429: rate limited during token exchange"),
+		isOAuthError:     true,
+		oauthRetryCount:  1,
+		lastOAuthAttempt: time.Now().Add(-time.Hour),
+	}
+	require.True(t, sm.ShouldRetryOAuth(), "precondition: the OAuth ladder has elapsed and would retry")
+
+	sm.SetRetryAfter(time.Now().Add(time.Hour))
+	assert.False(t, sm.ShouldRetryOAuth(), "the rate-limit window outranks the OAuth ladder")
 }
 
 // TestStateManager_SetRetryAfter_IgnoresPastDeadlines guards against a

@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
@@ -161,6 +162,42 @@ func TestConnect_429RetryAfter_HeadersAndSSETransports(t *testing.T) {
 			assert.False(t, info.ShouldAutoReconnect(time.Now()))
 		})
 	}
+}
+
+// TestConnect_RetryAfterIsPerAttempt pins the lifetime of a recorded hint: it
+// belongs to the attempt that saw it. Carrying it forward would let a window the
+// upstream never repeated re-park a server on the back of an unrelated later
+// failure (connection refused, DNS) — including right after a manual reconnect
+// cleared the state machine.
+func TestConnect_RetryAfterIsPerAttempt(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	var hits atomic.Int32
+	srv := rateLimitedServer(t, http.StatusTooManyRequests, "3600", &hits)
+
+	cfg := &config.ServerConfig{
+		Name:     "rate-limited-upstream",
+		URL:      srv.URL + "/mcp",
+		Protocol: "http",
+		Enabled:  true,
+		Created:  time.Now(),
+	}
+
+	client, err := core.NewClient("retry-after-attempt-test", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	require.Error(t, client.Connect(ctx), "a 429 upstream must not connect")
+	require.False(t, client.RetryAfterDeadline().IsZero(), "the rate-limited attempt must record its hint")
+
+	// The upstream goes away entirely: the next attempt fails for a completely
+	// different reason and must not inherit the previous window.
+	srv.Close()
+	require.Error(t, client.Connect(ctx))
+	assert.True(t, client.RetryAfterDeadline().IsZero(),
+		"a stale hint from an earlier attempt must not be attributed to this one")
 }
 
 // TestConnect_503WithoutRetryAfter_LeavesLadderAlone guards the deliberately

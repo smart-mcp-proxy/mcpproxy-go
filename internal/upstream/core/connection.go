@@ -87,6 +87,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}
 
+	// Start each attempt with an empty rate-limit slate (#1040). Without this a
+	// hint recorded during an earlier attempt outlives it: a manual reconnect
+	// that then fails for an unrelated reason (connection refused, DNS) would be
+	// re-parked for the remainder of a window the upstream never repeated.
+	// Whatever this attempt observes is recorded again, on its own merits.
+	c.retryAfter.Clear()
+
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("server", c.config.Name),
 		zap.String("url", c.config.URL),

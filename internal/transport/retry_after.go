@@ -108,10 +108,16 @@ func ParseRetryAfter(value string, now time.Time) (time.Duration, bool) {
 		return 0, false
 	}
 
-	// delta-seconds
-	if seconds, err := strconv.Atoi(value); err == nil {
+	// delta-seconds. The bound check happens BEFORE the multiplication: RFC 7231
+	// puts no ceiling on the value, and `time.Duration(seconds) * time.Second`
+	// overflows int64 nanoseconds past ~292 years, which would turn a huge (but
+	// syntactically valid) header into a tiny or negative delay instead of the cap.
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
 		if seconds <= 0 {
 			return 0, false
+		}
+		if seconds >= int64(MaxRetryAfterDelay/time.Second) {
+			return MaxRetryAfterDelay, true
 		}
 		return time.Duration(seconds) * time.Second, true
 	}

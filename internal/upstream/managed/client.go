@@ -319,13 +319,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 		// deadline comes from the recorder the transport RoundTripper fed (#1040).
 		// Stamp it BEFORE the SetError/SetOAuthError branches below so the
 		// ConnectionInfo their callbacks publish already carries the window.
-		if deadline := mc.coreClient.RetryAfterDeadline(); !deadline.IsZero() {
-			mc.logger.Warn("Upstream rate-limited us; parking reconnects until it says we may return",
-				zap.String("server", mc.GetConfig().Name),
-				zap.Time("retry_not_before", deadline),
-				zap.Duration("retry_after", time.Until(deadline)))
-			mc.StateManager.SetRetryAfter(deadline)
-		}
+		mc.syncRetryAfterFromTransport()
 
 		// Check if this is a deferred OAuth requirement (pending user action)
 		if core.IsOAuthPending(connectErr) {
@@ -1279,6 +1273,10 @@ func (mc *Client) performHealthCheck() {
 					zap.String("server", mc.GetConfig().Name),
 					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
 					zap.Error(err))
+				// A 429 answered to the ping carries the same "come back later"
+				// as one answered to connect (#1040); stamp it before SetError
+				// so the published ConnectionInfo already carries the window.
+				mc.syncRetryAfterFromTransport()
 				mc.StateManager.SetError(err)
 			} else {
 				mc.logger.Info("Health check failed transiently, tolerating below threshold",
@@ -1310,6 +1308,30 @@ func (mc *Client) performHealthCheck() {
 // failures (connection refused, host unreachable, DNS gone) trigger Error
 // immediately because waiting buys nothing — the server is genuinely
 // unreachable and the user should see that.
+// syncRetryAfterFromTransport copies any rate-limit hint the transport
+// RoundTripper recorded for this upstream into the state machine, where both
+// reconnect gates can see it (#1040).
+//
+// It is called from every path that turns an upstream failure into Error state,
+// not just connect: a 429 answered to a tools/call or to the health-check ping
+// is just as much a "come back later" as one answered to initialize, and the
+// recorder is the only place that hint exists — mcp-go has already flattened
+// the response into a string by the time the error reaches us.
+func (mc *Client) syncRetryAfterFromTransport() {
+	if mc.coreClient == nil {
+		return
+	}
+	deadline := mc.coreClient.RetryAfterDeadline()
+	if deadline.IsZero() {
+		return
+	}
+	mc.logger.Warn("Upstream rate-limited us; parking reconnects until it says we may return",
+		zap.String("server", mc.GetConfig().Name),
+		zap.Time("retry_not_before", deadline),
+		zap.Duration("retry_after", time.Until(deadline)))
+	mc.StateManager.SetRetryAfter(deadline)
+}
+
 func (mc *Client) recordHealthCheckFailure(err error) bool {
 	mc.consecutiveHealthFailures++
 	if !isTransientHealthCheckError(err) {
