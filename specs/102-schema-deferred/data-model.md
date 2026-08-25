@@ -59,7 +59,13 @@ appended `describe_tool` built-in.
   values fail validation naming the accepted set.
 - Precedence: env `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` > file value; serve flag
   applies only when explicitly set (Spec-085 flag pattern).
-- Read path: live snapshot (`p.currentConfig()`), resolved at catalog build time
+- Read path: one helper, `effectiveDirectToolResponseMode()`, mirroring
+  `effectiveToolResponseMode` (`internal/server/profile_resolver.go:57`) — reads
+  the live snapshot via `p.currentConfig()`, defaults to `full` on empty, and is
+  the ONLY read site, so the renderer, the catalog's recorded
+  `serializationMode`, and the FR-014 rebuild guard cannot resolve differently.
+  Unlike its retrieve_tools sibling it takes no per-call `detail` override: MCP
+  `tools/list` has no parameters (spec Non-Goals). Resolved at catalog build time
   and recorded on the catalog; never affects membership (FR-008).
 - `routing_mode` value set unchanged; literal `schema_deferred` → validation error
   naming the composition (FR-002).
