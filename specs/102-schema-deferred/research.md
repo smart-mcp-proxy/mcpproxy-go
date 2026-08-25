@@ -244,10 +244,15 @@ skew. That half of FR-017 needs no further mechanism.
 read the published pointer independently of which registry generation produced
 the list they are filtering. Enumerating both orderings:
 
-| Window | catalog published first (chosen) | `SetTools` first |
+| Window | catalog published first | `SetTools` first (**chosen**) |
 |---|---|---|
-| Tool removed in the new generation | listing still shows it (old registry), filter finds no catalog entry | not listed; describe would resolve from the old catalog → describable-but-unlisted |
-| Tool added in the new generation | not listed; describe resolves → describable-but-unlisted | listed, filter finds no old catalog entry |
+| Tool removed in the new generation | listing still shows it (old registry) while the filter finds no catalog entry — a *leak* unless the filter denies | already out of the registry: not listed, and rule 4's `GetTool` check makes describe answer `not_found`. **Window-free.** |
+| Tool added in the new generation | not listed; describe would resolve from the new catalog → describable-but-unlisted | listed, but the old catalog has no entry → rule 2 denies it for filtered sessions and rule 4 answers `not_found`. **Fails closed.** |
+| Same name, definition changed | filter/describe run ahead of the registry | registry runs ahead of the catalog: describe briefly returns the *previous* definition — which is the one the caller's own listing advertised. Accepted; see below. |
+
+`SetTools` first wins on every row: removal becomes window-free and addition
+fails closed, whereas catalog-first makes removal a potential leak. The two
+publications sit adjacent in the same function with nothing between them.
 
 **What cannot be built, stated plainly.** There is no way to stamp the generation
 onto the registered entry and compare it at read time: `mcp.Tool`'s only
