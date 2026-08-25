@@ -84,6 +84,7 @@ func (d *Detector) MaskText(text string) (masked string, changed bool) {
 		}
 
 		seen := make(map[string]struct{})
+		var pairs []string
 		for _, match := range pattern.Match(masked) {
 			if match == "" || !pattern.IsValid(match) {
 				continue
@@ -104,8 +105,9 @@ func (d *Detector) MaskText(text string) (masked string, changed bool) {
 			if preview == match {
 				continue
 			}
-			masked = strings.ReplaceAll(masked, match, preview)
+			pairs = append(pairs, match, preview)
 		}
+		masked = replaceAllPairs(masked, pairs)
 	}
 
 	// High-entropy strings have no pattern to key on, but the detector reports
@@ -113,16 +115,36 @@ func (d *Detector) MaskText(text string) (masked string, changed bool) {
 	// limit is a work bound well above what any reviewable payload carries —
 	// not a disclosure budget.
 	if d.config.IsCategoryEnabled("high_entropy") {
+		var pairs []string
+		seen := make(map[string]struct{})
 		for _, match := range FindHighEntropyStrings(masked, d.config.GetEntropyThreshold(), maxEntropyMasks) {
 			preview := MaskValue(match)
-			if preview == match || !strings.Contains(masked, match) {
+			if preview == match {
 				continue
 			}
-			masked = strings.ReplaceAll(masked, match, preview)
+			if _, done := seen[match]; done {
+				continue
+			}
+			seen[match] = struct{}{}
+			pairs = append(pairs, match, preview)
 		}
+		masked = replaceAllPairs(masked, pairs)
 	}
 
 	return masked, masked != text
+}
+
+// replaceAllPairs applies every (value, preview) pair in ONE pass.
+//
+// Per-value strings.ReplaceAll would re-scan the whole payload once per secret
+// found, which is quadratic on a payload stuffed with them — and since the
+// replacement cap was removed precisely so no secret is skipped, that is the
+// pathological case to keep cheap. strings.Replacer walks the text once.
+func replaceAllPairs(text string, pairs []string) string {
+	if len(pairs) == 0 {
+		return text
+	}
+	return strings.NewReplacer(pairs...).Replace(text)
 }
 
 // maxEntropyMasks bounds the high-entropy sweep. Scan reports at most five such

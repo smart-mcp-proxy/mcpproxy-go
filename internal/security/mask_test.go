@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -158,6 +159,32 @@ func TestMaskTextMasksBeyondTheDetectionCap(t *testing.T) {
 	if got := strings.Count(masked, "ghp_…****"); got != count {
 		t.Fatalf("masked %d of %d tokens", got, count)
 	}
+}
+
+// Removing the replacement cap makes "a payload stuffed with secrets" the
+// worst case, so it must not be quadratic: a full-size activity response
+// (64KB, the activity_max_response_size cap) of nothing but distinct tokens
+// still has to mask in well under a second.
+func TestMaskTextStaysCheapOnAPayloadFullOfSecrets(t *testing.T) {
+	d := NewDetector(nil)
+
+	var b strings.Builder
+	for i := 0; b.Len() < 64*1024; i++ {
+		fmt.Fprintf(&b, "key%d=ghp_%036d\n", i, i)
+	}
+	text := b.String()
+
+	start := time.Now()
+	masked, _ := d.MaskText(text)
+	elapsed := time.Since(start)
+
+	if strings.Contains(masked, "ghp_0000") {
+		t.Fatal("tokens survived masking")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("masking a %d-byte payload took %s", len(text), elapsed)
+	}
+	t.Logf("masked %d bytes in %s", len(text), elapsed)
 }
 
 // Turning detection off later must not retroactively serve the credentials in
