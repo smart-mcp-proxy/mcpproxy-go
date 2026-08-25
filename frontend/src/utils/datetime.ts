@@ -13,32 +13,36 @@
 
 const pad = (n: number, width = 2) => String(n).padStart(width, '0')
 
-/** `2026-08-25` — a bare date, which `new Date()` would read as UTC midnight. */
-const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/
+/** `2026-08-25`, optionally followed by a time — the ISO shapes the API emits. */
+const ISO_DATE_PART = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T ])/
+
+/** Does `YYYY-MM-DD` name a day that exists? `2026-02-31` does not. */
+function isRealCalendarDate(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12 || day < 1) return false
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+  const lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= lengths[month - 1]
+}
 
 function toDate(value: string | number | Date | null | undefined): Date | null {
   if (value === null || value === undefined || value === '') return null
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value
   if (typeof value === 'string') {
-    // A date-only string is a calendar date, not an instant: parsing it as UTC
-    // and printing it with local getters shifts it a day west of UTC.
-    const m = DATE_ONLY.exec(value.trim())
+    const text = value.trim()
+    const m = ISO_DATE_PART.exec(text)
     if (m) {
       const year = Number(m[1])
       const month = Number(m[2])
       const day = Number(m[3])
-      const d = new Date(year, month - 1, day)
-      // `new Date(2026, 1, 31)` silently rolls over to March; an impossible
-      // date is bad input, not the 3rd of the next month.
-      if (
-        Number.isNaN(d.getTime()) ||
-        d.getFullYear() !== year ||
-        d.getMonth() !== month - 1 ||
-        d.getDate() !== day
-      ) {
-        return null
+      // `new Date('2026-02-31T12:00:00')` silently rolls over into March. An
+      // impossible day is bad input, not the 3rd of the next month.
+      if (!isRealCalendarDate(year, month, day)) return null
+      // A date-only string is a calendar date, not an instant: parsing it as UTC
+      // and printing it with local getters shifts it a day west of UTC.
+      if (text.length === 10) {
+        const d = new Date(year, month - 1, day)
+        return Number.isNaN(d.getTime()) ? null : d
       }
-      return d
     }
   }
   const d = new Date(value)

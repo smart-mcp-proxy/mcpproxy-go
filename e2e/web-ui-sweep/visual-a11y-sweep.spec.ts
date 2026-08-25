@@ -286,6 +286,67 @@ test('contrast AA: filled primary buttons in both themes', async ({ page }) => {
   }
 })
 
+test('contrast AA: buttons and links on a coloured alert, hovered', async ({ page }) => {
+  // daisyUI paints a base surface into `--btn-bg` on hover, which on a coloured
+  // alert dropped a ghost button to 3.47:1. Hover is only reachable with a real
+  // pointer, so it is measured here rather than in the unit test.
+  //
+  // Real elements only: injecting markup that uses a class the app never ships
+  // measures nothing meaningful, because Tailwind only compiles the classes it
+  // finds in the source — an injected `.btn-link` inherits plain `.btn` styling
+  // and reports a failure that cannot occur in the product.
+  let measured = 0
+  for (const theme of THEMES) {
+    for (const route of ['/', '/servers'] as const) {
+      await goto(page, route, theme)
+      const targets = page.locator(
+        ':is(.alert-info, .alert-success, .alert-warning, .alert-error) :is(.btn-ghost, a.link, .btn-link)',
+      )
+      const count = await targets.count()
+      for (let i = 0; i < count; i++) {
+        const target = targets.nth(i)
+        if (!(await target.isVisible().catch(() => false))) continue
+        await target.hover()
+        const result = await target.evaluate((el) => {
+          const canvas = document.createElement('canvas')
+          canvas.width = canvas.height = 1
+          const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+          const resolve = (v: string) => {
+            ctx.clearRect(0, 0, 1, 1)
+            ctx.fillStyle = '#000000'
+            ctx.fillStyle = v
+            ctx.fillRect(0, 0, 1, 1)
+            const d = ctx.getImageData(0, 0, 1, 1).data
+            return [d[0], d[1], d[2], d[3] / 255]
+          }
+          const lum = (c: number[]) =>
+            c
+              .slice(0, 3)
+              .map((v) => v / 255)
+              .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)))
+              .reduce((acc, v, i) => acc + v * [0.2126, 0.7152, 0.0722][i], 0)
+          const cs = getComputedStyle(el as HTMLElement)
+          const alertBg = resolve(getComputedStyle((el as HTMLElement).closest('.alert')!).backgroundColor)
+          const own = resolve(cs.backgroundColor)
+          const bg = [0, 1, 2].map((i) => own[i] * own[3] + alertBg[i] * (1 - own[3]))
+          const fg = resolve(cs.color)
+          const [hi, lo] = lum(fg) >= lum(bg) ? [lum(fg), lum(bg)] : [lum(bg), lum(fg)]
+          return {
+            ratio: Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100,
+            label: (el.textContent || '').trim().slice(0, 30),
+          }
+        })
+        measured++
+        expect(
+          result.ratio,
+          `${theme} ${route}: "${result.label}" inside a coloured alert measures ${result.ratio}:1 while hovered`,
+        ).toBeGreaterThanOrEqual(4.5 - 0.005)
+      }
+    }
+  }
+  expect(measured, 'no ghost/link controls inside a coloured alert were found').toBeGreaterThan(0)
+})
+
 // ---------------------------------------------------------------------------
 // F29 — "match system" theme.
 // ---------------------------------------------------------------------------

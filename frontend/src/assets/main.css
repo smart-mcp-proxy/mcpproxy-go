@@ -359,6 +359,24 @@
   text-decoration-line: underline;
 }
 
+/*
+ * Hover/active on a transparent button inside a coloured alert. daisyUI paints
+ * `--btn-bg: var(--btn-color, var(--color-base-200))` in those states, i.e. a
+ * base surface dropped onto the alert's fill — measured 3.47:1 for a ghost
+ * button on a corporate info alert and 1.07:1 for a link button on a dark error
+ * alert. Any tint also erodes the pair (the fill/content ratio is only ~4.7:1
+ * to begin with), so the background stays transparent and the affordance is a
+ * border plus an underline: the foreground keeps exactly its rest contrast.
+ */
+:where(.alert-info, .alert-success, .alert-warning, .alert-error)
+  :where(.btn-ghost, .btn-link):is(:hover, :focus-visible, :active) {
+  --btn-bg: #0000;
+  --btn-border: currentColor;
+  background-color: #0000;
+  color: var(--alert-fg);
+  text-decoration-line: underline;
+}
+
 /* Code chips on a coloured alert: invert to the alert's own fill/content pair,
    which every theme guarantees to be legible (>= 4.5:1 after the token fixes). */
 :where(.alert-info, .alert-success, .alert-warning, .alert-error) :where(code, kbd) {

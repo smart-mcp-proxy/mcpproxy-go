@@ -48,6 +48,13 @@ describe('house date/time format', () => {
     expect(formatDate('2026-13-01')).toBe('-')
     expect(formatDate('2026-02-28')).toBe('2026-02-28')
     expect(formatDate('2028-02-29')).toBe('2028-02-29')
+    // 2100 is not a leap year; 2000 was.
+    expect(formatDate('2100-02-29')).toBe('-')
+    expect(formatDate('2000-02-29')).toBe('2000-02-29')
+    // …and the same applies once a time is attached.
+    expect(formatDateTime('2026-02-31T12:00:00')).toBe('-')
+    expect(formatDateTime('2026-04-31T12:00:00Z')).toBe('-')
+    expect(formatDateTime('2026-02-28T12:00:00')).toBe('2026-02-28 12:00:00')
   })
 
   it('never renders "Invalid Date" for missing or broken input', () => {
