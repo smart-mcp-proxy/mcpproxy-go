@@ -142,10 +142,17 @@ export function useModalA11y(
 
   function deactivate() {
     const at = openStack.indexOf(id)
-    if (at !== -1) openStack.splice(at, 1)
+    const wasOpen = at !== -1
+    if (wasOpen) openStack.splice(at, 1)
     document.removeEventListener('keydown', onKeydown, true)
     const target = previouslyFocused
     previouslyFocused = null
+
+    // Restore focus only when this was the LAST modal standing. A modal that
+    // closes while another is still open sits underneath it, and focusing its
+    // trigger would drag focus out of the top modal and behind it. The top
+    // modal keeps focus and restores to its own trigger when it goes.
+    if (!wasOpen || openStack.length > 0) return
     if (target && typeof target.focus === 'function' && document.contains(target)) {
       target.focus()
     }

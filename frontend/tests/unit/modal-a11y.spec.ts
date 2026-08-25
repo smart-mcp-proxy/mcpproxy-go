@@ -182,6 +182,36 @@ describe('modal accessibility (UX audit F6)', () => {
       under.unmount()
     })
 
+    // Closing the modal underneath must leave focus where the top modal put it,
+    // not drag it back to a trigger that now sits behind an open dialog.
+    it('closing a modal underneath another does not steal focus from the top one', async () => {
+      const underTrigger = document.createElement('button')
+      underTrigger.textContent = 'under-trigger'
+      document.body.appendChild(underTrigger)
+      underTrigger.focus()
+
+      const under = mount(AddServerModal, { props: { show: false }, attachTo: document.body })
+      await under.setProps({ show: true })
+      await flushPromises()
+
+      const over = mount(AddSecretModal, { props: { show: false }, attachTo: document.body })
+      await over.setProps({ show: true })
+      await flushPromises()
+
+      const topBox = over.find('[role="dialog"]').element
+      expect(topBox.contains(document.activeElement)).toBe(true)
+
+      // The one underneath closes on its own (e.g. its request resolved).
+      await under.setProps({ show: false })
+      await flushPromises()
+
+      expect(document.activeElement).not.toBe(underTrigger)
+      expect(topBox.contains(document.activeElement), 'focus stays in the top modal').toBe(true)
+
+      over.unmount()
+      under.unmount()
+    })
+
     it('restores focus when unmounted while still open', async () => {
       const trigger = document.createElement('button')
       document.body.appendChild(trigger)
