@@ -933,8 +933,10 @@ export interface ClientStatus {
   // This instance's own MCP endpoint. Config-derived, so it is present on both
   // the stat-only listing and the on-demand per-client read.
   proxy_url?: string
-  // The endpoint the client's existing entry actually points at (sanitized —
-  // query/userinfo/fragment stripped). Resolved only by the on-demand read.
+  // The endpoint the client's existing entry actually points at, projected
+  // through the same sanitizer as a connect preview's entry summary: scheme,
+  // host and path only (query — the ?apikey= carrier — userinfo and fragment
+  // are dropped). Resolved only by the on-demand read.
   registered_url?: string
   // How registered_url relates to proxy_url. `connected` only ever meant "an
   // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —

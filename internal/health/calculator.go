@@ -40,6 +40,14 @@ type HealthCalculatorInput struct {
 	Connected bool
 	LastError string
 
+	// HasEndpointURL reports whether this server is addressed by a configured
+	// URL (an HTTP/SSE server) rather than by a spawned command (stdio). It
+	// gates ActionEditURL: a stdio server can perfectly well emit "no such
+	// host" — an npx/uvx install failing to reach its package registry does
+	// exactly that — and offering "Edit URL" for it would point the user at a
+	// field that does not exist.
+	HasEndpointURL bool
+
 	// OAuth state (only for OAuth-enabled servers)
 	OAuthRequired   bool
 	OAuthStatus     string     // "authenticated", "expired", "error", "none"
@@ -142,7 +150,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		level := LevelUnhealthy
 		action := ActionRestart
 		summary := formatErrorSummary(input.LastError)
-		if isEndpointAddressError(input.LastError) {
+		if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
 			action = ActionEditURL
 		}
 		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
@@ -161,7 +169,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		action := ActionRestart
 		if input.LastError != "" {
 			summary = formatErrorSummary(input.LastError)
-			if isEndpointAddressError(input.LastError) {
+			if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
 				action = ActionEditURL
 			}
 			// For OAuth-required servers with OAuth-related errors, suggest login
@@ -427,6 +435,10 @@ func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError 
 // restarting the server — offering "Restart" for them sends the user in a loop
 // (audit F11). "connection refused" is deliberately NOT in this set: the host
 // resolved, so the address is plausibly right and the peer merely down.
+//
+// Callers MUST gate this behind HasEndpointURL: the same phrases appear in the
+// output of a stdio server's own failed network calls, and a stdio server has
+// no URL field to send the user to.
 func isEndpointAddressError(err string) bool {
 	if err == "" {
 		return false

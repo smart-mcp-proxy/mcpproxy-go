@@ -69,9 +69,15 @@ type ClientStatus struct {
 	// populated by both the stat-only listing and the on-demand read.
 	ProxyURL string `json:"proxy_url,omitempty"`
 	// RegisteredURL is the endpoint the client's existing entry actually points
-	// at, sanitized the same way a preview's entry summary is (query, userinfo
-	// and fragment stripped — never a credential). Empty when nothing was read
-	// or the entry carries no URL-shaped value. Resolved only by GetStatus.
+	// at, projected through exactly the same sanitizer as a Spec 091 preview's
+	// entry summary: scheme, host and path only — query (the ?apikey= carrier),
+	// userinfo and fragment are dropped, and a value that is not an absolute URL
+	// is not echoed at all. Note this is scheme+host+PATH, matching the preview:
+	// a credential embedded in a path segment by a third-party config would
+	// survive, exactly as it already does on the preview surface. Deliberately
+	// identical so the two surfaces cannot disagree about what an entry says.
+	// Empty when nothing was read or the entry carries no URL-shaped value.
+	// Resolved only by GetStatus.
 	RegisteredURL string `json:"registered_url,omitempty"`
 	// EndpointMatch says how RegisteredURL relates to ProxyURL. It exists
 	// because Connected only ever meant "an mcpproxy-shaped entry is present":
@@ -1172,7 +1178,9 @@ func classifyEndpointMatch(loc entryLocation) string {
 
 // entrySummaryEndpoint projects the endpoint an entry addresses, reusing the
 // Spec 091 entry-summary sanitizer so query strings (which may carry ?apikey=),
-// userinfo and fragments never reach the status payload.
+// userinfo and fragments never reach the status payload. Reused rather than
+// reimplemented on purpose: the status row and the connect preview must never
+// disagree about what a client's entry points at.
 func entrySummaryEndpoint(name string, entry map[string]interface{}) string {
 	summary := buildEntrySummary(name, entry)
 	if summary == nil {

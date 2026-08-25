@@ -2339,12 +2339,15 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		healthInput := health.HealthCalculatorInput{
-			Name:                  serverStatus.Name,
-			Enabled:               serverStatus.Enabled,
-			Quarantined:           serverStatus.Quarantined,
-			State:                 serverStatus.State,
-			Connected:             connected,
-			LastError:             lastError,
+			Name:        serverStatus.Name,
+			Enabled:     serverStatus.Enabled,
+			Quarantined: serverStatus.Quarantined,
+			State:       serverStatus.State,
+			Connected:   connected,
+			LastError:   lastError,
+			// Only a URL-addressed server has an endpoint the user can edit; a
+			// stdio server's own network failures must not offer "Edit URL".
+			HasEndpointURL:        url != "",
 			OAuthRequired:         oauthConfig != nil,
 			OAuthStatus:           oauthStatus,
 			HasRefreshToken:       hasRefreshToken,

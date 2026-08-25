@@ -843,7 +843,7 @@ additive-compatible and gains two fields:
 | `access_state` | string | `"unknown"` in the overall listing (not content-checked); resolved to `"accessible"`, `"absent"`, `"malformed"`, or `"denied"` by an on-demand single-client read. |
 | `remediation` | string | Present only when `access_state == "denied"`; carries the actionable fix text (App Data toggle + `tccutil reset` command). |
 | `proxy_url` | string | **This** instance's MCP endpoint. Config-derived (no file read), so it is present on the overall listing too. |
-| `registered_url` | string | The endpoint the client's existing entry actually points at, sanitized (query, userinfo and fragment stripped — never a credential). Resolved only by an on-demand read. |
+| `registered_url` | string | The endpoint the client's existing entry actually points at, projected through the same sanitizer as a connect preview's `existing_entry_summary.endpoint`: **scheme, host and path only** — query (the `?apikey=` carrier), userinfo and fragment are dropped, and a value that is not an absolute URL is not echoed at all. Resolved only by an on-demand read. |
 | `endpoint_match` | string | How `registered_url` relates to `proxy_url`: `"this"` (the entry addresses this instance), `"other"` (it addresses a different one), `"unknown"` (the entry has no comparable endpoint, e.g. a stdio command). Empty when `connected` is false or nothing was read. |
 
 A client that is installed but not yet content-checked reads as

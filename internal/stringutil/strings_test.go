@@ -79,6 +79,41 @@ func TestCollapseRepeatedErrorWrappers(t *testing.T) {
 			in:       "",
 			expected: "",
 		},
+
+		// Payload must survive verbatim even when it repeats. ": " is a Go
+		// wrapping boundary AND a separator inside quoted URLs, JSON, stderr
+		// and validation text; only prose-shaped wrappers may be dropped.
+		{
+			name:     "repeated JSON fragment is payload, not a wrapper",
+			in:       `parse failed: {"a": "x", "b": "x"}`,
+			expected: `parse failed: {"a": "x", "b": "x"}`,
+		},
+		{
+			name:     "repeated quoted URL is preserved",
+			in:       `redirect loop: "https://a.example/x": "https://a.example/x": giving up`,
+			expected: `redirect loop: "https://a.example/x": "https://a.example/x": giving up`,
+		},
+		{
+			name:     "repeated key=value payload is preserved",
+			in:       `bad env: FOO=bar: FOO=bar: rejected`,
+			expected: `bad env: FOO=bar: FOO=bar: rejected`,
+		},
+		{
+			name:     "repeated path-shaped segment is preserved",
+			in:       `stat /tmp/a/b: /tmp/a/b: no such file`,
+			expected: `stat /tmp/a/b: /tmp/a/b: no such file`,
+		},
+		{
+			name: "a repeat longer than a wrapper phrase is preserved",
+			in: "outer: " +
+				"this line is far too long to plausibly be a fmt Errorf wrapper phrase indeed: " +
+				"this line is far too long to plausibly be a fmt Errorf wrapper phrase indeed: " +
+				"boom",
+			expected: "outer: " +
+				"this line is far too long to plausibly be a fmt Errorf wrapper phrase indeed: " +
+				"this line is far too long to plausibly be a fmt Errorf wrapper phrase indeed: " +
+				"boom",
+		},
 	}
 
 	for _, tt := range tests {

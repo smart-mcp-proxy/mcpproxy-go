@@ -56,10 +56,11 @@ func TestCalculateHealth_ErrorState(t *testing.T) {
 
 func TestCalculateHealth_DisconnectedState(t *testing.T) {
 	input := HealthCalculatorInput{
-		Name:      "test-server",
-		Enabled:   true,
-		State:     "disconnected",
-		LastError: "no such host",
+		Name:           "test-server",
+		Enabled:        true,
+		State:          "disconnected",
+		LastError:      "no such host",
+		HasEndpointURL: true,
 	}
 
 	result := CalculateHealth(input, nil)
@@ -853,11 +854,12 @@ func TestCalculateHealth_RefreshStatePriority(t *testing.T) {
 
 	t.Run("offline HTTP server with no such host shows edit_url not login", func(t *testing.T) {
 		input := HealthCalculatorInput{
-			Name:          "remote-server",
-			Enabled:       true,
-			State:         "disconnected",
-			OAuthRequired: true,
-			LastError:     "authentication strategies failed: dial tcp: lookup example.invalid: no such host",
+			Name:           "remote-server",
+			Enabled:        true,
+			State:          "disconnected",
+			OAuthRequired:  true,
+			HasEndpointURL: true,
+			LastError:      "authentication strategies failed: dial tcp: lookup example.invalid: no such host",
 		}
 
 		result := CalculateHealth(input, nil)
@@ -968,10 +970,11 @@ func TestCalculateHealth_EndpointAddressErrors(t *testing.T) {
 	for _, tt := range addressErrors {
 		t.Run(tt.name+" in error state", func(t *testing.T) {
 			result := CalculateHealth(HealthCalculatorInput{
-				Name:      "broken-remote",
-				Enabled:   true,
-				State:     "error",
-				LastError: tt.lastError,
+				Name:           "broken-remote",
+				Enabled:        true,
+				State:          "error",
+				LastError:      tt.lastError,
+				HasEndpointURL: true,
 			}, nil)
 
 			assert.Equal(t, LevelUnhealthy, result.Level)
@@ -980,10 +983,11 @@ func TestCalculateHealth_EndpointAddressErrors(t *testing.T) {
 
 		t.Run(tt.name+" in disconnected state", func(t *testing.T) {
 			result := CalculateHealth(HealthCalculatorInput{
-				Name:      "broken-remote",
-				Enabled:   true,
-				State:     "disconnected",
-				LastError: tt.lastError,
+				Name:           "broken-remote",
+				Enabled:        true,
+				State:          "disconnected",
+				LastError:      tt.lastError,
+				HasEndpointURL: true,
 			}, nil)
 
 			assert.Equal(t, ActionEditURL, result.Action)
@@ -992,14 +996,33 @@ func TestCalculateHealth_EndpointAddressErrors(t *testing.T) {
 
 	t.Run("connection refused still suggests restart", func(t *testing.T) {
 		result := CalculateHealth(HealthCalculatorInput{
-			Name:      "local-server",
-			Enabled:   true,
-			State:     "error",
-			LastError: `dial tcp 127.0.0.1:9999: connect: connection refused`,
+			Name:           "local-server",
+			Enabled:        true,
+			State:          "error",
+			LastError:      `dial tcp 127.0.0.1:9999: connect: connection refused`,
+			HasEndpointURL: true,
 		}, nil)
 
 		assert.Equal(t, ActionRestart, result.Action,
 			"The host resolved, so the address is plausibly right — restart stays the remedy")
+	})
+
+	// A stdio server has no URL field. Its own network calls emit exactly these
+	// phrases — an npx/uvx install that cannot reach its package registry says
+	// "no such host" — and pointing the user at a field that does not exist
+	// would be worse than the Restart it replaced.
+	t.Run("stdio server never gets edit_url", func(t *testing.T) {
+		for _, tt := range addressErrors {
+			result := CalculateHealth(HealthCalculatorInput{
+				Name:           "local-stdio",
+				Enabled:        true,
+				State:          "error",
+				LastError:      tt.lastError,
+				HasEndpointURL: false,
+			}, nil)
+
+			assert.Equal(t, ActionRestart, result.Action, "case %q", tt.name)
+		}
 	})
 
 	t.Run("genuine OAuth error outranks an address hint", func(t *testing.T) {
