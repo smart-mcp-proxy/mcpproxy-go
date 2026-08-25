@@ -175,6 +175,31 @@ export const getIntentIcon = (operationType: string): string => {
 }
 
 /**
+ * The glyph vocabulary the Activity table uses, as a legend. The table paints
+ * the word beside each glyph, so this is a reference rather than the only key —
+ * but the Sensitive column has no room for a word, and a column of bare ☢ / ⚠️
+ * badges is unreadable without one (F26, #1046).
+ */
+export interface ActivityLegendEntry {
+  icon: string
+  term: string
+  description: string
+}
+
+export const INTENT_LEGEND: ActivityLegendEntry[] = [
+  { icon: intentIcons.read, term: 'read', description: 'the agent declared this call reads data' },
+  { icon: intentIcons.write, term: 'write', description: 'it creates or modifies data' },
+  { icon: intentIcons.destructive, term: 'destructive', description: 'it deletes or overwrites data' },
+]
+
+export const SENSITIVE_LEGEND: ActivityLegendEntry[] = [
+  { icon: '☢️', term: 'critical', description: 'cloud credentials, private keys' },
+  { icon: '⚠️', term: 'high', description: 'API tokens, connection strings' },
+  { icon: '⚡', term: 'medium', description: 'card numbers, sensitive paths' },
+  { icon: 'ℹ️', term: 'low', description: 'high-entropy strings worth a look' },
+]
+
+/**
  * Get badge CSS class for intent operation type
  *
  * @deprecated The table renders intent through {@link intentPresentation} (glyph
@@ -205,7 +230,12 @@ export interface IntentPresentation {
   present: boolean
   /** Operation glyph: book / pencil / warning. Empty when absent. */
   icon: string
-  /** Operation type, e.g. "read". Exposed for screen readers, not painted. */
+  /**
+   * Operation type, e.g. "read". PAINTED beside the glyph, not only announced:
+   * 📖 / ✏️ / ⚠️ with no key and no word left the column decodable only by
+   * someone who already knew the mapping, and made colour+glyph the sole
+   * encoding (audit finding F26, #1046; WCAG 1.4.1).
+   */
   label: string
   /** Declared reason, single line in the cell. Empty when none was given. */
   reason: string
@@ -265,6 +295,53 @@ export interface PreflightPerToolEntry {
  * codes; an uncapped rollup would push every other column off screen.
  */
 const MAX_PREFLIGHT_SUMMARY_REASONS = 3
+
+// --- security_scan records ---------------------------------------------------
+//
+// The drawer for a security_scan row showed Status, ID, Server, Tool, Source and
+// ~80% whitespace — no verdict, no findings, nowhere to go (audit finding F25,
+// #1046). The record does carry the scan's outcome: `metadata.findings_summary`
+// is a {severity: count} rollup written by handleSecurityScanSettled. It just
+// had no renderer.
+
+/** True for a settled security-scan record (Spec 077). */
+export const isSecurityScanActivity = (a?: { type?: string } | null): boolean =>
+  a?.type === 'security_scan'
+
+/** One {severity, count} pair of a scan's findings rollup. */
+export interface ScanFindingCount {
+  severity: string
+  count: number
+}
+
+/** Severity order, worst first — the order an operator triages in. */
+const SCAN_SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info']
+
+/**
+ * `metadata.findings_summary` as an ordered list: worst severity first, unknown
+ * keys last in alphabetical order so two renders never disagree. Zero counts are
+ * dropped — "0 low" is not a finding.
+ */
+export const scanFindingsRollup = (
+  metadata?: Record<string, any> | null
+): ScanFindingCount[] => {
+  const summary = metadata?.findings_summary
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return []
+
+  const rank = (severity: string): number => {
+    const i = SCAN_SEVERITY_ORDER.indexOf(severity)
+    return i === -1 ? SCAN_SEVERITY_ORDER.length : i
+  }
+
+  return Object.entries(summary as Record<string, unknown>)
+    .map(([severity, count]) => ({ severity, count: Number(count) || 0 }))
+    .filter(entry => entry.count > 0)
+    .sort((a, b) => rank(a.severity) - rank(b.severity) || a.severity.localeCompare(b.severity))
+}
+
+/** Total findings across every severity. 0 means the scan came back clean. */
+export const scanFindingsTotal = (metadata?: Record<string, any> | null): number =>
+  scanFindingsRollup(metadata).reduce((sum, entry) => sum + entry.count, 0)
 
 /** True for a Spec 098 preflight activity record. */
 export const isPreflightActivity = (activity?: { type?: string } | null): boolean =>
@@ -361,9 +438,12 @@ interface ActivitySummaryCounts {
   total_count?: number
   /** Calls the user made — the population the Usage tab counts (F1, #1046). */
   call_count?: number
+  success_count?: number
   error_count?: number
   blocked_count?: number
   rejected_count?: number
+  /** Rows whose status is outside the tool-call vocabulary (F2, #1046). */
+  other_count?: number
 }
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
@@ -446,6 +526,249 @@ export const compactSummaryParts = (
   return parts
 }
 
+// --- status tiles: a partition, not a selection --------------------------------
+//
+// The expanded panel's stat row printed `Total 42 · Success 15 · Errors 4 ·
+// Blocked 0 · Rejected 0` — four buckets adding to 19 under a denominator of 42
+// (audit finding F2, #1046). The four are the tool-call status vocabulary, but
+// the activity log is wider than tool calls: a quarantine change stores its
+// ACTION in `status` ("tool_auto_approved"), a policy decision its verdict
+// ("allow"). Those rows were in the total and in no tile.
+//
+// The summary endpoint now returns the residual as `other_count`, and the tiles
+// render it. The row is therefore a PARTITION of the total by construction, and
+// statusBucketTiles is the single place that decides what the row contains — so
+// the assertion "the tiles sum to the total" is testable without a browser.
+
+/** The pseudo-status the "Other" tile filters by. Never a stored value. */
+export const OTHER_STATUS = 'other'
+
+/** The four statuses a tool call can end in. Anything else is OTHER_STATUS. */
+export const CALL_STATUSES = ['success', 'error', 'blocked', 'rejected'] as const
+
+/** True for a record whose status is outside the tool-call vocabulary. */
+export const isOtherStatus = (status?: string): boolean =>
+  !CALL_STATUSES.includes((status ?? '') as (typeof CALL_STATUSES)[number])
+
+/** One tile of the status row. */
+export interface StatusBucketTile {
+  /** Status this tile filters to — a real status, or OTHER_STATUS. */
+  status: string
+  label: string
+  count: number
+  tone: StatusTone
+  /** Hover text; the Other tile has to explain what it holds. */
+  title?: string
+}
+
+/**
+ * The status tiles, in display order, as a partition of `total_count`.
+ *
+ * The Other tile is omitted when it is zero — a zero bucket contributes nothing
+ * to the sum and an always-on "Other 0" is a line of scanning for no
+ * information. Every other tile is always present: they are the vocabulary, and
+ * a missing "Errors" tile reads as "errors are not tracked", not as zero.
+ */
+export const statusBucketTiles = (summary?: ActivitySummaryCounts | null): StatusBucketTile[] => {
+  if (!summary) return []
+
+  const tiles: StatusBucketTile[] = [
+    { status: 'success', label: 'Success', count: summary.success_count ?? 0, tone: 'muted' },
+    { status: 'error', label: 'Errors', count: summary.error_count ?? 0, tone: 'error' },
+    { status: 'blocked', label: 'Blocked', count: summary.blocked_count ?? 0, tone: 'warning' },
+    { status: 'rejected', label: 'Rejected', count: summary.rejected_count ?? 0, tone: 'neutral' },
+  ]
+
+  const other = summary.other_count ?? 0
+  if (other > 0) {
+    tiles.push({
+      status: OTHER_STATUS,
+      label: 'Other / internal',
+      count: other,
+      tone: 'neutral',
+      title:
+        'Rows whose outcome is not a tool-call status: quarantine approvals, ' +
+        'policy allow decisions and other bookkeeping. Counted here so the ' +
+        'tiles add up to the total above them.',
+    })
+  }
+
+  return tiles
+}
+
+/**
+ * What the tiles add up to, so a caller (and a test) can compare it against the
+ * denominator without re-deriving the bucket list.
+ */
+export const statusBucketSum = (summary?: ActivitySummaryCounts | null): number =>
+  statusBucketTiles(summary).reduce((sum, tile) => sum + tile.count, 0)
+
+// --- run grouping ------------------------------------------------------------
+//
+// Twelve consecutive `everything:echo` calls produced twelve rows, each
+// repeating the same three-line timestamp, the same reason and the same word
+// "Success" (audit finding F5, #1046). A real export was 1479 calls in 809
+// runs, with runs up to 100×. The table is SCANNED: a hundred identical rows
+// cost a hundred rows of attention and carry one row of information.
+//
+// Consecutive rows that agree on everything the collapsed row would print
+// collapse into a RUN. A run never mixes outcomes — status is part of the key —
+// so "echo ×12" can never hide the one call that failed, which is the only way
+// this compression could lie.
+
+/** Minimal record shape the grouping needs. */
+export interface ActivityRunFields {
+  id?: string
+  type?: string
+  server_name?: string
+  tool_name?: string
+  status?: string
+  timestamp?: string
+  duration_ms?: number
+  parent_id?: string
+  has_sensitive_data?: boolean
+  metadata?: Record<string, any> | null
+}
+
+/** A run of identical consecutive rows. `count === 1` for an ordinary row. */
+export interface ActivityRun<T extends ActivityRunFields> {
+  /** Stable v-for key: the lead row's id. */
+  key: string
+  /** The row the collapsed line renders: the first member in list order. */
+  lead: T
+  /** Every member, lead included, in list order. */
+  rows: T[]
+  count: number
+  /**
+   * True when members declared DIFFERENT intent reasons. The collapsed line
+   * shows the lead's reason, so it has to admit the others exist.
+   */
+  reasonsVary: boolean
+}
+
+/**
+ * The identity a run is keyed on. Everything the collapsed line would print,
+ * plus the two flags that must never be hidden by folding: the sensitive-data
+ * marker and the code_execution parent link. The intent REASON is deliberately
+ * absent — agents vary their wording call to call, and keying on it would stop
+ * the compression working on exactly the logs that need it most; the run
+ * reports the variation instead (see reasonsVary).
+ */
+const runIdentity = (a: ActivityRunFields): string =>
+  [
+    a.type ?? '',
+    a.server_name ?? '',
+    a.tool_name ?? '',
+    a.status ?? '',
+    a.parent_id ?? '',
+    a.has_sensitive_data ? '1' : '0',
+    // A preflight or config change says everything in metadata.action / verdict;
+    // two of them are only "the same row twice" if that text matches too.
+    activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),
+  ].join(' ')
+
+const intentReasonOf = (a: ActivityRunFields): string =>
+  String((a.metadata?.intent as ActivityIntent | undefined)?.reason ?? '')
+
+/**
+ * Fold consecutive identical rows into runs. Pure and order-preserving: run i
+ * holds the rows that were at that position in the input, so the caller can
+ * paginate runs and still render the underlying rows in order.
+ *
+ * `enabled: false` returns one run per row — the escape hatch for an operator
+ * who wants the raw log, and the behaviour whenever the table is sorted by
+ * something other than time (adjacency is only meaningful in time order; two
+ * rows next to each other in a duration sort were not "repeated").
+ */
+export const groupActivityRuns = <T extends ActivityRunFields>(
+  rows: T[],
+  enabled = true
+): ActivityRun<T>[] => {
+  const runs: ActivityRun<T>[] = []
+  let currentKey: string | null = null
+
+  for (const row of rows) {
+    const identity = enabled ? runIdentity(row) : null
+    const current = runs.length > 0 ? runs[runs.length - 1] : undefined
+
+    if (current && identity !== null && identity === currentKey) {
+      current.rows.push(row)
+      current.count++
+      if (!current.reasonsVary && intentReasonOf(row) !== intentReasonOf(current.lead)) {
+        current.reasonsVary = true
+      }
+      continue
+    }
+
+    currentKey = identity
+    runs.push({
+      // Ids are unique per record; fall back to the position so a record
+      // without one still keys a stable row.
+      key: row.id ?? `row-${runs.length}`,
+      lead: row,
+      rows: [row],
+      count: 1,
+      reasonsVary: false,
+    })
+  }
+
+  return runs
+}
+
+/** Inclusive duration span of a run, in ms. Null when no member timed itself. */
+export interface DurationRange {
+  min: number
+  max: number
+}
+
+export const runDurationRange = (rows: ActivityRunFields[]): DurationRange | null => {
+  let min: number | null = null
+  let max: number | null = null
+  for (const row of rows) {
+    const ms = row.duration_ms
+    if (ms === undefined || ms === null || !Number.isFinite(ms)) continue
+    if (min === null || ms < min) min = ms
+    if (max === null || ms > max) max = ms
+  }
+  if (min === null || max === null) return null
+  return { min, max }
+}
+
+/**
+ * How a run's Duration cell reads: one value when every member agreed, a range
+ * otherwise. An empty string means "nothing to show" — the caller renders its
+ * usual dash.
+ */
+export const formatRunDuration = (rows: ActivityRunFields[]): string => {
+  const range = runDurationRange(rows)
+  if (!range) return ''
+  if (range.min === range.max) return formatDuration(range.min)
+  return `${formatDuration(range.min)}–${formatDuration(range.max)}`
+}
+
+/**
+ * The time a run covers, e.g. "over 4m". Empty for a single row or an
+ * instantaneous run — "over 0s" is noise.
+ */
+export const formatRunSpan = (rows: ActivityRunFields[]): string => {
+  if (rows.length < 2) return ''
+  let earliest = Infinity
+  let latest = -Infinity
+  for (const row of rows) {
+    const t = row.timestamp ? new Date(row.timestamp).getTime() : NaN
+    if (Number.isNaN(t)) continue
+    if (t < earliest) earliest = t
+    if (t > latest) latest = t
+  }
+  if (!Number.isFinite(earliest) || !Number.isFinite(latest)) return ''
+
+  const diff = latest - earliest
+  if (diff < 1000) return ''
+  if (diff < 60_000) return `over ${Math.round(diff / 1000)}s`
+  if (diff < 3_600_000) return `over ${Math.round(diff / 60_000)}m`
+  return `over ${Math.round(diff / 3_600_000)}h`
+}
+
 /** Every filter the Activity Log can apply, in one plain object. */
 export interface ActivityFilterState {
   types?: string[]
@@ -520,7 +843,14 @@ export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[
     chips.push({ kind: 'server', key: 'server', label: `Server: ${state.server}` })
   }
   if (state.status) {
-    chips.push({ kind: 'status', key: 'status', label: `Status: ${state.status}` })
+    chips.push({
+      kind: 'status',
+      key: 'status',
+      label:
+        state.status === OTHER_STATUS
+          ? 'Status: other / internal'
+          : `Status: ${state.status}`,
+    })
   }
   if (state.authType) {
     chips.push({

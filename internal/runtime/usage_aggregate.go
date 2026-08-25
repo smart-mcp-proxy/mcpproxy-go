@@ -28,7 +28,16 @@ const usageMaxBuckets = 24 * 90
 // latencyBucketBoundsMs are the inclusive upper bounds (in ms) of the fixed
 // latency histogram buckets. A final overflow bucket captures anything slower
 // than the last bound, so there are len(bounds)+1 buckets total.
-var latencyBucketBoundsMs = []int64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
+//
+// The low end is fine-grained on purpose. A percentile read off a histogram is
+// the upper bound of the bucket it falls in, so the FIRST bound is the floor of
+// everything the table can ever print: with 10ms as the first bound, an
+// in-process stdio server answering in 3ms reported "p50 10 ms", "p95 10 ms" —
+// every row of the latency table read exactly 10 ms while the Activity Log
+// showed 3/4/5 ms for those same calls (audit finding F22, #1046). Local MCP
+// servers live almost entirely under 10ms, which is precisely where the old
+// layout had no resolution at all.
+var latencyBucketBoundsMs = []int64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
 
 func numLatencyBuckets() int { return len(latencyBucketBoundsMs) + 1 }
 
@@ -91,31 +100,40 @@ func (t *ToolUsage) ErrorRate() float64 {
 }
 
 // Percentile returns an approximate latency percentile (in ms) derived from the
-// fixed latency histogram. p is in [0,1]. The returned value is the upper bound
-// of the bucket in which the percentile falls (overflow bucket -> last bound).
-func (t *ToolUsage) Percentile(p float64) int64 {
+// fixed latency histogram. p is in [0,1].
+//
+// ms is the upper BOUND of the bucket the percentile falls in, never a measured
+// duration — the true value is somewhere at or below it. exceeds reports the one
+// case where that reading inverts: the overflow bucket has no upper bound, so
+// its ms is the last bound and the true value is ABOVE it. Callers must render
+// the two differently ("≤ 5 ms" vs "> 10 s"); printing the number bare is how a
+// bucketed estimate came to be read as a measurement (F22, #1046).
+//
+// An empty histogram returns (0, false): no calls, nothing to bound.
+func (t *ToolUsage) Percentile(p float64) (ms int64, exceeds bool) {
 	total := int64(0)
 	for _, c := range t.LatencyBuckets {
 		total += c
 	}
 	if total == 0 {
-		return 0
+		return 0, false
 	}
 	target := int64(float64(total) * p)
 	if target < 1 {
 		target = 1
 	}
+	last := latencyBucketBoundsMs[len(latencyBucketBoundsMs)-1]
 	cum := int64(0)
 	for i, c := range t.LatencyBuckets {
 		cum += c
 		if cum >= target {
 			if i < len(latencyBucketBoundsMs) {
-				return latencyBucketBoundsMs[i]
+				return latencyBucketBoundsMs[i], false
 			}
-			return latencyBucketBoundsMs[len(latencyBucketBoundsMs)-1]
+			return last, true
 		}
 	}
-	return latencyBucketBoundsMs[len(latencyBucketBoundsMs)-1]
+	return last, true
 }
 
 func (t *ToolUsage) clone() *ToolUsage {
@@ -146,14 +164,17 @@ type UsageAggregate struct {
 	AdmissionVersion int `json:"admission_version,omitempty"`
 }
 
-// usageAdmissionVersion identifies the CURRENT admission rule for the
-// aggregate. Bump it whenever Apply changes which records are counted (2:
-// internal tool calls and blocked policy decisions joined the timeline; 3:
-// management built-ins excluded again per GlanceSelection rule 1; 4: successful
-// code_execution wrappers excluded — their sub-calls are tool_call records that
-// count on their own), so pre-change snapshots are rebuilt instead of carried
-// forward with hours counted under the old rule.
-const usageAdmissionVersion = 4
+// usageAdmissionVersion identifies the CURRENT admission rule AND bucket layout
+// for the aggregate. Bump it whenever Apply changes which records are counted,
+// or whenever a persisted counter changes meaning (2: internal tool calls and
+// blocked policy decisions joined the timeline; 3: management built-ins excluded
+// again per GlanceSelection rule 1; 4: successful code_execution wrappers
+// excluded — their sub-calls are tool_call records that count on their own; 5:
+// latencyBucketBoundsMs gained sub-10ms resolution, so every persisted
+// LatencyBuckets index now means a different span), so pre-change snapshots are
+// rebuilt instead of carried forward with hours counted — or milliseconds
+// bucketed — under the old rule.
+const usageAdmissionVersion = 5
 
 func newUsageAggregate() *UsageAggregate {
 	return &UsageAggregate{

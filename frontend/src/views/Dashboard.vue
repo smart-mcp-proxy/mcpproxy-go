@@ -267,18 +267,29 @@
           <circle cx="58%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
         </svg>
 
-        <!-- Token savings badge (above hub) -->
+        <!--
+          Token savings badge (above hub). This is the product's headline claim
+          and it used to be a chip with no tooltip, no destination and no window
+          — so when it read the same before and after 16 tool calls, there was
+          nothing on screen to explain why (audit finding F23, #1046). It is a
+          PER-REQUEST structural estimate over the current tool catalog; it says
+          so, explains itself on hover, and opens the breakdown that derives it.
+        -->
         <div class="mb-6 z-10">
-          <div
+          <button
             v-if="tokenSavingsData && tokenSavingsData.saved_tokens_percentage > 0"
-            class="badge badge-lg gap-1 px-4 py-3 bg-primary/10 text-primary border-primary/30"
+            type="button"
+            data-test="dashboard-token-savings-chip"
+            class="badge badge-lg gap-1 px-4 py-3 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20 transition-colors cursor-pointer"
+            :title="tokensSavedExplainer"
+            @click="openTokenSavingsDetails"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
             </svg>
             <span class="text-lg font-bold">{{ tokenSavingsData.saved_tokens_percentage >= 99.995 ? '99.99' : tokenSavingsData.saved_tokens_percentage >= 10 ? tokenSavingsData.saved_tokens_percentage.toFixed(1) : tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
-            <span class="text-xs font-medium">tokens saved</span>
-          </div>
+            <span class="text-xs font-medium">smaller tool context per request</span>
+          </button>
         </div>
 
         <!-- Logo Hub -->
@@ -402,9 +413,14 @@
       </div>
     </div>
 
-    <!-- Token Savings Collapsible Detail -->
-    <div v-if="tokenSavingsData" class="collapse collapse-arrow bg-base-100 shadow-sm border border-base-300">
-      <input type="checkbox" />
+    <!-- Token Savings Collapsible Detail — where the headline chip lands. -->
+    <div
+      v-if="tokenSavingsData"
+      ref="tokenSavingsDetails"
+      data-test="dashboard-token-savings-details"
+      class="collapse collapse-arrow bg-base-100 shadow-sm border border-base-300"
+    >
+      <input type="checkbox" v-model="tokenDetailsOpen" />
       <div class="collapse-title font-medium flex items-center gap-3">
         <svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
@@ -417,8 +433,8 @@
           <!-- Token Savings Stats -->
           <div>
             <div class="grid grid-cols-3 gap-4">
-              <div>
-                <div class="text-sm opacity-60">Tokens Saved</div>
+              <div :title="tokensSavedExplainer">
+                <div class="text-sm opacity-60">Tokens Saved / request</div>
                 <div class="text-2xl font-bold text-success">{{ formatNumber(tokenSavingsData.saved_tokens) }}</div>
                 <div class="text-xs opacity-60">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
               </div>
@@ -477,7 +493,7 @@
 
 <script setup lang="ts">
 import { serverDetailPath } from '@/utils/serverRoute'
-import { computed, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
+import { computed, nextTick, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -754,10 +770,39 @@ const showFirstRunCta = computed(
   () => serversStore.loaded && serversStore.serverCount.total === 0
 )
 
+// --- Token savings: the headline claim, and the panel that derives it --------
+//
+// F23 (#1046). The figure is a STRUCTURAL estimate over the current tool
+// catalog, not a running total of savings realised so far — which is why it does
+// not move when calls are made. That was invisible: no tooltip, no window, no
+// drill-down. The chip now carries this text and opens the breakdown below.
+const tokensSavedExplainer =
+  'Estimated per-request saving: the tokens it would take to put every ' +
+  'upstream tool definition in your agent\'s context, minus what retrieve_tools ' +
+  'returns for one query. It is a property of your current tool catalog, so it ' +
+  'changes when you add, remove or reconnect servers — not with each call.'
+
+const tokenDetailsOpen = ref(false)
+const tokenSavingsDetails = ref<HTMLElement | null>(null)
+
+const openTokenSavingsDetails = () => {
+  tokenDetailsOpen.value = true
+  // Let the collapse expand before scrolling, or the target moves under us.
+  nextTick(() => {
+    tokenSavingsDetails.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+}
+
 // --- Disabled server count ---
-const disabledCount = computed(() => {
-  return serversStore.serverCount.total - serversStore.serverCount.connected - serversStore.serverCount.quarantined
-})
+//
+// Disabled and quarantined must be MUTUALLY EXCLUSIVE here (audit finding F27,
+// #1046): the rail shows both, and a server that is both was counted twice,
+// reading as two problems needing two decisions. The old formula
+// (total − connected − quarantined) was wrong in the other direction too — an
+// ENABLED server that simply cannot connect was reported as "disabled", which
+// hides the actual fault behind an administrative word. Ask the question
+// directly instead: switched off, and not already spoken for by quarantine.
+const disabledCount = computed(() => serversStore.serverCount.disabled)
 
 // --- Servers needing attention ---
 // Only show servers that have actionable problems, not transient states like "Connecting..."
