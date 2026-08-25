@@ -141,7 +141,13 @@ deferral legend, so the operator's text still leads and the legend is additive.
 The legend is a package constant so the new direct built-in golden can pin its
 exact bytes, and the golden fixture uses the empty-`instructions` default so the
 pinned string is deterministic. A test asserts a custom `instructions` value
-still appears, legend still appended.
+still appears, legend still appended. Caveat, stated rather than implied:
+instructions are constructor-time state on both server instances, so a change to
+the `instructions` key still needs a restart — this feature does not make it
+hot-reloadable and does not regress it either (the default server behaves the
+same today). Only `direct_tool_response_mode` is hot-reloadable (FR-014), and the
+legend is phrased to stay true across a flip precisely so no instructions rebuild
+is required.
 
 **Alternatives considered**: describe_tool description (rejected above); synthetic
 pseudo-tool (forbidden by FR-007); per-entry legend repetition (token-multiplied

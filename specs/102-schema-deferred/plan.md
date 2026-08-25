@@ -45,7 +45,11 @@ Technical approach, grounded in the code:
   tool is a hard marshal error, not a silent override).
 - **describe_tool on the direct surface** (FR-009/FR-011): registration is
   composed into direct tool-set *construction* (`buildDirectModeTools` appends it)
-  so every `SetTools` refresh keeps it (FR-018). One `buildDescribeToolTool`
+  so every `SetTools` refresh keeps it (FR-018) — including the
+  `DiscoverTools`-error path, which returns `nil` early today
+  (`mcp_routing.go:81-85`) and would otherwise drop the built-in on the first
+  upstream hiccup. The built-in is appended on **every** return path, and the
+  direct built-in golden's zero-upstream fixture is exactly that shape. One `buildDescribeToolTool`
   builder still feeds all surfaces — its **four** retrieve_tools-specific strings
   (tool description, both parameter descriptions, and the two shared remediation
   constants) are rewritten surface-neutral, the one-time enumerated golden regen
