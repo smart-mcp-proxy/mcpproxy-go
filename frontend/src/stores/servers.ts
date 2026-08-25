@@ -9,6 +9,14 @@ export const useServersStore = defineStore('servers', () => {
   const servers = ref<Server[]>([])
   const loading = ref<LoadingState>({ loading: false, error: null })
 
+  // True once a server list has been fetched successfully at least once — the
+  // only reliable way to tell "no servers configured" from "we don't know yet".
+  // `servers` starts empty, and `loading.error` cannot stand in for this: it is
+  // shared state that any caller (including silent background refreshes and
+  // other components fetching concurrently) can write, and a success never
+  // clears it.
+  const loaded = ref(false)
+
   // Computed
   const serverCount = computed(() => ({
     total: servers.value.length,
@@ -98,6 +106,7 @@ export const useServersStore = defineStore('servers', () => {
       if (response.success && response.data) {
         // Use smart merge to preserve object references and avoid unnecessary re-renders
         servers.value = mergeServers(servers.value, response.data.servers)
+        loaded.value = true
       } else {
         loading.value.error = response.error || 'Failed to fetch servers'
       }
@@ -392,6 +401,7 @@ export const useServersStore = defineStore('servers', () => {
     // State
     servers,
     loading,
+    loaded,
 
     // Computed
     serverCount,

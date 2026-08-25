@@ -268,14 +268,32 @@ describe('analytics dashboard as the default landing page', () => {
     expect(serversSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the CTA available after a later background refresh fails', async () => {
-    // The store's shared `loading.error` is written by silent refreshes and is
-    // never cleared on success, so the gate must not read it live.
+  it('keeps the CTA available when an unrelated fetch reports an error', async () => {
+    // `loading.error` is shared: App.vue fetches concurrently on mount and
+    // silent background refreshes write the field too (and never clear it on
+    // success). A failure that is not ours must not suppress the CTA.
     const { wrapper } = await mountDashboard('/')
     expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(true)
 
     const store = useServersStore()
     store.loading.error = 'transient background failure'
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(true)
+  })
+
+  it('shows the CTA once a later refresh succeeds after a failed initial fetch', async () => {
+    serversSpy.mockResolvedValue({ success: false, error: 'boom' })
+    const { wrapper } = await mountDashboard('/')
+
+    // Initial fetch failed: no CTA (we do not know the server count), and the
+    // usage panel is shown rather than an endless spinner.
+    expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="dashboard-usage-pending"]').exists()).toBe(false)
+
+    // A background refresh then succeeds and confirms there are no servers.
+    serversSpy.mockResolvedValue({ success: true, data: { servers: [] } })
+    await useServersStore().fetchServers(true)
     await flushPromises()
 
     expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(true)

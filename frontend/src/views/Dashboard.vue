@@ -75,7 +75,7 @@
            "no usage data yet" card on a fresh install, only to be replaced by
            the CTA above a moment later. Both requests are issued together in
            onMounted, so this costs no extra round-trip. -->
-      <div v-else-if="!serversLoaded" class="flex justify-center py-16" data-test="dashboard-usage-pending">
+      <div v-else-if="!serversFetchSettled" class="flex justify-center py-16" data-test="dashboard-usage-pending">
         <span class="loading loading-spinner loading-lg"></span>
       </div>
       <Suspense v-else-if="usageEverActive">
@@ -732,15 +732,21 @@ const loadTokenSavings = async () => {
 }
 
 // --- First run (no servers configured) ---
-// Gated on a completed fetch so the CTA never flashes before the server list
-// has arrived. `fetchServers` swallows transport failures (it records them on
-// `loading.error` and leaves `servers` untouched), so a failed request would
-// otherwise look identical to "zero servers configured" and tell a user with a
-// full server list that they have none — hence the explicit error check.
-const serversLoaded = ref(false)
-const serversLoadFailed = ref(false)
+// Two different questions, deliberately answered by two different flags:
+//
+// `serversFetchSettled` — has our own initial request finished, successfully or
+// not? It gates the chart mount below, so a failed fetch falls through to the
+// usage panel rather than spinning forever.
+//
+// `serversStore.loaded` — has a server list ever arrived successfully? Only
+// that justifies telling the user they have no servers. It cannot be inferred
+// from `loading.error`: that field is shared, other components (App.vue) and
+// silent background refreshes write it concurrently, and a success never clears
+// it — so an unrelated failure would suppress the CTA, and a later successful
+// refresh could never bring it back.
+const serversFetchSettled = ref(false)
 const showFirstRunCta = computed(
-  () => serversLoaded.value && !serversLoadFailed.value && serversStore.serverCount.total === 0
+  () => serversStore.loaded && serversStore.serverCount.total === 0
 )
 
 // --- Disabled server count ---
@@ -959,12 +965,7 @@ onMounted(() => {
   // Populate security scanner totals for the Security Scan chip (F-12).
   void refreshSecurityScannerStatus()
   serversStore.fetchServers().then(() => {
-    // Snapshot the outcome of *this* fetch rather than reading the store's
-    // shared `loading.error` live: silent background refreshes write that field
-    // too and never clear it on success, so a live read would let one transient
-    // failure suppress the first-run CTA for the rest of the session.
-    serversLoadFailed.value = Boolean(serversStore.loading.error)
-    serversLoaded.value = true
+    serversFetchSettled.value = true
     loadPendingTools()
   })
 
