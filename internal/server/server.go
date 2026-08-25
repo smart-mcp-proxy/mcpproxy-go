@@ -563,6 +563,14 @@ func (s *Server) listenForRoutingModeRefresh() {
 			// prompts in its own case; config.reloaded fires for a config-only edit.)
 			if s.mcpProxy != nil {
 				s.mcpProxy.RefreshPrompts()
+				// UX audit F16: enable_code_execution is hot-reloadable. The
+				// routing-mode tool surfaces build their code_execution entry
+				// (live tool or "disabled" stub) from the live config snapshot,
+				// but they build it ONCE at init — so without this the /mcp
+				// surface kept serving the stale stub, which refuses every call,
+				// until a restart. Same shape as RefreshPrompts above: cheap,
+				// idempotent, static construction on this one listener goroutine.
+				s.mcpProxy.RefreshCodeExecutionAvailability()
 			}
 		case runtime.EventTypeUpstreamPromptsChanged:
 			// F13: an upstream added/removed a prompt at runtime (debounced
