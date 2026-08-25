@@ -772,6 +772,18 @@ actor APIClient {
 
     // MARK: - Tool Search
 
+    /// Percent-encode one query-string VALUE.
+    ///
+    /// `.urlQueryAllowed` is the wrong set for a value: it deliberately leaves
+    /// `&`, `=`, `+` and `?` intact, so a tool search for "a&limit=1" would
+    /// silently become two parameters, and a `+` in a session id would decode
+    /// as a space. Only unreserved characters survive here.
+    static func escapeQueryValue(_ value: String) -> String {
+        let unreserved = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
+    }
+
     /// BM25 search across every upstream tool via `GET /api/v1/index/search`.
     ///
     /// This used to call `GET /api/v1/tools?q=…`, which has no `q` parameter:
@@ -782,7 +794,7 @@ actor APIClient {
     /// Note the REST contract (#871): `tool.name` here is the BARE tool name
     /// with `server_name` alongside — callers assemble `server:tool` themselves.
     func searchTools(query: String, limit: Int = 50) async throws -> [SearchResult] {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let encoded = Self.escapeQueryValue(query)
         let data = try await fetchRaw(path: "/api/v1/index/search?q=\(encoded)&limit=\(limit)")
         let decoder = JSONDecoder()
         if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),

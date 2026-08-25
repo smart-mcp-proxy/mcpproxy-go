@@ -307,6 +307,18 @@ final class AppState: ObservableObject {
         servers.filter { $0.hasAttentionDiagnostic && !$0.isOAuthLoginRequired }
     }
 
+    /// How many servers carry the severity the tray icon is currently badging.
+    ///
+    /// Must agree with `worstDiagnosticSeverity` exactly, or the status item
+    /// says "4 server errors" over a badge that counted three: that property
+    /// looks only at ENABLED servers, while `serversWithDiagnostic` includes
+    /// the disabled ones and both severities.
+    func diagnosticCount(severity: String) -> Int {
+        servers.filter {
+            $0.enabled && !$0.isOAuthLoginRequired && $0.diagnostic?.severity == severity
+        }.count
+    }
+
     /// Highest-severity diagnostic across enabled servers. Returns nil when
     /// no diagnostics are attached. Used by TrayIcon to colour the badge.
     ///

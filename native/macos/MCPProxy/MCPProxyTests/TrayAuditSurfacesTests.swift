@@ -115,6 +115,19 @@ final class TrayAuditSurfacesTests: XCTestCase {
                        "a leading colon is not an identity")
     }
 
+    // MARK: - Query encoding (cross-model review, round 1)
+
+    /// `.urlQueryAllowed` — the obvious choice, and the one this code used —
+    /// deliberately permits `&`, `=`, `+` and `?`, so a search for
+    /// "a&limit=1" would have become a second parameter.
+    func testQueryValuesEscapeParameterDelimiters() {
+        XCTAssertEqual(APIClient.escapeQueryValue("a&limit=1"), "a%26limit%3D1")
+        XCTAssertEqual(APIClient.escapeQueryValue("git hub"), "git%20hub")
+        XCTAssertEqual(APIClient.escapeQueryValue("a+b"), "a%2Bb", "a raw + decodes as a space")
+        XCTAssertEqual(APIClient.escapeQueryValue("sess-1_a.b~c"), "sess-1_a.b~c",
+                       "unreserved characters must survive untouched")
+    }
+
     // MARK: - F10 · The glance hand-off has its own channel
 
     func testTheActivityFilterNotificationIsItsOwnChannel() {

@@ -20,8 +20,15 @@ So the gate now checks, for every field:
   1. KEY COVERAGE -- the two catalogues describe the same set of config keys
      (minus the documented exclusions below). This is what stops the next
      web-first field from drifting.
-  2. ATTRIBUTE PARITY -- placeholder / optional / step / min / max agree
-     wherever both sides declare the field.
+  2. ATTRIBUTE PARITY -- control / placeholder / optional / step / min / max /
+     restart / select options agree wherever both sides declare the field. A
+     control that drifts (number -> toggle) or a select option that disappears
+     changes what the tray can SET while leaving key coverage intact.
+
+Both parsers strip comments first: a commented-out ConfigField would otherwise
+be counted as editable, which is precisely the drift this gate exists to catch.
+A key declared twice on either side is a hard failure -- one definition would
+silently win.
 
 It is intentionally line-oriented and conservative. If either catalogue's
 format changes so that keys stop being parseable, the script FAILS rather than
@@ -50,6 +57,72 @@ NATIVE_ONLY_KEYS: set[str] = set()
 MIN_FIELDS = 40
 
 
+def strip_comments(text: str, block_comments: bool) -> str:
+    """Blank out `//` (and optionally `/* */`) comments, string-aware.
+
+    Without this the parsers happily read a COMMENTED-OUT field and report it
+    as editable — a false negative in a gate whose whole job is to notice a
+    field going missing. Characters are replaced with spaces rather than
+    deleted so no line/offset shifts."""
+    out = list(text)
+    i, n = 0, len(text)
+    quote: str | None = None
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in "\"'`":
+            quote = c
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if block_comments and c == "/" and i + 1 < n and text[i + 1] == "*":
+            while i < n and not (text[i] == "*" and i + 1 < n and text[i + 1] == "/"):
+                if text[i] != "\n":
+                    out[i] = " "
+                i += 1
+            for _ in range(2):
+                if i < n:
+                    out[i] = " "
+                    i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _ts_options(blob: str) -> list[str] | None:
+    """The selectable VALUES of a select/multiselect, in order. Dropping one
+    silently narrows what the tray can set, which no key-coverage check sees."""
+    m = re.search(r"options:\s*\[(.*?)\]", blob, re.S)
+    if not m:
+        return None
+    return re.findall(r"value:\s*['\"]([^'\"]+)['\"]", m.group(1)) or \
+        re.findall(r"['\"]([^'\"]+)['\"]", m.group(1))
+
+
+def _swift_options(block: str) -> list[str] | None:
+    """Swift writes options either as explicit ConfigOption(value:label:) pairs
+    or as `["a","b"].map { ConfigOption(value: $0, label: $0) }`."""
+    m = re.search(r"options:\s*\[(.*?)\]", block, re.S)
+    if not m:
+        return None
+    inner = m.group(1)
+    explicit = re.findall(r'value:\s*"([^"]+)"', inner)
+    if explicit:
+        return explicit
+    return re.findall(r'"([^"]+)"', inner)
+
+
 def _num(raw: str | None) -> float | None:
     if raw is None:
         return None
@@ -66,8 +139,11 @@ def parse_ts(text: str) -> dict[str, dict]:
     both start with a `key:` line, so the scan is anchored there and reads
     forward to the end of that object (tracked by brace depth)."""
     out: dict[str, dict] = {}
+    text = strip_comments(text, block_comments=True)
     for m in re.finditer(r"\bkey:\s*['\"]([^'\"]+)['\"]", text):
         key = m.group(1)
+        if key in out:
+            sys.exit(f"[parity] TS declares {key!r} twice — one definition silently wins")
         # The field is the object literal containing this key: walk back to the
         # nearest `{` and forward until the braces balance.
         open_idx = text.rfind("{", 0, m.start())
@@ -94,6 +170,8 @@ def parse_ts(text: str) -> dict[str, dict]:
             "step": _num(m2.group(1)) if (m2 := re.search(r"\bstep:\s*([\d.]+)", blob)) else None,
             "min": _num(m3.group(1)) if (m3 := re.search(r"\bmin:\s*(-?[\d.]+)", blob)) else None,
             "max": _num(m4.group(1)) if (m4 := re.search(r"\bmax:\s*(-?[\d.]+)", blob)) else None,
+            "restart": bool(re.search(r"\brestart:\s*true", blob)),
+            "options": _ts_options(blob),
         }
     return out
 
@@ -159,6 +237,7 @@ def _swift_placeholder(block: str) -> str | None:
 def parse_swift(text: str) -> dict[str, dict]:
     """Extract {key: attrs} for every ConfigField in SettingsCatalog.swift."""
     out: dict[str, dict] = {}
+    text = strip_comments(text, block_comments=True)
     for block in _swift_configfield_blocks(text):
         m = re.search(r'key:\s*"([^"]+)"', block)
         if not m:
@@ -169,6 +248,8 @@ def parse_swift(text: str) -> dict[str, dict]:
                 continue
             sys.exit(f"[parity] Swift ConfigField with no parseable key:\n  {block.strip()[:120]}")
         key = m.group(1)
+        if key in out:
+            sys.exit(f"[parity] SettingsCatalog declares {key!r} twice — one definition silently wins")
         opt = re.search(r"optional:\s*(true|false)", block)
         control = re.search(r"control:\s*\.(\w+)", block)
         out[key] = {
@@ -178,6 +259,8 @@ def parse_swift(text: str) -> dict[str, dict]:
             "step": _num(m2.group(1)) if (m2 := re.search(r"\bstep:\s*([\d.]+)", block)) else None,
             "min": _num(m3.group(1)) if (m3 := re.search(r"\bmin:\s*(-?[\d.]+)", block)) else None,
             "max": _num(m4.group(1)) if (m4 := re.search(r"\bmax:\s*(-?[\d.]+)", block)) else None,
+            "restart": bool(re.search(r"\brestart:\s*true", block)),
+            "options": _swift_options(block),
         }
     return out
 
@@ -213,7 +296,7 @@ def main() -> int:
 
     for key in sorted(comparable_web & comparable_native):
         w, n = web[key], native[key]
-        for attr in ("placeholder", "optional", "step", "min", "max"):
+        for attr in ("control", "placeholder", "optional", "step", "min", "max", "restart", "options"):
             if w[attr] != n[attr]:
                 errors.append(f"{key}: {attr} mismatch web={w[attr]!r} native={n[attr]!r}")
         if w["control"] == "duration":

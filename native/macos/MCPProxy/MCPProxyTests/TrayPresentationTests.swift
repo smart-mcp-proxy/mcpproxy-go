@@ -65,6 +65,40 @@ final class TrayPresentationTests: XCTestCase {
         XCTAssertFalse(label.contains("warnings"))
     }
 
+    /// The spoken count must be of the severity being badged, over the same
+    /// enabled, non-OAuth set `worstDiagnosticSeverity` uses — otherwise the
+    /// status item says "4 server errors" over a badge that counted three
+    /// (cross-model review, round 1).
+    @MainActor
+    func testTheSpokenCountMatchesTheBadgedSeverity() {
+        let state = AppState()
+        state.servers = [
+            Self.diagnosingServer(name: "a", enabled: true, severity: "error"),
+            Self.diagnosingServer(name: "b", enabled: true, severity: "error"),
+            Self.diagnosingServer(name: "c", enabled: true, severity: "warn"),
+            Self.diagnosingServer(name: "d", enabled: false, severity: "error"),
+        ]
+        XCTAssertEqual(state.worstDiagnosticSeverity, "error")
+        XCTAssertEqual(state.diagnosticCount(severity: "error"), 2,
+                       "the disabled server is not part of the badge")
+        XCTAssertEqual(state.diagnosticCount(severity: "warn"), 1)
+        XCTAssertEqual(state.serversWithDiagnostic.count, 4,
+                       "the old input counted every diagnostic, enabled or not")
+    }
+
+    private static func diagnosingServer(name: String, enabled: Bool, severity: String) -> ServerStatus {
+        let json = """
+        {
+            "id": "\(name)", "name": "\(name)", "protocol": "http",
+            "enabled": \(enabled), "connected": false, "quarantined": false, "tool_count": 0,
+            "error_code": "MCPX_TEST",
+            "diagnostic": {"code": "MCPX_TEST", "severity": "\(severity)", "summary": "boom"}
+        }
+        """.data(using: .utf8)!
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ServerStatus.self, from: json)
+    }
+
     func testAStoppedCoreIsNamedNotJustGlyphed() {
         let label = TrayStatusIcon.accessibilityLabel(for: .stopped, summary: "Stopped", attentionCount: 0)
         XCTAssertTrue(label.contains("core stopped"), "got: \(label)")

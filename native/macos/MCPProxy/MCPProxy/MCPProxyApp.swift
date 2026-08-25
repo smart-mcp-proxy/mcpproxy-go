@@ -930,10 +930,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             hasCoreError: hasError,
             worstDiagnosticSeverity: appState.worstDiagnosticSeverity
         )
+        // The count must be of the severity being badged, over the same
+        // (enabled, non-OAuth) set `worstDiagnosticSeverity` considers.
+        let badgedCount: Int
+        if case .severity(let severity) = badge {
+            badgedCount = appState.diagnosticCount(severity: severity.rawValue)
+        } else {
+            badgedCount = 0
+        }
         let label = TrayStatusIcon.accessibilityLabel(
             for: badge,
             summary: appState.statusSummary,
-            attentionCount: appState.serversWithDiagnostic.count
+            attentionCount: badgedCount
         )
 
         // Always use template icon (pure black, adapts to light/dark menu bar)

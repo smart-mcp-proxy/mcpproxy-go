@@ -388,8 +388,12 @@ func configSet(_ obj: inout [String: Any], _ path: String, _ value: Any?) {
 /// stored verbatim. This keeps a blank optional field from being sent as ""
 /// (which the backend can't parse as a duration) and from reading as dirty
 /// against an absent key.
+/// Whitespace here means newlines too: the textarea (`instructions`) shares
+/// this binding, and a box holding nothing but a stray newline must read as
+/// "unset" — otherwise the user thinks they cleared it back to the default and
+/// silently saved a blank line as their custom instructions.
 func optionalScalarStored(_ s: String) -> Any? {
-    s.trimmingCharacters(in: .whitespaces).isEmpty ? nil : s
+    s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : s
 }
 
 /// Assembles a nested object containing ONLY the given dot-path keys, read from
