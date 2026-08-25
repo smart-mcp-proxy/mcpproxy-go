@@ -98,11 +98,25 @@ type ActivitySummaryResponse struct {
 	// they reached an upstream (spec 093). Counted separately from errors: it is
 	// proxy backpressure, not an upstream fault, and it is the signal an
 	// operator right-sizes max_concurrent_requests against.
-	RejectedCount int                 `json:"rejected_count"`
-	TopServers    []ActivityTopServer `json:"top_servers,omitempty"` // Top servers by activity count
-	TopTools      []ActivityTopTool   `json:"top_tools,omitempty"`   // Top tools by activity count
-	StartTime     string              `json:"start_time"`            // Start of the period (RFC3339)
-	EndTime       string              `json:"end_time"`              // End of the period (RFC3339)
+	RejectedCount int `json:"rejected_count"`
+	// CallCount is how many of those records are CALLS THE USER MADE, as
+	// defined once in storage.CountsAsCall and shared with the usage aggregate
+	// behind the Usage tab (audit finding F1, #1046). TotalCount answers "how
+	// many rows does the Activity Log have"; CallCount answers "how many calls
+	// were there". They are different questions — quarantine auto-approvals,
+	// system start, security scans and management chatter are events, not calls
+	// — and printing either one under the other's label is how the same instance
+	// came to report 51 calls on one screen and 19 on another.
+	CallCount int `json:"call_count"`
+	// CallErrorCount is the failures within CallCount, so an error RATE computed
+	// from this response has one denominator. It is not ErrorCount: a policy
+	// block is a failed call but carries status "blocked", and a shed call is an
+	// error in neither sense because it never ran.
+	CallErrorCount int                 `json:"call_error_count"`
+	TopServers     []ActivityTopServer `json:"top_servers,omitempty"` // Top servers by activity count
+	TopTools       []ActivityTopTool   `json:"top_tools,omitempty"`   // Top tools by activity count
+	StartTime      string              `json:"start_time"`            // Start of the period (RFC3339)
+	EndTime        string              `json:"end_time"`              // End of the period (RFC3339)
 }
 
 // ActivityTopServer represents a server's activity count in the summary

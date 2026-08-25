@@ -30,6 +30,38 @@ export function formatLatency(ms: number | null | undefined): string {
   return `${Math.round(ms)} ms`
 }
 
+/** The window's headline counts, as the Usage tiles print them. */
+export interface UsageHeadline {
+  calls: number
+  errors: number
+  /** Percentage, one decimal, as a string — "0.0" when the window is empty. */
+  errorRate: string
+}
+
+/**
+ * Headline counts for the selected window.
+ *
+ * These come from the response, not from summing `tools`. Summing `tools`
+ * client-side was the Usage half of audit finding F1 (#1046): that list is
+ * lifetime-cumulative (the window only filters which tools appear), counts
+ * upstream tools only (so mcpproxy's own retrieve_tools and describe_tool calls
+ * vanished), and is truncated to top-N (so a high-cardinality log silently lost
+ * the tail). The result was a "Tool calls" tile that disagreed with the
+ * "Activity over time" chart printed directly beneath it AND with the Activity
+ * Log. `total_calls` / `total_errors` are the sum of that same chart.
+ */
+export function usageHeadline(
+  data?: { total_calls?: number; total_errors?: number } | null
+): UsageHeadline {
+  const calls = data?.total_calls ?? 0
+  const errors = data?.total_errors ?? 0
+  return {
+    calls,
+    errors,
+    errorRate: calls > 0 ? ((errors / calls) * 100).toFixed(1) : '0.0',
+  }
+}
+
 /** A short, readable label for a (server, tool) pair. */
 export function toolLabel(server: string, tool: string): string {
   return `${server}:${tool}`

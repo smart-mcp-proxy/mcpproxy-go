@@ -49,6 +49,7 @@
             <template v-for="(part, idx) in summaryParts" :key="part.key">
               <span v-if="idx > 0" class="text-base-content/25" aria-hidden="true">·</span>
               <button
+                v-if="part.filterable"
                 type="button"
                 :data-test="`activity-compact-${part.key}`"
                 :class="[
@@ -61,6 +62,15 @@
               >
                 {{ part.label }}
               </button>
+              <!-- No status filters to "calls", so this one only reports. -->
+              <span
+                v-else
+                :data-test="`activity-compact-${part.key}`"
+                :class="['text-sm', summaryToneClass(part.tone)]"
+                title="Calls the user made in the last 24h — the same count the Usage tab shows. The rest of the rows are events: security scans, quarantine changes, system start."
+              >
+                {{ part.label }}
+              </span>
             </template>
           </div>
 
@@ -146,8 +156,14 @@
         :aria-pressed="filterStatus === ''"
         @click="filterStatus = ''"
       >
-        <div class="stat-title">Total (24h)</div>
+        <!--
+          Rows in the window, not calls: the status tiles beside it are a split
+          of this, and a security scan or a quarantine auto-approval is one of
+          these and not one of those (F1/F24, #1046).
+        -->
+        <div class="stat-title">Events (24h)</div>
         <div class="stat-value text-2xl">{{ summary.total_count }}</div>
+        <div class="stat-desc">{{ summary.call_count }} calls</div>
       </button>
       <button
         type="button"

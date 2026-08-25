@@ -399,6 +399,18 @@ type UsageAggregateResponse struct {
 	Tools                 []UsageToolStat   `json:"tools"`
 	Other                 *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
 	Timeline              []UsageTimeBucket `json:"timeline"`
+	// TotalCalls and TotalErrors are the headline counts for the window: the sum
+	// of the timeline this same response carries, so the tiles and the histogram
+	// under them cannot disagree. They are NOT the sum of Tools — that list is
+	// lifetime-cumulative, upstream-only and truncated to top-N, and summing it
+	// client-side is what made the Usage tab print a third number for the same
+	// 24 hours (audit finding F1, #1046). The population is
+	// storage.CountsAsCall, shared with ActivitySummaryResponse.CallCount.
+	//
+	// Window granularity is the timeline's: whole hour buckets, so the span is
+	// the requested window rounded up to a bucket edge.
+	TotalCalls  int64 `json:"total_calls"`
+	TotalErrors int64 `json:"total_errors"`
 }
 
 // UsageToolStat is the per-(server,tool) rollup row in UsageAggregateResponse.

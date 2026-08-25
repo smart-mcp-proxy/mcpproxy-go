@@ -545,6 +545,12 @@ export interface UsageAggregateResponse {
   tools: UsageToolStat[]
   other?: UsageOtherBucket | null   // present only when list truncated to top-N
   timeline: UsageTimeBucket[]
+  // Headline counts for the window, computed server-side as the sum of the
+  // timeline above. NOT a sum of `tools`: that list is lifetime-cumulative,
+  // upstream-only and truncated to top-N. Same population as
+  // ActivitySummaryResponse.call_count (audit finding F1, #1046).
+  total_calls: number
+  total_errors: number
 }
 
 export type UsageWindow = '24h' | '7d' | 'all'
@@ -807,6 +813,14 @@ export interface ActivitySummaryResponse {
   error_count: number
   blocked_count: number
   rejected_count: number
+  // total_count is how many ROWS the log has in the period; call_count is how
+  // many of them are calls the user made (the rest — system starts, security
+  // scans, quarantine auto-approvals, management chatter — are events). The
+  // Usage tab counts the second population, so the header must label the two
+  // apart or the same instance reports different totals on two screens
+  // (audit finding F1/F24, #1046).
+  call_count: number
+  call_error_count: number
   top_servers?: ActivityTopServer[]
   top_tools?: ActivityTopTool[]
   start_time: string
