@@ -34,6 +34,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -274,6 +275,12 @@ type Server struct {
 	connectService     *connect.Service   // Client connect/disconnect operations
 	securityController SecurityController // Security scanner operations (Spec 039)
 
+	// sensitiveMasker masks detected secrets out of activity payloads before
+	// they are serialised (see maskActivityPayloads). nil when sensitive-data
+	// detection is disabled — in which case nothing is ever flagged either, so
+	// there is nothing to mask.
+	sensitiveMasker *security.Detector
+
 	// patchConfigMu serializes PATCH /api/v1/config's read-merge-apply
 	// sequence. The handler reads the live config, deep-merges the client's
 	// keys, then applies the FULL merged snapshot — two concurrent PATCHes
@@ -407,6 +414,14 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 // SetConnectService configures the client connect/disconnect service.
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
+}
+
+// SetSensitiveMasker configures the detector used to mask secrets out of
+// activity payloads on their way to a client. Pass nil (or never call this) to
+// serve payloads unmasked, which is what happens when sensitive-data detection
+// is off and no record is ever flagged.
+func (s *Server) SetSensitiveMasker(detector *security.Detector) {
+	s.sensitiveMasker = detector
 }
 
 // Router returns the underlying chi.Mux for external route registration.

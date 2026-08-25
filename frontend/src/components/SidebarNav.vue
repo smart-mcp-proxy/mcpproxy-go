@@ -633,7 +633,8 @@ const teamsUserMenu = [
   { name: 'My Activity', path: '/my/activity' },
   { name: 'Agent Tokens', path: '/my/tokens' },
   { name: 'Diagnostics', path: '/my/diagnostics' },
-  { name: 'Search', path: '/search' },
+  // Tools is the canonical search surface since /search folded into it (F20).
+  { name: 'Tools', path: '/tools' },
 ]
 
 const teamsAdminMenu = [

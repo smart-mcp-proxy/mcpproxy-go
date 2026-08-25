@@ -21,10 +21,12 @@
               @keydown.enter="handleSearch"
             />
           </div>
+          <!-- Always enabled: greyed out next to an empty box read as broken
+               (audit F20/F32). With nothing typed it simply opens Tools. -->
           <button
             @click="handleSearch"
             class="btn btn-primary"
-            :disabled="!searchQuery.trim()"
+            data-test="header-search-button"
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -67,8 +69,14 @@
           <span class="text-xs opacity-60">Tools</span>
         </div>
 
-        <!-- Routing Mode -->
-        <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
+        <!-- Routing Mode. The label alone is jargon (audit F31), so the badge
+             carries what the mode actually does to a connecting agent. -->
+        <div
+          class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm cursor-help"
+          :title="routingMode.description"
+          :aria-label="`Routing mode: ${routingMode.description}`"
+          data-test="routing-mode-badge"
+        >
           <span class="text-xs opacity-60">Mode:</span>
           <span class="font-medium">{{ routingModeLabel }}</span>
         </div>
@@ -141,6 +149,7 @@ import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
 import AddServerModal from './AddServerModal.vue'
 import ProfileSwitcher from './ProfileSwitcher.vue'
+import { routingModeMeta } from '@/utils/routingMode'
 
 const router = useRouter()
 const systemStore = useSystemStore()
@@ -149,17 +158,8 @@ const authStore = useAuthStore()
 
 const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')
 
-const routingModeLabel = computed(() => {
-  const mode = systemStore.routingMode
-  switch (mode) {
-    case 'direct':
-      return 'Direct'
-    case 'code_execution':
-      return 'Code Exec'
-    default:
-      return 'Retrieve'
-  }
-})
+const routingMode = computed(() => routingModeMeta(systemStore.routingMode))
+const routingModeLabel = computed(() => routingMode.value.label)
 
 const searchQuery = ref('')
 const showAddServerModal = ref(false)
@@ -222,10 +222,12 @@ async function copyEndpoint(ep: McpEndpoint) {
   }
 }
 
+// One canonical search surface (audit F20): the header box hands its query to
+// the Tools page instead of the retired /search view. An empty box is not an
+// error — it opens Tools unfiltered rather than leaving the button dead.
 function handleSearch() {
-  if (searchQuery.value.trim()) {
-    router.push({ path: '/search', query: { q: searchQuery.value } })
-  }
+  const q = searchQuery.value.trim()
+  router.push(q ? { path: '/tools', query: { q } } : { path: '/tools' })
 }
 
 function handleServerAdded() {

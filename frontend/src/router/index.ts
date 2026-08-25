@@ -45,13 +45,17 @@ const router = createRouter({
         title: 'Repositories',
       },
     },
+    // `/search` used to be a third, sidebar-less search surface duplicating the
+    // header box and the Tools page (audit F20). Tools is the canonical one —
+    // it is in the sidebar, it lists what it searches, and it can act on the
+    // results — so the orphan route now folds into it, carrying `?q=` across so
+    // old links and bookmarks still land on their query.
     {
       path: '/search',
-      name: 'search',
-      component: () => import('@/views/Search.vue'),
-      meta: {
-        title: 'Search',
-      },
+      redirect: (to) => ({
+        path: '/tools',
+        query: typeof to.query.q === 'string' && to.query.q ? { q: to.query.q } : {},
+      }),
     },
     {
       path: '/settings',

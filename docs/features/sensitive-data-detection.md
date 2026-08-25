@@ -185,8 +185,27 @@ When sensitive data is detected, it is recorded in the activity log metadata:
 ```
 
 :::caution Redaction
-Detected sensitive values are automatically redacted in the activity log to prevent secondary exposure. Only the type, category, and partial context are stored.
+A detection record itself never carries the value that triggered it — only the type, category, severity and location are stored.
 :::
+
+### Masked payloads
+
+A detection is stored alongside the call it came from, and that call's arguments and response are kept for debugging. Serving those verbatim would mean the screen that warns you about a credential also prints it, in cleartext, next to a Copy button — into every screenshot, screen-share and exported page.
+
+So MCPProxy masks them **server-side**, in the REST layer, before the record leaves the process:
+
+- `GET /api/v1/activity` and `GET /api/v1/activity/{id}` replace every detected value inside `arguments` and `response` with a recognisable preview — `AKIAIOSFODNN7EXAMPLE` becomes `AKIA…****`. Enough to tell you *which* credential to rotate, not enough to use.
+- Masking applies only to records the detector flagged (`has_sensitive_data: true`); an unflagged payload is served unchanged.
+- Internal `_auth_*` arguments (the server-edition identity MCPProxy injects into a call) are stripped from **every** record — they are plumbing, not something the caller sent.
+- The Web UI's activity drawer and `mcpproxy activity show` both read those endpoints, so both are masked.
+
+Full values remain reachable through one deliberate, separately-flagged surface for incident response and compliance:
+
+```bash
+mcpproxy activity export --include-bodies
+```
+
+Masking follows the same `sensitive_data_detection` configuration as detection: a category you disable is neither flagged nor masked.
 
 ## Web UI Usage
 
@@ -214,8 +233,8 @@ Clicking on an activity with detections shows:
 
 - List of all detected sensitive data types
 - Location (arguments or response)
-- Redacted context for verification
 - Timestamp and duration
+- The request arguments and response body, with every detected value masked (`AKIA…****`) and both panels badged **Masked** — see [Masked payloads](#masked-payloads)
 
 ## CLI Usage
 

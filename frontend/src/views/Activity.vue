@@ -774,6 +774,16 @@
                       </div>
                     </div>
                   </div>
+                  <!-- The payloads below are masked by the SERVER before this
+                       drawer ever sees them (audit F13): a drawer that prints
+                       the credential it just flagged leaks it into every
+                       screenshot and screen-share. Say so, so the mask does not
+                       read as a rendering glitch. -->
+                  <div class="text-xs text-inherit/80" data-test="sensitive-mask-note">
+                    Detected values are masked below (e.g. <code class="font-mono">AKIA…****</code>). Full values are
+                    only available from the explicit export:
+                    <code class="font-mono">mcpproxy activity export --include-bodies</code>.
+                  </div>
                 </div>
               </div>
             </div>
@@ -869,6 +879,14 @@
               <h4 class="font-semibold mb-2 flex items-center gap-2">
                 Request Arguments
                 <span class="badge badge-sm badge-info">JSON</span>
+                <span
+                  v-if="selectedActivity.has_sensitive_data"
+                  class="badge badge-sm badge-warning"
+                  title="Detected secrets are masked by the server before this view receives them"
+                  data-test="arguments-masked-badge"
+                >
+                  Masked
+                </span>
               </h4>
               <JsonViewer :data="selectedActivity.arguments" max-height="12rem" />
             </div>
@@ -879,6 +897,14 @@
                 Response Body
                 <span class="badge badge-sm badge-info">JSON</span>
                 <span v-if="selectedActivity.response_truncated" class="badge badge-sm badge-warning">Truncated</span>
+                <span
+                  v-if="selectedActivity.has_sensitive_data"
+                  class="badge badge-sm badge-warning"
+                  title="Detected secrets are masked by the server before this view receives them"
+                  data-test="response-masked-badge"
+                >
+                  Masked
+                </span>
               </h4>
               <JsonViewer :data="parseResponseData(selectedActivity.response)" max-height="16rem" />
             </div>
