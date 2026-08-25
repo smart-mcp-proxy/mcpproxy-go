@@ -61,6 +61,7 @@ vi.mock('@/composables/useSecurityScannerStatus', () => ({
 
 import Dashboard from '@/views/Dashboard.vue'
 import appRouter from '@/router'
+import { useServersStore } from '@/stores/servers'
 
 class FakeEventSource {
   close() {}
@@ -241,5 +242,42 @@ describe('analytics dashboard as the default landing page', () => {
     expect(router.currentRoute.value.path).toBe('/usage')
     expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
     expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(false)
+  })
+
+  it('ends on the last tab clicked after a burst that revisits the same panel', async () => {
+    // Overview → Usage → Overview → Usage in one burst. Guards the end state
+    // only; the marker-ownership rule that makes this hold under a slow async
+    // router guard is enforced by construction (navSeq in Dashboard.vue), which
+    // vue-router's abort ordering cannot be faithfully staged from here.
+    const { wrapper, router } = await mountDashboard('/')
+
+    wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
+    wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
+    wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
+    wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/usage')
+    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
+  })
+
+  it('fetches the server list exactly once on mount', async () => {
+    // Two unsequenced fetches made the first-run gate depend on which response
+    // landed last (one could succeed with zero servers while the other failed).
+    await mountDashboard('/')
+    expect(serversSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the CTA available after a later background refresh fails', async () => {
+    // The store's shared `loading.error` is written by silent refreshes and is
+    // never cleared on success, so the gate must not read it live.
+    const { wrapper } = await mountDashboard('/')
+    expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(true)
+
+    const store = useServersStore()
+    store.loading.error = 'transient background failure'
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(true)
   })
 })

@@ -525,7 +525,14 @@ const usageEverActive = ref(activeView.value === 'usage')
 // do, and then be overwritten when the first navigation lands. Tracking the
 // in-flight target makes the newest click win — the router cancels the
 // superseded navigation for us.
+//
+// `navSeq` identifies which navigation owns the marker. Comparing the panel
+// value alone is not enough: two navigations to the same panel (Overview →
+// Usage → Overview) share a value, so the older one's settlement would clear a
+// marker still owned by the newer one, and the next click would again compare
+// against the stale current route and be swallowed.
 let pendingView: DashboardView | null = null
+let navSeq = 0
 
 function selectView(view: DashboardView) {
   if (view === 'usage') {
@@ -536,11 +543,12 @@ function selectView(view: DashboardView) {
   if ((pendingView ?? routeView()) === view) {
     return
   }
+  const seq = ++navSeq
   pendingView = view
   const targetRoute = view === 'usage' ? 'usage' : 'dashboard-overview'
   void router.replace({ name: targetRoute }).finally(() => {
     // Only the newest navigation clears the marker; a superseded one must not.
-    if (pendingView === view) {
+    if (seq === navSeq) {
       pendingView = null
     }
   })
@@ -730,8 +738,9 @@ const loadTokenSavings = async () => {
 // otherwise look identical to "zero servers configured" and tell a user with a
 // full server list that they have none — hence the explicit error check.
 const serversLoaded = ref(false)
+const serversLoadFailed = ref(false)
 const showFirstRunCta = computed(
-  () => serversLoaded.value && !serversStore.loading.error && serversStore.serverCount.total === 0
+  () => serversLoaded.value && !serversLoadFailed.value && serversStore.serverCount.total === 0
 )
 
 // --- Disabled server count ---
@@ -950,6 +959,11 @@ onMounted(() => {
   // Populate security scanner totals for the Security Scan chip (F-12).
   void refreshSecurityScannerStatus()
   serversStore.fetchServers().then(() => {
+    // Snapshot the outcome of *this* fetch rather than reading the store's
+    // shared `loading.error` live: silent background refreshes write that field
+    // too and never clear it on success, so a live read would let one transient
+    // failure suppress the first-run CTA for the rest of the session.
+    serversLoadFailed.value = Boolean(serversStore.loading.error)
     serversLoaded.value = true
     loadPendingTools()
   })
@@ -966,7 +980,9 @@ onMounted(() => {
   }, 30000)
 
   systemStore.connectEventSource()
-  serversStore.fetchServers()
+  // NOTE: no second fetchServers() here — it duplicated the request issued
+  // above and, being unsequenced against it, made the first-run gate depend on
+  // which of the two responses landed last.
 
   // Adaptive onboarding wizard (Spec 046): auto-show on first Web UI load
   // when the user has not yet engaged with the wizard and at least one
