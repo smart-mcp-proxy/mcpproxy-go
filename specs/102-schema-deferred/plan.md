@@ -100,9 +100,12 @@ Technical approach, grounded in the code:
   server instance (today it has none — only the default server carries
   instructions, `mcp.go:480`), conditionally phrased so they are true in both
   modes; the `initialize`-response delta is enumerated and pinned (R4). The value
-  is `resolveInstructions(cfg.Instructions)` + the deferral legend, so the
+  comes from one new helper — the operator's `cfg.Instructions` when non-empty,
+  otherwise a **direct-specific default**, then the deferral legend — so the
   operator-configurable `instructions` key (`config.go:489`) is not silently
-  unreachable on this surface (D11).
+  unreachable here (D11) and the fallback never names a tool this surface does
+  not expose (D16). It is deliberately NOT `resolveInstructions`, whose
+  `defaultInstructions` advertises `retrieve_tools` and `call_tool_*`.
 
 ## Technical Context
 
@@ -146,13 +149,13 @@ Resolved in [research.md](research.md); recorded here as the plan of record:
 | D7 | FR-011 = catalog-backed direct resolver with listing-parity gates incl. permission tier; plain `not_found` for invisible ids in both modes; snapshot-backed definitions for visible ids; check-mode verdicts via shared preflight evaluator | R10 |
 | D8 | Rollout default = **opt-in, off**; no default flip in this feature (spec Non-Goals; any future flip is its own evidence-gated decision) | spec |
 | D9 | Deferred `inputSchema` is emitted via `mcp.NewToolWithRawSchema` (annotations copied on explicitly); `mcp.NewTool` cannot produce the FR-004 wire shape and mixing the two is a marshal error | R11 |
-| D10 | Parity is closed on every side: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__`; the definition assembly takes a catalog-supplied annotations override on this surface (`buildFullToolEntry` otherwise reads annotations from the StateView, not from the entry passed in, so a listed pending destructive tool would describe as `call_with: "read"`); and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
-| D11 | Direct-server instructions = `resolveInstructions(cfg.Instructions)` + blank line + the deferral legend, so an operator's configured `instructions` is not lost on the direct surface | R4 |
+| D10 | Parity is closed on every side: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__` (the tier itself comes from the filtered entry's own annotations — D13 rule 3, not the catalog); the definition assembly takes a catalog-supplied annotations override on this surface (`buildFullToolEntry` otherwise reads annotations from the StateView, not from the entry passed in, so a listed pending destructive tool would describe as `call_with: "read"`); and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
+| D11 | Direct-server instructions = operator's `cfg.Instructions` when non-empty + blank line + the deferral legend, so an operator's configured `instructions` is not lost on the direct surface (fallback when empty: D16, not `resolveInstructions`) | R4 |
 | D12 | `buildDirectModeTools` splits into a pure `buildDirectCatalog` + `renderDirectTools` pair so the unit matrix can drive a fixture toolset (`upstream.Manager` is concrete and only lists connected clients) | R12 |
 | D13 | The catalog swap and `SetTools` cannot be one transaction (`mcp.Tool`'s only free-form field marshals to `_meta`, and mcp-go snapshots its tool map before our filters run), so the plan promises a safety property, not atomicity: **`SetTools` first, catalog published immediately after**; filters **deny** on catalog miss (built-ins by explicit name set; a *nil* catalog is not a miss); the **permission tier is derived from the registered entry's own annotations**, never from the catalog, so it is generation-correct by construction; describe requires `directServer.GetTool(name) != nil` **and** catalog visibility; `generation` counter; residual same-name staleness enumerated and tested | R13 |
 | D14 | Direct check-mode adapter canonicalizes `server__tool` → `server:tool` before `preflight.Evaluate` (which accepts colon ids only, so direct ids would otherwise all answer `not_found`), gates invisibility itself without consulting the evaluator, **projects the evaluator's `status`/`reason`/`action`/`retryable` through untouched** (check mode's vocabulary is `status:"unavailable"` + `tool_pending_approval`/`tool_changed`/… — never definition mode's), and restores the caller's original id + ordering in the response and the activity record | R10, contract §3 |
 | D15 | `initRoutingModeServers` performs one **initial direct rebuild** before the listeners are wired — the direct server registers nothing today (`mcp_routing.go:651-653`), so composing the built-in into rebuild construction alone would still leave FR-009 false until the first `servers.changed`, and would leave the catalog nil so the first unrelated reload churns every client | R14 |
-| D16 | Direct-server instructions fall back to a **direct-specific default**, not `resolveInstructions`'s `defaultInstructions` — that text tells agents to use `retrieve_tools` and `call_tool_*`, none of which exist on this surface | R4/D11, R3 finding |
+| D16 | One helper `resolveDirectInstructions(custom string)`: custom when non-empty, else a **direct-specific default**, then the legend. Not `resolveInstructions` — its `defaultInstructions` names `retrieve_tools` and `call_tool_*`. The direct default names ONLY what this surface exposes: `server__tool` calling, `describe_tool`, and the ABOUT links — no `upstream_servers`, which is registered by the code-exec and call-tool builders only (`mcp_routing.go:398`, `:507`), never by `buildDirectModeTools` | R4/D11 |
 
 ### Config interaction matrix (D1 applied)
 
@@ -205,8 +208,10 @@ internal/
 │   │                                #     direct-specific default, NOT resolveInstructions' retrieve_tools text)
 │   │                                #     + the INITIAL direct rebuild the surface has never had (D15, :651-653);
 │   │                                #   refresh guard: rebuild-if-serialization-changed (FR-014)
-│   ├── mcp_direct_scope.go          # filterDirectModeToolsForAuth: resolve (server,tool) + requiredPermission through
-│   │                                #   the catalog instead of ParseDirectToolName/lookupDirectToolPermission (D10)
+│   ├── mcp_direct_scope.go          # filterDirectModeToolsForAuth: resolve (server,tool) through the catalog instead
+│   │                                #   of ParseDirectToolName; derive the tier from the filtered entry's OWN
+│   │                                #   annotations via contracts.DeriveCallWith, NOT from the catalog (D10/D13.3);
+│   │                                #   retires lookupDirectToolPermission
 │   ├── mcp_direct_callability.go    # filterDirectToolsForAgentCallability: same catalog resolution (D10)
 │   ├── mcp_describe_tool.go         # Surface-neutral prose — all FOUR retrieve_tools strings (D5/R5); resolver seam
 │   │                                #   parameter; additive output_schema at definition assembly (D2)

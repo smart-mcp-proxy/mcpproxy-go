@@ -144,10 +144,15 @@ destructive` (`mcp.go:72-80`). None of those tools exist on the direct surface
 (`buildDirectModeTools` is upstream tools plus `describe_tool`), so importing
 that text would put the in-band guidance FR-007 exists to provide in direct
 contradiction with the listing, pointing agents at a nonexistent tool. The
-direct-specific default keeps only the parts that are true here — the
-`server__tool` naming, `describe_tool`, `upstream_servers` list, and the ABOUT
-links — and the deferral legend follows after a blank line. Operator text, when
-set, still leads and is never rewritten.
+direct-specific default keeps only what this surface actually exposes — the
+`server__tool` naming, `describe_tool`, and the ABOUT links — and the deferral
+legend follows after a blank line. It must NOT mention `upstream_servers`
+either: management tools are registered by the code-exec and call-tool builders
+only (`mcp_routing.go:398`, `:507`), never by `buildDirectModeTools`, so naming
+it would repeat the very defect this decision fixes. One helper,
+`resolveDirectInstructions(custom string)`, is the single place this composition
+lives, so `resolveInstructions` keeps its current callers and bytes untouched.
+Operator text, when set, still leads and is never rewritten.
 The legend is a package constant so the new direct built-in golden can pin its
 exact bytes, and the golden fixture uses the empty-`instructions` default so the
 pinned string is deterministic. A test asserts a custom `instructions` value

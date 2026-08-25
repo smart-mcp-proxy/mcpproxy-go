@@ -28,11 +28,20 @@ pointer swap; never mutated after publication.
 | `outputSchemaJSON` | string | optional; describe `output_schema` source |
 | `hash` | string | Spec-032 SHA-256 — `toolsig.Cache.Peek` key + validator memo key |
 | `annotations` | `*config.ToolAnnotations` | listing + `call_with`/permission derivation |
-| `requiredPermission` | string | `requiredPermissionForDirectTool(annotations)` — absorbs today's `directToolPermissions` map; permission-tier gate for listing filter AND describe resolver |
+| `requiredPermission` | string | `requiredPermissionForDirectTool(annotations)` — absorbs today's `directToolPermissions` map. Used by the **describe resolver** only. The *listing filters* must NOT read it: they derive the tier from each filtered `mcp.Tool`'s own `Annotations` via `contracts.DeriveCallWith`, exactly as dispatch does (`mcp_routing.go:211-213`), so the tier always belongs to the generation actually registered (R13 rule 3) |
 
 **Invariants**
 - Entry and its dispatch handler are built from the same `directCatalogEntry` in
-  one pass and installed by one `SetTools` call (atomicity, FR-017).
+  one pass, so a handler always validates against the definition its own
+  registration advertised. This is handler↔schema atomicity, and it is the only
+  atomicity the design claims: the `SetTools` call and the catalog publish are
+  two publications and cannot be one transaction (R13). What holds across them is
+  a safety property, not atomicity — *no request observes a state less
+  restrictive than both generations, and no request receives a definition for a
+  name the registry is not currently serving* — delivered by R13's four rules
+  (`SetTools` first then publish; filters deny on catalog miss; the tier derived
+  from the registered entry's annotations; describe requires
+  `directServer.GetTool(name) != nil` as well as catalog visibility).
 - Membership is decided by this snapshot, not index presence: listed ⇒ describable
   (definition mode) and validatable; unlisted ⇒ `not_found`, even if indexed.
 - Collisions (`a` + `b__c` vs `a__b` + `c`): deterministic sorted iteration,
@@ -86,8 +95,12 @@ preflight evaluator.
 **The catalog is also the resolution source for the LISTING side** (D10): the two
 direct tool filters (`filterDirectModeToolsForAuth`,
 `filterDirectToolsForAgentCallability`) resolve display names through
-`byDisplayName` rather than `ParseDirectToolName`'s first-`__` split, and read
-`requiredPermission` off the entry. Without this, a server whose name contains
+`byDisplayName` rather than `ParseDirectToolName`'s first-`__` split — for the
+`(server, tool)` split ONLY. The permission tier is **not** read off the catalog
+entry there; it comes from the filtered `mcp.Tool`'s own `Annotations` (R13 rule
+3), because during the two-publication window a same-name entry's annotations may
+already belong to the newer generation while the catalog still holds the older
+one. Without the catalog-backed split, a server whose name contains
 `__` is evaluated as a different (nonexistent) server by the listing and as the
 real pair by describe, producing a describable-but-unlisted id — the exact FR-011
 disclosure the catalog exists to prevent.
@@ -111,6 +124,11 @@ definition-assembly seam (not `buildFullToolEntry`).
 - **Upstream refresh** (`servers.changed`): full catalog rebuild → `SetTools`
   (includes `describe_tool` by construction — FR-018) → mcp-go emits
   `tools/list_changed`.
+- **Init** (`initRoutingModeServers`, D15/R14): one initial rebuild before the
+  listeners are wired — with no upstreams connected this publishes the built-in
+  set (`describe_tool`) and an empty catalog recording the effective mode, so the
+  direct surface is never observed empty and the FR-014 guard always has a mode
+  to compare against.
 - **Config hot-reload** (`config.reloaded`): rebuild iff live effective
   serialization ≠ `catalog.serializationMode`; otherwise no-op, no notification
   (FR-014).
