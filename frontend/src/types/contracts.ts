@@ -29,6 +29,7 @@ export const HealthActionApprove = 'approve' as const;
 export const HealthActionViewLogs = 'view_logs' as const;
 export const HealthActionSetSecret = 'set_secret' as const;
 export const HealthActionConfigure = 'configure' as const;
+export const HealthActionEditURL = 'edit_url' as const;
 export type HealthAction =
   | typeof HealthActionNone
   | typeof HealthActionLogin
@@ -37,7 +38,8 @@ export type HealthAction =
   | typeof HealthActionApprove
   | typeof HealthActionViewLogs
   | typeof HealthActionSetSecret
-  | typeof HealthActionConfigure;
+  | typeof HealthActionConfigure
+  | typeof HealthActionEditURL;
 
 export interface HealthStatus {
   level: HealthLevel;

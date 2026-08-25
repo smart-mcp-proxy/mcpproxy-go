@@ -360,7 +360,8 @@ Activity Summary (last 24h)
 
 METRIC          VALUE
 ───────         ─────
-Total Calls     150
+Total Events    150
+Calls           128 (3.9% failed)
 Successful      142 (94.7%)
 Errors          5 (3.3%)
 Blocked         3 (2.0%)
@@ -384,6 +385,8 @@ database:query           15 calls
 {
   "period": "24h",
   "total_count": 150,
+  "call_count": 128,
+  "call_error_count": 5,
   "success_count": 142,
   "error_count": 5,
   "blocked_count": 3,

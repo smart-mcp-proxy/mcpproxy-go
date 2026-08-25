@@ -673,7 +673,8 @@ const teamsUserMenu = [
   { name: 'My Activity', path: '/my/activity' },
   { name: 'Agent Tokens', path: '/my/tokens' },
   { name: 'Diagnostics', path: '/my/diagnostics' },
-  { name: 'Search', path: '/search' },
+  // Tools is the canonical search surface since /search folded into it (F20).
+  { name: 'Tools', path: '/tools' },
 ]
 
 const teamsAdminMenu = [
@@ -695,9 +696,13 @@ const userInitials = computed(() => {
   return name.substring(0, 2).toUpperCase()
 })
 
+// Dashboard panels are deep-linkable routes that all render the Dashboard, so
+// the "Dashboard" entry stays highlighted on each of them.
+const DASHBOARD_PATHS = ['/', '/usage', '/overview']
+
 function isActiveRoute(path: string): boolean {
   if (path === '/') {
-    return route.path === '/'
+    return DASHBOARD_PATHS.includes(route.path)
   }
   return route.path.startsWith(path)
 }

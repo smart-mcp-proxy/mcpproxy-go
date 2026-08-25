@@ -6,40 +6,12 @@
     <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
     <UpdateBanner />
 
-    <!-- Overview ↔ Usage switcher (Spec 069 T016) -->
-    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
-      <a
-        role="tab"
-        class="tab"
-        :class="activeView === 'overview' ? 'tab-active' : ''"
-        data-test="dashboard-tab-overview"
-        @click="activeView = 'overview'"
-      >Overview</a>
-      <a
-        role="tab"
-        class="tab"
-        :class="activeView === 'usage' ? 'tab-active' : ''"
-        data-test="dashboard-tab-usage"
-        @click="selectUsage"
-      >Usage</a>
-    </div>
-
-    <!-- Usage view: the panel wrapper is always in the DOM (kept hidden with
-         v-show so switching back is instant and the Overview subtree is never
-         torn down, SC-006). The heavy chart bundle + the usage fetch inside
-         UsageView are lazy-mounted only on first switch (v-if="usageEverActive")
-         so they never block Dashboard first paint (SC-004). -->
-    <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
-      <Suspense v-if="usageEverActive">
-        <UsageView />
-        <template #fallback>
-          <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
-        </template>
-      </Suspense>
-    </div>
-
-    <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
-    <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
+    <!-- "What needs me": servers in a bad state and tools awaiting approval.
+         These live above the panel switcher rather than inside a panel — they
+         are the one thing on this page the user is expected to act on, and
+         burying them under a tab means the landing page can look calm while a
+         server is down or an unreviewed tool is waiting. Each renders only
+         when it has something to say, so a healthy install sees neither. -->
     <!-- Servers Needing Attention Banner (using unified health status) -->
     <!-- UX audit F14: below `sm` the alert stacks instead of sharing its row
          with "View All Servers", and `min-w-0` lets the text shrink, so at 390px
@@ -95,6 +67,16 @@
             >
               Configure
             </router-link>
+            <!-- Audit F11: DNS / malformed-URL failures are address problems.
+                 Restart redials the same broken address; Edit URL does not. -->
+            <router-link
+              v-if="server.health?.action === 'edit_url'"
+              :to="`${serverDetailPath(server.name, 'config')}&focus=endpoint`"
+              class="btn btn-xs btn-primary"
+              data-test="attention-edit-url"
+            >
+              Edit URL
+            </router-link>
           </div>
           <div v-if="serversNeedingAttention.length > 3" class="text-xs opacity-60">
             ... and {{ serversNeedingAttention.length - 3 }} more
@@ -134,6 +116,92 @@
       </router-link>
     </div>
 
+    <!-- Usage ↔ Overview switcher (Spec 069 T016). Usage is the default panel
+         (analytics-as-landing-page); each tab maps to a deep-linkable route
+         (/usage, /overview) so the panel survives a reload or a shared link. -->
+    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
+      <a
+        role="tab"
+        class="tab"
+        :class="activeView === 'usage' ? 'tab-active' : ''"
+        data-test="dashboard-tab-usage"
+        @click="selectUsage"
+      >Usage</a>
+      <a
+        role="tab"
+        class="tab"
+        :class="activeView === 'overview' ? 'tab-active' : ''"
+        data-test="dashboard-tab-overview"
+        @click="selectOverview"
+      >Overview</a>
+    </div>
+
+    <!-- Usage view: the panel wrapper is always in the DOM (kept hidden with
+         v-show so switching back is instant and the Overview subtree is never
+         torn down, SC-006). The heavy chart bundle + the usage fetch inside
+         UsageView are mounted only once the panel has been active
+         (usageEverActive) AND the server list has arrived, and stay code-split
+         behind Suspense, so the Dashboard shell still paints immediately
+         (SC-004). -->
+    <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
+      <!-- First run: no upstream servers configured, so the analytics panel
+           would only ever show "no data". Point the new user at the one action
+           that makes the dashboard useful instead. -->
+      <div
+        v-if="showFirstRunCta"
+        class="card bg-base-200 border border-base-300"
+        data-test="dashboard-usage-first-run"
+      >
+        <div class="card-body items-center text-center py-12">
+          <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <h3 class="font-semibold text-lg mt-2">Add your first server to see usage</h3>
+          <p class="text-sm opacity-60 max-w-md">
+            No upstream MCP servers are configured yet, so there is nothing to chart.
+            Add one and this page will show call volume, token sinks, error rates and a timeline.
+          </p>
+          <div class="flex flex-wrap gap-2 justify-center mt-2">
+            <button
+              class="btn btn-primary btn-sm"
+              data-test="dashboard-first-run-add-server"
+              @click="showAddServer = true"
+            >
+              Add your first server
+            </button>
+            <router-link to="/repositories" class="btn btn-sm btn-ghost">Browse Registry</router-link>
+            <button
+              class="btn btn-sm btn-ghost"
+              data-test="dashboard-first-run-overview"
+              @click="selectOverview"
+            >
+              Go to Overview
+            </button>
+          </div>
+        </div>
+      </div>
+      <!-- Hold the charts back until the server list has arrived: mounting
+           UsageView first would fire a usage aggregate request and flash the
+           "no usage data yet" card on a fresh install, only to be replaced by
+           the CTA above a moment later. Both requests are issued together in
+           onMounted, so this costs no extra round-trip. -->
+      <div
+        v-else-if="!serversFetchSettled && !serversStore.loaded"
+        class="flex justify-center py-16"
+        data-test="dashboard-usage-pending"
+      >
+        <span class="loading loading-spinner loading-lg"></span>
+      </div>
+      <Suspense v-else-if="usageEverActive">
+        <UsageView />
+        <template #fallback>
+          <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
+        </template>
+      </Suspense>
+    </div>
+
+    <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
+    <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
     <!-- Hub Visualization -->
     <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] gap-0 min-h-[520px] relative">
 
@@ -141,20 +209,34 @@
       <div class="flex flex-col justify-center items-center lg:items-end space-y-3 py-6 lg:pr-0">
         <h3 class="text-xs font-bold uppercase tracking-widest text-base-content/60 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
 
-        <!-- Single big clients box -->
-        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]">
+        <!-- Single big clients box. Audit F10: "Connected" is now the same fact
+             /sessions shows — a live MCP session — instead of a flag the
+             content-read-free connect listing can never set. Each live client
+             links to its session row. -->
+        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]" data-test="dashboard-agents-box">
           <div class="card-body py-3 px-4">
-            <div v-if="connectedClientNames.length > 0" class="mb-1">
+            <div v-if="liveClients.length > 0" class="mb-1">
               <div class="flex items-center gap-2 mb-1">
                 <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
                 <span class="text-xs font-bold uppercase tracking-wide text-base-content/60">Connected</span>
               </div>
-              <div class="text-sm font-medium">{{ connectedClientNames.join(', ') }}</div>
+              <router-link
+                v-for="client in liveClients"
+                :key="client.name"
+                to="/sessions"
+                class="flex items-baseline justify-between gap-2 text-sm link link-hover"
+                :data-test="`dashboard-live-client-${client.name}`"
+              >
+                <span class="font-medium truncate">{{ client.name }}</span>
+                <span class="text-xs opacity-50 shrink-0">{{ formatRelativeTime(client.lastActivity) }}</span>
+              </router-link>
             </div>
-            <div v-if="supportedClientNames.length > 0">
-              <div class="text-xs text-base-content/60 mt-1">Available: {{ supportedClientNames.join(', ') }}</div>
+            <div v-if="availableClientNames.length > 0">
+              <div class="text-xs text-base-content/60 mt-1" data-test="dashboard-available-clients">
+                Available: {{ availableClientNames.join(', ') }}
+              </div>
             </div>
-            <div v-if="connectedClientNames.length === 0 && supportedClientNames.length === 0" class="text-sm text-base-content/60 text-center py-2">
+            <div v-if="liveClients.length === 0 && availableClientNames.length === 0" class="text-sm text-base-content/60 text-center py-2">
               No clients detected
             </div>
           </div>
@@ -222,18 +304,29 @@
           <circle cx="58%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
         </svg>
 
-        <!-- Token savings badge (above hub) -->
+        <!--
+          Token savings badge (above hub). This is the product's headline claim
+          and it used to be a chip with no tooltip, no destination and no window
+          — so when it read the same before and after 16 tool calls, there was
+          nothing on screen to explain why (audit finding F23, #1046). It is a
+          PER-REQUEST structural estimate over the current tool catalog; it says
+          so, explains itself on hover, and opens the breakdown that derives it.
+        -->
         <div class="mb-6 z-10">
-          <div
+          <button
             v-if="tokenSavingsData && tokenSavingsData.saved_tokens_percentage > 0"
-            class="badge badge-lg gap-1 px-4 py-3 bg-primary/10 text-primary border-primary/30"
+            type="button"
+            data-test="dashboard-token-savings-chip"
+            class="badge badge-lg gap-1 px-4 py-3 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20 transition-colors cursor-pointer"
+            :title="tokensSavedExplainer"
+            @click="openTokenSavingsDetails"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
             </svg>
             <span class="text-lg font-bold">{{ tokenSavingsData.saved_tokens_percentage >= 99.995 ? '99.99' : tokenSavingsData.saved_tokens_percentage >= 10 ? tokenSavingsData.saved_tokens_percentage.toFixed(1) : tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
-            <span class="text-xs font-medium">tokens saved</span>
-          </div>
+            <span class="text-xs font-medium">smaller tool context per request</span>
+          </button>
         </div>
 
         <!-- Logo Hub -->
@@ -357,9 +450,14 @@
       </div>
     </div>
 
-    <!-- Token Savings Collapsible Detail -->
-    <div v-if="tokenSavingsData" class="collapse collapse-arrow bg-base-100 shadow-sm border border-base-300">
-      <input type="checkbox" aria-label="Show token savings details" />
+    <!-- Token Savings Collapsible Detail — where the headline chip lands. -->
+    <div
+      v-if="tokenSavingsData"
+      ref="tokenSavingsDetails"
+      data-test="dashboard-token-savings-details"
+      class="collapse collapse-arrow bg-base-100 shadow-sm border border-base-300"
+    >
+      <input type="checkbox" v-model="tokenDetailsOpen" aria-label="Show token savings details" />
       <div class="collapse-title font-medium flex items-center gap-3">
         <svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
@@ -372,8 +470,8 @@
           <!-- Token Savings Stats -->
           <div>
             <div class="grid grid-cols-3 gap-4">
-              <div>
-                <div class="text-sm opacity-60">Tokens Saved</div>
+              <div :title="tokensSavedExplainer">
+                <div class="text-sm opacity-60">Tokens Saved / request</div>
                 <div class="text-2xl font-bold text-success">{{ formatNumber(tokenSavingsData.saved_tokens) }}</div>
                 <div class="text-xs opacity-60">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
               </div>
@@ -432,7 +530,8 @@
 
 <script setup lang="ts">
 import { serverDetailPath } from '@/utils/serverRoute'
-import { computed, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
+import { computed, nextTick, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
@@ -448,6 +547,8 @@ import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
+import { liveClientsFromSessions } from '@/utils/sessionLabel'
+import { formatRelativeTime } from '@/utils/activity'
 
 // Usage view is code-split so chart.js + the usage fetch stay out of the
 // Dashboard's first-paint critical path (Spec 069 SC-004).
@@ -457,14 +558,72 @@ const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
 
-// Overview ↔ Usage switcher state (Spec 069 T016). `usageEverActive` gates the
+// Usage ↔ Overview switcher state (Spec 069 T016). `usageEverActive` gates the
 // first mount; `activeView` then toggles via v-show so both panels keep state.
-const activeView = ref<'overview' | 'usage'>('overview')
-const usageEverActive = ref(false)
-function selectUsage() {
-  usageEverActive.value = true
-  activeView.value = 'usage'
+//
+// The active panel comes from the route (`meta.dashboardView`): `/` and
+// `/usage` land on the analytics panel, `/overview` on the hub overview.
+// Clicking a tab rewrites the URL (replace, so the switcher does not pile up
+// history entries) — the routes share this component, so switching never
+// remounts the Dashboard and both panels keep their state.
+type DashboardView = 'overview' | 'usage'
+
+const route = useRoute()
+const router = useRouter()
+
+function routeView(): DashboardView {
+  return (route.meta?.dashboardView as DashboardView | undefined) === 'overview' ? 'overview' : 'usage'
 }
+
+const activeView = ref<DashboardView>(routeView())
+const usageEverActive = ref(activeView.value === 'usage')
+
+// The panel a navigation is currently heading for. `route` only reflects a
+// *confirmed* navigation, so comparing against it alone loses a fast second tab
+// click: it would still see the pre-navigation route, decide it has nothing to
+// do, and then be overwritten when the first navigation lands. Tracking the
+// in-flight target makes the newest click win — the router cancels the
+// superseded navigation for us.
+//
+// `navSeq` identifies which navigation owns the marker. Comparing the panel
+// value alone is not enough: two navigations to the same panel (Overview →
+// Usage → Overview) share a value, so the older one's settlement would clear a
+// marker still owned by the newer one, and the next click would again compare
+// against the stale current route and be swallowed.
+let pendingView: DashboardView | null = null
+let navSeq = 0
+
+function selectView(view: DashboardView) {
+  if (view === 'usage') {
+    usageEverActive.value = true
+  }
+  activeView.value = view
+  // `/` is also a usage route — don't rewrite it to `/usage` needlessly.
+  if ((pendingView ?? routeView()) === view) {
+    return
+  }
+  const seq = ++navSeq
+  pendingView = view
+  const targetRoute = view === 'usage' ? 'usage' : 'dashboard-overview'
+  void router.replace({ name: targetRoute }).finally(() => {
+    // Only the newest navigation clears the marker; a superseded one must not.
+    if (seq === navSeq) {
+      pendingView = null
+    }
+  })
+}
+const selectUsage = () => selectView('usage')
+const selectOverview = () => selectView('overview')
+
+// Keep the panel in sync when the route changes underneath us (sidebar link,
+// browser back/forward, a pasted deep link).
+watch(() => route.meta?.dashboardView, () => {
+  const view = routeView()
+  if (view === 'usage') {
+    usageEverActive.value = true
+  }
+  activeView.value = view
+})
 
 // Modal state
 const showConnectModal = ref(false)
@@ -476,12 +635,20 @@ let refreshInterval: ReturnType<typeof setInterval> | null = null
 // --- Client statuses ---
 const clientStatuses = ref<ClientStatus[]>([])
 
-const connectedClientNames = computed(() =>
-  clientStatuses.value.filter(c => c.connected).map(c => c.name)
-)
-const supportedClientNames = computed(() =>
-  clientStatuses.value.filter(c => c.supported && !c.connected && c.exists).map(c => c.name)
-)
+// Audit F10: "Connected" means a live MCP session, the same fact /sessions and
+// the macOS tray render. `ClientStatus.connected` cannot be used here — the
+// stat-only connect listing leaves it false for every client by design.
+const liveClients = computed(() => liveClientsFromSessions(recentSessions.value))
+
+// Everything else installed on this machine that COULD be connected. A client
+// currently holding a live session is not repeated here.
+const availableClientNames = computed(() => {
+  const live = new Set(liveClients.value.map(c => c.name))
+  return clientStatuses.value
+    .filter(c => c.supported && c.exists)
+    .map(c => c.name)
+    .filter(name => !live.has(name))
+})
 
 function clientIcon(client: ClientStatus): string {
   const iconMap: Record<string, string> = {
@@ -579,36 +746,42 @@ watch(() => systemStore.isRunning, (running: boolean) => {
   }
 }, { immediate: true })
 
+// Audit F36: uptime used to be measured from the moment THIS PAGE first saw the
+// core running, so every reload reset it and the hub read "just started"
+// indefinitely — a stuck state, not a fact. The core now reports its own
+// start time (`started_at` on /status and every SSE status frame); the
+// page-local first-seen fallback is kept only for older cores that omit it.
 const uptime = computed(() => {
   if (!systemStore.isRunning) return ''
 
-  // Use the SSE status timestamp as server epoch if available
-  // The status.timestamp is a unix timestamp from the backend
-  const ts = systemStore.status?.timestamp
-  if (ts && ts > 0) {
-    // ts is in seconds — it represents when the status was generated
-    // The server start time ~ ts minus how long it's been running
-    // But we don't have start_time in API, so use the oldest timestamp we've seen
-    const now = Math.floor(Date.now() / 1000)
-    // If firstSeen is set, compute from that
-    if (serverFirstSeen.value) {
-      const diff = Math.floor((Date.now() - serverFirstSeen.value) / 1000)
-      if (diff < 60) return 'just started'
-      if (diff < 3600) return `${Math.floor(diff / 60)}m uptime`
-      if (diff < 86400) return `${Math.floor(diff / 3600)}h uptime`
-      return `${Math.floor(diff / 86400)}d uptime`
-    }
+  const startedAt = systemStore.status?.started_at
+  if (startedAt && startedAt > 0) {
+    return formatUptime(Math.floor(Date.now() / 1000) - startedAt)
+  }
+
+  if (serverFirstSeen.value) {
+    return formatUptime(Math.floor((Date.now() - serverFirstSeen.value) / 1000))
   }
 
   return 'online'
 })
+
+function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'online'
+  if (seconds < 60) return `${Math.max(seconds, 1)}s uptime`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m uptime`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h uptime`
+  return `${Math.floor(seconds / 86400)}d uptime`
+}
 
 // --- Recent Sessions ---
 const recentSessions = ref<any[]>([])
 
 const loadSessions = async () => {
   try {
-    const response = await api.getSessions(5)
+    // status=active + a roomier limit (audit F10): an unfiltered top-5 can be
+    // filled entirely by closed sessions and hide every live client.
+    const response = await api.getSessions(25, 'active')
     if (response.success && response.data) {
       recentSessions.value = response.data.sessions || []
     }
@@ -631,10 +804,58 @@ const loadTokenSavings = async () => {
   }
 }
 
+// --- First run (no servers configured) ---
+// Two different questions, deliberately answered by two different flags:
+//
+// `serversFetchSettled` — has our own initial request finished, successfully or
+// not? Together with `loaded` it gates the chart mount below, so a failed fetch
+// falls through to the usage panel rather than spinning forever, and an
+// authoritative list arriving by SSE first clears the spinner immediately.
+//
+// `serversStore.loaded` — has a server list ever arrived successfully? Only
+// that justifies telling the user they have no servers. It cannot be inferred
+// from `loading.error`: that field is shared, other components (App.vue) and
+// silent background refreshes write it concurrently, and a success never clears
+// it — so an unrelated failure would suppress the CTA, and a later successful
+// refresh could never bring it back.
+const serversFetchSettled = ref(false)
+const showFirstRunCta = computed(
+  () => serversStore.loaded && serversStore.serverCount.total === 0
+)
+
+// --- Token savings: the headline claim, and the panel that derives it --------
+//
+// F23 (#1046). The figure is a STRUCTURAL estimate over the current tool
+// catalog, not a running total of savings realised so far — which is why it does
+// not move when calls are made. That was invisible: no tooltip, no window, no
+// drill-down. The chip now carries this text and opens the breakdown below.
+const tokensSavedExplainer =
+  'Estimated per-request saving: the tokens it would take to put every ' +
+  'upstream tool definition in your agent\'s context, minus what retrieve_tools ' +
+  'returns for one query. It is a property of your current tool catalog, so it ' +
+  'changes when you add, remove or reconnect servers — not with each call.'
+
+const tokenDetailsOpen = ref(false)
+const tokenSavingsDetails = ref<HTMLElement | null>(null)
+
+const openTokenSavingsDetails = () => {
+  tokenDetailsOpen.value = true
+  // Let the collapse expand before scrolling, or the target moves under us.
+  nextTick(() => {
+    tokenSavingsDetails.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+}
+
 // --- Disabled server count ---
-const disabledCount = computed(() => {
-  return serversStore.serverCount.total - serversStore.serverCount.connected - serversStore.serverCount.quarantined
-})
+//
+// Disabled and quarantined must be MUTUALLY EXCLUSIVE here (audit finding F27,
+// #1046): the rail shows both, and a server that is both was counted twice,
+// reading as two problems needing two decisions. The old formula
+// (total − connected − quarantined) was wrong in the other direction too — an
+// ENABLED server that simply cannot connect was reported as "disabled", which
+// hides the actual fault behind an administrative word. Ask the question
+// directly instead: switched off, and not already spoken for by quarantine.
+const disabledCount = computed(() => serversStore.serverCount.disabled)
 
 // --- Servers needing attention ---
 // Only show servers that have actionable problems, not transient states like "Connecting..."
@@ -846,7 +1067,10 @@ onMounted(() => {
   loadSecurityStatus()
   // Populate security scanner totals for the Security Scan chip (F-12).
   void refreshSecurityScannerStatus()
-  serversStore.fetchServers().then(() => loadPendingTools())
+  serversStore.fetchServers().then(() => {
+    serversFetchSettled.value = true
+    loadPendingTools()
+  })
 
   // Auto-refresh every 30 seconds
   refreshInterval = setInterval(() => {
@@ -860,7 +1084,9 @@ onMounted(() => {
   }, 30000)
 
   systemStore.connectEventSource()
-  serversStore.fetchServers()
+  // NOTE: no second fetchServers() here — it duplicated the request issued
+  // above and, being unsequenced against it, made the first-run gate depend on
+  // which of the two responses landed last.
 
   // Adaptive onboarding wizard (Spec 046): auto-show on first Web UI load
   // when the user has not yet engaged with the wizard and at least one

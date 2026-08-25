@@ -11,15 +11,11 @@
 import Foundation
 import Combine
 
-// MARK: - Health Indicator (tray icon badge)
-
-/// Tray icon badge level, derived from aggregated server health.
-enum HealthIndicator: String, Sendable {
-    case healthy
-    case degraded
-    case unhealthy
-    case disconnected
-}
+// The former `HealthIndicator` enum and `AppState.healthLevel` lived here to
+// feed `Menu/TrayIcon.swift` — a SwiftUI menu-bar label that was never
+// instantiated, so both were dead from the day they were written (found by the
+// 2026-08 tray UX audit, F1). The status item is AppKit and now badges server
+// severity itself; see `TrayStatusIcon` in Menu/TrayPresentation.swift.
 
 // MARK: - App State
 
@@ -82,6 +78,17 @@ final class AppState: ObservableObject {
     // MARK: - Profiles (Profiles v2 T5)
     /// Configured profiles for the tray profile switcher.
     @Published var profiles: [ProfileSummary] = []
+
+    /// A session the Activity Log should scope itself to as soon as it exists
+    /// (F10 — a tray glance row's hand-off).
+    ///
+    /// A notification alone cannot carry this: a window created BY the click
+    /// subscribes its `onReceive` observers only once the view appears, so a
+    /// post made now lands on the floor — the same trap `showMainWindow(tab:)`
+    /// documents for the sidebar tab. ActivityView consumes and clears this on
+    /// appear; the notification still covers the already-open window, and
+    /// whichever arrives first clears it for the other.
+    @Published var pendingActivitySessionFilter: String?
     /// Server-level default active profile slug; empty means "all servers".
     @Published var activeProfile: String = ""
 
@@ -311,6 +318,18 @@ final class AppState: ObservableObject {
         servers.filter { $0.hasAttentionDiagnostic && !$0.isOAuthLoginRequired }
     }
 
+    /// How many servers carry the severity the tray icon is currently badging.
+    ///
+    /// Must agree with `worstDiagnosticSeverity` exactly, or the status item
+    /// says "4 server errors" over a badge that counted three: that property
+    /// looks only at ENABLED servers, while `serversWithDiagnostic` includes
+    /// the disabled ones and both severities.
+    func diagnosticCount(severity: String) -> Int {
+        servers.filter {
+            $0.enabled && !$0.isOAuthLoginRequired && $0.diagnostic?.severity == severity
+        }.count
+    }
+
     /// Highest-severity diagnostic across enabled servers. Returns nil when
     /// no diagnostics are attached. Used by TrayIcon to colour the badge.
     ///
@@ -325,35 +344,6 @@ final class AppState: ObservableObject {
             if d.severity == "warn" { sawWarn = true }
         }
         return sawWarn ? "warn" : nil
-    }
-
-    /// Aggregate health indicator for the tray icon badge.
-    /// Only considers ENABLED servers. Disabled servers are intentional — don't flag them.
-    /// Uses majority-based logic: green if most are healthy, yellow if some degraded,
-    /// red only if the majority are unhealthy.
-    var healthLevel: HealthIndicator {
-        guard coreState == .connected else {
-            return .disconnected
-        }
-
-        let enabled = servers.filter { $0.enabled }
-        if enabled.isEmpty {
-            return .healthy
-        }
-
-        let unhealthyCount = enabled.filter { $0.health?.level == "unhealthy" }.count
-        let degradedCount = enabled.filter { $0.health?.level == "degraded" }.count
-        let total = enabled.count
-
-        // Red only if more than half of enabled servers are unhealthy
-        if unhealthyCount > total / 2 {
-            return .unhealthy
-        }
-        // Yellow if any degraded or unhealthy (but not majority)
-        if unhealthyCount > 0 || degradedCount > 0 {
-            return .degraded
-        }
-        return .healthy
     }
 
     /// Whether the tray is connected to a running core.

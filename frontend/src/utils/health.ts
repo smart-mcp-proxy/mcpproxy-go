@@ -35,6 +35,7 @@ export const HealthAction = {
   ViewLogs: 'view_logs',
   SetSecret: 'set_secret',
   Configure: 'configure',
+  EditURL: 'edit_url',
 } as const
 
 /**

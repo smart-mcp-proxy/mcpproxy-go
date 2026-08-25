@@ -6,17 +6,32 @@
         <h1 class="text-3xl font-bold">Secrets & Environment Variables</h1>
         <p class="text-base-content/70 mt-1">Manage secrets stored in your system's secure keyring and environment variables</p>
       </div>
-      <button
-        @click="refreshSecrets"
-        :disabled="loading"
-        class="btn btn-outline"
-      >
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-        </svg>
-        <span v-if="loading" class="loading loading-spinner loading-sm"></span>
-        {{ loading ? 'Refreshing...' : 'Refresh' }}
-      </button>
+      <div class="flex gap-2">
+        <button
+          @click="refreshSecrets"
+          :disabled="loading"
+          class="btn btn-outline"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          <span v-if="loading" class="loading loading-spinner loading-sm"></span>
+          {{ loading ? 'Refreshing...' : 'Refresh' }}
+        </button>
+        <!-- UX audit F8: the page promises secret management but the only way
+             in used to be a per-row "Add Value" button, which does not render
+             when there are no rows. -->
+        <button
+          @click="showAddSecretModal()"
+          class="btn btn-primary"
+          data-test="secrets-add-button"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+          </svg>
+          Add Secret
+        </button>
+      </div>
     </div>
 
     <!-- Summary Stats -->
@@ -112,11 +127,27 @@
       </svg>
       <h3 class="text-xl font-semibold mb-2">No secrets found</h3>
       <p class="text-base-content/70 mb-4">
-        {{ searchQuery ? 'No secrets match your search criteria' : `No ${filter === 'all' ? '' : filter} secrets available`.replace(/\s+/g, ' ').trim() }}
+        {{ searchQuery
+          ? 'No secrets match your search criteria'
+          : 'Store an API key or token in your system keyring, then reference it from your config as ${keyring:name}.' }}
       </p>
-      <button v-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
-        Clear Search
-      </button>
+      <div class="flex gap-2 justify-center">
+        <button v-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
+          Clear Search
+        </button>
+        <!-- UX audit F8: empty-state CTA -->
+        <button
+          v-if="!searchQuery"
+          @click="showAddSecretModal()"
+          class="btn btn-primary"
+          data-test="secrets-empty-add-button"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+          </svg>
+          Add Secret
+        </button>
+      </div>
     </div>
 
     <!-- Secrets List with Smooth Transitions -->
@@ -373,8 +404,9 @@ const runMigrationAnalysis = async () => {
   }
 }
 
-const showAddSecretModal = (predefinedName: string) => {
-  // Open modal with predefined name
+// Called with a name to fill a config-referenced secret, or with no argument
+// from the page-level / empty-state "Add Secret" CTA (UX audit F8).
+const showAddSecretModal = (predefinedName?: string) => {
   modalPredefinedName.value = predefinedName
   showAddModal.value = true
 }

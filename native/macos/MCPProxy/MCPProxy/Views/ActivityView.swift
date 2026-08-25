@@ -32,6 +32,11 @@ struct ActivityView: View {
     /// (records whose parent_id equals it). Set by "View sub-calls" in the
     /// detail panel; cleared by the filter chip or "View parent call".
     @State private var filterParentId: String?
+    /// When set, the list shows only the records of one MCP session. Seeded by
+    /// a tray glance row (`.activityFilter`) so a click on "github:search ×12"
+    /// lands on that client's calls instead of the whole log (F10); cleared by
+    /// its own chip.
+    @State private var filterSessionId: String?
     /// Monotonic ticket for loadActivities: only the NEWEST in-flight load may
     /// publish its results, so a slow unfiltered fetch can never overwrite the
     /// sub-call view the user just asked for (or vice versa).
@@ -87,14 +92,36 @@ struct ActivityView: View {
 
     /// Build query string from current filter state.
     private var filterQueryString: String {
-        var parts: [String] = ["limit=100"]
-        if filterType != "all" { parts.append("type=\(filterType)") }
-        if filterServer != "all" { parts.append("server=\(filterServer)") }
-        if filterStatus != "all" { parts.append("status=\(filterStatus)") }
+        (["limit=100"] + activeFilterParams).joined(separator: "&")
+    }
+
+    /// The filters currently in force, as encoded `key=value` pairs.
+    ///
+    /// Shared with the export so a filtered view and its export can never
+    /// disagree — "Export with current filters" used to drop the sub-call and
+    /// session scopes and hand back the whole log. Values are escaped: a
+    /// server name with a space or `&` is otherwise a broken (or extra) query
+    /// parameter.
+    private var activeFilterParams: [String] {
+        var parts: [String] = []
+        if filterType != "all" { parts.append("type=\(APIClient.escapeQueryValue(filterType))") }
+        if filterServer != "all" { parts.append("server=\(APIClient.escapeQueryValue(filterServer))") }
+        if filterStatus != "all" { parts.append("status=\(APIClient.escapeQueryValue(filterStatus))") }
         if let parentId = filterParentId, !parentId.isEmpty {
-            parts.append("parent_id=\(parentId)")
+            parts.append("parent_id=\(APIClient.escapeQueryValue(parentId))")
         }
-        return parts.joined(separator: "&")
+        if let sessionId = filterSessionId, !sessionId.isEmpty {
+            parts.append("session_id=\(APIClient.escapeQueryValue(sessionId))")
+        }
+        return parts
+    }
+
+    /// Scope the list to one MCP session (a tray glance row's hand-off).
+    private func showSession(_ sessionId: String) {
+        filterSessionId = sessionId
+        filterParentId = nil
+        selectedActivityID = nil
+        Task { await loadActivities() }
     }
 
     // MARK: - Parent/child navigation (code_execution sub-calls)
@@ -216,6 +243,13 @@ struct ActivityView: View {
             }
         }
         .task {
+            // A glance row that opened this window left its session here (F10);
+            // consume it before the first load so the list is never briefly
+            // unfiltered.
+            if let pending = appState.pendingActivitySessionFilter, !pending.isEmpty {
+                appState.pendingActivitySessionFilter = nil
+                filterSessionId = pending
+            }
             await loadSummary()
             await loadActivities()
         }
@@ -225,6 +259,14 @@ struct ActivityView: View {
                 await loadSummary()
                 await loadActivities()
             }
+        }
+        // F10: a tray glance row hands over the session it was derived from.
+        .onReceive(NotificationCenter.default.publisher(for: .activityFilter)) { note in
+            guard let sessionId = note.object as? String, !sessionId.isEmpty else { return }
+            // This view is live, so the hand-off is settled here — clear the
+            // pending value so a later-appearing view does not re-apply it.
+            appState.pendingActivitySessionFilter = nil
+            showSession(sessionId)
         }
     }
 
@@ -410,6 +452,36 @@ struct ActivityView: View {
                 .clipShape(Capsule())
                 .accessibilityIdentifier("activity-parent-filter-chip")
             }
+
+            // Session filter chip (F10): says which client's calls are on
+            // screen, and how to get back to everything.
+            if let sessionId = filterSessionId {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.scaled(.caption, scale: fontScale))
+                    Text("Session \(Self.shortCorrelationId(sessionId))")
+                        .font(.scaled(.caption, scale: fontScale))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button {
+                        filterSessionId = nil
+                        Task { await loadActivities() }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Show all activity")
+                    .accessibilityLabel("Clear session filter")
+                    .accessibilityIdentifier("activity-clear-session-filter")
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.accentColor.opacity(0.12))
+                .clipShape(Capsule())
+                .accessibilityIdentifier("activity-session-filter-chip")
+            }
         }
         .padding(.horizontal)
         .padding(.bottom, 8)
@@ -517,11 +589,9 @@ struct ActivityView: View {
                 defer { isExporting = false }
                 guard let client = apiClient else { return }
                 do {
-                    // Build export query with current filters
-                    var exportQuery = "format=\(format)"
-                    if filterType != "all" { exportQuery += "&type=\(filterType)" }
-                    if filterServer != "all" { exportQuery += "&server=\(filterServer)" }
-                    if filterStatus != "all" { exportQuery += "&status=\(filterStatus)" }
+                    // Build export query with current filters — every one of
+                    // them, from the same source the list uses.
+                    let exportQuery = (["format=\(format)"] + activeFilterParams).joined(separator: "&")
                     let data = try await client.fetchRaw(path: "/api/v1/activity/export?\(exportQuery)")
                     try data.write(to: url)
                     NSWorkspace.shared.activateFileViewerSelecting([url])

@@ -123,27 +123,42 @@
       </div>
     </div>
 
-    <!-- Overview Stats -->
-    <div class="stats shadow bg-base-100 w-full">
-      <div class="stat">
-        <div class="stat-title">Scanners Installed</div>
-        <div class="stat-value">{{ overview.scanners_installed || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Total Scans</div>
-        <div class="stat-value">{{ overview.total_scans || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Active Scans</div>
-        <div class="stat-value" :class="overview.active_scans > 0 ? 'text-warning' : ''">{{ overview.active_scans || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Findings</div>
-        <div class="stat-value" :class="totalFindings > 0 ? 'text-error' : 'text-success'">{{ totalFindings }}</div>
-        <div class="stat-desc" v-if="overview.findings_by_severity">
-          {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
+    <!-- Overview Stats.
+         Until the first /security/overview lands, `overview` is {} and every
+         tile used to render a hard `0` — a security page stating "0 findings"
+         before it has looked is worse than one that admits it is still looking
+         (audit F15). Skeletons hold the layout instead. -->
+    <div class="stats shadow bg-base-100 w-full" data-test="security-overview-stats">
+      <template v-if="!overviewLoaded">
+        <div v-for="tile in PENDING_STAT_TILES" :key="tile" class="stat" data-test="overview-stat-skeleton">
+          <div class="stat-title">{{ tile }}</div>
+          <div class="stat-value">
+            <span class="skeleton inline-block h-8 w-12 align-middle" aria-hidden="true"></span>
+            <span class="sr-only">Loading</span>
+          </div>
         </div>
-      </div>
+      </template>
+      <template v-else>
+        <div class="stat">
+          <div class="stat-title">Scanners Installed</div>
+          <div class="stat-value">{{ overview.scanners_installed || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Total Scans</div>
+          <div class="stat-value">{{ overview.total_scans || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Active Scans</div>
+          <div class="stat-value" :class="overview.active_scans > 0 ? 'text-warning' : ''">{{ overview.active_scans || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Findings</div>
+          <div class="stat-value" :class="totalFindings > 0 ? 'text-error' : 'text-success'">{{ totalFindings }}</div>
+          <div class="stat-desc" v-if="overview.findings_by_severity">
+            {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
+          </div>
+        </div>
+      </template>
       <!-- Offline TPA signature corpus (spec 086 FR-019 / #938): which
            signatures are live, where they came from, and how fresh they are. -->
       <div v-if="signatureBundle" class="stat" data-test="signature-bundle-stat">
@@ -544,6 +559,9 @@ const overview = ref<any>({})
 // this to avoid flashing a false warning while the initial request is still
 // in flight (overview.docker_available is undefined before the fetch lands).
 const overviewLoaded = ref(false)
+// Titles rendered above the loading skeletons, so the tiles keep their labels
+// (and their width) while the numbers are still unknown.
+const PENDING_STAT_TILES = ['Scanners Installed', 'Total Scans', 'Active Scans', 'Findings'] as const
 const installing = ref<string | null>(null)
 
 // Deep-scan master state. `null` until the config loads, so the truth badges
