@@ -59,9 +59,19 @@ information reachable, `describe_tool` definitions gain an additive
   `TestRetrieveToolsFullMode_GoldenByteIdentity` golden
   (`retrieve_full_default.golden.json`) — so the field is added at the definition
   assembly seam only. The definition-equality tests ("full-mode entry minus score")
-  are updated to enumerate the new field; no golden pins describe_tool *response*
-  bytes (the goldens pin its tools/list *definition*, untouched by a response
-  field).
+  are updated to enumerate the new field.
+- **Correction — a response-bytes golden DOES exist.** An earlier draft of this
+  decision claimed "no golden pins describe_tool *response* bytes". That is
+  false: `TestDescribeToolPlainCorpus_*` (`describe_plain_corpus_test.go`,
+  golden `testdata/describe_plain_corpus/pre099.json`) replays 18 plain-mode
+  `describe_tool` calls and compares each **response body byte for byte**,
+  permitting only the substitutions enumerated in `describePlainDelta`; its doc
+  comment is explicit that "a reordered key, a reworded remediation, a changed
+  cap message" fails. `output_schema` is `omitempty` and today's
+  `seedVisibilityFixture` tools declare no output schema, so D2 by itself does
+  not move these bytes — but the R5 prose work does, and any fixture that later
+  declares an output schema would. This gate is enumerated as the FOURTH frozen
+  gate in plan §Test strategy.
 - Uniform across surfaces: a per-surface response shape would break the
   single-assembly invariant and give the same id two different answers.
 
@@ -118,19 +128,56 @@ direct-surface built-in gate — see plan §Test strategy.)
   server carries instructions, `mcp.go:480`). Enumerated as a back-compat note in
   the plan and pinned by a test.
 
+**Precedence against the existing `instructions` config field** (interaction the
+first draft missed): `instructions` is an operator-configurable config key
+(`config.go:489`) that `resolveInstructions` (`mcp.go:94`) resolves to the
+operator's string, or `defaultInstructions` when empty — and it is applied to
+`p.server` ONLY (`mcp.go:480`). A hard-coded direct-server string would leave an
+operator's configured instructions permanently unreachable on `/mcp/all` and on
+`/mcp` under `routing_mode: "direct"`. **Decision**: the direct server's
+instructions are `resolveInstructions(cfg.Instructions)` + a blank line + the
+deferral legend, so the operator's text still leads and the legend is additive.
+The legend is a package constant so the new direct built-in golden can pin its
+exact bytes, and the golden fixture uses the empty-`instructions` default so the
+pinned string is deterministic. A test asserts a custom `instructions` value
+still appears, legend still appended.
+
 **Alternatives considered**: describe_tool description (rejected above); synthetic
 pseudo-tool (forbidden by FR-007); per-entry legend repetition (token-multiplied
 across every tool — defeats the feature).
 
 ## R5 — FR-009 prose: surface-neutral rewrite + one deliberate golden regen
 
-**Decision**: Keep ONE `buildDescribeToolTool` builder; rewrite its description to
-surface-neutral prose (drop "found via retrieve_tools"; e.g. "Return full JSON
-Schema + long description for specific tools by id. …"), keeping it under the
-250-token budget. Regenerate `toolslist_goldens/default_server.json` and
-`toolslist_goldens/retrieve_tools_mode.json` **once**, as the FR-010-sanctioned
-enumerated delta; extend `toolsListAllowedDelta` accordingly. The frozen `pre099/`
-baseline and `code_execution_mode.json` are never touched.
+**Decision**: Keep ONE `buildDescribeToolTool` builder; rewrite its
+retrieve_tools-specific prose to surface-neutral prose, keeping the marshalled
+definition under the 250-token budget (`TestDescribeTool_DefinitionTokenBudget`,
+currently measuring 243 — the rewrite has ~7 tokens of headroom and MUST be
+re-measured, not assumed).
+
+**Scope — FOUR strings, not one.** The top-level description is only the most
+visible offender; the same builder and handler carry three more
+retrieve_tools-specific strings that are equally false on a surface with no
+`retrieve_tools`, and two of them are *runtime response* strings rather than
+definition bytes:
+
+| Site | Current text | Why it must change |
+|---|---|---|
+| `mcp_describe_tool.go:64` tool description | "…for specific tools found via retrieve_tools." | FR-009 (definition bytes; golden-pinned) |
+| `mcp_describe_tool.go:71` `tool_ids` param description | "Tool ids in '\<server\>:\<tool\>' format from retrieve_tools. Max 5, or 50 with check:true." | definition bytes; ALSO contradicts FR-011, which requires the direct surface to accept `server__tool` ids — the prose must name both accepted forms |
+| `mcp_describe_tool.go:82` `filters` param description | "check:true only. Annotation filters, as in retrieve_tools." | definition bytes; golden-pinned |
+| `mcp_describe_tool.go:50` `describeNotFoundRemediation` + `:195` malformed-id remediation | "…re-run retrieve_tools." / "…exactly as returned by retrieve_tools." | **response** bytes — contract §3 calls these the direct surface's "standard remediation" / "format remediation"; pinned by the describe_plain_corpus gate (R2 correction) |
+
+**Golden handling**:
+- Regenerate `toolslist_goldens/default_server.json` and
+  `toolslist_goldens/retrieve_tools_mode.json` **once**, as the FR-010-sanctioned
+  enumerated delta. `toolsListAllowedDelta` needs **no edit**: it already lists
+  `describe_tool` for both surfaces (`toolslist_snapshot_test.go:188-192`),
+  because spec 099 enumerated it there. The frozen `pre099/` baseline and
+  `code_execution_mode.json` are never touched.
+- Extend `describePlainDelta` (`describe_plain_corpus_test.go:48`) with the named
+  remediation substitutions, in the same one-substitution-per-scenario style the
+  existing entries use, and regenerate nothing there — the delta map is the
+  enumeration, the golden stays frozen.
 
 **Rationale**: The alternative — per-surface descriptions — breaks the deliberate
 single-builder invariant ("the two schemas cannot drift", `mcp_describe_tool.go:53`)
@@ -149,6 +196,78 @@ observable so the entry can be listed signature-less.
 **Decision**: Add `Peek(hash string) (Signature, bool)` to `internal/toolsig` —
 pure read, no memoization, miss returns `ok=false`. Existing callers
 (`buildCompactToolEntry`, warm path) are untouched.
+
+**Key availability confirmed**: the catalog's `hash` is real on the discovery
+projection — `core/client.go:384` sets `toolMeta.Hash =
+hash.ComputeToolHashWithOutputSchema(...)` inside `ListTools`, so every
+`DiscoverTools` entry carries the same Spec-032 hash the indexer later warms the
+cache with (`runtime/lifecycle.go:874`, which skips hashless tools). `Peek` and
+the warm path therefore agree by construction; no hash is recomputed in the
+direct rebuild.
+
+## R11 — The `{"type":"object"}` placeholder needs `RawInputSchema` (verified empirically)
+
+**Finding** (probe run against mcp-go v0.57.0 in this tree): the plan's first
+draft asserted that "`mcp.NewTool` already produces" the permissive placeholder.
+It does not. `ToolInputSchema.MarshalJSON` →
+`toolArgumentsSchemaMarshalJSON` (`mcp/tools.go:765-792`) **unconditionally**
+writes `properties` (as `{}` when nil) and `required` (as `[]` when empty), so a
+schemaless `mcp.NewTool` entry serializes as:
+
+```json
+"inputSchema":{"properties":{},"required":[],"type":"object"}
+```
+
+That is not the FR-004 wire shape, and it is not cosmetic: an empty declared
+`properties` map is exactly the arg-pruning hazard FR-004's "never literal `{}`"
+rule exists to avoid — a client that prunes arguments to the declared properties
+would drop **every** argument.
+
+**Decision**: deferred entries are built with
+`mcp.NewToolWithRawSchema(displayName, description, json.RawMessage(`{"type":"object"}`))`
+(`mcp/tools.go:877`), which marshals to exactly `"inputSchema":{"type":"object"}`.
+Two traps the implementation MUST honor, both verified:
+
+1. `NewToolWithRawSchema` takes **no** `ToolOption`s and leaves `Annotations`
+   zero — FR-004 requires annotations preserved, so the deferred builder copies
+   the annotation fields onto the returned `mcp.Tool` explicitly (the same five
+   hints `buildDirectModeTools` applies today, `mcp_routing.go:99-115`).
+2. Setting `RawInputSchema` on a tool that already went through `mcp.NewTool`
+   is a **hard marshal failure**, not a silent override: `Tool.MarshalJSON`
+   (`mcp/tools.go:677-680`) returns `errToolSchemaConflict` when both
+   `InputSchema.Type` and `RawInputSchema` are set, which would break the whole
+   `tools/list` response. Full-mode entries keep the `NewTool` path unchanged
+   (FR-015); only the deferred branch uses the raw-schema constructor.
+
+A unit test asserts the exact marshalled bytes of a deferred entry's
+`inputSchema` and that a deferred entry marshals without error.
+
+## R12 — Direct-catalog test seam (`upstream.Manager` is concrete)
+
+**Finding**: `MCPProxyServer.upstreamManager` is a concrete `*upstream.Manager`
+(`mcp.go:121`), not an interface, and `buildDirectModeTools` calls
+`p.upstreamManager.DiscoverTools` directly (`mcp_routing.go:80`).
+`discoverTools` only returns tools from **connected** clients
+(`upstream/manager.go:1160-1176`), so no unit test can produce a deterministic
+multi-tool direct listing today. That blocks most of the plan's unit matrix
+(deferred rendering, full↔deferred set identity, collision determinism,
+describe/listing parity, the FR-015 fixture capture) — the one exception is the
+new direct built-in golden, which is specified over **zero** upstream tools and
+works with the existing `createTestMCPProxyServer` harness.
+
+**Decision**: split `buildDirectModeTools` into a thin I/O wrapper plus two pure
+functions the tests drive directly:
+
+```go
+func (p *MCPProxyServer) buildDirectCatalog(tools []*config.ToolMetadata, mode string) *directCatalog
+func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.ServerTool
+func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool // DiscoverTools → buildDirectCatalog → renderDirectTools → publish
+```
+
+The unit matrix feeds `buildDirectCatalog` a fixture `[]*config.ToolMetadata`
+slice (including the `__`-in-server-name collision pair) and asserts over
+`renderDirectTools` output. No interface extraction, no new dependency, and
+`buildDirectModeTools` keeps its current signature and call sites.
 
 ## R7 — Config-field wiring points (verified against this tree)
 
@@ -190,9 +309,19 @@ nearby).
   listener goroutine as the servers.changed rebuild, so no new reentrancy.
 - `SetTools` panics on task-tool name collisions and last-writer-wins on
   duplicate names — motivates the deterministic collision guard in R9.
-- `applyStrictInputSchemaDefault` is inert here (mcpproxy does not set
-  `WithStrictInputSchemaDefault`), so the `{"type":"object"}` placeholder passes
-  through `SetTools` unmodified — no injected `additionalProperties: false`.
+- `applyStrictInputSchemaDefault` (`server/server.go:884`) is inert here
+  (mcpproxy does not set `WithStrictInputSchemaDefault`), so `SetTools` injects
+  no `additionalProperties: false`. Note this is *not* what produces the
+  `{"type":"object"}` wire shape — see R11: the placeholder requires
+  `NewToolWithRawSchema`, and note further that `applyStrictInputSchemaDefault`
+  early-returns on `len(tool.RawInputSchema) > 0`, so a raw-schema entry would
+  stay permissive even if that option were ever enabled.
+- **Rebuild guard and the empty catalog**: `buildDirectModeTools` returns `nil`
+  and clears permissions when `DiscoverTools` errors (`mcp_routing.go:81-85`).
+  The catalog MUST still be published in that case (zero entries, recording the
+  mode it was built with), so the FR-014 guard always has a mode to compare
+  against; a nil/absent catalog is treated as "mode unknown" and rebuilds
+  unconditionally, so a flip during an upstream outage is never lost.
 - FR-018: `RefreshDirectModeTools` → `SetTools(buildDirectModeTools()...)` — the
   built list is 100% upstream-derived today (`mcp_routing.go:76`), so
   `describe_tool` must be appended inside `buildDirectModeTools` (tool-set
@@ -229,13 +358,59 @@ kept entry by construction.
 ## R10 — Direct-surface describe_tool visibility parity (FR-011)
 
 **Finding**: the direct listing's filters are `filterDirectModeToolsForAuth`
-(token server scope + operation-permission tier via
-`requiredPermissionForDirectTool`) and `filterDirectToolsForAgentCallability`,
-both registered only on `p.directServer` (`mcp_routing.go:614-618`), plus profile
-scope at dispatch. `toolVisibleToSession` checks scope + callability but **no
-permission tier**, and answers existence-confirming reason codes
+(`mcp_direct_scope.go:61` — **profile scope for every auth type**, then token
+server scope, then the operation-permission tier via
+`lookupDirectToolPermission`) and `filterDirectToolsForAgentCallability`
+(`mcp_direct_callability.go:49` — agent sessions only), both registered on
+`p.directServer` (`mcp_routing.go:616-618`); profile scope is additionally
+re-checked at dispatch (`mcp_routing.go:191`). `toolVisibleToSession`
+(`mcp_visibility.go:51`) checks scope + callability but **no permission tier**,
+and answers existence-confirming reason codes
 (`quarantined`/`pending_approval`/`changed`/`disabled`) — both divergences the
-spec names are real in this tree.
+spec names are real in this tree. (The step helpers live in three files, not one:
+`serverInScope` in `mcp_visibility.go:150`, `evaluateToolGate` in
+`tool_gate.go:80`, `isToolCallable` in `mcp.go:6068`.)
+
+**Three parity leaks the first draft did not close.** "Listing parity" is not
+achieved by building a correct resolver alone — the *listing* side and two
+suggestion paths must be brought onto the same catalog:
+
+1. **The listing filters still re-parse the display name.** Both filters resolve
+   `(server, tool)` via `ParseDirectToolName` (first-`__` split;
+   `mcp_direct_scope.go:76`, `mcp_direct_callability.go:65`), and
+   `filterDirectModeToolsForAuth` looks the permission up by display name. For a
+   server named `a__b` with tool `c` the filter evaluates a *nonexistent* server
+   `a` while the catalog-backed describe resolver evaluates the real pair
+   `a__b`/`c` — so describe can return a definition for a tool the same session's
+   listing dropped, which is precisely the FR-011 violation this decision exists
+   to prevent. **Decision**: both filters resolve through the catalog's
+   `byDisplayName` map (falling through unchanged when the name is not a catalog
+   entry, preserving today's behavior for built-ins), so listing and describe
+   agree by construction. This makes `mcp_direct_scope.go` and
+   `mcp_direct_callability.go` in-scope files, and retires
+   `lookupDirectToolPermission`'s separate map in favor of the catalog entry's
+   `requiredPermission` (FR-017).
+2. **`check:true` suggestions (`did_you_mean`) come from a server-level corpus.**
+   The shared preflight evaluator builds them in
+   `visibleCorpus.candidates()` (`internal/preflight/evaluator.go:594-650`),
+   which filters only by token server scope and server policy
+   (found/quarantined/enabled) — **no operation-permission tier and no
+   tool-level callability/approval gate** — and they are surfaced to the caller
+   (`mcp_describe_check.go:294`, `did_you_mean`). Swapping the *id gate* to
+   catalog membership does not touch this corpus, so a read-scoped token's
+   `not_found` could name destructive tools absent from its own direct
+   `tools/list` (FR-011, SC-005). **Decision**: on the direct surface the
+   evaluator is invoked with a caller-visible corpus derived from the direct
+   catalog under the same listing-parity gates; if that injection point does not
+   exist, `did_you_mean` is suppressed on this surface rather than shipped
+   unfiltered. A test asserts a read-scoped token receives no suggestion naming a
+   destructive tool.
+3. **Definition-mode case-correction suggestions.** `suggestCanonicalToolID`
+   (`mcp_visibility.go:204`) is invoked on the definition-mode not-found path
+   (`mcp_describe_tool.go:202-206`) and gates its suggestion with
+   `toolVisibleToSession` — the index-backed, permission-tier-blind resolver.
+   **Decision**: the direct surface uses the catalog-backed resolver for that
+   gate too (or omits the suggestion), same rule and same test.
 
 **Decision**: a direct-surface resolver (`directToolVisibleToSession`) built from
 the catalog + the same step helpers (`serverInScope`, `evaluateToolGate`,

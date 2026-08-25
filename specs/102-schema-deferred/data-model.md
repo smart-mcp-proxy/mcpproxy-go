@@ -46,9 +46,9 @@ The `tools/list` rendering of one catalog entry under `deferred`:
 |---|---|
 | `name` | `displayName` (unchanged) |
 | `description` | `[server] <description>` + `"\n"` + compact signature when `Peek(hash)` hits; without the signature suffix on a cache miss (entry still listed — FR-005) |
-| `inputSchema` | exactly `{"type":"object"}` — never `{}`, never absent, no upstream properties/required |
-| `outputSchema` | absent (stripped — research.md R2) |
-| annotations | unchanged from full mode |
+| `inputSchema` | exactly `{"type":"object"}` — never `{}`, never absent, no upstream properties/required. **Emitted via `mcp.NewToolWithRawSchema`**, not `mcp.NewTool`: mcp-go's schema marshaller always adds `"properties":{}` and `"required":[]` (research.md R11 / D9) |
+| `outputSchema` | absent (stripped — research.md R2); `Tool.MarshalJSON` omits it when unset |
+| annotations | unchanged from full mode — copied onto the tool explicitly, since the raw-schema constructor takes no `ToolOption`s |
 
 Full-mode rendering is byte-identical to pre-feature behavior (FR-015) modulo the
 appended `describe_tool` built-in.
@@ -76,6 +76,22 @@ Both forms resolve to the same entry; per-id error vocabulary on this surface:
 signal); visible ids never error in definition mode (snapshot-backed definition),
 and under `check:true` return the informative availability verdict from the shared
 preflight evaluator.
+
+**The catalog is also the resolution source for the LISTING side** (D10): the two
+direct tool filters (`filterDirectModeToolsForAuth`,
+`filterDirectToolsForAgentCallability`) resolve display names through
+`byDisplayName` rather than `ParseDirectToolName`'s first-`__` split, and read
+`requiredPermission` off the entry. Without this, a server whose name contains
+`__` is evaluated as a different (nonexistent) server by the listing and as the
+real pair by describe, producing a describable-but-unlisted id — the exact FR-011
+disclosure the catalog exists to prevent.
+
+**Suggestion surfaces are part of the parity contract** (D10): `did_you_mean`
+(check mode) and `suggestCanonicalToolID` (definition mode) must draw only from
+ids this session's direct listing would include, or be suppressed on this
+surface. The shared preflight corpus (`preflight.visibleCorpus`) filters at the
+server level only — no permission tier, no tool-level gate — so it is not
+listing-parity by itself.
 
 ## 5. describe_tool definition (additive delta) — research.md R2
 

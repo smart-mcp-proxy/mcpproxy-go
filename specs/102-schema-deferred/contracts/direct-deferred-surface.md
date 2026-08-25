@@ -29,6 +29,11 @@ Rules:
   otherwise unchanged (never dropped, never delayed — FR-005).
 - `inputSchema` is exactly `{"type":"object"}` — never literal `{}`, never absent,
   never carrying upstream properties/required (strict-client safety, FR-004).
+  Note the mechanism is normative too: `mcp.NewTool` marshals
+  `{"properties":{},"required":[],"type":"object"}`, which fails this rule and
+  re-opens the arg-pruning hazard, so deferred entries use
+  `mcp.NewToolWithRawSchema` with annotations copied on explicitly (research.md
+  R11).
 - `outputSchema` is absent (research.md R2).
 - Full mode (`"full"`, the default) is byte-identical to pre-feature output modulo
   §3's built-in addition (FR-015).
@@ -37,7 +42,12 @@ Rules:
 
 The direct server's `initialize` result carries `instructions` (today absent on
 this server instance), static across both serialization modes, conditionally
-phrased. Reference text (final bytes pinned by the direct built-in golden):
+phrased. The value is `resolveInstructions(cfg.Instructions)` (the operator's
+configured `instructions`, or the built-in default) followed by a blank line and
+the deferral legend — so enabling this feature never hides an operator's
+configured instructions on the direct surface. Reference legend text (final bytes
+pinned by the direct built-in golden, captured with the default
+`instructions`):
 
 > Some tool descriptions end with a compact signature `(param*:type, …)`:
 > `*` = required, `~` = collapsed/lossy details. When a signature is present the
@@ -68,8 +78,22 @@ phrased. Reference text (final bytes pinned by the direct built-in golden):
 | Removed between list and describe | per-id `not_found`, batch not failed | `not_found` |
 | Malformed id | per-id `not_found` + format remediation | same |
 
-No reason code, remediation variant, or timing may confirm the existence of an id
-this session's listing omitted. Retrieve_tools-surface semantics are unchanged.
+No reason code, remediation variant, **suggestion**, or timing may confirm the
+existence of an id this session's listing omitted. That explicitly covers both
+suggestion channels: `did_you_mean` (check mode) and the definition-mode
+case-correction hint. Both must be drawn from this session's direct catalog under
+the listing-parity gates, or omitted on this surface — the shared preflight
+suggestion corpus is server-level-filtered only and is NOT parity by itself
+(research.md R10). Remediation strings on this surface must not instruct the agent
+to "re-run retrieve_tools": the shared not-found and malformed-id remediations are
+rewritten surface-neutral along with the tool prose (research.md R5).
+
+Membership on both sides of this table is decided by the same catalog: the direct
+listing filters resolve display names through the catalog's registration mapping,
+never by re-parsing on the first `__`, so listing and describe cannot disagree for
+a server name containing `__`.
+
+Retrieve_tools-surface semantics are unchanged.
 
 ## 4. Pre-dispatch validation (FR-012/FR-013)
 

@@ -67,6 +67,13 @@ go test -race ./internal/toolsig/... ./internal/config/... ./internal/runtime/..
 
 Golden rules: only `toolslist_goldens/{default_server,retrieve_tools_mode}.json`
 are regenerated (once, FR-009 prose); `pre099/`, `code_execution_mode.json`,
-`tools_list_prefeature.golden.json`, and `retrieve_full_default.golden.json` must
-pass unregenerated; the new `direct_mode_builtins.json` gate pins the direct
-built-ins in both modes.
+`tools_list_prefeature.golden.json`, `retrieve_full_default.golden.json`, and
+`describe_plain_corpus/pre099.json` must pass **unregenerated** — the
+describe-corpus prose movement is absorbed by adding named substitutions to
+`describePlainDelta`, not by rewriting its golden. The new
+`direct_mode_builtins.json` gate pins the direct built-ins in both modes and is a
+standalone test, not an entry in `toolsListGoldenSurfaces`.
+
+Expected red tests during implementation (enumerated, not regressions):
+`TestDescribeTool_RegisteredInRetrieveToolsModeOnly`'s `direct routing mode`
+subtest, which asserts the v1 decision this feature reverses.
