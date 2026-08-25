@@ -99,7 +99,7 @@ Technical approach, grounded in the code:
 **Project Type**: Single Go project (core server).
 **Performance Goals**: Constitution I unaffected — serialization + registration-time work only; signatures come from the index-warmed cache via a pure read (`Peek`), no per-request compilation (FR-005); validation is memoized per tool hash and cheaper than the upstream round trip it prevents.
 **Constraints**: FR-015 byte-stability of full-mode direct listings; FR-010 existing goldens pass unregenerated except the two enumerated FR-009 regens; FR-008 identical tool-set membership across modes; FR-013b fail-open validation; SC-001 ≥70% token reduction on the 45-tool corpus.
-**Scale/Scope**: ~5 packages touched: `internal/server` (core of the change), `internal/config`, `internal/runtime` (one clause), `internal/toolsig` (one method), `cmd/mcpproxy` (one flag); plus docs and generated OpenAPI artifacts.
+**Scale/Scope**: ~6 packages touched: `internal/server` (core of the change), `internal/config`, `internal/runtime` (one clause), `internal/toolsig` (one method), `cmd/mcpproxy` (one flag), `bench/arms` (one measurement arm for the SC-001/SC-002 gates); plus docs and generated OpenAPI artifacts.
 
 ## Constitution Check
 
@@ -207,6 +207,7 @@ internal/
 │   └── e2e_test.go                  # flip-notification, self-healing-retry, describe-on-direct E2E
 cmd/mcpproxy/
 │   └── main.go                      # --direct-tool-response-mode serve flag (pattern of :141/:769)
+bench/arms/                          # NEW deferred-direct arm + testdata golden for the SC-001/SC-002 gates
 oas/                                 # regenerated via `make swagger` (config struct change)
 docs/
 ├── configuration.md                 # new field + env/flag
@@ -335,7 +336,12 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
 **Token gates (SC-001/SC-002)**: measure deferred vs full direct `tools/list` over
 the frozen 45-tool corpus with the spec-083 profiler's pinned tokenizer (the
 085/099 pattern): assert ≥70% reduction and ≥80% one-shot-callable (non-lossy)
-share.
+share. Concretely this is a **new arm** in `bench/arms/` (registry contract:
+`specs/083-discovery-profiler/contracts/arm-interface.md`, `bench/arms/arm.go`),
+alongside `baseline`/`compact_sig`/`toon`/`tron`/`tscg`, plus its
+`bench/arms/testdata/*_golden.txt` render golden — the existing arms all encode
+`retrieve_tools` result sets, none renders a direct `tools/list`. `bench/` is
+therefore an in-scope directory for this feature (added to the touch list below).
 
 **E2E** (`internal/server/e2e_test.go`): live flip with a connected client —
 `notifications/tools/list_changed` observed, next listing reflects the mode,
