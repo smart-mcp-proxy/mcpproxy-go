@@ -67,7 +67,8 @@ func TestCalculateHealth_DisconnectedState(t *testing.T) {
 	assert.Equal(t, LevelUnhealthy, result.Level)
 	assert.Equal(t, StateEnabled, result.AdminState)
 	assert.Equal(t, "Host not found", result.Summary)
-	assert.Equal(t, ActionRestart, result.Action)
+	assert.Equal(t, ActionEditURL, result.Action,
+		"A name that does not resolve is an address problem, not a restartable outage (audit F11)")
 }
 
 func TestCalculateHealth_ConnectingState(t *testing.T) {
@@ -850,7 +851,7 @@ func TestCalculateHealth_RefreshStatePriority(t *testing.T) {
 		assert.NotEqual(t, "Authentication required", result.Summary)
 	})
 
-	t.Run("offline HTTP server with no such host shows restart not login", func(t *testing.T) {
+	t.Run("offline HTTP server with no such host shows edit_url not login", func(t *testing.T) {
 		input := HealthCalculatorInput{
 			Name:          "remote-server",
 			Enabled:       true,
@@ -862,7 +863,7 @@ func TestCalculateHealth_RefreshStatePriority(t *testing.T) {
 		result := CalculateHealth(input, nil)
 
 		assert.Equal(t, LevelUnhealthy, result.Level)
-		assert.Equal(t, ActionRestart, result.Action, "Should suggest restart, not login, for DNS failure")
+		assert.Equal(t, ActionEditURL, result.Action, "Should suggest edit_url, not login or restart, for DNS failure")
 	})
 
 	t.Run("genuine OAuth error still suggests login", func(t *testing.T) {
@@ -948,4 +949,68 @@ func TestRefreshStateSync(t *testing.T) {
 		"RefreshStateRetrying values must match between health and oauth packages")
 	assert.Equal(t, int(RefreshStateFailed), int(oauth.RefreshStateFailed),
 		"RefreshStateFailed values must match between health and oauth packages")
+}
+
+// TestCalculateHealth_EndpointAddressErrors covers audit F11: a server whose
+// configured address is wrong must be offered "Edit URL", never "Restart",
+// because restarting redials the same broken address forever.
+func TestCalculateHealth_EndpointAddressErrors(t *testing.T) {
+	addressErrors := []struct {
+		name      string
+		lastError string
+	}{
+		{"dns failure", `failed to connect: transport error: Post "https://example.invalid/mcp": dial tcp: lookup example.invalid: no such host`},
+		{"unsupported scheme", `Post "ftp://example.com/mcp": unsupported protocol scheme "ftp"`},
+		{"missing scheme", `parse "example.com/mcp": missing protocol scheme`},
+		{"malformed url", `invalid URL escape "%zz"`},
+	}
+
+	for _, tt := range addressErrors {
+		t.Run(tt.name+" in error state", func(t *testing.T) {
+			result := CalculateHealth(HealthCalculatorInput{
+				Name:      "broken-remote",
+				Enabled:   true,
+				State:     "error",
+				LastError: tt.lastError,
+			}, nil)
+
+			assert.Equal(t, LevelUnhealthy, result.Level)
+			assert.Equal(t, ActionEditURL, result.Action)
+		})
+
+		t.Run(tt.name+" in disconnected state", func(t *testing.T) {
+			result := CalculateHealth(HealthCalculatorInput{
+				Name:      "broken-remote",
+				Enabled:   true,
+				State:     "disconnected",
+				LastError: tt.lastError,
+			}, nil)
+
+			assert.Equal(t, ActionEditURL, result.Action)
+		})
+	}
+
+	t.Run("connection refused still suggests restart", func(t *testing.T) {
+		result := CalculateHealth(HealthCalculatorInput{
+			Name:      "local-server",
+			Enabled:   true,
+			State:     "error",
+			LastError: `dial tcp 127.0.0.1:9999: connect: connection refused`,
+		}, nil)
+
+		assert.Equal(t, ActionRestart, result.Action,
+			"The host resolved, so the address is plausibly right — restart stays the remedy")
+	})
+
+	t.Run("genuine OAuth error outranks an address hint", func(t *testing.T) {
+		result := CalculateHealth(HealthCalculatorInput{
+			Name:          "oauth-server",
+			Enabled:       true,
+			State:         "error",
+			OAuthRequired: true,
+			LastError:     "invalid_grant: token has been revoked",
+		}, nil)
+
+		assert.Equal(t, ActionLogin, result.Action)
+	})
 }

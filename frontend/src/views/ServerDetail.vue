@@ -125,16 +125,20 @@
           </div>
         </div>
 
+        <!-- Audit F11: this row used to speak three vocabularies at once
+             (Enabled/Active + Online/Offline + the Disconnected badge), one of
+             them green on a server that was down. It now carries exactly two
+             axes: the admin state you set, and the health we observe. -->
         <div class="stats shadow bg-base-100">
           <div class="stat">
-            <div class="stat-figure text-secondary">
+            <div class="stat-figure" :class="adminStateTone">
               <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
               </svg>
             </div>
-            <div class="stat-title">Status</div>
-            <div class="stat-value text-sm">{{ server.enabled ? 'Enabled' : 'Disabled' }}</div>
-            <div class="stat-desc">{{ server.quarantined ? 'Quarantined' : 'Active' }}</div>
+            <div class="stat-title">Admin state</div>
+            <div class="stat-value text-sm" data-test="server-admin-state">{{ adminStateLabel }}</div>
+            <div class="stat-desc">set by you</div>
           </div>
         </div>
 
@@ -153,16 +157,16 @@
 
         <div class="stats shadow bg-base-100">
           <div class="stat">
-            <div class="stat-figure text-warning">
+            <div class="stat-figure" :class="healthLevelTone">
               <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
-            <div class="stat-title">Connection</div>
-            <div class="stat-value text-sm">
-              {{ server.connected ? 'Online' : server.connecting ? 'Connecting' : 'Offline' }}
+            <div class="stat-title">Health</div>
+            <div class="stat-value text-sm" :class="healthLevelTone" data-test="server-health-level">
+              {{ healthLevelLabel }}
             </div>
-            <div class="stat-desc">current state</div>
+            <div class="stat-desc [overflow-wrap:anywhere]" data-test="server-health-summary">{{ statusBadgeText }}</div>
           </div>
         </div>
       </div>
@@ -854,13 +858,63 @@
               </div>
             </div>
 
-            <!-- Connection (HTTP/SSE) -->
-            <div v-if="server.url" class="card bg-base-100 shadow-sm">
+            <!-- Connection (HTTP/SSE). Audit F11: the endpoint is editable here
+                 so the "Edit URL" remedy offered on an unresolvable host lands on
+                 the control that fixes it, not on a read-only echo of it. -->
+            <div
+              v-if="server.url"
+              class="card bg-base-100 shadow-sm"
+              :class="endpointHighlighted ? 'ring-2 ring-primary/50' : ''"
+              data-test="server-connection-card"
+            >
               <div class="card-body py-4">
                 <h3 class="card-title text-base">Connection</h3>
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
                   <dt class="text-base-content/60">URL</dt>
-                  <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.url }}</code></dd>
+                  <dd>
+                    <div v-if="!editingUrl" class="flex items-center gap-2 flex-wrap">
+                      <code class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.url }}</code>
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-xs"
+                        data-test="server-url-edit"
+                        @click="startEditUrl"
+                      >Edit</button>
+                    </div>
+                    <div v-else class="flex items-start gap-2 flex-wrap">
+                      <input
+                        ref="urlInputRef"
+                        v-model="urlDraft"
+                        type="url"
+                        class="input input-bordered input-sm font-mono w-full max-w-xl"
+                        :class="urlDraftError ? 'input-error' : ''"
+                        aria-label="Server URL"
+                        data-test="server-url-input"
+                        @keyup.enter="saveUrl"
+                        @keyup.escape="cancelEditUrl"
+                      />
+                      <div class="flex gap-2">
+                        <button
+                          type="button"
+                          class="btn btn-primary btn-sm"
+                          :disabled="actionLoading || !urlDraft.trim()"
+                          data-test="server-url-save"
+                          @click="saveUrl"
+                        >Save</button>
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-sm"
+                          :disabled="actionLoading"
+                          data-test="server-url-cancel"
+                          @click="cancelEditUrl"
+                        >Cancel</button>
+                      </div>
+                      <p v-if="urlDraftError" class="text-error text-xs w-full" data-test="server-url-error">{{ urlDraftError }}</p>
+                      <p v-else class="text-base-content/60 text-xs w-full">
+                        Saving reconnects the server with the new endpoint.
+                      </p>
+                    </div>
+                  </dd>
                 </dl>
               </div>
             </div>
@@ -1158,18 +1212,31 @@
                 Cancel
               </button>
 
-              <div v-if="(scanReport || server.security_scan) && scanReport?.scan_complete !== false && !scanLoading" class="flex items-center gap-3">
+              <!-- Audit F34: this is now the ONLY Risk Score on the tab, and
+                   the gauge is labelled — it used to render as a bare coloured
+                   ring with an unexplained number beside it. -->
+              <div
+                v-if="showHeaderRiskScore"
+                class="flex items-center gap-3"
+                data-test="security-risk-score"
+              >
                 <div class="text-right">
                   <div class="text-sm text-base-content/70">Risk Score</div>
                   <div class="text-2xl font-bold" :class="riskScoreClass">
                     {{ currentRiskScore }}<span class="text-sm font-normal text-base-content/50">/100</span>
                   </div>
+                  <div class="text-xs text-base-content/50">lower is safer</div>
                 </div>
                 <div
                   class="radial-progress text-sm"
                   :class="riskScoreClass"
                   :style="`--value:${currentRiskScore}; --size:3.5rem; --thickness:4px;`"
                   role="progressbar"
+                  :aria-valuenow="currentRiskScore"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-label="`Risk score ${currentRiskScore} out of 100 — lower is safer`"
+                  :title="`Risk score ${currentRiskScore} out of 100 — lower is safer`"
                 >
                   {{ currentRiskScore }}
                 </div>
@@ -1338,9 +1405,12 @@
 
             <!-- Scan results summary (hidden during active scan) -->
             <template v-else-if="scanReport && !scanLoading">
-              <!-- Risk Score + Summary -->
+              <!-- Findings summary. Audit F34: the Risk Score lives in the tab
+                   header only — it used to be printed twice on one screen. It
+                   still appears here when the header cannot show it (a failed or
+                   empty scan, where "N/A" is the honest reading). -->
               <div class="flex items-center gap-6 mb-4">
-                <div class="text-center">
+                <div v-if="!showHeaderRiskScore" class="text-center" data-test="security-risk-score-fallback">
                   <div class="text-3xl font-bold" :class="scanReport.risk_score >= 70 ? 'text-error' : scanReport.risk_score >= 40 ? 'text-warning' : 'text-success'">
                     {{ scanReport.empty_scan ? 'N/A' : scanReport.risk_score + '/100' }}
                   </div>
@@ -1356,7 +1426,24 @@
 
               <!-- Scan metadata -->
               <div class="text-sm text-base-content/60 mb-4">
-                <span v-if="scanReport.job_id">Scan ID: <code class="bg-base-200 px-1 rounded text-xs">{{ scanReport.job_id.substring(0, 8) }}</code></span>
+                <!-- Audit F34: a truncated id you cannot copy is unusable in a
+                     bug report. Full id on hover, one click to copy. -->
+                <span v-if="scanReport.job_id" class="inline-flex items-center gap-1">
+                  Scan ID:
+                  <code class="bg-base-200 px-1 rounded text-xs" :title="scanReport.job_id">{{ scanReport.job_id.substring(0, 8) }}…</code>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs px-1"
+                    :title="`Copy full scan ID (${scanReport.job_id})`"
+                    :aria-label="`Copy full scan ID ${scanReport.job_id}`"
+                    data-test="scan-id-copy"
+                    @click="copyScanId(scanReport.job_id)"
+                  >
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                  </button>
+                </span>
                 <span v-if="scanReport.scanned_at" class="ml-4">{{ new Date(scanReport.scanned_at).toLocaleString() }}</span>
                 <span v-if="scanReport.pass2_running" class="ml-4 badge badge-sm badge-info">Pass 2 running...</span>
                 <span v-else-if="scanReport.pass2_complete" class="ml-4 badge badge-sm badge-success">Pass 2 complete</span>
@@ -1426,7 +1513,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -1599,7 +1686,32 @@ const signInState = computed(() => {
   return server.value ? oauthSignInState(server.value) : null
 })
 
+// Audit F11: the badge speaks the same unified vocabulary as the Servers-page
+// card — admin_state first, then health level — instead of a private
+// Connected/Disconnected reading of `server.connected`. A server that is down
+// can no longer read green here while the tiles say something else.
 const statusBadgeClass = computed(() => {
+  const health = server.value?.health
+  if (health) {
+    switch (health.admin_state) {
+      case 'disabled':
+        return 'badge-neutral'
+      case 'quarantined':
+        return signInState.value ? 'badge-warning' : 'badge-secondary'
+      default:
+        if (signInState.value) return 'badge-warning'
+        switch (health.level) {
+          case 'healthy':
+            return 'badge-success'
+          case 'degraded':
+            return 'badge-warning'
+          case 'unhealthy':
+            return 'badge-error'
+          default:
+            return 'badge-ghost'
+        }
+    }
+  }
   if (signInState.value) return 'badge-warning'
   if (server.value?.connected) return 'badge-success'
   if (server.value?.connecting) return 'badge-warning'
@@ -1607,10 +1719,66 @@ const statusBadgeClass = computed(() => {
 })
 
 const statusBadgeText = computed(() => {
+  const health = server.value?.health
+  if (health) {
+    if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
+    return health.summary || health.level
+  }
   if (signInState.value) return 'Sign-in required'
   if (server.value?.connected) return 'Connected'
   if (server.value?.connecting) return 'Connecting'
   return 'Disconnected'
+})
+
+// The two axes the status tiles render (audit F11). admin_state is what the
+// user set; level is what we observe. Neither borrows the other's words.
+const adminStateLabel = computed(() => {
+  const adminState = server.value?.health?.admin_state
+  if (adminState === 'quarantined' || server.value?.quarantined) return 'Quarantined'
+  if (adminState === 'disabled' || server.value?.enabled === false) return 'Disabled'
+  return 'Enabled'
+})
+
+const adminStateTone = computed(() => {
+  switch (adminStateLabel.value) {
+    case 'Quarantined':
+      return 'text-warning'
+    case 'Disabled':
+      return 'text-base-content/50'
+    default:
+      return 'text-secondary'
+  }
+})
+
+const healthLevelLabel = computed(() => {
+  const level = server.value?.health?.level
+  switch (level) {
+    case 'healthy':
+      return 'Healthy'
+    case 'degraded':
+      return 'Degraded'
+    case 'unhealthy':
+      return 'Unhealthy'
+    default:
+      return server.value?.connected ? 'Healthy' : 'Unknown'
+  }
+})
+
+// Never a success tone on an unhealthy server (audit F11). A disabled server is
+// not "green healthy" either — its health level is healthy only because being
+// off is intentional, so it reads neutral.
+const healthLevelTone = computed(() => {
+  if (adminStateLabel.value === 'Disabled') return 'text-base-content/50'
+  switch (healthLevelLabel.value) {
+    case 'Healthy':
+      return 'text-success'
+    case 'Degraded':
+      return 'text-warning'
+    case 'Unhealthy':
+      return 'text-error'
+    default:
+      return 'text-base-content/50'
+  }
 })
 
 // Spec 044 — render the structured diagnostic panel whenever a warn/error
@@ -1679,6 +1847,29 @@ const riskScoreClass = computed(() => {
   if (score >= 30) return 'text-warning'
   return 'text-success'
 })
+
+// Audit F34: exactly one Risk Score per screen. The tab header owns it whenever
+// it can show a real number; the results block falls back only when it cannot
+// (a scan that did not complete, where the header shows the failure instead).
+const showHeaderRiskScore = computed(() => {
+  if (scanLoading.value) return false
+  if (scanReport.value?.scan_complete === false) return false
+  if (scanReport.value?.empty_scan) return false
+  return !!(scanReport.value || server.value?.security_scan)
+})
+
+async function copyScanId(jobID: string) {
+  try {
+    await navigator.clipboard.writeText(jobID)
+    systemStore.addToast({ type: 'success', title: 'Scan ID copied', message: jobID })
+  } catch {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Copy failed',
+      message: 'Clipboard access was denied — the full ID is in the tooltip.',
+    })
+  }
+}
 
 // Spec 088 (FR-011/FR-014, research D4) — route of the server's MOST RECENT scan
 // report, reused by the quarantine banner and by every hold-evidence badge.
@@ -2925,6 +3116,70 @@ function scopeKey(scope: 'header' | 'env'): 'headers' | 'env' {
   return scope === 'header' ? 'headers' : 'env'
 }
 
+// --- Endpoint editing (audit F11) ---------------------------------------
+// A DNS or malformed-URL failure now offers "Edit URL", which deep-links here
+// with ?focus=endpoint. The remedy has to land on an editable field, so the
+// Connection card's URL row is one.
+const editingUrl = ref(false)
+const urlDraft = ref('')
+const urlDraftError = ref('')
+const endpointHighlighted = ref(false)
+const urlInputRef = ref<HTMLInputElement | null>(null)
+
+function startEditUrl() {
+  urlDraft.value = server.value?.url ?? ''
+  urlDraftError.value = ''
+  editingUrl.value = true
+  void nextTick(() => urlInputRef.value?.focus())
+}
+
+function cancelEditUrl() {
+  editingUrl.value = false
+  urlDraftError.value = ''
+  endpointHighlighted.value = false
+}
+
+async function saveUrl() {
+  const next = urlDraft.value.trim()
+  if (!next) {
+    urlDraftError.value = 'Enter a URL'
+    return
+  }
+  // Reject locally what the backend would reject anyway, so the user sees the
+  // problem beside the field instead of as a toast over a closed editor.
+  let parsed: URL
+  try {
+    parsed = new URL(next)
+  } catch {
+    urlDraftError.value = 'Not a valid URL — include the scheme, e.g. https://example.com/mcp'
+    return
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    urlDraftError.value = 'Only http:// and https:// endpoints are supported'
+    return
+  }
+  if (next === server.value?.url) {
+    cancelEditUrl()
+    return
+  }
+  urlDraftError.value = ''
+  const ok = await patchServerDiff({ url: next }, 'Updated URL')
+  if (ok) {
+    cancelEditUrl()
+    await loadServerDetails()
+  }
+}
+
+// ?focus=endpoint (set by the Edit URL action) opens the editor and draws
+// attention to the card, so the deep link ends on the control, not near it.
+function applyEndpointFocus() {
+  if (route.query.focus !== 'endpoint') return
+  if (activeTab.value !== 'config') return
+  if (!server.value?.url) return
+  endpointHighlighted.value = true
+  if (!editingUrl.value) startEditUrl()
+}
+
 // Spec 088 US1 (FR-004/FR-005): the tri-mode trust selector supersedes the
 // MCP-2932 binary "Auto-approve tool changes" toggle. Persistence goes through
 // the same PATCH /api/v1/servers/{id} path, but the body carries `trust_mode`
@@ -3463,6 +3718,9 @@ onMounted(() => {
     activeTab.value = tabParam as typeof activeTab.value
   }
   loadServerDetails().then(() => {
+    // Audit F11: honor ?focus=endpoint once the server payload is in, so the
+    // Edit URL action lands on a focused, pre-filled field.
+    applyEndpointFocus()
     // Pre-load scanner names if opening security tab
     if (activeTab.value === 'security') {
       loadScannerNames()

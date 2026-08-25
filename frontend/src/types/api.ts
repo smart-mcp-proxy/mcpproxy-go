@@ -410,6 +410,9 @@ export interface StatusUpdate {
   }
   status: Record<string, any>
   timestamp: number
+  // Unix seconds at which the core process started. Absent on older cores and
+  // on SSE status frames that don't carry it — treat it as optional.
+  started_at?: number
 }
 
 // Routing mode types
@@ -913,7 +916,20 @@ export interface ClientStatus {
   // Every config location the existence check consults, highest precedence
   // first (e.g. OpenCode's opencode.jsonc then opencode.json).
   checked_paths?: string[]
+  // This instance's own MCP endpoint. Config-derived, so it is present on both
+  // the stat-only listing and the on-demand per-client read.
+  proxy_url?: string
+  // The endpoint the client's existing entry actually points at (sanitized —
+  // query/userinfo/fragment stripped). Resolved only by the on-demand read.
+  registered_url?: string
+  // How registered_url relates to proxy_url. `connected` only ever meant "an
+  // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
+  // so a row can be connected to a different instance entirely (audit F18).
+  endpoint_match?: EndpointMatch
 }
+
+// How a client's registered endpoint relates to this instance (audit F18).
+export type EndpointMatch = 'this' | 'other' | 'unknown'
 
 export interface ConnectResult {
   success: boolean

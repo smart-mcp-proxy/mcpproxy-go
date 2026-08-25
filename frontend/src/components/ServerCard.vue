@@ -115,22 +115,46 @@
         </div>
       </div>
 
-      <!-- Error message - suppressed when health.action conveys the issue (FR-018, FR-019) -->
-      <div v-if="shouldShowError" class="alert alert-error alert-sm mb-4">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <!-- Error message - suppressed when health.action conveys the issue (FR-018, FR-019)
+           Audit F12: the card shows the plain-language summary; the raw wrapped
+           Go error chain lives behind a disclosure so it is available for a bug
+           report without shouting over the card it sits on. -->
+      <div v-if="shouldShowError" class="alert alert-error alert-sm mb-4 items-start" data-test="server-card-error">
+        <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
-        <span class="text-xs">{{ server.last_error }}</span>
+        <div class="min-w-0 flex-1">
+          <div class="text-xs font-medium" data-test="server-card-error-summary">{{ errorSummary }}</div>
+          <details class="mt-1">
+            <summary
+              class="text-[11px] opacity-80 cursor-pointer select-none"
+              data-test="server-card-error-toggle"
+            >Technical details</summary>
+            <p
+              class="text-[11px] font-mono mt-1 [overflow-wrap:anywhere] opacity-90"
+              data-test="server-card-error-detail"
+            >{{ server.last_error }}</p>
+          </details>
+        </div>
       </div>
 
       <!-- Server-level quarantine warning. Server is held back entirely until
-           the user approves it. Drives the Approve button below via
-           health.action='approve'. -->
-      <div v-if="server.quarantined" class="alert alert-warning alert-sm mb-4">
+           the user approves it. Audit F7: the card states a required action
+           ("needs security review") so it must also afford it — Review opens the
+           server's Security tab, where the spec-088 banner carries the verdict
+           and the approve/scan actions. -->
+      <div v-if="server.quarantined" class="alert alert-warning alert-sm mb-4" data-test="server-card-quarantine">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
         </svg>
-        <span class="text-xs">Server is quarantined</span>
+        <span class="text-xs flex-1">Quarantined — needs security review</span>
+        <router-link
+          :to="serverDetailPath(server.name, 'security')"
+          class="btn btn-xs btn-warning"
+          data-test="server-card-quarantine-review"
+        >
+          Review
+        </router-link>
       </div>
 
       <!-- Tool-level quarantine warning (Spec 032). Independent of server
@@ -165,11 +189,15 @@
           Approve
         </button>
 
+        <!-- Audit F7: while a server is quarantined, Review outranks Enable —
+             enabling a server that is still held back does nothing the user can
+             see, so it drops to a secondary outline button. -->
         <button
           v-if="healthAction === 'enable'"
           @click="enableServer"
           :disabled="loading"
-          class="btn btn-sm btn-primary"
+          :class="['btn btn-sm', server.quarantined ? 'btn-outline' : 'btn-primary']"
+          data-test="server-card-enable"
         >
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
           Enable
@@ -219,6 +247,17 @@
           Configure
         </router-link>
 
+        <!-- Audit F11: a name that does not resolve is not a restartable
+             outage. Send the user to the field that is actually wrong. -->
+        <router-link
+          v-if="healthAction === 'edit_url'"
+          :to="editEndpointPath"
+          class="btn btn-sm btn-primary"
+          data-test="server-card-edit-url"
+        >
+          Edit URL
+        </router-link>
+
         <!-- Logout button (only when connected with OAuth) -->
         <button
           v-if="canLogout"
@@ -234,11 +273,14 @@
           <div
             v-if="!server.enabled"
             class="tooltip tooltip-top"
-            data-tip="Enable server first"
+            :data-tip="scanDisabledReason"
           >
             <button
               class="btn btn-sm btn-outline btn-ghost"
               disabled
+              :title="scanDisabledReason"
+              :aria-label="`Scan — ${scanDisabledReason}`"
+              data-test="server-card-scan-disabled"
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
@@ -495,6 +537,30 @@ const statusTooltip = computed(() => {
 // Suggested action from health status
 const healthAction = computed(() => {
   return props.server.health?.action || ''
+})
+
+// Audit F11: the Edit URL action lands on the Configuration tab with the
+// endpoint field focused, so the remedy and the control are one click apart.
+const editEndpointPath = computed(
+  () => `${serverDetailPath(props.server.name, 'config')}&focus=endpoint`
+)
+
+// Audit F7: a disabled control must say why it is disabled.
+const scanDisabledReason = computed(() =>
+  props.server.quarantined && !props.server.enabled
+    ? 'Enable the server to scan it — approving it from Review enables it too'
+    : 'Enable the server first — a scan inspects a running server'
+)
+
+// Audit F12: the plain-language half of the error. health.summary is already
+// the mapped phrase ("Host not found"); fall back to the raw chain's own last
+// segment — the root cause — rather than to the whole wrapped chain.
+const errorSummary = computed(() => {
+  const summary = props.server.health?.summary
+  if (summary) return summary
+  const raw = props.server.last_error ?? ''
+  const segments = raw.split(': ')
+  return segments[segments.length - 1] || raw
 })
 
 // Tool-level quarantine count (pending + changed)

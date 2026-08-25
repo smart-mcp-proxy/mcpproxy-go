@@ -63,7 +63,33 @@ type ClientStatus struct {
 	CheckedPaths []string `json:"checked_paths,omitempty"`
 	// Remediation carries actionable fix text, populated only when access is denied.
 	Remediation string `json:"remediation,omitempty"`
+
+	// ProxyURL is THIS instance's MCP endpoint — the address a client would be
+	// pointed at by a connect. Derived from config only (no file read), so it is
+	// populated by both the stat-only listing and the on-demand read.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// RegisteredURL is the endpoint the client's existing entry actually points
+	// at, sanitized the same way a preview's entry summary is (query, userinfo
+	// and fragment stripped — never a credential). Empty when nothing was read
+	// or the entry carries no URL-shaped value. Resolved only by GetStatus.
+	RegisteredURL string `json:"registered_url,omitempty"`
+	// EndpointMatch says how RegisteredURL relates to ProxyURL. It exists
+	// because Connected only ever meant "an mcpproxy-shaped entry is present":
+	// an entry merely *named* mcpproxy counts, even when it points at another
+	// instance on another port (audit F18). One of:
+	//   "this"    — the entry's endpoint is this instance
+	//   "other"   — the entry points somewhere else (a different instance)
+	//   "unknown" — the entry has no comparable endpoint (e.g. a stdio command)
+	// Empty when Connected is false or nothing was read.
+	EndpointMatch string `json:"endpoint_match,omitempty"`
 }
+
+// EndpointMatch values for ClientStatus.EndpointMatch.
+const (
+	EndpointMatchThis    = "this"
+	EndpointMatchOther   = "other"
+	EndpointMatchUnknown = "unknown"
+)
 
 // Service provides connect/disconnect operations for MCP client configurations.
 type Service struct {
@@ -300,6 +326,10 @@ func (s *Service) GetAllStatus() []ClientStatus {
 	clients := GetAllClients()
 	statuses := make([]ClientStatus, 0, len(clients))
 
+	// Config-derived, so it costs no file read and stays inside the Spec 075
+	// content-read-free contract.
+	proxyURL := s.baseURL()
+
 	for _, c := range clients {
 		cfgPath := s.configPath(c.ID)
 		status := ClientStatus{
@@ -313,6 +343,7 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			Bridge:       c.Bridge,
 			Icon:         c.Icon,
 			AccessState:  accessUnknown,
+			ProxyURL:     proxyURL,
 		}
 
 		// Metadata-only existence check (no content read).
@@ -354,6 +385,7 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		Bridge:       c.Bridge,
 		Icon:         c.Icon,
 		AccessState:  accessUnknown,
+		ProxyURL:     s.baseURL(),
 	}
 
 	if _, err := s.stat(cfgPath); err == nil {
@@ -376,12 +408,14 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		return status, nil
 	}
 
-	name, found, outcome := s.entryAccess(*c, cfgPath)
+	loc, found, outcome := s.entryAccess(*c, cfgPath)
 	status.AccessState = outcome
 	switch {
 	case outcome == accessAccessible && found:
 		status.Connected = true
-		status.ServerName = name
+		status.ServerName = loc.Name
+		status.RegisteredURL = loc.Endpoint
+		status.EndpointMatch = classifyEndpointMatch(loc)
 	case outcome == accessDenied:
 		// A macOS App-Data block must surface as actionable remediation, not as
 		// a plain "not connected" (Spec 075 FR-004).
@@ -395,16 +429,16 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 // access outcome classified strictly from the error class (Spec 075 FR-011):
 // a read error maps to absent/denied/malformed via classifyAccess, and a parse
 // failure on otherwise-readable bytes maps to malformed.
-func (s *Service) entryAccess(client ClientDef, cfgPath string) (name string, found bool, outcome string) {
+func (s *Service) entryAccess(client ClientDef, cfgPath string) (loc entryLocation, found bool, outcome string) {
 	raw, err := s.read(cfgPath)
 	if err != nil {
-		return "", false, classifyAccess(err)
+		return entryLocation{}, false, classifyAccess(err)
 	}
-	name, found, parsedOK := s.findEntryFromBytes(client, raw)
+	loc, found, parsedOK := s.findEntryFromBytes(client, raw)
 	if !parsedOK {
-		return "", false, accessMalformed
+		return entryLocation{}, false, accessMalformed
 	}
-	return name, found, accessAccessible
+	return loc, found, accessAccessible
 }
 
 // Connect registers MCPProxy in the specified client's configuration file.
@@ -1043,29 +1077,46 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, re
 // whether the bytes parsed successfully (parsedOK=false => malformed). All
 // content reads route through s.read (Spec 075 T010); this function never
 // touches the filesystem.
-func (s *Service) findEntryFromBytes(client ClientDef, raw []byte) (name string, found, parsedOK bool) {
+func (s *Service) findEntryFromBytes(client ClientDef, raw []byte) (loc entryLocation, found, parsedOK bool) {
 	if client.Format == "toml" {
 		return s.findEntryTOMLBytes(raw)
 	}
 	return s.findEntryJSONBytes(client, raw)
 }
 
+// entryLocation describes a matched mcpproxy-like entry in a client config.
+//
+// PointsHere separates the two very different ways an entry matches: its
+// endpoint really is this instance, or it merely carries the well-known
+// "mcpproxy" key and could be pointing anywhere. Endpoint is the sanitized
+// address it points at ("" when the entry carries no URL-shaped value), so the
+// UI can name the other instance instead of claiming a bare "Connected".
+type entryLocation struct {
+	Name       string
+	Endpoint   string
+	PointsHere bool
+}
+
 // findEntryJSONBytes parses JSON config bytes and looks for an entry that points
 // to our MCP URL.
-func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string, found, parsedOK bool) {
+func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLocation, found, parsedOK bool) {
 	var data map[string]interface{}
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
-		return "", false, false
+		return entryLocation{}, false, false
 	}
 
 	serversMap, ok := data[client.ServerKey].(map[string]interface{})
 	if !ok {
-		return "", false, true
+		return entryLocation{}, false, true
 	}
 
 	// Anchor on the credential-free base URL so both new clean entries and
 	// legacy entries carrying a ?apikey= query are recognized (Spec 078).
 	baseURL := s.baseURL()
+
+	// A name-only match is the weakest evidence, so it never short-circuits the
+	// scan: a sibling entry that genuinely points at us wins over it.
+	var nameOnly *entryLocation
 
 	for name, v := range serversMap {
 		entry, ok := v.(map[string]interface{})
@@ -1077,7 +1128,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
 				if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-					return name, true, true
+					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true}, true, true
 				}
 			}
 		}
@@ -1086,16 +1137,48 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 		// mcpproxy endpoint lives in the command args. Detect by inspecting
 		// args so a bridge written under a custom server name is still found.
 		if entryPointsToBridge(entry, baseURL) {
-			return name, true, true
+			return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true}, true, true
 		}
 
-		// Also match by server name
-		if name == defaultServerName {
-			return name, true, true
+		// Also match by server name. This arm is why "connected" has historically
+		// over-reported: the entry is called mcpproxy but may address a different
+		// instance entirely (audit F18). Record where it actually points.
+		if name == defaultServerName && nameOnly == nil {
+			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry)}
 		}
 	}
 
-	return "", false, true
+	if nameOnly != nil {
+		return *nameOnly, true, true
+	}
+	return entryLocation{}, false, true
+}
+
+// classifyEndpointMatch turns a matched entry into the EndpointMatch value the
+// UI renders. PointsHere is authoritative — it means the matcher recognized our
+// exact base URL. Otherwise the entry matched on its name alone: if it names an
+// endpoint at all, that endpoint is somewhere else; if it names none (a stdio
+// command entry), we cannot tell.
+func classifyEndpointMatch(loc entryLocation) string {
+	switch {
+	case loc.PointsHere:
+		return EndpointMatchThis
+	case loc.Endpoint != "":
+		return EndpointMatchOther
+	default:
+		return EndpointMatchUnknown
+	}
+}
+
+// entrySummaryEndpoint projects the endpoint an entry addresses, reusing the
+// Spec 091 entry-summary sanitizer so query strings (which may carry ?apikey=),
+// userinfo and fragments never reach the status payload.
+func entrySummaryEndpoint(name string, entry map[string]interface{}) string {
+	summary := buildEntrySummary(name, entry)
+	if summary == nil {
+		return ""
+	}
+	return summary.Endpoint
 }
 
 // entryPointsToBridge reports whether a JSON config entry is an mcp-remote
@@ -1204,23 +1287,25 @@ func jsonHasComments(raw []byte) bool {
 
 // findEntryTOMLBytes parses TOML config bytes and looks for an entry that points
 // to our MCP URL.
-func (s *Service) findEntryTOMLBytes(raw []byte) (name string, found, parsedOK bool) {
+func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, parsedOK bool) {
 	var data map[string]interface{}
 	if _, err := toml.Decode(string(raw), &data); err != nil {
-		return "", false, false
+		return entryLocation{}, false, false
 	}
 
 	serversRaw, ok := data["mcp_servers"]
 	if !ok {
-		return "", false, true
+		return entryLocation{}, false, true
 	}
 
 	serversMap, ok := serversRaw.(map[string]interface{})
 	if !ok {
-		return "", false, true
+		return entryLocation{}, false, true
 	}
 
 	baseURL := s.baseURL()
+
+	var nameOnly *entryLocation
 
 	for name, v := range serversMap {
 		entry, ok := v.(map[string]interface{})
@@ -1229,13 +1314,16 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (name string, found, parsedOK b
 		}
 		if u, ok := entry["url"].(string); ok {
 			if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-				return name, true, true
+				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true}, true, true
 			}
 		}
-		if name == defaultServerName {
-			return name, true, true
+		if name == defaultServerName && nameOnly == nil {
+			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry)}
 		}
 	}
 
-	return "", false, true
+	if nameOnly != nil {
+		return *nameOnly, true, true
+	}
+	return entryLocation{}, false, true
 }

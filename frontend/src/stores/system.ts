@@ -24,6 +24,16 @@ export const useSystemStore = defineStore('system', () => {
   const checkingForUpdates = ref(false)
   const updateCheckedAt = ref<string | null>(null)
 
+  // Audit F28: with no API key the user saw three messages for one cause — the
+  // "Authentication Required" modal, a red inline load error behind it, and a
+  // "Connection Lost — Reconnecting" toast. While the modal owns the screen it
+  // owns the message too; the downstream surfaces read this flag and stay quiet.
+  const authRequired = ref(false)
+
+  function setAuthRequired(value: boolean) {
+    authRequired.value = value
+  }
+
   // Available themes
   const themes: Theme[] = [
     { name: 'light', displayName: 'Light', dark: false },
@@ -492,6 +502,7 @@ export const useSystemStore = defineStore('system', () => {
     routing,
     checkingForUpdates,
     updateCheckedAt,
+    authRequired,
 
     // Computed
     isRunning,
@@ -519,5 +530,6 @@ export const useSystemStore = defineStore('system', () => {
     fetchInfo,
     fetchRouting,
     checkForUpdates,
+    setAuthRequired,
   }
 })

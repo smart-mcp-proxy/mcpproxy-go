@@ -33,3 +33,57 @@ func TestContainsIgnoreCase(t *testing.T) {
 		})
 	}
 }
+
+func TestCollapseRepeatedErrorWrappers(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		expected string
+	}{
+		{
+			name:     "no separator is returned unchanged",
+			in:       "plain error",
+			expected: "plain error",
+		},
+		{
+			name:     "distinct wrappers are preserved",
+			in:       "failed to connect: transport error: dial tcp",
+			expected: "failed to connect: transport error: dial tcp",
+		},
+		{
+			name: "mcp-go double send wrapper collapses once",
+			in: `failed to connect: MCP initialize failed during no-auth strategy: transport error: ` +
+				`failed to send request: failed to send request: Post "https://example.invalid/mcp": ` +
+				`dial tcp: lookup example.invalid: no such host`,
+			expected: `failed to connect: MCP initialize failed during no-auth strategy: transport error: ` +
+				`failed to send request: Post "https://example.invalid/mcp": ` +
+				`dial tcp: lookup example.invalid: no such host`,
+		},
+		{
+			name:     "three repeats collapse to one",
+			in:       "a: a: a: boom",
+			expected: "a: boom",
+		},
+		{
+			name:     "non-adjacent repeats are kept",
+			in:       "a: b: a: boom",
+			expected: "a: b: a: boom",
+		},
+		{
+			name:     "trailing repeat keeps the root cause",
+			in:       "boom: boom",
+			expected: "boom: boom",
+		},
+		{
+			name:     "empty string",
+			in:       "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, CollapseRepeatedErrorWrappers(tt.in))
+		})
+	}
+}

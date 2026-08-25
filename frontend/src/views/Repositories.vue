@@ -23,7 +23,11 @@
       <div class="card-body">
         <div>
           <h2 class="card-title text-lg">Registries</h2>
-          <p class="text-sm text-base-content/70">Sources MCPProxy browses for MCP servers. Custom sources you add can be edited or removed.</p>
+          <!-- Audit F17: these cards sat above the selector looking exactly like
+               one, but were display-only. They ARE the selector now. -->
+          <p class="text-sm text-base-content/70">
+            Click a registry to search it. Custom sources you add can be edited or removed.
+          </p>
         </div>
 
         <!-- Loading -->
@@ -42,14 +46,40 @@
           <div
             v-for="registry in registries"
             :key="registry.id"
-            class="border border-base-300 rounded-lg p-3 flex flex-col gap-2"
+            role="button"
+            tabindex="0"
+            :aria-pressed="selectedRegistries.includes(registry.id)"
+            :aria-label="`${selectedRegistries.includes(registry.id) ? 'Deselect' : 'Select'} ${registry.name}`"
+            :class="[
+              'border rounded-lg p-3 flex flex-col gap-2 cursor-pointer transition-colors text-left',
+              selectedRegistries.includes(registry.id)
+                ? 'border-primary bg-primary/5 ring-2 ring-inset ring-primary/30'
+                : 'border-base-300 hover:bg-base-200/60',
+            ]"
             :data-test="`registry-card-${registry.id}`"
+            @click="toggleRegistry(registry.id)"
+            @keydown.enter.prevent="toggleRegistry(registry.id)"
+            @keydown.space.prevent="toggleRegistry(registry.id)"
           >
             <div class="flex items-start justify-between gap-2">
-              <div class="font-semibold min-w-0 [overflow-wrap:anywhere]">{{ registry.name }}</div>
+              <div class="font-semibold min-w-0 [overflow-wrap:anywhere] flex items-center gap-1.5">
+                <svg
+                  v-if="selectedRegistries.includes(registry.id)"
+                  class="w-4 h-4 shrink-0 text-primary"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  :data-test="`registry-card-selected-${registry.id}`"
+                >
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {{ registry.name }}
+              </div>
 
-              <!-- Kebab (⋮) menu — custom registries only; official is read-only -->
-              <div v-if="isCustomRegistry(registry)" class="dropdown dropdown-end shrink-0">
+              <!-- Kebab (⋮) menu — custom registries only; official is read-only.
+                   @click.stop so managing a source never doubles as selecting it. -->
+              <div v-if="isCustomRegistry(registry)" class="dropdown dropdown-end shrink-0" @click.stop>
                 <div
                   tabindex="0"
                   role="button"
@@ -144,12 +174,18 @@
             <input
               v-model="searchQuery"
               type="text"
-              placeholder="Search by name or description..."
+              :placeholder="selectedRegistries.length === 0 ? 'Select a registry above first' : 'Search by name or description...'"
               class="input input-bordered w-full"
               data-test="registry-search-input"
               @input="handleSearchInput"
               :disabled="selectedRegistries.length === 0 || loadingServers"
             />
+            <!-- Audit F17: a disabled field must say what would enable it. -->
+            <label v-if="selectedRegistries.length === 0" class="label py-1">
+              <span class="label-text-alt text-base-content/60" data-test="registry-search-hint">
+                Click a registry card above to enable search.
+              </span>
+            </label>
           </div>
 
           <!-- Transport Filter (R3) -->
@@ -316,7 +352,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
           </svg>
           <h3 class="text-xl font-semibold mb-2">Select a Registry</h3>
-          <p class="text-base-content/70">Choose a registry from the dropdown to start browsing MCP servers.</p>
+          <p class="text-base-content/70">Click one of the registry cards above to start browsing MCP servers.</p>
         </div>
       </div>
     </div>

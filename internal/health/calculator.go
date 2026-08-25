@@ -142,6 +142,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		level := LevelUnhealthy
 		action := ActionRestart
 		summary := formatErrorSummary(input.LastError)
+		if isEndpointAddressError(input.LastError) {
+			action = ActionEditURL
+		}
 		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
 			level, action, summary = oauthAttentionState(input.LastError)
 		}
@@ -158,6 +161,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		action := ActionRestart
 		if input.LastError != "" {
 			summary = formatErrorSummary(input.LastError)
+			if isEndpointAddressError(input.LastError) {
+				action = ActionEditURL
+			}
 			// For OAuth-required servers with OAuth-related errors, suggest login
 			if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
 				level, action, summary = oauthAttentionState(input.LastError)
@@ -413,6 +419,32 @@ func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError 
 	}
 
 	return detail
+}
+
+// isEndpointAddressError reports whether a connection failure is caused by the
+// configured address itself rather than by a transient outage. DNS resolution
+// failures, unsupported/absent schemes and unparseable URLs cannot be fixed by
+// restarting the server — offering "Restart" for them sends the user in a loop
+// (audit F11). "connection refused" is deliberately NOT in this set: the host
+// resolved, so the address is plausibly right and the peer merely down.
+func isEndpointAddressError(err string) bool {
+	if err == "" {
+		return false
+	}
+	addressPatterns := []string{
+		"no such host",
+		"unsupported protocol scheme",
+		"missing protocol scheme",
+		"invalid url",
+		"invalid uri",
+		"first path segment in url",
+	}
+	for _, pattern := range addressPatterns {
+		if stringutil.ContainsIgnoreCase(err, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // isOAuthRelatedError checks if the error message indicates an OAuth issue.
