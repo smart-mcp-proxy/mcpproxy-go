@@ -128,6 +128,16 @@ final class TrayAuditSurfacesTests: XCTestCase {
                        "unreserved characters must survive untouched")
     }
 
+    /// Server names are validated only against `:`, so `my/server` is a legal
+    /// name that would split a `/servers/{id}/restart` path into extra
+    /// segments — every menu action goes through those routes (cross-model
+    /// review, round 2).
+    func testServerNamesAreSafeAsPathSegments() {
+        XCTAssertEqual(APIClient.escapePathComponent("my/server"), "my%2Fserver")
+        XCTAssertEqual(APIClient.escapePathComponent("my server"), "my%20server")
+        XCTAssertEqual(APIClient.escapePathComponent("github"), "github")
+    }
+
     // MARK: - F10 · The glance hand-off has its own channel
 
     func testTheActivityFilterNotificationIsItsOwnChannel() {
