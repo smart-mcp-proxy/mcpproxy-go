@@ -490,6 +490,50 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 	return snap
 }
 
+// HasPendingCounters reports whether anything has been recorded since the last
+// Reset — i.e. whether a heartbeat would carry usage data that has not yet been
+// accepted by the endpoint.
+//
+// The counter set inspected here is EXACTLY the set Reset zeroes: those are the
+// counters whose window is "since the last accepted send", so they are the ones
+// that would be lost if the process exited without transmitting. Lifetime
+// tallies that Reset deliberately preserves (anonymityViolations) are excluded —
+// they are never transmitted and must not, on their own, justify a send.
+//
+// Used by the graceful-shutdown flush to skip a final heartbeat that would carry
+// no new information.
+func (r *CounterRegistry) HasPendingCounters() bool {
+	if r == nil {
+		return false
+	}
+	for i := range r.surfaceCounts {
+		if r.surfaceCounts[i].Load() > 0 {
+			return true
+		}
+	}
+	if r.upstreamTotal.Load() > 0 {
+		return true
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if len(r.builtinCalls) > 0 || len(r.restEndpoints) > 0 ||
+		len(r.errorCategories) > 0 || len(r.doctorChecks) > 0 {
+		return true
+	}
+	if r.tpaScansCompleted > 0 || r.tpaScansFailed > 0 || r.tpaScansWithFindings > 0 ||
+		r.tpaToolChangeGateScans > 0 || r.tpaPromptScans > 0 {
+		return true
+	}
+	for _, v := range r.tpaFindings {
+		if v > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Reset zeros all counters. Called only after a successful heartbeat send.
 //
 // Deliberate, registry-wide trade-off: an event recorded between Snapshot()

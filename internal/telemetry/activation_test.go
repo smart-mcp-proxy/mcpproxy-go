@@ -337,14 +337,28 @@ func TestInstallerPending_ClearedAfterFirstHeartbeat(t *testing.T) {
 		activationDB:    db,
 	}
 
-	// First call → "installer" and the pending flag must be cleared.
-	ls1 := s.resolveLaunchSource()
+	// The shutdown flush must NOT consume the one-shot: it builds a payload that
+	// may never be accepted, so a non-consuming resolve has to leave the flag
+	// armed for the next run and report the runtime-detected source instead.
+	if ls := s.resolveLaunchSource(false); ls == LaunchSourceInstaller {
+		t.Fatal("non-consuming resolveLaunchSource claimed installer; the shutdown flush must not spend the one-shot")
+	}
+	pendingAfterFlush, err := store.IsInstallerPending(db)
+	if err != nil {
+		t.Fatalf("IsInstallerPending after non-consuming resolve: %v", err)
+	}
+	if !pendingAfterFlush {
+		t.Fatal("non-consuming resolveLaunchSource cleared installer_heartbeat_pending; a failed shutdown flush would destroy the attribution")
+	}
+
+	// First consuming call → "installer" and the pending flag must be cleared.
+	ls1 := s.resolveLaunchSource(true)
 	if ls1 != LaunchSourceInstaller {
 		t.Fatalf("first resolveLaunchSource = %q, want %q", ls1, LaunchSourceInstaller)
 	}
 	pending, err := store.IsInstallerPending(db)
 	if err != nil {
-		t.Fatalf("IsInstallerPending after first call: %v", err)
+		t.Fatalf("IsInstallerPending after first consuming call: %v", err)
 	}
 	if pending {
 		t.Fatalf("installer_heartbeat_pending should be cleared after first heartbeat")
@@ -352,7 +366,7 @@ func TestInstallerPending_ClearedAfterFirstHeartbeat(t *testing.T) {
 
 	// Second call → no longer installer; should return the runtime
 	// detector's value (whatever it is in the test env), not installer.
-	ls2 := s.resolveLaunchSource()
+	ls2 := s.resolveLaunchSource(true)
 	if ls2 == LaunchSourceInstaller {
 		t.Fatalf("second resolveLaunchSource still returned installer — one-shot broken")
 	}

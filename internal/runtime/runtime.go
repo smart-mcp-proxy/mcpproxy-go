@@ -776,6 +776,13 @@ func (r *Runtime) Close() error {
 	// ActivityService.Stop above — terminally stops the service so a Start
 	// goroutine not yet scheduled (lifecycle.go launches it via `go`) becomes
 	// a no-op instead of writing after this point.
+	//
+	// Stop also performs the graceful-shutdown heartbeat flush — one bounded
+	// (4s) final send of the counters recorded since the last accepted
+	// heartbeat, which would otherwise die with the process. It runs after the
+	// loop is joined, so it is the only sender at that moment, and it happens
+	// HERE — while the BBolt handle is still open and before the marker
+	// resolves below — because its buildHeartbeat writes funnel activity.
 	if r.telemetryService != nil {
 		r.telemetryService.Stop()
 	}
