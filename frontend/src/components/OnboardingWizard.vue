@@ -857,7 +857,7 @@ async function onOpened() {
   await onboarding.fetchState()
   await Promise.all([
     fetchClients(),
-    fetchSecurityState(),
+    fetchSecurityState(seq),
     fetchDockerStatus(),
     fetchImportSources(),
     fetchRecentActivity(),
@@ -986,9 +986,15 @@ function formatTime(ts: string): string {
   return d.toLocaleDateString()
 }
 
-async function fetchSecurityState() {
+// `seq` (when given) ties this read to one open sequence. Unlike the other
+// fetches, what this one writes is user-editable: the quarantine and Docker
+// isolation checkboxes. A read left over from a superseded open landing after
+// the user has already toggled one would silently flip it back to the old
+// server value, so a stale read must not commit.
+async function fetchSecurityState(seq?: number) {
   try {
     const res = await api.getConfig()
+    if (seq !== undefined && seq !== openSeq) return
     if (res.success && res.data) {
       const cfg = res.data.config ?? {}
       requireMcpAuth.value = !!cfg.require_mcp_auth

@@ -350,6 +350,52 @@ describe('OnboardingWizard mounted already-open', () => {
     expect(wrapper.find('[data-test="panel-clients"]').exists()).toBe(true)
   })
 
+  it('a superseded config read does not flip the security toggles back', async () => {
+    // These checkboxes are the one thing the open sequence writes that the user
+    // can also edit — and the panel is expanded by default, so editing one
+    // immediately is the expected path. A config read from a superseded open
+    // landing afterwards must not silently revert the user's choice.
+    let releaseConfig: (v: unknown) => void = () => {}
+    ;(api.getConfig as any).mockReturnValueOnce(
+      new Promise((resolve) => { releaseConfig = resolve })
+    )
+
+    const router = makeRouter()
+    router.push('/')
+    await router.isReady()
+    const wrapper = mount(OnboardingWizard, {
+      props: { show: true },
+      global: {
+        plugins: [router],
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' },
+          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
+        },
+      },
+    })
+    await flushPromises()
+
+    // Supersede the first open: close, then reopen with quarantine off.
+    await wrapper.setProps({ show: false })
+    ;(api.getConfig as any).mockResolvedValue({
+      success: true,
+      data: { config: { quarantine_enabled: false } },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    await wrapper.find('[data-test="tab-servers"]').trigger('click')
+    await flushPromises()
+
+    const toggle = () => wrapper.find('[data-test="toggle-quarantine"]')
+    expect((toggle().element as HTMLInputElement).checked).toBe(false)
+
+    // The abandoned read finally returns, claiming quarantine is ON.
+    releaseConfig({ success: true, data: { config: { quarantine_enabled: true } } })
+    await flushPromises()
+
+    expect((toggle().element as HTMLInputElement).checked).toBe(false)
+  })
+
   it('still initialises (fetches its state) with no request pending', async () => {
     const store = useOnboardingStore()
     store.openWizard()

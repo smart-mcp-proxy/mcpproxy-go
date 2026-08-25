@@ -125,15 +125,24 @@ export const useServersStore = defineStore('servers', () => {
     }
     const ticket = ++issueSeq
 
+    // Failures take the same ticket as successes. Without that, an older
+    // request failing after a newer one already delivered a list would raise a
+    // stale error over fresh data — the mirror image of the stale-list problem
+    // the sequencing exists to prevent.
+    const recordError = (message: string) => {
+      if (ticket < appliedSeq) return
+      loading.value.error = message
+    }
+
     try {
       const response = await api.getServers()
       if (response.success && response.data) {
         applyServerList(response.data.servers, ticket)
       } else {
-        loading.value.error = response.error || 'Failed to fetch servers'
+        recordError(response.error || 'Failed to fetch servers')
       }
     } catch (error) {
-      loading.value.error = error instanceof Error ? error.message : 'Unknown error'
+      recordError(error instanceof Error ? error.message : 'Unknown error')
     } finally {
       if (!silent) {
         loading.value.loading = false
