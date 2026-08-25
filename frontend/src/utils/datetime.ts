@@ -24,8 +24,21 @@ function toDate(value: string | number | Date | null | undefined): Date | null {
     // and printing it with local getters shifts it a day west of UTC.
     const m = DATE_ONLY.exec(value.trim())
     if (m) {
-      const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-      return Number.isNaN(d.getTime()) ? null : d
+      const year = Number(m[1])
+      const month = Number(m[2])
+      const day = Number(m[3])
+      const d = new Date(year, month - 1, day)
+      // `new Date(2026, 1, 31)` silently rolls over to March; an impossible
+      // date is bad input, not the 3rd of the next month.
+      if (
+        Number.isNaN(d.getTime()) ||
+        d.getFullYear() !== year ||
+        d.getMonth() !== month - 1 ||
+        d.getDate() !== day
+      ) {
+        return null
+      }
+      return d
     }
   }
   const d = new Date(value)

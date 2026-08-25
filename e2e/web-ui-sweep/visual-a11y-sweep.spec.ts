@@ -420,17 +420,23 @@ test('the activity table announces updates and carries a caption', async ({ page
   }
 })
 
-test('activity rows open their details from the keyboard', async ({ page }) => {
-  await goto(page, '/activity')
-  const rows = page.locator('[data-test="activity-row"]')
-  if ((await rows.count()) === 0) {
-    test.skip(true, 'no activity records on this instance')
+test('activity rows open their details from the keyboard, at every width', async ({ page }) => {
+  // Clicking the row is a shortcut; the per-row button is the real control, and
+  // it must survive the narrow layout (it used to be hidden below `sm`).
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await goto(page, '/activity')
+    const rows = page.locator('[data-test="activity-row"]')
+    if ((await rows.count()) === 0) {
+      test.skip(true, 'no activity records on this instance')
+    }
+    const open = rows.first().locator('button[aria-label^="Open details"]')
+    await expect(open, `row button missing at ${width}px`).toBeVisible()
+    await open.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('#activity-detail-drawer')).toBeChecked()
+    await page.keyboard.press('Escape')
   }
-  const row = rows.first()
-  await expect(row).toHaveAttribute('tabindex', '0')
-  await row.focus()
-  await page.keyboard.press('Enter')
-  await expect(page.locator('#activity-detail-drawer')).toBeChecked()
 })
 
 // ---------------------------------------------------------------------------

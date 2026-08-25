@@ -447,26 +447,23 @@
                 <th class="hidden md:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('duration_ms')">
                   Duration {{ getSortIndicator('duration_ms') }}
                 </th>
-                <!-- Row-open chevron: the whole row is clickable, so on a phone
-                     the column is pure overhead and folds away (F14). -->
-                <th class="hidden sm:table-cell"></th>
+                <!-- Row-open chevron. Kept at every width: it is the actual
+                     named, keyboard-operable control for the row (F30). -->
+                <th class="w-8"></th>
               </tr>
             </thead>
             <tbody>
-              <!-- The row opens the detail drawer, and below `sm` the chevron
-                   column folds away, so the row itself has to be reachable from
-                   the keyboard (UX audit F30). -->
+              <!-- Clicking the row is a shortcut for the chevron button in the
+                   last cell; that button is what carries the accessible name and
+                   the keyboard path, so the row stays a plain <tr> rather than
+                   a focusable pseudo-control with row semantics (F30). -->
               <tr
                 v-for="activity in paginatedActivities"
                 :key="activity.id"
                 data-test="activity-row"
                 class="hover cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px]"
                 :class="{ 'bg-base-200': selectedActivity?.id === activity.id }"
-                tabindex="0"
-                :aria-label="`Open details for ${formatType(activity.type)} at ${formatTimestamp(activity.timestamp)}`"
                 @click="selectActivity(activity)"
-                @keydown.enter.prevent="selectActivity(activity)"
-                @keydown.space.prevent="selectActivity(activity)"
               >
                 <td class="whitespace-nowrap">
                   <!-- The full stamp needs ~10rem; on a phone that wrapped onto
@@ -620,10 +617,11 @@
                   </span>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td class="hidden sm:table-cell">
+                <td class="w-8">
                   <button
                     class="btn btn-xs btn-ghost"
-                    aria-label="Open activity details"
+                    :aria-label="`Open details for ${formatType(activity.type)} at ${formatTimestamp(activity.timestamp)}`"
+                    :data-test="`activity-open-${activity.id}`"
                     @click.stop="selectActivity(activity)"
                   >
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">

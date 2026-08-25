@@ -122,6 +122,20 @@ describe('theme selection', () => {
     expect(store.currentTheme).toBe(SYSTEM_THEME)
   })
 
+  it('removes its media listener when the store is disposed', () => {
+    const store = useSystemStore()
+    expect(listeners.length, 'no listener registered').toBe(1)
+    store.$dispose()
+    expect(listeners.length, 'listener outlived the store').toBe(0)
+  })
+
+  it('registers exactly one listener even if loadTheme runs again', () => {
+    const store = useSystemStore()
+    store.loadTheme()
+    store.loadTheme()
+    expect(listeners.length).toBe(1)
+  })
+
   it('resolveThemeName maps only the system pseudo-theme', () => {
     prefersDark = true
     installMatchMedia()

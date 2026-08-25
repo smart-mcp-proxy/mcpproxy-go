@@ -41,6 +41,15 @@ describe('house date/time format', () => {
     expect(formatDateTime('2026-08-25')).toBe('2026-08-25 00:00:00')
   })
 
+  it('rejects an impossible date instead of rolling it over', () => {
+    // `new Date(2026, 1, 31)` is the 3rd of March, which is not what the caller
+    // was handed.
+    expect(formatDate('2026-02-31')).toBe('-')
+    expect(formatDate('2026-13-01')).toBe('-')
+    expect(formatDate('2026-02-28')).toBe('2026-02-28')
+    expect(formatDate('2028-02-29')).toBe('2028-02-29')
+  })
+
   it('never renders "Invalid Date" for missing or broken input', () => {
     for (const value of [null, undefined, '', 'not-a-date']) {
       expect(formatDateTime(value)).toBe('-')

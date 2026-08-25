@@ -63,7 +63,7 @@ function themeTokens(theme: string): Record<string, RGB> {
 }
 
 const THEMES = ['corporate', 'dark'] as const
-const SEMANTIC = ['primary', 'info', 'success', 'warning', 'error'] as const
+const SEMANTIC = ['primary', 'secondary', 'accent', 'info', 'success', 'warning', 'error'] as const
 
 // Compare the EXACT ratio — rounding first would let 4.496 pass as 4.50 — and
 // only round when a message needs to be readable.
