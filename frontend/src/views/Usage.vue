@@ -42,15 +42,20 @@
         <div class="stat-value text-success">{{ formatNumber(data.tokens_saved) }}</div>
         <div class="stat-desc">{{ data.tokens_saved_percentage.toFixed(1) }}% reduction via BM25 discovery</div>
       </div>
-      <div class="stat">
-        <div class="stat-title">Tool calls</div>
-        <div class="stat-value">{{ formatNumber(totalCalls) }}</div>
+      <!--
+        Calls and errors come from the response, which counts the same
+        population as the Activity Log's own header — see usageHeadline for why
+        summing `tools` here was wrong (F1, #1046).
+      -->
+      <div class="stat" data-test="usage-calls-tile">
+        <div class="stat-title">Calls</div>
+        <div class="stat-value">{{ formatNumber(headline.calls) }}</div>
         <div class="stat-desc">{{ data.tools.length }} active tool{{ data.tools.length === 1 ? '' : 's' }} ({{ windowLabel }})</div>
       </div>
-      <div class="stat">
+      <div class="stat" data-test="usage-errors-tile">
         <div class="stat-title">Errors</div>
-        <div class="stat-value" :class="totalErrors > 0 ? 'text-error' : ''">{{ formatNumber(totalErrors) }}</div>
-        <div class="stat-desc">{{ overallErrorRate }}% overall error rate</div>
+        <div class="stat-value" :class="headline.errors > 0 ? 'text-error' : ''">{{ formatNumber(headline.errors) }}</div>
+        <div class="stat-desc">{{ headline.errorRate }}% overall error rate</div>
       </div>
     </div>
 
@@ -122,7 +127,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
 import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
-import { formatNumber } from '@/utils/usageFormat'
+import { formatNumber, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
 import ResponseSizeRanking from '@/components/usage/ResponseSizeRanking.vue'
 import ErrorRateChart from '@/components/usage/ErrorRateChart.vue'
@@ -151,12 +156,7 @@ const windowLabel = computed(() => {
   }
 })
 
-const totalCalls = computed(() => data.value?.tools.reduce((s, t) => s + t.calls, 0) ?? 0)
-const totalErrors = computed(() => data.value?.tools.reduce((s, t) => s + t.errors, 0) ?? 0)
-const overallErrorRate = computed(() => {
-  const c = totalCalls.value
-  return c > 0 ? ((totalErrors.value / c) * 100).toFixed(1) : '0.0'
-})
+const headline = computed(() => usageHeadline(data.value))
 
 const isEmpty = computed(() => {
   if (!data.value) return false
@@ -170,7 +170,14 @@ const freshnessLabel = computed(() => {
   return `${Math.round(ms / 60_000)}m ago`
 })
 
+// Requests can overlap — the 30s auto-refresh, a window switch and a filter
+// reset all call reload() and there is no cancellation. Without sequencing, a
+// slower earlier response can land last and repaint the panel with data for a
+// window the user already moved off. Only the newest request may write state.
+let reloadSeq = 0
+
 async function reload() {
+  const seq = ++reloadSeq
   loading.value = true
   error.value = null
   try {
@@ -179,15 +186,20 @@ async function reload() {
       status: status.value || undefined,
       sort: sort.value,
     })
+    if (seq !== reloadSeq) return
     if (resp.success && resp.data) {
       data.value = resp.data
     } else {
       error.value = resp.error || 'Failed to load usage data'
     }
   } catch (e) {
+    if (seq !== reloadSeq) return
     error.value = e instanceof Error ? e.message : 'Failed to load usage data'
   } finally {
-    loading.value = false
+    // A superseded request must not clear the spinner the newest one owns.
+    if (seq === reloadSeq) {
+      loading.value = false
+    }
   }
 }
 

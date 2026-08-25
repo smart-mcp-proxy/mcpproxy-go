@@ -13,9 +13,14 @@
 
       <!-- Summary Stats Row -->
       <div v-if="summary" class="stats stats-horizontal bg-base-200 mb-4">
+        <!-- Rows in the window; only some of them are calls (F1, #1046). -->
         <div class="stat py-2 px-4">
-          <div class="stat-title text-xs">Today</div>
+          <div class="stat-title text-xs">Events (24h)</div>
           <div class="stat-value text-lg">{{ summary.total_count }}</div>
+        </div>
+        <div class="stat py-2 px-4">
+          <div class="stat-title text-xs">Calls</div>
+          <div class="stat-value text-lg">{{ summary.call_count }}</div>
         </div>
         <div class="stat py-2 px-4">
           <div class="stat-title text-xs">Success</div>

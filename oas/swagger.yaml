@@ -1319,6 +1319,24 @@ components:
         blocked_count:
           description: Count of blocked activities
           type: integer
+        call_count:
+          description: |-
+            CallCount is how many of those records are CALLS THE USER MADE, as
+            defined once in storage.CountsAsCall and shared with the usage aggregate
+            behind the Usage tab (audit finding F1, #1046). TotalCount answers "how
+            many rows does the Activity Log have"; CallCount answers "how many calls
+            were there". They are different questions — quarantine auto-approvals,
+            system start, security scans and management chatter are events, not calls
+            — and printing either one under the other's label is how the same instance
+            came to report 51 calls on one screen and 19 on another.
+          type: integer
+        call_error_count:
+          description: |-
+            CallErrorCount is the failures within CallCount, so an error RATE computed
+            from this response has one denominator. It is not ErrorCount: a policy
+            block is a failed call but carries status "blocked", and a shed call is an
+            error in neither sense because it never ran.
+          type: integer
         end_time:
           description: End of the period (RFC3339)
           type: string
@@ -2841,6 +2859,31 @@ components:
             $ref: '#/components/schemas/contracts.UsageToolStat'
           type: array
           uniqueItems: false
+        total_calls:
+          description: |-
+            TotalCalls and TotalErrors are the headline counts for the window: the sum
+            of the timeline this same response carries, so the tiles and the histogram
+            under them cannot disagree. They are NOT the sum of Tools — that list is
+            lifetime-cumulative, upstream-only and truncated to top-N, and summing it
+            client-side is what made the Usage tab print a third number for the same
+            24 hours (audit finding F1, #1046). The population is
+            storage.CountsAsCall, shared with ActivitySummaryResponse.CallCount.
+
+            Two bounds on how exactly this matches the Activity Log's own count.
+            Both are bounded and disclosed, unlike the population mismatch they
+            replace, which was unbounded and silent:
+
+              - Window granularity is the timeline's: whole hour buckets, so the span
+                is the requested window rounded up to a bucket edge.
+              - This response is served from a snapshot behind a short read cache
+                (observability.usage_cache_ttl, 5s by default) so the endpoint never
+                scans the activity log per request, while the summary endpoint counts
+                live. Calls that land inside that window appear on the Activity Log
+                first. FreshnessMs and GeneratedAt say how old the figures are, and
+                the Usage tab prints it ("Updated 3s ago").
+          type: integer
+        total_errors:
+          type: integer
         window:
           type: string
       type: object

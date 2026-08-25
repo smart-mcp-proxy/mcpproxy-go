@@ -6,15 +6,10 @@
     <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
     <UpdateBanner />
 
-    <!-- Overview ↔ Usage switcher (Spec 069 T016) -->
+    <!-- Usage ↔ Overview switcher (Spec 069 T016). Usage is the default panel
+         (analytics-as-landing-page); each tab maps to a deep-linkable route
+         (/usage, /overview) so the panel survives a reload or a shared link. -->
     <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
-      <a
-        role="tab"
-        class="tab"
-        :class="activeView === 'overview' ? 'tab-active' : ''"
-        data-test="dashboard-tab-overview"
-        @click="activeView = 'overview'"
-      >Overview</a>
       <a
         role="tab"
         class="tab"
@@ -22,15 +17,72 @@
         data-test="dashboard-tab-usage"
         @click="selectUsage"
       >Usage</a>
+      <a
+        role="tab"
+        class="tab"
+        :class="activeView === 'overview' ? 'tab-active' : ''"
+        data-test="dashboard-tab-overview"
+        @click="selectOverview"
+      >Overview</a>
     </div>
 
     <!-- Usage view: the panel wrapper is always in the DOM (kept hidden with
          v-show so switching back is instant and the Overview subtree is never
          torn down, SC-006). The heavy chart bundle + the usage fetch inside
-         UsageView are lazy-mounted only on first switch (v-if="usageEverActive")
-         so they never block Dashboard first paint (SC-004). -->
+         UsageView are mounted only once the panel has been active
+         (usageEverActive) AND the server list has arrived, and stay code-split
+         behind Suspense, so the Dashboard shell still paints immediately
+         (SC-004). -->
     <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
-      <Suspense v-if="usageEverActive">
+      <!-- First run: no upstream servers configured, so the analytics panel
+           would only ever show "no data". Point the new user at the one action
+           that makes the dashboard useful instead. -->
+      <div
+        v-if="showFirstRunCta"
+        class="card bg-base-200 border border-base-300"
+        data-test="dashboard-usage-first-run"
+      >
+        <div class="card-body items-center text-center py-12">
+          <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <h3 class="font-semibold text-lg mt-2">Add your first server to see usage</h3>
+          <p class="text-sm opacity-60 max-w-md">
+            No upstream MCP servers are configured yet, so there is nothing to chart.
+            Add one and this page will show call volume, token sinks, error rates and a timeline.
+          </p>
+          <div class="flex flex-wrap gap-2 justify-center mt-2">
+            <button
+              class="btn btn-primary btn-sm"
+              data-test="dashboard-first-run-add-server"
+              @click="showAddServer = true"
+            >
+              Add your first server
+            </button>
+            <router-link to="/repositories" class="btn btn-sm btn-ghost">Browse Registry</router-link>
+            <button
+              class="btn btn-sm btn-ghost"
+              data-test="dashboard-first-run-overview"
+              @click="selectOverview"
+            >
+              Go to Overview
+            </button>
+          </div>
+        </div>
+      </div>
+      <!-- Hold the charts back until the server list has arrived: mounting
+           UsageView first would fire a usage aggregate request and flash the
+           "no usage data yet" card on a fresh install, only to be replaced by
+           the CTA above a moment later. Both requests are issued together in
+           onMounted, so this costs no extra round-trip. -->
+      <div
+        v-else-if="!serversFetchSettled && !serversStore.loaded"
+        class="flex justify-center py-16"
+        data-test="dashboard-usage-pending"
+      >
+        <span class="loading loading-spinner loading-lg"></span>
+      </div>
+      <Suspense v-else-if="usageEverActive">
         <UsageView />
         <template #fallback>
           <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
@@ -450,6 +502,7 @@
 <script setup lang="ts">
 import { serverDetailPath } from '@/utils/serverRoute'
 import { computed, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
@@ -476,14 +529,72 @@ const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
 
-// Overview ↔ Usage switcher state (Spec 069 T016). `usageEverActive` gates the
+// Usage ↔ Overview switcher state (Spec 069 T016). `usageEverActive` gates the
 // first mount; `activeView` then toggles via v-show so both panels keep state.
-const activeView = ref<'overview' | 'usage'>('overview')
-const usageEverActive = ref(false)
-function selectUsage() {
-  usageEverActive.value = true
-  activeView.value = 'usage'
+//
+// The active panel comes from the route (`meta.dashboardView`): `/` and
+// `/usage` land on the analytics panel, `/overview` on the hub overview.
+// Clicking a tab rewrites the URL (replace, so the switcher does not pile up
+// history entries) — the routes share this component, so switching never
+// remounts the Dashboard and both panels keep their state.
+type DashboardView = 'overview' | 'usage'
+
+const route = useRoute()
+const router = useRouter()
+
+function routeView(): DashboardView {
+  return (route.meta?.dashboardView as DashboardView | undefined) === 'overview' ? 'overview' : 'usage'
 }
+
+const activeView = ref<DashboardView>(routeView())
+const usageEverActive = ref(activeView.value === 'usage')
+
+// The panel a navigation is currently heading for. `route` only reflects a
+// *confirmed* navigation, so comparing against it alone loses a fast second tab
+// click: it would still see the pre-navigation route, decide it has nothing to
+// do, and then be overwritten when the first navigation lands. Tracking the
+// in-flight target makes the newest click win — the router cancels the
+// superseded navigation for us.
+//
+// `navSeq` identifies which navigation owns the marker. Comparing the panel
+// value alone is not enough: two navigations to the same panel (Overview →
+// Usage → Overview) share a value, so the older one's settlement would clear a
+// marker still owned by the newer one, and the next click would again compare
+// against the stale current route and be swallowed.
+let pendingView: DashboardView | null = null
+let navSeq = 0
+
+function selectView(view: DashboardView) {
+  if (view === 'usage') {
+    usageEverActive.value = true
+  }
+  activeView.value = view
+  // `/` is also a usage route — don't rewrite it to `/usage` needlessly.
+  if ((pendingView ?? routeView()) === view) {
+    return
+  }
+  const seq = ++navSeq
+  pendingView = view
+  const targetRoute = view === 'usage' ? 'usage' : 'dashboard-overview'
+  void router.replace({ name: targetRoute }).finally(() => {
+    // Only the newest navigation clears the marker; a superseded one must not.
+    if (seq === navSeq) {
+      pendingView = null
+    }
+  })
+}
+const selectUsage = () => selectView('usage')
+const selectOverview = () => selectView('overview')
+
+// Keep the panel in sync when the route changes underneath us (sidebar link,
+// browser back/forward, a pasted deep link).
+watch(() => route.meta?.dashboardView, () => {
+  const view = routeView()
+  if (view === 'usage') {
+    usageEverActive.value = true
+  }
+  activeView.value = view
+})
 
 // Modal state
 const showConnectModal = ref(false)
@@ -663,6 +774,25 @@ const loadTokenSavings = async () => {
     // Silently fail
   }
 }
+
+// --- First run (no servers configured) ---
+// Two different questions, deliberately answered by two different flags:
+//
+// `serversFetchSettled` — has our own initial request finished, successfully or
+// not? Together with `loaded` it gates the chart mount below, so a failed fetch
+// falls through to the usage panel rather than spinning forever, and an
+// authoritative list arriving by SSE first clears the spinner immediately.
+//
+// `serversStore.loaded` — has a server list ever arrived successfully? Only
+// that justifies telling the user they have no servers. It cannot be inferred
+// from `loading.error`: that field is shared, other components (App.vue) and
+// silent background refreshes write it concurrently, and a success never clears
+// it — so an unrelated failure would suppress the CTA, and a later successful
+// refresh could never bring it back.
+const serversFetchSettled = ref(false)
+const showFirstRunCta = computed(
+  () => serversStore.loaded && serversStore.serverCount.total === 0
+)
 
 // --- Disabled server count ---
 const disabledCount = computed(() => {
@@ -879,7 +1009,10 @@ onMounted(() => {
   loadSecurityStatus()
   // Populate security scanner totals for the Security Scan chip (F-12).
   void refreshSecurityScannerStatus()
-  serversStore.fetchServers().then(() => loadPendingTools())
+  serversStore.fetchServers().then(() => {
+    serversFetchSettled.value = true
+    loadPendingTools()
+  })
 
   // Auto-refresh every 30 seconds
   refreshInterval = setInterval(() => {
@@ -893,7 +1026,9 @@ onMounted(() => {
   }, 30000)
 
   systemStore.connectEventSource()
-  serversStore.fetchServers()
+  // NOTE: no second fetchServers() here — it duplicated the request issued
+  // above and, being unsequenced against it, made the first-run gate depend on
+  // which of the two responses landed last.
 
   // Adaptive onboarding wizard (Spec 046): auto-show on first Web UI load
   // when the user has not yet engaged with the wizard and at least one

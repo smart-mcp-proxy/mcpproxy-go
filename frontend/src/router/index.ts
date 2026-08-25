@@ -12,12 +12,37 @@ const router = createRouter({
       meta: { title: 'Sign In', public: true },
     },
     // Existing routes (admin/personal)
+    //
+    // The landing page (`/`) opens the Dashboard on its Usage (analytics)
+    // panel — that is the "analytics dashboard as default landing page"
+    // behaviour. `/usage` and `/overview` render the same Dashboard component
+    // so each panel is deep-linkable and survives a reload; `meta.dashboardView`
+    // is what the component reads to pick the active panel.
     {
       path: '/',
       name: 'dashboard',
       component: Dashboard,
       meta: {
         title: 'Dashboard',
+        dashboardView: 'usage',
+      },
+    },
+    {
+      path: '/usage',
+      name: 'usage',
+      component: Dashboard,
+      meta: {
+        title: 'Usage Analytics',
+        dashboardView: 'usage',
+      },
+    },
+    {
+      path: '/overview',
+      name: 'dashboard-overview',
+      component: Dashboard,
+      meta: {
+        title: 'Overview',
+        dashboardView: 'overview',
       },
     },
     {
