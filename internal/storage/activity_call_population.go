@@ -45,13 +45,12 @@ var glanceManagementBuiltins = map[string]bool{
 //     dispatch (a policy refused a code_execution sub-call) counts as a failed
 //     call: the user made it and did not get it.
 //   - internal_tool_call — one of mcpproxy's own built-ins. The call_tool_*
-//     variants are excluded because the dispatch they wrap ALREADY emitted its
-//     own tool_call record with the same request id, so counting both would
-//     double every direct call. (The tray glance instead collapses the pair by
-//     request id, which lets it keep a wrapper that failed BEFORE dispatch and
-//     has no upstream partner. A counter sees one record at a time and cannot
-//     tell the two apart, so it drops both: undercounting pre-dispatch failures
-//     is the safer error of the two.) Management built-ins never count. The rest
+//     variants are excluded because every one of them duplicates a canonical
+//     record: a dispatched call — succeeded or failed — also emits its own
+//     tool_call record under the same request id, and a shed one is already
+//     written by the concurrency limiter. This is the same exclusion
+//     ActivityFilter.ExcludeCallToolSuccess applies to the list, so the counter
+//     and the rows it counts agree. Management built-ins never count. The rest
 //     count when they failed, and on success only for the discovery built-ins
 //     the user actually sees.
 //   - policy_decision — counts only when a policy blocked or shed the attempt,
