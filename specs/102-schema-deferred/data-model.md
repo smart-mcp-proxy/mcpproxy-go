@@ -147,8 +147,9 @@ definition-assembly seam (not `buildFullToolEntry`).
 - **Upstream refresh** (`servers.changed`): full catalog rebuild → `SetTools`
   (includes `describe_tool` by construction — FR-018) → mcp-go emits
   `tools/list_changed`.
-- **Init** (`initRoutingModeServers`, D15/R14): one initial rebuild before the
-  listeners are wired — with no upstreams connected this publishes the built-in
+- **Init** (`initRoutingModeServers`, D15/R14): one initial rebuild — a call to
+  the single publisher `RefreshDirectModeTools`, not a second copy of it — before
+  the listeners are wired — with no upstreams connected this publishes the built-in
   set (`describe_tool`) and an empty catalog recording the effective mode, so the
   direct surface is never observed empty and the FR-014 guard always has a mode
   to compare against.

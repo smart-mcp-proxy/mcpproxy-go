@@ -277,8 +277,8 @@ The plan therefore does not promise a single transaction; it promises a
    same function with nothing between them. Note what this forbids: the *builder*
    must not publish. `buildDirectCatalog` returns the snapshot,
    `renderDirectTools` turns it into `[]ServerTool`, and only
-   `RefreshDirectModeTools` (and the D15 initial rebuild) publishes — after its
-   `SetTools` call. Today's `buildDirectModeTools` does the opposite, calling
+   `RefreshDirectModeTools` — the single publisher, which the D15 initial rebuild
+   calls rather than duplicating — publishes, after its `SetTools` call. Today's `buildDirectModeTools` does the opposite, calling
    `setDirectToolPermissions` mid-build (`mcp_routing.go:82`, `:151`) before
    `RefreshDirectModeTools` reaches `SetTools` (`:673`); that ordering is exactly
    what this rule reverses. This is the ordering that makes
@@ -407,8 +407,8 @@ The plan therefore does not promise a single transaction; it promises a
    section). The identity/origin hazards ARE fully closed; the schema-only one is
    not, and it is recorded as a residual rather than papered over.
 
-**Residual, stated exactly** (rounds 5, 6 and 8). Three different things happen
-in the window, and two of them are still open:
+**Residual, stated exactly** (rounds 5, 6, 8 and 9). Four different things happen
+in the window, and three of them are still open:
 
 - *Anything the discriminator sees* — an origin flip, a description change, a
   signature change — is **withheld**: the filters drop it and describe answers
@@ -416,15 +416,44 @@ in the window, and two of them are still open:
   availability loss, not correctness loss: fail-closed, self-correcting on the
   next instruction, and bounded from the client's side by the
   `tools/list_changed` notification `SetTools` has already emitted.
-- *A schema-only change* passes the discriminator, so for those few instructions
-  `describe_tool` may return the **previous** generation's schema for a name
-  whose registered handler already carries the new one. Its blast radius is small
+**What is invisible to the discriminator, field by field.** The rendered
+description is a function of exactly two catalog fields — `description` (both
+modes) and, in deferred mode, the signature that `toolsig.Render(paramsJSON,
+description)` produces. Walking `directCatalogEntry`: `displayName`,
+`serverName`/`toolName` and `description` are all description-visible;
+`renderedDescription` is the discriminator itself; `hash` is not rendered but is
+derived from the others, and a hash change that does not move the rendered string
+is by definition invisible. That leaves exactly three fields that can change with
+a byte-identical rendered description — `paramsJSON`, `outputSchemaJSON` and
+`annotations` — and each is enumerated as a residual below. Nothing else on the
+entry can skew silently.
+
+- *A schema-only change* (`paramsJSON`) passes the discriminator, so for those few
+  instructions `describe_tool` may return the **previous** generation's
+  `inputSchema` for a name whose registered handler already carries the new one.
+  (Note that in deferred mode a `paramsJSON` edit usually *is* visible, because it
+  moves the Spec-032 hash and the rendered signature with it — but not reliably:
+  a re-ordered or semantically-equal edit can render the identical signature, and
+  full mode never renders the schema at all.) Its blast radius is small
   and, importantly, is absorbed by a mechanism this very feature ships: dispatch
   is never wrong (the handler validates against the schema it captured, R9), so
   an agent that acted on the stale definition is rejected by the pre-dispatch
   validator with the **correct** schema embedded (FR-012/FR-013) and succeeds on
   one retry — precisely the US3/SC-003 self-healing path. Cost: one extra round
   trip, in a microsecond window, for a tool whose schema changed mid-refresh.
+- *An output-schema-only change* (`outputSchemaJSON`) is invisible for the same
+  reason, and — unlike the input schema — **the pre-dispatch validator does not
+  absorb it**: nothing validates against an output schema, so there is no
+  self-healing retry here. Stated plainly rather than folded into the row above
+  (round 9): for the width of the window `describe_tool` may return the previous
+  generation's `output_schema` for a tool that now declares a different one. The
+  consequence is bounded by what an output schema *is* on this protocol —
+  advisory shape metadata for structured content, which MCP permits without any
+  declared schema at all (R2). A stale one cannot cause a call to be
+  mis-authorized, mis-validated, or rejected; at worst an agent parses the
+  response against last generation's shape. It self-corrects at the catalog
+  publish microseconds later, and a client that re-reads after the
+  `tools/list_changed` notification never sees it.
 - *An annotations-only change* whose rendered description is byte-identical also
   passes the discriminator (round 8, with rule 3's correction), so the listing
   filters and the describe resolver may gate on the **previous** generation's
@@ -440,10 +469,12 @@ one origin and dispatched to another; no display name can denote two origins, in
 any interleaving; and no *call* can be authorized against a tier the registered
 handler does not itself derive.
 
-**These two residuals are the second and third narrowings of FR-017's "no window
-exposes one without the other" and are recorded in plan §Complexity Tracking for
-the maintainer's assent at the tasks stage**, alongside the transaction
-narrowing — they are not to be discovered later in a task.
+**These three residuals narrow FR-017's "no window exposes one without the
+other", and the annotations-only one additionally narrows FR-011/SC-005 while the
+two schema ones narrow FR-017/SC-007. All are recorded in plan §Complexity
+Tracking and cross-referenced from spec.md FR-017 for the maintainer's assent at
+the tasks stage**, alongside the transaction narrowing — they are not to be
+discovered later in a task.
 
 The catalog carries a monotonically increasing `generation`. It is not
 decorative: every publish logs it beside the entry count and the serialization
@@ -453,19 +484,24 @@ makes "did this request see the old or the new generation" observable rather tha
 inferred.
 
 **Tests** — a rebuild paused between the two publications, with a concurrent
-scoped `tools/list` and `describe_tool`, covering **seven** cases: an **added**
+scoped `tools/list` and `describe_tool`, covering **eight** cases: an **added**
 name, a **removed** name, a **same-name description-visible** change, a
 **same-name origin flip** (server A removed and server B added in one reconcile,
 B's tool flattening to A's old display name), a **within-generation collision**
 (both entries withheld, warning logged, neither listed nor describable, in both
-generations), and the two cases the discriminator cannot see: a **schema-only
-change** and an **annotations-only change** (read→destructive), each with the
-description and rendered signature held byte-identical. The last two assert the
-documented residuals behave as claimed — the stale definition/tier may be
-returned, while dispatch still validates against the new schema and re-derives
-the new tier, so the `invalid_params` error carries the NEW schema (one retry
-succeeds) and the destructive call is still refused a read-scoped token at the
-handler. Plus the **two no-rebuild cases** of rule 5: a signature-cache
+generations), and the three cases the discriminator cannot see: an
+**input-schema-only change**, an **output-schema-only change**, and an
+**annotations-only change** (read→destructive), each with the description and
+rendered signature held byte-identical. Those three are exactly the
+`directCatalogEntry` fields that can move invisibly, so the set doubles as the
+proof of that enumeration. They assert the documented residuals behave as
+claimed — the stale definition/tier may be returned, while dispatch still
+validates against the new input schema and re-derives the new tier, so the
+`invalid_params` error carries the NEW schema (one retry succeeds) and the
+destructive call is still refused a read-scoped token at the handler; the
+output-schema case asserts only that a stale advisory `output_schema` may be
+returned and is corrected by the next publish. Plus the **two no-rebuild
+cases** of rule 5: a signature-cache
 **miss→warm** and a **hit→eviction** between registration and a later
 filter/describe call (`toolsig.Cache.Warm` / `RetainHashes`), both of which must
 leave the tool listed and describable — the proof that the discriminator reads
@@ -503,10 +539,10 @@ unrelated `config.reloaded` into a rebuild plus a `tools/list_changed` broadcast
 — precisely the churn FR-014's no-op requirement forbids.
 
 **Decision**:
-1. `initRoutingModeServers` performs one **initial direct rebuild** —
-   `buildDirectCatalog` + `renderDirectTools` + `SetTools` + publish — before the
-   HTTP listeners are wired, so no session can ever observe an empty direct
-   surface. With no upstreams connected yet this seeds exactly the built-in set
+1. `initRoutingModeServers` performs one **initial direct rebuild** by calling
+   `RefreshDirectModeTools()` — the single publisher (R12), not a second copy of
+   the build→`SetTools`→publish sequence — before the HTTP listeners are wired,
+   so no session can ever observe an empty direct surface. With no upstreams connected yet this seeds exactly the built-in set
    (`describe_tool`) and an empty catalog recording the effective mode; the
    `servers.changed` refresh then replaces it normally. The stale comment at
    `:651-653` is updated rather than left contradicting the code.
@@ -626,11 +662,19 @@ round 8): R13 rule 1 forbids the builder from publishing, so if
 of this section said, "keeps its current signature and call sites" — the catalog
 it built would be unreachable and `RefreshDirectModeTools` would have nothing to
 publish after its `SetTools` call (`mcp_routing.go:666-673`). The two-value
-return is what makes rule 1 expressible. The blast radius is two call sites:
-`RefreshDirectModeTools` (`mcp_routing.go:666`) and one test
-(`mcp_describe_tool_test.go:369`, already being edited for FR-009).
+return is what makes rule 1 expressible.
 
-Both publishers therefore read:
+**There is exactly ONE publisher, and this is pinned deliberately.**
+`RefreshDirectModeTools` is it; the D15 initial rebuild does not re-implement the
+sequence, it *calls* `RefreshDirectModeTools()`. Two independent
+build→`SetTools`→publish sequences would be two places for rule 1's ordering to
+drift, for no gain — the init case differs only in that `DiscoverTools` returns
+nothing yet. So the blast radius of the signature change is two call sites of the
+*builder*: `RefreshDirectModeTools` (`mcp_routing.go:666`) and one test
+(`mcp_describe_tool_test.go:369`, already being edited for FR-009); and one new
+call site of the *publisher*: `initRoutingModeServers`.
+
+The publisher reads:
 
 ```go
 tools, cat := p.buildDirectModeTools()

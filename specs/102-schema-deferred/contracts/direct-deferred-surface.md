@@ -39,8 +39,13 @@ Rules:
   Note the mechanism is normative too: `mcp.NewTool` marshals
   `{"properties":{},"required":[],"type":"object"}`, which fails this rule and
   re-opens the arg-pruning hazard, so deferred entries use
-  `mcp.NewToolWithRawSchema` with annotations copied on explicitly (research.md
-  R11).
+  `mcp.NewToolWithRawSchema`. That constructor takes no `ToolOption`s **and
+  leaves every annotation hint `nil`**, where `mcp.NewTool` seeds
+  `readOnlyHint=false, destructiveHint=true, idempotentHint=false,
+  openWorldHint=true` before any option runs — so the deferred renderer MUST seed
+  those same defaults and only then apply the upstream overrides. Copying only
+  the upstream hints marshals a different (or empty) `annotations` object for the
+  same tool and breaks the rule above (research.md R11).
 - `outputSchema` is absent (research.md R2).
 - Full mode (`"full"`, the default) is byte-identical to pre-feature output modulo
   §3's built-in addition (FR-015).
