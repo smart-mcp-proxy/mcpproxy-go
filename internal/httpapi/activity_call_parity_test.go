@@ -218,14 +218,34 @@ func TestUsageCacheHonoursAHotReloadedTTL(t *testing.T) {
 	resp := &contracts.UsageAggregateResponse{TotalCalls: 7}
 
 	srv.putUsageCache("k", resp, time.Hour)
+	assert.Same(t, resp, srv.getUsageCache("k", time.Hour),
+		"a fresh entry is served")
 
-	// The operator lowers usage_cache_ttl. The entry is now older than the bound.
-	assert.Nil(t, srv.getUsageCache("k", time.Nanosecond),
+	// Age the entry by a minute. Wall-clock waiting would not do: a Windows
+	// runner's clock can report zero elapsed time between two adjacent calls,
+	// which is how the first version of this test failed there.
+	ageUsageCacheEntry(t, srv, "k", time.Minute)
+
+	// The operator lowers usage_cache_ttl below the entry's age. The bound in
+	// force now is what decides, not the one banked when it was written.
+	assert.Nil(t, srv.getUsageCache("k", 5*time.Second),
 		"an entry banked under the old TTL must not outlive the new one")
 
-	// Still served while it is within the TTL actually in force.
+	// Raising it back accepts the same entry again.
 	assert.Same(t, resp, srv.getUsageCache("k", time.Hour))
 
 	// And caching off means never served.
 	assert.Nil(t, srv.getUsageCache("k", 0))
+}
+
+// ageUsageCacheEntry back-dates a cache entry so freshness can be tested
+// without sleeping or trusting clock granularity.
+func ageUsageCacheEntry(t *testing.T, srv *Server, key string, age time.Duration) {
+	t.Helper()
+	srv.usageCacheMu.Lock()
+	defer srv.usageCacheMu.Unlock()
+	entry, ok := srv.usageCache[key]
+	require.True(t, ok, "no cache entry under %q to age", key)
+	entry.stored = entry.stored.Add(-age)
+	srv.usageCache[key] = entry
 }
