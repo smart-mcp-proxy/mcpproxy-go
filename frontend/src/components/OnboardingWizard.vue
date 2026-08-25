@@ -171,6 +171,7 @@
                 <input
                   type="checkbox"
                   class="checkbox checkbox-sm mt-0.5"
+                  aria-label="Require API key on /mcp"
                   :checked="requireMcpAuth"
                   :disabled="securityBusy"
                   @change="onToggleRequireAuth(($event.target as HTMLInputElement).checked)"

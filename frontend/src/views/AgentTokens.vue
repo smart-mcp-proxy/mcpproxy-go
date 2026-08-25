@@ -379,6 +379,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import apiClient from '@/services/api'
+import { formatDateTimeShort } from '@/utils/datetime'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import type { AgentTokenInfo, Server } from '@/types'
@@ -458,14 +459,7 @@ function isExpiringSoon(token: AgentTokenInfo): boolean {
 }
 
 function formatDate(dateStr: string): string {
-  const date = new Date(dateStr)
-  return date.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  return formatDateTimeShort(dateStr)
 }
 
 function permissionBadgeClass(perm: string): string {

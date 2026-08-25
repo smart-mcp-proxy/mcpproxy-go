@@ -12,8 +12,11 @@
       <!-- Top Header -->
       <TopHeader />
 
-      <!-- Page content -->
-      <main class="overflow-y-auto p-6">
+      <!-- Page content. `min-h-0` / `min-w-0`: a grid item defaults to
+           `min-height:auto`, so a tall page pushed this scroll container past
+           its track and the footer ended up overlapping the last row at 390px
+           (UX audit F14). -->
+      <main class="overflow-y-auto min-h-0 min-w-0 p-4 sm:p-6">
         <router-view />
       </main>
 

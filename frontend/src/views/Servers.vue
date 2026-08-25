@@ -123,9 +123,11 @@
       <div class="form-control">
         <input
           v-model="searchQuery"
-          type="text"
+          type="search"
           placeholder="Search servers..."
-          class="input input-bordered input-sm w-64"
+          aria-label="Search servers"
+          data-test="servers-search"
+          class="input input-bordered input-sm w-full sm:w-64"
         />
       </div>
     </div>
