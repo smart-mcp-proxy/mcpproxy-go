@@ -49,12 +49,15 @@ Rules:
 
 The direct server's `initialize` result carries `instructions` (today absent on
 this server instance), static across both serialization modes, conditionally
-phrased. The value is `resolveInstructions(cfg.Instructions)` (the operator's
-configured `instructions`, or the built-in default) followed by a blank line and
-the deferral legend — so enabling this feature never hides an operator's
-configured instructions on the direct surface. Reference legend text (final bytes
-pinned by the direct built-in golden, captured with the default
-`instructions`):
+phrased. The value is the operator's `instructions` config value when non-empty,
+otherwise a **direct-specific default**, followed by a blank line and the
+deferral legend. It is deliberately NOT `resolveInstructions`'s built-in
+`defaultInstructions`: that text tells agents to "Use 'retrieve_tools'" and to
+call `call_tool_read/write/destructive`, none of which exist on this surface
+(research.md R4/D11). So an operator's configured instructions are never hidden
+here, and the default never advertises a workflow this surface cannot serve.
+Reference legend text (final bytes pinned by the direct built-in golden,
+captured with an empty `instructions` config):
 
 > Some tool descriptions end with a compact signature `(param*:type, …)`:
 > `*` = required, `~` = collapsed/lossy details. When a signature is present the
@@ -80,11 +83,30 @@ pinned by the direct built-in golden, captured with the default
 | Id state for this session | definition mode | `check: true` |
 |---|---|---|
 | Listed, ready | full definition | `ready` |
-| Listed, but pending / changed / tool-level-disabled (non-agent sessions retain **these** — see the note below) | full snapshot-backed definition — a listed tool is never undescribable | informative verdict (`pending_approval` / `changed` / `disabled`) |
-| On a **server-level** quarantined or disabled server | never listed on this surface (see note) → `not_found` | `not_found` |
-| Omitted from this session's listing — any reason: token server scope, operation-permission tier, profile scope, agent callability, or nonexistence | `not_found` + standard remediation | `not_found` |
-| Removed between list and describe | per-id `not_found`, batch not failed | `not_found` |
-| Malformed id | per-id `not_found` + format remediation | same |
+| Listed, but pending / changed / tool-level-disabled (non-agent sessions retain **these** — see the note below) | full snapshot-backed definition — a listed tool is never undescribable | `status:"unavailable"` + the evaluator's real `reason` (see the vocabulary note) |
+| On a **server-level** quarantined or disabled server | never listed on this surface (see note) → `not_found` | `status:"unavailable"`, `reason:"not_found"` |
+| Omitted from this session's listing — any reason: token server scope, operation-permission tier, profile scope, agent callability, or nonexistence | `not_found` + standard remediation | `status:"unavailable"`, `reason:"not_found"` |
+| Removed between list and describe | per-id `not_found`, batch not failed | `status:"unavailable"`, `reason:"not_found"` |
+| Malformed id | per-id `not_found` + format remediation | `status:"unavailable"`, `reason:"not_found"` |
+
+**Check-mode vocabulary note.** Definition mode and check mode do NOT share an
+error vocabulary, and this table's check column uses check mode's own. Check mode
+answers `describeCheckPayload{verdict, checked_at, request_id, results[]}` with
+each result `{id, status, reason?, retryable?, action?, detail?, remediation?,
+did_you_mean?}` (`mcp_describe_check.go:69-87`); a non-ready id is
+`status:"unavailable"` carrying one `preflight.Reason`, and the reason constants
+are `tool_pending_approval`, `tool_changed`, `tool_blocked_by_user`,
+`tool_denied_by_config`, `server_quarantined`, `server_disabled`, `not_found`, …
+(`internal/preflight/reasons.go:22-38`) — note the `tool_`/`server_` prefixes.
+FR-009 requires this shape to survive verbatim onto the direct surface, so the
+direct adapter **projects, never translates**: it decides which ids reach the
+evaluator (listing parity) and canonicalizes their form (§3 request rules), and
+passes the evaluator's `status`/`reason`/`action`/`retryable` through untouched.
+The distinctions the existing vocabulary draws — user-blocked
+(`tool_blocked_by_user`) versus config-denied (`tool_denied_by_config`), and
+server- versus tool-level states — are preserved exactly. A test asserts a direct
+check response is byte-compatible with the retrieve-surface response for the same
+underlying tool state.
 
 **Note — server-level vs tool-level states.** The spec's Edge Cases say a
 non-agent direct listing "retains tools that are pending, changed, quarantined or

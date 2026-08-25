@@ -136,8 +136,18 @@ operator's string, or `defaultInstructions` when empty — and it is applied to
 `p.server` ONLY (`mcp.go:480`). A hard-coded direct-server string would leave an
 operator's configured instructions permanently unreachable on `/mcp/all` and on
 `/mcp` under `routing_mode: "direct"`. **Decision**: the direct server's
-instructions are `resolveInstructions(cfg.Instructions)` + a blank line + the
-deferral legend, so the operator's text still leads and the legend is additive.
+instructions are the operator's `cfg.Instructions` when non-empty, **otherwise a
+direct-specific default** — NOT `resolveInstructions`'s built-in
+`defaultInstructions`, whose DISCOVERY line reads "Use 'retrieve_tools' to search
+for tools by description" and whose CALLING line names `call_tool_read/write/
+destructive` (`mcp.go:72-80`). None of those tools exist on the direct surface
+(`buildDirectModeTools` is upstream tools plus `describe_tool`), so importing
+that text would put the in-band guidance FR-007 exists to provide in direct
+contradiction with the listing, pointing agents at a nonexistent tool. The
+direct-specific default keeps only the parts that are true here — the
+`server__tool` naming, `describe_tool`, `upstream_servers` list, and the ABOUT
+links — and the deferral legend follows after a blank line. Operator text, when
+set, still leads and is never rewritten.
 The legend is a package constant so the new direct built-in golden can pin its
 exact bytes, and the golden fixture uses the empty-`instructions` default so the
 pinned string is deterministic. A test asserts a custom `instructions` value
@@ -239,11 +249,26 @@ the list they are filtering. Enumerating both orderings:
 | Tool removed in the new generation | listing still shows it (old registry), filter finds no catalog entry | not listed; describe would resolve from the old catalog → describable-but-unlisted |
 | Tool added in the new generation | not listed; describe resolves → describable-but-unlisted | listed, filter finds no old catalog entry |
 
-**Decision** — three rules that make every cell safe, rather than pretending the
-window does not exist:
+**What cannot be built, stated plainly.** There is no way to stamp the generation
+onto the registered entry and compare it at read time: `mcp.Tool`'s only
+free-form field is `Meta`, which marshals to `_meta` on the wire
+(`mcp/tools.go` `Tool.Meta`), so using it would move the very bytes FR-015
+freezes. And mcp-go takes its own snapshot of `s.tools` under `toolsMu` *before*
+invoking our tool filters, so no lock of ours can span the registry read either.
+The plan therefore does not promise a single transaction; it promises a
+**safety property** and enumerates the residual:
 
-1. **Catalog is published first**, so the filters always enforce the newer,
-   narrower truth.
+> No request observes a state less restrictive than **both** generations, and no
+> request receives a definition for a name the registry is not currently serving.
+
+**Decision** — four rules that deliver that property:
+
+1. **`SetTools` runs first, the catalog is published immediately after**, in the
+   same function with nothing between them. This is the ordering that makes
+   *removal* window-free (a removed name leaves the registry before the catalog
+   stops describing it, and rule 3's registry check then answers `not_found`),
+   and it makes an *addition* fail closed (listed but not yet in the catalog →
+   rule 2 denies it for filtered sessions, rule 3 answers `not_found`).
 2. **Filters deny on catalog miss.** A name absent from the current catalog is
    dropped, NOT passed through. Pass-through is reserved for built-ins and is
    matched against an explicit built-in name set (today: `describe_tool`), never
@@ -257,7 +282,16 @@ window does not exist:
    (`mcp_routing_test.go`, `toon_surface_isolation_test.go`), would see the whole
    listing denied. An *empty published* catalog is a real generation and does
    deny; only the nil pointer falls back.
-3. **Describe requires registry membership as well as catalog visibility.**
+3. **The permission tier is derived from the registered entry's own
+   annotations**, via `contracts.DeriveCallWith(tool.Annotations)` — exactly what
+   the dispatch handler already does (`mcp_routing.go:212-213`) — instead of
+   being looked up in the catalog. The annotations travel *with* the entry the
+   filter is filtering, so the tier is generation-correct by construction. This
+   closes the one over-permit case the ordering alone leaves open: a tool whose
+   annotations changed from read to destructive between generations. The catalog
+   is still consulted for the `(server, tool)` split (rule 2) — that is what
+   `ParseDirectToolName` gets wrong — but never for the tier.
+4. **Describe requires registry membership as well as catalog visibility.**
    Before returning a definition the direct resolver checks
    `p.directServer.GetTool(displayName) != nil` (mcp-go
    `server/server.go:1023`, an O(1) read of the very map the listing is served
@@ -266,11 +300,71 @@ window does not exist:
    "membership is decided by the direct-surface snapshot, not index presence" —
    the registry is the listing's own source, not the index.
 
+**Residual, accepted and documented** (cross-model review round 3): for the few
+instructions between `SetTools` and the catalog publish, a display name that
+exists in *both* generations but whose definition changed — a schema edit, or a
+flipped `__` collision winner — describes as the **previous** generation while
+the registry already serves the new one. This is not a disclosure (the name is
+visible in both) and not a dispatch hazard (the handler carries its own schema,
+R9). It is also the *more* consistent answer for the caller: the previous
+generation's definition is what that session's own listing advertised, since the
+`tools/list_changed` notification `SetTools` emits has not yet been acted on. The
+notification bounds the window from the client's side; the ordering bounds it to
+microseconds on the server's.
+
 The catalog carries a monotonically increasing `generation` so the skew is
-observable in logs and assertable in tests. **Test**: a rebuild that pauses
-between the two publications, with a concurrent scoped `tools/list` and
-`describe_tool` for both an added and a removed tool, asserting no
-describable-but-unlisted id and no unfiltered stale entry in either window.
+observable in logs and assertable in tests. **Tests** — a rebuild paused between
+the two publications, with a concurrent scoped `tools/list` and `describe_tool`,
+covering four cases, not two: an **added** name, a **removed** name, a
+**same-name schema update**, and a **flipped collision winner**. Assertions: no
+describable-but-unlisted id; no entry served past the permission-tier gate; and
+for the two same-name cases, that the definition returned is one of the two
+generations and never a mix of both.
+
+## R14 — The direct surface is never initialized eagerly (FR-009/FR-014 gap)
+
+**Finding** (cross-model review round 3, verified): `initRoutingModeServers`
+registers the built-ins for the code-exec and call-tool servers but deliberately
+registers **nothing** on the direct server:
+
+> `// Note: Direct mode tools are built lazily/on-demand via RefreshDirectModeTools`
+> `// because upstream servers may not be connected yet during initialization.`
+> `// The servers.changed event will trigger a refresh.`
+> (`mcp_routing.go:651-653`)
+
+Composing `describe_tool` into `buildDirectModeTools` (FR-018) is therefore
+necessary but **not sufficient**: until something calls
+`RefreshDirectModeTools`, the direct server has an empty tool map and FR-009's
+"present in BOTH serialization modes" is false. The exposure is worst in exactly
+the configuration the new built-in golden models — **zero upstream servers**,
+where a `servers.changed` refresh may never be a meaningful trigger — and the
+golden itself does not catch it, because it asserts over
+`buildDirectModeTools()`'s return value rather than over what `p.directServer`
+actually serves.
+
+It also interacts with the R8 nil-catalog rule: with no initial rebuild the
+catalog stays nil, so "a nil catalog rebuilds unconditionally" turns the first
+unrelated `config.reloaded` into a rebuild plus a `tools/list_changed` broadcast
+— precisely the churn FR-014's no-op requirement forbids.
+
+**Decision**:
+1. `initRoutingModeServers` performs one **initial direct rebuild** —
+   `buildDirectCatalog` + `renderDirectTools` + `SetTools` + publish — before the
+   HTTP listeners are wired, so no session can ever observe an empty direct
+   surface. With no upstreams connected yet this seeds exactly the built-in set
+   (`describe_tool`) and an empty catalog recording the effective mode; the
+   `servers.changed` refresh then replaces it normally. The stale comment at
+   `:651-653` is updated rather than left contradicting the code.
+2. Because the catalog is now always published after init, the nil-catalog
+   "rebuild unconditionally" branch becomes unreachable in production and is kept
+   only as the defensive path (R8, R13 rule 2's nil exception). FR-014's no-op
+   guarantee then holds from the first reload onward.
+3. The new direct built-in gate asserts over **`p.directServer.ListTools()`** —
+   what the server actually serves after init — not over
+   `buildDirectModeTools()`'s return value, so it fails if the initial
+   registration is ever dropped again. A companion test asserts an unrelated
+   `config.reloaded` on a freshly initialized zero-upstream proxy triggers no
+   `SetTools` and no notification.
 
 ## R11 — The `{"type":"object"}` placeholder needs `RawInputSchema` (verified empirically)
 
