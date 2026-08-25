@@ -416,17 +416,39 @@ in the window, and three of them are still open:
   availability loss, not correctness loss: fail-closed, self-correcting on the
   next instruction, and bounded from the client's side by the
   `tools/list_changed` notification `SetTools` has already emitted.
-**What is invisible to the discriminator, field by field.** The rendered
-description is a function of exactly two catalog fields — `description` (both
-modes) and, in deferred mode, the signature that `toolsig.Render(paramsJSON,
-description)` produces. Walking `directCatalogEntry`: `displayName`,
-`serverName`/`toolName` and `description` are all description-visible;
-`renderedDescription` is the discriminator itself; `hash` is not rendered but is
-derived from the others, and a hash change that does not move the rendered string
-is by definition invisible. That leaves exactly three fields that can change with
-a byte-identical rendered description — `paramsJSON`, `outputSchemaJSON` and
-`annotations` — and each is enumerated as a residual below. Nothing else on the
-entry can skew silently.
+**What is invisible to the discriminator, field by field** (corrected in round
+10 — the round-9 walk skipped the derived fields and over-claimed). The rendered
+description is a function of exactly two things: `description` (both modes) and,
+in deferred mode, `toolsig.Render(paramsJSON, description).Sig`, whose parameter
+list reads `paramsJSON` alone (`internal/toolsig/signature.go:44-89`).
+
+Split `directCatalogEntry` into **source** fields (set from the upstream
+projection) and **derived** fields (computed from those), because only the source
+fields are independent axes of change:
+
+*Source fields.*
+
+| Field | Visible in a rendered-description comparison? |
+|---|---|
+| `displayName`, `serverName`, `toolName` | Yes. A change of identity is an add/remove, and the origin-flip case moves the `[server]` prefix (`mcp_routing.go:95`). |
+| `description` | Yes, by construction — it *is* the rendered string in full mode. |
+| `paramsJSON` | **No, not reliably.** Never rendered in full mode; in deferred mode it usually moves the signature, but a re-ordered or semantically-equal edit renders the identical `Sig`. |
+| `outputSchemaJSON` | **No.** Never rendered in either mode. It moves the Spec-032 hash, so it can flip a `Peek` hit to a miss and thereby change the suffix — but only until the indexer warms the new hash, at which point `Render` reproduces the identical `Sig` (it never reads the output schema). |
+| `annotations` | **No.** Never rendered in either mode. |
+
+*Derived fields — no new axis.*
+
+| Field | Derived from | Consequence |
+|---|---|---|
+| `renderedDescription` | the renderer, at render time | it *is* the discriminator |
+| `hash` | server, tool, description, input schema, output schema (`internal/hash/hash.go:10-16`, `ToolHashWithOutputSchema`) — **not** annotations | moves iff one of those sources moves; adds no independent case |
+| `requiredPermission` | `annotations`, via `requiredPermissionForDirectTool` (`mcp_direct_scope.go:18`) | moves iff `annotations` moves; it is the *mechanism* of the annotations residual, not a fourth one |
+
+So there are exactly **three independent source fields** that can change while the
+rendered description stays byte-identical — `paramsJSON`, `outputSchemaJSON`,
+`annotations` — and each is enumerated as a residual below. The derived fields
+add no fourth case; the skew tests drive the three source classes and assert the
+derived consequences.
 
 - *A schema-only change* (`paramsJSON`) passes the discriminator, so for those few
   instructions `describe_tool` may return the **previous** generation's
@@ -492,8 +514,9 @@ B's tool flattening to A's old display name), a **within-generation collision**
 generations), and the three cases the discriminator cannot see: an
 **input-schema-only change**, an **output-schema-only change**, and an
 **annotations-only change** (read→destructive), each with the description and
-rendered signature held byte-identical. Those three are exactly the
-`directCatalogEntry` fields that can move invisibly, so the set doubles as the
+rendered signature held byte-identical. Those three are exactly the *independent
+source* fields that can move invisibly (the field table above; the derived
+`hash` and `requiredPermission` add no fourth case), so the set doubles as the
 proof of that enumeration. They assert the documented residuals behave as
 claimed — the stale definition/tier may be returned, while dispatch still
 validates against the new input schema and re-derives the new tier, so the
