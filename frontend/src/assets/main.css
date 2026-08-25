@@ -268,42 +268,48 @@
  * is the same failure mode as `text-*` (a dark-theme outline secondary button
  * measured 2.96:1). daisyUI exposes `--btn-rest-fg` for exactly this: it is
  * read only in the rest state, so hover still flips to the filled fg/bg pair.
+ *
+ * Each value falls back THROUGH `--alert-fg`, which only exists inside a
+ * coloured alert: on that surface the on-colour foreground has to win, and a
+ * variable fallback settles it without a specificity duel with the alert rules
+ * further down (`.btn-link.btn-primary` would otherwise outrank them).
  */
 :where(.btn-outline, .btn-dash, .btn-soft, .btn-ghost) {
-  &.btn-primary { --btn-rest-fg: var(--tone-primary); }
-  &.btn-secondary { --btn-rest-fg: var(--tone-secondary); }
-  &.btn-accent { --btn-rest-fg: var(--tone-accent); }
-  &.btn-info { --btn-rest-fg: var(--tone-info); }
-  &.btn-success { --btn-rest-fg: var(--tone-success); }
-  &.btn-warning { --btn-rest-fg: var(--tone-warning); }
-  &.btn-error { --btn-rest-fg: var(--tone-error); }
+  &.btn-primary { --btn-rest-fg: var(--alert-fg, var(--tone-primary)); }
+  &.btn-secondary { --btn-rest-fg: var(--alert-fg, var(--tone-secondary)); }
+  &.btn-accent { --btn-rest-fg: var(--alert-fg, var(--tone-accent)); }
+  &.btn-info { --btn-rest-fg: var(--alert-fg, var(--tone-info)); }
+  &.btn-success { --btn-rest-fg: var(--alert-fg, var(--tone-success)); }
+  &.btn-warning { --btn-rest-fg: var(--alert-fg, var(--tone-warning)); }
+  &.btn-error { --btn-rest-fg: var(--alert-fg, var(--tone-error)); }
 }
 
 /* `.btn-link` ignores `--btn-rest-fg` — daisyUI paints it straight from
    `--btn-color` — so it needs the colour set directly. It has no fill in any
    state, so there is no hover pair to preserve. */
 .btn-link {
-  &.btn-primary { color: var(--tone-primary); }
-  &.btn-secondary { color: var(--tone-secondary); }
-  &.btn-accent { color: var(--tone-accent); }
-  &.btn-info { color: var(--tone-info); }
-  &.btn-success { color: var(--tone-success); }
-  &.btn-warning { color: var(--tone-warning); }
-  &.btn-error { color: var(--tone-error); }
+  &.btn-primary { color: var(--alert-fg, var(--tone-primary)); }
+  &.btn-secondary { color: var(--alert-fg, var(--tone-secondary)); }
+  &.btn-accent { color: var(--alert-fg, var(--tone-accent)); }
+  &.btn-info { color: var(--alert-fg, var(--tone-info)); }
+  &.btn-success { color: var(--alert-fg, var(--tone-success)); }
+  &.btn-warning { color: var(--alert-fg, var(--tone-warning)); }
+  &.btn-error { color: var(--alert-fg, var(--tone-error)); }
 }
 /* Uncoloured `.btn-link` defaults to `--color-primary`, i.e. a fill used as text. */
 .btn-link:not(.btn-primary, .btn-secondary, .btn-accent, .btn-info, .btn-success, .btn-warning, .btn-error) {
-  color: var(--tone-primary);
+  color: var(--alert-fg, var(--tone-primary));
 }
 
+/* Same story for unfilled badges, and the same `--alert-fg` escape hatch. */
 :where(.badge-outline, .badge-dash, .badge-soft) {
-  &.badge-primary { color: var(--tone-primary); }
-  &.badge-secondary { color: var(--tone-secondary); }
-  &.badge-accent { color: var(--tone-accent); }
-  &.badge-info { color: var(--tone-info); }
-  &.badge-success { color: var(--tone-success); }
-  &.badge-warning { color: var(--tone-warning); }
-  &.badge-error { color: var(--tone-error); }
+  &.badge-primary { color: var(--alert-fg, var(--tone-primary)); }
+  &.badge-secondary { color: var(--alert-fg, var(--tone-secondary)); }
+  &.badge-accent { color: var(--alert-fg, var(--tone-accent)); }
+  &.badge-info { color: var(--alert-fg, var(--tone-info)); }
+  &.badge-success { color: var(--alert-fg, var(--tone-success)); }
+  &.badge-warning { color: var(--alert-fg, var(--tone-warning)); }
+  &.badge-error { color: var(--alert-fg, var(--tone-error)); }
 }
 
 /* daisyUI paints these with `opacity` on base-content, which lands at ~4.2:1
