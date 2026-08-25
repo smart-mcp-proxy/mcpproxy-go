@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, onScopeDispose } from 'vue'
 import type { StatusUpdate, Theme, Toast, InfoResponse, RoutingInfo } from '@/types'
 import api from '@/services/api'
 
@@ -386,15 +386,27 @@ export const useSystemStore = defineStore('system', () => {
     } catch {
       return
     }
+    const query = colorSchemeQuery
     const onChange = () => {
       if (currentTheme.value === SYSTEM_THEME) applyResolvedTheme()
     }
-    if (typeof colorSchemeQuery.addEventListener === 'function') {
-      colorSchemeQuery.addEventListener('change', onChange)
-    } else if (typeof colorSchemeQuery.addListener === 'function') {
-      // Safari < 14
-      colorSchemeQuery.addListener(onChange)
+    const detach = () => {
+      if (typeof query.removeEventListener === 'function') {
+        query.removeEventListener('change', onChange)
+      } else if (typeof query.removeListener === 'function') {
+        query.removeListener(onChange)
+      }
+      colorSchemeQuery = null
     }
+    if (typeof query.addEventListener === 'function') {
+      query.addEventListener('change', onChange)
+    } else if (typeof query.addListener === 'function') {
+      // Safari < 14
+      query.addListener(onChange)
+    }
+    // The store outlives most things, but HMR and tests dispose and recreate it;
+    // without this each incarnation would leave its listener behind.
+    onScopeDispose(detach)
   }
 
   function setTheme(themeName: string) {

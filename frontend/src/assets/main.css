@@ -82,6 +82,156 @@
   --tone-muted: oklch(64% 0.029 256.847); /* base-content/40 3.56 -> 4.71 */
 }
 
+/*
+ * Per-theme tone ramps for the other themes the picker offers. Generated the
+ * same way as the two blocks above — hue and chroma come straight from the
+ * upstream token, only lightness moves, until the colour clears 4.65:1 against
+ * base-100/200/300 and their 10% tints. The `:root` color-mix above stays as
+ * the fallback for any theme not listed here.
+ */
+[data-theme="light"] {
+  --tone-primary: oklch(51% 0.24 277.023);
+  --tone-secondary: oklch(50% 0.241 354.308);
+  --tone-accent: oklch(47% 0.152 181.912);
+  --tone-info: oklch(48% 0.16 232.661);
+  --tone-success: oklch(46% 0.177 163.223);
+  --tone-warning: oklch(51% 0.189 84.429);
+  --tone-error: oklch(52% 0.194 13.428);
+  --tone-muted: oklch(52% 0.006 285.885);
+}  /* worst 4.65:1 */
+
+[data-theme="business"] {
+  --tone-primary: oklch(65% 0.099 251.473);
+  --tone-secondary: oklch(67% 0.027 229.389);
+  --tone-accent: oklch(69% 0.167 35.791);
+  --tone-info: oklch(66% 0.143 240.033);
+  --tone-success: oklch(67% 0.094 156.596);
+  --tone-warning: oklch(69% 0.115 81.519);
+  --tone-error: oklch(67% 0.146 29.674);
+  --tone-muted: oklch(63% 0.0 0.0);
+}  /* worst 4.66:1 */
+
+[data-theme="emerald"] {
+  --tone-primary: oklch(43% 0.135 153.45);
+  --tone-secondary: oklch(45% 0.202 261.294);
+  --tone-accent: oklch(46% 0.149 33.2);
+  --tone-info: oklch(41% 0.191 231.6);
+  --tone-success: oklch(40% 0.15 160.0);
+  --tone-warning: oklch(45% 0.199 83.87);
+  --tone-error: oklch(43% 0.221 22.18);
+  --tone-muted: oklch(46% 0.032 262.988);
+}  /* worst 4.66:1 */
+
+[data-theme="forest"] {
+  --tone-primary: oklch(63% 0.185 148.958);
+  --tone-secondary: oklch(63% 0.135 168.327);
+  --tone-accent: oklch(63% 0.119 185.713);
+  --tone-info: oklch(62% 0.191 231.6);
+  --tone-success: oklch(62% 0.15 160.0);
+  --tone-warning: oklch(66% 0.199 83.87);
+  --tone-error: oklch(67% 0.221 22.18);
+  --tone-muted: oklch(61% 0.001 17.911);
+}  /* worst 4.65:1 */
+
+[data-theme="aqua"] {
+  --tone-primary: oklch(78% 0.144 198.645);
+  --tone-secondary: oklch(78% 0.108 309.782);
+  --tone-accent: oklch(81% 0.102 94.555);
+  --tone-info: oklch(80% 0.215 262.88);
+  --tone-success: oklch(75% 0.169 149.213);
+  --tone-warning: oklch(77% 0.157 58.318);
+  --tone-error: oklch(85% 0.19 27.33);
+  --tone-muted: oklch(74% 0.058 230.902);
+}  /* worst 4.67:1 */
+
+[data-theme="lofi"] {
+  --tone-primary: oklch(46% 0.0 0.0);
+  --tone-secondary: oklch(47% 0.001 17.278);
+  --tone-accent: oklch(47% 0.0 0.0);
+  --tone-info: oklch(49% 0.103 205.9);
+  --tone-success: oklch(48% 0.153 164.14);
+  --tone-warning: oklch(51% 0.135 79.94);
+  --tone-error: oklch(52% 0.15 28.47);
+  --tone-muted: oklch(51% 0.0 0.0);
+}  /* worst 4.66:1 */
+
+[data-theme="pastel"] {
+  --tone-primary: oklch(51% 0.063 306.703);
+  --tone-secondary: oklch(51% 0.058 10.001);
+  --tone-accent: oklch(49% 0.093 164.15);
+  --tone-info: oklch(47% 0.127 207.078);
+  --tone-success: oklch(47% 0.15 154.449);
+  --tone-warning: oklch(50% 0.128 66.29);
+  --tone-error: oklch(51% 0.114 19.571);
+  --tone-muted: oklch(50% 0.0 0.0);
+}  /* worst 4.66:1 */
+
+[data-theme="fantasy"] {
+  --tone-primary: oklch(44% 0.189 325.02);
+  --tone-secondary: oklch(41% 0.162 241.36);
+  --tone-accent: oklch(46% 0.204 56.72);
+  --tone-info: oklch(41% 0.191 231.6);
+  --tone-success: oklch(40% 0.15 160.0);
+  --tone-warning: oklch(45% 0.199 83.87);
+  --tone-error: oklch(43% 0.221 22.18);
+  --tone-muted: oklch(46% 0.029 256.847);
+}  /* worst 4.65:1 */
+
+[data-theme="wireframe"] {
+  --tone-primary: oklch(51% 0.0 0.0);
+  --tone-secondary: oklch(51% 0.0 0.0);
+  --tone-accent: oklch(51% 0.0 0.0);
+  --tone-info: oklch(48% 0.11 240.79);
+  --tone-success: oklch(47% 0.095 166.913);
+  --tone-warning: oklch(49% 0.137 46.201);
+  --tone-error: oklch(49% 0.177 26.899);
+  --tone-muted: oklch(51% 0.0 0.0);
+}  /* worst 4.65:1 */
+
+[data-theme="luxury"] {
+  --tone-primary: oklch(70% 0.0 0.0);
+  --tone-secondary: oklch(63% 0.064 261.069);
+  --tone-accent: oklch(64% 0.051 338.825);
+  --tone-info: oklch(67% 0.121 237.133);
+  --tone-success: oklch(66% 0.192 132.154);
+  --tone-warning: oklch(68% 0.136 102.891);
+  --tone-error: oklch(68% 0.176 22.568);
+  --tone-muted: oklch(63% 0.123 76.89);
+}  /* worst 4.66:1 */
+
+[data-theme="dracula"] {
+  --tone-primary: oklch(74% 0.183 346.812);
+  --tone-secondary: oklch(73% 0.148 301.883);
+  --tone-accent: oklch(73% 0.124 66.558);
+  --tone-info: oklch(73% 0.093 212.846);
+  --tone-success: oklch(71% 0.219 148.024);
+  --tone-warning: oklch(74% 0.134 112.757);
+  --tone-error: oklch(76% 0.206 24.43);
+  --tone-muted: oklch(67% 0.007 106.545);
+}  /* worst 4.67:1 */
+
+[data-theme="synthwave"] {
+  --tone-primary: oklch(70% 0.202 349.761);
+  --tone-secondary: oklch(68% 0.111 230.318);
+  --tone-accent: oklch(68% 0.183 55.934);
+  --tone-info: oklch(66% 0.16 232.661);
+  --tone-success: oklch(65% 0.152 181.912);
+  --tone-warning: oklch(69% 0.182 98.111);
+  --tone-error: oklch(69% 0.121 32.639);
+  --tone-muted: oklch(64% 0.115 274.713);
+}  /* worst 4.70:1 */
+
+[data-theme="cyberpunk"] {
+  --tone-primary: oklch(44% 0.209 6.35);
+  --tone-secondary: oklch(40% 0.184 204.72);
+  --tone-accent: oklch(47% 0.217 310.43);
+  --tone-info: oklch(41% 0.191 231.6);
+  --tone-success: oklch(40% 0.15 160.0);
+  --tone-warning: oklch(46% 0.199 83.87);
+  --tone-error: oklch(43% 0.221 22.18);
+  --tone-muted: oklch(45% 0.0 0.0);
+}  /* worst 4.66:1 */
+
 @layer utilities {
   /* Semantic text/link colours read from the AA-checked ramp. Fills
      (`bg-*`, `badge-*`, `btn-*`, `alert-*`) deliberately keep `--color-*`. */
@@ -119,7 +269,7 @@
  * measured 2.96:1). daisyUI exposes `--btn-rest-fg` for exactly this: it is
  * read only in the rest state, so hover still flips to the filled fg/bg pair.
  */
-:where(.btn-outline, .btn-dash, .btn-soft, .btn-ghost, .btn-link) {
+:where(.btn-outline, .btn-dash, .btn-soft, .btn-ghost) {
   &.btn-primary { --btn-rest-fg: var(--tone-primary); }
   &.btn-secondary { --btn-rest-fg: var(--tone-secondary); }
   &.btn-accent { --btn-rest-fg: var(--tone-accent); }
@@ -127,6 +277,23 @@
   &.btn-success { --btn-rest-fg: var(--tone-success); }
   &.btn-warning { --btn-rest-fg: var(--tone-warning); }
   &.btn-error { --btn-rest-fg: var(--tone-error); }
+}
+
+/* `.btn-link` ignores `--btn-rest-fg` — daisyUI paints it straight from
+   `--btn-color` — so it needs the colour set directly. It has no fill in any
+   state, so there is no hover pair to preserve. */
+.btn-link {
+  &.btn-primary { color: var(--tone-primary); }
+  &.btn-secondary { color: var(--tone-secondary); }
+  &.btn-accent { color: var(--tone-accent); }
+  &.btn-info { color: var(--tone-info); }
+  &.btn-success { color: var(--tone-success); }
+  &.btn-warning { color: var(--tone-warning); }
+  &.btn-error { color: var(--tone-error); }
+}
+/* Uncoloured `.btn-link` defaults to `--color-primary`, i.e. a fill used as text. */
+.btn-link:not(.btn-primary, .btn-secondary, .btn-accent, .btn-info, .btn-success, .btn-warning, .btn-error) {
+  color: var(--tone-primary);
 }
 
 :where(.badge-outline, .badge-dash, .badge-soft) {

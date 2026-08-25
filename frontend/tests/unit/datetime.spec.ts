@@ -34,6 +34,13 @@ describe('house date/time format', () => {
     expect(formatDateTime(iso)).toBe('2026-08-25 06:51:38')
   })
 
+  it('treats a date-only string as a calendar date, not UTC midnight', () => {
+    // `new Date('2026-08-25')` is UTC midnight, which prints as the 24th in any
+    // timezone west of UTC.
+    expect(formatDate('2026-08-25')).toBe('2026-08-25')
+    expect(formatDateTime('2026-08-25')).toBe('2026-08-25 00:00:00')
+  })
+
   it('never renders "Invalid Date" for missing or broken input', () => {
     for (const value of [null, undefined, '', 'not-a-date']) {
       expect(formatDateTime(value)).toBe('-')

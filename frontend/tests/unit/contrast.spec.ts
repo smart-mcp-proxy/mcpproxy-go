@@ -65,8 +65,10 @@ function themeTokens(theme: string): Record<string, RGB> {
 const THEMES = ['corporate', 'dark'] as const
 const SEMANTIC = ['primary', 'info', 'success', 'warning', 'error'] as const
 
-// Round the way a report does, so failures print a readable number.
-const ratio = (a: RGB, b: RGB) => Math.round(contrastRatio(a, b) * 100) / 100
+// Compare the EXACT ratio — rounding first would let 4.496 pass as 4.50 — and
+// only round when a message needs to be readable.
+const ratio = (a: RGB, b: RGB) => contrastRatio(a, b)
+const show = (value: number) => Math.round(value * 100) / 100
 
 describe.each(THEMES)('theme %s', (theme) => {
   const t = themeTokens(theme)
@@ -120,6 +122,23 @@ describe.each(THEMES)('theme %s', (theme) => {
     }
   })
 
+  it('keeps ghost buttons on a coloured alert readable while hovered', () => {
+    // main.css pins those buttons to the alert's content colour in every state.
+    // daisyUI's hover tints the button background with 10% base-content (20%
+    // is the active/focus depth), so the pair has to hold there too.
+    for (const name of ['info', 'success', 'warning', 'error'] as const) {
+      const fill = t[`--color-${name}`]
+      const content = t[`--color-${name}-content`]
+      for (const alpha of [0.1, 0.2]) {
+        const hovered = alphaOver(t['--color-base-content'], fill, alpha)
+        expect(
+          ratio(content, hovered),
+          `alert-${name} ghost button at ${alpha * 100}% hover tint (${show(ratio(content, hovered))}:1)`,
+        ).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+      }
+    }
+  })
+
   it('a code chip inverted onto a coloured alert stays readable', () => {
     // The `dig <hostname>` remediation chip inside alert-error rendered
     // base-200 under the alert's own dark content colour: 1.07:1 in dark.
@@ -139,6 +158,77 @@ describe.each(THEMES)('theme %s', (theme) => {
       expect(
         ratio(t['--color-base-content'], surface.color),
         `base-content on ${surface.name}`,
+      ).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+    }
+  })
+})
+
+// Every theme the picker offers carries its own generated tone ramp, so the
+// guarantee is not limited to the two defaults `system` resolves to.
+const OFFERED_THEMES = [
+  'light',
+  'dark',
+  'corporate',
+  'business',
+  'emerald',
+  'forest',
+  'aqua',
+  'lofi',
+  'pastel',
+  'fantasy',
+  'wireframe',
+  'luxury',
+  'dracula',
+  'synthwave',
+  'cyberpunk',
+] as const
+
+it('covers exactly the themes the picker offers', () => {
+  // Read the store as text: a new theme in the dropdown without a tone ramp
+  // would otherwise silently fall back to the approximate color-mix.
+  const store = readFileSync(resolve(root, 'src/stores/system.ts'), 'utf8')
+  const declaration = store.slice(store.indexOf('const themes: Theme[]'))
+  const block = declaration.slice(declaration.indexOf('= ['), declaration.indexOf(']\n'))
+  const offered = [...block.matchAll(/name:\s*'([\w-]+)'/g)]
+    .map((m) => m[1])
+    .filter((n) => n !== 'system')
+  expect(new Set(offered)).toEqual(new Set(OFFERED_THEMES))
+  for (const theme of offered) {
+    expect(
+      stripComments(appCss).includes(`[data-theme="${theme}"]`),
+      `main.css has no tone ramp for the offered theme "${theme}"`,
+    ).toBe(true)
+  }
+})
+
+describe.each(OFFERED_THEMES)('offered theme %s', (theme) => {
+  const t = themeTokens(theme)
+
+  it('has a tone ramp that clears AA on every base surface and 10% tint', () => {
+    for (const name of SEMANTIC) {
+      const tone = t[`--tone-${name}`]
+      expect(tone, `--tone-${name} missing in ${theme}`).toBeDefined()
+      const fill = t[`--color-${name}`]
+      for (const surface of ['base-100', 'base-200', 'base-300'] as const) {
+        const bg = t[`--color-${surface}`]
+        expect(ratio(tone, bg), `${theme}: text-${name} on ${surface}`).toBeGreaterThanOrEqual(
+          AA_NORMAL_TEXT,
+        )
+        expect(
+          ratio(tone, alphaOver(fill, bg, 0.1)),
+          `${theme}: text-${name} on bg-${name}/10 over ${surface}`,
+        ).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+      }
+    }
+  })
+
+  it('has a muted body-text colour that clears AA on every base surface', () => {
+    const muted = t['--tone-muted']
+    expect(muted, `--tone-muted missing in ${theme}`).toBeDefined()
+    for (const surface of ['base-100', 'base-200', 'base-300'] as const) {
+      expect(
+        ratio(muted, t[`--color-${surface}`]),
+        `${theme}: muted text on ${surface}`,
       ).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
     }
   })

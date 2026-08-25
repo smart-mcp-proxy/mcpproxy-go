@@ -30,14 +30,30 @@ function url(route: string): string {
   return KEY ? `${BASE}/ui${route}${sep}apikey=${encodeURIComponent(KEY)}` : `${BASE}/ui${route}`
 }
 
+/**
+ * Navigate, optionally pinning a theme first.
+ *
+ * The theme is written to localStorage and the page reloaded rather than
+ * registered with `addInitScript`: init scripts ACCUMULATE across calls on the
+ * same page, so a second theme would leave two setters racing on the next
+ * navigation.
+ */
 async function goto(page: Page, route: string, theme?: string) {
   if (theme) {
-    await page.addInitScript((t) => {
-      window.localStorage.setItem('mcpproxy-theme', t)
-    }, theme)
+    // localStorage needs an origin, so land on the page once before writing.
+    if (new URL(page.url() || 'about:blank').origin !== new URL(BASE).origin) {
+      await page.goto(url(route))
+      await page.waitForLoadState('domcontentloaded')
+    }
+    await page.evaluate((t) => window.localStorage.setItem('mcpproxy-theme', t), theme)
   }
   await page.goto(url(route))
   await page.waitForLoadState('domcontentloaded')
+  if (theme) {
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.getAttribute('data-theme')))
+      .toBe(theme)
+  }
   const closeWizard = page.locator('[data-test="close-wizard"]')
   if (await closeWizard.isVisible().catch(() => false)) {
     await closeWizard.click()
@@ -58,6 +74,12 @@ interface ContrastFailure {
 /**
  * Walk every visible text node, resolve its effective colours and return the
  * ones below the WCAG AA threshold for their size.
+ *
+ * Known limits, deliberately: the backdrop is taken from `background-color`
+ * only (a gradient or background image behind text is not sampled), and text
+ * over media is not evaluated. Both would need pixel sampling; the failures
+ * this catches are the palette ones the audit was about. It errs toward
+ * silence, never toward a false failure.
  */
 async function contrastFailures(page: Page): Promise<ContrastFailure[]> {
   return page.evaluate(() => {
@@ -214,12 +236,53 @@ for (const theme of THEMES) {
 }
 
 test('contrast AA: filled primary buttons in both themes', async ({ page }) => {
+  // Measured on the BUTTON elements directly. Filtering the generic walker's
+  // output by class would silently match nothing, because a button's label
+  // usually lives in a nested <span> and that span is what the walker reports.
   for (const theme of THEMES) {
     await goto(page, '/servers', theme)
-    const failures = (await contrastFailures(page)).filter((f) =>
-      f.selector.includes('btn-primary'),
-    )
-    expect(failures, `primary button contrast in ${theme}`).toEqual([])
+    const measured = await page.evaluate(() => {
+      const canvas = document.createElement('canvas')
+      canvas.width = canvas.height = 1
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+      const resolve = (value: string) => {
+        ctx.clearRect(0, 0, 1, 1)
+        ctx.fillStyle = '#000000'
+        ctx.fillStyle = value
+        ctx.fillRect(0, 0, 1, 1)
+        const d = ctx.getImageData(0, 0, 1, 1).data
+        return [d[0], d[1], d[2]]
+      }
+      const lum = (c: number[]) =>
+        c
+          .map((v) => v / 255)
+          .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)))
+          .reduce((acc, v, i) => acc + v * [0.2126, 0.7152, 0.0722][i], 0)
+
+      const out: Array<{ label: string; ratio: number }> = []
+      document.querySelectorAll('.btn-primary').forEach((el) => {
+        const button = el as HTMLElement
+        if (button.hasAttribute('disabled') || button.classList.contains('btn-disabled')) return
+        const rect = button.getBoundingClientRect()
+        if (rect.width < 2 || rect.height < 2) return
+        const cs = getComputedStyle(button)
+        const fg = resolve(cs.color)
+        const bg = resolve(cs.backgroundColor)
+        const a = lum(fg)
+        const b = lum(bg)
+        const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+        out.push({ label: (button.textContent || '').trim().slice(0, 40), ratio })
+      })
+      return out
+    })
+
+    expect(measured.length, `no .btn-primary rendered in ${theme}`).toBeGreaterThan(0)
+    const failures = measured.filter((m) => m.ratio + 0.005 < 4.5)
+    expect(
+      failures,
+      `primary button contrast in ${theme}: ` +
+        failures.map((f) => `${f.ratio.toFixed(2)}:1 "${f.label}"`).join(', '),
+    ).toEqual([])
   }
 })
 
@@ -315,11 +378,18 @@ test('every form control on the main screens has an accessible name', async ({ p
         if (c.type === 'hidden') return
         const rect = c.getBoundingClientRect()
         if (rect.width < 2 || rect.height < 2) return
+        // An `aria-labelledby` only names a control if its target exists and
+        // actually has text, so it is resolved rather than trusted.
+        const labelledBy = (c.getAttribute('aria-labelledby') || '')
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((id) => document.getElementById(id))
+          .filter((n): n is HTMLElement => !!n && !!(n.textContent || '').trim())
         const labelled =
-          c.getAttribute('aria-label') ||
-          c.getAttribute('aria-labelledby') ||
-          c.getAttribute('placeholder') ||
-          c.getAttribute('title') ||
+          (c.getAttribute('aria-label') || '').trim() ||
+          labelledBy.length > 0 ||
+          (c.getAttribute('placeholder') || '').trim() ||
+          (c.getAttribute('title') || '').trim() ||
           (c.id && document.querySelector(`label[for="${CSS.escape(c.id)}"]`)) ||
           c.closest('label')
         if (!labelled) {
@@ -334,13 +404,33 @@ test('every form control on the main screens has an accessible name', async ({ p
 
 test('the activity table announces updates and carries a caption', async ({ page }) => {
   await goto(page, '/activity')
+  // The live region reports the row count in every state, empty included, so
+  // this check does not depend on the instance having traffic.
   await expect(page.locator('[data-test="activity-live-region"]')).toHaveCount(1)
   await expect(page.locator('[data-test="activity-live-region"]')).toHaveAttribute(
     'aria-live',
     'polite',
   )
-  const captions = await page.locator('table caption').count()
-  expect(captions, 'activity table has no <caption>').toBeGreaterThan(0)
+  await expect(page.locator('[data-test="activity-live-region"]')).toContainText(/\d+ of \d+/)
+
+  // The caption only exists when there is a table to caption.
+  if ((await page.locator('[data-test="activity-row"]').count()) > 0) {
+    const captions = await page.locator('table caption').count()
+    expect(captions, 'activity table has no <caption>').toBeGreaterThan(0)
+  }
+})
+
+test('activity rows open their details from the keyboard', async ({ page }) => {
+  await goto(page, '/activity')
+  const rows = page.locator('[data-test="activity-row"]')
+  if ((await rows.count()) === 0) {
+    test.skip(true, 'no activity records on this instance')
+  }
+  const row = rows.first()
+  await expect(row).toHaveAttribute('tabindex', '0')
+  await row.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('#activity-detail-drawer')).toBeChecked()
 })
 
 // ---------------------------------------------------------------------------

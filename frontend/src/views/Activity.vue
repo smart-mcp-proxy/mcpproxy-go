@@ -377,6 +377,19 @@
     <!-- Activity Table -->
     <div class="card bg-base-100 shadow-md">
       <div class="card-body">
+        <!-- UX audit F30: the table auto-refreshes, so a screen reader is told
+             how many rows it now holds. Rendered in every state — including the
+             empty one — so "no records" is announced too. -->
+        <p
+          class="sr-only"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-test="activity-live-region"
+        >
+          Showing {{ paginatedActivities.length }} of {{ sortedActivities.length }} activity records
+        </p>
+
         <!-- Loading State -->
         <div v-if="loading && activities.length === 0" class="flex justify-center py-12">
           <span class="loading loading-spinner loading-lg"></span>
@@ -401,22 +414,10 @@
         </div>
 
         <!-- Activity Table.
-             UX audit F30: the table auto-refreshes, so the row count lives in
-             an aria-live region and the table carries a <caption>, otherwise a
-             screen-reader user is never told that rows changed.
              UX audit F14: below `md` the secondary columns fold away so Status
              — the column that tells you a call FAILED — stays on screen at
              390px instead of being clipped off the right edge. -->
         <div v-else>
-          <p
-            class="sr-only"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-            data-test="activity-live-region"
-          >
-            Showing {{ paginatedActivities.length }} of {{ sortedActivities.length }} activity records
-          </p>
           <div class="overflow-x-auto">
           <!-- table-fixed below sm: with only Time/Details/Status left, fixed columns
                guarantee the row fits a 390px viewport instead of letting one long
@@ -452,13 +453,20 @@
               </tr>
             </thead>
             <tbody>
+              <!-- The row opens the detail drawer, and below `sm` the chevron
+                   column folds away, so the row itself has to be reachable from
+                   the keyboard (UX audit F30). -->
               <tr
                 v-for="activity in paginatedActivities"
                 :key="activity.id"
                 data-test="activity-row"
-                class="hover cursor-pointer"
+                class="hover cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px]"
                 :class="{ 'bg-base-200': selectedActivity?.id === activity.id }"
+                tabindex="0"
+                :aria-label="`Open details for ${formatType(activity.type)} at ${formatTimestamp(activity.timestamp)}`"
                 @click="selectActivity(activity)"
+                @keydown.enter.prevent="selectActivity(activity)"
+                @keydown.space.prevent="selectActivity(activity)"
               >
                 <td class="whitespace-nowrap">
                   <!-- The full stamp needs ~10rem; on a phone that wrapped onto

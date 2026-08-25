@@ -13,9 +13,22 @@
 
 const pad = (n: number, width = 2) => String(n).padStart(width, '0')
 
+/** `2026-08-25` — a bare date, which `new Date()` would read as UTC midnight. */
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/
+
 function toDate(value: string | number | Date | null | undefined): Date | null {
   if (value === null || value === undefined || value === '') return null
-  const d = value instanceof Date ? value : new Date(value)
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value
+  if (typeof value === 'string') {
+    // A date-only string is a calendar date, not an instant: parsing it as UTC
+    // and printing it with local getters shifts it a day west of UTC.
+    const m = DATE_ONLY.exec(value.trim())
+    if (m) {
+      const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+      return Number.isNaN(d.getTime()) ? null : d
+    }
+  }
+  const d = new Date(value)
   return Number.isNaN(d.getTime()) ? null : d
 }
 
