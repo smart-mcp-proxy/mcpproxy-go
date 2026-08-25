@@ -6,9 +6,17 @@ import SwiftUI
 enum SidebarItem: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case servers = "Servers"
+    // F16: BM25 tool discovery is the product's headline feature and had no
+    // native home — a tray-first user could not answer "which of my 942 tools
+    // does X?" without opening a browser.
+    case tools = "Tools"
     case registries = "Registries"
     case activity = "Activity Log"
     case secrets = "Secrets"
+    // F5: TokensView was a complete, API-complete create/list/revoke UI that
+    // nothing instantiated — a headline security feature reachable from the
+    // Web UI and the CLI but not from the app the user has open.
+    case tokens = "Agent Tokens"
 
     var id: String { rawValue }
 
@@ -16,9 +24,11 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "rectangle.3.group"
         case .servers: return "server.rack"
+        case .tools: return "wrench.and.screwdriver"
         case .registries: return "books.vertical"
         case .activity: return "clock.arrow.circlepath"
         case .secrets: return "key.fill"
+        case .tokens: return "key.horizontal"
         }
     }
 
@@ -70,12 +80,16 @@ struct MainWindow: View {
                         DashboardView(appState: appState)
                     case .servers:
                         ServersView(appState: appState)
+                    case .tools:
+                        ToolsView(appState: appState)
                     case .registries:
                         RegistriesView(appState: appState)
                     case .activity:
                         ActivityView(appState: appState)
                     case .secrets:
                         SecretsView(appState: appState)
+                    case .tokens:
+                        TokensView(appState: appState)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
