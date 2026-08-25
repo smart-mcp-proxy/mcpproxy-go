@@ -85,6 +85,13 @@ type Client struct {
 	// behaviour).
 	brokeredAuth *proxytransport.BrokeredAuth
 
+	// retryAfter collects the `Retry-After` hints this upstream's HTTP/SSE
+	// responses carry. mcp-go flattens a 429 into an error string long before
+	// the connection state machine sees it, so the hint is captured by a
+	// RoundTripper installed under the MCP client and read back here via
+	// RetryAfterDeadline (#1040).
+	retryAfter *proxytransport.RetryAfterRecorder
+
 	// Transport type and stderr access (for stdio)
 	transportType string
 	stderr        io.Reader
@@ -173,6 +180,7 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		globalConfig:   globalConfig,
 		storage:        storage,
 		secretResolver: secretResolver, // Store resolver for future use
+		retryAfter:     proxytransport.NewRetryAfterRecorder(),
 		logger: logger.With(
 			zap.String("upstream_id", id),
 			zap.String("upstream_name", serverConfig.Name),
@@ -520,6 +528,31 @@ func (c *Client) GetConnectionInfo() types.ConnectionInfo {
 		State:      state,
 		ServerName: c.getServerName(),
 	}
+}
+
+// httpTransportConfig builds the transport config for this client's HTTP/SSE
+// connections, threading the per-server Retry-After recorder (#1040) into every
+// mcp-go client we construct. Every HTTP/SSE connect path must go through it —
+// a branch that calls proxytransport.CreateHTTPTransportConfig directly would
+// silently lose the rate-limit hint for that auth strategy.
+func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthConfig *client.OAuthConfig) *proxytransport.HTTPTransportConfig {
+	cfg := proxytransport.CreateHTTPTransportConfig(serverConfig, oauthConfig)
+	cfg.RetryAfter = c.retryAfter
+	return cfg
+}
+
+// RetryAfterDeadline reports the instant before which this upstream asked us not
+// to come back (from a `Retry-After` on a 429/503), or the zero time when it gave
+// no such hint. The managed client stamps it onto the state machine so both
+// reconnect gates honour it (#1040).
+func (c *Client) RetryAfterDeadline() time.Time {
+	return c.retryAfter.Deadline()
+}
+
+// ClearRetryAfter drops any recorded rate-limit hint. Called once a connection
+// succeeds so a stale window cannot hold back a later, unrelated reconnect.
+func (c *Client) ClearRetryAfter() {
+	c.retryAfter.Clear()
 }
 
 // GetServerInfo returns server information from initialization

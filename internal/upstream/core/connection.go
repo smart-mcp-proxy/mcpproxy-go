@@ -236,6 +236,10 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.connected = true
 
+	// The upstream answered, so any rate-limit window we were holding is spent.
+	// Dropping it here keeps a stale hint from parking a future reconnect (#1040).
+	c.retryAfter.Clear()
+
 	// If we had an OAuth flow in progress and connection succeeded, mark OAuth as complete
 	if c.isOAuthInProgress() {
 		c.logger.Info("✅ OAuth flow completed successfully - connection established with token",

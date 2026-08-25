@@ -314,6 +314,19 @@ func (mc *Client) Connect(ctx context.Context) error {
 	defer mc.mu.Unlock()
 
 	if connectErr != nil {
+		// A rate-limited upstream (429, or 503 with a hint) told us when to come
+		// back. mcp-go flattened that response into connectErr's string, so the
+		// deadline comes from the recorder the transport RoundTripper fed (#1040).
+		// Stamp it BEFORE the SetError/SetOAuthError branches below so the
+		// ConnectionInfo their callbacks publish already carries the window.
+		if deadline := mc.coreClient.RetryAfterDeadline(); !deadline.IsZero() {
+			mc.logger.Warn("Upstream rate-limited us; parking reconnects until it says we may return",
+				zap.String("server", mc.GetConfig().Name),
+				zap.Time("retry_not_before", deadline),
+				zap.Duration("retry_after", time.Until(deadline)))
+			mc.StateManager.SetRetryAfter(deadline)
+		}
+
 		// Check if this is a deferred OAuth requirement (pending user action)
 		if core.IsOAuthPending(connectErr) {
 			mc.logger.Info("⏳ OAuth authentication pending user action",
