@@ -102,7 +102,7 @@ case without shipping schemas.
 the direct server instance** — a static string set via
 `mcpserver.WithInstructions(...)` when `p.directServer` is constructed in
 `initRoutingModeServers` (`mcp_routing.go:619`), present in BOTH serialization
-modes, phrased conditionally so it is true in both:
+modes, phrased conditionally so it is true in both.
 
 The single reference wording lives in
 [contracts/direct-deferred-surface.md §2](contracts/direct-deferred-surface.md)
