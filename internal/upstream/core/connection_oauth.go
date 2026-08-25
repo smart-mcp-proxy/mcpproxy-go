@@ -245,7 +245,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 	// Create HTTP transport config with OAuth
 	c.logger.Debug("🛠️ Creating HTTP transport config for OAuth")
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+	httpConfig := c.httpTransportConfig(c.config, oauthConfig)
 
 	c.logger.Debug("🔨 Calling transport.CreateHTTPClient with OAuth config")
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
@@ -679,7 +679,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 
 	// Create SSE transport config with OAuth
 	c.logger.Debug("🛠️ Creating SSE transport config for OAuth")
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+	httpConfig := c.httpTransportConfig(c.config, oauthConfig)
 
 	c.logger.Debug("🔨 Calling transport.CreateSSEClient with OAuth config")
 	sseClient, err := transport.CreateSSEClient(httpConfig)
@@ -1839,7 +1839,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 // Returns the URL, OAuth handler, code verifier, and state for later use.
 func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, error) {
 	// Create transport config with OAuth
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+	httpConfig := c.httpTransportConfig(c.config, oauthConfig)
 
 	// Create OAuth-enabled HTTP client
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
@@ -2174,7 +2174,7 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 		zap.Int("extra_params_count", len(extraParams)))
 
 	// Create HTTP transport config with OAuth
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+	httpConfig := c.httpTransportConfig(c.config, oauthConfig)
 
 	// Create OAuth-enabled HTTP client using transport layer
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
@@ -2239,7 +2239,7 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 		zap.Int("extra_params_count", len(extraParams)))
 
 	// Create SSE transport config with OAuth
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, oauthConfig)
+	httpConfig := c.httpTransportConfig(c.config, oauthConfig)
 
 	// Create OAuth-enabled SSE client using transport layer
 	sseClient, err := transport.CreateSSEClient(httpConfig)
