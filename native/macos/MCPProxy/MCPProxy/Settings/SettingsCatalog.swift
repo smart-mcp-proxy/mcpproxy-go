@@ -237,7 +237,7 @@ enum SettingsCatalog {
             fields: [
                 ConfigField(key: "code_execution_timeout_ms", label: "Max run time per execution (ms)", control: .number, min: 1, max: 600000),
                 ConfigField(key: "code_execution_max_tool_calls", label: "Max tool calls per execution", help: "0 = unlimited.", control: .number, min: 0),
-                ConfigField(key: "code_execution_pool_size", label: "JavaScript runtime pool size", help: "How many sandboxes run concurrently.", control: .number, min: 1, max: 100),
+                ConfigField(key: "code_execution_pool_size", label: "JavaScript runtime pool size", help: "How many sandboxes run concurrently. Takes effect after restart.", control: .number, min: 1, max: 100, restart: true),
                 // Spec 096 field, added web-side only (F6).
                 ConfigField(key: "code_execution_max_parallel", label: "Parallel calls per call_tools() batch", help: "Default concurrency for batched tool calls; a script can override it per call (1-32).", control: .number, min: 1, max: 32),
             ]
