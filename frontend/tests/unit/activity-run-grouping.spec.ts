@@ -85,6 +85,51 @@ describe('groupActivityRuns', () => {
     expect(groupActivityRuns(rows).map(r => r.count)).toEqual([1, 1])
   })
 
+  // The identity has to cover EVERY field the collapsed line prints, not just
+  // the outcome. These three were folds the first version of the key allowed.
+
+  it('never folds a write under a read lead', () => {
+    // call_tool_read and call_tool_write against the same tool produce records
+    // identical in type, server, tool and status. The Intent column would then
+    // print "📖 read" on behalf of a run containing writes.
+    const rows = [
+      call({ id: 'a', metadata: { intent: { operation_type: 'read', reason: 'same' } } }),
+      call({ id: 'b', metadata: { intent: { operation_type: 'write', reason: 'same' } } }),
+      call({ id: 'c', metadata: { intent: { operation_type: 'write', reason: 'same' } } }),
+    ]
+    const runs = groupActivityRuns(rows)
+    expect(runs.map(r => r.count)).toEqual([1, 2])
+    expect((runs[1].lead.metadata as any).intent.operation_type).toBe('write')
+  })
+
+  it('never folds a critical detection under a low-severity lead', () => {
+    // The Sensitive badge prints the severity glyph and the detection count, so
+    // the boolean alone is not what the row displays.
+    const rows = [
+      call({ id: 'a', has_sensitive_data: true, max_severity: 'low', detection_types: ['high_entropy'] }),
+      call({ id: 'b', has_sensitive_data: true, max_severity: 'critical', detection_types: ['cloud_credentials'] }),
+    ]
+    expect(groupActivityRuns(rows).map(r => r.count)).toEqual([1, 1])
+  })
+
+  it('never folds two rows that differ only in how many detections they carry', () => {
+    const rows = [
+      call({ id: 'a', has_sensitive_data: true, max_severity: 'high', detection_types: ['api_token'] }),
+      call({ id: 'b', has_sensitive_data: true, max_severity: 'high', detection_types: ['api_token', 'private_key'] }),
+    ]
+    expect(groupActivityRuns(rows).map(r => r.count)).toEqual([1, 1])
+  })
+
+  it('is collision-safe against separator characters inside free-form fields', () => {
+    // A delimiter-joined key would make these two agree; the fields are
+    // free-form (a server may be named anything the user typed).
+    const rows = [
+      call({ id: 'a', server_name: 'my server', tool_name: 'echo' }),
+      call({ id: 'b', server_name: 'my', tool_name: 'server echo' }),
+    ]
+    expect(groupActivityRuns(rows).map(r => r.count)).toEqual([1, 1])
+  })
+
   it('keeps two different config changes apart even though both carry no tool', () => {
     const rows = [
       { id: 'a', type: 'config_change', status: 'success', metadata: { action: 'server_added' } },

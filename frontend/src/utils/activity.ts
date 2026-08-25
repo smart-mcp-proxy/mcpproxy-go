@@ -627,6 +627,8 @@ export interface ActivityRunFields {
   duration_ms?: number
   parent_id?: string
   has_sensitive_data?: boolean
+  max_severity?: string
+  detection_types?: string[]
   metadata?: Record<string, any> | null
 }
 
@@ -647,25 +649,43 @@ export interface ActivityRun<T extends ActivityRunFields> {
 }
 
 /**
- * The identity a run is keyed on. Everything the collapsed line would print,
- * plus the two flags that must never be hidden by folding: the sensitive-data
- * marker and the code_execution parent link. The intent REASON is deliberately
- * absent — agents vary their wording call to call, and keying on it would stop
- * the compression working on exactly the logs that need it most; the run
- * reports the variation instead (see reasonsVary).
+ * The identity a run is keyed on: EVERYTHING THE COLLAPSED LINE PRINTS, plus
+ * the code_execution parent link. That rule is what makes the compression safe
+ * — a field the lead row displays on behalf of eleven others has to be one all
+ * twelve agree on, or the fold is a quiet lie.
+ *
+ * The intent REASON is the one displayed field deliberately left out: agents
+ * reword it call to call, and keying on it would stop the compression working
+ * on exactly the logs that need it most. The run reports the variation instead
+ * (see reasonsVary), so the lead's reason never silently stands for the rest.
  */
 const runIdentity = (a: ActivityRunFields): string =>
-  [
+  // JSON.stringify rather than a delimiter join: server names, tool names and
+  // the details text are free-form, so any separator character could appear
+  // inside a field and let two different rows agree on one joined string.
+  JSON.stringify([
     a.type ?? '',
     a.server_name ?? '',
     a.tool_name ?? '',
     a.status ?? '',
     a.parent_id ?? '',
+    // The Intent column prints this word on the lead row's authority.
+    // call_tool_read and call_tool_write against the same tool produce records
+    // identical in type, server, tool and status, so without it a run of writes
+    // could fold under a "read" lead.
+    intentOperationOf(a),
+    // Not just the boolean: the badge prints the severity glyph AND the count,
+    // so a critical detection must not fold under a low-severity lead.
     a.has_sensitive_data ? '1' : '0',
+    a.max_severity ?? '',
+    a.detection_types?.length ?? 0,
     // A preflight or config change says everything in metadata.action / verdict;
     // two of them are only "the same row twice" if that text matches too.
     activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),
-  ].join(' ')
+  ])
+
+const intentOperationOf = (a: ActivityRunFields): string =>
+  String((a.metadata?.intent as ActivityIntent | undefined)?.operation_type ?? '')
 
 const intentReasonOf = (a: ActivityRunFields): string =>
   String((a.metadata?.intent as ActivityIntent | undefined)?.reason ?? '')
