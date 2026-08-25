@@ -784,6 +784,12 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 	result, err := invoker.CallTool(ctx, toolName, args)
 	if err != nil {
 		mc.recordCallToolOAuthSignal(toolName, err)
+		// A 429 answered to a tools/call is the same instruction as one answered
+		// to connect (#1040). Recording it here does NOT mark the server
+		// unhealthy — the classification below owns that — it only makes sure
+		// the hint survives into the state machine, where the reconnect gates
+		// can honour it if this upstream later needs redialing.
+		mc.syncRetryAfterFromTransport()
 		// GH #965: a canceled or timed-out CALL is not a dead SERVER. SetError
 		// flips the whole upstream to Error and burns a retry, evicting it for
 		// every other client — so only hard evidence of a broken transport may
@@ -1266,6 +1272,15 @@ func (mc *Client) performHealthCheck() {
 	err := prober.Ping(ctx)
 
 	if err != nil {
+		// Pick up any rate-limit hint this ping's response carried, BEFORE the
+		// classification below (#1040). A 429 does not read as a connection
+		// error — isConnectionError matches transport-level failures, not HTTP
+		// statuses — so gating the sync on that branch would make it
+		// unreachable for exactly the case it exists for. Recording the window
+		// does not change the health verdict; it only stops the automatic
+		// reconnect paths from returning before the upstream said we may.
+		mc.syncRetryAfterFromTransport()
+
 		// Only mark as error if it's a real connection issue, not timeout during high activity
 		if mc.isConnectionError(err) {
 			if mc.recordHealthCheckFailure(err) {
@@ -1273,10 +1288,6 @@ func (mc *Client) performHealthCheck() {
 					zap.String("server", mc.GetConfig().Name),
 					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
 					zap.Error(err))
-				// A 429 answered to the ping carries the same "come back later"
-				// as one answered to connect (#1040); stamp it before SetError
-				// so the published ConnectionInfo already carries the window.
-				mc.syncRetryAfterFromTransport()
 				mc.StateManager.SetError(err)
 			} else {
 				mc.logger.Info("Health check failed transiently, tolerating below threshold",

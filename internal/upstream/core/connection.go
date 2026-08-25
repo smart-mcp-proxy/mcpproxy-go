@@ -92,7 +92,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	// that then fails for an unrelated reason (connection refused, DNS) would be
 	// re-parked for the remainder of a window the upstream never repeated.
 	// Whatever this attempt observes is recorded again, on its own merits.
-	c.retryAfter.Clear()
+	// A swap, not a Clear: a request still in flight on the superseded client
+	// keeps the recorder it was built with instead of writing into this attempt.
+	c.beginRetryAfterGeneration()
 
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("server", c.config.Name),
@@ -245,7 +247,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// The upstream answered, so any rate-limit window we were holding is spent.
 	// Dropping it here keeps a stale hint from parking a future reconnect (#1040).
-	c.retryAfter.Clear()
+	c.ClearRetryAfter()
 
 	// If we had an OAuth flow in progress and connection succeeded, mark OAuth as complete
 	if c.isOAuthInProgress() {
