@@ -957,7 +957,7 @@
                     {{ selectedActivity.status === 'error' ? 'scan failed' : 'scan completed' }}
                   </span>
                   <span
-                    v-if="selectedActivity.status !== 'error'"
+                    v-if="selectedActivity.status !== 'error' && hasScanFindingsSummary(selectedActivity.metadata)"
                     class="text-sm"
                     :class="scanFindingsTotal(selectedActivity.metadata) > 0 ? 'text-warning' : 'text-base-content/60'"
                   >
@@ -979,11 +979,27 @@
                     {{ entry.severity }} ×{{ entry.count }}
                   </span>
                 </div>
+                <!--
+                  "Clean" and "we don't know" must not read the same. Only a
+                  rollup that is actually present can support the first claim;
+                  an absent one (every record written before the producer's
+                  map[string]int stopped being silently dropped) gets the
+                  second, and a link to the page that can answer it.
+                -->
                 <p
-                  v-else-if="selectedActivity.status !== 'error'"
+                  v-else-if="selectedActivity.status !== 'error' && hasScanFindingsSummary(selectedActivity.metadata)"
+                  data-test="activity-scan-clean"
                   class="text-sm text-base-content/60"
                 >
                   No findings — the scanners had nothing to report for this server.
+                </p>
+                <p
+                  v-else-if="selectedActivity.status !== 'error'"
+                  data-test="activity-scan-no-summary"
+                  class="text-sm text-base-content/60"
+                >
+                  This record carries no findings summary, which is not the same as a clean
+                  result — open the Security page for the current verdict.
                 </p>
                 <div class="flex flex-wrap gap-2 pt-1">
                   <router-link
@@ -1191,6 +1207,7 @@ import {
   preflightIdsCount,
   preflightPerTool,
   preflightReasonRollup,
+  hasScanFindingsSummary,
   scanFindingsRollup,
   scanFindingsTotal,
   showParentBadgeInTypeColumn,
@@ -2097,10 +2114,20 @@ const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown
 // Reset page when filters change. Expanded runs go with it: run keys are the
 // lead row's id, and after a refilter the row that led a run may not be in the
 // list at all — a stale key would silently expand the wrong run.
-watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterStartDate, filterEndDate], () => {
+watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterSession, filterStartDate, filterEndDate, sortColumn, sortDirection, groupRepeats], () => {
   currentPage.value = 1
   expandedRuns.value = new Set()
 }, { deep: true })
+
+// Whatever else moved, the page must exist. Folding on, a wider page size, a
+// filter that matched less than expected — each can shrink the list under a
+// currentPage that was valid a moment ago, and the table then renders nothing
+// at all with no hint why. Clamp on the derived count so every path is covered
+// by one rule rather than by remembering to reset at each call site. (Zero
+// pages means an empty list, which has its own empty state; leave page 1.)
+watch(totalPages, pages => {
+  if (pages > 0 && currentPage.value > pages) currentPage.value = pages
+})
 
 // Clear agent name filter when auth type changes away from "agent"
 watch(filterAuthType, (val) => {

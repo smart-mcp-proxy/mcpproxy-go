@@ -78,7 +78,18 @@
           whole rollup here would print "6 active tools" over a histogram
           labelled "3 tools" on the same screen.
         -->
-        <div class="stat-desc">{{ activeToolCount }} active tool{{ activeToolCount === 1 ? '' : 's' }} ({{ windowLabel }})</div>
+        <div class="stat-desc">
+          {{ activeToolCount }} active tool{{ activeToolCount === 1 ? '' : 's' }}
+          <!--
+            The per-tool list is truncated to top-N server-side, so this count
+            is of what is CHARTED, not of everything that ran. Say so rather
+            than print a total that quietly excludes the tail.
+          -->
+          <span v-if="data.other" :title="`${data.other.tools_folded} further tools are folded into “other”`">
+            (+{{ data.other.tools_folded }} folded)
+          </span>
+          ({{ windowLabel }})
+        </div>
       </div>
       <div class="stat" data-test="usage-errors-tile">
         <div class="stat-title">Errors</div>

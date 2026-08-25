@@ -314,6 +314,21 @@ export interface ScanFindingCount {
   count: number
 }
 
+/**
+ * Whether the record actually CARRIES a findings rollup.
+ *
+ * An empty rollup and a missing one look identical downstream — both produce
+ * zero findings — and they mean opposite things. "The scanners found nothing"
+ * is a security claim; "this record has no summary" is the absence of one, and
+ * a drawer that prints the first when it only knows the second is telling the
+ * operator a server is clean on no evidence. Records written before the
+ * producer/consumer type mismatch was fixed all fall in the second case.
+ */
+export const hasScanFindingsSummary = (metadata?: Record<string, any> | null): boolean => {
+  const summary = metadata?.findings_summary
+  return Boolean(summary) && typeof summary === 'object' && !Array.isArray(summary)
+}
+
 /** Severity order, worst first — the order an operator triages in. */
 const SCAN_SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info']
 

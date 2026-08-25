@@ -2,7 +2,10 @@ import { describe, it, expect } from 'vitest'
 import {
   CALL_STATUSES,
   OTHER_STATUS,
+  hasScanFindingsSummary,
   isOtherStatus,
+  scanFindingsRollup,
+  scanFindingsTotal,
   statusBucketSum,
   statusBucketTiles,
   activeFilterChips,
@@ -93,5 +96,37 @@ describe('the Other bucket as a filter', () => {
   it('reads as words in the active-filter chip, not as a raw sentinel', () => {
     const [chip] = activeFilterChips({ status: OTHER_STATUS })
     expect(chip.label).toBe('Status: other / internal')
+  })
+})
+
+// F25 (#1046): the scan drawer reads metadata.findings_summary. "The scanners
+// found nothing" and "this record has no summary" both produce zero findings
+// and mean opposite things — one is a security claim, the other is the absence
+// of one. Records written before the producer's map[string]int stopped being
+// dropped on the way into the record are all the second case.
+describe('scan findings rollup', () => {
+  it('separates an empty rollup from a missing one', () => {
+    expect(hasScanFindingsSummary({ findings_summary: {} })).toBe(true)
+    expect(hasScanFindingsSummary({ findings_summary: { high: 2 } })).toBe(true)
+
+    expect(hasScanFindingsSummary({})).toBe(false)
+    expect(hasScanFindingsSummary(null)).toBe(false)
+    expect(hasScanFindingsSummary(undefined)).toBe(false)
+    // A malformed payload is not a clean result either.
+    expect(hasScanFindingsSummary({ findings_summary: [] })).toBe(false)
+    expect(hasScanFindingsSummary({ findings_summary: 'none' })).toBe(false)
+  })
+
+  it('orders findings worst-first and drops zero counts', () => {
+    const rollup = scanFindingsRollup({
+      findings_summary: { low: 3, critical: 1, medium: 0, high: 2 },
+    })
+    expect(rollup.map(f => f.severity)).toEqual(['critical', 'high', 'low'])
+    expect(scanFindingsTotal({ findings_summary: { low: 3, critical: 1, high: 2 } })).toBe(6)
+  })
+
+  it('sorts unknown severities last, deterministically', () => {
+    const rollup = scanFindingsRollup({ findings_summary: { zeta: 1, alpha: 1, high: 1 } })
+    expect(rollup.map(f => f.severity)).toEqual(['high', 'alpha', 'zeta'])
   })
 })
