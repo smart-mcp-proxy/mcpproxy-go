@@ -269,7 +269,14 @@ The plan therefore does not promise a single transaction; it promises a
 **Decision** — four rules that deliver that property:
 
 1. **`SetTools` runs first, the catalog is published immediately after**, in the
-   same function with nothing between them. This is the ordering that makes
+   same function with nothing between them. Note what this forbids: the *builder*
+   must not publish. `buildDirectCatalog` returns the snapshot,
+   `renderDirectTools` turns it into `[]ServerTool`, and only
+   `RefreshDirectModeTools` (and the D15 initial rebuild) publishes — after its
+   `SetTools` call. Today's `buildDirectModeTools` does the opposite, calling
+   `setDirectToolPermissions` mid-build (`mcp_routing.go:82`, `:151`) before
+   `RefreshDirectModeTools` reaches `SetTools` (`:673`); that ordering is exactly
+   what this rule reverses. This is the ordering that makes
    *removal* window-free (a removed name leaves the registry before the catalog
    stops describing it, and rule 3's registry check then answers `not_found`),
    and it makes an *addition* fail closed (listed but not yet in the catalog →
