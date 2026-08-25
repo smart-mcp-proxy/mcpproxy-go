@@ -27,6 +27,14 @@ import (
 // directly above that chart). Only the middle one is "calls the user made";
 // the other two were an every-record-type event count and a client-side sum of
 // a lifetime-cumulative, top-N-truncated per-tool rollup.
+//
+// What this pins is that the two endpoints count the same POPULATION. It does
+// not pin instantaneous equality on a live proxy, and cannot: the usage
+// endpoint is served from a snapshot behind a short read cache so it never
+// scans the log per request, so a call can be on the Activity Log a few seconds
+// before it is in the usage figures. That skew is bounded by
+// observability.usage_cache_ttl and disclosed by freshness_ms; the population
+// mismatch this replaces was neither.
 
 // callParityController answers both halves of the comparison from one record
 // set: the summary streams the records, and the usage snapshot is the same
