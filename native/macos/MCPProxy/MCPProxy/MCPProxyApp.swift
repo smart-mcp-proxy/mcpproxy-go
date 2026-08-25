@@ -1906,21 +1906,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         credits.append(NSAttributedString(
             string: "Smart MCP proxy — intelligent tool discovery, token savings, and security quarantine.\n\n",
             attributes: body))
-        appendLink(to: credits, label: "Homepage", url: ProjectLinks.homepage)
-        credits.append(NSAttributedString(string: "   ", attributes: body))
-        appendLink(to: credits, label: "GitHub", url: ProjectLinks.github)
-        credits.append(NSAttributedString(string: "   ", attributes: body))
-        appendLink(to: credits, label: "Documentation", url: ProjectLinks.docs)
-        // F14: the tray — the surface a Homebrew user actually sees — had no
-        // way to report anything, while `ProjectLinks.issues`/`.discussions`
-        // sat declared and unused. They land here and in Settings → App
-        // rather than as new top-level rows: the menu was deliberately cut to
-        // stop it scrolling (#1023, pinned by MenuStructureTests), and this
-        // costs no row.
-        credits.append(NSAttributedString(string: "   ", attributes: body))
-        appendLink(to: credits, label: "Report an Issue", url: ProjectLinks.issues)
-        credits.append(NSAttributedString(string: "   ", attributes: body))
-        appendLink(to: credits, label: "Discussions", url: ProjectLinks.discussions)
+        for (index, link) in AboutPanelLinks.all.enumerated() {
+            if index > 0 { credits.append(NSAttributedString(string: "   ", attributes: body)) }
+            appendLink(to: credits, label: link.label, url: link.url)
+        }
 
         NSApp.orderFrontStandardAboutPanel(options: [
             .credits: credits
