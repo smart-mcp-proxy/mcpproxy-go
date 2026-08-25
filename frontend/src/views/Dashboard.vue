@@ -30,8 +30,9 @@
          v-show so switching back is instant and the Overview subtree is never
          torn down, SC-006). The heavy chart bundle + the usage fetch inside
          UsageView are mounted only once the panel has been active
-         (v-if="usageEverActive") and stay code-split behind Suspense, so the
-         Dashboard shell still paints immediately (SC-004). -->
+         (usageEverActive) AND the server list has arrived, and stay code-split
+         behind Suspense, so the Dashboard shell still paints immediately
+         (SC-004). -->
     <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
       <!-- First run: no upstream servers configured, so the analytics panel
            would only ever show "no data". Point the new user at the one action
@@ -68,6 +69,14 @@
             </button>
           </div>
         </div>
+      </div>
+      <!-- Hold the charts back until the server list has arrived: mounting
+           UsageView first would fire a usage aggregate request and flash the
+           "no usage data yet" card on a fresh install, only to be replaced by
+           the CTA above a moment later. Both requests are issued together in
+           onMounted, so this costs no extra round-trip. -->
+      <div v-else-if="!serversLoaded" class="flex justify-center py-16" data-test="dashboard-usage-pending">
+        <span class="loading loading-spinner loading-lg"></span>
       </div>
       <Suspense v-else-if="usageEverActive">
         <UsageView />
@@ -510,16 +519,31 @@ function routeView(): DashboardView {
 const activeView = ref<DashboardView>(routeView())
 const usageEverActive = ref(activeView.value === 'usage')
 
+// The panel a navigation is currently heading for. `route` only reflects a
+// *confirmed* navigation, so comparing against it alone loses a fast second tab
+// click: it would still see the pre-navigation route, decide it has nothing to
+// do, and then be overwritten when the first navigation lands. Tracking the
+// in-flight target makes the newest click win — the router cancels the
+// superseded navigation for us.
+let pendingView: DashboardView | null = null
+
 function selectView(view: DashboardView) {
   if (view === 'usage') {
     usageEverActive.value = true
   }
   activeView.value = view
-  const targetRoute = view === 'usage' ? 'usage' : 'dashboard-overview'
   // `/` is also a usage route — don't rewrite it to `/usage` needlessly.
-  if (routeView() !== view) {
-    void router.replace({ name: targetRoute })
+  if ((pendingView ?? routeView()) === view) {
+    return
   }
+  pendingView = view
+  const targetRoute = view === 'usage' ? 'usage' : 'dashboard-overview'
+  void router.replace({ name: targetRoute }).finally(() => {
+    // Only the newest navigation clears the marker; a superseded one must not.
+    if (pendingView === view) {
+      pendingView = null
+    }
+  })
 }
 const selectUsage = () => selectView('usage')
 const selectOverview = () => selectView('overview')
@@ -701,9 +725,14 @@ const loadTokenSavings = async () => {
 
 // --- First run (no servers configured) ---
 // Gated on a completed fetch so the CTA never flashes before the server list
-// has arrived.
+// has arrived. `fetchServers` swallows transport failures (it records them on
+// `loading.error` and leaves `servers` untouched), so a failed request would
+// otherwise look identical to "zero servers configured" and tell a user with a
+// full server list that they have none — hence the explicit error check.
 const serversLoaded = ref(false)
-const showFirstRunCta = computed(() => serversLoaded.value && serversStore.serverCount.total === 0)
+const showFirstRunCta = computed(
+  () => serversLoaded.value && !serversStore.loading.error && serversStore.serverCount.total === 0
+)
 
 // --- Disabled server count ---
 const disabledCount = computed(() => {

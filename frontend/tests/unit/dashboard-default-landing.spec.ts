@@ -204,4 +204,42 @@ describe('analytics dashboard as the default landing page', () => {
     expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
   })
+
+  it('does not claim "no servers" when the server list request failed', async () => {
+    // `fetchServers` swallows failures: it records the error and leaves the
+    // (empty) server list alone, so a transport error must not be mistaken for
+    // a fresh install and tell a user with servers that they have none.
+    serversSpy.mockResolvedValue({ success: false, error: 'boom' })
+    const { wrapper } = await mountDashboard('/')
+
+    expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
+  })
+
+  it('holds the charts back until the server list has arrived', async () => {
+    // Never-resolving fetch: the usage panel must show a spinner rather than
+    // mounting UsageView (which would fire a request and flash "no usage data
+    // yet" before the first-run CTA replaces it).
+    serversSpy.mockReturnValue(new Promise(() => {}))
+    const { wrapper } = await mountDashboard('/')
+
+    expect(wrapper.find('[data-test="dashboard-usage-pending"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
+  })
+
+  it('honours the last tab clicked when two clicks land before navigation settles', async () => {
+    const { wrapper, router } = await mountDashboard('/')
+
+    // No awaits between the clicks: the Overview navigation is still in flight
+    // when Usage is clicked, so the second click must not be swallowed by a
+    // comparison against the not-yet-updated current route.
+    wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
+    wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/usage')
+    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
+    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(false)
+  })
 })

@@ -170,7 +170,14 @@ const freshnessLabel = computed(() => {
   return `${Math.round(ms / 60_000)}m ago`
 })
 
+// Requests can overlap — the 30s auto-refresh, a window switch and a filter
+// reset all call reload() and there is no cancellation. Without sequencing, a
+// slower earlier response can land last and repaint the panel with data for a
+// window the user already moved off. Only the newest request may write state.
+let reloadSeq = 0
+
 async function reload() {
+  const seq = ++reloadSeq
   loading.value = true
   error.value = null
   try {
@@ -179,15 +186,20 @@ async function reload() {
       status: status.value || undefined,
       sort: sort.value,
     })
+    if (seq !== reloadSeq) return
     if (resp.success && resp.data) {
       data.value = resp.data
     } else {
       error.value = resp.error || 'Failed to load usage data'
     }
   } catch (e) {
+    if (seq !== reloadSeq) return
     error.value = e instanceof Error ? e.message : 'Failed to load usage data'
   } finally {
-    loading.value = false
+    // A superseded request must not clear the spinner the newest one owns.
+    if (seq === reloadSeq) {
+      loading.value = false
+    }
   }
 }
 
