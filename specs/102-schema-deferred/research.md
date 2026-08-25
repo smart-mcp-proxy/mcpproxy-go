@@ -448,7 +448,7 @@ independent axes of change:
 |---|---|
 | `serverName`, `toolName` | Yes. `serverName` is in the `[server]` prefix in both modes; `toolName` is in the deferred suffix. `displayName` is derived from the pair (`serverName__toolName`) and cannot move on its own. |
 | `description` | Yes, by construction — it *is* the rendered string in full mode. |
-| `paramsJSON` | **No, not reliably.** Never rendered in full mode. In deferred mode it usually moves the signature, but an edit that renders the same `Sig` — a re-ordering, or a change confined to nested properties the grammar collapses to `~` — is invisible. |
+| `paramsJSON` | **No, not reliably.** Never rendered in full mode. In deferred mode a semantic edit moves the hash, so it usually shows up — either as a different `Sig` or, until the new hash is warmed, as a vanished suffix. But an edit confined to nested properties the 085 grammar collapses to `~` renders a byte-identical `Sig` once that hash is warmed, and is then invisible. |
 | `outputSchemaJSON` | **No.** Never rendered in either mode. It moves the Spec-032 hash, so it can flip a `Peek` hit to a miss and change the suffix that way — but only until the indexer warms the new hash, after which `Render` reproduces the identical `Sig` (it never reads the output schema). |
 | `annotations` | **No.** Never rendered in either mode. |
 
@@ -460,7 +460,7 @@ it.
 | Field | Derived from | Note |
 |---|---|---|
 | `renderedDescription` | the renderer inputs listed above, at render time | it *is* the discriminator |
-| `hash` | server, tool, description, input schema, output schema (`hash.ToolHashWithOutputSchema`, `internal/hash/hash.go:10-16`) — **not** annotations | schemas are canonicalized first (`:59-104`), so a purely representational schema edit leaves the hash — and therefore the cached signature — untouched. That is what makes the input-schema-only skew case constructible in a test. |
+| `hash` | server, tool, description, input schema, output schema (`hash.ToolHashWithOutputSchema`, `internal/hash/hash.go:10-16`) — **not** annotations | schemas are parsed and re-marshalled before hashing (`:59-104`), so a purely representational edit is not a schema change at all: same hash, same signature, and nothing for the validator to behave differently about. A *semantic* schema change always moves the hash, which is why the input-schema skew case needs its new hash warmed before the rebuild renders (see the test recipe in plan §Test Strategy). |
 | `requiredPermission` | `annotations`, via `requiredPermissionForDirectTool` (`mcp_direct_scope.go:18`) → `contracts.DeriveCallWith` | it reads only `destructiveHint` and `readOnlyHint` (`internal/contracts/intent.go:208-227`), so a title / idempotent / open-world edit moves `annotations` without moving the tier. It is the *mechanism* of the annotations residual, not a fourth one. |
 
 So there are exactly **three independent source fields** that can change while the

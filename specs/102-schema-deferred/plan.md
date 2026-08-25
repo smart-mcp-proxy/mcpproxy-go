@@ -428,10 +428,18 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
      move unless one of these does, so they add no fourth case, and the
      catalog-level fields are membership or generation state covered by the other
      groups). The test set is the proof of that partition, not just of the
-     behaviors — the input-schema case uses a canonicalization-equal edit so the
-     hash and cached signature genuinely do not move, and the annotations case
-     uses `read → destructive`, the sub-change the tier is sensitive to. All
-     three assert accepted
+     behaviors. Constructing the input-schema case takes care, and the recipe is
+     normative: the edit must be **semantically different but signature-identical**
+     — a change confined to nested properties, which the 085 grammar collapses to
+     a `~` marker, so `Sig` renders byte-for-byte the same — **and** the new
+     hash must be warmed into the signature cache before the rebuild renders, or
+     `Peek` misses, the suffix vanishes, and the description changes visibly
+     instead. A canonicalization-equal edit will NOT do: `hash` re-marshals the
+     parsed schema (`internal/hash/hash.go:95-104`), so such an edit is the same
+     schema and the validator cannot behave differently, which would make the
+     self-healing assertion vacuous. The annotations case uses `read →
+     destructive`, the sub-change the tier is sensitive to. All three assert
+     accepted
      behavior, not a fix: the stale definition/tier may be served for the width of
      the window, while **dispatch is never wrong** — the handler validates against
      the input schema it captured, so the `invalid_params` error carries the NEW
