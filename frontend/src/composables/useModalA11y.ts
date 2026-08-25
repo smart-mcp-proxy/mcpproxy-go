@@ -141,7 +141,11 @@ export function useModalA11y(
   )
 
   onBeforeUnmount(() => {
-    document.removeEventListener('keydown', onKeydown, true)
+    // Unmounting while open (a route change, a v-if around the modal) must not
+    // strand the listener or the focus: deactivate does both, and its
+    // document.contains guard makes restoring a no-op when the trigger went
+    // away with the same subtree.
+    deactivate()
   })
 
   return { dialogRef, focusInitial }
