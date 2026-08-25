@@ -283,9 +283,10 @@ The plan therefore does not promise a single transaction; it promises a
    `RefreshDirectModeTools` reaches `SetTools` (`:673`); that ordering is exactly
    what this rule reverses. This is the ordering that makes
    *removal* window-free (a removed name leaves the registry before the catalog
-   stops describing it, and rule 3's registry check then answers `not_found`),
-   and it makes an *addition* fail closed (listed but not yet in the catalog →
-   rule 2 denies it for filtered sessions, rule 3 answers `not_found`).
+   stops describing it, and rule **4**'s registry check then answers
+   `not_found`), and it makes an *addition* fail closed (listed but not yet in
+   the catalog → rule 2 denies it for filtered sessions, rule **4** answers
+   `not_found`).
 2. **Filters deny on catalog miss.** A name absent from the current catalog is
    dropped, NOT passed through. Pass-through is reserved for built-ins and is
    matched against an explicit built-in name set (today: `describe_tool`), never
@@ -299,15 +300,51 @@ The plan therefore does not promise a single transaction; it promises a
    (`mcp_routing_test.go`, `toon_surface_isolation_test.go`), would see the whole
    listing denied. An *empty published* catalog is a real generation and does
    deny; only the nil pointer falls back.
-3. **The permission tier is derived from the registered entry's own
-   annotations**, via `contracts.DeriveCallWith(tool.Annotations)` — exactly what
-   the dispatch handler already does (`mcp_routing.go:212-213`) — instead of
-   being looked up in the catalog. The annotations travel *with* the entry the
-   filter is filtering, so the tier is generation-correct by construction. This
-   closes the one over-permit case the ordering alone leaves open: a tool whose
-   annotations changed from read to destructive between generations. The catalog
-   is still consulted for the `(server, tool)` split (rule 2) — that is what
-   `ParseDirectToolName` gets wrong — but never for the tier.
+3. **The permission tier comes from the catalog entry's `requiredPermission`,
+   which is derived from the UPSTREAM annotations — never from the registered
+   `mcp.Tool.Annotations`.** *(Corrected in cross-model review round 8; the
+   round-5 draft said the opposite, and it was wrong twice over.)*
+
+   The draft rule read the tier off the entry the filter is filtering, via
+   `contracts.DeriveCallWith(tool.Annotations)`, "exactly as dispatch does". Two
+   verified defects:
+
+   - **Type.** `DeriveCallWith` takes `*config.ToolAnnotations`
+     (`internal/contracts/intent.go:208`). The registered entry carries
+     `mcp.ToolAnnotation` — a different type. Dispatch calls it on the
+     **upstream** `*config.ToolAnnotations` the handler closed over
+     (`mcp_routing.go:211-213`), not on anything registered.
+   - **Semantics, and this one is severe.** `mcp.NewTool` seeds every tool with
+     `ReadOnlyHint=false, DestructiveHint=true, IdempotentHint=false,
+     OpenWorldHint=true` (`mcp/tools.go` `NewTool`), and each
+     `With…HintAnnotation` option overwrites only its own field. So a read-only
+     upstream tool registers with `readOnlyHint=true` **and** the untouched
+     default `destructiveHint=true`. `DeriveCallWith` gives destructive top
+     priority, so reading the tier off the registered entry would classify
+     nearly every direct tool as **destructive**, hiding it from every read- and
+     write-scoped agent token — and diverging from dispatch, which would still
+     admit the call as `read`. That is a listing↔dispatch divergence, precisely
+     the class of defect this design exists to remove.
+
+   **Rule as it now stands**: the tier is the catalog entry's
+   `requiredPermission` (`requiredPermissionForDirectTool(upstreamAnnotations)`,
+   `mcp_direct_scope.go:18` — byte-identical to today's behavior and to
+   dispatch's), used **only after the rule-5 discriminator has confirmed the
+   catalog entry and the registered entry are the same generation**. The
+   discriminator, not the annotation source, is what buys generation-correctness
+   here.
+
+   **Residual this creates, stated exactly**: an **annotations-only** change
+   whose rendered description is byte-identical passes the discriminator, so for
+   the duration of the window the listing and describe may gate on the previous
+   generation's tier. It is bounded the same way the schema-only residual is:
+   **dispatch is never wrong** — `makeDirectModeHandler` re-derives the tier from
+   the annotations *its own* registration captured (`mcp_routing.go:211-213`), so
+   a call is never mis-authorized, only a listing can be one generation stale.
+   This is the third and last item on the residual list below; it needs the same
+   maintainer assent as the other two. The catalog is also still the source for
+   the `(server, tool)` split (rule 2) — that is what `ParseDirectToolName` gets
+   wrong.
 4. **Describe requires registry membership as well as catalog visibility.**
    Before returning a definition the direct resolver checks
    `p.directServer.GetTool(displayName) != nil` (mcp-go
@@ -316,9 +353,11 @@ The plan therefore does not promise a single transaction; it promises a
    in *both* orderings, and it strengthens rather than weakens FR-017's
    "membership is decided by the direct-surface snapshot, not index presence" —
    the registry is the listing's own source, not the index. The describe
-   resolver's permission tier likewise comes from that **registered** entry's
-   annotations (`GetTool` returns the `ServerTool`), never from the catalog's
-   `requiredPermission`, for the same generation-correctness reason as rule 3.
+   resolver's permission tier follows rule 3 exactly — the catalog entry's
+   `requiredPermission`, after the rule-5 discriminator — for the same reason
+   rule 3 gives: the registered entry's `mcp.ToolAnnotation` carries mcp-go's
+   constructor defaults and cannot be used as a tier source. `GetTool` is
+   consulted here **only** for registry membership, never for annotations.
 5. **A display name never denotes two origins — within a generation, or across
    the window.** Two mechanisms, because the hazard has two shapes:
    - *Within* a generation: display-name collisions (`a` + `b__c` vs `a__b` + `c`)
@@ -368,8 +407,8 @@ The plan therefore does not promise a single transaction; it promises a
    section). The identity/origin hazards ARE fully closed; the schema-only one is
    not, and it is recorded as a residual rather than papered over.
 
-**Residual, stated exactly** (rounds 5 and 6). Two different things happen in the
-window, and only one of them is still open:
+**Residual, stated exactly** (rounds 5, 6 and 8). Three different things happen
+in the window, and two of them are still open:
 
 - *Anything the discriminator sees* — an origin flip, a description change, a
   signature change — is **withheld**: the filters drop it and describe answers
@@ -379,41 +418,63 @@ window, and only one of them is still open:
   `tools/list_changed` notification `SetTools` has already emitted.
 - *A schema-only change* passes the discriminator, so for those few instructions
   `describe_tool` may return the **previous** generation's schema for a name
-  whose registered handler already carries the new one. **This is the one
-  residual the design does not eliminate.** Its blast radius is small and,
-  importantly, is absorbed by a mechanism this very feature ships: dispatch is
-  never wrong (the handler validates against the schema it captured, R9), so an
-  agent that acted on the stale definition is rejected by the pre-dispatch
+  whose registered handler already carries the new one. Its blast radius is small
+  and, importantly, is absorbed by a mechanism this very feature ships: dispatch
+  is never wrong (the handler validates against the schema it captured, R9), so
+  an agent that acted on the stale definition is rejected by the pre-dispatch
   validator with the **correct** schema embedded (FR-012/FR-013) and succeeds on
   one retry — precisely the US3/SC-003 self-healing path. Cost: one extra round
   trip, in a microsecond window, for a tool whose schema changed mid-refresh.
+- *An annotations-only change* whose rendered description is byte-identical also
+  passes the discriminator (round 8, with rule 3's correction), so the listing
+  filters and the describe resolver may gate on the **previous** generation's
+  permission tier for those few instructions. Bounded identically: the tier that
+  actually authorizes a call is re-derived inside `makeDirectModeHandler` from
+  the annotations *its own* registration captured (`mcp_routing.go:211-213`), so
+  no call is ever mis-authorized — only a listing/describe decision can be one
+  generation stale, and it self-corrects at the catalog publish that follows
+  microseconds later.
 
 What is explicitly NOT residual any more: no session can be scope-checked against
-one origin and dispatched to another; no read-scoped token can obtain a
-destructive tool's definition; and no display name can denote two origins, in any
-interleaving.
+one origin and dispatched to another; no display name can denote two origins, in
+any interleaving; and no *call* can be authorized against a tier the registered
+handler does not itself derive.
 
-**This residual is a second, narrower narrowing of FR-017's "no window exposes
-one without the other" and is recorded in plan §Complexity Tracking for the
-maintainer's assent at the tasks stage**, alongside the transaction narrowing —
-it is not to be discovered later in a task.
+**These two residuals are the second and third narrowings of FR-017's "no window
+exposes one without the other" and are recorded in plan §Complexity Tracking for
+the maintainer's assent at the tasks stage**, alongside the transaction
+narrowing — they are not to be discovered later in a task.
 
-The catalog carries a monotonically increasing `generation` so the skew is
-observable in logs and assertable in tests. **Tests** — a rebuild paused between
-the two publications, with a concurrent scoped `tools/list` and `describe_tool`,
-covering five cases: an **added** name, a **removed** name, a **same-name schema
-update** (description-visible), a **same-name origin flip** (server A removed and
-server B added in one reconcile, B's tool flattening to A's old display name), a
-**within-generation collision** (both entries withheld, warning logged, neither
-listed nor describable, in both generations), and — the case the discriminator
-cannot see — a **schema-only change with the description and rendered signature
-held byte-identical**, asserting the documented residual behaves as claimed: the
-stale definition may be returned, dispatch still validates against the new
-schema, and the resulting `invalid_params` error carries the NEW schema so one
-retry succeeds. Assertions across the set: no describable-but-unlisted id; no
-entry scope-checked against one origin while its handler dispatches to another;
-no read-scoped token receiving a destructive tool's definition; and no case where
-a stale definition leads to a call that *succeeds* against the wrong schema.
+The catalog carries a monotonically increasing `generation`. It is not
+decorative: every publish logs it beside the entry count and the serialization
+mode, and the skew tests below assert on it (each paused rebuild must show
+exactly one increment, and a guarded no-op reload must show none), which is what
+makes "did this request see the old or the new generation" observable rather than
+inferred.
+
+**Tests** — a rebuild paused between the two publications, with a concurrent
+scoped `tools/list` and `describe_tool`, covering **seven** cases: an **added**
+name, a **removed** name, a **same-name description-visible** change, a
+**same-name origin flip** (server A removed and server B added in one reconcile,
+B's tool flattening to A's old display name), a **within-generation collision**
+(both entries withheld, warning logged, neither listed nor describable, in both
+generations), and the two cases the discriminator cannot see: a **schema-only
+change** and an **annotations-only change** (read→destructive), each with the
+description and rendered signature held byte-identical. The last two assert the
+documented residuals behave as claimed — the stale definition/tier may be
+returned, while dispatch still validates against the new schema and re-derives
+the new tier, so the `invalid_params` error carries the NEW schema (one retry
+succeeds) and the destructive call is still refused a read-scoped token at the
+handler. Plus the **two no-rebuild cases** of rule 5: a signature-cache
+**miss→warm** and a **hit→eviction** between registration and a later
+filter/describe call (`toolsig.Cache.Warm` / `RetainHashes`), both of which must
+leave the tool listed and describable — the proof that the discriminator reads
+the stored `renderedDescription` rather than re-rendering.
+
+Assertions across the set: no describable-but-unlisted id; no entry scope-checked
+against one origin while its handler dispatches to another; no read-scoped token
+having a destructive tool's **call** admitted; and no case where a stale
+definition leads to a call that *succeeds* against the wrong schema.
 
 ## R14 — The direct surface is never initialized eagerly (FR-009/FR-014 gap)
 
@@ -453,6 +514,27 @@ unrelated `config.reloaded` into a rebuild plus a `tools/list_changed` broadcast
    "rebuild unconditionally" branch becomes unreachable in production and is kept
    only as the defensive path (R8, R13 rule 2's nil exception). FR-014's no-op
    guarantee then holds from the first reload onward.
+
+   **This removes an accidental self-heal, so one ordering bug must be fixed with
+   it** (cross-model review round 8, verified): the routing-refresh listener
+   creates its subscription *inside* its own goroutine —
+   `eventCh := s.runtime.SubscribeEvents()` is the first line of
+   `listenForRoutingModeRefresh` (`server.go:528-530`) — and that goroutine is
+   merely *scheduled* at `server.go:301`, one line before
+   `s.runtime.StartBackgroundInitialization()` (`:302`). Nothing orders the
+   subscription before the first publish, and the bus delivers only to
+   subscribers already registered, so a fast background init can drop the first
+   `servers.changed` outright. Today that is self-healing by accident: the
+   catalog is nil, so the next `config.reloaded` rebuilds unconditionally. With
+   D15 publishing an empty catalog at init and FR-014 guarding the reload on a
+   mode comparison, the unconditional rebuild no longer fires and a dropped first
+   event would leave the direct surface at built-ins-only until the next upstream
+   change. **Decision**: `SubscribeEvents()` is hoisted into the constructor —
+   called synchronously before `StartBackgroundInitialization()`, with the
+   channel handed to the goroutine — so the subscription provably precedes any
+   publish. `server.go` is already in the touch list for the FR-014 guard; this
+   is the same file. A test asserts a `servers.changed` published immediately
+   after construction still reaches the direct rebuild.
 3. The new direct built-in gate asserts over **`p.directServer.ListTools()`** —
    what the server actually serves after init — not over
    `buildDirectModeTools()`'s return value, so it fails if the initial
@@ -484,9 +566,22 @@ would drop **every** argument.
 Two traps the implementation MUST honor, both verified:
 
 1. `NewToolWithRawSchema` takes **no** `ToolOption`s and leaves `Annotations`
-   zero — FR-004 requires annotations preserved, so the deferred builder copies
-   the annotation fields onto the returned `mcp.Tool` explicitly (the same five
-   hints `buildDirectModeTools` applies today, `mcp_routing.go:99-115`).
+   **zero-valued** — every hint pointer `nil`. Copying only the upstream hints
+   onto it is NOT enough (cross-model review round 8): `mcp.NewTool` seeds a tool
+   with `ReadOnlyHint=false, DestructiveHint=true, IdempotentHint=false,
+   OpenWorldHint=true` before any option runs, and each `With…HintAnnotation`
+   overwrites only its own field, so a full-mode entry whose upstream declares
+   only `readOnlyHint:true` still marshals **all four** hints. A deferred entry
+   built by copying just that one hint would marshal only `readOnlyHint`, and an
+   entry with nil upstream annotations would marshal none at all — different
+   wire bytes for the same tool in the two modes, violating FR-004 ("unchanged
+   annotations") and FR-008 (set identity includes annotations).
+   **Decision**: the deferred renderer seeds the returned `mcp.Tool.Annotations`
+   with mcp-go's exact `NewTool` defaults and *then* applies the same five
+   upstream overrides `buildDirectModeTools` applies today
+   (`mcp_routing.go:99-115`). The unit matrix asserts the marshalled
+   `annotations` object is byte-identical between the two modes for three
+   fixtures: nil upstream annotations, partial (one hint), and full.
 2. Setting `RawInputSchema` on a tool that already went through `mcp.NewTool`
    is a **hard marshal failure**, not a silent override: `Tool.MarshalJSON`
    (`mcp/tools.go:677-680`) returns `errToolSchemaConflict` when both
@@ -519,15 +614,41 @@ func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.Serve
 //   renderDirectTools also records each entry's renderedDescription on the
 //   catalog before it is published, so the R13 rule 5 discriminator compares
 //   two immutable snapshots rather than re-rendering against a mutable cache.
-func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool // DiscoverTools → buildDirectCatalog → renderDirectTools
-// NOTE: publication is NOT here. RefreshDirectModeTools (and the D15 initial
-// rebuild) publishes the catalog AFTER its SetTools call — R13 rule 1.
+
+// DiscoverTools → buildDirectCatalog → renderDirectTools. Returns BOTH halves:
+// the rendered tool set AND the catalog it was rendered from, unpublished.
+func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *directCatalog)
 ```
+
+**The return type must change, and this is load-bearing** (cross-model review
+round 8): R13 rule 1 forbids the builder from publishing, so if
+`buildDirectModeTools` still returned only `[]ServerTool` — as the round-7 draft
+of this section said, "keeps its current signature and call sites" — the catalog
+it built would be unreachable and `RefreshDirectModeTools` would have nothing to
+publish after its `SetTools` call (`mcp_routing.go:666-673`). The two-value
+return is what makes rule 1 expressible. The blast radius is two call sites:
+`RefreshDirectModeTools` (`mcp_routing.go:666`) and one test
+(`mcp_describe_tool_test.go:369`, already being edited for FR-009).
+
+Both publishers therefore read:
+
+```go
+tools, cat := p.buildDirectModeTools()
+p.directServer.SetTools(tools...)   // rule 1: registry first
+p.publishDirectCatalog(cat)         // …catalog immediately after
+```
+
+`buildDirectModeTools` returns a non-nil catalog on **every** path, including the
+`DiscoverTools` error path (`mcp_routing.go:81-85`, which returns `nil` today):
+there it returns the built-ins-only tool set and an **empty catalog recording the
+effective mode**, so FR-014's guard always has a mode to compare against and
+FR-018's built-in survives an upstream outage.
 
 The unit matrix feeds `buildDirectCatalog` a fixture `[]*config.ToolMetadata`
 slice (including the `__`-in-server-name collision pair) and asserts over
-`renderDirectTools` output. No interface extraction, no new dependency, and
-`buildDirectModeTools` keeps its current signature and call sites.
+`renderDirectTools` output. No interface extraction and no new dependency;
+`buildDirectModeTools` keeps its name and its two call sites, and gains the
+second return value the publication rule requires (above).
 
 ## R7 — Config-field wiring points (verified against this tree)
 
@@ -621,7 +742,7 @@ is never served at all.
 **Scope of the atomicity this buys**: handler ↔ its own schema/hash, which is
 what consumer (4) needs. It does NOT make the catalog swap and `SetTools` one
 transaction — see [R13](#r13--two-publications-one-generation-closing-the-catalogregistry-skew-window)
-for the filter/resolver skew window and the three rules that close it.
+for the filter/resolver skew window and the five rules that close it.
 
 ## R10 — Direct-surface describe_tool visibility parity (FR-011)
 

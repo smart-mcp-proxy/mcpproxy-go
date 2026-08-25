@@ -36,9 +36,13 @@ curl -s http://127.0.0.1:18102/mcp/all -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[] | {name, inputSchema, description}'
 ```
 
-Expect: every tool listed; `inputSchema == {"type":"object"}`; descriptions ending
-with a `(param*:type, …)` signature; `describe_tool` present in the list; the
-`initialize` result carrying the convention instructions.
+Expect: every tool listed; `inputSchema == {"type":"object"}` on every entry;
+`describe_tool` present in the list; the `initialize` result carrying the
+convention instructions. Descriptions end with a `(param*:type, …)` signature
+**for every tool the signature cache has warmed** — a tool the indexer has not
+reached yet (or whose hash was just evicted) is listed with no suffix, which is
+correct, not a bug: FR-005 lists a cache miss signature-less rather than dropping
+or delaying it. Re-run the listing after indexing settles and the suffix appears.
 
 ## 4. Recover a schema and trigger self-healing
 

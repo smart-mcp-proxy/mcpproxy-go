@@ -32,10 +32,12 @@ Technical approach, grounded in the code:
   dispatch can never validate against a definition other than the one its own
   registration advertised (research.md R9). That covers handler↔schema; the
   catalog swap and `SetTools` are still two publications, so the filter/resolver
-  skew window is bounded separately by R13's four rules (`SetTools` first then
-  publish, filters deny on catalog miss, the permission tier derived from the
-  entry's own annotations, describe requiring registry membership as well as
-  catalog visibility) — a stated safety property, not a claim of atomicity. The
+  skew window is bounded separately by R13's **five** rules (`SetTools` first
+  then publish, filters deny on catalog miss, the permission tier taken from the
+  catalog entry's upstream-derived `requiredPermission` behind the discriminator,
+  describe requiring registry membership as well as catalog visibility, and no
+  display name ever denoting two origins) — a stated safety property, not a claim
+  of atomicity. The
   catalog build iterates a sorted tool list and **withholds** every `__`
   display-name collision outright, logging both origins, so an ambiguous name is
   never served and dispatch registration, listing and describe resolution cannot
@@ -47,10 +49,13 @@ Technical approach, grounded in the code:
   never drops or delays it (FR-005). The permissive placeholder is **not** what
   `mcp.NewTool` produces: mcp-go's schema marshaller always emits
   `"properties":{}` and `"required":[]`, so deferred entries are built with
-  `mcp.NewToolWithRawSchema(…, json.RawMessage(`{"type":"object"}`))` with
-  annotations copied on explicitly, and the full-mode branch keeps the `NewTool`
-  path untouched (verified empirically — research.md R11; mixing the two on one
-  tool is a hard marshal error, not a silent override).
+  `mcp.NewToolWithRawSchema(…, json.RawMessage(`{"type":"object"}`))` — seeded
+  with mcp-go's own `NewTool` annotation defaults and *then* given the upstream
+  overrides, because the raw-schema constructor leaves every hint `nil` and
+  `NewTool` does not (otherwise the two modes marshal different `annotations`
+  objects for the same tool — FR-004/FR-008). The full-mode branch keeps the
+  `NewTool` path untouched (verified empirically — research.md R11; mixing the
+  two on one tool is a hard marshal error, not a silent override).
 - **describe_tool on the direct surface** (FR-009/FR-011): registration is
   composed into direct tool-set *construction* (`buildDirectModeTools` appends it)
   so every `SetTools` refresh keeps it (FR-018) — including the
@@ -130,7 +135,7 @@ Technical approach, grounded in the code:
 | **I. Performance at Scale** | PASS. BM25 search and indexing untouched. The direct rebuild already runs on upstream changes; deferred rendering *removes* per-entry schema unmarshal work and reads signatures via a pure cache lookup. Pre-dispatch validation is memoized per tool hash (existing validator). |
 | **II. Actor-Based Concurrency** | PASS (with one justified primitive). The catalog is written only on the single routing-refresh listener goroutine and read on request paths — an immutable snapshot behind an `atomic.Pointer` swap, replacing the existing mutex-guarded `directToolPermissions` map with the same read-mostly pattern Spec 085 justified for the signature cache. The catalog swap and mcp-go's `SetTools` remain two publications and cannot be made one transaction (mcp-go owns its registry read), so the resulting skew window is closed by ordering + deny-on-miss + registry-membership rules rather than papered over — D13/R13, with an interleaving test. See Complexity Tracking. |
 | **III. Configuration-Driven Architecture** | PASS. One JSON config field with env override, serve flag, validation, and hot-reload (FR-001/FR-014); default preserves today's behavior; no tray state. |
-| **IV. Security by Default** | PASS. Serialization never changes membership (FR-008/FR-016): all discovery filters run before rendering. describe_tool on the direct surface applies listing-parity visibility *including the operation-permission tier the existing resolver lacks*, and never emits an existence-confirming reason code **or suggestion** for an id this session's listing omitted (FR-011). Parity is enforced on both sides (D10): the listing filters resolve through the catalog instead of re-parsing `__`, and both suggestion channels (`did_you_mean`, case-correction) are catalog-gated or suppressed — closing four concrete parity defects that exist in this tree today — three disclosure paths plus a wrong-safety-hint path (a listed destructive tool describing as `call_with: "read"`) — rather than opening any. Quarantine/approval gates on dispatch are untouched; validation is fail-open, never blocking a call a schemaless proxy would allow. |
+| **IV. Security by Default** | PASS. Serialization never changes membership (FR-008/FR-016): all discovery filters run before rendering. describe_tool on the direct surface applies listing-parity visibility *including the operation-permission tier the existing resolver lacks*, and never emits an existence-confirming reason code **or suggestion** for an id this session's listing omitted (FR-011). Parity is enforced on both sides (D10): the listing filters resolve through the catalog instead of re-parsing `__`, and both suggestion channels (`did_you_mean`, case-correction) are catalog-gated or suppressed — closing four concrete parity defects that exist in this tree today — three disclosure paths plus a wrong-safety-hint path (a listed destructive tool describing as `call_with: "read"`) — rather than opening any. Quarantine/approval gates on dispatch are untouched; validation is fail-open, never blocking a call a schemaless proxy would allow. The one place the design accepts staleness — an annotations-only change inside the two-publication window (Complexity Tracking, third row) — touches only listing/describe; call-time authorization is re-derived by the handler from its own captured annotations and is never one generation behind. |
 | **V. Test-Driven Development** | PASS. Every behavior lands test-first; the golden gates make surface drift a failing test by construction (see Test strategy). |
 | **VI. Documentation Hygiene** | PASS. `docs/configuration.md`, the feature doc under `docs/features/`, `CLAUDE.md` MCP-protocol line, and `make swagger` regen are in scope (see Documentation & wiring). |
 
@@ -150,11 +155,11 @@ Resolved in [research.md](research.md); recorded here as the plan of record:
 | D6 | FR-017 = immutable `directCatalog` snapshot, atomic swap, **colliding display names withheld** (not first-writer-wins — D13 rule 5); handlers capture their own schema | R9 |
 | D7 | FR-011 = catalog-backed direct resolver with listing-parity gates incl. permission tier; plain `not_found` for invisible ids in both modes; snapshot-backed definitions for visible ids; check-mode verdicts via shared preflight evaluator | R10 |
 | D8 | Rollout default = **opt-in, off**; no default flip in this feature (spec Non-Goals; any future flip is its own evidence-gated decision) | spec |
-| D9 | Deferred `inputSchema` is emitted via `mcp.NewToolWithRawSchema` (annotations copied on explicitly); `mcp.NewTool` cannot produce the FR-004 wire shape and mixing the two is a marshal error | R11 |
-| D10 | Parity is closed on every side: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__` (the tier itself comes from the filtered entry's own annotations — D13 rule 3, not the catalog); the definition assembly takes a catalog-supplied annotations override on this surface (`buildFullToolEntry` otherwise reads annotations from the StateView, not from the entry passed in, so a listed pending destructive tool would describe as `call_with: "read"`); and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
+| D9 | Deferred `inputSchema` is emitted via `mcp.NewToolWithRawSchema`, whose `Annotations` are zero-valued — so the deferred renderer seeds mcp-go's `NewTool` defaults (`readOnly=false, destructive=true, idempotent=false, openWorld=true`) and then applies the upstream overrides, or the two modes marshal different `annotations` for the same tool. `mcp.NewTool` cannot produce the FR-004 wire shape and mixing the two is a marshal error | R11 |
+| D10 | Parity is closed on every side: the two direct listing filters resolve `(server, tool)` through the catalog instead of re-parsing `__` (the tier comes from that same catalog entry's `requiredPermission`, behind the D13 rule-5 discriminator — never from the registered `mcp.Tool`'s annotations, which carry mcp-go's constructor defaults; D13 rule 3); the definition assembly takes a catalog-supplied annotations override on this surface (`buildFullToolEntry` otherwise reads annotations from the StateView, not from the entry passed in, so a listed pending destructive tool would describe as `call_with: "read"`); and the two suggestion paths (`did_you_mean`, `suggestCanonicalToolID`) are gated by the direct catalog or suppressed on this surface | R10 |
 | D11 | Direct-server instructions = operator's `cfg.Instructions` when non-empty + blank line + the deferral legend, so an operator's configured `instructions` is not lost on the direct surface (fallback when empty: D16, not `resolveInstructions`) | R4 |
-| D12 | `buildDirectModeTools` splits into a pure `buildDirectCatalog` + `renderDirectTools` pair so the unit matrix can drive a fixture toolset (`upstream.Manager` is concrete and only lists connected clients) | R12 |
-| D13 | The catalog swap and `SetTools` cannot be one transaction (`mcp.Tool`'s only free-form field marshals to `_meta`, and mcp-go snapshots its tool map before our filters run), so the plan promises a safety property, not atomicity. Five rules: **`SetTools` first, catalog published immediately after**; filters **deny** on catalog miss (built-ins by explicit name set; a *nil* catalog is not a miss); the **permission tier comes from the registered entry's own annotations** on BOTH the filter and the describe path, never from the catalog; describe requires `directServer.GetTool(name) != nil` **and** catalog visibility; and **a display name never denotes two origins** — colliding names are withheld outright (spec-sanctioned "report it"), and a mismatch between the entry's **stored** `renderedDescription` (captured at render time, never re-rendered — the signature cache mutates independently of rebuilds) and the registered `mcp.Tool.Description` fails closed. Identity/origin hazards are fully closed; a **schema-only** change is NOT description-visible and remains a stated residual, absorbed by the feature's own self-healing validator (one retry). `generation` counter + six interleaving tests | R13 |
+| D12 | `buildDirectModeTools` splits into a pure `buildDirectCatalog` + `renderDirectTools` pair so the unit matrix can drive a fixture toolset (`upstream.Manager` is concrete and only lists connected clients), and returns **both** the rendered tool set and the unpublished catalog — D13 rule 1 forbids the builder from publishing, so the publisher needs the handle (two call sites: `RefreshDirectModeTools`, one test) | R12, R13 |
+| D13 | The catalog swap and `SetTools` cannot be one transaction (`mcp.Tool`'s only free-form field marshals to `_meta`, and mcp-go snapshots its tool map before our filters run), so the plan promises a safety property, not atomicity. Five rules: **`SetTools` first, catalog published immediately after** (which forces `buildDirectModeTools` to return the catalog alongside the tool set — the builder must not publish, so the publisher needs a handle); filters **deny** on catalog miss (built-ins by explicit name set; a *nil* catalog is not a miss); the **permission tier is the catalog entry's `requiredPermission`** — derived from the UPSTREAM annotations exactly as dispatch does, **never** from the registered `mcp.Tool.Annotations`, which carry mcp-go's `NewTool` defaults (`destructiveHint=true` unless overridden) and would classify almost every tool destructive; describe requires `directServer.GetTool(name) != nil` **and** catalog visibility (`GetTool` for membership only, never for annotations); and **a display name never denotes two origins** — colliding names are withheld outright (spec-sanctioned "report it"), and a mismatch between the entry's **stored** `renderedDescription` (captured at render time, never re-rendered — the signature cache mutates independently of rebuilds) and the registered `mcp.Tool.Description` fails closed. Identity/origin hazards are fully closed; **schema-only** and **annotations-only** changes are not description-visible and remain two stated residuals, both absorbed by the handler re-deriving schema and tier from its own capture (one self-healing retry; never a mis-authorized call). `generation` counter (logged per publish, asserted in the skew tests) + seven interleaving tests + two no-rebuild cache tests | R13 |
 | D14 | Direct check-mode adapter canonicalizes `server__tool` → `server:tool` before `preflight.Evaluate` (which accepts colon ids only, so direct ids would otherwise all answer `not_found`), gates invisibility itself without consulting the evaluator, **projects the evaluator's `status`/`reason`/`action`/`retryable` through untouched** (check mode's vocabulary is `status:"unavailable"` + `tool_pending_approval`/`tool_changed`/… — never definition mode's), and restores the caller's original id + ordering in the response and the activity record | R10, contract §3 |
 | D15 | `initRoutingModeServers` performs one **initial direct rebuild** before the listeners are wired — the direct server registers nothing today (`mcp_routing.go:651-653`), so composing the built-in into rebuild construction alone would still leave FR-009 false until the first `servers.changed`, and would leave the catalog nil so the first unrelated reload churns every client | R14 |
 | D16 | One helper `resolveDirectInstructions(custom string)`: custom when non-empty, else a **direct-specific default**, then the legend. Not `resolveInstructions` — its `defaultInstructions` names `retrieve_tools` and `call_tool_*`. The direct default names ONLY what this surface exposes: `server__tool` calling, `describe_tool`, and the ABOUT links — no `upstream_servers`, which is registered by the code-exec and call-tool builders only (`mcp_routing.go:398`, `:507`), never by `buildDirectModeTools` | R4/D11 |
@@ -204,8 +209,12 @@ internal/
 │   │                                #   both origins logged — D13 rule 5) + atomic store on MCPProxyServer,
 │   │                                #   PUBLISHED BY THE CALLER AFTER SetTools, never mid-build; absorbs
 │   │                                #   directToolPermissions
-│   ├── mcp_routing.go               # buildDirectModeTools splits into buildDirectCatalog + renderDirectTools (D12);
-│   │                                #   render full|deferred via live config (deferred uses NewToolWithRawSchema, D9)
+│   ├── mcp_routing.go               # buildDirectModeTools splits into buildDirectCatalog + renderDirectTools (D12)
+│   │                                #   and RETURNS ([]ServerTool, *directCatalog) so the publisher can swap the
+│   │                                #   catalog after SetTools (D13 rule 1) — non-nil catalog on EVERY path incl.
+│   │                                #   the DiscoverTools error return (:81-85);
+│   │                                #   render full|deferred via live config (deferred uses NewToolWithRawSchema
+│   │                                #   seeded with mcp-go's NewTool annotation defaults, D9)
 │   │                                #   → append describe_tool registration (FR-018); makeDirectModeHandler:
 │   │                                #   pre-dispatch validation from the captured catalog entry (FR-012/013);
 │   │                                #   initRoutingModeServers: WithInstructions on directServer (FR-007/D11/D16,
@@ -213,9 +222,12 @@ internal/
 │   │                                #     + the INITIAL direct rebuild the surface has never had (D15, :651-653);
 │   │                                #   refresh guard: rebuild-if-serialization-changed (FR-014)
 │   ├── mcp_direct_scope.go          # filterDirectModeToolsForAuth: resolve (server,tool) through the catalog instead
-│   │                                #   of ParseDirectToolName; derive the tier from the filtered entry's OWN
-│   │                                #   annotations via contracts.DeriveCallWith, NOT from the catalog (D10/D13.3);
-│   │                                #   retires lookupDirectToolPermission
+│   │                                #   of ParseDirectToolName; tier = that entry's requiredPermission (upstream-
+│   │                                #   derived, same as dispatch) behind the rule-5 discriminator — NEVER
+│   │                                #   DeriveCallWith over the registered mcp.Tool.Annotations, which carry
+│   │                                #   mcp-go's destructive=true default (D10/D13.3);
+│   │                                #   retires lookupDirectToolPermission's separate map, keeps
+│   │                                #   requiredPermissionForDirectTool as the catalog's derivation
 │   ├── mcp_direct_callability.go    # filterDirectToolsForAgentCallability: same catalog resolution (D10)
 │   ├── mcp_describe_tool.go         # Surface-neutral prose — all FOUR retrieve_tools strings (D5/R5); resolver seam
 │   │                                #   parameter; additive output_schema at definition assembly (D2)
@@ -232,7 +244,11 @@ internal/
 │   │                                #   in mcp.go:6068); suggestCanonicalToolID gains the resolver seam (D10);
 │   │                                #   existing retrieve-surface resolvers byte-identical
 │   ├── mcp.go                       # MCPProxyServer field for the catalog pointer; sigCache handle reuse
-│   ├── server.go                    # listenForRoutingModeRefresh config.reloaded branch (:554): guarded direct rebuild
+│   ├── server.go                    # listenForRoutingModeRefresh config.reloaded branch (:554): guarded direct rebuild;
+│   │                                #   AND hoist SubscribeEvents() out of the listener goroutine into the
+│   │                                #   constructor, before StartBackgroundInitialization (:301-302), so the first
+│   │                                #   servers.changed cannot be dropped now that D15 removes the nil-catalog
+│   │                                #   accidental self-heal (R14)
 │   ├── toolslist_snapshot_test.go   # NEW standalone direct built-in gate (NOT added to toolsListGoldenSurfaces)
 │   ├── describe_plain_corpus_test.go# describePlainDelta: enumerate the remediation-prose substitutions (gate 4)
 │   ├── mcp_describe_tool_test.go    # invert + rename the "direct routing mode" subtest of
@@ -359,9 +375,11 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
   `inputSchema` is byte-exactly `{"type":"object"}` — asserted on the JSON, not on
   the Go struct, since `mcp.NewTool` would marshal
   `{"properties":{},"required":[],"type":"object"}` (R11/D9) — no upstream
-  properties/required; annotations preserved through the raw-schema constructor;
-  cache-miss entry listed signature-less (FR-004/005); a deferred entry marshals
-  without `errToolSchemaConflict`.
+  properties/required; **the marshalled `annotations` object is byte-identical to
+  full mode's for three fixtures — nil upstream annotations, one hint, all five —
+  proving the raw-schema constructor was seeded with mcp-go's `NewTool` defaults
+  (D9)**; cache-miss entry listed signature-less (FR-004/005); a deferred entry
+  marshals without `errToolSchemaConflict`.
 - Set identity full↔deferred: same names, count, annotations, ordering source
   (FR-008), incl. under agent-token and profile filters (SC-005, FR-016).
 - Catalog: colliding display names withheld in both flattening directions (neither
@@ -391,7 +409,7 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
 - **Instructions** (D11): a custom `instructions` config value still appears on the
   direct server's `initialize`, with the deferral legend appended, in both modes.
 - **Publication skew** (D13) — a rebuild paused between `SetTools` and the catalog
-  publish, with a concurrent scoped `tools/list` and `describe_tool`. Six
+  publish, with a concurrent scoped `tools/list` and `describe_tool`. Seven
   interleavings, in three groups:
   1. *Closed by the design* — an added name, a removed name, a same-name
      **description-visible** change, and a same-name **origin flip** (server A
@@ -400,11 +418,15 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
   2. *Closed by withholding* — a within-generation display-name collision:
      neither entry listed, neither describable, in both generations, warning
      naming both origins.
-  3. *The documented residual* — a **schema-only** change with the description
-     and rendered signature held byte-identical. This asserts the accepted
-     behavior, not a fix: the stale definition may be returned, dispatch still
-     validates against the new schema, and the `invalid_params` error carries the
-     NEW schema so one retry succeeds (US3/SC-003).
+  3. *The two documented residuals* — a **schema-only** change and an
+     **annotations-only** change (read → destructive), each with the description
+     and rendered signature held byte-identical. Both assert accepted behavior,
+     not a fix: the stale definition/tier may be served for the width of the
+     window, while **dispatch is never wrong** — the handler validates against the
+     schema it captured, so the `invalid_params` error carries the NEW schema and
+     one retry succeeds (US3/SC-003), and it re-derives the tier from the
+     annotations it captured, so a read-scoped token's call to the
+     newly-destructive tool is still refused at the handler.
 
   Plus two **no-rebuild** cases the discriminator must not mistake for a
   generation change: a signature-cache **miss→warm** and a **hit→eviction**
@@ -415,9 +437,20 @@ pure `buildDirectCatalog`/`renderDirectTools` pair (D12) with a fixture
 
   Assertions across the whole set: no describable-but-unlisted id; no entry
   scope-checked against one origin while its handler dispatches to another; no
-  read-scoped token receiving a destructive tool's definition (the tier comes from
-  the registered entry's own annotations on both paths); and no case where a stale
-  definition leads to a call that *succeeds* against the wrong schema.
+  read-scoped token having a destructive tool's **call** admitted (the handler
+  re-derives the tier from its own captured upstream annotations); `generation`
+  increments exactly once per paused rebuild and not at all on a guarded no-op
+  reload; and no case where a stale definition leads to a call that *succeeds*
+  against the wrong schema.
+- **Publication API** (D13 rule 1): `buildDirectModeTools` returns a non-nil
+  catalog on every path — including the `DiscoverTools` error path — and the two
+  publishers (`RefreshDirectModeTools`, the D15 initial rebuild) call `SetTools`
+  strictly before `publishDirectCatalog`. Asserted by a test that fails if the
+  catalog pointer is swapped from inside the builder.
+- **Event subscription ordering** (R14): a `servers.changed` published
+  immediately after `NewServer` returns still reaches the direct rebuild — the
+  regression test for hoisting `SubscribeEvents()` ahead of
+  `StartBackgroundInitialization`.
 - **Initial registration** (D15/R14): on a freshly initialized proxy with **zero**
   upstream servers, `p.directServer` already lists `describe_tool` before any
   `servers.changed` fires; and an unrelated `config.reloaded` on that proxy
@@ -475,6 +508,8 @@ for `internal/server` and an isolated high-port instance; never
 | **FR-017's literal "rebuilt atomically, so no window exposes one without the other" is delivered as a safety property, not as a transaction** (spec.md FR-017 third bullet) | The advertised entry lives in mcp-go's tool registry and the catalog lives in ours; they are two publications. mcp-go reads its own `s.tools` under `toolsMu` before invoking our tool filters, so no lock of ours can span the registry read, and the only free-form field on `mcp.Tool` (`Meta`) marshals to `_meta`, so a generation stamp would move bytes FR-015 freezes. | Making it literally atomic would require either forking/patching mcp-go's registry or moving the direct listing off `SetTools` onto a hand-rolled tools/list handler — a far larger blast radius than this feature, and one that would put mcpproxy's own code on the protocol hot path for every routing mode. Instead R13 states the property that actually matters and proves it per-window: *no request observes a state less restrictive than both generations, and no request receives a definition for a name the registry is not currently serving*. The half of FR-017 that names dispatch — the handler validating against what it advertised — IS literally satisfied (closure capture, R9). **This narrowing is deliberate and needs the maintainer's assent at the tasks stage; it is the one place this plan does not deliver a spec MUST word-for-word.** |
 
 | **A schema-only change can be described one generation stale for the duration of the two-publication window** (the second, narrower FR-017 narrowing) | The skew discriminator is the rendered description, which does not encode the schema: full mode renders `[server] description` (`mcp_routing.go:95`) and deferred mode's appended signature is lossy by design, so a nested-property edit can render identically. No field on the registered `mcp.Tool` encodes the schema in *both* modes — deferred advertises the same `{"type":"object"}` placeholder for every tool — and `Tool.Meta` is wire-visible, so a hash stamp is closed off by FR-015. | The alternatives are the same ones rejected above (fork mcp-go's registry, or take the direct listing off `SetTools`). The residual is bounded and self-correcting by a mechanism this feature itself ships: dispatch is never wrong (R9 closure capture), so an agent acting on a stale definition is rejected by the pre-dispatch validator with the **correct** schema embedded and succeeds on one retry — the US3/SC-003 path. Cost is one extra round trip, in a microsecond window, for a tool whose schema changed mid-refresh. **Like the row above, this needs the maintainer's assent at the tasks stage.** |
+
+| **An annotations-only change can be listed/described one generation stale for the duration of the same window** (the third FR-017 narrowing — cross-model review round 8) | The round-5 draft avoided this by deriving the permission tier from the *registered* `mcp.Tool.Annotations`. That is not implementable: `contracts.DeriveCallWith` takes `*config.ToolAnnotations`, and more importantly `mcp.NewTool` seeds `destructiveHint=true` on every tool and each `With…HintAnnotation` overwrites only its own field, so the registered annotations say "destructive" for essentially every tool — which would hide almost the whole catalog from read- and write-scoped tokens and disagree with dispatch. The tier must therefore come from the catalog entry's upstream-derived `requiredPermission`, which is one publication behind for the width of the window. | Stamping the tier on the registered entry needs a free field on `mcp.Tool`; the only one (`Meta`) is wire-visible and FR-015 freezes those bytes — the same wall the row above hits. The residual is bounded by the mechanism that actually matters: **authorization at call time never uses the catalog.** `makeDirectModeHandler` re-derives the tier from the upstream annotations its own registration captured (`mcp_routing.go:211-213`), so a tool that just became destructive cannot be *called* by a read-scoped token even while the listing is briefly stale. The exposure is a listing/describe decision, in a microsecond window, self-correcting at the next publish. **Needs the maintainer's assent at the tasks stage, with the two rows above.** |
 
 No other deviations: no new dependency, no new package, no new abstraction beyond
 the catalog type the spec's FR-017 mandates by name.
