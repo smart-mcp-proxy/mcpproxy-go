@@ -190,24 +190,37 @@ actor APIClient {
         return response.servers
     }
 
+    /// Percent-encode one PATH segment.
+    ///
+    /// Server names are only validated against `:` (see
+    /// `internal/config/server_name_validation_test.go`), so `my/server` or
+    /// `my server` are legal names that would otherwise split the path into
+    /// extra segments and 404 — or, worse, address a different route. Every
+    /// `/servers/{id}/…` action the tray menu can fire goes through this.
+    static func escapePathComponent(_ value: String) -> String {
+        let unreserved = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
+    }
+
     /// Enable a server via `POST /api/v1/servers/{id}/enable`.
     func enableServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/enable")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/enable")
     }
 
     /// Disable a server via `POST /api/v1/servers/{id}/disable`.
     func disableServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/disable")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/disable")
     }
 
     /// Restart a server via `POST /api/v1/servers/{id}/restart`.
     func restartServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/restart")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/restart")
     }
 
     /// Trigger OAuth login for a server via `POST /api/v1/servers/{id}/login`.
     func loginServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/login")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/login")
     }
 
     // MARK: - Profiles (Profiles v2 T5)
@@ -772,10 +785,30 @@ actor APIClient {
 
     // MARK: - Tool Search
 
-    /// Search tools across all servers via `GET /api/v1/tools`.
-    func searchTools(query: String, limit: Int = 20) async throws -> [SearchResult] {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let data = try await fetchRaw(path: "/api/v1/tools?q=\(encoded)&limit=\(limit)")
+    /// Percent-encode one query-string VALUE.
+    ///
+    /// `.urlQueryAllowed` is the wrong set for a value: it deliberately leaves
+    /// `&`, `=`, `+` and `?` intact, so a tool search for "a&limit=1" would
+    /// silently become two parameters, and a `+` in a session id would decode
+    /// as a space. Only unreserved characters survive here.
+    static func escapeQueryValue(_ value: String) -> String {
+        let unreserved = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
+    }
+
+    /// BM25 search across every upstream tool via `GET /api/v1/index/search`.
+    ///
+    /// This used to call `GET /api/v1/tools?q=…`, which has no `q` parameter:
+    /// it returns the full catalogue under `tools`, while this function reads
+    /// `results` — so every call returned an empty array. Nothing consumed it,
+    /// which is how it stayed broken; `ToolsView` (F16) is the first caller.
+    ///
+    /// Note the REST contract (#871): `tool.name` here is the BARE tool name
+    /// with `server_name` alongside — callers assemble `server:tool` themselves.
+    func searchTools(query: String, limit: Int = 50) async throws -> [SearchResult] {
+        let encoded = Self.escapeQueryValue(query)
+        let data = try await fetchRaw(path: "/api/v1/index/search?q=\(encoded)&limit=\(limit)")
         let decoder = JSONDecoder()
         if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),
            let payload = wrapper.data {
@@ -783,6 +816,21 @@ actor APIClient {
         }
         if let direct = try? decoder.decode(SearchToolsResponse.self, from: data) {
             return direct.results ?? []
+        }
+        return []
+    }
+
+    /// The whole tool catalogue via `GET /api/v1/tools` — what the Tools view
+    /// shows before anything is typed.
+    func allTools() async throws -> [SearchTool] {
+        let data = try await fetchRaw(path: "/api/v1/tools")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.tools ?? []
+        }
+        if let direct = try? decoder.decode(SearchToolsResponse.self, from: data) {
+            return direct.tools ?? []
         }
         return []
     }

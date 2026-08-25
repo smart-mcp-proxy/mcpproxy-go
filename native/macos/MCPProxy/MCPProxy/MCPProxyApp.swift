@@ -895,11 +895,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - Status Icon
 
     /// Update the status bar icon based on app state.
-    /// Always draws the MCPProxy base icon, with a small colored overlay badge
-    /// in the bottom-right corner for stopped or error states.
-    /// - Running OK: plain MCPProxy icon (no overlay)
-    /// - Stopped: small orange stop badge overlay
-    /// - Error: small red exclamation badge overlay
+    ///
+    /// The icon itself is always the plain MCPProxy template glyph; the state
+    /// rides beside it as a coloured glyph in the button's attributed title.
+    /// See `TrayStatusIcon.glyph(for:)` for why the badge cannot be composited
+    /// into the image.
+    ///
+    /// - Running OK: plain MCPProxy icon, no glyph
+    /// - Stopped: ⏹
+    /// - Core error: ⚠
+    /// - Server warn/error diagnostics: an amber/red dot (F1 — before the audit
+    ///   the menu bar looked identical to all-healthy with five servers down)
+    ///
+    /// F2: every pass also publishes the state as text — accessibility
+    /// description, accessibility label and tooltip — so a screen-reader user
+    /// hears more than "status menu" and the glyphs have a text alternative.
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
 
@@ -915,20 +925,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let isStopped = appState.isStopped
         let hasError: Bool
         if case .error = appState.coreState { hasError = true } else { hasError = false }
+        let badge = TrayStatusIcon.badge(
+            isStopped: isStopped,
+            hasCoreError: hasError,
+            worstDiagnosticSeverity: appState.worstDiagnosticSeverity
+        )
+        // The count must be of the severity being badged, over the same
+        // (enabled, non-OAuth) set `worstDiagnosticSeverity` considers.
+        let badgedCount: Int
+        if case .severity(let severity) = badge {
+            badgedCount = appState.diagnosticCount(severity: severity.rawValue)
+        } else {
+            badgedCount = 0
+        }
+        let label = TrayStatusIcon.accessibilityLabel(
+            for: badge,
+            summary: appState.statusSummary,
+            attentionCount: badgedCount
+        )
 
         // Always use template icon (pure black, adapts to light/dark menu bar)
         base.isTemplate = true
         base.size = NSSize(width: 18, height: 18)
+        base.accessibilityDescription = label
         button.image = base
 
         // Show state indicator as text next to icon (keeps icon as pure template)
-        if isStopped {
-            button.title = "⏹"
-        } else if hasError {
-            button.title = "⚠"
-        } else {
+        let glyph = TrayStatusIcon.glyph(for: badge)
+        if glyph.isEmpty {
+            button.attributedTitle = NSAttributedString(string: "")
             button.title = ""
+        } else {
+            // Only the severity dot is coloured; ⏹/⚠ keep the menu bar's own
+            // label colour so they stay legible in both appearances.
+            var attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11)
+            ]
+            if case .severity(let severity) = badge {
+                attributes[.foregroundColor] = severity == .error ? NSColor.systemRed : NSColor.systemOrange
+            }
+            button.attributedTitle = NSAttributedString(string: " " + glyph, attributes: attributes)
         }
+
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
     }
 
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)
@@ -1068,14 +1108,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // The full text stays in the tooltip.
                 let title = GlanceFormatting.tailTruncated(
                     fullTitle, limit: GlanceFormatting.reasonBudget)
-                let item = NSMenuItem(title: title, action: #selector(handleAttentionAction(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = server
+
+                // F4: these rows used to run `health.action` on click — a row
+                // reading "demo-filesystem — failed to connect" silently
+                // RESTARTED the server, and an `enable`-actioned row enabled
+                // one. Nothing in the label said so, nothing confirmed it and
+                // (F3) nothing reported failure. A row that reads as
+                // disclosure now navigates and nothing else; the action moves
+                // into a submenu under its own verb, matching the explicit
+                // verbs already used under `Servers ▸`.
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
                 item.toolTip = fullTitle
                 // Truncated on screen, spoken in full — tooltips are not read
                 // by VoiceOver (same FR-025 discipline as the glance rows).
                 item.setAccessibilityLabel(fullTitle)
                 item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
+
+                if let verb = TrayServerAction.fromHealthAction(action) {
+                    let rowMenu = NSMenu(title: server.name)
+
+                    let act = NSMenuItem(title: verb.menuTitle,
+                                         action: #selector(performAttentionAction(_:)),
+                                         keyEquivalent: "")
+                    act.target = self
+                    act.representedObject = server
+                    act.image = NSImage(systemSymbolName: actionIcon(for: action),
+                                        accessibilityDescription: action)
+                    rowMenu.addItem(act)
+                    rowMenu.addItem(.separator())
+
+                    let details = NSMenuItem(title: "Open Server Details",
+                                             action: #selector(showServerDetailFromMenu(_:)),
+                                             keyEquivalent: "")
+                    details.target = self
+                    details.representedObject = server.name
+                    rowMenu.addItem(details)
+
+                    item.submenu = rowMenu
+                } else {
+                    // Nothing to run — quarantine review, a missing secret, a
+                    // configuration problem. Straight to the detail view.
+                    item.action = #selector(showServerDetailFromMenu(_:))
+                    item.target = self
+                    item.representedObject = server.name
+                }
                 submenu.addItem(item)
             }
             parent.submenu = submenu
@@ -1103,79 +1179,42 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             serversSubmenu.addItem(makeAddServerItem())
             serversSubmenu.addItem(.separator())
 
+            // F15: 29 flat alphabetical entries — 13 of them disabled, 3
+            // quarantined, interleaved and told apart only by dot colour —
+            // made a submenu taller than the screen. Attention first, then the
+            // servers that are working, then the disabled tail behind one row.
+            let attentionNames = Set(attentionServers.map(\.name))
+            var grouped: [TrayServerGroup: [ServerStatus]] = [:]
             for server in appState.servers {
-                let item = NSMenuItem(title: server.name, action: nil, keyEquivalent: "")
+                let group = TrayServerGrouping.group(
+                    enabled: server.enabled,
+                    needsAttention: attentionNames.contains(server.name))
+                grouped[group, default: []].append(server)
+            }
 
-                // Status icon: colored dot. The OAuth login-required state is a
-                // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
-                // gives it the system accent tint instead of the red error dot +
-                // red lock badge that previously framed sign-in as a hard failure.
-                let needsAuth = server.isOAuthLoginRequired
-                let dotColor = server.menuStatusNSColor
+            for server in (grouped[.needsAttention] ?? []) + (grouped[.active] ?? []) {
+                serversSubmenu.addItem(makeServerMenuItem(server))
+            }
 
-                let iconSize = NSSize(width: 16, height: 16)
-                let icon = NSImage(size: iconSize, flipped: false) { _ in
-                    // Draw health dot
-                    let dotRect = NSRect(x: 2, y: 4, width: 8, height: 8)
-                    dotColor.setFill()
-                    NSBezierPath(ovalIn: dotRect).fill()
-                    return true
-                }
-                item.image = icon
-
-                // Per-server submenu with actions
-                let sub = NSMenu()
-                let statusText = server.health?.summary ?? (server.connected ? "Connected" : server.enabled ? "Disconnected" : "Disabled")
-                let statusLine = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-                statusLine.isEnabled = false
-                sub.addItem(statusLine)
-
-                // Protocol info
-                let protoLine = NSMenuItem(title: "Protocol: \(server.protocol)", action: nil, keyEquivalent: "")
-                protoLine.isEnabled = false
-                sub.addItem(protoLine)
-
-                sub.addItem(.separator())
-
-                // OAuth sign-in — calm, actionable affordance shown first when
-                // login is required (MCP-1822), not error framing.
-                if needsAuth {
-                    let login = NSMenuItem(title: "Sign in", action: #selector(loginServer(_:)), keyEquivalent: "")
-                    login.target = self
-                    login.representedObject = server.name
-                    login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
-                    sub.addItem(login)
-                    sub.addItem(.separator())
-                }
-
-                if server.enabled {
-                    let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
-                    let disable = NSMenuItem(title: disableLabel, action: #selector(disableServer(_:)), keyEquivalent: "")
-                    disable.target = self
-                    disable.representedObject = server.name
-                    sub.addItem(disable)
+            let disabledServers = grouped[.disabled] ?? []
+            if !disabledServers.isEmpty {
+                if disabledServers.count >= TrayServerGrouping.disabledFoldThreshold {
+                    let fold = NSMenuItem(title: "Disabled (\(disabledServers.count))",
+                                          action: nil, keyEquivalent: "")
+                    let foldMenu = NSMenu(title: "Disabled")
+                    for server in disabledServers {
+                        foldMenu.addItem(makeServerMenuItem(server))
+                    }
+                    fold.submenu = foldMenu
+                    serversSubmenu.addItem(.separator())
+                    serversSubmenu.addItem(fold)
                 } else {
-                    let enableLabel = server.protocol == "stdio" ? "Start" : "Enable"
-                    let enable = NSMenuItem(title: enableLabel, action: #selector(enableServer(_:)), keyEquivalent: "")
-                    enable.target = self
-                    enable.representedObject = server.name
-                    sub.addItem(enable)
+                    // Below the fold threshold the extra click costs more than
+                    // the rows it saves.
+                    for server in disabledServers {
+                        serversSubmenu.addItem(makeServerMenuItem(server))
+                    }
                 }
-
-                let restart = NSMenuItem(title: "Restart", action: #selector(restartServer(_:)), keyEquivalent: "")
-                restart.target = self
-                restart.representedObject = server.name
-                sub.addItem(restart)
-
-                sub.addItem(.separator())
-
-                let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
-                logs.target = self
-                logs.representedObject = server.name
-                sub.addItem(logs)
-
-                item.submenu = sub
-                serversSubmenu.addItem(item)
             }
 
             serversMenuItem.submenu = serversSubmenu
@@ -1201,12 +1240,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             profileSubmenu.addItem(allItem)
             profileSubmenu.addItem(.separator())
 
+            // F11: the tray showed only a tool count, so a profile whose
+            // servers are not in the config read as "empty" rather than
+            // "switching to this scopes every agent to nothing".
+            let knownServers = Set(appState.servers.map(\.name))
             for profile in appState.profiles {
-                let item = NSMenuItem(title: "\(profile.name) (\(profile.toolCount) tools)",
+                let title = TrayProfileDisplay.label(
+                    name: profile.name,
+                    servers: profile.servers,
+                    toolCount: profile.toolCount,
+                    knownServers: knownServers)
+                let item = NSMenuItem(title: title,
                                       action: #selector(switchProfile(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = profile.name
                 item.state = profile.name == appState.activeProfile ? .on : .off
+                if profile.servers.filter({ knownServers.contains($0) }).isEmpty {
+                    item.toolTip = "None of this profile’s servers (\(profile.servers.joined(separator: ", "))) "
+                        + "are in the configuration. Switching to it would leave agents with no tools."
+                }
                 profileSubmenu.addItem(item)
             }
 
@@ -1230,7 +1282,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // together (a nil target would make it silently do nothing).
         menu.addItem(ConnectClientMenuRouter.shared.makeMenuItem())
 
-        let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: "")
+        // F9: "Open MCPProxy..." and "Open Web UI" never said that one is a
+        // native window and the other a browser tab.
+        let openApp = NSMenuItem(title: "Open MCPProxy Window", action: #selector(openMainWindow), keyEquivalent: "")
         openApp.target = self
         menu.addItem(openApp)
 
@@ -1238,16 +1292,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let webUI = NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: "")
+        let webUI = NSMenuItem(title: "Open Web UI in Browser", action: #selector(openWebUI), keyEquivalent: "")
         webUI.target = self
         menu.addItem(webUI)
 
         menu.addItem(.separator())
 
-        // Settings
-        let autoStart = NSMenuItem(title: "Run at Startup", action: #selector(toggleAutoStart(_:)), keyEquivalent: "")
+        // F9: the same AutoStartService setting is called "Launch MCPProxy at
+        // login" in Settings → App. One setting, one name — and a tooltip that
+        // separates it from "Start MCPProxy Core when the app opens", the
+        // genuinely confusable neighbour one row from "Start/Stop MCPProxy
+        // Core" (which means *now*, not at launch).
+        let autoStart = NSMenuItem(title: "Launch at Login", action: #selector(toggleAutoStart(_:)), keyEquivalent: "")
         autoStart.target = self
         autoStart.state = appState.autoStartEnabled ? .on : .off
+        autoStart.toolTip = "Starts the MCPProxy app when you log in. Whether it also starts the core is "
+            + "“Start MCPProxy Core when the app opens” in Settings → App."
         menu.addItem(autoStart)
 
         let checkUpdates = NSMenuItem(title: "Check for Updates", action: #selector(checkForUpdates), keyEquivalent: "")
@@ -1369,6 +1429,109 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         quit.target = self
         menu.addItem(quit)
 
+    }
+
+    /// One row of the Servers submenu: the server's name, a health dot, and a
+    /// submenu of the actions that apply to it.
+    ///
+    /// Internal so the menu tests can build a row without walking the whole
+    /// menu, and because F15's grouping calls it from three places.
+    @MainActor
+    func makeServerMenuItem(_ server: ServerStatus) -> NSMenuItem {
+        let item = NSMenuItem(title: server.name, action: nil, keyEquivalent: "")
+
+        // Status icon: colored dot. The OAuth login-required state is a
+        // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
+        // gives it the system accent tint instead of the red error dot +
+        // red lock badge that previously framed sign-in as a hard failure.
+        let needsAuth = server.isOAuthLoginRequired
+        let dotColor = server.menuStatusNSColor
+
+        let iconSize = NSSize(width: 16, height: 16)
+        let icon = NSImage(size: iconSize, flipped: false) { _ in
+            // Draw health dot
+            let dotRect = NSRect(x: 2, y: 4, width: 8, height: 8)
+            dotColor.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+            return true
+        }
+        item.image = icon
+
+        // Per-server submenu with actions
+        let sub = NSMenu()
+        let statusText = server.health?.summary ?? (server.connected ? "Connected" : server.enabled ? "Disconnected" : "Disabled")
+        let statusLine = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        statusLine.isEnabled = false
+        sub.addItem(statusLine)
+
+        // Protocol info — display-normalised (F12). `streamable-http` beside
+        // `http` and `sse` is three wire spellings of one transport family.
+        let protoLine = NSMenuItem(title: "Protocol: \(TrayProtocolDisplay.label(for: server.protocol))",
+                                   action: nil, keyEquivalent: "")
+        protoLine.isEnabled = false
+        sub.addItem(protoLine)
+
+        sub.addItem(.separator())
+
+        // OAuth sign-in — calm, actionable affordance shown first when
+        // login is required (MCP-1822), not error framing.
+        if needsAuth {
+            let login = NSMenuItem(title: TrayServerAction.login.menuTitle,
+                                   action: #selector(loginServer(_:)), keyEquivalent: "")
+            login.target = self
+            login.representedObject = server.name
+            login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
+            sub.addItem(login)
+            sub.addItem(.separator())
+        }
+
+        // F8(a): a quarantined server offered only Disable · Restart · View
+        // Logs — the one thing it needs is a review, and the menu had no path
+        // to it at all. Deep-links to Server Detail, which opens on Tools with
+        // the quarantine banner.
+        if server.quarantined {
+            let review = NSMenuItem(title: TrayServerAction.approve.menuTitle,
+                                    action: #selector(showServerDetailFromMenu(_:)), keyEquivalent: "")
+            review.target = self
+            review.representedObject = server.name
+            review.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "review quarantine")
+            sub.addItem(review)
+            sub.addItem(.separator())
+        }
+
+        // F7: one config write, one verb pair. `Stop`/`Start` for stdio and
+        // `Disable`/`Enable` for everything else put two mental models —
+        // transient process control vs. persistent admin state — on the same
+        // `enabled` flag, and left submenus reading "Disabled … Start".
+        if server.enabled {
+            let disable = NSMenuItem(title: TrayServerAction.disable.menuTitle,
+                                     action: #selector(disableServer(_:)), keyEquivalent: "")
+            disable.target = self
+            disable.representedObject = server.name
+            sub.addItem(disable)
+        } else {
+            let enable = NSMenuItem(title: TrayServerAction.enable.menuTitle,
+                                    action: #selector(enableServer(_:)), keyEquivalent: "")
+            enable.target = self
+            enable.representedObject = server.name
+            sub.addItem(enable)
+        }
+
+        let restart = NSMenuItem(title: TrayServerAction.restart.menuTitle,
+                                 action: #selector(restartServer(_:)), keyEquivalent: "")
+        restart.target = self
+        restart.representedObject = server.name
+        sub.addItem(restart)
+
+        sub.addItem(.separator())
+
+        let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
+        logs.target = self
+        logs.representedObject = server.name
+        sub.addItem(logs)
+
+        item.submenu = sub
+        return item
     }
 
     // MARK: - Menu Actions
@@ -1542,43 +1705,115 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.runModal()
     }
 
-    @objc private func handleAttentionAction(_ sender: NSMenuItem) {
-        guard let server = sender.representedObject as? ServerStatus else { return }
-        let action = server.health?.action ?? ""
+    /// Run the remediation a "Needs Attention" row offers — from the row's own
+    /// submenu, under its own verb, never as a side effect of clicking the row
+    /// (F4).
+    @MainActor
+    @objc private func performAttentionAction(_ sender: NSMenuItem) {
+        guard let server = sender.representedObject as? ServerStatus,
+              let verb = TrayServerAction.fromHealthAction(server.health?.action ?? "") else { return }
+        perform(verb, on: server.name, id: server.id)
+    }
 
-        // Perform the API action silently (if any)
-        if !action.isEmpty {
-            Task {
-                switch action {
-                case "login": try? await appState.apiClient?.loginServer(server.id)
-                case "restart": try? await appState.apiClient?.restartServer(server.id)
-                case "enable": try? await appState.apiClient?.enableServer(server.id)
-                default: break
-                }
-            }
-        }
-
-        // Always navigate to the server's detail page
+    /// Navigate to a server's detail page. The represented object is the
+    /// server NAME (what `.showServerDetail` matches on).
+    @objc private func showServerDetailFromMenu(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
         showMainWindow()
         NotificationCenter.default.post(name: .switchToServers, object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: .showServerDetail, object: server.name)
+            NotificationCenter.default.post(name: .showServerDetail, object: name)
         }
     }
 
+    /// F3: the one place a per-server menu action is dispatched.
+    ///
+    /// Every one of these used to be `try? await …`, so a restart that 500s
+    /// was indistinguishable from one that worked — the menu simply closed.
+    /// The Web UI raises a toast and Server Detail shows an inline error; the
+    /// tray was the only surface that lied by omission. Failures are now
+    /// user-visible, and the alert is presented only on failure so the happy
+    /// path stays silent.
+    @MainActor
+    private func perform(_ action: TrayServerAction, on name: String, id: String) {
+        guard let client = appState.apiClient else {
+            presentServerActionFailure(action, server: name, error: TrayActionError.noCore)
+            return
+        }
+        Task { [weak self] in
+            do {
+                switch action {
+                case .enable: try await client.enableServer(id)
+                case .disable: try await client.disableServer(id)
+                case .restart: try await client.restartServer(id)
+                case .login: try await client.loginServer(id)
+                case .approve: return  // review is a human decision — never dispatched
+                }
+                NSLog("[MCPProxy] %@ %@: ok", action.rawValue, name)
+            } catch {
+                NSLog("[MCPProxy] %@ %@ failed: %@", action.rawValue, name, error.localizedDescription)
+                await MainActor.run {
+                    self?.presentServerActionFailure(action, server: name, error: error)
+                }
+            }
+        }
+    }
+
+    /// A failed menu action, said out loud. Modal because the user just asked
+    /// for this and is still looking at the menu bar — and because a
+    /// UNUserNotification can be silenced by Focus, which would put us back
+    /// where F3 started.
+    @MainActor
+    private func presentServerActionFailure(_ action: TrayServerAction, server: String, error: Error) {
+        let alert = NSAlert()
+        alert.messageText = TrayServerActionFailure.title(action: action, server: server)
+        alert.informativeText = TrayServerActionFailure.message(action: action, server: server, error: error)
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Server Details")
+        alert.addButton(withTitle: "Report an Issue")
+        alert.addButton(withTitle: "Dismiss")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            showMainWindow()
+            NotificationCenter.default.post(name: .switchToServers, object: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: .showServerDetail, object: server)
+            }
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.open(ProjectLinks.issues)
+        default:
+            break
+        }
+    }
+
+    /// Failure modes the tray itself knows about, before any request is made.
+    enum TrayActionError: LocalizedError {
+        case noCore
+        var errorDescription: String? {
+            switch self {
+            case .noCore:
+                return "MCPProxy is not connected to a running core."
+            }
+        }
+    }
+
+    @MainActor
     @objc private func enableServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await appState.apiClient?.enableServer(id) }
+        perform(.enable, on: id, id: id)
     }
 
+    @MainActor
     @objc private func disableServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await appState.apiClient?.disableServer(id) }
+        perform(.disable, on: id, id: id)
     }
 
+    @MainActor
     @objc private func restartServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await appState.apiClient?.restartServer(id) }
+        perform(.restart, on: id, id: id)
     }
 
     /// Switch the server-level default active profile (Profiles v2 T5). The
@@ -1593,25 +1828,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    @MainActor
     @objc private func loginServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else {
             NSLog("[MCPProxy] loginServer: no server ID in representedObject")
             return
         }
         NSLog("[MCPProxy] loginServer: triggering login for %@", id)
-        // Use appState.apiClient directly (already on main thread, no async needed)
-        if let client = appState.apiClient {
-            Task {
-                do {
-                    try await client.loginServer(id)
-                    NSLog("[MCPProxy] loginServer: API call succeeded for %@", id)
-                } catch {
-                    NSLog("[MCPProxy] loginServer: API call failed: %@", error.localizedDescription)
-                }
-            }
-        } else {
-            NSLog("[MCPProxy] loginServer: no apiClient available")
-        }
+        perform(.login, on: id, id: id)
     }
 
     @objc private func viewServerLogs(_ sender: NSMenuItem) {
@@ -1638,25 +1862,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// Open the Web UI activity log filtered by a glance row's session.
+    /// Open the native activity log filtered to a glance row's session.
     ///
     /// Opens the app's own window at the Activity section — the activity log
     /// has a native home, and a tray click should not context-switch the user
-    /// into a browser (the Web UI stays reachable via "Open Web UI"). The
-    /// row's session id (representedObject) stays on the item because the
-    /// glance in-place update reads it as row identity; the native log
-    /// currently opens unfiltered.
+    /// into a browser (the Web UI stays reachable via "Open Web UI in
+    /// Browser").
+    ///
+    /// F10: the row's session id (representedObject) used to be thrown away,
+    /// so a click on one client's run opened the whole unfiltered log. The id
+    /// now rides along on `.activityFilter` and seeds ActivityView's session
+    /// filter, which is what makes a glance row parent↔child navigable.
     @objc private func openActivityForSession(_ sender: NSMenuItem) {
+        let sessionId = sender.representedObject as? String
+        // Published BEFORE the window is built, so a view created by this very
+        // click picks the filter up on appear. A delayed notification would be
+        // a race: too early and nothing is subscribed, too late and the user
+        // has already read an unfiltered log.
+        if let sessionId, !sessionId.isEmpty {
+            appState.pendingActivitySessionFilter = sessionId
+        }
         showMainWindow(tab: Self.glanceActivityDestination)
+        guard let sessionId, !sessionId.isEmpty else { return }
+        // Covers the already-open window, whose observers are live now.
+        NotificationCenter.default.post(name: .activityFilter, object: sessionId)
     }
 
     /// Where a glance row click lands. A constant so tests can pin the
     /// destination without instantiating the app delegate.
     static let glanceActivityDestination: SidebarItem = .activity
 
-    @objc private func openConfigFile() {
-        NSWorkspace.shared.open(InstancePaths.configFileURL)
-    }
+    // `openConfigFile()` used to live here: an @objc selector nothing
+    // referenced, for a file the tray deliberately never reads or writes (all
+    // config goes through REST). Deleted by the 2026-08 UX audit (F14) rather
+    // than wired to a menu row that would contradict the REST-only contract —
+    // the effective configuration is in Settings → Raw.
 
     // MARK: - Project links (discussion #948)
 
@@ -1678,11 +1918,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         credits.append(NSAttributedString(
             string: "Smart MCP proxy — intelligent tool discovery, token savings, and security quarantine.\n\n",
             attributes: body))
-        appendLink(to: credits, label: "Homepage", url: ProjectLinks.homepage)
-        credits.append(NSAttributedString(string: "   ", attributes: body))
-        appendLink(to: credits, label: "GitHub", url: ProjectLinks.github)
-        credits.append(NSAttributedString(string: "   ", attributes: body))
-        appendLink(to: credits, label: "Documentation", url: ProjectLinks.docs)
+        for (index, link) in AboutPanelLinks.all.enumerated() {
+            if index > 0 { credits.append(NSAttributedString(string: "   ", attributes: body)) }
+            appendLink(to: credits, label: link.label, url: link.url)
+        }
 
         NSApp.orderFrontStandardAboutPanel(options: [
             .credits: credits
@@ -1802,6 +2041,11 @@ extension Notification.Name {
     /// Posted by `showMainWindow(tab:)` to select a sidebar section in an
     /// already-open main window (object = SidebarItem raw value string).
     static let switchToSidebarTab = Notification.Name("MCPProxy.switchToSidebarTab")
+    /// Posted by a tray glance row to scope the Activity Log to the session it
+    /// came from (object = MCP session id string). F10 — a glance row that
+    /// opened the whole unfiltered log was the one place the "parent↔child
+    /// navigable" rule was not honoured.
+    static let activityFilter = Notification.Name("MCPProxy.activityFilter")
 }
 
 @main

@@ -193,6 +193,7 @@ import {
   DOCS_BASE,
   docsUrl,
   isBlankInstructions,
+  restartRequiredLabels,
   type SettingField,
   type SettingsAccordion,
 } from '@/views/settings/fields'
@@ -424,8 +425,10 @@ const settingsHints = computed<Hint[]>(() => [
         text: 'Each section saves only the fields you changed, so secrets like your API key are never overwritten.',
       },
       {
+        // UX audit F16: derived from the badges the fields actually carry, not
+        // a hand-maintained list that drifts away from them.
         title: 'Requires restart',
-        list: ['Listen address', 'Data directory', 'API key', 'TLS/HTTPS settings'],
+        list: restartRequiredLabels(),
       },
     ],
   },

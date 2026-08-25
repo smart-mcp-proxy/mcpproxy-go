@@ -90,7 +90,12 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 			tlsChanged = true
 		} else if oldCfg.TLS.Enabled != newCfg.TLS.Enabled ||
 			oldCfg.TLS.RequireClientCert != newCfg.TLS.RequireClientCert ||
-			oldCfg.TLS.CertsDir != newCfg.TLS.CertsDir {
+			oldCfg.TLS.CertsDir != newCfg.TLS.CertsDir ||
+			// HSTS wraps the handler chain once, where the HTTP server is built
+			// (server.go withHSTS), so it cannot apply hot. Settings already
+			// badges tls.hsts as restart-required; this makes the backend agree
+			// instead of silently reporting the edit as applied (UX audit F16).
+			oldCfg.TLS.HSTS != newCfg.TLS.HSTS {
 			tlsChanged = true
 		}
 
@@ -119,8 +124,21 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 
 	// Track hot-reloadable changes
 
-	// Server configuration changes (can be hot-reloaded)
-	if !reflect.DeepEqual(oldCfg.Servers, newCfg.Servers) {
+	// Server configuration changes (can be hot-reloaded).
+	//
+	// Compared via jsonEqual, not reflect.DeepEqual, for the same reason as
+	// docker_isolation and trusted_hosts below: PATCH /api/v1/config round-trips
+	// the LIVE config through JSON before merging the patch, so newCfg.Servers is
+	// a decoded copy while oldCfg.Servers is the in-memory slice. DeepEqual saw
+	// those as different for every patch — `Created`/`Updated` carry a monotonic
+	// reading and a *time.Location in memory but not after an RFC3339 decode, and
+	// `omitempty` collapses empty Args/Env/Headers to nil. That mislabelled
+	// changed_fields as ["mcpServers"] on unrelated edits (UX audit F16) AND
+	// triggered a spurious full upstream reload/reconnect on every settings save.
+	// The length guard keeps nil vs []*ServerConfig{} (`null` vs `[]`) from
+	// re-introducing the same false positive when there are no servers at all.
+	if len(oldCfg.Servers) != len(newCfg.Servers) ||
+		(len(oldCfg.Servers) > 0 && !jsonEqual(oldCfg.Servers, newCfg.Servers)) {
 		result.ChangedFields = append(result.ChangedFields, "mcpServers")
 		// These will be applied by triggering server reconnection
 	}
@@ -206,13 +224,24 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// code_execution handler resolves timeout / max_tool_calls /
 	// max_parallel from the LIVE snapshot (p.currentConfig()) on every
 	// execution, so a lone edit here must be reported as a change instead of
-	// being swallowed as "no changes detected". EnableCodeExecution is
-	// deliberately absent: toggling it changes the registered tool set,
-	// which is a restart concern.
+	// being swallowed as "no changes detected".
 	if oldCfg.CodeExecutionTimeoutMs != newCfg.CodeExecutionTimeoutMs ||
 		oldCfg.CodeExecutionMaxToolCalls != newCfg.CodeExecutionMaxToolCalls ||
 		oldCfg.CodeExecutionMaxParallel != newCfg.CodeExecutionMaxParallel {
 		result.ChangedFields = append(result.ChangedFields, "code_execution")
+	}
+
+	// enable_code_execution (UX audit F16 — hot-reloadable). Toggling this
+	// changes the advertised tool set, which used to make it a restart concern:
+	// the routing-mode surfaces built their code_execution entry (live tool or
+	// "disabled" stub) once, from the construction-time config snapshot. Both
+	// now build from the LIVE snapshot and are rebuilt on config.reloaded
+	// (server.listenForRoutingModeRefresh), and the handler gate already read
+	// the live value per call — so the flag applies without a restart and must
+	// be reported here, or ApplyConfig swallows a lone toggle as "no changes
+	// detected" and never emits config.reloaded.
+	if oldCfg.EnableCodeExecution != newCfg.EnableCodeExecution {
+		result.ChangedFields = append(result.ChangedFields, "enable_code_execution")
 	}
 
 	// The JS runtime pool is sized once at server construction and never

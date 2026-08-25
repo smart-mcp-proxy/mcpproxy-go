@@ -21,6 +21,11 @@ final class ConfigStore: ObservableObject {
     @Published var loadError: String?
     /// Bumped on every mutation so SwiftUI re-evaluates dirty state.
     @Published var revision = 0
+    /// The core's built-in MCP `instructions` text (MCP-2176), shown as the
+    /// placeholder of the instructions field so a blank box reads as "the
+    /// default is this" instead of "nothing". Fetched, never hardcoded — the
+    /// Web UI does the same and the two must not drift.
+    @Published var defaultInstructions: String?
 
     private var original: [String: Any] = [:]
     private let appState: AppState
@@ -42,6 +47,11 @@ final class ConfigStore: ObservableObject {
             revision += 1
         } catch {
             loadError = (error as? APIClientError)?.errorDescription ?? error.localizedDescription
+        }
+        // Best-effort: an older core without the field just leaves the generic
+        // placeholder in place, so this never fails the settings load.
+        if let status = try? await api.status(), let text = status.defaultInstructions, !text.isEmpty {
+            defaultInstructions = text
         }
         loading = false
     }
@@ -304,30 +314,45 @@ struct ConfigFieldRow: View {
     private var validationError: String? { dirty ? validateConfigField(field, store.value(field.key)) : nil }
 
     var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(field.label).fontWeight(.medium)
-                    if dirty { Circle().fill(Color.orange).frame(width: 6, height: 6) }
-                    if field.restart {
-                        Text("restart").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Color.orange.opacity(0.25)).cornerRadius(4)
-                    }
-                    if let docs = field.docs, let url = URL(string: SettingsCatalog.docsBase + docs) {
-                        Link("docs ↗", destination: url).font(.caption)
-                    }
+        Group {
+            // A textarea cannot share a row with its label — 240pt of trailing
+            // column is not a place to edit a paragraph. It stacks instead.
+            if field.control == .textarea {
+                VStack(alignment: .leading, spacing: 6) {
+                    labelBlock
+                    control.frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if let help = field.help {
-                    Text(help).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                if let err = validationError {
-                    Text(err).font(.caption).foregroundColor(.red)
+            } else {
+                HStack(alignment: .top) {
+                    labelBlock
+                    Spacer(minLength: 16)
+                    control.frame(maxWidth: 240, alignment: .trailing)
                 }
             }
-            Spacer(minLength: 16)
-            control.frame(maxWidth: 240, alignment: .trailing)
         }
         .padding(.vertical, 8)
+    }
+
+    private var labelBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(field.label).fontWeight(.medium)
+                if dirty { Circle().fill(Color.orange).frame(width: 6, height: 6) }
+                if field.restart {
+                    Text("restart").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.25)).cornerRadius(4)
+                }
+                if let docs = field.docs, let url = URL(string: SettingsCatalog.docsBase + docs) {
+                    Link("docs ↗", destination: url).font(.caption)
+                }
+            }
+            if let help = field.help {
+                Text(help).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let err = validationError {
+                Text(err).font(.caption).foregroundColor(.red)
+            }
+        }
     }
 
     @ViewBuilder private var control: some View {
@@ -340,9 +365,36 @@ struct ConfigFieldRow: View {
             }
             .labelsHidden().frame(maxWidth: 220)
         case .number:
-            TextField("", value: store.doubleBinding(field.key), format: .number)
-                .multilineTextAlignment(.trailing).frame(width: 100)
-                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 4) {
+                TextField("", value: store.doubleBinding(field.key), format: .number)
+                    .multilineTextAlignment(.trailing).frame(width: 100)
+                    .textFieldStyle(.roundedBorder)
+                // F13: fields.ts gives entropy_threshold step 0.1 and
+                // oauth_expiry_warning_hours step 0.5; without a stepper the
+                // native form could only be typed into.
+                if let step = field.step {
+                    Stepper("", value: store.doubleBinding(field.key),
+                            in: (field.min ?? -.greatestFiniteMagnitude)...(field.max ?? .greatestFiniteMagnitude),
+                            step: step)
+                        .labelsHidden()
+                }
+            }
+        case .textarea:
+            // The instructions field: multi-line, and its placeholder is the
+            // live built-in default rather than an example.
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: store.optionalStringBinding(field.key))
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(minHeight: 120)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+                if coerceString(store.value(field.key)).isEmpty {
+                    Text(store.defaultInstructions ?? field.placeholder ?? "")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 10)
+                        .allowsHitTesting(false)
+                }
+            }
         case .text, .duration:
             // Duration fields are tri-state: an optional one stores a blank
             // value as "unset" (reset to default) via optionalStringBinding.

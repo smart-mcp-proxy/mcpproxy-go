@@ -48,7 +48,7 @@
                 <th>Tokens</th>
                 <th>Started</th>
                 <th>Last Active</th>
-                <th>Actions</th>
+                <th class="whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -108,18 +108,19 @@
                   <div class="text-sm">{{ formatTimestamp(session.last_activity) }}</div>
                   <div class="text-xs text-base-content/60">{{ formatRelativeTime(session.last_activity) }}</div>
                 </td>
-                <td>
+                <td class="whitespace-nowrap">
                   <!-- Link by WORK session (Spec 082) — that is what the Activity
                        Log groups by. Falling back to the transport id keeps rows
-                       written before 082 reachable; the log accepts either. -->
-                  <!--
-                    whitespace-nowrap: the label wrapped onto two lines inside a
-                    btn-xs and clipped both of them (audit finding F36, #1046).
-                  -->
+                       written before 082 reachable; the log accepts either.
+                       whitespace-nowrap: the label wrapped onto two lines inside
+                       a btn-xs in this narrow last column and clipped both of
+                       them (audit finding F36, #1046). -->
+
                   <router-link
                     :to="{ name: 'activity', query: { session: session.work_session_id || session.id } }"
                     class="btn btn-xs btn-primary whitespace-nowrap"
                     title="View activity for this session"
+                    data-test="session-view-activity"
                   >
                     View Activity
                   </router-link>

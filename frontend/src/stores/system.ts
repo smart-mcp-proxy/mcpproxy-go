@@ -24,6 +24,16 @@ export const useSystemStore = defineStore('system', () => {
   const checkingForUpdates = ref(false)
   const updateCheckedAt = ref<string | null>(null)
 
+  // Audit F28: with no API key the user saw three messages for one cause — the
+  // "Authentication Required" modal, a red inline load error behind it, and a
+  // "Connection Lost — Reconnecting" toast. While the modal owns the screen it
+  // owns the message too; the downstream surfaces read this flag and stay quiet.
+  const authRequired = ref(false)
+
+  function setAuthRequired(value: boolean) {
+    authRequired.value = value
+  }
+
   // Available themes
   const themes: Theme[] = [
     { name: 'light', displayName: 'Light', dark: false },
@@ -208,11 +218,15 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
-    // Listen for activity events (tool calls, policy decisions, etc.)
+    // Listen for activity events (tool calls, policy decisions, etc.).
+    //
+    // These payloads carry the call's raw arguments and response, so they are
+    // NOT logged: `console.log(data)` printed whatever secret the call carried
+    // straight into the DevTools console, which is the same leak the activity
+    // drawer was fixed for (audit F13). Only parse failures are logged.
     es.addEventListener('activity.tool_call.started', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.tool_call.started event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-started', { detail: payload }))
@@ -224,7 +238,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity.tool_call.completed', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.tool_call.completed event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: payload }))
@@ -236,7 +249,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity.policy_decision', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.policy_decision event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-policy', { detail: payload }))
@@ -248,7 +260,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: payload }))
@@ -261,7 +272,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity.internal_tool_call.completed', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.internal_tool_call.completed event received:', data)
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: payload }))
       } catch (error) {
@@ -492,6 +502,7 @@ export const useSystemStore = defineStore('system', () => {
     routing,
     checkingForUpdates,
     updateCheckedAt,
+    authRequired,
 
     // Computed
     isRunning,
@@ -519,5 +530,6 @@ export const useSystemStore = defineStore('system', () => {
     fetchInfo,
     fetchRouting,
     checkForUpdates,
+    setAuthRequired,
   }
 })

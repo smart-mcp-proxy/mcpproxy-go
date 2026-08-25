@@ -13,19 +13,23 @@
         <div class="alert alert-info mb-4">
           <div class="flex-1">
             <h4 class="font-semibold mb-2">How to get the API key:</h4>
+            <!-- Audit F28: headless and server installs have no tray, so the
+                 tray route can't be the only one. The config file and the CLI
+                 work everywhere. -->
             <ol class="list-decimal list-inside space-y-1 text-sm">
-              <li><strong>Using Tray:</strong> Right-click the MCPProxy tray icon and select "Open Web UI"</li>
-              <li><strong>From Logs:</strong> Check mcpproxy startup logs for the API key, then add <code class="bg-base-200 px-1 rounded">?apikey=YOUR_KEY</code> to the URL</li>
-              <li><strong>Manual Entry:</strong> Enter your API key below if you have it</li>
+              <li><strong>From the CLI:</strong> run <code class="bg-base-200 px-1 rounded">mcpproxy doctor</code>, or read <code class="bg-base-200 px-1 rounded">api_key</code> in <code class="bg-base-200 px-1 rounded">~/.mcpproxy/mcp_config.json</code></li>
+              <li><strong>From logs:</strong> the key is printed in the mcpproxy startup log</li>
+              <li><strong>Using the tray</strong> (desktop installs): right-click the MCPProxy tray icon and select "Open Web UI" — it opens an already-authenticated window</li>
             </ol>
           </div>
         </div>
       </div>
 
-      <!-- Manual API Key Entry -->
+      <!-- Manual API Key Entry. Audit F28: the field was labelled "(optional)"
+           while being the only way in. -->
       <div class="form-control mb-6">
         <label class="label">
-          <span class="label-text font-semibold">Enter API Key (optional)</span>
+          <span class="label-text font-semibold">API key <span class="text-error">(required)</span></span>
         </label>
         <div class="input-group">
           <input
@@ -72,8 +76,17 @@
           </svg>
           Refresh & Retry
         </button>
-        <button v-if="canClose" class="btn btn-outline" @click="handleClose">
-          Continue Without Auth
+        <!-- Audit F28: "Continue Without Auth" led to a shell of zero-valued
+             tiles, so it must not sit at equal weight beside the real way in.
+             Demoted to a link, and honest about where it goes. -->
+        <button
+          v-if="canClose"
+          class="btn btn-ghost btn-sm text-base-content/60"
+          data-test="auth-dismiss"
+          title="The UI cannot load data without a key — pages will render empty"
+          @click="handleClose"
+        >
+          Dismiss (pages stay empty)
         </button>
       </div>
     </div>

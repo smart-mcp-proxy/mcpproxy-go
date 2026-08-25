@@ -6,6 +6,109 @@
     <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
     <UpdateBanner />
 
+    <!-- "What needs me": servers in a bad state and tools awaiting approval.
+         These live above the panel switcher rather than inside a panel — they
+         are the one thing on this page the user is expected to act on, and
+         burying them under a tab means the landing page can look calm while a
+         server is down or an unreviewed tool is waiting. Each renders only
+         when it has something to say, so a healthy install sees neither. -->
+    <!-- Servers Needing Attention Banner (using unified health status) -->
+    <div
+      v-if="serversNeedingAttention.length > 0"
+      class="alert alert-warning"
+    >
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+      </svg>
+      <div class="flex-1">
+        <h3 class="font-bold">{{ serversNeedingAttention.length }} server{{ serversNeedingAttention.length !== 1 ? 's' : '' }} need{{ serversNeedingAttention.length === 1 ? 's' : '' }} attention</h3>
+        <div class="text-sm space-y-1 mt-1">
+          <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex items-center gap-2">
+            <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'">●</span>
+            <router-link :to="serverDetailPath(server.name)" class="font-medium link link-hover">{{ server.name }}</router-link>
+            <span class="opacity-70">{{ server.health?.summary }}</span>
+            <button
+              v-if="server.health?.action === 'login'"
+              @click="triggerServerAction(server.name, 'oauth_login')"
+              class="btn btn-xs btn-primary"
+            >
+              Login
+            </button>
+            <button
+              v-if="server.health?.action === 'restart'"
+              @click="triggerServerAction(server.name, 'restart')"
+              class="btn btn-xs btn-primary"
+            >
+              Restart
+            </button>
+            <button
+              v-if="server.health?.action === 'enable'"
+              @click="triggerServerAction(server.name, 'enable')"
+              class="btn btn-xs btn-primary"
+            >
+              Enable
+            </button>
+            <router-link
+              v-if="server.health?.action === 'set_secret'"
+              to="/secrets"
+              class="btn btn-xs btn-primary"
+            >
+              Set Secret
+            </router-link>
+            <router-link
+              v-if="server.health?.action === 'configure'"
+              :to="serverDetailPath(server.name, 'config')"
+              class="btn btn-xs btn-primary"
+            >
+              Configure
+            </router-link>
+            <!-- Audit F11: DNS / malformed-URL failures are address problems.
+                 Restart redials the same broken address; Edit URL does not. -->
+            <router-link
+              v-if="server.health?.action === 'edit_url'"
+              :to="`${serverDetailPath(server.name, 'config')}&focus=endpoint`"
+              class="btn btn-xs btn-primary"
+              data-test="attention-edit-url"
+            >
+              Edit URL
+            </router-link>
+          </div>
+          <div v-if="serversNeedingAttention.length > 3" class="text-xs opacity-60">
+            ... and {{ serversNeedingAttention.length - 3 }} more
+          </div>
+        </div>
+      </div>
+      <router-link to="/servers" class="btn btn-sm">
+        View All Servers
+      </router-link>
+    </div>
+
+    <!-- Tools Pending Quarantine Approval Banner -->
+    <div
+      v-if="totalPendingTools > 0"
+      class="alert alert-warning"
+    >
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+      <div class="flex-1">
+        <h3 class="font-bold">{{ totalPendingTools }} tool{{ totalPendingTools !== 1 ? 's' : '' }} pending approval across {{ serversWithPendingTools.length }} server{{ serversWithPendingTools.length !== 1 ? 's' : '' }}</h3>
+        <div class="text-sm space-y-1 mt-1">
+          <div v-for="entry in serversWithPendingTools.slice(0, 5)" :key="entry.serverName" class="flex items-center gap-2">
+            <span class="text-warning">&#9679;</span>
+            <router-link :to="serverDetailPath(entry.serverName)" class="font-medium link link-hover">{{ entry.serverName }}</router-link>
+            <span class="opacity-70">{{ entry.count }} tool{{ entry.count !== 1 ? 's' : '' }} pending</span>
+          </div>
+          <div v-if="serversWithPendingTools.length > 5" class="text-xs opacity-60">
+            ... and {{ serversWithPendingTools.length - 5 }} more server{{ serversWithPendingTools.length - 5 !== 1 ? 's' : '' }}
+          </div>
+        </div>
+      </div>
+      <router-link to="/servers" class="btn btn-sm">
+        Review Tools
+      </router-link>
+    </div>
+
     <!-- Usage ↔ Overview switcher (Spec 069 T016). Usage is the default panel
          (analytics-as-landing-page); each tab maps to a deep-linkable route
          (/usage, /overview) so the panel survives a reload or a shared link. -->
@@ -92,93 +195,6 @@
 
     <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
     <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
-    <!-- Servers Needing Attention Banner (using unified health status) -->
-    <div
-      v-if="serversNeedingAttention.length > 0"
-      class="alert alert-warning"
-    >
-      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
-      </svg>
-      <div class="flex-1">
-        <h3 class="font-bold">{{ serversNeedingAttention.length }} server{{ serversNeedingAttention.length !== 1 ? 's' : '' }} need{{ serversNeedingAttention.length === 1 ? 's' : '' }} attention</h3>
-        <div class="text-sm space-y-1 mt-1">
-          <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex items-center gap-2">
-            <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'">●</span>
-            <router-link :to="serverDetailPath(server.name)" class="font-medium link link-hover">{{ server.name }}</router-link>
-            <span class="opacity-70">{{ server.health?.summary }}</span>
-            <button
-              v-if="server.health?.action === 'login'"
-              @click="triggerServerAction(server.name, 'oauth_login')"
-              class="btn btn-xs btn-primary"
-            >
-              Login
-            </button>
-            <button
-              v-if="server.health?.action === 'restart'"
-              @click="triggerServerAction(server.name, 'restart')"
-              class="btn btn-xs btn-primary"
-            >
-              Restart
-            </button>
-            <button
-              v-if="server.health?.action === 'enable'"
-              @click="triggerServerAction(server.name, 'enable')"
-              class="btn btn-xs btn-primary"
-            >
-              Enable
-            </button>
-            <router-link
-              v-if="server.health?.action === 'set_secret'"
-              to="/secrets"
-              class="btn btn-xs btn-primary"
-            >
-              Set Secret
-            </router-link>
-            <router-link
-              v-if="server.health?.action === 'configure'"
-              :to="serverDetailPath(server.name, 'config')"
-              class="btn btn-xs btn-primary"
-            >
-              Configure
-            </router-link>
-          </div>
-          <div v-if="serversNeedingAttention.length > 3" class="text-xs opacity-60">
-            ... and {{ serversNeedingAttention.length - 3 }} more
-          </div>
-        </div>
-      </div>
-      <router-link to="/servers" class="btn btn-sm">
-        View All Servers
-      </router-link>
-    </div>
-
-    <!-- Tools Pending Quarantine Approval Banner -->
-    <div
-      v-if="totalPendingTools > 0"
-      class="alert alert-warning"
-    >
-      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-      </svg>
-      <div class="flex-1">
-        <h3 class="font-bold">{{ totalPendingTools }} tool{{ totalPendingTools !== 1 ? 's' : '' }} pending approval across {{ serversWithPendingTools.length }} server{{ serversWithPendingTools.length !== 1 ? 's' : '' }}</h3>
-        <div class="text-sm space-y-1 mt-1">
-          <div v-for="entry in serversWithPendingTools.slice(0, 5)" :key="entry.serverName" class="flex items-center gap-2">
-            <span class="text-warning">&#9679;</span>
-            <router-link :to="serverDetailPath(entry.serverName)" class="font-medium link link-hover">{{ entry.serverName }}</router-link>
-            <span class="opacity-70">{{ entry.count }} tool{{ entry.count !== 1 ? 's' : '' }} pending</span>
-          </div>
-          <div v-if="serversWithPendingTools.length > 5" class="text-xs opacity-60">
-            ... and {{ serversWithPendingTools.length - 5 }} more server{{ serversWithPendingTools.length - 5 !== 1 ? 's' : '' }}
-          </div>
-        </div>
-      </div>
-      <router-link to="/servers" class="btn btn-sm">
-        Review Tools
-      </router-link>
-    </div>
-
     <!-- Hub Visualization -->
     <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] gap-0 min-h-[520px] relative">
 
@@ -186,20 +202,34 @@
       <div class="flex flex-col justify-center items-center lg:items-end space-y-3 py-6 lg:pr-0">
         <h3 class="text-xs font-bold uppercase tracking-widest opacity-40 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
 
-        <!-- Single big clients box -->
-        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]">
+        <!-- Single big clients box. Audit F10: "Connected" is now the same fact
+             /sessions shows — a live MCP session — instead of a flag the
+             content-read-free connect listing can never set. Each live client
+             links to its session row. -->
+        <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]" data-test="dashboard-agents-box">
           <div class="card-body py-3 px-4">
-            <div v-if="connectedClientNames.length > 0" class="mb-1">
+            <div v-if="liveClients.length > 0" class="mb-1">
               <div class="flex items-center gap-2 mb-1">
                 <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
                 <span class="text-xs font-bold uppercase tracking-wide opacity-50">Connected</span>
               </div>
-              <div class="text-sm font-medium">{{ connectedClientNames.join(', ') }}</div>
+              <router-link
+                v-for="client in liveClients"
+                :key="client.name"
+                to="/sessions"
+                class="flex items-baseline justify-between gap-2 text-sm link link-hover"
+                :data-test="`dashboard-live-client-${client.name}`"
+              >
+                <span class="font-medium truncate">{{ client.name }}</span>
+                <span class="text-xs opacity-50 shrink-0">{{ formatRelativeTime(client.lastActivity) }}</span>
+              </router-link>
             </div>
-            <div v-if="supportedClientNames.length > 0">
-              <div class="text-xs opacity-40 mt-1">Available: {{ supportedClientNames.join(', ') }}</div>
+            <div v-if="availableClientNames.length > 0">
+              <div class="text-xs opacity-40 mt-1" data-test="dashboard-available-clients">
+                Available: {{ availableClientNames.join(', ') }}
+              </div>
             </div>
-            <div v-if="connectedClientNames.length === 0 && supportedClientNames.length === 0" class="text-sm opacity-50 text-center py-2">
+            <div v-if="liveClients.length === 0 && availableClientNames.length === 0" class="text-sm opacity-50 text-center py-2">
               No clients detected
             </div>
           </div>
@@ -510,6 +540,8 @@ import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
+import { liveClientsFromSessions } from '@/utils/sessionLabel'
+import { formatRelativeTime } from '@/utils/activity'
 
 // Usage view is code-split so chart.js + the usage fetch stay out of the
 // Dashboard's first-paint critical path (Spec 069 SC-004).
@@ -596,12 +628,20 @@ let refreshInterval: ReturnType<typeof setInterval> | null = null
 // --- Client statuses ---
 const clientStatuses = ref<ClientStatus[]>([])
 
-const connectedClientNames = computed(() =>
-  clientStatuses.value.filter(c => c.connected).map(c => c.name)
-)
-const supportedClientNames = computed(() =>
-  clientStatuses.value.filter(c => c.supported && !c.connected && c.exists).map(c => c.name)
-)
+// Audit F10: "Connected" means a live MCP session, the same fact /sessions and
+// the macOS tray render. `ClientStatus.connected` cannot be used here — the
+// stat-only connect listing leaves it false for every client by design.
+const liveClients = computed(() => liveClientsFromSessions(recentSessions.value))
+
+// Everything else installed on this machine that COULD be connected. A client
+// currently holding a live session is not repeated here.
+const availableClientNames = computed(() => {
+  const live = new Set(liveClients.value.map(c => c.name))
+  return clientStatuses.value
+    .filter(c => c.supported && c.exists)
+    .map(c => c.name)
+    .filter(name => !live.has(name))
+})
 
 function clientIcon(client: ClientStatus): string {
   const iconMap: Record<string, string> = {
@@ -699,36 +739,42 @@ watch(() => systemStore.isRunning, (running: boolean) => {
   }
 }, { immediate: true })
 
+// Audit F36: uptime used to be measured from the moment THIS PAGE first saw the
+// core running, so every reload reset it and the hub read "just started"
+// indefinitely — a stuck state, not a fact. The core now reports its own
+// start time (`started_at` on /status and every SSE status frame); the
+// page-local first-seen fallback is kept only for older cores that omit it.
 const uptime = computed(() => {
   if (!systemStore.isRunning) return ''
 
-  // Use the SSE status timestamp as server epoch if available
-  // The status.timestamp is a unix timestamp from the backend
-  const ts = systemStore.status?.timestamp
-  if (ts && ts > 0) {
-    // ts is in seconds — it represents when the status was generated
-    // The server start time ~ ts minus how long it's been running
-    // But we don't have start_time in API, so use the oldest timestamp we've seen
-    const now = Math.floor(Date.now() / 1000)
-    // If firstSeen is set, compute from that
-    if (serverFirstSeen.value) {
-      const diff = Math.floor((Date.now() - serverFirstSeen.value) / 1000)
-      if (diff < 60) return 'just started'
-      if (diff < 3600) return `${Math.floor(diff / 60)}m uptime`
-      if (diff < 86400) return `${Math.floor(diff / 3600)}h uptime`
-      return `${Math.floor(diff / 86400)}d uptime`
-    }
+  const startedAt = systemStore.status?.started_at
+  if (startedAt && startedAt > 0) {
+    return formatUptime(Math.floor(Date.now() / 1000) - startedAt)
+  }
+
+  if (serverFirstSeen.value) {
+    return formatUptime(Math.floor((Date.now() - serverFirstSeen.value) / 1000))
   }
 
   return 'online'
 })
+
+function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'online'
+  if (seconds < 60) return `${Math.max(seconds, 1)}s uptime`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m uptime`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h uptime`
+  return `${Math.floor(seconds / 86400)}d uptime`
+}
 
 // --- Recent Sessions ---
 const recentSessions = ref<any[]>([])
 
 const loadSessions = async () => {
   try {
-    const response = await api.getSessions(5)
+    // status=active + a roomier limit (audit F10): an unfiltered top-5 can be
+    // filled entirely by closed sessions and hide every live client.
+    const response = await api.getSessions(25, 'active')
     if (response.success && response.data) {
       recentSessions.value = response.data.sessions || []
     }

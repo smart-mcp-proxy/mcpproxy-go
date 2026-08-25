@@ -112,12 +112,27 @@ export const useServersStore = defineStore('servers', () => {
   let issueSeq = 0
   let appliedSeq = 0
 
-  function applyServerList(list: Server[], ticket: number) {
-    if (ticket < appliedSeq) return
+  // A request settles when it produces an outcome — a list OR a failure. Both
+  // advance the mark, because both are news about the same list: if only
+  // successes advanced it, a newer request failing would leave the mark behind
+  // and an older list arriving afterwards would still be accepted, overwriting
+  // the newer outcome with stale data.
+  function claimTicket(ticket: number): boolean {
+    if (ticket < appliedSeq) return false
     appliedSeq = ticket
+    return true
+  }
+
+  function applyServerList(list: Server[], ticket: number) {
+    if (!claimTicket(ticket)) return
     // Smart merge preserves object references and avoids unnecessary re-renders
     servers.value = mergeServers(servers.value, list)
     loaded.value = true
+    // A list that arrived is proof the previous failure is over. Without this
+    // an error is write-only: silent background refreshes set it and nothing
+    // ever clears it, so one transient blip pins an error banner on the
+    // Servers page for the rest of the session.
+    loading.value.error = null
   }
 
   // Actions
@@ -127,15 +142,24 @@ export const useServersStore = defineStore('servers', () => {
     }
     const ticket = ++issueSeq
 
+    // Failures are sequenced exactly like successes: an older request failing
+    // after a newer one already delivered a list must not raise a stale error
+    // over fresh data — the mirror image of the stale-list problem the
+    // sequencing exists to prevent.
+    const recordError = (message: string) => {
+      if (!claimTicket(ticket)) return
+      loading.value.error = message
+    }
+
     try {
       const response = await api.getServers()
       if (response.success && response.data) {
         applyServerList(response.data.servers, ticket)
       } else {
-        loading.value.error = response.error || 'Failed to fetch servers'
+        recordError(response.error || 'Failed to fetch servers')
       }
     } catch (error) {
-      loading.value.error = error instanceof Error ? error.message : 'Unknown error'
+      recordError(error instanceof Error ? error.message : 'Unknown error')
     } finally {
       if (!silent) {
         loading.value.loading = false
