@@ -239,6 +239,32 @@ describe('useServersStore — a successful list clears a stale error', () => {
     expect(store.servers).toHaveLength(1)
   })
 
+  it('does not let an older list land on top of a newer failure', async () => {
+    // A failure is news about the list too, so it advances the sequencing mark.
+    // Otherwise a newer request failing leaves the mark behind and an older
+    // list arriving afterwards is still accepted — overwriting the newer
+    // outcome with stale servers and silently clearing its error.
+    const store = useServersStore()
+
+    let finishOld: (v: unknown) => void = () => {}
+    ;(api.getServers as any).mockReturnValueOnce(
+      new Promise((resolve) => { finishOld = resolve })
+    )
+    const oldFetch = store.fetchServers(true)
+
+    // A newer request settles first — with a failure.
+    ;(api.getServers as any).mockResolvedValueOnce({ success: false, error: 'network down' })
+    await store.fetchServers(true)
+    expect(store.loading.error).toBe('network down')
+
+    // The older request now succeeds. It is stale: it must not apply.
+    finishOld({ success: true, data: { servers: [srv] } })
+    await oldFetch
+
+    expect(store.servers).toHaveLength(0)
+    expect(store.loading.error).toBe('network down')
+  })
+
   it('still records a failure that happens after a successful load', async () => {
     // Clearing on success must not make errors unreportable afterwards.
     const store = useServersStore()

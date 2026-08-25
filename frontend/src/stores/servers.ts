@@ -105,9 +105,19 @@ export const useServersStore = defineStore('servers', () => {
   let issueSeq = 0
   let appliedSeq = 0
 
-  function applyServerList(list: Server[], ticket: number) {
-    if (ticket < appliedSeq) return
+  // A request settles when it produces an outcome — a list OR a failure. Both
+  // advance the mark, because both are news about the same list: if only
+  // successes advanced it, a newer request failing would leave the mark behind
+  // and an older list arriving afterwards would still be accepted, overwriting
+  // the newer outcome with stale data.
+  function claimTicket(ticket: number): boolean {
+    if (ticket < appliedSeq) return false
     appliedSeq = ticket
+    return true
+  }
+
+  function applyServerList(list: Server[], ticket: number) {
+    if (!claimTicket(ticket)) return
     // Smart merge preserves object references and avoids unnecessary re-renders
     servers.value = mergeServers(servers.value, list)
     loaded.value = true
@@ -125,12 +135,12 @@ export const useServersStore = defineStore('servers', () => {
     }
     const ticket = ++issueSeq
 
-    // Failures take the same ticket as successes. Without that, an older
-    // request failing after a newer one already delivered a list would raise a
-    // stale error over fresh data — the mirror image of the stale-list problem
-    // the sequencing exists to prevent.
+    // Failures are sequenced exactly like successes: an older request failing
+    // after a newer one already delivered a list must not raise a stale error
+    // over fresh data — the mirror image of the stale-list problem the
+    // sequencing exists to prevent.
     const recordError = (message: string) => {
-      if (ticket < appliedSeq) return
+      if (!claimTicket(ticket)) return
       loading.value.error = message
     }
 
