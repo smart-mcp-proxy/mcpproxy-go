@@ -212,7 +212,10 @@ describe('modal accessibility (UX audit F6)', () => {
       under.unmount()
     })
 
-    it('restores focus when unmounted while still open', async () => {
+    // The trigger lives outside the modal's own subtree here (the real shape:
+    // a page-level button with the modal behind a v-if), so it survives the
+    // unmount and must get focus back.
+    it('restores focus to a surviving trigger when unmounted while still open', async () => {
       const trigger = document.createElement('button')
       document.body.appendChild(trigger)
       trigger.focus()
@@ -223,7 +226,52 @@ describe('modal accessibility (UX audit F6)', () => {
       expect(document.activeElement).not.toBe(trigger)
 
       wrapper.unmount()
+      await flushPromises() // the restore is deferred until after teardown
       expect(document.activeElement).toBe(trigger)
+
+      trigger.remove()
+    })
+
+    // A trigger torn down together with the modal must not be focused on its
+    // way out — that is a pointless focus/blur pair that scrolls and is
+    // announced by a screen reader, for an element about to vanish.
+    it('does not focus a trigger that is torn down with the modal', async () => {
+      const host = document.createElement('div')
+      const trigger = document.createElement('button')
+      host.appendChild(trigger)
+      document.body.appendChild(host)
+      trigger.focus()
+
+      const wrapper = mount(AddSecretModal, { props: { show: false }, attachTo: host })
+      await wrapper.setProps({ show: true })
+      await flushPromises()
+
+      const focusSpy = vi.spyOn(trigger, 'focus')
+      wrapper.unmount()
+      host.remove() // the trigger's subtree goes away in the same teardown
+      await flushPromises()
+
+      expect(focusSpy).not.toHaveBeenCalled()
+      focusSpy.mockRestore()
+    })
+
+    // The focus-on-open runs on nextTick; by then the modal may have closed
+    // again, and grabbing focus would drag it somewhere invisible.
+    it('does not grab focus if the modal closed before the open tick landed', async () => {
+      const trigger = document.createElement('button')
+      document.body.appendChild(trigger)
+      trigger.focus()
+
+      const wrapper = mount(AddSecretModal, { props: { show: false }, attachTo: document.body })
+      // Open and close again within the same tick.
+      await wrapper.setProps({ show: true })
+      await wrapper.setProps({ show: false })
+      await flushPromises()
+
+      expect(document.activeElement).toBe(trigger)
+
+      wrapper.unmount()
+      trigger.remove()
     })
 
     it('moves focus into the dialog on open', async () => {

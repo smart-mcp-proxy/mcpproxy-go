@@ -65,8 +65,13 @@ export function useModalA11y(
     return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => {
       if (el.hasAttribute('hidden')) return false
       if (el.getAttribute('aria-hidden') === 'true') return false
-      // jsdom reports offsetParent === null for everything, so only trust this
-      // signal in a real browser (where at least one element reports a parent).
+      // A control inside a `v-show`-hidden (display:none) subtree is in the DOM
+      // but cannot take focus, and letting it bound the trap would make Tab
+      // appear to stick. checkVisibility covers display/visibility/content-
+      // visibility in every browser we target; jsdom does not implement it, so
+      // the tests fall through to "visible", which matches how they build the
+      // DOM (v-if branches are absent rather than hidden).
+      if (typeof el.checkVisibility === 'function') return el.checkVisibility()
       return true
     })
   }
@@ -137,10 +142,15 @@ export function useModalA11y(
     previouslyFocused = document.activeElement as HTMLElement | null
     openStack.push(id)
     document.addEventListener('keydown', onKeydown, true)
-    void nextTick(() => focusInitial())
+    void nextTick(() => {
+      // The tick may land after this modal closed again, or after a second
+      // modal opened on top of it; in either case grabbing focus now would
+      // take it somewhere the user cannot see.
+      if (isOpen() && isTopmost(id)) focusInitial()
+    })
   }
 
-  function deactivate() {
+  function deactivate(deferRestore = false) {
     const at = openStack.indexOf(id)
     const wasOpen = at !== -1
     if (wasOpen) openStack.splice(at, 1)
@@ -152,10 +162,26 @@ export function useModalA11y(
     // closes while another is still open sits underneath it, and focusing its
     // trigger would drag focus out of the top modal and behind it. The top
     // modal keeps focus and restores to its own trigger when it goes.
+    //
+    // Known limit: when a stack unwinds bottom-up in one tick, the top modal's
+    // remembered trigger is an element of the modal below it, which is by then
+    // gone or hidden — focus lands on <body> rather than the original opener.
+    // Unwinding top-down (the normal order) restores correctly. Chaining the
+    // remembered targets across instances is not worth it while nothing in the
+    // app stacks these modals.
     if (!wasOpen || openStack.length > 0) return
-    if (target && typeof target.focus === 'function' && document.contains(target)) {
+    if (!target || typeof target.focus !== 'function') return
+
+    const restore = () => {
+      // Re-check at call time: a trigger torn down with the modal must not be
+      // focused just before removal (a pointless focus/blur pair that scrolls
+      // and is announced), and a modal opened in the meantime keeps focus.
+      if (openStack.length > 0) return
+      if (!document.contains(target)) return
       target.focus()
     }
+    if (deferRestore) void nextTick(restore)
+    else restore()
   }
 
   watch(
@@ -170,10 +196,12 @@ export function useModalA11y(
 
   onBeforeUnmount(() => {
     // Unmounting while open (a route change, a v-if around the modal) must not
-    // strand the listener or the focus: deactivate does both, and its
-    // document.contains guard makes restoring a no-op when the trigger went
-    // away with the same subtree.
-    deactivate()
+    // strand the listener or the focus. The restore is deferred one tick so it
+    // runs AFTER Vue has detached this subtree: a trigger that went away with
+    // the modal then fails the contains() check and is left alone, while a
+    // trigger that outlives it (modal alone behind a v-if) still gets focus
+    // back.
+    deactivate(true)
   })
 
   return { dialogRef, focusInitial }
