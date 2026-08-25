@@ -25,6 +25,42 @@ var sensitiveHeaders = map[string]bool{
 	"proxy-authorization": true,
 }
 
+// sensitiveHeaderSegments catch credential-bearing custom header names that
+// cannot be enumerated exhaustively (for example access_token or
+// X-Client-Credential). Matching complete delimiter-separated segments avoids
+// false positives such as X-Author-ID and X-Monkey-ID.
+var sensitiveHeaderSegments = map[string]bool{
+	"auth":          true,
+	"authorization": true,
+	"bearer":        true,
+	"cookie":        true,
+	"token":         true,
+	"secret":        true,
+	"key":           true,
+	"apikey":        true,
+	"password":      true,
+	"passwd":        true,
+	"credential":    true,
+	"private":       true,
+	"session":       true,
+}
+
+var headerNameSegmentPattern = regexp.MustCompile(`[a-z0-9]+`)
+
+func isSensitiveHeaderKey(name string) bool {
+	if sensitiveHeaders[strings.ToLower(name)] {
+		return true
+	}
+
+	for _, segment := range headerNameSegmentPattern.FindAllString(strings.ToLower(name), -1) {
+		if sensitiveHeaderSegments[segment] {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Sensitive parameter names in request bodies or URLs.
 var sensitiveParams = []string{
 	"access_token",
@@ -92,8 +128,7 @@ func RedactHeaders(headers http.Header) map[string]string {
 	redacted := make(map[string]string)
 
 	for key, values := range headers {
-		lowerKey := strings.ToLower(key)
-		if sensitiveHeaders[lowerKey] {
+		if isSensitiveHeaderKey(key) {
 			redacted[key] = "***REDACTED***"
 		} else {
 			// Join multiple values and redact any sensitive data within
@@ -129,8 +164,7 @@ func RedactStringHeaders(headers map[string]string) map[string]string {
 	}
 	redacted := make(map[string]string, len(headers))
 	for key, value := range headers {
-		lowerKey := strings.ToLower(key)
-		if sensitiveHeaders[lowerKey] {
+		if isSensitiveHeaderKey(key) {
 			redacted[key] = MaskValue(value)
 		} else {
 			redacted[key] = RedactSensitiveData(value)
