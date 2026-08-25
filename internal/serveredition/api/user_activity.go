@@ -100,6 +100,14 @@ func (h *UserActivityHandlers) getUserActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// NOTE: these are raw storage records, serialised as-is. That is safe only
+	// while activityFilter is nil (setup.go wires nil today, so this endpoint
+	// returns an empty list). Whoever wires it must route the records through
+	// the same masking the personal-edition activity API applies
+	// (httpapi.maskActivityPayloads → security.MaskArguments/MaskText +
+	// StripInternalArgs), or this endpoint will serve the credentials the
+	// detector flagged — the leak fixed for the activity drawer (audit F13).
+	//
 	// Ensure empty array in JSON (not null).
 	items := interface{}(records)
 	if records == nil {

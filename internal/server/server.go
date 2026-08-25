@@ -33,6 +33,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
@@ -2469,6 +2470,17 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		}
 		httpAPIServer.SetTokenStore(sm, dataDir)
 	}
+	// Wire the sensitive-data masker so an activity record the detector flagged
+	// never serves the credential it flagged (Spec 026). Same config as the
+	// detector the activity service scans with, so the two can never disagree
+	// about which categories count.
+	//
+	// Installed unconditionally, including when detection is currently off:
+	// records flagged while it was on are still in the log, and turning the
+	// feature off must not start serving their credentials in cleartext.
+	if cfg := s.runtime.Config(); cfg != nil {
+		httpAPIServer.SetSensitiveMasker(security.NewDetector(cfg.SensitiveDataDetection))
+	}
 	// Wire feedback submitter (Spec 036)
 	if ts := s.runtime.TelemetryService(); ts != nil {
 		httpAPIServer.SetFeedbackSubmitter(ts)
@@ -2669,9 +2681,16 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/ui/", http.StatusFound)
-		} else {
-			http.NotFound(w, r)
+			return
 		}
+		// A Web UI deep link that lost its /ui prefix (audit F33): send it to
+		// the SPA rather than to Go's plain-text 404, which reads like the
+		// server is broken.
+		if target, ok := uiRedirectTarget(r); ok {
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		http.NotFound(w, r)
 	})
 	s.logger.Info("Registered Web UI endpoints", zap.Strings("ui_endpoints", []string{"/ui/", "/"}))
 

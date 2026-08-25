@@ -185,8 +185,31 @@ When sensitive data is detected, it is recorded in the activity log metadata:
 ```
 
 :::caution Redaction
-Detected sensitive values are automatically redacted in the activity log to prevent secondary exposure. Only the type, category, and partial context are stored.
+A detection record itself never carries the value that triggered it — only the type, category, severity and location are stored.
 :::
+
+### Masked payloads
+
+A detection is stored alongside the call it came from, and that call's arguments and response are kept for debugging. Serving those verbatim would mean the screen that warns you about a credential also prints it, in cleartext, next to a Copy button — into every screenshot, screen-share and exported page.
+
+So MCPProxy masks them **server-side**, in the REST layer, before the record leaves the process:
+
+- `GET /api/v1/activity` and `GET /api/v1/activity/{id}` replace every detected value inside `arguments`, `response` and `error_message` with a recognisable preview — `AKIAIOSFODNN7EXAMPLE` becomes `AKIA…****`. Enough to tell you *which* credential to rotate, not enough to use. A private key is replaced whole, envelope and body: its pattern matches only the `-----BEGIN …-----` line, and masking that alone would leave the key readable.
+- Masking applies to records the detector flagged (`has_sensitive_data: true`); an unflagged payload is served unchanged. Detection runs asynchronously just after the call is recorded, so a record read in that sub-second window is not yet flagged and is served unmasked.
+- The live event stream (`GET /events`, and therefore the tray and `mcpproxy activity watch`) masks **unconditionally**: those events are emitted at completion time, before the detector has a verdict to gate on.
+- `GET /api/v1/tool-calls` and friends — a separate store with no detection metadata — mask unconditionally too.
+- Internal `_auth_*` arguments (the server-edition identity MCPProxy injects into a call) are stripped from every browsing response.
+- The Web UI's activity drawer and `mcpproxy activity show` both read the activity endpoints, so both are masked.
+
+Full values remain reachable through one deliberate, separately-flagged surface for incident response and compliance:
+
+```bash
+mcpproxy activity export --include-bodies
+```
+
+That export deliberately keeps `_auth_*` as well: attributing a call to a user is the point of a compliance export.
+
+Masking follows the same `sensitive_data_detection` categories as detection — a category you exclude is neither flagged nor masked. It does **not** follow the `enabled` flag: records flagged while detection was on stay masked after you turn it off, so disabling the feature never starts serving old credentials.
 
 ## Web UI Usage
 
@@ -214,8 +237,8 @@ Clicking on an activity with detections shows:
 
 - List of all detected sensitive data types
 - Location (arguments or response)
-- Redacted context for verification
 - Timestamp and duration
+- The request arguments and response body, with every detected value masked (`AKIA…****`) and both panels badged **Masked** — see [Masked payloads](#masked-payloads)
 
 ## CLI Usage
 

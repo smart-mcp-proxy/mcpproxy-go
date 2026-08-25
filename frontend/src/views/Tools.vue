@@ -326,7 +326,13 @@
                   </router-link>
                 </td>
                 <td>
-                  <div class="max-w-xs truncate text-sm text-base-content/70">
+                  <!-- Descriptions are clipped to keep the row height stable;
+                       without a title the clipped half was unreadable without
+                       opening the tool (audit F36). -->
+                  <div
+                    class="max-w-xs truncate text-sm text-base-content/70"
+                    :title="tool.description || undefined"
+                  >
                     {{ tool.description || '—' }}
                   </div>
                 </td>
@@ -503,6 +509,7 @@
 <script setup lang="ts">
 import { serverDetailPath } from '@/utils/serverRoute'
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
@@ -511,6 +518,9 @@ import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 
 const systemStore = useSystemStore()
+// Undefined when the view is mounted without a router — several unit suites do
+// exactly that, and a query prefill is not worth making them install one.
+const route = useRoute() as ReturnType<typeof useRoute> | undefined
 
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
@@ -1023,6 +1033,25 @@ const toolsHints = computed<Hint[]>(() => [
 
 // ---- Lifecycle ----
 onMounted(() => {
+  // Tools is the canonical search surface (audit F20): the header box and the
+  // retired /search route both arrive here with ?q=, so the query has to
+  // prefill the filter rather than being silently dropped.
+  applyQueryParam()
   loadTools()
 })
+
+// A second search from the header while Tools is already open is a route query
+// change, not a remount — without this watch the box would appear to do nothing.
+watch(
+  () => route?.query.q,
+  () => applyQueryParam()
+)
+
+function applyQueryParam() {
+  const q = route?.query.q
+  if (typeof q === 'string' && q !== searchQuery.value) {
+    searchQuery.value = q
+    currentPage.value = 1
+  }
+}
 </script>

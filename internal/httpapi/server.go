@@ -34,6 +34,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -274,6 +275,15 @@ type Server struct {
 	connectService     *connect.Service   // Client connect/disconnect operations
 	securityController SecurityController // Security scanner operations (Spec 039)
 
+	// sensitiveMasker masks detected secrets out of payloads before they are
+	// serialised (see maskActivityPayloads, maskEventPayload,
+	// maskToolCallRecord). Installed whatever the detection config says —
+	// records flagged while detection was on must stay masked after it is
+	// turned off. nil only in tests and in embeddings that never call
+	// SetSensitiveMasker, where every path degrades to serving what it was
+	// given.
+	sensitiveMasker *security.Detector
+
 	// patchConfigMu serializes PATCH /api/v1/config's read-merge-apply
 	// sequence. The handler reads the live config, deep-merges the client's
 	// keys, then applies the FULL merged snapshot — two concurrent PATCHes
@@ -416,6 +426,14 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 // SetConnectService configures the client connect/disconnect service.
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
+}
+
+// SetSensitiveMasker configures the detector used to mask secrets out of
+// payloads on their way to a client. Its per-category switches decide what
+// counts as a secret; its `enabled` flag does not gate masking (see
+// Detector.MaskText). Never calling this leaves payloads unmasked.
+func (s *Server) SetSensitiveMasker(detector *security.Detector) {
+	s.sensitiveMasker = detector
 }
 
 // Router returns the underlying chi.Mux for external route registration.
@@ -3461,7 +3479,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			}
 
 			eventPayload := map[string]interface{}{
-				"payload":   evt.Payload,
+				"payload":   s.maskEventPayload(evt.Payload),
 				"timestamp": evt.Timestamp.Unix(),
 			}
 
@@ -3471,6 +3489,62 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// eventPayloadTextFields are the runtime-event payload keys whose PRESENCE
+// marks an event as carrying a tool call's own text. They are the trigger for
+// masking, not its scope: once an event qualifies, every string in it is
+// masked, because the payload shape keeps growing (`detection_text` is the raw
+// pre-encoding response, `intent` is agent-authored prose, `response` is
+// `any` on the internal-call and prompt paths) and a key-name allowlist would
+// leak each new field until someone remembered to add it.
+var eventPayloadTextFields = []string{"arguments", "response", "error", "error_message", "detection_text", "intent", "result"}
+
+// maskEventPayload sanitises a runtime event before it is streamed to an SSE
+// subscriber.
+//
+// Activity events carry the call's arguments and response verbatim, and they
+// are emitted at completion time — BEFORE the asynchronous detector has a
+// verdict — so the flag-gated masking the activity API uses has nothing to key
+// on here. Masking runs unconditionally instead: the alternative is that every
+// SSE consumer (Web UI, tray, `mcpproxy activity watch`) receives the same
+// credential the activity drawer was fixed for (audit F13).
+//
+// Nothing is dropped: an identifier the UI renders (server, tool, status,
+// duration) is not a secret and survives the sweep unchanged, and an event with
+// none of the trigger fields is returned exactly as it came in — so a status or
+// config event costs one map lookup.
+//
+// The input map belongs to the event bus and is shared with every other
+// subscriber, so it is never edited in place.
+func (s *Server) maskEventPayload(payload map[string]interface{}) map[string]interface{} {
+	if s.sensitiveMasker == nil || len(payload) == 0 {
+		return payload
+	}
+
+	relevant := false
+	for _, field := range eventPayloadTextFields {
+		if _, ok := payload[field]; ok {
+			relevant = true
+			break
+		}
+	}
+	if !relevant {
+		return payload
+	}
+
+	// Strip MCPProxy's own injected identity before the sweep; masking would
+	// leave `_auth_user_email` readable (it is not secret-shaped) and it does
+	// not belong in a payload view either.
+	stripped := make(map[string]interface{}, len(payload))
+	for key, value := range payload {
+		stripped[key] = value
+	}
+	if args, ok := stripped["arguments"].(map[string]interface{}); ok {
+		stripped["arguments"] = security.StripInternalArgs(args)
+	}
+
+	return s.sensitiveMasker.MaskArguments(stripped)
 }
 
 func (s *Server) writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, canFlush bool, event string, data interface{}) error {
@@ -4064,7 +4138,7 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := contracts.GetToolCallsResponse{
-		ToolCalls: convertToolCallPointers(toolCalls),
+		ToolCalls: s.convertToolCallPointers(toolCalls),
 		Total:     total,
 		Limit:     limit,
 		Offset:    offset,
@@ -4107,8 +4181,11 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	detail := *toolCall
+	s.maskToolCallRecord(&detail)
+
 	response := contracts.GetToolCallDetailResponse{
-		ToolCall: *toolCall,
+		ToolCall: detail,
 	}
 
 	s.writeSuccess(w, response)
@@ -4160,7 +4237,7 @@ func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request
 
 	response := contracts.GetServerToolCallsResponse{
 		ServerName: serverID,
-		ToolCalls:  convertToolCallPointers(toolCalls),
+		ToolCalls:  s.convertToolCallPointers(toolCalls),
 		Total:      len(toolCalls),
 	}
 
@@ -4168,14 +4245,43 @@ func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request
 }
 
 // Helper to convert []*contracts.ToolCallRecord to []contracts.ToolCallRecord
-func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.ToolCallRecord {
+func (s *Server) convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.ToolCallRecord {
 	records := make([]contracts.ToolCallRecord, 0, len(pointers))
 	for _, ptr := range pointers {
 		if ptr != nil {
-			records = append(records, *ptr)
+			record := *ptr
+			s.maskToolCallRecord(&record)
+			records = append(records, record)
 		}
 	}
 	return records
+}
+
+// maskToolCallRecord masks a tool-call record's payloads before serialisation.
+//
+// These records live in their own store, separate from the activity log, and
+// carry no detection verdict — so unlike the activity API this cannot be gated
+// on `has_sensitive_data` and masks unconditionally. Without it,
+// /api/v1/tool-calls serves in cleartext exactly what the activity drawer was
+// fixed for (audit F13).
+func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
+	if record == nil {
+		return
+	}
+
+	record.Arguments = security.StripInternalArgs(record.Arguments)
+	if s.sensitiveMasker == nil {
+		return
+	}
+
+	record.Arguments = s.sensitiveMasker.MaskArguments(record.Arguments)
+	if record.Response != nil {
+		record.Response = s.sensitiveMasker.MaskJSON(record.Response)
+	}
+	if record.Error != "" {
+		masked, _ := s.sensitiveMasker.MaskText(record.Error)
+		record.Error = masked
+	}
 }
 
 // handleReplayToolCall godoc
@@ -4239,10 +4345,15 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A replay's record is a tool call like any other — same masking as the
+	// endpoints that list it.
+	replayed := *newToolCall
+	s.maskToolCallRecord(&replayed)
+
 	response := contracts.ReplayToolCallResponse{
 		Success:      true,
 		NewCallID:    newToolCall.ID,
-		NewToolCall:  *newToolCall,
+		NewToolCall:  replayed,
 		ReplayedFrom: id,
 	}
 
