@@ -486,11 +486,11 @@ func (s *Service) syncRegistryFromStorage() {
 		}
 
 		_ = s.registry.UpdateStatus(inst.ID, inst.Status)
-		// Also update configured env so the engine can pass it to containers
+		// Also update configured env so the engine can pass it to containers.
+		// Registry.Get hands back a copy, so this must go through the locked
+		// setter to actually land on the record the engine reads.
 		if inst.ConfiguredEnv != nil {
-			if reg, err := s.registry.Get(inst.ID); err == nil {
-				reg.ConfiguredEnv = inst.ConfiguredEnv
-			}
+			_ = s.registry.SetConfiguredEnv(inst.ID, inst.ConfiguredEnv)
 		}
 	}
 	s.logger.Info("Synced scanner registry from storage", zap.Int("count", len(installed)))
@@ -582,6 +582,8 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 
 	// Reuse any previously-stored configured env / image override so that
 	// toggling the scanner off and back on doesn't wipe the user's API keys.
+	// `scanner` is a copy of the registry record, so the reused values are
+	// written back through the locked setter for the engine to see them.
 	if existing, err := s.storage.GetScanner(id); err == nil && existing != nil {
 		if len(existing.ConfiguredEnv) > 0 {
 			scanner.ConfiguredEnv = existing.ConfiguredEnv
@@ -589,6 +591,7 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 		if existing.ImageOverride != "" {
 			scanner.ImageOverride = existing.ImageOverride
 		}
+		_ = s.registry.SetRuntimeConfig(id, scanner.ConfiguredEnv, scanner.ImageOverride)
 	}
 
 	// In-process scanners (e.g. tpa-descriptions) run in Go with no Docker
@@ -810,11 +813,9 @@ func (s *Service) ConfigureScanner(_ context.Context, id string, env map[string]
 	_ = s.registry.UpdateStatus(id, sc.Status)
 
 	// Also update the registry's ConfiguredEnv and ImageOverride so the engine
-	// picks up changes without requiring a restart
-	if reg, err := s.registry.Get(id); err == nil {
-		reg.ConfiguredEnv = sc.ConfiguredEnv
-		reg.ImageOverride = sc.ImageOverride
-	}
+	// picks up changes without requiring a restart. Both fields land in one
+	// locked update — a reader never sees the new env against the old image.
+	_ = s.registry.SetRuntimeConfig(id, sc.ConfiguredEnv, sc.ImageOverride)
 
 	s.emit().EmitSecurityScannerChanged(id, sc.Status, "")
 

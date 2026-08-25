@@ -11,7 +11,15 @@ import (
 	"go.uber.org/zap"
 )
 
-// Registry manages the scanner plugin registry
+// Registry manages the scanner plugin registry.
+//
+// Concurrency contract: the *ScannerPlugin records in `scanners` are owned by
+// the registry and may only be read or written while holding `mu`. Get and List
+// therefore return defensive copies, and every mutation of a stored record goes
+// through a locked method on this type (UpdateStatus, SetConfiguredEnv,
+// SetRuntimeConfig). Callers must never write to a plugin they got back from
+// Get/List and expect the registry to see it — a stored record mutated outside
+// the lock races every concurrent reader, including the REST scanner-list path.
 type Registry struct {
 	mu       sync.RWMutex
 	scanners map[string]*ScannerPlugin // keyed by ID
@@ -37,14 +45,20 @@ func NewRegistry(dataDir string, logger *zap.Logger) *Registry {
 // always available to the engine — they need no install step. Docker-backed
 // scanners start "available" and only become "installed" once their image is
 // pulled.
+//
+// bundledScanners holds package-level pointers shared by every Registry in the
+// process, so each registry stores its OWN clone: writing Status straight onto
+// the shared record would make two registries (two tests, a service plus a
+// CLI-side registry) mutate the same memory.
 func (r *Registry) loadBundledRegistry() {
 	for _, s := range bundledScanners {
-		if s.InProcess {
-			s.Status = ScannerStatusInstalled
+		entry := s.clone()
+		if entry.InProcess {
+			entry.Status = ScannerStatusInstalled
 		} else {
-			s.Status = ScannerStatusAvailable
+			entry.Status = ScannerStatusAvailable
 		}
-		r.scanners[s.ID] = s
+		r.scanners[entry.ID] = entry
 	}
 }
 
@@ -80,12 +94,15 @@ func (r *Registry) loadUserRegistry() {
 
 // List returns all known scanners (bundled + user) sorted by ID so that
 // API consumers, CLI output, and the web UI all see a deterministic order.
+//
+// The returned plugins are defensive copies: the caller may read and mutate
+// them freely without racing a concurrent install/pull.
 func (r *Registry) List() []*ScannerPlugin {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	result := make([]*ScannerPlugin, 0, len(r.scanners))
 	for _, s := range r.scanners {
-		result = append(result, s)
+		result = append(result, s.clone())
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].ID < result[j].ID
@@ -97,11 +114,8 @@ func (r *Registry) List() []*ScannerPlugin {
 // means the engine will actually run them (installed or configured), sorted.
 //
 // It exists so a caller can count the always-on in-process baseline without
-// reading ScannerPlugin fields outside the registry lock: List() hands out the
-// live pointers the registry keeps, and UpdateStatus mutates Status on exactly
-// those records, so an unsynchronized read of reg.Status races with any
-// concurrent install/pull. Resolving the predicate here keeps the read under
-// the same lock as the write.
+// copying the whole plugin set: resolving the predicate here keeps the read
+// under the same lock as the write, and returns only the ids.
 func (r *Registry) InProcessRunnableIDs() []string {
 	if r == nil {
 		return nil
@@ -121,7 +135,9 @@ func (r *Registry) InProcessRunnableIDs() []string {
 	return ids
 }
 
-// Get returns a scanner by ID
+// Get returns a defensive copy of the scanner with the given ID. Mutating the
+// result does NOT change registry state — use UpdateStatus/SetConfiguredEnv/
+// SetRuntimeConfig to write it back under the lock.
 func (r *Registry) Get(id string) (*ScannerPlugin, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -129,7 +145,7 @@ func (r *Registry) Get(id string) (*ScannerPlugin, error) {
 	if !ok {
 		return nil, fmt.Errorf("scanner not found: %s", id)
 	}
-	return s, nil
+	return s.clone(), nil
 }
 
 // Register adds a custom scanner to the registry
@@ -146,7 +162,9 @@ func (r *Registry) Register(s *ScannerPlugin) error {
 	if s.Status == "" {
 		s.Status = ScannerStatusAvailable
 	}
-	r.scanners[s.ID] = s
+	// Store our own copy — the caller keeps its pointer and may keep writing
+	// to it, which must never reach the record readers see under the lock.
+	r.scanners[s.ID] = s.clone()
 
 	return r.saveUserRegistry()
 }
@@ -179,6 +197,37 @@ func (r *Registry) UpdateStatus(id, status string) error {
 		return fmt.Errorf("scanner not found: %s", id)
 	}
 	s.Status = status
+	return nil
+}
+
+// SetConfiguredEnv replaces a scanner's configured env under the registry
+// lock, so the engine picks up newly stored API keys without a restart. The
+// map is copied — the caller may keep mutating the one it passed in.
+func (r *Registry) SetConfiguredEnv(id string, env map[string]string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.scanners[id]
+	if !ok {
+		return fmt.Errorf("scanner not found: %s", id)
+	}
+	s.ConfiguredEnv = copyEnv(env)
+	return nil
+}
+
+// SetRuntimeConfig replaces a scanner's configured env AND image override in a
+// single locked update, so a concurrent reader never observes a half-applied
+// configuration (new env with the old image, or vice versa).
+func (r *Registry) SetRuntimeConfig(id string, env map[string]string, imageOverride string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.scanners[id]
+	if !ok {
+		return fmt.Errorf("scanner not found: %s", id)
+	}
+	s.ConfiguredEnv = copyEnv(env)
+	s.ImageOverride = imageOverride
 	return nil
 }
 

@@ -86,6 +86,40 @@ type ScannerPlugin struct {
 	Custom        bool              `json:"custom,omitempty"` // User-added (not from registry)
 }
 
+// clone returns a deep copy of the plugin.
+//
+// The registry hands clones (never the records it keeps) to Get/List callers so
+// that reading — or freely mutating — a returned plugin can never race a
+// concurrent install/pull writing Status under the registry lock. Nil slices
+// and maps stay nil so the JSON shape (omitempty) is byte-identical to the
+// original.
+func (s *ScannerPlugin) clone() *ScannerPlugin {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	cp.Inputs = append([]string(nil), s.Inputs...)
+	cp.Outputs = append([]string(nil), s.Outputs...)
+	cp.Command = append([]string(nil), s.Command...)
+	cp.ImageCommand = append([]string(nil), s.ImageCommand...)
+	cp.RequiredEnv = append([]EnvRequirement(nil), s.RequiredEnv...)
+	cp.OptionalEnv = append([]EnvRequirement(nil), s.OptionalEnv...)
+	cp.ConfiguredEnv = copyEnv(s.ConfiguredEnv)
+	return &cp
+}
+
+// copyEnv duplicates a scanner env map, preserving nil.
+func copyEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
+}
+
 // EffectiveImage returns ImageOverride if set, otherwise DockerImage.
 func (s *ScannerPlugin) EffectiveImage() string {
 	if s.ImageOverride != "" {
@@ -123,6 +157,25 @@ type ScanJob struct {
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses"`
 	// Scan context — what was scanned and how
 	ScanContext *ScanContext `json:"scan_context,omitempty"`
+}
+
+// clone returns a snapshot copy of the job.
+//
+// The engine owns the live *ScanJob for as long as the scan runs and mutates it
+// (Status, CompletedAt, ScannerStatuses) under Engine.mu; everything handed
+// outside — GetActiveJob results, scan callbacks, the job returned by StartScan
+// — is a clone, so a reader can never observe a torn write.
+//
+// ScanContext is shared by pointer on purpose: it is fully populated by the
+// caller before the job is created and is never written again.
+func (j *ScanJob) clone() *ScanJob {
+	if j == nil {
+		return nil
+	}
+	cp := *j
+	cp.Scanners = append([]string(nil), j.Scanners...)
+	cp.ScannerStatuses = append([]ScannerJobStatus(nil), j.ScannerStatuses...)
+	return &cp
 }
 
 // ScanJobMeta is a lightweight projection of a scan job, persisted in a
