@@ -275,10 +275,13 @@ type Server struct {
 	connectService     *connect.Service   // Client connect/disconnect operations
 	securityController SecurityController // Security scanner operations (Spec 039)
 
-	// sensitiveMasker masks detected secrets out of activity payloads before
-	// they are serialised (see maskActivityPayloads). nil when sensitive-data
-	// detection is disabled — in which case nothing is ever flagged either, so
-	// there is nothing to mask.
+	// sensitiveMasker masks detected secrets out of payloads before they are
+	// serialised (see maskActivityPayloads, maskEventPayload,
+	// maskToolCallRecord). Installed whatever the detection config says —
+	// records flagged while detection was on must stay masked after it is
+	// turned off. nil only in tests and in embeddings that never call
+	// SetSensitiveMasker, where every path degrades to serving what it was
+	// given.
 	sensitiveMasker *security.Detector
 
 	// patchConfigMu serializes PATCH /api/v1/config's read-merge-apply
@@ -417,9 +420,9 @@ func (s *Server) SetConnectService(svc *connect.Service) {
 }
 
 // SetSensitiveMasker configures the detector used to mask secrets out of
-// activity payloads on their way to a client. Pass nil (or never call this) to
-// serve payloads unmasked, which is what happens when sensitive-data detection
-// is off and no record is ever flagged.
+// payloads on their way to a client. Its per-category switches decide what
+// counts as a secret; its `enabled` flag does not gate masking (see
+// Detector.MaskText). Never calling this leaves payloads unmasked.
 func (s *Server) SetSensitiveMasker(detector *security.Detector) {
 	s.sensitiveMasker = detector
 }
@@ -3479,9 +3482,14 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// eventPayloadTextFields are the runtime-event payload keys that carry a tool
-// call's own text: what was sent, what came back, and what the failure said.
-var eventPayloadTextFields = []string{"response", "error", "error_message"}
+// eventPayloadTextFields are the runtime-event payload keys whose PRESENCE
+// marks an event as carrying a tool call's own text. They are the trigger for
+// masking, not its scope: once an event qualifies, every string in it is
+// masked, because the payload shape keeps growing (`detection_text` is the raw
+// pre-encoding response, `intent` is agent-authored prose, `response` is
+// `any` on the internal-call and prompt paths) and a key-name allowlist would
+// leak each new field until someone remembered to add it.
+var eventPayloadTextFields = []string{"arguments", "response", "error", "error_message", "detection_text", "intent", "result"}
 
 // maskEventPayload sanitises a runtime event before it is streamed to an SSE
 // subscriber.
@@ -3493,18 +3501,19 @@ var eventPayloadTextFields = []string{"response", "error", "error_message"}
 // SSE consumer (Web UI, tray, `mcpproxy activity watch`) receives the same
 // credential the activity drawer was fixed for (audit F13).
 //
-// Nothing is dropped: keys the UI renders (server, tool, status, duration) pass
-// through untouched, and payloads without any of these fields are returned as
-// they came in, so non-activity events cost a map copy at most.
+// Nothing is dropped: an identifier the UI renders (server, tool, status,
+// duration) is not a secret and survives the sweep unchanged, and an event with
+// none of the trigger fields is returned exactly as it came in — so a status or
+// config event costs one map lookup.
+//
+// The input map belongs to the event bus and is shared with every other
+// subscriber, so it is never edited in place.
 func (s *Server) maskEventPayload(payload map[string]interface{}) map[string]interface{} {
 	if s.sensitiveMasker == nil || len(payload) == 0 {
 		return payload
 	}
 
 	relevant := false
-	if _, ok := payload["arguments"]; ok {
-		relevant = true
-	}
 	for _, field := range eventPayloadTextFields {
 		if _, ok := payload[field]; ok {
 			relevant = true
@@ -3515,22 +3524,18 @@ func (s *Server) maskEventPayload(payload map[string]interface{}) map[string]int
 		return payload
 	}
 
-	masked := make(map[string]interface{}, len(payload))
+	// Strip MCPProxy's own injected identity before the sweep; masking would
+	// leave `_auth_user_email` readable (it is not secret-shaped) and it does
+	// not belong in a payload view either.
+	stripped := make(map[string]interface{}, len(payload))
 	for key, value := range payload {
-		masked[key] = value
+		stripped[key] = value
+	}
+	if args, ok := stripped["arguments"].(map[string]interface{}); ok {
+		stripped["arguments"] = security.StripInternalArgs(args)
 	}
 
-	if args, ok := masked["arguments"].(map[string]interface{}); ok {
-		masked["arguments"] = s.sensitiveMasker.MaskArguments(security.StripInternalArgs(args))
-	}
-	for _, field := range eventPayloadTextFields {
-		if text, ok := masked[field].(string); ok && text != "" {
-			maskedText, _ := s.sensitiveMasker.MaskText(text)
-			masked[field] = maskedText
-		}
-	}
-
-	return masked
+	return s.sensitiveMasker.MaskArguments(stripped)
 }
 
 func (s *Server) writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, canFlush bool, event string, data interface{}) error {
@@ -4331,10 +4336,15 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A replay's record is a tool call like any other — same masking as the
+	// endpoints that list it.
+	replayed := *newToolCall
+	s.maskToolCallRecord(&replayed)
+
 	response := contracts.ReplayToolCallResponse{
 		Success:      true,
 		NewCallID:    newToolCall.ID,
-		NewToolCall:  *newToolCall,
+		NewToolCall:  replayed,
 		ReplayedFrom: id,
 	}
 

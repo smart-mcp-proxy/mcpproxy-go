@@ -148,6 +148,27 @@ func TestActivityDetail_MasksErrorMessage(t *testing.T) {
 	assert.Contains(t, string(raw), "upstream rejected credentials")
 }
 
+// metadata.intent.reason is prose the calling agent wrote — an agent
+// explaining what it was doing can quote the very value being masked in
+// `arguments`.
+func TestActivityDetail_MasksMetadataProse(t *testing.T) {
+	record := flaggedActivityRecord()
+	record.Metadata["intent"] = map[string]interface{}{
+		"operation_type": "read",
+		"reason":         "checking whether " + maskTestSecret + " is still valid",
+	}
+
+	srv := newMaskingServer(t, record)
+
+	data := getJSON(t, srv, "/api/v1/activity/activity-flagged")
+	raw, err := json.Marshal(data)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(raw), maskTestSecret, "metadata served the flagged secret verbatim")
+	assert.Contains(t, string(raw), "is still valid", "masking mangled the reason")
+	assert.Contains(t, string(raw), "aws_access_key", "the detection block must survive the sweep")
+}
+
 // SSE events are emitted at completion time, BEFORE the async detector has a
 // verdict, so this path masks unconditionally.
 func TestMaskEventPayload_MasksActivityEvent(t *testing.T) {
@@ -170,6 +191,40 @@ func TestMaskEventPayload_MasksActivityEvent(t *testing.T) {
 	assert.NotContains(t, masked["response"], maskTestSecret)
 	assert.NotContains(t, masked["error"], maskTestSecret)
 	assert.Equal(t, "echo", masked["tool_name"], "non-payload fields must survive untouched")
+}
+
+// The payload shape keeps growing: `detection_text` is the raw pre-encoding
+// response, `intent` is agent-authored prose, and `response` is `any` on the
+// internal-call and prompt paths. A key-name allowlist leaked each of them.
+func TestMaskEventPayload_MasksEveryStringInTheEvent(t *testing.T) {
+	srv := newMaskingServer(t)
+
+	masked := srv.maskEventPayload(map[string]interface{}{
+		"tool_name":      "echo",
+		"detection_text": "pre-encoding " + maskTestSecret,
+		"intent":         map[string]interface{}{"reason": "rotating " + maskTestSecret},
+		"response":       map[string]interface{}{"content": []interface{}{"Echo: " + maskTestSecret}},
+	})
+
+	raw, err := json.Marshal(masked)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), maskTestSecret)
+	assert.Contains(t, string(raw), "AKIA…****")
+	assert.Equal(t, "echo", masked["tool_name"])
+}
+
+// The event bus hands the same map to every subscriber.
+func TestMaskEventPayload_DoesNotMutateTheSharedPayload(t *testing.T) {
+	srv := newMaskingServer(t)
+
+	args := map[string]interface{}{"message": maskTestSecret, "_auth_user_id": "u-1"}
+	payload := map[string]interface{}{"arguments": args, "response": maskTestSecret}
+
+	srv.maskEventPayload(payload)
+
+	assert.Equal(t, maskTestSecret, args["message"], "shared argument map was edited in place")
+	assert.Equal(t, "u-1", args["_auth_user_id"])
+	assert.Equal(t, maskTestSecret, payload["response"], "shared payload was edited in place")
 }
 
 func TestMaskEventPayload_LeavesNonPayloadEventsAlone(t *testing.T) {

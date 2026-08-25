@@ -138,6 +138,92 @@ func TestMaskTextMasksUnterminatedKeyBlock(t *testing.T) {
 	}
 }
 
+// A block must end at ITS OWN footer. Stopping at the first "-----END" left
+// the remainder of an outer key readable whenever another block was quoted
+// inside it.
+func TestMaskTextMasksNestedKeyBlocks(t *testing.T) {
+	d := NewDetector(nil)
+
+	const outerTail = "OUTERKEYREMAINDERxyz0123456789ABCDEFGHIJKLMNOP"
+	const innerBody = "INNERKEYBODYabcdefghijklmnop0123456789"
+	text := "-----BEGIN RSA PRIVATE KEY-----\n" +
+		"-----BEGIN EC PRIVATE KEY-----\n" + innerBody + "\n-----END EC PRIVATE KEY-----\n" +
+		outerTail + "\n-----END RSA PRIVATE KEY-----\ntrailing text"
+
+	masked, _ := d.MaskText(text)
+
+	if strings.Contains(masked, outerTail) {
+		t.Fatalf("outer key remainder survived: %q", masked)
+	}
+	if strings.Contains(masked, innerBody) {
+		t.Fatalf("inner key body survived: %q", masked)
+	}
+	if !strings.Contains(masked, "trailing text") {
+		t.Fatalf("masking ate the text after the block: %q", masked)
+	}
+}
+
+// A custom pattern filed under private_key can match anything; block masking
+// must not eat the text that follows an ordinary match.
+func TestMaskTextDoesNotBlockMaskANonHeaderPrivateKeyMatch(t *testing.T) {
+	cfg := config.DefaultSensitiveDataDetectionConfig()
+	cfg.Categories["high_entropy"] = false
+	cfg.CustomPatterns = []config.CustomPattern{{
+		Name:     "internal_key_label",
+		Regex:    `INTERNAL-KEY-[0-9]{4}`,
+		Category: "private_key",
+		Severity: "high",
+	}}
+	d := NewDetector(cfg)
+
+	masked, changed := d.MaskText("label INTERNAL-KEY-1234 and everything after it")
+
+	if !changed {
+		t.Fatalf("custom pattern did not mask: %q", masked)
+	}
+	if !strings.Contains(masked, "and everything after it") {
+		t.Fatalf("block masking swallowed the trailing text: %q", masked)
+	}
+	if strings.Contains(masked, "INTERNAL-KEY-1234") {
+		t.Fatalf("custom match not masked: %q", masked)
+	}
+}
+
+// Masking must not inherit Scan's find-limit: everything the sweep skips is a
+// value served in the clear.
+func TestMaskTextMasksEveryHighEntropyValue(t *testing.T) {
+	cfg := config.DefaultSensitiveDataDetectionConfig()
+	d := NewDetector(cfg)
+
+	var b strings.Builder
+	const count = 800
+	for i := 0; i < count; i++ {
+		fmt.Fprintf(&b, "v%d=%s\n", i, highEntropyValue(i))
+	}
+
+	masked, _ := d.MaskText(b.String())
+
+	for _, i := range []int{0, count / 2, count - 1} {
+		if strings.Contains(masked, highEntropyValue(i)) {
+			t.Fatalf("high-entropy value %d survived masking", i)
+		}
+	}
+}
+
+// A 48-char base64-alphabet token over the entropy threshold, distinct per
+// index. Driven by an LCG so the characters do not repeat in a short cycle —
+// a low-entropy fixture would pass the test for the wrong reason.
+func highEntropyValue(i int) string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	state := uint32(i)*2654435761 + 12345
+	var b strings.Builder
+	for j := 0; j < 48; j++ {
+		state = state*1664525 + 1013904223
+		b.WriteByte(alphabet[(state>>16)%uint32(len(alphabet))])
+	}
+	return b.String()
+}
+
 // The replacement pass must not stop at the detection cap: the cap bounds what
 // is worth REPORTING, and reusing it here would leave later secrets in the clear.
 func TestMaskTextMasksBeyondTheDetectionCap(t *testing.T) {

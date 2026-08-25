@@ -293,6 +293,12 @@ func (s *Server) maskActivityPayloads(record *contracts.ActivityRecord) {
 		masked, _ := s.sensitiveMasker.MaskText(record.ErrorMessage)
 		record.ErrorMessage = masked
 	}
+	// Metadata is not all machine-generated: `intent.reason` is prose the
+	// calling agent wrote, and an agent explaining itself ("rotating
+	// AKIA…") lands the same value in a field nobody was masking. The
+	// detection block itself is short identifiers no pattern matches, so the
+	// sweep passes over it untouched.
+	record.Metadata = s.sensitiveMasker.MaskArguments(record.Metadata)
 }
 
 // contextualMetadataKeys are the top-level metadata keys that survive the

@@ -96,7 +96,10 @@ func (d *Detector) MaskText(text string) (masked string, changed bool) {
 
 			// The private-key patterns match only the PEM/PGP BEGIN line, so
 			// masking the match alone would leave the key body in the clear.
-			if pattern.Category == CategoryPrivateKey {
+			// Gated on the match actually being a BEGIN header: a custom
+			// pattern filed under private_key can match anything, and block
+			// masking would eat text after an ordinary match.
+			if pattern.Category == CategoryPrivateKey && isKeyBlockHeader(match) {
 				masked = maskKeyBlocks(masked, match)
 				continue
 			}
@@ -111,21 +114,32 @@ func (d *Detector) MaskText(text string) (masked string, changed bool) {
 	}
 
 	// High-entropy strings have no pattern to key on, but the detector reports
-	// them as findings, so a flagged record must not render them either. The
-	// limit is a work bound well above what any reviewable payload carries —
-	// not a disclosure budget.
+	// them as findings, so a flagged record must not render them either.
+	//
+	// FindHighEntropyStrings is not reused here: it stops after N findings and
+	// only inspects 2N candidates, which is right for "how many findings are
+	// worth reporting" and wrong for masking, where every one it skipped is a
+	// value served in the clear. Every candidate in the payload is examined.
 	if d.config.IsCategoryEnabled("high_entropy") {
+		threshold := d.config.GetEntropyThreshold()
+		if threshold <= 0 {
+			threshold = defaultEntropyThreshold
+		}
+
 		var pairs []string
 		seen := make(map[string]struct{})
-		for _, match := range FindHighEntropyStrings(masked, d.config.GetEntropyThreshold(), maxEntropyMasks) {
-			preview := MaskValue(match)
-			if preview == match {
-				continue
-			}
+		for _, match := range highEntropyCandidate.FindAllString(masked, -1) {
 			if _, done := seen[match]; done {
 				continue
 			}
 			seen[match] = struct{}{}
+			if ShannonEntropy(match) <= threshold {
+				continue
+			}
+			preview := MaskValue(match)
+			if preview == match {
+				continue
+			}
 			pairs = append(pairs, match, preview)
 		}
 		masked = replaceAllPairs(masked, pairs)
@@ -147,21 +161,34 @@ func replaceAllPairs(text string, pairs []string) string {
 	return strings.NewReplacer(pairs...).Replace(text)
 }
 
-// maxEntropyMasks bounds the high-entropy sweep. Scan reports at most five such
-// findings; masking has to cover far more than it reports, because every
-// unmasked one is a value served in the clear.
-const maxEntropyMasks = 500
+// defaultEntropyThreshold mirrors the fallback FindHighEntropyStrings applies
+// when the configured threshold is unset.
+const defaultEntropyThreshold = 4.5
+
+// keyBlockBegin is the opening of every PEM/PGP armour header.
+const keyBlockBegin = "-----BEGIN"
+
+// isKeyBlockHeader reports whether a match is a PEM/PGP BEGIN line, and so
+// whether block masking (rather than plain value masking) applies to it.
+func isKeyBlockHeader(match string) bool {
+	return strings.HasPrefix(match, keyBlockBegin)
+}
 
 // maskKeyBlocks replaces whole PEM/PGP blocks introduced by the given BEGIN
 // header — header, body and footer — with a single masked marker.
 //
 // The private-key patterns match the header line only ("-----BEGIN RSA PRIVATE
 // KEY-----"), so masking the match would replace the least secret part of the
-// payload and leave the key itself readable. Everything from the header to the
-// matching END line (or, if the payload was truncated before it, to the end of
-// the text) goes.
+// payload and leave the key itself readable.
+//
+// The block ends at ITS OWN footer ("-----END RSA PRIVATE KEY-----"), not at
+// the first "-----END" that happens to follow: text that quotes one key inside
+// another (or simply mentions a different key type in between) would otherwise
+// end the block early and leave the rest of the outer key in the clear. A block
+// with no matching footer — a payload truncated mid-key — loses everything
+// after the header rather than serving a partial key.
 func maskKeyBlocks(text, header string) string {
-	const endMarker = "-----END"
+	footer := strings.Replace(header, keyBlockBegin, "-----END", 1)
 
 	var b strings.Builder
 	rest := text
@@ -176,19 +203,12 @@ func maskKeyBlocks(text, header string) string {
 		b.WriteString(MaskValue(header))
 
 		after := rest[start+len(header):]
-		endIdx := strings.Index(after, endMarker)
+		endIdx := strings.Index(after, footer)
 		if endIdx < 0 {
-			// Unterminated block (truncated payload): drop the remainder
-			// rather than serve a partial key.
 			return b.String()
 		}
-		// Skip the END line too, so its own dashes do not survive alone.
-		tail := after[endIdx:]
-		if nl := strings.IndexByte(tail, '\n'); nl >= 0 {
-			rest = tail[nl:]
-		} else {
-			return b.String()
-		}
+		// Skip the footer too, so its own dashes do not survive alone.
+		rest = after[endIdx+len(footer):]
 	}
 }
 
