@@ -3467,7 +3467,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			}
 
 			eventPayload := map[string]interface{}{
-				"payload":   evt.Payload,
+				"payload":   s.maskEventPayload(evt.Payload),
 				"timestamp": evt.Timestamp.Unix(),
 			}
 
@@ -3477,6 +3477,60 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// eventPayloadTextFields are the runtime-event payload keys that carry a tool
+// call's own text: what was sent, what came back, and what the failure said.
+var eventPayloadTextFields = []string{"response", "error", "error_message"}
+
+// maskEventPayload sanitises a runtime event before it is streamed to an SSE
+// subscriber.
+//
+// Activity events carry the call's arguments and response verbatim, and they
+// are emitted at completion time — BEFORE the asynchronous detector has a
+// verdict — so the flag-gated masking the activity API uses has nothing to key
+// on here. Masking runs unconditionally instead: the alternative is that every
+// SSE consumer (Web UI, tray, `mcpproxy activity watch`) receives the same
+// credential the activity drawer was fixed for (audit F13).
+//
+// Nothing is dropped: keys the UI renders (server, tool, status, duration) pass
+// through untouched, and payloads without any of these fields are returned as
+// they came in, so non-activity events cost a map copy at most.
+func (s *Server) maskEventPayload(payload map[string]interface{}) map[string]interface{} {
+	if s.sensitiveMasker == nil || len(payload) == 0 {
+		return payload
+	}
+
+	relevant := false
+	if _, ok := payload["arguments"]; ok {
+		relevant = true
+	}
+	for _, field := range eventPayloadTextFields {
+		if _, ok := payload[field]; ok {
+			relevant = true
+			break
+		}
+	}
+	if !relevant {
+		return payload
+	}
+
+	masked := make(map[string]interface{}, len(payload))
+	for key, value := range payload {
+		masked[key] = value
+	}
+
+	if args, ok := masked["arguments"].(map[string]interface{}); ok {
+		masked["arguments"] = s.sensitiveMasker.MaskArguments(security.StripInternalArgs(args))
+	}
+	for _, field := range eventPayloadTextFields {
+		if text, ok := masked[field].(string); ok && text != "" {
+			maskedText, _ := s.sensitiveMasker.MaskText(text)
+			masked[field] = maskedText
+		}
+	}
+
+	return masked
 }
 
 func (s *Server) writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, canFlush bool, event string, data interface{}) error {
@@ -4070,7 +4124,7 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := contracts.GetToolCallsResponse{
-		ToolCalls: convertToolCallPointers(toolCalls),
+		ToolCalls: s.convertToolCallPointers(toolCalls),
 		Total:     total,
 		Limit:     limit,
 		Offset:    offset,
@@ -4113,8 +4167,11 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	detail := *toolCall
+	s.maskToolCallRecord(&detail)
+
 	response := contracts.GetToolCallDetailResponse{
-		ToolCall: *toolCall,
+		ToolCall: detail,
 	}
 
 	s.writeSuccess(w, response)
@@ -4166,7 +4223,7 @@ func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request
 
 	response := contracts.GetServerToolCallsResponse{
 		ServerName: serverID,
-		ToolCalls:  convertToolCallPointers(toolCalls),
+		ToolCalls:  s.convertToolCallPointers(toolCalls),
 		Total:      len(toolCalls),
 	}
 
@@ -4174,14 +4231,43 @@ func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request
 }
 
 // Helper to convert []*contracts.ToolCallRecord to []contracts.ToolCallRecord
-func convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.ToolCallRecord {
+func (s *Server) convertToolCallPointers(pointers []*contracts.ToolCallRecord) []contracts.ToolCallRecord {
 	records := make([]contracts.ToolCallRecord, 0, len(pointers))
 	for _, ptr := range pointers {
 		if ptr != nil {
-			records = append(records, *ptr)
+			record := *ptr
+			s.maskToolCallRecord(&record)
+			records = append(records, record)
 		}
 	}
 	return records
+}
+
+// maskToolCallRecord masks a tool-call record's payloads before serialisation.
+//
+// These records live in their own store, separate from the activity log, and
+// carry no detection verdict — so unlike the activity API this cannot be gated
+// on `has_sensitive_data` and masks unconditionally. Without it,
+// /api/v1/tool-calls serves in cleartext exactly what the activity drawer was
+// fixed for (audit F13).
+func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
+	if record == nil {
+		return
+	}
+
+	record.Arguments = security.StripInternalArgs(record.Arguments)
+	if s.sensitiveMasker == nil {
+		return
+	}
+
+	record.Arguments = s.sensitiveMasker.MaskArguments(record.Arguments)
+	if record.Response != nil {
+		record.Response = s.sensitiveMasker.MaskJSON(record.Response)
+	}
+	if record.Error != "" {
+		masked, _ := s.sensitiveMasker.MaskText(record.Error)
+		record.Error = masked
+	}
 }
 
 // handleReplayToolCall godoc

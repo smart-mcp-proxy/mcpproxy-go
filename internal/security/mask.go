@@ -55,6 +55,18 @@ func MaskValue(value string) string {
 // Sensitive FILE PATHS are deliberately not masked: the path is what makes the
 // finding actionable ("this call read ~/.aws/credentials") and the path itself
 // is not the secret.
+//
+// Unlike Scan, masking is NOT capped at MaxDetectionsPerScan. That cap bounds
+// how many findings are worth reporting; here a cap would be a disclosure
+// budget — the 51st secret in a payload would be served in cleartext. Work
+// stays bounded instead by the fixed pattern set (each applied once, over
+// de-duplicated matches) and by the payload sizes the activity log already
+// caps.
+//
+// Masking also ignores the `enabled` flag: a record that carries a detection
+// verdict was flagged while detection was on, and turning the feature off later
+// must not retroactively serve its credentials. Per-category switches are still
+// honoured, so a category the operator excluded is neither flagged nor masked.
 func (d *Detector) MaskText(text string) (masked string, changed bool) {
 	if text == "" {
 		return text, false
@@ -63,57 +75,99 @@ func (d *Detector) MaskText(text string) (masked string, changed bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	if !d.config.IsEnabled() {
-		return text, false
-	}
-
 	masked = text
-	replaced := 0
 
 	allPatterns := append(d.patterns, d.customPatterns...) //nolint:gocritic // intentional copy: two slices scanned as one
 	for _, pattern := range allPatterns {
-		if replaced >= MaxDetectionsPerScan {
-			break
-		}
 		if !d.config.IsCategoryEnabled(string(pattern.Category)) {
 			continue
 		}
 
+		seen := make(map[string]struct{})
 		for _, match := range pattern.Match(masked) {
-			if replaced >= MaxDetectionsPerScan {
-				break
-			}
 			if match == "" || !pattern.IsValid(match) {
 				continue
 			}
+			if _, done := seen[match]; done {
+				continue
+			}
+			seen[match] = struct{}{}
+
+			// The private-key patterns match only the PEM/PGP BEGIN line, so
+			// masking the match alone would leave the key body in the clear.
+			if pattern.Category == CategoryPrivateKey {
+				masked = maskKeyBlocks(masked, match)
+				continue
+			}
+
 			preview := MaskValue(match)
 			if preview == match {
 				continue
 			}
-			if strings.Contains(masked, match) {
-				masked = strings.ReplaceAll(masked, match, preview)
-				replaced++
-			}
+			masked = strings.ReplaceAll(masked, match, preview)
 		}
 	}
 
 	// High-entropy strings have no pattern to key on, but the detector reports
-	// them as findings, so a flagged record must not render them either.
-	if d.config.IsCategoryEnabled("high_entropy") && replaced < MaxDetectionsPerScan {
-		for _, match := range FindHighEntropyStrings(masked, d.config.GetEntropyThreshold(), 5) {
-			if replaced >= MaxDetectionsPerScan {
-				break
-			}
+	// them as findings, so a flagged record must not render them either. The
+	// limit is a work bound well above what any reviewable payload carries —
+	// not a disclosure budget.
+	if d.config.IsCategoryEnabled("high_entropy") {
+		for _, match := range FindHighEntropyStrings(masked, d.config.GetEntropyThreshold(), maxEntropyMasks) {
 			preview := MaskValue(match)
 			if preview == match || !strings.Contains(masked, match) {
 				continue
 			}
 			masked = strings.ReplaceAll(masked, match, preview)
-			replaced++
 		}
 	}
 
 	return masked, masked != text
+}
+
+// maxEntropyMasks bounds the high-entropy sweep. Scan reports at most five such
+// findings; masking has to cover far more than it reports, because every
+// unmasked one is a value served in the clear.
+const maxEntropyMasks = 500
+
+// maskKeyBlocks replaces whole PEM/PGP blocks introduced by the given BEGIN
+// header — header, body and footer — with a single masked marker.
+//
+// The private-key patterns match the header line only ("-----BEGIN RSA PRIVATE
+// KEY-----"), so masking the match would replace the least secret part of the
+// payload and leave the key itself readable. Everything from the header to the
+// matching END line (or, if the payload was truncated before it, to the end of
+// the text) goes.
+func maskKeyBlocks(text, header string) string {
+	const endMarker = "-----END"
+
+	var b strings.Builder
+	rest := text
+	for {
+		start := strings.Index(rest, header)
+		if start < 0 {
+			b.WriteString(rest)
+			return b.String()
+		}
+
+		b.WriteString(rest[:start])
+		b.WriteString(MaskValue(header))
+
+		after := rest[start+len(header):]
+		endIdx := strings.Index(after, endMarker)
+		if endIdx < 0 {
+			// Unterminated block (truncated payload): drop the remainder
+			// rather than serve a partial key.
+			return b.String()
+		}
+		// Skip the END line too, so its own dashes do not survive alone.
+		tail := after[endIdx:]
+		if nl := strings.IndexByte(tail, '\n'); nl >= 0 {
+			rest = tail[nl:]
+		} else {
+			return b.String()
+		}
+	}
 }
 
 // MaskArguments returns a deep copy of a tool call's arguments with every
@@ -126,6 +180,14 @@ func (d *Detector) MaskArguments(args map[string]interface{}) map[string]interfa
 	masked, _ := d.maskAny(args)
 	out, _ := masked.(map[string]interface{})
 	return out
+}
+
+// MaskJSON returns a copy of an arbitrary decoded-JSON value with every string
+// leaf run through MaskText. Use it for payload fields typed as `any` (a tool
+// call's response, say); MaskArguments is the map-shaped convenience wrapper.
+func (d *Detector) MaskJSON(value interface{}) interface{} {
+	masked, _ := d.maskAny(value)
+	return masked
 }
 
 // maskAny walks an arbitrary decoded-JSON value, masking string leaves. It

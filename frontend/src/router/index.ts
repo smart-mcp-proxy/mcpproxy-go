@@ -52,10 +52,7 @@ const router = createRouter({
     // old links and bookmarks still land on their query.
     {
       path: '/search',
-      redirect: (to) => ({
-        path: '/tools',
-        query: typeof to.query.q === 'string' && to.query.q ? { q: to.query.q } : {},
-      }),
+      redirect: (to) => ({ path: '/tools', query: to.query, hash: to.hash }),
     },
     {
       path: '/settings',

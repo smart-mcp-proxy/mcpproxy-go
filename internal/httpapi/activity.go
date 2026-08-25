@@ -286,6 +286,13 @@ func (s *Server) maskActivityPayloads(record *contracts.ActivityRecord) {
 		masked, _ := s.sensitiveMasker.MaskText(record.Response)
 		record.Response = masked
 	}
+	// An upstream error commonly quotes the request or the response it choked
+	// on, so a failed call can carry the same credential the successful one
+	// would have — masking the body and not the error would just move the leak.
+	if record.ErrorMessage != "" {
+		masked, _ := s.sensitiveMasker.MaskText(record.ErrorMessage)
+		record.ErrorMessage = masked
+	}
 }
 
 // contextualMetadataKeys are the top-level metadata keys that survive the

@@ -129,6 +129,79 @@ func TestActivityList_LeavesCleanRecordsAlone(t *testing.T) {
 	assert.NotContains(t, body, "****")
 }
 
+// An upstream error commonly quotes the payload it choked on, so masking the
+// response and not the error just moves the leak.
+func TestActivityDetail_MasksErrorMessage(t *testing.T) {
+	record := flaggedActivityRecord()
+	record.Status = "error"
+	record.Response = ""
+	record.ErrorMessage = "upstream rejected credentials: " + maskTestSecret
+
+	srv := newMaskingServer(t, record)
+
+	data := getJSON(t, srv, "/api/v1/activity/activity-flagged")
+	raw, err := json.Marshal(data)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(raw), maskTestSecret, "error message served the flagged secret verbatim")
+	assert.Contains(t, string(raw), "AKIA…****")
+	assert.Contains(t, string(raw), "upstream rejected credentials")
+}
+
+// SSE events are emitted at completion time, BEFORE the async detector has a
+// verdict, so this path masks unconditionally.
+func TestMaskEventPayload_MasksActivityEvent(t *testing.T) {
+	srv := newMaskingServer(t)
+
+	masked := srv.maskEventPayload(map[string]interface{}{
+		"server_name": "everything",
+		"tool_name":   "echo",
+		"arguments": map[string]interface{}{
+			"message":       maskTestSecret,
+			"_auth_user_id": "u-1",
+		},
+		"response": "Echo: " + maskTestSecret,
+		"error":    "failed on " + maskTestSecret,
+	})
+
+	args := masked["arguments"].(map[string]interface{})
+	assert.NotContains(t, args["message"], maskTestSecret)
+	assert.NotContains(t, args, "_auth_user_id", "internal auth plumbing streamed to SSE subscribers")
+	assert.NotContains(t, masked["response"], maskTestSecret)
+	assert.NotContains(t, masked["error"], maskTestSecret)
+	assert.Equal(t, "echo", masked["tool_name"], "non-payload fields must survive untouched")
+}
+
+func TestMaskEventPayload_LeavesNonPayloadEventsAlone(t *testing.T) {
+	srv := newMaskingServer(t)
+
+	payload := map[string]interface{}{"server_name": "everything", "state": "ready"}
+	masked := srv.maskEventPayload(payload)
+
+	assert.Equal(t, payload, masked)
+}
+
+// The legacy tool-call store carries no detection verdict, so its endpoints
+// mask unconditionally.
+func TestMaskToolCallRecord(t *testing.T) {
+	srv := newMaskingServer(t)
+
+	record := contracts.ToolCallRecord{
+		ToolName:  "echo",
+		Arguments: map[string]interface{}{"message": maskTestSecret, "_auth_auth_type": "admin"},
+		Response:  map[string]interface{}{"text": "Echo: " + maskTestSecret},
+		Error:     "boom " + maskTestSecret,
+	}
+
+	srv.maskToolCallRecord(&record)
+
+	raw, err := json.Marshal(record)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), maskTestSecret)
+	assert.NotContains(t, string(raw), "_auth_auth_type")
+	assert.Contains(t, string(raw), "AKIA…****")
+}
+
 // The compliance export is the one deliberate full-value surface: it carries no
 // payload at all unless the caller asks for include_bodies=true, and it is an
 // incident-response tool rather than a browsing view.

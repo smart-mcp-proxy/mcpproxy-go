@@ -46,6 +46,13 @@ describe('/search route (audit F20)', () => {
     expect(appRouter.currentRoute.value.path).toBe('/tools')
     expect(appRouter.currentRoute.value.query.q).toBe('echo')
   })
+
+  it('keeps the rest of the link intact, not just q', async () => {
+    await appRouter.push('/search?q=echo&server=everything#results')
+    await appRouter.isReady()
+    expect(appRouter.currentRoute.value.query.server).toBe('everything')
+    expect(appRouter.currentRoute.value.hash).toBe('#results')
+  })
 })
 
 describe('Tools page honours ?q= (audit F20)', () => {

@@ -2473,8 +2473,12 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Wire the sensitive-data masker so an activity record the detector flagged
 	// never serves the credential it flagged (Spec 026). Same config as the
 	// detector the activity service scans with, so the two can never disagree
-	// about what counts as a secret.
-	if cfg := s.runtime.Config(); cfg != nil && cfg.SensitiveDataDetection != nil && cfg.SensitiveDataDetection.IsEnabled() {
+	// about which categories count.
+	//
+	// Installed unconditionally, including when detection is currently off:
+	// records flagged while it was on are still in the log, and turning the
+	// feature off must not start serving their credentials in cleartext.
+	if cfg := s.runtime.Config(); cfg != nil {
 		httpAPIServer.SetSensitiveMasker(security.NewDetector(cfg.SensitiveDataDetection))
 	}
 	// Wire feedback submitter (Spec 036)

@@ -1,8 +1,11 @@
 package security
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func TestMaskValue(t *testing.T) {
@@ -91,6 +94,97 @@ func TestMaskArgumentsWalksNestedValues(t *testing.T) {
 	// The caller's map belongs to storage and must survive untouched.
 	if got := args["message"].(string); !strings.Contains(got, secret) {
 		t.Fatalf("input map was mutated: %q", got)
+	}
+}
+
+// A private-key pattern matches only the BEGIN line, so masking the match
+// alone would replace the label and serve the key.
+func TestMaskTextMasksWholeKeyBlock(t *testing.T) {
+	d := NewDetector(nil)
+
+	const body = "MIIEowIBAAKCAQEAx7Ke9SecretKeyBodyThatMustNeverBeRendered1234567890"
+	text := "before\n-----BEGIN RSA PRIVATE KEY-----\n" + body + "\n-----END RSA PRIVATE KEY-----\nafter"
+
+	masked, changed := d.MaskText(text)
+
+	if !changed {
+		t.Fatal("expected the key block to be masked")
+	}
+	if strings.Contains(masked, body) {
+		t.Fatalf("key body survived masking: %q", masked)
+	}
+	if strings.Contains(masked, "BEGIN RSA PRIVATE KEY") || strings.Contains(masked, "END RSA PRIVATE KEY") {
+		t.Fatalf("key envelope survived masking: %q", masked)
+	}
+	if !strings.Contains(masked, "before") || !strings.Contains(masked, "after") {
+		t.Fatalf("masking ate the surrounding text: %q", masked)
+	}
+}
+
+func TestMaskTextMasksUnterminatedKeyBlock(t *testing.T) {
+	d := NewDetector(nil)
+
+	const body = "MIIEowIBAAKCAQEAtruncatedSecretBody0987654321"
+	text := "note\n-----BEGIN OPENSSH PRIVATE KEY-----\n" + body
+
+	masked, _ := d.MaskText(text)
+
+	if strings.Contains(masked, body) {
+		t.Fatalf("truncated key body survived masking: %q", masked)
+	}
+	if !strings.Contains(masked, "note") {
+		t.Fatalf("masking ate the leading text: %q", masked)
+	}
+}
+
+// The replacement pass must not stop at the detection cap: the cap bounds what
+// is worth REPORTING, and reusing it here would leave later secrets in the clear.
+func TestMaskTextMasksBeyondTheDetectionCap(t *testing.T) {
+	d := NewDetector(nil)
+
+	var b strings.Builder
+	const count = MaxDetectionsPerScan * 2
+	for i := 0; i < count; i++ {
+		// 36+ chars after the prefix — the shape the GitHub PAT pattern matches.
+		fmt.Fprintf(&b, "key%d=ghp_%036d\n", i, i)
+	}
+	text := b.String()
+
+	masked, _ := d.MaskText(text)
+
+	if strings.Contains(masked, fmt.Sprintf("ghp_%036d", 0)) || strings.Contains(masked, fmt.Sprintf("ghp_%036d", count-1)) {
+		t.Fatalf("a token survived past the cap:\n%s", masked)
+	}
+	if got := strings.Count(masked, "ghp_…****"); got != count {
+		t.Fatalf("masked %d of %d tokens", got, count)
+	}
+}
+
+// Turning detection off later must not retroactively serve the credentials in
+// records it already flagged.
+func TestMaskTextMasksEvenWhenDetectionIsDisabled(t *testing.T) {
+	cfg := config.DefaultSensitiveDataDetectionConfig()
+	cfg.Enabled = false
+	d := NewDetector(cfg)
+
+	masked, changed := d.MaskText("AKIAIOSFODNN7EXAMPLE")
+
+	if !changed || strings.Contains(masked, "AKIAIOSFODNN7EXAMPLE") {
+		t.Fatalf("secret served with detection disabled: %q", masked)
+	}
+}
+
+// A category the operator excluded is neither flagged nor masked.
+func TestMaskTextHonoursDisabledCategory(t *testing.T) {
+	cfg := config.DefaultSensitiveDataDetectionConfig()
+	cfg.Categories["cloud_credentials"] = false
+	cfg.Categories["high_entropy"] = false
+	d := NewDetector(cfg)
+
+	masked, changed := d.MaskText("AKIAIOSFODNN7EXAMPLE")
+
+	if changed || masked != "AKIAIOSFODNN7EXAMPLE" {
+		t.Fatalf("excluded category was masked anyway: %q", masked)
 	}
 }
 
