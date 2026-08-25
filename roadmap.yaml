@@ -233,9 +233,10 @@ epics:
         depends_on: []
       - id: analytics-default-landing
         title: Make dashboard the default landing page
-        status: todo
+        status: in_review
         spec: specs/039-connect-and-dashboard
         depends_on: [analytics-token-drain-graphs]
+        note: "PR: `/` now opens the Dashboard on its Usage (analytics) panel; `/usage` + `/overview` added as deep-linkable routes rendering the same component (tab clicks rewrite the URL, no remount). Zero-servers first run shows an 'add your first server' CTA in place of empty charts instead of conditional routing."
 
   - id: registries-search-add
     title: Registries — easier search + add-server

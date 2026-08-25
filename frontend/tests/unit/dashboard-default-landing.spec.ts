@@ -1,0 +1,207 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { ref } from 'vue'
+import { shallowMount, flushPromises } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { createRouter, createMemoryHistory } from 'vue-router'
+
+// Roadmap analytics-dashboard / analytics-default-landing: the analytics
+// (Usage) panel of the Dashboard is what the Web UI lands on. `/` and `/usage`
+// open the analytics panel, `/overview` stays deep-linkable for the hub
+// overview, and a brand-new install (zero upstream servers) gets an
+// "add your first server" CTA instead of an empty chart grid.
+
+const serversSpy = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ success: true, data: { servers: [] } })
+)
+
+const usageSpy = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({
+    success: true,
+    data: { window: '24h', tokens_saved: 0, tokens_saved_percentage: 0, tools: [], timeline: [] },
+  })
+)
+
+vi.mock('@/services/api', () => {
+  const ok = (data: unknown = null) => vi.fn().mockResolvedValue({ success: true, data })
+  const fakeEventSource = {
+    onopen: null,
+    onmessage: null,
+    onerror: null,
+    addEventListener() {},
+    removeEventListener() {},
+    close() {},
+  }
+  const base: Record<string, unknown> = {
+    getServers: serversSpy,
+    getActivityUsage: usageSpy,
+    createEventSource: vi.fn(() => fakeEventSource),
+    hasAPIKey: vi.fn(() => true),
+    getAPIKeyPreview: vi.fn(() => 'test…'),
+    onAuthError: vi.fn(() => () => {}),
+  }
+  return {
+    default: new Proxy(base, {
+      get(target: Record<string, unknown>, prop: string) {
+        if (prop in target) return target[prop]
+        target[prop] = ok()
+        return target[prop]
+      },
+    }),
+  }
+})
+
+vi.mock('@/composables/useSecurityScannerStatus', () => ({
+  refreshSecurityScannerStatus: vi.fn().mockResolvedValue(undefined),
+  useSecurityScannerStatus: () => ({
+    totalFindings: ref(0),
+    totalScans: ref(0),
+    loaded: ref(true),
+  }),
+}))
+
+import Dashboard from '@/views/Dashboard.vue'
+import appRouter from '@/router'
+
+class FakeEventSource {
+  close() {}
+  addEventListener() {}
+  onmessage: ((e: unknown) => void) | null = null
+  onerror: ((e: unknown) => void) | null = null
+}
+
+function makeRouter() {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', name: 'dashboard', component: Dashboard, meta: { dashboardView: 'usage' } },
+      { path: '/usage', name: 'usage', component: Dashboard, meta: { dashboardView: 'usage' } },
+      { path: '/overview', name: 'dashboard-overview', component: Dashboard, meta: { dashboardView: 'overview' } },
+      { path: '/repositories', name: 'repositories', component: { template: '<div />' } },
+      { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
+    ],
+  })
+}
+
+async function mountDashboard(path = '/') {
+  const router = makeRouter()
+  router.push(path)
+  await router.isReady()
+  const wrapper = shallowMount(Dashboard, {
+    global: {
+      plugins: [createPinia(), router],
+      stubs: {
+        RouterLink: { template: '<a><slot /></a>' },
+        // Keep the lazy Usage panel as an inert stub — this suite is about the
+        // landing panel and the first-run CTA, not the charts.
+        Suspense: false,
+        UsageView: { template: '<div data-test="usage-view-stub" />' },
+      },
+    },
+  })
+  await flushPromises()
+  return { wrapper, router }
+}
+
+describe('analytics dashboard as the default landing page', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    usageSpy.mockClear()
+    serversSpy.mockClear()
+    serversSpy.mockResolvedValue({ success: true, data: { servers: [] } })
+    ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
+  })
+
+  it('routes "/" to the Dashboard on its usage panel, with /usage and /overview deep-linkable', () => {
+    const root = appRouter.resolve('/')
+    expect(root.name).toBe('dashboard')
+    expect(root.meta.dashboardView).toBe('usage')
+
+    const usage = appRouter.resolve('/usage')
+    expect(usage.meta.dashboardView).toBe('usage')
+    expect(usage.matched[0].components?.default).toBe(root.matched[0].components?.default)
+
+    const overview = appRouter.resolve('/overview')
+    expect(overview.name).toBe('dashboard-overview')
+    expect(overview.meta.dashboardView).toBe('overview')
+    expect(overview.matched[0].components?.default).toBe(root.matched[0].components?.default)
+  })
+
+  it('shows the usage panel (not the overview) when landing on "/"', async () => {
+    serversSpy.mockResolvedValue({
+      success: true,
+      data: { servers: [{ name: 'srv-a', enabled: true, connected: true }] },
+    })
+    const { wrapper } = await mountDashboard('/')
+
+    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
+    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(false)
+    expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
+  })
+
+  it('honours a /overview deep link', async () => {
+    serversSpy.mockResolvedValue({
+      success: true,
+      data: { servers: [{ name: 'srv-a', enabled: true, connected: true }] },
+    })
+    const { wrapper } = await mountDashboard('/overview')
+
+    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(true)
+    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(false)
+  })
+
+  it('rewrites the URL when the tabs are used, so the panel survives a reload', async () => {
+    const { wrapper, router } = await mountDashboard('/')
+
+    await wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/overview')
+
+    await wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/usage')
+  })
+
+  it('follows the route when it changes underneath the component', async () => {
+    const { wrapper, router } = await mountDashboard('/')
+
+    await router.push('/overview')
+    await flushPromises()
+    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(true)
+
+    await router.push('/')
+    await flushPromises()
+    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
+  })
+
+  it('shows an "add your first server" CTA instead of empty charts on a fresh install', async () => {
+    const { wrapper } = await mountDashboard('/')
+
+    const cta = wrapper.find('[data-test="dashboard-usage-first-run"]')
+    expect(cta.exists()).toBe(true)
+    expect(cta.text()).toContain('Add your first server')
+    // The chart panel is not rendered (and no usage aggregate is fetched)
+    // while there is nothing to chart.
+    expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(false)
+  })
+
+  it('offers a one-click escape to the Overview panel from the first-run CTA', async () => {
+    const { wrapper, router } = await mountDashboard('/')
+
+    await wrapper.find('[data-test="dashboard-first-run-overview"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(true)
+    expect(router.currentRoute.value.path).toBe('/overview')
+  })
+
+  it('renders the usage panel once at least one server is configured', async () => {
+    serversSpy.mockResolvedValue({
+      success: true,
+      data: { servers: [{ name: 'srv-a', enabled: true, connected: true }] },
+    })
+    const { wrapper } = await mountDashboard('/')
+
+    expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
+  })
+})

@@ -136,15 +136,15 @@ graph LR
   analytics_token_drain_graphs --> analytics_default_landing
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   class analytics_token_drain_graphs done;
-  class analytics_default_landing todo;
+  class analytics_default_landing in_review;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | Per-server / per-tool token-drain graphs | 🟢 Done | — |
-| Make dashboard the default landing page | ⚪ Todo | — |
+| Make dashboard the default landing page | 🟡 In review | — |
 
 </details>
 
@@ -804,3 +804,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 26/33 (79%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
+| [102-schema-deferred](./specs/102-schema-deferred/) | — | — |
