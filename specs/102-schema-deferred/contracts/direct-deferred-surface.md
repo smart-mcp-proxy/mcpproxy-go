@@ -24,9 +24,16 @@ Rules:
 - `name`, annotations, membership, count, and ordering source: identical to full
   mode for the same session (FR-008/FR-016).
 - `description` = full-mode description (`[server] …`, untruncated) + newline +
-  compact signature per the 085 grammar (`*` required — never elided; `~` lossy
-  collapse). On a signature-cache miss the suffix is absent and the entry is
-  otherwise unchanged (never dropped, never delayed — FR-005).
+  the **bare tool name** + the compact signature per the 085 grammar (`*`
+  required — never elided; `~` lossy collapse). The name prefix is normative and
+  must be prepended by this renderer: `toolsig.Signature.Sig` is the parenthesised
+  parameter list only (`"(origin*:str, ttl:int=3600, account~:obj)"`,
+  `internal/toolsig/signature.go:18`) and carries no name.
+  `toolsig.Signature.Desc` — the first-sentence prefix Spec 085's compact entries
+  use — is deliberately NOT used here, because deferred entries keep the full
+  description. On a signature-cache miss the whole suffix (name + signature) is
+  absent and the entry is otherwise unchanged (never dropped, never delayed —
+  FR-005).
 - `inputSchema` is exactly `{"type":"object"}` — never literal `{}`, never absent,
   never carrying upstream properties/required (strict-client safety, FR-004).
   Note the mechanism is normative too: `mcp.NewTool` marshals

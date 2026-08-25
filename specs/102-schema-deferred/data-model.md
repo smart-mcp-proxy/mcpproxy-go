@@ -45,7 +45,7 @@ The `tools/list` rendering of one catalog entry under `deferred`:
 | Field | Value |
 |---|---|
 | `name` | `displayName` (unchanged) |
-| `description` | `[server] <description>` + `"\n"` + compact signature when `Peek(hash)` hits; without the signature suffix on a cache miss (entry still listed — FR-005) |
+| `description` | `[server] <description>` + `"\n"` + `<toolName>` + `Signature.Sig` when `Peek(hash)` hits; without that suffix on a cache miss (entry still listed — FR-005). `Sig` is the parameter list only and carries no tool name, so the renderer prepends it; `Signature.Desc` is unused here (deferred keeps the full description) |
 | `inputSchema` | exactly `{"type":"object"}` — never `{}`, never absent, no upstream properties/required. **Emitted via `mcp.NewToolWithRawSchema`**, not `mcp.NewTool`: mcp-go's schema marshaller always adds `"properties":{}` and `"required":[]` (research.md R11 / D9) |
 | `outputSchema` | absent (stripped — research.md R2); `Tool.MarshalJSON` omits it when unset |
 | annotations | unchanged from full mode — copied onto the tool explicitly, since the raw-schema constructor takes no `ToolOption`s |
