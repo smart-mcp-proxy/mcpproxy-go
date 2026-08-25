@@ -761,3 +761,129 @@ func TestDetectConfigChanges_CodeExecution(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "code_execution_pool_size")
 	})
 }
+
+// TestDetectConfigChanges_EnableCodeExecution (UX audit F16): the Settings page
+// states that changes save instantly, and the enable_code_execution field
+// carries no "restart" badge. Before this clause the toggle contributed nothing
+// to ChangedFields, so the field the user actually flipped was never named back
+// to them — the toast reported whatever else the round-trip had (falsely)
+// flagged. The tool surface now rebuilds off the live snapshot on
+// config.reloaded, so the change genuinely applies hot.
+func TestDetectConfigChanges_EnableCodeExecution(t *testing.T) {
+	mk := func(on bool) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			EnableCodeExecution: on,
+		}
+	}
+
+	t.Run("off to on is a hot-reloadable change", func(t *testing.T) {
+		result := DetectConfigChanges(mk(false), mk(true))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "enable_code_execution")
+		assert.False(t, result.RequiresRestart, "the tool surface is rebuilt on config.reloaded")
+		assert.True(t, result.AppliedImmediately)
+	})
+
+	t.Run("on to off is a hot-reloadable change", func(t *testing.T) {
+		result := DetectConfigChanges(mk(true), mk(false))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "enable_code_execution")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("unchanged is not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk(true), mk(true))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "enable_code_execution")
+	})
+}
+
+// TestDetectConfigChanges_ServersRoundTripNoFalsePositive (UX audit F16): the
+// PATCH /api/v1/config handler round-trips the LIVE config through JSON before
+// merging the patch, so newCfg.Servers is a decoded copy while oldCfg.Servers is
+// the in-memory slice. reflect.DeepEqual saw those as different — `Created`
+// carries a monotonic reading and a *time.Location in memory but not after an
+// RFC3339 decode, and `omitempty` collapses empty Args/Env/Headers to nil — so
+// EVERY patch reported "mcpServers" as changed. That both mislabelled
+// changed_fields in the UI (the audit's own symptom) and triggered a spurious
+// full upstream reload/reconnect on every settings save.
+func TestDetectConfigChanges_ServersRoundTripNoFalsePositive(t *testing.T) {
+	now := time.Now()
+	old := &config.Config{
+		Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+		Servers: []*config.ServerConfig{
+			{
+				Name:     "github",
+				URL:      "https://api.github.com/mcp",
+				Protocol: "http",
+				Enabled:  true,
+				Args:     []string{},
+				Env:      map[string]string{},
+				Headers:  map[string]string{},
+				Created:  now,
+				Updated:  now,
+			},
+		},
+	}
+
+	b, err := json.Marshal(old) // simulate handlePatchConfig's round-trip
+	require.NoError(t, err)
+	var next config.Config
+	require.NoError(t, json.Unmarshal(b, &next))
+	// The user patched exactly one unrelated scalar.
+	next.EnableCodeExecution = !old.EnableCodeExecution
+
+	result := DetectConfigChanges(old, &next)
+	require.True(t, result.Success)
+	assert.NotContains(t, result.ChangedFields, "mcpServers",
+		"mcpServers was not patched — the JSON round-trip is not a change")
+	assert.Equal(t, []string{"enable_code_execution"}, result.ChangedFields)
+}
+
+// TestDetectConfigChanges_ServersRealChangeStillDetected: real server edits must
+// still be detected through the round-trip-tolerant comparison.
+func TestDetectConfigChanges_ServersRealChangeStillDetected(t *testing.T) {
+	mk := func(url string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			Servers: []*config.ServerConfig{
+				{Name: "github", URL: url, Protocol: "http", Enabled: true},
+			},
+		}
+	}
+
+	t.Run("field edit", func(t *testing.T) {
+		result := DetectConfigChanges(mk("https://a/mcp"), mk("https://b/mcp"))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "mcpServers")
+	})
+
+	t.Run("server added", func(t *testing.T) {
+		next := mk("https://a/mcp")
+		next.Servers = append(next.Servers, &config.ServerConfig{Name: "second", URL: "https://c/mcp"})
+		result := DetectConfigChanges(mk("https://a/mcp"), next)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "mcpServers")
+	})
+
+	t.Run("server removed", func(t *testing.T) {
+		old := mk("https://a/mcp")
+		next := mk("https://a/mcp")
+		next.Servers = nil
+		result := DetectConfigChanges(old, next)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "mcpServers")
+	})
+
+	t.Run("no servers on either side is not a change", func(t *testing.T) {
+		old := &config.Config{Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{}}
+		next := &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			Servers: []*config.ServerConfig{},
+		}
+		result := DetectConfigChanges(old, next)
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "mcpServers")
+	})
+}
