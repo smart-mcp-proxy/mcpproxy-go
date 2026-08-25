@@ -295,10 +295,12 @@ epics:
 
   - id: tpa-db
     title: "tpa-db: versioned TPA signature database for the offline scanner"
-    status: todo
+    status: in_review
     priority: P1
+    spec: specs/101-tpa-db
+    pr: "#1028"
     depends_on: [scanner-simplification]
-    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate."
+    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db is in review as #1028 (merge-on-convergence armed); no implementation has started, so every child task stays todo."
     tasks:
       - id: tpa-db-format
         title: "Signature DB format + loader (versioned, signed, bundled default)"
@@ -337,6 +339,14 @@ epics:
         title: "Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker"
         status: todo
         depends_on: [tunnel-orchestration, tunnel-exposure-allowlist]
+
+  - id: schema-deferred
+    title: "Deferred-schema serialization for the direct tools/list surface (spec 102)"
+    status: in_progress
+    priority: P1
+    spec: specs/102-schema-deferred
+    depends_on: []
+    note: "Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema (~88% smaller listing), with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction); plan in progress."
 
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
@@ -449,7 +459,8 @@ epics:
         depends_on: []
       - id: release-qa-gate-playwright
         title: "T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only)"
-        status: in_review
+        status: done
+        pr: "#1030"
         priority: P2
         note: "Landed ADVISORY, not blocking (FR-016 wants blocking eventually). The sweep itself is now committed (e2e/web-ui-sweep: servers list, server detail + security tab, tools page + search, activity log, settings; uncaught page exceptions fail it) and scripts/run-web-smoke.sh — previously dead, it pointed at a spec file that lives in a gitignored dir — is its single launcher for both `./scripts/run-web-smoke.sh` by hand and the gate's `web-ui-sweep` job. Advisory is enforced twice: continue-on-error on the job (a failing job inside a reusable workflow would otherwise become the workflow_call conclusion the publishers gate on) and a non-blocking manifest entry advisory/web-ui-sweep (renamed from reserved/web-ui-sweep) whose failures land in advisory_failures via the new `release-gate run-suite --advisory` flag. Promotion to blocking = Blocking:true + drop continue-on-error, after 3 consecutive clean tags."
         depends_on: [release-qa-gate-matrix]
@@ -603,11 +614,12 @@ epics:
   # are the genuinely-unbuilt ones. See docs/personal-edition-polish.md audit.
   - id: mcp-2026-upgrade
     title: MCP protocol upgrade to 2026-07-28 revision
-    status: blocked
+    status: in_progress
     priority: P3
     spec: specs/058-mcp-2026-upgrade
+    pr: "#1033"
     depends_on: []
-    note: "BLOCKED on mcp-go shipping 2026-07-28 (pinned v0.55.x tops out at 2025-11-25). CROSS-SPEC CONFLICT: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug>. Must reconcile at plan time (058 spec now carries a Cross-Spec Reconciliation note). 028 agent-token scoping is already compatible (header-carried)."
+    note: "UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision in review as #1033: final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532."
   - id: security-gateway-cd
     title: Security gateway Tracks C/D (per-arg least-privilege + signature provenance)
     status: todo
