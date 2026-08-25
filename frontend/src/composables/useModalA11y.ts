@@ -59,41 +59,51 @@ export function useModalA11y(
   const id = Symbol('modal-a11y')
   let previouslyFocused: HTMLElement | null = null
 
+  /**
+   * Whether an element can actually take focus right now.
+   *
+   * An element inside a `v-show`-hidden (display:none) or `visibility:hidden`
+   * subtree is in the DOM but cannot be focused, and letting one bound the Tab
+   * trap would make Tab appear to stick. checkVisibility covers display and
+   * content-visibility on its own; `visibility` needs checkVisibilityCSS, which
+   * is off by default. jsdom does not implement the method, so the unit tests
+   * fall through to "visible" — which matches how they build the DOM (v-if
+   * branches are absent rather than hidden). The browser path is covered by the
+   * Playwright sweep instead.
+   */
+  function isFocusable(el: HTMLElement): boolean {
+    if (el.hasAttribute('hidden')) return false
+    if (el.getAttribute('aria-hidden') === 'true') return false
+    if (el.hasAttribute('disabled')) return false
+    if (typeof el.checkVisibility === 'function') {
+      return el.checkVisibility({ checkVisibilityCSS: true })
+    }
+    return true
+  }
+
   function visibleFocusables(): HTMLElement[] {
     const root = dialogRef.value
     if (!root) return []
-    return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => {
-      if (el.hasAttribute('hidden')) return false
-      if (el.getAttribute('aria-hidden') === 'true') return false
-      // A control inside a `v-show`-hidden (display:none) or `visibility:hidden`
-      // subtree is in the DOM but cannot take focus, and letting it bound the
-      // trap would make Tab appear to stick. checkVisibility covers display and
-      // content-visibility on its own; `visibility` needs checkVisibilityCSS,
-      // which is off by default. jsdom does not implement the method, so the
-      // tests fall through to "visible" — which matches how they build the DOM
-      // (v-if branches are absent rather than hidden).
-      if (typeof el.checkVisibility === 'function') {
-        return el.checkVisibility({ checkVisibilityCSS: true })
-      }
-      return true
-    })
+    return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(isFocusable)
   }
 
   function focusInitial() {
     const root = dialogRef.value
     if (!root) return
-    const candidates = visibleFocusables()
     if (options.initialFocus) {
-      // Matched against the SAME filtered set, not a raw querySelector: a
-      // configured selector must not be able to hand focus to a control that
-      // is hidden or disabled, which would silently focus nothing.
-      const selector = options.initialFocus
-      const preferred = candidates.find((el) => el.matches(selector))
-      if (preferred) {
+      // Resolved with its own query rather than against the Tab-order list: the
+      // usual target for this option is the dialog heading carrying
+      // tabindex="-1", which is programmatically focusable but deliberately NOT
+      // in the tab order, so matching it against FOCUSABLE_SELECTOR would
+      // silently ignore the option. Visibility and disabled are still enforced,
+      // so a selector can never hand focus to something that cannot take it.
+      const preferred = root.querySelector<HTMLElement>(options.initialFocus)
+      if (preferred && isFocusable(preferred)) {
         preferred.focus()
         return
       }
     }
+    const candidates = visibleFocusables()
     const first = candidates.find((el) => el.dataset.modalCloseButton === undefined) ?? candidates[0]
     if (first) {
       first.focus()
