@@ -32,6 +32,11 @@ struct ActivityView: View {
     /// (records whose parent_id equals it). Set by "View sub-calls" in the
     /// detail panel; cleared by the filter chip or "View parent call".
     @State private var filterParentId: String?
+    /// When set, the list shows only the records of one MCP session. Seeded by
+    /// a tray glance row (`.activityFilter`) so a click on "github:search ×12"
+    /// lands on that client's calls instead of the whole log (F10); cleared by
+    /// its own chip.
+    @State private var filterSessionId: String?
     /// Monotonic ticket for loadActivities: only the NEWEST in-flight load may
     /// publish its results, so a slow unfiltered fetch can never overwrite the
     /// sub-call view the user just asked for (or vice versa).
@@ -94,7 +99,19 @@ struct ActivityView: View {
         if let parentId = filterParentId, !parentId.isEmpty {
             parts.append("parent_id=\(parentId)")
         }
+        if let sessionId = filterSessionId, !sessionId.isEmpty,
+           let encoded = sessionId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            parts.append("session_id=\(encoded)")
+        }
         return parts.joined(separator: "&")
+    }
+
+    /// Scope the list to one MCP session (a tray glance row's hand-off).
+    private func showSession(_ sessionId: String) {
+        filterSessionId = sessionId
+        filterParentId = nil
+        selectedActivityID = nil
+        Task { await loadActivities() }
     }
 
     // MARK: - Parent/child navigation (code_execution sub-calls)
@@ -225,6 +242,11 @@ struct ActivityView: View {
                 await loadSummary()
                 await loadActivities()
             }
+        }
+        // F10: a tray glance row hands over the session it was derived from.
+        .onReceive(NotificationCenter.default.publisher(for: .activityFilter)) { note in
+            guard let sessionId = note.object as? String, !sessionId.isEmpty else { return }
+            showSession(sessionId)
         }
     }
 
@@ -409,6 +431,36 @@ struct ActivityView: View {
                 .background(Color.accentColor.opacity(0.12))
                 .clipShape(Capsule())
                 .accessibilityIdentifier("activity-parent-filter-chip")
+            }
+
+            // Session filter chip (F10): says which client's calls are on
+            // screen, and how to get back to everything.
+            if let sessionId = filterSessionId {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.scaled(.caption, scale: fontScale))
+                    Text("Session \(Self.shortCorrelationId(sessionId))")
+                        .font(.scaled(.caption, scale: fontScale))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button {
+                        filterSessionId = nil
+                        Task { await loadActivities() }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Show all activity")
+                    .accessibilityLabel("Clear session filter")
+                    .accessibilityIdentifier("activity-clear-session-filter")
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.accentColor.opacity(0.12))
+                .clipShape(Capsule())
+                .accessibilityIdentifier("activity-session-filter-chip")
             }
         }
         .padding(.horizontal)

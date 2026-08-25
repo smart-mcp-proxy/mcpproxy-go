@@ -772,10 +772,18 @@ actor APIClient {
 
     // MARK: - Tool Search
 
-    /// Search tools across all servers via `GET /api/v1/tools`.
-    func searchTools(query: String, limit: Int = 20) async throws -> [SearchResult] {
+    /// BM25 search across every upstream tool via `GET /api/v1/index/search`.
+    ///
+    /// This used to call `GET /api/v1/tools?q=…`, which has no `q` parameter:
+    /// it returns the full catalogue under `tools`, while this function reads
+    /// `results` — so every call returned an empty array. Nothing consumed it,
+    /// which is how it stayed broken; `ToolsView` (F16) is the first caller.
+    ///
+    /// Note the REST contract (#871): `tool.name` here is the BARE tool name
+    /// with `server_name` alongside — callers assemble `server:tool` themselves.
+    func searchTools(query: String, limit: Int = 50) async throws -> [SearchResult] {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let data = try await fetchRaw(path: "/api/v1/tools?q=\(encoded)&limit=\(limit)")
+        let data = try await fetchRaw(path: "/api/v1/index/search?q=\(encoded)&limit=\(limit)")
         let decoder = JSONDecoder()
         if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),
            let payload = wrapper.data {
@@ -783,6 +791,21 @@ actor APIClient {
         }
         if let direct = try? decoder.decode(SearchToolsResponse.self, from: data) {
             return direct.results ?? []
+        }
+        return []
+    }
+
+    /// The whole tool catalogue via `GET /api/v1/tools` — what the Tools view
+    /// shows before anything is typed.
+    func allTools() async throws -> [SearchTool] {
+        let data = try await fetchRaw(path: "/api/v1/tools")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.tools ?? []
+        }
+        if let direct = try? decoder.decode(SearchToolsResponse.self, from: data) {
+            return direct.tools ?? []
         }
         return []
     }

@@ -11,15 +11,11 @@
 import Foundation
 import Combine
 
-// MARK: - Health Indicator (tray icon badge)
-
-/// Tray icon badge level, derived from aggregated server health.
-enum HealthIndicator: String, Sendable {
-    case healthy
-    case degraded
-    case unhealthy
-    case disconnected
-}
+// The former `HealthIndicator` enum and `AppState.healthLevel` lived here to
+// feed `Menu/TrayIcon.swift` — a SwiftUI menu-bar label that was never
+// instantiated, so both were dead from the day they were written (found by the
+// 2026-08 tray UX audit, F1). The status item is AppKit and now badges server
+// severity itself; see `TrayStatusIcon` in Menu/TrayPresentation.swift.
 
 // MARK: - App State
 
@@ -325,35 +321,6 @@ final class AppState: ObservableObject {
             if d.severity == "warn" { sawWarn = true }
         }
         return sawWarn ? "warn" : nil
-    }
-
-    /// Aggregate health indicator for the tray icon badge.
-    /// Only considers ENABLED servers. Disabled servers are intentional — don't flag them.
-    /// Uses majority-based logic: green if most are healthy, yellow if some degraded,
-    /// red only if the majority are unhealthy.
-    var healthLevel: HealthIndicator {
-        guard coreState == .connected else {
-            return .disconnected
-        }
-
-        let enabled = servers.filter { $0.enabled }
-        if enabled.isEmpty {
-            return .healthy
-        }
-
-        let unhealthyCount = enabled.filter { $0.health?.level == "unhealthy" }.count
-        let degradedCount = enabled.filter { $0.health?.level == "degraded" }.count
-        let total = enabled.count
-
-        // Red only if more than half of enabled servers are unhealthy
-        if unhealthyCount > total / 2 {
-            return .unhealthy
-        }
-        // Yellow if any degraded or unhealthy (but not majority)
-        if unhealthyCount > 0 || degradedCount > 0 {
-            return .degraded
-        }
-        return .healthy
     }
 
     /// Whether the tray is connected to a running core.
