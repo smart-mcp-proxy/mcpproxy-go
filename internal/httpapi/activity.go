@@ -1104,6 +1104,14 @@ func sortUsageRows(rows []contracts.UsageToolStat, key string) {
 			if a.P95Ms != b.P95Ms {
 				return a.P95Ms > b.P95Ms
 			}
+			// Both sit on the last histogram bound, but one of them is only
+			// BOUNDED there and the other ran PAST it. "Sort by p95 latency"
+			// exists to surface the slowest tools, and top-N truncation means
+			// losing that tie-break can drop the genuinely slow one off the
+			// chart in favour of a tool that merely touched the ceiling.
+			if a.P95Exceeds != b.P95Exceeds {
+				return a.P95Exceeds
+			}
 		default: // resp_bytes
 			if a.TotalRespBytes != b.TotalRespBytes {
 				return a.TotalRespBytes > b.TotalRespBytes

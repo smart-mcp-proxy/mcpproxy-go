@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // Audit finding F2 (#1046): the Activity Log's own filter tiles did not sum.
@@ -39,4 +41,22 @@ func TestActivitySummaryBucketsPartitionTheTotal(t *testing.T) {
 	// confused with the status partition — that conflation is F1/F24.
 	assert.Less(t, summary.CallCount, summary.TotalCount,
 		"the fixture contains events that are not calls")
+}
+
+// A percentile that hit the unbounded overflow bucket is a FLOOR, not a bound,
+// so two rows sitting on the last histogram bound are not equally slow. "Sort
+// by p95 latency" exists to surface the slowest tools and the response is
+// truncated to top-N, so losing that tie-break can drop the genuinely slow tool
+// off the chart in favour of one that merely touched the ceiling.
+func TestUsageP95SortPutsOverflowFirstOnATie(t *testing.T) {
+	rows := []contracts.UsageToolStat{
+		{Server: "a", Tool: "bounded", P95Ms: 10000, P95Exceeds: false},
+		{Server: "b", Tool: "overflowing", P95Ms: 10000, P95Exceeds: true},
+		{Server: "c", Tool: "fast", P95Ms: 5, P95Exceeds: false},
+	}
+	sortUsageRows(rows, "p95")
+
+	assert.Equal(t, "overflowing", rows[0].Tool, "past the last bound outranks sitting on it")
+	assert.Equal(t, "bounded", rows[1].Tool)
+	assert.Equal(t, "fast", rows[2].Tool)
 }

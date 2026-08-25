@@ -965,11 +965,21 @@
                     finding{{ scanFindingsTotal(selectedActivity.metadata) === 1 ? '' : 's' }}
                   </span>
                 </div>
+                <!--
+                  A FAILED scan can still carry findings: the debouncer keeps
+                  the last non-nil rollup (scan_notify.go), so a storm where
+                  some scanners finished and a later one failed settles as
+                  "failed" with real findings attached. Hiding them would be the
+                  worse error in a security view — they are shown, and told
+                  apart from a rollup that describes the whole scan.
+                -->
                 <div
                   v-if="scanFindingsRollup(selectedActivity.metadata).length > 0"
                   class="flex items-center gap-1 flex-wrap"
                 >
-                  <span class="text-sm text-base-content/60">By severity:</span>
+                  <span class="text-sm text-base-content/60">
+                    {{ selectedActivity.status === 'error' ? 'Found before the failure:' : 'By severity:' }}
+                  </span>
                   <span
                     v-for="entry in scanFindingsRollup(selectedActivity.metadata)"
                     :key="entry.severity"
@@ -977,6 +987,12 @@
                     :class="getSeverityBadgeClass(entry.severity)"
                   >
                     {{ entry.severity }} ×{{ entry.count }}
+                  </span>
+                  <span
+                    v-if="selectedActivity.status === 'error'"
+                    class="text-xs text-base-content/50 basis-full"
+                  >
+                    The scan did not complete, so this is not the whole picture.
                   </span>
                 </div>
                 <!--
@@ -1979,7 +1995,14 @@ const exportActivities = (format: 'json' | 'csv') => {
     // Spec 024: Pass comma-separated types for multi-type filter
     type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
-    status: filterStatus.value || undefined,
+    // "Other / internal" is a client-side residual, not a stored status: the
+    // export endpoint matches `status` exactly against the closed vocabulary,
+    // so passing it would hand back an empty file. Export unfiltered by status
+    // instead — a wider export is recoverable, an empty one looks like "there
+    // was nothing there".
+    status: filterStatus.value && filterStatus.value !== OTHER_STATUS
+      ? filterStatus.value
+      : undefined,
     // Exporting from the sub-call view exports that run's sub-calls.
     parent_id: filterParentId.value || undefined,
   })
