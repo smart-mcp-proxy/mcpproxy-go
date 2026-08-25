@@ -4,19 +4,29 @@
       <!-- Left: Mobile menu toggle + Search + Add Server -->
 <div class="flex items-center space-x-3 flex-1 min-w-0 overflow-x-hidden">
         <!-- Mobile menu toggle -->
-        <label for="sidebar-drawer" class="btn btn-ghost btn-square lg:hidden">
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <label
+          for="sidebar-drawer"
+          class="btn btn-ghost btn-square lg:hidden"
+          aria-label="Open navigation menu"
+        >
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
           </svg>
         </label>
 
-        <!-- Search Box with Button -->
+        <!-- Search Box with Button.
+             The button stays enabled at rest (UX audit F32): a greyed-out
+             control next to an empty box reads as broken, when in fact the
+             search simply has nothing to run yet. Submitting an empty query
+             is a no-op. -->
         <div class="flex items-center space-x-2 flex-1 max-w-2xl min-w-0">
           <div class="relative flex-1">
             <input
-              type="text"
+              type="search"
               placeholder="Search tools, servers..."
               class="input input-bordered w-full pr-3"
+              aria-label="Search tools and servers"
+              data-test="header-search-input"
               v-model="searchQuery"
               @keydown.enter="handleSearch"
             />
@@ -24,9 +34,10 @@
           <button
             @click="handleSearch"
             class="btn btn-primary"
-            :disabled="!searchQuery.trim()"
+            aria-label="Search"
+            data-test="header-search-button"
           >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
             <span class="hidden sm:inline ml-2">Search</span>
@@ -34,7 +45,12 @@
         </div>
 
         <!-- Add Server Button -->
-        <button @click="showAddServerModal = true" class="btn btn-primary" data-test="header-add-server">
+        <button
+          @click="showAddServerModal = true"
+          class="btn btn-primary"
+          :aria-label="addServerLabel"
+          data-test="header-add-server"
+        >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
           </svg>
@@ -56,20 +72,20 @@
             ]"
           />
           <span class="font-bold">{{ serversStore.serverCount.connected }}</span>
-          <span class="opacity-60">/</span>
+          <span class="text-base-content/60">/</span>
           <span>{{ serversStore.serverCount.total }}</span>
-          <span class="text-xs opacity-60">Servers</span>
+          <span class="text-xs text-base-content/60">Servers</span>
         </div>
 
         <!-- Tools -->
         <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
           <span class="font-bold">{{ serversStore.totalTools }}</span>
-          <span class="text-xs opacity-60">Tools</span>
+          <span class="text-xs text-base-content/60">Tools</span>
         </div>
 
         <!-- Routing Mode -->
         <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
-          <span class="text-xs opacity-60">Mode:</span>
+          <span class="text-xs text-base-content/60">Mode:</span>
           <span class="font-medium">{{ routingModeLabel }}</span>
         </div>
 
@@ -79,7 +95,7 @@
             @click="showEndpoints = !showEndpoints"
             class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg cursor-pointer hover:bg-base-300 transition-colors"
           >
-            <span class="text-xs font-medium opacity-60">MCP:</span>
+            <span class="text-xs font-medium text-base-content/60">MCP:</span>
             <code class="text-xs font-mono">{{ systemStore.listenAddr }}</code>
             <svg class="w-3 h-3 opacity-60 transition-transform" :class="{ 'rotate-180': showEndpoints }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -89,7 +105,7 @@
             v-if="showEndpoints"
             class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-96 border border-base-300 z-50"
           >
-            <div class="text-xs font-semibold opacity-60 mb-2 px-1">MCP Endpoints</div>
+            <div class="text-xs font-semibold text-base-content/60 mb-2 px-1">MCP Endpoints</div>
             <div class="space-y-1">
               <div
                 v-for="ep in mcpEndpoints"
@@ -101,7 +117,7 @@
                     <code class="text-xs font-mono truncate">{{ ep.url }}</code>
                     <span v-if="ep.isDefault" class="badge badge-xs badge-primary">default</span>
                   </div>
-                  <div class="text-xs opacity-50 mt-0.5">{{ ep.description }}</div>
+                  <div class="text-xs text-base-content/60 mt-0.5">{{ ep.description }}</div>
                 </div>
                 <button
                   @click.stop="copyEndpoint(ep)"

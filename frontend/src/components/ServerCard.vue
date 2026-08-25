@@ -65,12 +65,16 @@
           <div class="stat-title text-xs">Status</div>
           <div class="stat-value text-lg">
             <div class="flex items-center space-x-1">
+              <!-- UX audit F30: the toggle carried no accessible name, so a
+                   screen reader announced five identical unlabelled checkboxes
+                   on /servers. -->
               <input
                 type="checkbox"
                 :checked="server.enabled"
                 @change="toggleEnabled"
                 class="toggle toggle-sm"
                 :disabled="loading"
+                :aria-label="`${server.enabled ? 'Disable' : 'Enable'} server ${server.name}`"
               />
               <span class="text-sm">{{ server.enabled ? 'Enabled' : 'Disabled' }}</span>
             </div>
@@ -237,7 +241,7 @@
             data-tip="Enable server first"
           >
             <button
-              class="btn btn-sm btn-outline btn-ghost"
+              class="btn btn-sm btn-outline"
               disabled
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -249,7 +253,7 @@
           <router-link
             v-else
             :to="serverDetailPath(server.name, 'security')"
-            class="btn btn-sm btn-outline btn-ghost"
+            class="btn btn-sm btn-outline"
             title="Security Scan"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -247,7 +247,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Server</span>
             </label>
-            <select v-model="filterServer" class="select select-bordered select-sm">
+            <select v-model="filterServer" class="select select-bordered select-sm" aria-label="Filter by server">
               <option value="">All Servers</option>
               <option v-for="server in availableServers" :key="server" :value="server">
                 {{ server }}
@@ -260,7 +260,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Status</span>
             </label>
-            <select v-model="filterStatus" class="select select-bordered select-sm">
+            <select v-model="filterStatus" class="select select-bordered select-sm" aria-label="Filter by status">
               <option value="">All</option>
               <option value="success">Success</option>
               <option value="error">Error</option>
@@ -274,7 +274,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Auth</span>
             </label>
-            <select v-model="filterAuthType" class="select select-bordered select-sm">
+            <select v-model="filterAuthType" class="select select-bordered select-sm" aria-label="Filter by authentication type">
               <option value="">All</option>
               <option value="admin">🔑 Admin</option>
               <option value="agent">🤖 Agent</option>
@@ -286,7 +286,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Agent</span>
             </label>
-            <select v-model="filterAgentName" class="select select-bordered select-sm">
+            <select v-model="filterAgentName" class="select select-bordered select-sm" aria-label="Filter by agent">
               <option value="">All Agents</option>
               <option v-for="agent in availableAgents" :key="agent" :value="agent">
                 {{ agent }}
@@ -299,7 +299,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Sensitive Data</span>
             </label>
-            <select v-model="filterSensitiveData" class="select select-bordered select-sm">
+            <select v-model="filterSensitiveData" class="select select-bordered select-sm" aria-label="Filter by sensitive data">
               <option value="">All</option>
               <option value="true">⚠️ Detected</option>
               <option value="false">Clean</option>
@@ -311,7 +311,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Severity</span>
             </label>
-            <select v-model="filterSeverity" class="select select-bordered select-sm">
+            <select v-model="filterSeverity" class="select select-bordered select-sm" aria-label="Filter by severity">
               <option value="">All</option>
               <option value="critical">☢️ Critical</option>
               <option value="high">⚠️ High</option>
@@ -325,7 +325,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Session</span>
             </label>
-            <select v-model="filterSession" class="select select-bordered select-sm">
+            <select v-model="filterSession" class="select select-bordered select-sm" aria-label="Filter by session">
               <option value="">All Sessions</option>
               <option v-for="session in availableSessions" :key="session.id" :value="session.id">
                 {{ session.label }}
@@ -333,25 +333,32 @@
             </select>
           </div>
 
-          <!-- Date Range Filter -->
+          <!-- Date Range Filter. The native control renders in the OS locale,
+               so the hint states the format the table itself prints (F35). -->
           <div class="form-control min-w-[160px]">
-            <label class="label py-1">
+            <label class="label py-1" for="activity-filter-from">
               <span class="label-text text-xs">From</span>
             </label>
             <input
+              id="activity-filter-from"
               type="datetime-local"
               v-model="filterStartDate"
               class="input input-bordered input-sm"
+              :title="dateTimeFormatHint"
+              aria-label="Filter activity from date and time"
             />
           </div>
           <div class="form-control min-w-[160px]">
-            <label class="label py-1">
+            <label class="label py-1" for="activity-filter-to">
               <span class="label-text text-xs">To</span>
             </label>
             <input
+              id="activity-filter-to"
               type="datetime-local"
               v-model="filterEndDate"
               class="input input-bordered input-sm"
+              :title="dateTimeFormatHint"
+              aria-label="Filter activity to date and time"
             />
           </div>
 
@@ -393,31 +400,55 @@
           <p class="text-sm mt-1">{{ hasActiveFilters ? 'Try adjusting your filters' : 'Activity will appear here as tools are called and actions are taken' }}</p>
         </div>
 
-        <!-- Activity Table -->
-        <div v-else class="overflow-x-auto">
-          <table class="table table-sm">
+        <!-- Activity Table.
+             UX audit F30: the table auto-refreshes, so the row count lives in
+             an aria-live region and the table carries a <caption>, otherwise a
+             screen-reader user is never told that rows changed.
+             UX audit F14: below `md` the secondary columns fold away so Status
+             — the column that tells you a call FAILED — stays on screen at
+             390px instead of being clipped off the right edge. -->
+        <div v-else>
+          <p
+            class="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            data-test="activity-live-region"
+          >
+            Showing {{ paginatedActivities.length }} of {{ sortedActivities.length }} activity records
+          </p>
+          <div class="overflow-x-auto">
+          <!-- table-fixed below sm: with only Time/Details/Status left, fixed columns
+               guarantee the row fits a 390px viewport instead of letting one long
+               tool name push Status off the edge (F14). -->
+          <table class="table table-sm w-full table-fixed sm:table-auto">
+            <caption class="sr-only">
+              Activity log — one row per proxied call, newest first. Updates automatically.
+            </caption>
             <thead>
               <tr>
                 <th class="cursor-pointer hover:bg-base-200" @click="sortBy('timestamp')">
                   Time {{ getSortIndicator('timestamp') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('type')">
+                <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('type')">
                   Type {{ getSortIndicator('type') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('server_name')">
+                <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('server_name')">
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <th>Details</th>
-                <th>Sensitive</th>
+                <th class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
-                <th class="min-w-[11rem]">Intent</th>
+                <th class="hidden lg:table-cell min-w-[11rem]">Intent</th>
                 <th class="cursor-pointer hover:bg-base-200" @click="sortBy('status')">
                   Status {{ getSortIndicator('status') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('duration_ms')">
+                <th class="hidden md:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('duration_ms')">
                   Duration {{ getSortIndicator('duration_ms') }}
                 </th>
-                <th></th>
+                <!-- Row-open chevron: the whole row is clickable, so on a phone
+                     the column is pure overhead and folds away (F14). -->
+                <th class="hidden sm:table-cell"></th>
               </tr>
             </thead>
             <tbody>
@@ -429,11 +460,16 @@
                 :class="{ 'bg-base-200': selectedActivity?.id === activity.id }"
                 @click="selectActivity(activity)"
               >
-                <td>
-                  <div class="text-sm">{{ formatTimestamp(activity.timestamp) }}</div>
+                <td class="whitespace-nowrap">
+                  <!-- The full stamp needs ~10rem; on a phone that wrapped onto
+                       three lines and squeezed Status off the row (F14), so the
+                       narrow layout keeps the wall-clock time and the relative
+                       age, and the date stays one breakpoint up. -->
+                  <div class="text-sm hidden sm:block">{{ formatTimestamp(activity.timestamp) }}</div>
+                  <div class="text-sm sm:hidden">{{ formatTimeOfDay(activity.timestamp) }}</div>
                   <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
                 </td>
-                <td>
+                <td class="hidden sm:table-cell">
                   <div class="flex flex-col gap-1">
                     <div class="flex items-center gap-2">
                       <span class="text-lg">{{ getTypeIcon(activity.type) }}</span>
@@ -466,7 +502,7 @@
                     </span>
                   </div>
                 </td>
-                <td>
+                <td class="hidden sm:table-cell">
                   <router-link
                     v-if="activity.server_name"
                     :to="serverDetailPath(activity.server_name)"
@@ -478,7 +514,13 @@
                   <span v-else class="text-base-content/40">-</span>
                 </td>
                 <td>
-                  <div class="max-w-xs truncate flex items-center gap-1.5">
+                  <div class="max-w-[6rem] sm:max-w-xs truncate flex items-center gap-1.5">
+                    <!-- Below `sm` the Type column folds away (F14), so the row
+                         keeps its type as the glyph in front of the details. -->
+                    <span
+                      class="sm:hidden text-sm shrink-0"
+                      :title="formatType(activity.type)"
+                    >{{ getTypeIcon(activity.type) }}</span>
                     <!--
                       The parent marker, when the Details text already says
                       "code_execution": a quiet glyph instead of a second copy of
@@ -514,7 +556,7 @@
                   </div>
                 </td>
                 <!-- Sensitive Data column (Spec 026) -->
-                <td>
+                <td class="hidden lg:table-cell">
                   <div
                     v-if="activity.has_sensitive_data"
                     class="tooltip tooltip-top"
@@ -533,7 +575,7 @@
                   coloured `read` pill spent semantic colour on the most common
                   case and clipped its own icon.
                 -->
-                <td class="max-w-[18rem]">
+                <td class="hidden lg:table-cell max-w-[18rem]">
                   <div
                     v-if="intentOf(activity).present"
                     data-test="activity-intent"
@@ -556,7 +598,7 @@
                   Status: success is the norm and stays quiet (muted text, no
                   pill); only error / blocked / oddities get a chip.
                 -->
-                <td>
+                <td class="whitespace-nowrap">
                   <span
                     data-test="activity-status"
                     :class="statusPresentation(activity.status).className"
@@ -564,15 +606,19 @@
                     {{ statusPresentation(activity.status).label }}
                   </span>
                 </td>
-                <td>
+                <td class="hidden md:table-cell">
                   <span v-if="activity.duration_ms !== undefined" class="text-sm">
                     {{ formatDuration(activity.duration_ms) }}
                   </span>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td>
-                  <button class="btn btn-xs btn-ghost" @click.stop="selectActivity(activity)">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <td class="hidden sm:table-cell">
+                  <button
+                    class="btn btn-xs btn-ghost"
+                    aria-label="Open activity details"
+                    @click.stop="selectActivity(activity)"
+                  >
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
                     </svg>
                   </button>
@@ -580,6 +626,7 @@
               </tr>
             </tbody>
           </table>
+          </div>
 
           <!-- Pagination -->
           <div v-if="totalPages > 1" class="flex justify-between items-center mt-4 pt-4 border-t border-base-300">
@@ -620,7 +667,11 @@
               </button>
             </div>
             <div class="form-control">
-              <select v-model.number="pageSize" class="select select-bordered select-sm">
+              <select
+                v-model.number="pageSize"
+                class="select select-bordered select-sm"
+                aria-label="Rows per page"
+              >
                 <option :value="10">10 / page</option>
                 <option :value="25">25 / page</option>
                 <option :value="50">50 / page</option>
@@ -935,6 +986,7 @@ import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
+import { DATE_TIME_FORMAT_HINT, formatDateTime, formatTime } from '@/utils/datetime'
 import {
   buildWorkSessionIndex,
   groupKeyOf as workSessionKeyOf,
@@ -1625,10 +1677,14 @@ const handleActivityCompleted = (event: CustomEvent) => {
   }
 }
 
-// Format helpers
-const formatTimestamp = (timestamp: string): string => {
-  return new Date(timestamp).toLocaleString()
-}
+// Format helpers. Timestamps use the one house format (UX audit F35) so the
+// table no longer prints a US `8/25/2026, 6:51:38 AM` next to `dd/mm/yyyy`
+// native date inputs on the same screen.
+const formatTimestamp = (timestamp: string): string => formatDateTime(timestamp)
+
+const formatTimeOfDay = (timestamp: string): string => formatTime(timestamp)
+
+const dateTimeFormatHint = DATE_TIME_FORMAT_HINT
 
 const formatRelativeTime = (timestamp: string): string => {
   const now = Date.now()

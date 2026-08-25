@@ -41,20 +41,25 @@
     <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
     <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
     <!-- Servers Needing Attention Banner (using unified health status) -->
+    <!-- UX audit F14: below `sm` the alert stacks instead of sharing its row
+         with "View All Servers", and `min-w-0` lets the text shrink, so at 390px
+         "Host not found" wraps as words rather than one character per line. -->
     <div
       v-if="serversNeedingAttention.length > 0"
-      class="alert alert-warning"
+      class="alert alert-vertical sm:alert-horizontal alert-warning"
     >
-      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
       </svg>
-      <div class="flex-1">
+      <div class="flex-1 min-w-0">
         <h3 class="font-bold">{{ serversNeedingAttention.length }} server{{ serversNeedingAttention.length !== 1 ? 's' : '' }} need{{ serversNeedingAttention.length === 1 ? 's' : '' }} attention</h3>
         <div class="text-sm space-y-1 mt-1">
-          <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex items-center gap-2">
-            <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'">●</span>
-            <router-link :to="serverDetailPath(server.name)" class="font-medium link link-hover">{{ server.name }}</router-link>
-            <span class="opacity-70">{{ server.health?.summary }}</span>
+          <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+            <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'" aria-hidden="true">●</span>
+            <router-link :to="serverDetailPath(server.name)" class="font-medium link link-hover break-words">{{ server.name }}</router-link>
+            <!-- No opacity: the failure reason is the point of the banner, and a
+                 faded foreground on a filled alert is what F9 measured at 2.x:1. -->
+            <span class="break-words">{{ server.health?.summary }}</span>
             <button
               v-if="server.health?.action === 'login'"
               @click="triggerServerAction(server.name, 'oauth_login')"
@@ -96,7 +101,9 @@
           </div>
         </div>
       </div>
-      <router-link to="/servers" class="btn btn-sm">
+      <!-- `whitespace-nowrap` + `shrink-0`: at 390px the label was wrapping onto
+           three clipped lines inside the alert grid (UX audit F14/F36). -->
+      <router-link to="/servers" class="btn btn-sm shrink-0 whitespace-nowrap">
         View All Servers
       </router-link>
     </div>
@@ -132,7 +139,7 @@
 
       <!-- Left Column: AI Agents / Clients -->
       <div class="flex flex-col justify-center items-center lg:items-end space-y-3 py-6 lg:pr-0">
-        <h3 class="text-xs font-bold uppercase tracking-widest opacity-40 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
+        <h3 class="text-xs font-bold uppercase tracking-widest text-base-content/60 mb-1 w-full max-w-[260px] text-center lg:text-right">AI Agents</h3>
 
         <!-- Single big clients box -->
         <div class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[260px]">
@@ -140,14 +147,14 @@
             <div v-if="connectedClientNames.length > 0" class="mb-1">
               <div class="flex items-center gap-2 mb-1">
                 <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
-                <span class="text-xs font-bold uppercase tracking-wide opacity-50">Connected</span>
+                <span class="text-xs font-bold uppercase tracking-wide text-base-content/60">Connected</span>
               </div>
               <div class="text-sm font-medium">{{ connectedClientNames.join(', ') }}</div>
             </div>
             <div v-if="supportedClientNames.length > 0">
-              <div class="text-xs opacity-40 mt-1">Available: {{ supportedClientNames.join(', ') }}</div>
+              <div class="text-xs text-base-content/60 mt-1">Available: {{ supportedClientNames.join(', ') }}</div>
             </div>
-            <div v-if="connectedClientNames.length === 0 && supportedClientNames.length === 0" class="text-sm opacity-50 text-center py-2">
+            <div v-if="connectedClientNames.length === 0 && supportedClientNames.length === 0" class="text-sm text-base-content/60 text-center py-2">
               No clients detected
             </div>
           </div>
@@ -242,7 +249,7 @@
             <div class="text-xs font-medium" :class="systemStore.isRunning ? 'text-success' : 'text-error'">
               {{ systemStore.isRunning ? 'active' : 'stopped' }}
             </div>
-            <div v-if="uptime" class="text-[10px] opacity-50">{{ uptime }}</div>
+            <div v-if="uptime" class="text-[10px] text-base-content/60">{{ uptime }}</div>
           </div>
         </div>
 
@@ -284,7 +291,7 @@
 
       <!-- Right Column: Upstream Servers -->
       <div class="flex flex-col justify-center items-center lg:items-start space-y-3 py-6 lg:pl-4">
-        <h3 class="text-xs font-bold uppercase tracking-widest opacity-40 mb-1 w-full max-w-[240px] text-center lg:text-left">Upstream Servers</h3>
+        <h3 class="text-xs font-bold uppercase tracking-widest text-base-content/60 mb-1 w-full max-w-[240px] text-center lg:text-left">Upstream Servers</h3>
 
         <!-- Connected servers card -->
         <router-link to="/servers" class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[240px] hover:shadow-md transition-shadow">
@@ -300,7 +307,7 @@
             </div>
             <div
               v-if="disabledCount > 0"
-              class="text-xs opacity-50 mt-0.5"
+              class="text-xs text-base-content/60 mt-0.5"
             >
               {{ disabledCount }} disabled
             </div>
@@ -352,7 +359,7 @@
 
     <!-- Token Savings Collapsible Detail -->
     <div v-if="tokenSavingsData" class="collapse collapse-arrow bg-base-100 shadow-sm border border-base-300">
-      <input type="checkbox" />
+      <input type="checkbox" aria-label="Show token savings details" />
       <div class="collapse-title font-medium flex items-center gap-3">
         <svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
@@ -402,7 +409,7 @@
                 </div>
                 <div class="flex items-center space-x-2 shrink-0">
                   <span class="font-mono text-xs">{{ formatNumber(segment.value) }}</span>
-                  <span class="text-xs opacity-50">({{ segment.percentage.toFixed(1) }}%)</span>
+                  <span class="text-xs text-base-content/60">({{ segment.percentage.toFixed(1) }}%)</span>
                 </div>
               </div>
             </div>

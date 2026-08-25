@@ -10,6 +10,189 @@
           coffee, winter, dim, nord, sunset;
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * WCAG AA contrast tokens (UX audit F9)
+ * ---------------------------------------------------------------------------
+ * Two problems the stock daisyUI palettes have, both measured on a live page:
+ *
+ *   1. Semantic colours are *fills*, not text colours. `text-warning` on a
+ *      `bg-warning/10` chip resolved to 1.28:1 in `corporate` — the worst
+ *      offender was the "Docker isolation disabled" security warning itself.
+ *      Fix: a parallel `--tone-*` ramp, dark enough (light themes) or light
+ *      enough (dark themes) to clear 4.5:1 on base-100/200/300 and on their
+ *      10% tints. Only `text-*` / `link-*` are remapped; fills keep their token.
+ *
+ *   2. A few fill/content pairs fail on their own: white on `primary` was
+ *      4.13:1 in BOTH shipped themes (every filled primary button in the app),
+ *      and white on corporate `success`/`info` was 3.30/3.73:1. Fix: one step
+ *      darker on the fill, which buys AA everywhere those tokens are used.
+ *
+ * The values below are computed, not eyeballed: `frontend/src/utils/contrast.ts`
+ * implements the CSS colour maths and `frontend/tests/unit/contrast.spec.ts`
+ * parses THIS file plus the daisyUI theme files and fails if any audited pair
+ * drops below AA. Chroma/hue are preserved from the upstream token so the
+ * themes still look like themselves; only lightness moves.
+ */
+:root {
+  /* Generic fallback for the 13 non-default themes: bend the semantic colour
+     toward the theme's own text colour, which always increases contrast with
+     the theme's own surfaces regardless of whether the theme is light or dark. */
+  --tone-primary: color-mix(in oklab, var(--color-primary) 62%, var(--color-base-content));
+  --tone-secondary: color-mix(in oklab, var(--color-secondary) 62%, var(--color-base-content));
+  --tone-accent: color-mix(in oklab, var(--color-accent) 62%, var(--color-base-content));
+  --tone-info: color-mix(in oklab, var(--color-info) 62%, var(--color-base-content));
+  --tone-success: color-mix(in oklab, var(--color-success) 62%, var(--color-base-content));
+  --tone-warning: color-mix(in oklab, var(--color-warning) 62%, var(--color-base-content));
+  --tone-error: color-mix(in oklab, var(--color-error) 62%, var(--color-base-content));
+  /* Secondary/muted body text. `text-base-content/40` resolved to 2.51:1 on
+     white — AA has no "this text is less important" exemption, so the muted
+     ramp is a colour, not an alpha. */
+  --tone-muted: color-mix(in oklab, var(--color-base-content) 78%, var(--color-base-100));
+}
+
+/* Light default. Worst-case ratios after the change are in the spec file. */
+[data-theme="corporate"] {
+  --color-primary: oklch(55% 0.158 241.966); /* white on primary 4.14 -> 4.66 */
+  --color-success: oklch(53% 0.194 149.214); /* white on success 3.30 -> 4.66 */
+  --color-info: oklch(54% 0.126 221.723); /* white on info 3.73 -> 4.70 */
+  --color-accent: oklch(54% 0.118 184.704); /* white on accent 3.66 -> 4.61 */
+  --color-secondary: oklch(46% 0.046 257.417); /* outline secondary 3.94 -> 5.79 */
+  --tone-primary: oklch(42% 0.158 241.966);
+  --tone-secondary: oklch(43% 0.046 257.417);
+  --tone-accent: oklch(40% 0.118 184.704);
+  --tone-info: oklch(41% 0.126 221.723);
+  --tone-success: oklch(39% 0.194 149.214);
+  --tone-warning: oklch(45% 0.199 91.936);
+  --tone-error: oklch(46% 0.191 22.216);
+  --tone-muted: oklch(46% 0.031 278.072); /* base-content/40 2.51 -> 4.68 */
+}
+
+/* Dark default. */
+[data-theme="dark"] {
+  --color-primary: oklch(55% 0.233 277.117); /* primary-content on primary 4.14 -> 4.71 */
+  --color-secondary: oklch(53% 0.241 354.308); /* secondary-content on secondary 3.05 -> 4.69 */
+  --tone-primary: oklch(70% 0.233 277.117);
+  --tone-secondary: oklch(71% 0.241 354.308);
+  --tone-accent: oklch(66% 0.152 181.912);
+  --tone-info: oklch(67% 0.16 232.661);
+  --tone-success: oklch(66% 0.177 163.223);
+  --tone-warning: oklch(70% 0.189 84.429);
+  --tone-error: oklch(70% 0.194 13.428);
+  --tone-muted: oklch(64% 0.029 256.847); /* base-content/40 3.56 -> 4.71 */
+}
+
+@layer utilities {
+  /* Semantic text/link colours read from the AA-checked ramp. Fills
+     (`bg-*`, `badge-*`, `btn-*`, `alert-*`) deliberately keep `--color-*`. */
+  .text-primary { color: var(--tone-primary); }
+  .text-secondary { color: var(--tone-secondary); }
+  .text-accent { color: var(--tone-accent); }
+  .text-info { color: var(--tone-info); }
+  .text-success { color: var(--tone-success); }
+  .text-warning { color: var(--tone-warning); }
+  .text-error { color: var(--tone-error); }
+
+  .link-primary { color: var(--tone-primary); }
+  .link-secondary { color: var(--tone-secondary); }
+  .link-accent { color: var(--tone-accent); }
+  .link-info { color: var(--tone-info); }
+  .link-success { color: var(--tone-success); }
+  .link-warning { color: var(--tone-warning); }
+  .link-error { color: var(--tone-error); }
+
+  /* Faded body text: the alpha ramp below /80 never cleared AA on any surface,
+     so every step of it resolves to the muted colour instead. */
+  .text-base-content\/30,
+  .text-base-content\/40,
+  .text-base-content\/50,
+  .text-base-content\/60,
+  .text-base-content\/70 {
+    color: var(--tone-muted);
+  }
+}
+
+/*
+ * Unfilled variants paint the semantic colour as TEXT on a base surface, which
+ * is the same failure mode as `text-*` (a dark-theme outline secondary button
+ * measured 2.96:1). daisyUI exposes `--btn-rest-fg` for exactly this: it is
+ * read only in the rest state, so hover still flips to the filled fg/bg pair.
+ */
+:where(.btn-outline, .btn-dash, .btn-soft, .btn-ghost, .btn-link) {
+  &.btn-primary { --btn-rest-fg: var(--tone-primary); }
+  &.btn-secondary { --btn-rest-fg: var(--tone-secondary); }
+  &.btn-accent { --btn-rest-fg: var(--tone-accent); }
+  &.btn-info { --btn-rest-fg: var(--tone-info); }
+  &.btn-success { --btn-rest-fg: var(--tone-success); }
+  &.btn-warning { --btn-rest-fg: var(--tone-warning); }
+  &.btn-error { --btn-rest-fg: var(--tone-error); }
+}
+
+:where(.badge-outline, .badge-dash, .badge-soft) {
+  &.badge-primary { color: var(--tone-primary); }
+  &.badge-secondary { color: var(--tone-secondary); }
+  &.badge-accent { color: var(--tone-accent); }
+  &.badge-info { color: var(--tone-info); }
+  &.badge-success { color: var(--tone-success); }
+  &.badge-warning { color: var(--tone-warning); }
+  &.badge-error { color: var(--tone-error); }
+}
+
+/* daisyUI paints these with `opacity` on base-content, which lands at ~4.2:1
+   in corporate and ~3.6:1 in dark. Same intent, AA-checked colour instead. */
+.stat-title,
+.stat-desc {
+  color: var(--tone-muted);
+  opacity: 1;
+}
+
+.tabs .tab:not(.tab-active):not(.tab-disabled) {
+  color: var(--tone-muted);
+  opacity: 1;
+}
+
+/*
+ * Inside a COLOURED alert the background is the semantic fill, so any tinted
+ * foreground on top of it is unreadable by construction: the audit measured
+ * 1.07:1 for the `dig <host>` remediation chip and 1.41:1 for the docs link.
+ * On such a surface the only guaranteed-AA foreground is the theme's own
+ * `*-content` colour, so links, ghost buttons and semantic text utilities all
+ * inherit it, and code chips invert into it. Unlayered so it beats daisyUI.
+ * Neutral `.alert` (base-200 surface) is untouched — tones are readable there.
+ */
+.alert-info { --alert-fg: var(--color-info-content); }
+.alert-success { --alert-fg: var(--color-success-content); }
+.alert-warning { --alert-fg: var(--color-warning-content); }
+.alert-error { --alert-fg: var(--color-error-content); }
+
+/* `:not(.btn)` matters: a FILLED button inside an alert brings its own
+   background, so forcing the alert's foreground onto it would drop it to
+   1.8:1 — the alert's rules apply to text, links and transparent buttons. */
+:where(.alert-info, .alert-success, .alert-warning, .alert-error)
+  :where(a:not(.btn), .link:not(.btn), .link-primary:not(.btn), .link-info:not(.btn),
+         .link-success:not(.btn), .link-warning:not(.btn), .link-error:not(.btn),
+         .btn-ghost, .btn-link,
+         .text-primary:not(.btn), .text-secondary:not(.btn), .text-accent:not(.btn),
+         .text-info:not(.btn), .text-success:not(.btn), .text-warning:not(.btn),
+         .text-error:not(.btn), .text-base-content\/30, .text-base-content\/40,
+         .text-base-content\/50, .text-base-content\/60, .text-base-content\/70) {
+  color: var(--alert-fg);
+  --btn-rest-fg: var(--alert-fg);
+}
+
+:where(.alert-info, .alert-success, .alert-warning, .alert-error)
+  :where(a:not(.btn), .link:not(.btn)) {
+  text-decoration-line: underline;
+}
+
+/* Code chips on a coloured alert: invert to the alert's own fill/content pair,
+   which every theme guarantees to be legible (>= 4.5:1 after the token fixes). */
+:where(.alert-info, .alert-success, .alert-warning, .alert-error) :where(code, kbd) {
+  background-color: var(--alert-fg);
+  color: var(--alert-color, var(--color-base-200));
+  border-color: transparent;
+}
+
 /* Prevent horizontal scroll globally */
 html,
 body {

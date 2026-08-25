@@ -652,6 +652,7 @@
 import { ref, computed, nextTick, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '@/services/api'
+import { formatDateTime } from '@/utils/datetime'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import type { SecurityScanFinding, ThreatType } from '@/types/api'
@@ -885,9 +886,7 @@ const supplyChainHasWarnings = computed(() => {
 })
 
 function formatDate(dateStr: string): string {
-  if (!dateStr) return '-'
-  const d = new Date(dateStr)
-  return d.toLocaleString()
+  return formatDateTime(dateStr)
 }
 
 async function loadReport() {

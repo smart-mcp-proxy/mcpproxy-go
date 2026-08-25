@@ -741,7 +741,7 @@
               <p class="text-base-content/70">Recent log entries for {{ server.name }}</p>
             </div>
             <div class="flex items-center space-x-2">
-              <select v-model="logTail" class="select select-bordered select-sm">
+              <select v-model="logTail" class="select select-bordered select-sm" aria-label="Number of log lines to load">
                 <option :value="50">Last 50 lines</option>
                 <option :value="100">Last 100 lines</option>
                 <option :value="200">Last 200 lines</option>
@@ -775,8 +775,27 @@
             <p class="text-base-content/70">No log entries found for this server.</p>
           </div>
 
-          <div v-else class="mockup-code max-h-96 overflow-y-auto">
-            <pre v-for="(line, index) in serverLogs" :key="index" class="text-xs"><code>{{ line }}</code></pre>
+          <!--
+            UX audit F21: `mockup-code` clipped every entry at the right edge —
+            no wrap, no horizontal scrollbar, and its own palette rather than
+            the theme's. This is the primary debugging surface, so entries now
+            wrap, keep a monospace ramp with real line spacing, separate from
+            one another, and sit on a base surface whose foreground is the
+            theme's own AA-checked `base-content`.
+          -->
+          <div
+            v-else
+            class="max-h-[32rem] overflow-y-auto overflow-x-auto rounded-box border border-base-300 bg-base-200"
+            role="log"
+            aria-label="Server log entries"
+            tabindex="0"
+            data-test="server-logs"
+          >
+            <pre
+              v-for="(line, index) in serverLogs"
+              :key="index"
+              class="font-mono text-xs leading-relaxed text-base-content px-3 py-1.5 whitespace-pre-wrap break-words border-b border-base-300/60 last:border-b-0 odd:bg-base-100/40"
+            ><code class="bg-transparent p-0">{{ line }}</code></pre>
           </div>
         </div>
 
@@ -1357,7 +1376,7 @@
               <!-- Scan metadata -->
               <div class="text-sm text-base-content/60 mb-4">
                 <span v-if="scanReport.job_id">Scan ID: <code class="bg-base-200 px-1 rounded text-xs">{{ scanReport.job_id.substring(0, 8) }}</code></span>
-                <span v-if="scanReport.scanned_at" class="ml-4">{{ new Date(scanReport.scanned_at).toLocaleString() }}</span>
+                <span v-if="scanReport.scanned_at" class="ml-4">{{ formatDateTime(scanReport.scanned_at) }}</span>
                 <span v-if="scanReport.pass2_running" class="ml-4 badge badge-sm badge-info">Pass 2 running...</span>
                 <span v-else-if="scanReport.pass2_complete" class="ml-4 badge badge-sm badge-success">Pass 2 complete</span>
               </div>
@@ -1433,6 +1452,7 @@ import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import ErrorPanel from '@/components/diagnostics/ErrorPanel.vue'
+import { formatDateTime } from '@/utils/datetime'
 import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
 import KVValueCell from '@/components/KVValueCell.vue'
 import TrustModeSelector from '@/components/TrustModeSelector.vue'
@@ -3083,15 +3103,13 @@ const hasIsolationData = computed(() => {
   return false
 })
 
-// Locale-aware absolute timestamp for "Connected At" / similar fields.
-// We use the absolute form (not relative-time) because it matches what
-// users see in the macOS tray and in `mcpproxy upstream list` — a single
-// authoritative source-of-truth representation.
+// Absolute timestamp for "Connected At" / similar fields. We use the absolute
+// form (not relative-time) because it matches what users see in the macOS tray
+// and in `mcpproxy upstream list` — a single authoritative representation — and
+// the house `YYYY-MM-DD HH:mm:ss` format the CLI prints (UX audit F35).
 function formatConfigTime(isoString: string | null | undefined): string {
   if (!isoString) return ''
-  const date = new Date(isoString)
-  if (isNaN(date.getTime())) return isoString
-  return date.toLocaleString()
+  return formatDateTime(isoString, isoString)
 }
 
 // healthLevelBadgeClass returns the daisyUI class set for a Health.Level

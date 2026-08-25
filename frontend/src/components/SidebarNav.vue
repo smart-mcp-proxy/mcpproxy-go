@@ -103,6 +103,7 @@
                 :class="{ 'active': isActiveRoute(item.path) }"
                 class="rounded-lg"
                 :title="collapsed ? item.name : ''"
+                :aria-label="collapsed ? item.name : undefined"
               >
                 <span :class="collapsed ? 'mx-auto' : ''">{{ item.name }}</span>
               </router-link>
@@ -121,6 +122,7 @@
                   :class="{ 'active': isActiveRoute(item.path) }"
                   class="rounded-lg"
                   :title="collapsed ? item.name : ''"
+                  :aria-label="collapsed ? item.name : undefined"
                 >
                   <span :class="collapsed ? 'mx-auto' : ''">{{ item.name }}</span>
                 </router-link>
@@ -145,6 +147,7 @@
                   ? 'bg-gradient-to-r from-primary/10 to-secondary/10 hover:from-primary/15 hover:to-secondary/15'
                   : 'text-base-content/60'"
                 :title="collapsed ? setupTitleAttr : ''"
+                :aria-label="collapsed ? setupTitleAttr : undefined"
                 data-test="sidebar-setup"
                 @click.prevent="onClickSetup"
               >
@@ -185,6 +188,7 @@
                 :class="{ 'active': isActiveRoute('/') }"
                 class="rounded-lg font-medium"
                 :title="collapsed ? 'Dashboard' : ''"
+                :aria-label="collapsed ? 'Dashboard' : undefined"
               >
                 <IconDashboard class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Dashboard</span>
@@ -208,6 +212,7 @@
                 :class="{ 'active': isActiveRoute('/servers') }"
                 class="rounded-lg font-medium"
                 :title="collapsed ? 'Servers' : ''"
+                :aria-label="collapsed ? 'Servers' : undefined"
               >
                 <IconServers class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Servers</span>
@@ -223,6 +228,7 @@
                 :class="{ 'active': isActiveRoute('/tools') }"
                 class="rounded-lg font-medium"
                 :title="collapsed ? 'Tools' : ''"
+                :aria-label="collapsed ? 'Tools' : undefined"
               >
                 <IconTools class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Tools</span>
@@ -238,6 +244,7 @@
                 :class="{ 'active': isActiveRoute('/secrets') }"
                 class="rounded-lg font-medium"
                 :title="collapsed ? 'Secrets' : ''"
+                :aria-label="collapsed ? 'Secrets' : undefined"
               >
                 <IconSecrets class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Secrets</span>
@@ -258,6 +265,7 @@
                   collapsed ? 'rounded-lg' : 'rounded-lg !pl-7 text-[13px] text-base-content/75',
                 ]"
                 :title="collapsed ? 'Agent Tokens' : ''"
+                :aria-label="collapsed ? 'Agent Tokens' : undefined"
               >
                 <IconTokens class="w-4 h-4 shrink-0" :class="collapsed ? 'w-5 h-5' : ''" />
                 <span v-show="!collapsed">Agent Tokens</span>
@@ -284,6 +292,7 @@
                 :class="{ 'active': isActiveRoute('/activity') }"
                 class="rounded-lg font-medium"
                 :title="collapsed ? 'Activity Log' : ''"
+                :aria-label="collapsed ? 'Activity Log' : undefined"
               >
                 <IconActivity class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Activity Log</span>
@@ -295,6 +304,7 @@
                 :class="{ 'active': isActiveRoute('/sessions') }"
                 class="rounded-lg font-medium"
                 :title="collapsed ? 'Sessions' : ''"
+                :aria-label="collapsed ? 'Sessions' : undefined"
                 data-test="sidebar-sessions"
               >
                 <IconSessions class="w-5 h-5 shrink-0" />
@@ -307,6 +317,7 @@
                 :class="{ 'active': isActiveRoute('/security') }"
                 class="rounded-lg font-medium"
                 :title="collapsed ? 'Security Scanners' : ''"
+                :aria-label="collapsed ? 'Security Scanners' : undefined"
               >
                 <IconShield class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Security Scanners</span>
@@ -330,6 +341,7 @@
                 :class="{ 'active': isActiveRoute('/repositories') }"
                 class="rounded-lg text-base-content/70"
                 :title="collapsed ? 'Repositories' : ''"
+                :aria-label="collapsed ? 'Repositories' : undefined"
               >
                 <IconRepo class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed" class="text-[13px]">Repositories</span>
@@ -341,6 +353,7 @@
                 :class="{ 'active': isActiveRoute('/settings') }"
                 class="rounded-lg text-base-content/70"
                 :title="collapsed ? 'Configuration' : ''"
+                :aria-label="collapsed ? 'Configuration' : undefined"
               >
                 <IconSettings class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed" class="text-[13px]">Configuration</span>
@@ -393,20 +406,41 @@
               class="btn btn-ghost btn-sm font-normal"
               :class="collapsed ? 'btn-square w-full' : 'w-full justify-start gap-2 px-2'"
               :title="collapsed ? 'Theme' : ''"
+              :aria-label="collapsed ? 'Theme' : undefined"
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
               </svg>
               <span v-show="!collapsed">Theme</span>
             </div>
-            <ul tabindex="0" class="dropdown-content z-[1] menu flex-nowrap p-2 shadow-2xl bg-base-300 rounded-box w-72 max-h-96 overflow-y-auto mb-2">
+            <ul tabindex="0" class="dropdown-content z-[1] menu flex-nowrap p-2 shadow-2xl bg-base-300 rounded-box w-72 max-h-96 overflow-y-auto mb-2" aria-label="Choose theme">
               <li class="menu-title">
                 <span>Choose theme</span>
               </li>
-              <li v-for="theme in systemStore.themes" :key="theme.name">
+              <!-- Default: follow the OS light/dark setting (UX audit F29). -->
+              <li>
                 <a
-                  @click="systemStore.setTheme(theme.name)"
+                  data-test="theme-option-system"
+                  :aria-current="systemStore.currentTheme === 'system' ? 'true' : undefined"
+                  :class="{ 'active': systemStore.currentTheme === 'system' }"
+                  @click="systemStore.setTheme('system')"
+                >
+                  <span :data-theme="systemStore.resolvedTheme" class="bg-base-100 rounded-badge w-4 h-4 mr-2"></span>
+                  System
+                  <span class="ml-auto text-xs opacity-60">
+                    {{ systemStore.resolvedTheme === 'dark' ? 'dark' : 'light' }}
+                  </span>
+                </a>
+              </li>
+              <li class="menu-title pt-2">
+                <span>More themes</span>
+              </li>
+              <li v-for="theme in explicitThemes" :key="theme.name">
+                <a
+                  :data-test="`theme-option-${theme.name}`"
+                  :aria-current="systemStore.currentTheme === theme.name ? 'true' : undefined"
                   :class="{ 'active': systemStore.currentTheme === theme.name }"
+                  @click="systemStore.setTheme(theme.name)"
                 >
                   <span :data-theme="theme.name" class="bg-base-100 rounded-badge w-4 h-4 mr-2"></span>
                   {{ theme.displayName }}
@@ -444,6 +478,7 @@
 import { computed, h, onMounted, ref, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
+import { formatDateTime } from '@/utils/datetime'
 import { useAuthStore } from '@/stores/auth'
 import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
@@ -495,6 +530,12 @@ onMounted(() => {
 
 const collapsed = computed(() => systemStore.sidebarCollapsed)
 
+// "System" is rendered on its own above the divider; the rest are the explicit
+// theme choices grouped under "More themes" (UX audit F29).
+const explicitThemes = computed(() =>
+  systemStore.themes.filter((t) => t.name !== 'system'),
+)
+
 // Strip a leading "v" so the template can format consistently as `v<version>`.
 const displayVersion = computed(() => systemStore.version.replace(/^v/i, ''))
 
@@ -525,8 +566,7 @@ const updateCompactLabel = computed(() => {
 const updateStatusTitle = computed(() => {
   const ts = systemStore.updateCheckedAt
   if (!ts) return 'Check for updates on GitHub'
-  const d = new Date(ts)
-  return `Last checked ${d.toLocaleString()}`
+  return `Last checked ${formatDateTime(ts)}`
 })
 
 async function handleCheckForUpdates() {

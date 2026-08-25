@@ -114,7 +114,7 @@
                        written before 082 reachable; the log accepts either. -->
                   <router-link
                     :to="{ name: 'activity', query: { session: session.work_session_id || session.id } }"
-                    class="btn btn-xs btn-primary"
+                    class="btn btn-xs btn-primary whitespace-nowrap"
                     title="View activity for this session"
                   >
                     View Activity
@@ -159,6 +159,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
 import type { MCPSession } from '@/types'
+import { formatDateTime } from '@/utils/datetime'
 
 // State
 const sessions = ref<MCPSession[]>([])
@@ -187,10 +188,8 @@ const loadSessions = async () => {
   }
 }
 
-// Format helpers
-const formatTimestamp = (timestamp: string): string => {
-  return new Date(timestamp).toLocaleString()
-}
+// Format helpers — house format, shared with the Activity Log (UX audit F35).
+const formatTimestamp = (timestamp: string): string => formatDateTime(timestamp)
 
 const formatRelativeTime = (timestamp: string): string => {
   const now = Date.now()

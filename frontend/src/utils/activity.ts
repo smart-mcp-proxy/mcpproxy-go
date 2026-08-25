@@ -3,6 +3,8 @@
  * Extracted for reuse across Activity.vue and ActivityWidget.vue
  */
 
+import { formatDateTime } from './datetime'
+
 // Activity type labels
 const typeLabels: Record<string, string> = {
   'tool_call': 'Tool Call',
@@ -450,10 +452,7 @@ export interface ActiveFilterChip {
   title?: string
 }
 
-const localDateLabel = (value: string): string => {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
-}
+const localDateLabel = (value: string): string => formatDateTime(value, value)
 
 /**
  * The active filters, as chips. Pure and order-stable: types first (they are
@@ -647,11 +646,9 @@ export const getPreflightVerdictBadgeClass = (verdict?: string): string => {
 }
 
 /**
- * Format timestamp for display
+ * Format timestamp for display, in the one house format (UX audit F35).
  */
-export const formatTimestamp = (timestamp: string): string => {
-  return new Date(timestamp).toLocaleString()
-}
+export const formatTimestamp = (timestamp: string): string => formatDateTime(timestamp, timestamp)
 
 /**
  * Format relative time (e.g., "5m ago")

@@ -87,7 +87,7 @@
               <label class="label">
                 <span class="label-text font-semibold">Command</span>
               </label>
-              <select v-model="formData.command" class="select select-bordered" required>
+              <select v-model="formData.command" class="select select-bordered" aria-label="Command" required>
                 <option value="">Select command</option>
                 <option value="npx">npx (Node.js)</option>
                 <option value="uvx">uvx (Python)</option>
