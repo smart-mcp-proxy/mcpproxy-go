@@ -416,39 +416,59 @@ in the window, and three of them are still open:
   availability loss, not correctness loss: fail-closed, self-correcting on the
   next instruction, and bounded from the client's side by the
   `tools/list_changed` notification `SetTools` has already emitted.
-**What is invisible to the discriminator, field by field** (corrected in round
-10 — the round-9 walk skipped the derived fields and over-claimed). The rendered
-description is a function of exactly two things: `description` (both modes) and,
-in deferred mode, `toolsig.Render(paramsJSON, description).Sig`, whose parameter
-list reads `paramsJSON` alone (`internal/toolsig/signature.go:44-89`).
+**What is invisible to the discriminator, field by field** (round 9, corrected in
+rounds 10 and 11).
 
-Split `directCatalogEntry` into **source** fields (set from the upstream
-projection) and **derived** fields (computed from those), because only the source
-fields are independent axes of change:
+What the renderer actually reads, stated exactly: in **full** mode
+`fmt.Sprintf("[%s] %s", serverName, description)` (`mcp_routing.go:95`); in
+**deferred** mode that same string plus `"\n" + toolName +
+toolsig.Render(paramsJSON, description).Sig` when `Peek(hash)` hits, and nothing
+appended when it misses. So `renderedDescription` is a function of `serverName`,
+`toolName`, `description`, `paramsJSON`, the serialization mode, and whether the
+signature cache held `hash` at render time — **not** of `description` alone.
+
+**Scope of this walk**: it covers the per-entry *definition* fields, because the
+discriminator is a per-name comparison. The catalog-level fields are generation
+state, not definition data, and are accounted for separately: `entries`,
+`byDisplayName` and `byCanonical` express **membership**, whose changes are the
+add / remove / origin-flip / collision cases already in the test matrix — a name
+that leaves or joins them is caught by rule 2 (deny on catalog miss) and rule 4
+(registry membership), not by the description comparison; `serializationMode` is
+*visible* (a flip adds or removes the whole signature suffix, which is why the
+FR-014 guard rebuilds on it); and `generation` is never rendered and is
+observability only. None of them is an invisible per-entry skew axis.
+
+Now the entry itself, split into **source** fields (set from the upstream
+projection) and **derived** fields, because only the source fields are
+independent axes of change:
 
 *Source fields.*
 
 | Field | Visible in a rendered-description comparison? |
 |---|---|
-| `displayName`, `serverName`, `toolName` | Yes. A change of identity is an add/remove, and the origin-flip case moves the `[server]` prefix (`mcp_routing.go:95`). |
+| `serverName`, `toolName` | Yes. `serverName` is in the `[server]` prefix in both modes; `toolName` is in the deferred suffix. `displayName` is derived from the pair (`serverName__toolName`) and cannot move on its own. |
 | `description` | Yes, by construction — it *is* the rendered string in full mode. |
-| `paramsJSON` | **No, not reliably.** Never rendered in full mode; in deferred mode it usually moves the signature, but a re-ordered or semantically-equal edit renders the identical `Sig`. |
-| `outputSchemaJSON` | **No.** Never rendered in either mode. It moves the Spec-032 hash, so it can flip a `Peek` hit to a miss and thereby change the suffix — but only until the indexer warms the new hash, at which point `Render` reproduces the identical `Sig` (it never reads the output schema). |
+| `paramsJSON` | **No, not reliably.** Never rendered in full mode. In deferred mode it usually moves the signature, but an edit that renders the same `Sig` — a re-ordering, or a change confined to nested properties the grammar collapses to `~` — is invisible. |
+| `outputSchemaJSON` | **No.** Never rendered in either mode. It moves the Spec-032 hash, so it can flip a `Peek` hit to a miss and change the suffix that way — but only until the indexer warms the new hash, after which `Render` reproduces the identical `Sig` (it never reads the output schema). |
 | `annotations` | **No.** Never rendered in either mode. |
 
-*Derived fields — no new axis.*
+*Derived fields — no new axis.* The property that matters is one-directional:
+each **cannot move unless one of its sources moves**, so none of them adds a
+fourth independent case. The converse does not hold, and the plan does not claim
+it.
 
-| Field | Derived from | Consequence |
+| Field | Derived from | Note |
 |---|---|---|
-| `renderedDescription` | the renderer, at render time | it *is* the discriminator |
-| `hash` | server, tool, description, input schema, output schema (`internal/hash/hash.go:10-16`, `ToolHashWithOutputSchema`) — **not** annotations | moves iff one of those sources moves; adds no independent case |
-| `requiredPermission` | `annotations`, via `requiredPermissionForDirectTool` (`mcp_direct_scope.go:18`) | moves iff `annotations` moves; it is the *mechanism* of the annotations residual, not a fourth one |
+| `renderedDescription` | the renderer inputs listed above, at render time | it *is* the discriminator |
+| `hash` | server, tool, description, input schema, output schema (`hash.ToolHashWithOutputSchema`, `internal/hash/hash.go:10-16`) — **not** annotations | schemas are canonicalized first (`:59-104`), so a purely representational schema edit leaves the hash — and therefore the cached signature — untouched. That is what makes the input-schema-only skew case constructible in a test. |
+| `requiredPermission` | `annotations`, via `requiredPermissionForDirectTool` (`mcp_direct_scope.go:18`) → `contracts.DeriveCallWith` | it reads only `destructiveHint` and `readOnlyHint` (`internal/contracts/intent.go:208-227`), so a title / idempotent / open-world edit moves `annotations` without moving the tier. It is the *mechanism* of the annotations residual, not a fourth one. |
 
 So there are exactly **three independent source fields** that can change while the
 rendered description stays byte-identical — `paramsJSON`, `outputSchemaJSON`,
-`annotations` — and each is enumerated as a residual below. The derived fields
-add no fourth case; the skew tests drive the three source classes and assert the
-derived consequences.
+`annotations` — and each is enumerated as a residual below. The skew tests drive
+those three classes (the annotations case using a `read → destructive` edit,
+since that is the sub-change the tier is sensitive to) and assert the derived
+consequences.
 
 - *A schema-only change* (`paramsJSON`) passes the discriminator, so for those few
   instructions `describe_tool` may return the **previous** generation's
