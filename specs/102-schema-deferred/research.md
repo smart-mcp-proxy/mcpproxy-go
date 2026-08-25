@@ -337,9 +337,23 @@ The plan therefore does not promise a single transaction; it promises a
      to A's old display name. Neither generation has a collision, yet the old
      catalog's `(server, tool)` would be used to scope-check the new registered
      entry. Closed by a **generation discriminator**: both the listing filters and
-     the describe resolver compare the catalog entry's rendered description
-     against the registered `mcp.Tool.Description` and **fail closed** (deny /
-     `not_found`) on a mismatch. One string comparison, no wire change.
+     the describe resolver compare the entry's **stored** `renderedDescription`
+     — the exact string `renderDirectTools` handed to `SetTools` for that entry,
+     captured on the entry at render time — against the registered
+     `mcp.Tool.Description`, and **fail closed** (deny / `not_found`) on a
+     mismatch. One string comparison, no wire change.
+
+     It must be the stored value, never a re-render. The deferred suffix comes
+     from `toolsig.Cache`, which mutates on its own schedule — `Warm` adds
+     entries at index time and `RetainHashes` evicts them
+     (`internal/toolsig/cache.go:79`, `:108`), neither of which triggers a direct
+     rebuild. Recomputing the description at filter or describe time would
+     therefore flip after a cache miss→warm (or hit→eviction) with no generation
+     change at all, manufacturing a false mismatch that leaves a still-registered
+     tool unlisted and undescribable **until the next rebuild** — a persistent
+     "listed ⇒ describable" violation (SC-007), far worse than the microsecond
+     window the discriminator exists to police. Comparing two immutable snapshots
+     has no such failure mode.
 
    **What the discriminator does NOT catch** (cross-model review round 6,
    correcting an over-broad claim in the round-5 draft that it "subsumes" the
@@ -502,6 +516,9 @@ functions the tests drive directly:
 ```go
 func (p *MCPProxyServer) buildDirectCatalog(tools []*config.ToolMetadata, mode string) *directCatalog
 func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.ServerTool
+//   renderDirectTools also records each entry's renderedDescription on the
+//   catalog before it is published, so the R13 rule 5 discriminator compares
+//   two immutable snapshots rather than re-rendering against a mutable cache.
 func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool // DiscoverTools → buildDirectCatalog → renderDirectTools
 // NOTE: publication is NOT here. RefreshDirectModeTools (and the D15 initial
 // rebuild) publishes the catalog AFTER its SetTools call — R13 rule 1.

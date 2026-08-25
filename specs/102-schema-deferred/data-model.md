@@ -23,7 +23,8 @@ pointer swap; never mutated after publication.
 |---|---|---|
 | `displayName` | string | `serverName__toolName` (unchanged naming) |
 | `serverName`, `toolName` | string | original pair the handler closes over — dispatch never parses `displayName` |
-| `description` | string | upstream description (pre-`[server]`-prefix) |
+| `description` | string | upstream description (pre-`[server]`-prefix) — the source the renderer reads |
+| `renderedDescription` | string | the **exact** string handed to `SetTools` for this entry in this generation, filled in by `renderDirectTools`: `[server] …` in full mode, plus the name+signature suffix in deferred mode when `Peek` hit. Immutable once published. This — never a recomputation — is what the R13 rule 5 discriminator compares against `mcp.Tool.Description` |
 | `paramsJSON` | string | upstream input schema — validation + describe source |
 | `outputSchemaJSON` | string | optional; describe `output_schema` source |
 | `hash` | string | Spec-032 SHA-256 — `toolsig.Cache.Peek` key + validator memo key |
@@ -48,10 +49,18 @@ pointer swap; never mutated after publication.
   logs both origins — an ambiguous display name is never served, so listing,
   describe and dispatch agree by construction. Not first-writer-wins: that still
   lets one name denote different origins across a rebuild (R13 rule 5).
-- A display name resolved from the catalog is used only after its rendered
-  description matches the registered `mcp.Tool.Description`; a mismatch means the
-  two publications disagree for that name, and the entry is withheld (filter
-  denies, describe answers `not_found`) rather than served from either side.
+- A display name resolved from the catalog is used only after the entry's stored
+  `renderedDescription` matches the registered `mcp.Tool.Description`; a mismatch
+  means the two publications disagree for that name, and the entry is withheld
+  (filter denies, describe answers `not_found`) rather than served from either
+  side. The comparison MUST use the stored value, never a re-render: the deferred
+  suffix comes from `toolsig.Cache`, which mutates independently of direct
+  rebuilds (`Warm` adds entries, `RetainHashes` evicts them —
+  `internal/toolsig/cache.go:79`, `:108`), so a miss at registration followed by a
+  hit at filter time — or the reverse — would manufacture a false mismatch and
+  leave a still-registered tool unlisted and undescribable until the next rebuild.
+  That would break "listed ⇒ describable" persistently, not just within the
+  publication window.
 
 ## 2. Deferred tool entry — FR-004
 
