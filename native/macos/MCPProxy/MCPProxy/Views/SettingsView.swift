@@ -59,8 +59,12 @@ private struct AppPrefsTab: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Launch MCPProxy at login", isOn: $launchAtLogin)
+                // F9: the tray menu calls this same AutoStartService setting
+                // "Launch at Login" — one setting, one name.
+                Toggle("Launch at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { applyLaunchAtLogin($0) }
+                Text("Starts the MCPProxy app when you log in. Also shown as “Launch at Login” in the menu-bar menu.")
+                    .font(.callout).foregroundColor(.secondary)
                 if let launchError {
                     Text(launchError).font(.callout).foregroundColor(.red)
                 }
@@ -78,7 +82,13 @@ private struct AppPrefsTab: View {
                     Text("MCPProxy will not start the core. It still connects to a core you start yourself, and you can start one from the menu at any time.")
                         .font(.callout).foregroundColor(.secondary)
                 }
-            } header: { Text("Startup") }
+            } header: { Text("Startup") } footer: {
+                // F9: these two and the menu's "Start/Stop MCPProxy Core" are a
+                // genuinely confusable trio — one is at login, one is at app
+                // launch, one is right now — and nothing said so.
+                Text("These settings act at login and at app launch. To start or stop the core right now, use “Start/Stop MCPProxy Core” in the menu-bar menu.")
+                    .font(.callout).foregroundColor(.secondary)
+            }
 
             Section {
                 HStack {
@@ -97,6 +107,18 @@ private struct AppPrefsTab: View {
                         Circle().fill(appState.isConnected ? .green : .secondary).frame(width: 8, height: 8)
                         Text(appState.isConnected ? "Connected" : "Not connected")
                     }
+                }
+                // F14: the tray had no feedback path at all while the Web UI
+                // has /feedback and the CLI has `mcpproxy feedback`. A
+                // Homebrew user who never sees the repo now has one here and
+                // in the About panel — without spending a menu row.
+                LabeledContent("Help") {
+                    HStack(spacing: 12) {
+                        Link("Documentation", destination: ProjectLinks.docs)
+                        Link("Report an Issue", destination: ProjectLinks.issues)
+                        Link("Discussions", destination: ProjectLinks.discussions)
+                    }
+                    .font(.callout)
                 }
             } header: { Text("About") } footer: {
                 Text("All server configuration is managed in the Security, General and Advanced tabs.")

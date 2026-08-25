@@ -324,7 +324,10 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
     fields: [
       { key: 'code_execution_timeout_ms', label: 'Max run time per execution (ms)', control: 'number', min: 1, max: 600000 },
       { key: 'code_execution_max_tool_calls', label: 'Max tool calls per execution', help: '0 = unlimited.', control: 'number', min: 0 },
-      { key: 'code_execution_pool_size', label: 'JavaScript runtime pool size', help: 'How many sandboxes run concurrently.', control: 'number', min: 1, max: 100 },
+      // UX audit F16: the Go detector forces a restart for this one (the JS
+      // runtime pool is sized at server construction and never resized), so it
+      // must carry the badge — its siblings above genuinely apply hot.
+      { key: 'code_execution_pool_size', label: 'JavaScript runtime pool size', help: 'How many sandboxes run concurrently.', control: 'number', min: 1, max: 100, restart: true },
       { key: 'code_execution_max_parallel', label: 'Parallel calls per call_tools() batch', help: 'Default concurrency for batched tool calls; a script can override it per call (1-32).', control: 'number', min: 1, max: 32 },
     ],
   },
@@ -437,6 +440,30 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
 // prototype, constructor) so a crafted dot-path can never reach Object.prototype.
 // Settings keys come from the static catalogue above, but the generic helper is
 // guarded regardless.
+
+/**
+ * Labels of every field that carries the "restart" badge, derived from the
+ * catalogue itself.
+ *
+ * UX audit F16: the Settings hints panel used to hardcode this list in prose,
+ * which drifted from the badges (it named "Data directory", which has no field
+ * at all, and missed the code-execution pool size). Deriving it means the two
+ * surfaces cannot disagree — a field gains or loses the badge and the hint
+ * follows.
+ */
+export function restartRequiredLabels(): string[] {
+  const fields = [
+    ...GENERAL_FIELDS,
+    ...SECURITY_FIELDS,
+    ...SERVER_EDITION_FIELDS,
+    ...ADVANCED_ACCORDIONS.flatMap((a) => a.fields),
+  ]
+  const labels: string[] = []
+  for (const f of fields) {
+    if (f.restart && !labels.includes(f.label)) labels.push(f.label)
+  }
+  return labels
+}
 
 export function getPath(obj: any, path: string): any {
   return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)

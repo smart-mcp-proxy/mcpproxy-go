@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -190,6 +191,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	contractActivities := make([]contracts.ActivityRecord, len(activities))
 	for i, a := range activities {
 		contractActivities[i] = storageToContractActivity(a)
+		s.maskActivityPayloads(&contractActivities[i])
 		if excludePayloads {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
@@ -241,11 +243,62 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	record := storageToContractActivity(activity)
+	s.maskActivityPayloads(&record)
+
 	response := contracts.ActivityDetailResponse{
-		Activity: storageToContractActivity(activity),
+		Activity: record,
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// maskActivityPayloads sanitises a record's request/response payloads before
+// they leave the process.
+//
+// Two separate problems, deliberately handled differently:
+//
+//   - Internal `_auth_*` arguments are MCPProxy's own plumbing, never something
+//     the caller sent, so they are dropped from EVERY record unconditionally.
+//   - A record the detector flagged carries the very credential the detection
+//     exists to warn about. The drawer that renders it is the surface most
+//     likely to end up in a screenshot or a screen-share, so the secret is
+//     replaced with a recognisable preview (`AKIA…****`) HERE, on the server:
+//     redacting in the client would leave the raw value on the wire and in the
+//     browser's network log, which is not a fix.
+//
+// Masking is scoped to flagged records so an unflagged payload costs nothing —
+// the detector already ran asynchronously when the call was recorded, and its
+// verdict is what `has_sensitive_data` reports.
+//
+// Full values remain reachable through the deliberate, separately-flagged
+// export path (`GET /api/v1/activity/export?include_bodies=true`), which is the
+// compliance/incident-response surface rather than a browsing one.
+func (s *Server) maskActivityPayloads(record *contracts.ActivityRecord) {
+	record.Arguments = security.StripInternalArgs(record.Arguments)
+
+	if !record.HasSensitiveData || s.sensitiveMasker == nil {
+		return
+	}
+
+	record.Arguments = s.sensitiveMasker.MaskArguments(record.Arguments)
+	if record.Response != "" {
+		masked, _ := s.sensitiveMasker.MaskText(record.Response)
+		record.Response = masked
+	}
+	// An upstream error commonly quotes the request or the response it choked
+	// on, so a failed call can carry the same credential the successful one
+	// would have — masking the body and not the error would just move the leak.
+	if record.ErrorMessage != "" {
+		masked, _ := s.sensitiveMasker.MaskText(record.ErrorMessage)
+		record.ErrorMessage = masked
+	}
+	// Metadata is not all machine-generated: `intent.reason` is prose the
+	// calling agent wrote, and an agent explaining itself ("rotating
+	// AKIA…") lands the same value in a field nobody was masking. The
+	// detection block itself is short identifiers no pattern matches, so the
+	// sweep passes over it untouched.
+	record.Metadata = s.sensitiveMasker.MaskArguments(record.Metadata)
 }
 
 // contextualMetadataKeys are the top-level metadata keys that survive the
