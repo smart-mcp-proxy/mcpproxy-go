@@ -405,12 +405,20 @@ catalog:
    (`mcp_describe_check.go:294`, `did_you_mean`). Swapping the *id gate* to
    catalog membership does not touch this corpus, so a read-scoped token's
    `not_found` could name destructive tools absent from its own direct
-   `tools/list` (FR-011, SC-005). **Decision**: on the direct surface the
-   evaluator is invoked with a caller-visible corpus derived from the direct
-   catalog under the same listing-parity gates; if that injection point does not
-   exist, `did_you_mean` is suppressed on this surface rather than shipped
-   unfiltered. A test asserts a read-scoped token receives no suggestion naming a
-   destructive tool.
+   `tools/list` (FR-011, SC-005). The root cause is structural, not incidental:
+   `preflight.Scope` is a **server-name set** (`NewScope(profileName, allowed)`,
+   built by `sessionPreflightScope` from `serverInScope`,
+   `preflight_glue.go:209-226`), so the evaluator has no way to express a
+   per-tool gate. **Decision — and the injection point exists**:
+   `preflight.EvalContext.Index` is an interface, supplied today as
+   `&preflightIndexReader{index: p.index, annotations: annotations}`
+   (`preflight_glue.go:103`, reader at `:284`). The direct surface passes a
+   `directCatalogIndexReader` backed by the catalog snapshot and filtered by the
+   listing-parity gates instead, so both the id resolution and the `did_you_mean`
+   corpus come from the same authority (FR-017) with no change to the evaluator
+   itself. Suppressing `did_you_mean` on this surface is the fallback only if
+   that reader turns out to be load-bearing for a verdict path. A test asserts a
+   read-scoped token receives no suggestion naming a destructive tool.
 3. **The definition's annotations are not read from the entry you pass in.**
    `buildFullToolEntry` (`mcp_entry_builder.go`) uses `result.Tool` only for
    name/description/inputSchema/server, and resolves annotations through

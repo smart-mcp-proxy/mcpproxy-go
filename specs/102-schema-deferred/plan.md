@@ -201,8 +201,10 @@ internal/
 │   │                                #   path byte-identical (buildFullToolEntry logic otherwise untouched)
 │   ├── mcp_describe_direct.go       # NEW: catalog-backed direct resolver (both id forms, listing-parity gates incl.
 │   │                                #   permission tier, not_found discipline) + check-mode delegation (D7)
-│   ├── mcp_describe_check.go        # id-gate seam + caller-visible-corpus seam for did_you_mean on the direct
-│   │                                #   surface (D10); verdict logic (shared preflight evaluator) unchanged
+│   ├── mcp_describe_check.go        # id-gate seam for the direct surface (D10); verdict logic unchanged
+│   ├── preflight_glue.go            # NEW directCatalogIndexReader passed as preflight.EvalContext.Index on the
+│   │                                #   direct surface (:103 today builds preflightIndexReader), so id resolution
+│   │                                #   AND the did_you_mean corpus share the catalog authority (D10/FR-017)
 │   ├── mcp_visibility.go            # serverInScope reused (evaluateToolGate lives in tool_gate.go:80, isToolCallable
 │   │                                #   in mcp.go:6068); suggestCanonicalToolID gains the resolver seam (D10);
 │   │                                #   existing retrieve-surface resolvers byte-identical
