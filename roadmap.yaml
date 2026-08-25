@@ -349,6 +349,55 @@ epics:
     depends_on: []
     note: "Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema (~88% smaller listing), with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction); plan in progress."
 
+  - id: token-bench
+    title: "Token-efficiency benchmark: measured savings, published results"
+    status: todo
+    priority: P1
+    depends_on: [schema-deferred]
+    note: "Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix."
+    tasks:
+      - id: token-bench-harness
+        title: "Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries"
+        status: todo
+        depends_on: []
+        note: "Absorbs discovery-eval-harness (spec 065 second half) — the same harness measures retrieval recall."
+      - id: token-bench-public
+        title: "Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results"
+        status: todo
+        depends_on: [token-bench-harness]
+      - id: token-bench-blog
+        title: "Publish results + methodology on mcpproxy.app/blog"
+        status: todo
+        depends_on: [token-bench-public]
+      - id: token-bench-telemetry
+        title: "Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation"
+        status: todo
+        depends_on: []
+
+  - id: tool-graph
+    title: "Tool co-occurrence graph (experimental, feature-flagged)"
+    status: todo
+    priority: P2
+    depends_on: []
+    note: "Local-only co-occurrence graph mined from the activity log: suggests likely-next tools to agents and surfaces usage-chain analytics. Everything sits behind experimental.tool_graph, off by default — nothing leaves the machine."
+    tasks:
+      - id: tool-graph-core
+        title: "Co-occurrence graph from the activity log + related_tools hint in call_tool responses (flag-gated)"
+        status: todo
+        depends_on: []
+      - id: tool-graph-ranking
+        title: "Session-aware rank boost in retrieve_tools"
+        status: todo
+        depends_on: [tool-graph-core]
+      - id: tool-graph-mining
+        title: "Workflow mining: frequent chains → suggested stored scripts (spec 097 synergy)"
+        status: todo
+        depends_on: [tool-graph-core]
+      - id: tool-graph-analytics
+        title: "Usage-chain analytics on the dashboard/stats page"
+        status: todo
+        depends_on: [tool-graph-core, analytics-default-landing]
+
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
     title: Upgrade awareness & guided update
@@ -633,5 +682,5 @@ epics:
     status: todo
     priority: P3
     spec: specs/065-evaluation-foundation
-    depends_on: []
-    note: "Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness."
+    depends_on: [token-bench-harness]
+    note: "SUPERSEDED — folded into token-bench-harness: the token-efficiency replay harness re-runs real sessions under every mode combo and measures retrieval recall on the same corpus, so a separate discovery-quality harness would duplicate it. Kept here as a pointer (the id is a stable depends_on target); do not build standalone. Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness."
