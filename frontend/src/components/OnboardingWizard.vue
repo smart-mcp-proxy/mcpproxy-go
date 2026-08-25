@@ -200,10 +200,48 @@
           <div v-if="loadingImportSources" class="flex justify-center py-4">
             <span class="loading loading-spinner loading-md"></span>
           </div>
-          <div v-else-if="importSourcesWithServers.length === 0" class="text-sm opacity-60 py-4 text-center">
-            No client configs with importable servers detected on this machine.
+          <!-- Nothing to import. Step 2 is otherwise entirely about picking
+               servers out of an existing MCP setup, which leaves a user who has
+               none — the exact user this wizard matters most to — staring at a
+               dead end. Give that user the two ways to get a first server. -->
+          <div
+            v-else-if="importSourcesWithServers.length === 0"
+            class="border border-base-300 rounded-lg p-6 text-center mb-5"
+            data-test="servers-nothing-to-import"
+          >
+            <div class="text-3xl opacity-40 mb-2">📦</div>
+            <div class="font-semibold">Nothing to import</div>
+            <p class="text-sm opacity-70 mt-1 max-w-md mx-auto">
+              We found no MCP servers in your AI clients' configs on this machine —
+              so there is nothing to bring across. Start from the registry instead,
+              or add a server yourself.
+            </p>
+            <div class="flex flex-wrap gap-2 justify-center mt-4">
+              <button
+                class="btn btn-primary btn-sm"
+                data-test="nothing-to-import-registry"
+                @click="goToRegistry"
+              >
+                Browse the registry
+              </button>
+              <button
+                class="btn btn-outline btn-sm"
+                data-test="nothing-to-import-manual"
+                @click="openAddServer"
+              >
+                Add a server manually
+              </button>
+            </div>
+            <p v-if="serverAddedJustNow" class="text-xs text-success mt-3">
+              ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
+            </p>
           </div>
-          <div v-else class="border border-base-300 rounded-lg overflow-hidden mb-5">
+          <!-- The list is capped and scrolls in place. Uncapped it ran off the
+               bottom of the modal body and clipped its last row with no hint
+               that more existed; the cap also leaves the security panel below
+               it partly on screen, so the choice it offers is visible rather
+               than something the user has to go looking for. -->
+          <div v-else class="border border-base-300 rounded-lg overflow-hidden mb-4 max-h-[32vh] overflow-y-auto">
             <div
               v-for="(src, idx) in importSourcesWithServers"
               :key="src.path"
@@ -266,7 +304,87 @@
             <span class="text-sm">{{ selectionImportMessage }}</span>
           </div>
 
-          <details class="border border-base-300 rounded-lg p-3 text-sm" data-test="manual-add-details">
+          <!-- The security choice lives in the step body, not the sticky
+               footer: expanded (it must not hide) it is tall enough that a
+               footer would eat the modal and squeeze the import list back down
+               to the clipped single row this step started with. Here it simply
+               scrolls with the rest of the step. -->
+          <details class="group border border-base-300 rounded-lg overflow-hidden bg-base-200/40 mb-4" data-test="security-panel" open>
+            <summary class="cursor-pointer flex items-center gap-2 px-4 py-2.5 select-none hover:bg-base-200/70 transition-colors">
+              <span class="transition-transform inline-block group-open:rotate-90 opacity-60">▸</span>
+              <span class="text-sm font-medium">Runtime isolation and MCP server quarantine</span>
+              <span class="ml-auto inline-flex items-center gap-2">
+                <span class="badge badge-primary badge-sm font-semibold">Global settings</span>
+                <span class="text-xs opacity-70 hidden sm:inline">saved to your mcpproxy config</span>
+              </span>
+            </summary>
+            <div class="px-4 py-4 space-y-4 bg-base-100 border-t border-base-300">
+              <!-- Docker isolation -->
+              <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-sm mt-0.5"
+                  :checked="dockerIsolationDefault"
+                  :disabled="securityBusy || dockerStatus === false"
+                  @change="onToggleDockerIsolation(($event.target as HTMLInputElement).checked)"
+                  data-test="toggle-docker-isolation"
+                />
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium text-sm">Docker isolation</div>
+                  <p class="text-xs opacity-70 mt-1 leading-relaxed">
+                    Sandboxes every stdio server in a throwaway Docker container so a compromised server can't read or write your host files, env vars, or SSH keys. Recommended whenever you import servers from sources you don't fully control.
+                  </p>
+                  <p
+                    v-if="dockerStatus === false"
+                    class="text-xs text-warning mt-2"
+                    data-test="docker-install-hint"
+                  >
+                    Docker isn't running on this machine. Install
+                    <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener" class="link">Docker Desktop</a>
+                    (or start the Docker daemon) then come back to enable this — stdio servers run unsandboxed otherwise.
+                  </p>
+                  <p class="text-[11px] mt-2">
+                    <a href="https://docs.mcpproxy.app/security/docker-isolation/" target="_blank" rel="noopener" class="link link-primary">Learn more about Docker isolation →</a>
+                  </p>
+                </div>
+              </label>
+
+              <!-- Quarantine new servers -->
+              <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-sm mt-0.5"
+                  :checked="quarantineEnabled"
+                  :disabled="securityBusy"
+                  @change="onToggleQuarantine(($event.target as HTMLInputElement).checked)"
+                  data-test="toggle-quarantine"
+                />
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium text-sm">Quarantine new servers</div>
+                  <p class="text-xs mt-1 leading-relaxed">
+                    <strong>Recommended.</strong> Holds every newly added server in a quarantine zone until you explicitly approve it. Defends against tool-poisoning attacks where a malicious server smuggles instructions into tool descriptions. <strong>Important:</strong> your AI agent itself can add upstream servers via mcpproxy's built-in MCP tools — your approval is the only safety net.
+                  </p>
+                  <p class="text-xs opacity-70 mt-1.5 leading-relaxed">
+                    Combine with security scanners (Trivy, Semgrep, MCP Scan) on the
+                    <router-link to="/servers" class="link link-primary">Servers</router-link>
+                    page for deeper supply-chain checks before approving.
+                  </p>
+                  <p class="text-[11px] mt-2">
+                    <a href="https://docs.mcpproxy.app/security/quarantine/" target="_blank" rel="noopener" class="link link-primary">Learn more about quarantine →</a>
+                  </p>
+                </div>
+              </label>
+            </div>
+          </details>
+
+          <!-- Only an alternative when there is something to import; the
+               nothing-to-import branch above already offers manual add as a
+               first-class action, so this would just repeat it. -->
+          <details
+            v-if="importSourcesWithServers.length > 0"
+            class="border border-base-300 rounded-lg p-3 text-sm"
+            data-test="manual-add-details"
+          >
             <summary class="cursor-pointer font-medium flex items-center gap-2 select-none">
               <span class="transition-transform group-open:rotate-90">▸</span>
               Add a single server manually instead
@@ -383,111 +501,44 @@
       </div>
 
       <!-- Footer (sticky, non-scrollable) -->
-      <!-- Servers tab gets a dedicated import-action footer when at least one
-           detectable server source exists. The action buttons stay visible
-           even as the list above scrolls. Above the buttons sits a
-           collapsed-by-default panel exposing global security settings
-           (Docker isolation + per-server quarantine) so the user can opt
-           into stricter or looser defaults without leaving the wizard. -->
+      <!-- Servers tab gets a dedicated import-action footer so the import
+           buttons stay visible as the list above scrolls. The security panel
+           itself sits in the step body, not here — see the comment there. -->
       <div
-        v-if="activeTab === 'servers' && importSourcesWithServers.length > 0"
+        v-if="activeTab === 'servers'"
         class="border-t border-base-300 shrink-0 bg-base-200/40"
       >
-        <details class="border-b border-base-300" data-test="security-panel">
-          <summary class="cursor-pointer flex items-center gap-2 px-6 py-2.5 select-none hover:bg-base-200/70 transition-colors">
-            <span class="transition-transform inline-block group-open:rotate-90 opacity-60">▸</span>
-            <span class="text-sm font-medium">Runtime isolation and MCP server quarantine</span>
-            <span class="ml-auto inline-flex items-center gap-2">
-              <span class="badge badge-primary badge-sm font-semibold">Global settings</span>
-              <span class="text-xs opacity-70 hidden sm:inline">saved to your mcpproxy config</span>
-            </span>
-          </summary>
-          <div class="px-6 py-4 space-y-4 bg-base-100">
-            <!-- Docker isolation -->
-            <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
-              <input
-                type="checkbox"
-                class="checkbox checkbox-sm mt-0.5"
-                :checked="dockerIsolationDefault"
-                :disabled="securityBusy || dockerStatus === false"
-                @change="onToggleDockerIsolation(($event.target as HTMLInputElement).checked)"
-                data-test="toggle-docker-isolation"
-              />
-              <div class="flex-1 min-w-0">
-                <div class="font-medium text-sm">Docker isolation</div>
-                <p class="text-xs opacity-70 mt-1 leading-relaxed">
-                  Sandboxes every stdio server in a throwaway Docker container so a compromised server can't read or write your host files, env vars, or SSH keys. Recommended whenever you import servers from sources you don't fully control.
-                </p>
-                <p
-                  v-if="dockerStatus === false"
-                  class="text-xs text-warning mt-2"
-                  data-test="docker-install-hint"
-                >
-                  Docker isn't running on this machine. Install
-                  <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener" class="link">Docker Desktop</a>
-                  (or start the Docker daemon) then come back to enable this — stdio servers run unsandboxed otherwise.
-                </p>
-                <p class="text-[11px] mt-2">
-                  <a href="https://docs.mcpproxy.app/security/docker-isolation/" target="_blank" rel="noopener" class="link link-primary">Learn more about Docker isolation →</a>
-                </p>
-              </div>
-            </label>
-
-            <!-- Quarantine new servers -->
-            <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
-              <input
-                type="checkbox"
-                class="checkbox checkbox-sm mt-0.5"
-                :checked="quarantineEnabled"
-                :disabled="securityBusy"
-                @change="onToggleQuarantine(($event.target as HTMLInputElement).checked)"
-                data-test="toggle-quarantine"
-              />
-              <div class="flex-1 min-w-0">
-                <div class="font-medium text-sm">Quarantine new servers</div>
-                <p class="text-xs mt-1 leading-relaxed">
-                  <strong>Recommended.</strong> Holds every newly added server in a quarantine zone until you explicitly approve it. Defends against tool-poisoning attacks where a malicious server smuggles instructions into tool descriptions. <strong>Important:</strong> your AI agent itself can add upstream servers via mcpproxy's built-in MCP tools — your approval is the only safety net.
-                </p>
-                <p class="text-xs opacity-70 mt-1.5 leading-relaxed">
-                  Combine with security scanners (Trivy, Semgrep, MCP Scan) on the
-                  <router-link to="/servers" class="link link-primary">Servers</router-link>
-                  page for deeper supply-chain checks before approving.
-                </p>
-                <p class="text-[11px] mt-2">
-                  <a href="https://docs.mcpproxy.app/security/quarantine/" target="_blank" rel="noopener" class="link link-primary">Learn more about quarantine →</a>
-                </p>
-              </div>
-            </label>
-          </div>
-        </details>
-
-        <!-- Action footer -->
-        <div class="flex items-center justify-between gap-3 px-6 py-3">
-          <div class="text-xs">
-            <span v-if="selectedCount === 0" class="opacity-50">Select at least one server to import</span>
-            <span v-else>
-              <span class="font-semibold text-primary">{{ selectedCount }}</span>
-              <span class="opacity-70"> selected</span>
-              <span v-if="conflictCount > 0" class="opacity-70">
-                · <span class="text-warning">{{ conflictCount }} renamed</span>
+        <!-- Action footer. Only shown when there is something to import — the
+             nothing-to-import branch has its own actions in the body. -->
+        <div v-if="importSourcesWithServers.length > 0" class="flex items-center justify-between gap-3 px-6 py-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <button class="btn btn-ghost btn-sm" @click="goBack" data-test="wizard-back">← Back</button>
+            <div class="text-xs">
+              <span v-if="selectedCount === 0" class="opacity-50">Select at least one server to import</span>
+              <span v-else>
+                <span class="font-semibold text-primary">{{ selectedCount }}</span>
+                <span class="opacity-70"> selected</span>
+                <span v-if="conflictCount > 0" class="opacity-70">
+                  · <span class="text-warning">{{ conflictCount }} renamed</span>
+                </span>
               </span>
-            </span>
+            </div>
           </div>
-          <div class="flex items-center gap-2">
+          <!-- One primary, and it is the safe one. Two equally-weighted
+               primaries made the user guess which import was safer, with the
+               reviewed path rendered as the weaker of the pair. Importing
+               without review stays available, as a link — the cost of choosing
+               it should be a deliberate read, not a symmetric coin flip. -->
+          <div class="flex items-center gap-3">
             <button
-              class="btn btn-ghost btn-sm"
-              @click="dismiss"
-              data-test="close-wizard"
-            >Close</button>
-            <button
-              class="btn btn-secondary btn-sm gap-1 min-w-[180px]"
+              class="btn btn-link btn-sm px-1 no-underline hover:underline text-base-content/70"
               :disabled="selectedCount === 0 || importBusyAny"
+              title="Skips quarantine — the servers connect and expose their tools immediately, with no review"
               @click="onBulkImport(false)"
               data-test="bulk-import-active"
             >
               <span v-if="bulkImportBusy === 'active'" class="loading loading-spinner loading-xs"></span>
-              <span v-else>⚡</span>
-              Import as active
+              Import without review
             </button>
             <button
               class="btn btn-primary btn-sm gap-1 min-w-[180px]"
@@ -502,14 +553,30 @@
             </button>
           </div>
         </div>
+        <!-- Nothing to import: no import action to offer, but the step still
+             needs a way forward and back. -->
+        <div v-else class="flex items-center justify-between px-6 py-3">
+          <button class="btn btn-ghost btn-sm" @click="goBack" data-test="wizard-back">← Back</button>
+          <button class="btn btn-primary btn-sm" @click="dismiss" data-test="close-wizard">
+            {{ onboarding.incompleteTabCount === 0 ? 'Done' : 'Close for now' }}
+          </button>
+        </div>
       </div>
-      <!-- Default footer for other tabs / empty server state -->
+      <!-- Default footer for other tabs -->
       <div
         v-else
-        class="flex items-center justify-between px-6 py-3 border-t border-base-300 shrink-0"
+        class="flex items-center justify-between gap-3 px-6 py-3 border-t border-base-300 shrink-0"
       >
-        <div class="text-xs opacity-50">
-          Tip: you can always re-open this from the sidebar's <span class="font-medium">Setup</span> entry.
+        <div class="flex items-center gap-3 min-w-0">
+          <button
+            v-if="canGoBack"
+            class="btn btn-ghost btn-sm"
+            @click="goBack"
+            data-test="wizard-back"
+          >← Back</button>
+          <div class="text-xs opacity-50 truncate">
+            Tip: you can always re-open this from the sidebar's <span class="font-medium">Setup</span> entry.
+          </div>
         </div>
         <button class="btn btn-primary btn-sm" @click="dismiss" data-test="close-wizard">
           {{ onboarding.incompleteTabCount === 0 ? 'Done' : 'Close for now' }}
@@ -529,6 +596,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onUnmounted, h, type FunctionalComponent } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
@@ -550,6 +618,7 @@ const emit = defineEmits<Emits>()
 const onboarding = useOnboardingStore()
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
+const router = useRouter()
 
 type TabID = 'clients' | 'servers' | 'verify'
 const activeTab = ref<TabID>('clients')
@@ -781,10 +850,34 @@ watch(() => props.show, async (open) => {
 })
 
 function pickInitialTab(): TabID {
+  // An explicit request from the opener wins — "Import from your AI client
+  // configs" on the Servers page means that step, not whichever one the
+  // predicates would have chosen. Consumed here so it applies once.
+  const requested = onboarding.consumeWizardInitialTab()
+  if (requested) return requested
   if (!onboarding.hasConnectedClient) return 'clients'
   if (!onboarding.hasConfiguredServer) return 'servers'
   if (!onboarding.firstMCPClientEver) return 'verify'
   return 'clients'
+}
+
+// --- Step navigation ---
+// The tabs double as steps, so Back is just "the previous tab". Without it the
+// only way out of a step was the tab strip, which reads as navigation rather
+// than as a way to undo a wrong turn.
+const tabOrder: TabID[] = ['clients', 'servers', 'verify']
+const canGoBack = computed(() => tabOrder.indexOf(activeTab.value) > 0)
+function goBack() {
+  const i = tabOrder.indexOf(activeTab.value)
+  if (i > 0) activeTab.value = tabOrder[i - 1]
+}
+
+// Leaving the wizard for the registry: the wizard is a modal owned by the
+// Dashboard, so it has to close before the route changes or it would hang over
+// the registry page.
+function goToRegistry() {
+  dismiss()
+  void router.push('/repositories')
 }
 
 function startPolling() {

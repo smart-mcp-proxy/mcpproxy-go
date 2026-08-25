@@ -17,6 +17,9 @@ import api from '@/services/api'
  *     onboarding.openWizard()
  *   }
  */
+/** Tabs the wizard renders, in order. */
+export type WizardTab = 'clients' | 'servers' | 'verify'
+
 export const useOnboardingStore = defineStore('onboarding', () => {
   // State fetched from backend
   const state = ref<OnboardingStateResponse | null>(null)
@@ -28,6 +31,14 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   // the wizard via the "Run setup wizard" link even when both predicates
   // are satisfied.
   const wizardOpen = ref(false)
+
+  // Which tab the wizard should land on when it next opens. Callers that mean
+  // a *specific* step ("Import from your AI client configs" on the Servers
+  // page) set it; everything else leaves it null and gets the default first
+  // tab. It is a one-shot request: the wizard consumes it on open and clears
+  // it, so a later plain `openWizard()` is never silently redirected to a tab
+  // some earlier caller asked for.
+  const wizardInitialTab = ref<WizardTab | null>(null)
 
   // Computed
   const shouldShowWizard = computed(() => state.value?.should_show_wizard ?? false)
@@ -146,10 +157,18 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     await mark({ engaged: true })
   }
 
-  function openWizard(): void {
+  function openWizard(tab: WizardTab | null = null): void {
+    wizardInitialTab.value = tab
     wizardOpen.value = true
     // Best-effort first-shown stamp.
     void markShown()
+  }
+
+  /** Read and clear the one-shot initial-tab request. */
+  function consumeWizardInitialTab(): WizardTab | null {
+    const tab = wizardInitialTab.value
+    wizardInitialTab.value = null
+    return tab
   }
 
   function closeWizard(): void {
@@ -161,6 +180,7 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     loading,
     error,
     wizardOpen,
+    wizardInitialTab,
     shouldShowWizard,
     hasConnectedClient,
     hasConfiguredServer,
@@ -179,6 +199,7 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     markServerSkipped,
     markEngaged,
     openWizard,
+    consumeWizardInitialTab,
     closeWizard,
   }
 })

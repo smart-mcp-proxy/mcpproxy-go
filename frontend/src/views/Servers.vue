@@ -33,8 +33,13 @@
       </div>
     </div>
 
+    <!-- Everything between the header and the server grid describes a list that
+         does not exist yet on a fresh install: four zero-valued stat tiles,
+         four zero-count filter pills and a search box with nothing to search.
+         They are hidden until the first server is configured so the empty
+         state below is the only thing on the page. -->
     <!-- Summary Stats — clickable cards drive the filter row (issue #436) -->
-    <div class="stats shadow bg-base-100 w-full">
+    <div v-if="hasServers" class="stats shadow bg-base-100 w-full">
       <button
         type="button"
         data-test="kpi-card-total"
@@ -79,7 +84,7 @@
     </div>
 
     <!-- Filters -->
-    <div class="flex flex-wrap gap-4 items-center justify-between">
+    <div v-if="hasServers" class="flex flex-wrap gap-4 items-center justify-between">
       <div class="flex flex-wrap gap-2">
         <button
           @click="filter = 'all'"
@@ -137,8 +142,54 @@
       </button>
     </div>
 
-    <!-- Empty State -->
-    <div v-else-if="filteredServers.length === 0" class="text-center py-12">
+    <!-- First-run empty state: no servers configured at all. This is the page a
+         new user lands on after closing the setup wizard, so it has to offer
+         the next action rather than restate that the list is empty. Kept
+         distinct from the filter/search empty state below — "you have nothing
+         yet" and "nothing matched" need different answers. -->
+    <div v-else-if="isFirstRun" class="text-center py-12" data-test="servers-first-run-empty">
+      <svg class="w-24 h-24 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+      </svg>
+      <h3 class="text-xl font-semibold mb-2">No servers yet</h3>
+      <p class="text-base-content/70 mb-4 max-w-lg mx-auto">
+        Upstream MCP servers are where your tools come from. Add one and MCPProxy
+        indexes its tools, so your AI agent can find them without loading every
+        schema into its context.
+      </p>
+      <div class="flex flex-wrap gap-2 justify-center">
+        <button
+          @click="showAddServer = true"
+          class="btn btn-primary"
+          data-test="servers-empty-add"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+          </svg>
+          Add Server
+        </button>
+        <router-link
+          to="/repositories"
+          class="btn btn-outline"
+          data-test="servers-empty-registry"
+        >
+          Browse Registry
+        </router-link>
+      </div>
+      <p class="mt-4 text-sm">
+        <button
+          type="button"
+          class="link link-primary"
+          data-test="servers-empty-import"
+          @click="openImportWizard"
+        >
+          Import from your AI client configs
+        </button>
+      </p>
+    </div>
+
+    <!-- Filter/search empty state: servers exist, none match the current view. -->
+    <div v-else-if="filteredServers.length === 0" class="text-center py-12" data-test="servers-filter-empty">
       <svg class="w-24 h-24 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
       </svg>
@@ -148,6 +199,9 @@
       </p>
       <button v-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
         Clear Search
+      </button>
+      <button v-else @click="filter = 'all'" class="btn btn-outline">
+        Show all servers
       </button>
     </div>
 
@@ -179,25 +233,57 @@
 
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="serversHints" />
+
+    <AddServerModal :show="showAddServer" @close="showAddServer = false" @added="onServerAdded" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
 import ServerCard from '@/components/ServerCard.vue'
+import AddServerModal from '@/components/AddServerModal.vue'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+const onboardingStore = useOnboardingStore()
+const router = useRouter()
 const filter = ref<'all' | 'connected' | 'enabled' | 'quarantined'>('all')
 const searchQuery = ref('')
 const scanAllRunning = ref(false)
+const showAddServer = ref(false)
 const { hasEnabledScanners } = useSecurityScannerStatus()
+
+// The page chrome (stat tiles, filter pills, search) only describes a list that
+// exists. `servers.length` — not `loaded` — is the right gate: it is also false
+// while the very first fetch is in flight, so a fresh install never flashes a
+// row of zeroes before the empty state resolves.
+const hasServers = computed(() => serversStore.servers.length > 0)
+
+// Telling the user "you have no servers" is a claim, and only a list that
+// actually arrived can support it. `loaded` (set once any successful list has
+// been applied) is what distinguishes "none configured" from "we don't know
+// yet" — `servers` starts empty either way.
+const isFirstRun = computed(() => serversStore.loaded && serversStore.servers.length === 0)
+
+function onServerAdded() {
+  showAddServer.value = false
+  void serversStore.fetchServers()
+}
+
+// The setup wizard is mounted by Dashboard.vue, so opening it from here means
+// navigating there first; the store carries the tab request across the hop.
+function openImportWizard() {
+  onboardingStore.openWizard('servers')
+  void router.push('/')
+}
 
 const filteredServers = computed(() => {
   let servers = serversStore.servers

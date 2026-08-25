@@ -6,92 +6,12 @@
     <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
     <UpdateBanner />
 
-    <!-- Usage ↔ Overview switcher (Spec 069 T016). Usage is the default panel
-         (analytics-as-landing-page); each tab maps to a deep-linkable route
-         (/usage, /overview) so the panel survives a reload or a shared link. -->
-    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
-      <a
-        role="tab"
-        class="tab"
-        :class="activeView === 'usage' ? 'tab-active' : ''"
-        data-test="dashboard-tab-usage"
-        @click="selectUsage"
-      >Usage</a>
-      <a
-        role="tab"
-        class="tab"
-        :class="activeView === 'overview' ? 'tab-active' : ''"
-        data-test="dashboard-tab-overview"
-        @click="selectOverview"
-      >Overview</a>
-    </div>
-
-    <!-- Usage view: the panel wrapper is always in the DOM (kept hidden with
-         v-show so switching back is instant and the Overview subtree is never
-         torn down, SC-006). The heavy chart bundle + the usage fetch inside
-         UsageView are mounted only once the panel has been active
-         (usageEverActive) AND the server list has arrived, and stay code-split
-         behind Suspense, so the Dashboard shell still paints immediately
-         (SC-004). -->
-    <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
-      <!-- First run: no upstream servers configured, so the analytics panel
-           would only ever show "no data". Point the new user at the one action
-           that makes the dashboard useful instead. -->
-      <div
-        v-if="showFirstRunCta"
-        class="card bg-base-200 border border-base-300"
-        data-test="dashboard-usage-first-run"
-      >
-        <div class="card-body items-center text-center py-12">
-          <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-          </svg>
-          <h3 class="font-semibold text-lg mt-2">Add your first server to see usage</h3>
-          <p class="text-sm opacity-60 max-w-md">
-            No upstream MCP servers are configured yet, so there is nothing to chart.
-            Add one and this page will show call volume, token sinks, error rates and a timeline.
-          </p>
-          <div class="flex flex-wrap gap-2 justify-center mt-2">
-            <button
-              class="btn btn-primary btn-sm"
-              data-test="dashboard-first-run-add-server"
-              @click="showAddServer = true"
-            >
-              Add your first server
-            </button>
-            <router-link to="/repositories" class="btn btn-sm btn-ghost">Browse Registry</router-link>
-            <button
-              class="btn btn-sm btn-ghost"
-              data-test="dashboard-first-run-overview"
-              @click="selectOverview"
-            >
-              Go to Overview
-            </button>
-          </div>
-        </div>
-      </div>
-      <!-- Hold the charts back until the server list has arrived: mounting
-           UsageView first would fire a usage aggregate request and flash the
-           "no usage data yet" card on a fresh install, only to be replaced by
-           the CTA above a moment later. Both requests are issued together in
-           onMounted, so this costs no extra round-trip. -->
-      <div
-        v-else-if="!serversFetchSettled && !serversStore.loaded"
-        class="flex justify-center py-16"
-        data-test="dashboard-usage-pending"
-      >
-        <span class="loading loading-spinner loading-lg"></span>
-      </div>
-      <Suspense v-else-if="usageEverActive">
-        <UsageView />
-        <template #fallback>
-          <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
-        </template>
-      </Suspense>
-    </div>
-
-    <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
-    <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
+    <!-- "What needs me": servers in a bad state and tools awaiting approval.
+         These live above the panel switcher rather than inside a panel — they
+         are the one thing on this page the user is expected to act on, and
+         burying them under a tab means the landing page can look calm while a
+         server is down or an unreviewed tool is waiting. Each renders only
+         when it has something to say, so a healthy install sees neither. -->
     <!-- Servers Needing Attention Banner (using unified health status) -->
     <div
       v-if="serversNeedingAttention.length > 0"
@@ -179,6 +99,92 @@
       </router-link>
     </div>
 
+    <!-- Usage ↔ Overview switcher (Spec 069 T016). Usage is the default panel
+         (analytics-as-landing-page); each tab maps to a deep-linkable route
+         (/usage, /overview) so the panel survives a reload or a shared link. -->
+    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
+      <a
+        role="tab"
+        class="tab"
+        :class="activeView === 'usage' ? 'tab-active' : ''"
+        data-test="dashboard-tab-usage"
+        @click="selectUsage"
+      >Usage</a>
+      <a
+        role="tab"
+        class="tab"
+        :class="activeView === 'overview' ? 'tab-active' : ''"
+        data-test="dashboard-tab-overview"
+        @click="selectOverview"
+      >Overview</a>
+    </div>
+
+    <!-- Usage view: the panel wrapper is always in the DOM (kept hidden with
+         v-show so switching back is instant and the Overview subtree is never
+         torn down, SC-006). The heavy chart bundle + the usage fetch inside
+         UsageView are mounted only once the panel has been active
+         (usageEverActive) AND the server list has arrived, and stay code-split
+         behind Suspense, so the Dashboard shell still paints immediately
+         (SC-004). -->
+    <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
+      <!-- First run: no upstream servers configured, so the analytics panel
+           would only ever show "no data". Point the new user at the one action
+           that makes the dashboard useful instead. -->
+      <div
+        v-if="showFirstRunCta"
+        class="card bg-base-200 border border-base-300"
+        data-test="dashboard-usage-first-run"
+      >
+        <div class="card-body items-center text-center py-12">
+          <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <h3 class="font-semibold text-lg mt-2">Add your first server to see usage</h3>
+          <p class="text-sm opacity-60 max-w-md">
+            No upstream MCP servers are configured yet, so there is nothing to chart.
+            Add one and this page will show call volume, token sinks, error rates and a timeline.
+          </p>
+          <div class="flex flex-wrap gap-2 justify-center mt-2">
+            <button
+              class="btn btn-primary btn-sm"
+              data-test="dashboard-first-run-add-server"
+              @click="showAddServer = true"
+            >
+              Add your first server
+            </button>
+            <router-link to="/repositories" class="btn btn-sm btn-ghost">Browse Registry</router-link>
+            <button
+              class="btn btn-sm btn-ghost"
+              data-test="dashboard-first-run-overview"
+              @click="selectOverview"
+            >
+              Go to Overview
+            </button>
+          </div>
+        </div>
+      </div>
+      <!-- Hold the charts back until the server list has arrived: mounting
+           UsageView first would fire a usage aggregate request and flash the
+           "no usage data yet" card on a fresh install, only to be replaced by
+           the CTA above a moment later. Both requests are issued together in
+           onMounted, so this costs no extra round-trip. -->
+      <div
+        v-else-if="!serversFetchSettled && !serversStore.loaded"
+        class="flex justify-center py-16"
+        data-test="dashboard-usage-pending"
+      >
+        <span class="loading loading-spinner loading-lg"></span>
+      </div>
+      <Suspense v-else-if="usageEverActive">
+        <UsageView />
+        <template #fallback>
+          <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
+        </template>
+      </Suspense>
+    </div>
+
+    <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
+    <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
     <!-- Hub Visualization -->
     <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] gap-0 min-h-[520px] relative">
 
