@@ -16,7 +16,10 @@ import {
   AA_NORMAL_TEXT,
   alphaOver,
   contrastRatio,
+  mixOklab,
+  oklchToRgb,
   parseColor,
+  rgbToOklab,
   type RGB,
 } from '@/utils/contrast'
 
@@ -179,6 +182,56 @@ describe('contrast maths', () => {
     // #767676 on white is the canonical "exactly AA" grey.
     expect(ratio(parseColor('#767676'), white)).toBeGreaterThanOrEqual(4.5)
     expect(ratio(parseColor('#777777'), white)).toBeLessThan(4.6)
+  })
+
+  it('converts sRGB to Oklab with the published reference values', () => {
+    // CSS Color 4 §Oklab worked examples: pure sRGB primaries.
+    const expectations: Array<[RGB, [number, number, number]]> = [
+      [{ r: 1, g: 0, b: 0 }, [0.6279, 0.2249, 0.1258]],
+      [{ r: 0, g: 1, b: 0 }, [0.8664, -0.2339, 0.1795]],
+      [{ r: 0, g: 0, b: 1 }, [0.452, -0.0324, -0.3115]],
+      [{ r: 1, g: 1, b: 1 }, [1, 0, 0]],
+    ]
+    for (const [rgb, expected] of expectations) {
+      const got = rgbToOklab(rgb)
+      for (let i = 0; i < 3; i++) {
+        expect(got[i], `channel ${i} of ${JSON.stringify(rgb)}`).toBeCloseTo(expected[i], 3)
+      }
+    }
+  })
+
+  it('round-trips an in-gamut oklch colour', () => {
+    const rgb = oklchToRgb(0.55, 0.05, 241.966)
+    const [L, a, b] = rgbToOklab(rgb)
+    expect(L).toBeCloseTo(0.55, 3)
+    expect(Math.hypot(a, b)).toBeCloseTo(0.05, 3)
+  })
+
+  it('clips (rather than gamut-maps) colours outside sRGB', () => {
+    // A browser reduces chroma to bring an out-of-gamut oklch colour into sRGB;
+    // this module clips per channel instead, which shifts lightness slightly.
+    // That is why the numbers here are a design-time guide and the Playwright
+    // sweep measures the real page — both must agree that a pair clears AA.
+    const [L] = rgbToOklab(oklchToRgb(0.55, 0.158, 241.966))
+    expect(L).toBeGreaterThan(0.55)
+    expect(L).toBeLessThan(0.57)
+  })
+
+  it('mixes in oklab the way CSS color-mix does', () => {
+    const white = parseColor('#ffffff')
+    const black = parseColor('#000000')
+    // color-mix(in oklab, white 50%, black) === oklch(50% 0 0)
+    const mid = mixOklab(white, black, 0.5)
+    const reference = oklchToRgb(0.5, 0, 0)
+    expect(mid.r).toBeCloseTo(reference.r, 3)
+    expect(mid.g).toBeCloseTo(reference.g, 3)
+    expect(mid.b).toBeCloseTo(reference.b, 3)
+    // Mixing a colour with itself is the identity.
+    const red = parseColor('#ff0000')
+    const same = mixOklab(red, red, 0.5)
+    expect(same.r).toBeCloseTo(red.r, 3)
+    expect(same.g).toBeCloseTo(red.g, 3)
+    expect(same.b).toBeCloseTo(red.b, 3)
   })
 
   it('parses the oklch syntax the themes use', () => {
