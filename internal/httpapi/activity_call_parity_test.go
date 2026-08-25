@@ -206,3 +206,26 @@ func TestSummaryKeepsEventTotalSeparateFromCallCount(t *testing.T) {
 	assert.Greater(t, summary.TotalCount, summary.CallCount,
 		"quarantine bookkeeping, system start and management chatter are events, not calls")
 }
+
+// The read cache is what makes the usage figures lag the Activity Log, and the
+// contract says that lag is bounded by observability.usage_cache_ttl — which is
+// hot-reloadable. An entry that banked an absolute expiry from the OLD, longer
+// TTL would outlive the new bound, so the documented bound has to be evaluated
+// against the TTL in force at READ time, not the one in force when the entry
+// was written.
+func TestUsageCacheHonoursAHotReloadedTTL(t *testing.T) {
+	srv := NewServer(&callParityController{}, zap.NewNop().Sugar(), nil)
+	resp := &contracts.UsageAggregateResponse{TotalCalls: 7}
+
+	srv.putUsageCache("k", resp, time.Hour)
+
+	// The operator lowers usage_cache_ttl. The entry is now older than the bound.
+	assert.Nil(t, srv.getUsageCache("k", time.Nanosecond),
+		"an entry banked under the old TTL must not outlive the new one")
+
+	// Still served while it is within the TTL actually in force.
+	assert.Same(t, resp, srv.getUsageCache("k", time.Hour))
+
+	// And caching off means never served.
+	assert.Nil(t, srv.getUsageCache("k", 0))
+}
