@@ -1059,10 +1059,18 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		// unreviewed server, or by any future writer — was detected here and then
 		// ignored, leaving the tool descriptions retrievable indefinitely.
 		//
-		// Only the false -> true transition purges. Doing it whenever the flag is
-		// true would re-delete on every unrelated reload, and doing it on
-		// true -> false would blank the catalog until the next discovery pass.
-		newlyQuarantined := existsInStorage && !storedServer.Quarantined && serverCfg.Quarantined
+		// Purge on the false -> true transition, and also when the server is not
+		// in the stored view at all. Doing it whenever the flag is already true
+		// would re-delete on every unrelated reload, and doing it on true -> false
+		// would blank the catalog until the next discovery pass.
+		//
+		// The not-in-storage arm is not redundant: a genuinely first-seen server
+		// has nothing indexed, so the delete is a cheap no-op, but a FAILED
+		// storage read produces the same empty view (see storageReadable above)
+		// while the index still holds the previous run's tools. Without this arm
+		// a quarantined server would keep its descriptions searchable for exactly
+		// as long as storage stays unreadable.
+		newlyQuarantined := serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)
 
 		if hasChanged {
 			changed = true

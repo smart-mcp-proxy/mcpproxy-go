@@ -188,3 +188,42 @@ func TestUnquarantineViaConfigReload_LeavesIndexAlone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, indexed, 2, "un-quarantining must not purge the index")
 }
+
+// TestQuarantineWithUnknownStoredServer_PurgesToolsFromIndex covers the arm that
+// looks redundant and is not.
+//
+// LoadConfiguredServers flattens a FAILED storage read into an empty stored view
+// (it only distinguishes the two for the admission gate), so every configured
+// server then looks first-seen — while the index still holds the previous run's
+// tools. Keying the purge solely on a false -> true transition would leave a
+// quarantined server's descriptions searchable for as long as storage stayed
+// unreadable. A genuinely first-seen server has nothing indexed, so the same
+// call is a cheap no-op there.
+func TestQuarantineWithUnknownStoredServer_PurgesToolsFromIndex(t *testing.T) {
+	rt := newPurgeTestRuntime(t)
+	const server = "unknown-to-storage"
+
+	// Indexed, but deliberately never saved to storage — the shape a failed
+	// ListUpstreamServers leaves behind.
+	indexTwoTools(t, rt, server)
+
+	quarantined := &config.ServerConfig{
+		Name:        server,
+		Command:     "npx",
+		Args:        []string{"-y", "some-server"},
+		Protocol:    "stdio",
+		Enabled:     true,
+		Quarantined: true,
+	}
+	quarantined.MarkQuarantineExplicitlySet(true)
+
+	cfg := rt.Config()
+	cfg.Servers = []*config.ServerConfig{quarantined}
+	require.NoError(t, rt.LoadConfiguredServers(cfg))
+
+	indexed, err := rt.indexManager.GetToolsByServer(server)
+	require.NoError(t, err)
+	assert.Empty(t, indexed,
+		"a quarantined server absent from the stored view must still lose its indexed tools: "+
+			"an unreadable config.db must not turn into a disclosure window (issue #1061)")
+}
