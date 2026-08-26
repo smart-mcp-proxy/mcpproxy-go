@@ -67,25 +67,26 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 			// — re-parsing would pick an origin the catalog refused to choose.
 			continue
 		case directResolveNoCatalog:
-			// Nothing published yet. Fall back to parsing rather than deny, or a
-			// proxy still coming up would serve an empty listing.
-			serverName, _, ok := ParseDirectToolName(tool.Name)
-			if !ok || !profileScope.Allows(serverName) {
-				if !ok {
-					filtered = append(filtered, tool)
-				}
+			// Nothing published yet — a proxy still coming up. Fall back to the
+			// pre-catalog behaviour rather than deny, or startup would serve an
+			// empty listing to everyone.
+			//
+			// The parse cannot fail here: resolveDirectTool already classified a
+			// separator-less name as a built-in, so anything reaching this branch
+			// has a "__" in it.
+			serverName, _, _ := ParseDirectToolName(tool.Name)
+			if !profileScope.Allows(serverName) {
 				continue
 			}
-			if !isScopedAgent {
-				filtered = append(filtered, tool)
+			if isScopedAgent {
+				// With no catalog there is no permission tier to check, and the
+				// retired directToolPermissions map behaved identically — a
+				// missing tier DROPPED the tool. Failing closed on an unknown
+				// tier is the safe direction, and this window is one rebuild
+				// long.
 				continue
 			}
-			if !authCtx.CanAccessServer(serverName) {
-				continue
-			}
-			// No catalog means no permission tier is known. Historically the
-			// missing-permission case DROPPED the tool for a scoped agent, and
-			// that stays: failing closed on an unknown tier is correct.
+			filtered = append(filtered, tool)
 			continue
 		case directResolveFound:
 		}

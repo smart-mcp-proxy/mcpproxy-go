@@ -1,8 +1,13 @@
 package server
 
 import (
+	"context"
 	"sort"
 	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,4 +141,45 @@ func publishPermsCatalog(p *MCPProxyServer, perms map[string]string) {
 	}
 	sort.Strings(cat.displayNames)
 	p.publishDirectCatalog(cat)
+}
+
+// TestFilterDirectModeToolsForAuth_NoCatalogPreservesPreChangeBehaviour pins the
+// startup window.
+//
+// Between process start and the first publish there is no catalog. Denying there
+// would serve an empty listing to everyone during startup; allowing everything
+// would hand a scoped token tools it must not see. The retired
+// directToolPermissions map resolved this by accident — a nil map missed, and a
+// miss dropped the tool for a scoped agent — so the behaviour is preserved
+// deliberately here rather than left to be rediscovered.
+func TestFilterDirectModeToolsForAuth_NoCatalogPreservesPreChangeBehaviour(t *testing.T) {
+	proxy := &MCPProxyServer{}
+	require.Nil(t, proxy.loadDirectCatalog(), "precondition: no catalog published")
+
+	tools := []mcp.Tool{
+		{Name: FormatDirectToolName("github", "get_issue")},
+		{Name: "retrieve_tools"},
+	}
+
+	t.Run("unauthenticated caller keeps everything", func(t *testing.T) {
+		got := proxy.filterDirectModeToolsForAuth(context.Background(), tools)
+		assert.Len(t, got, 2, "startup must not blank the listing for an ordinary caller")
+	})
+
+	t.Run("scoped agent drops upstream tools but keeps built-ins", func(t *testing.T) {
+		ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type:           auth.AuthTypeAgent,
+			AllowedServers: []string{"github"},
+			Permissions:    []string{auth.PermRead},
+		})
+		got := proxy.filterDirectModeToolsForAuth(ctx, tools)
+
+		names := make([]string, 0, len(got))
+		for _, tl := range got {
+			names = append(names, tl.Name)
+		}
+		assert.Equal(t, []string{"retrieve_tools"}, names,
+			"with no catalog the tier is unknown, so an upstream tool fails closed for a scoped "+
+				"agent — but a built-in, which has no tier to begin with, must survive")
+	})
 }

@@ -76,12 +76,9 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 		case directResolveDenied:
 			continue
 		case directResolveNoCatalog:
-			var ok bool
-			serverName, toolName, ok = ParseDirectToolName(tool.Name)
-			if !ok {
-				filtered = append(filtered, tool)
-				continue
-			}
+			// The parse cannot fail: a separator-less name was already classified
+			// as a built-in above.
+			serverName, toolName, _ = ParseDirectToolName(tool.Name)
 		case directResolveFound:
 			serverName, toolName = entry.ServerName, entry.ToolName
 		}
