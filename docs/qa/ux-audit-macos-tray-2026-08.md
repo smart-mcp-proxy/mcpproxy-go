@@ -217,7 +217,30 @@ and the Web UI had **no `/usage` route** in v0.60.0 — Usage was a Dashboard ta
 a real route later, in #1044. The parity matrix's "✅ `/usage`" therefore overstated the Web UI side of
 that row.
 
-**Verification caveat**: the review pass that added this section could **not** re-walk the live tray — macOS Accessibility permission was revoked on the reviewing machine (`mcpproxy-ui-test` → `check_accessibility`: `trusted: false`), so `list_menu_items` / `read_status_bar` were unavailable. The resolution above is taken from the #1055 diff (`Menu/TrayIcon.swift` deleted, `TokensView` now reachable from `Views/MainWindow.swift`, `MCPProxyTests/TrayAuditMenuTests.swift` added), not from a second live walk. A follow-up walk on a machine with Accessibility granted is the remaining verification step.
+**Re-walked 2026-08-26 — and the findings hold, because the installed tray is still v0.60.0.**
+`mcpproxy-ui-test` was initially unusable (macOS Accessibility revoked; `check_accessibility` →
+`trusted: false`); once granted, a fresh `list_menu_items` walk reproduced this audit almost verbatim:
+
+- Header still `MCPProxy v0.60.0`, with `Update 0.61.0 — ready to restart?` sitting in the menu — the
+  #1055 fixes are downloaded but **not running**, so this walk cannot verify them.
+- **F2** — `read_status_bar` still returns `title: ""` with no description and no tooltip.
+- **F5** — no Agent Tokens entry anywhere in the menu.
+- **F7** — `ElevenLabs` (stdio) offers **Stop** while `cloudflare-graphql` (http) offers **Disable**; and
+  `memory` shows status **Disabled** above the action **Start**, exactly the contradiction F7 names.
+- **F8** — all three quarantined servers (`everything`, `io.github.GreatQuestion/mcp`, `playwright`)
+  offer only Disable/Stop · Restart · View Logs. No Review, no Approve.
+- **F11** — `research (0 tools)` and `deploy (0 tools)` are still offered.
+- **F12** — `Protocol: streamable-http` sits beside `Protocol: http` and `Protocol: sse`.
+- **F15** — 29 flat entries, disabled and quarantined interleaved.
+- **F16** — no tool search.
+- Menu labels are still `Open MCPProxy...` / `Open Web UI` / `Run at Startup`, i.e. the pre-#1055 strings
+  in §1.1 above.
+- One drift from the original walk: the Clients block now reads `No clients in the last 24h` rather than
+  listing an idle client — the empty state H5 exists to avoid.
+
+So: the audit is accurate as a description of v0.60.0, and #1055's fixes remain **unverified on a running
+tray**. Verifying them needs the pending 0.61.0 restart (or the dev bundle-swap procedure), which this
+pass deliberately did not do — restarting the tray would have killed the core it manages.
 
 ---
 
