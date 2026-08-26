@@ -32,8 +32,22 @@ Equivalents: `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE=deferred` or
 ## 3. Inspect the deferred listing
 
 ```bash
-curl -s http://127.0.0.1:18102/mcp/all -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[] | {name, inputSchema, description}'
+# /mcp/all is a Streamable HTTP endpoint: a bare tools/list POST answers
+# "Invalid session ID". Do the handshake first and reuse the session id.
+BASE=http://127.0.0.1:18102/mcp/all
+ACCEPT='Accept: application/json, text/event-stream'
+
+SID=$(curl -s -D- -o /dev/null "$BASE" -H 'Content-Type: application/json' -H "$ACCEPT" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"quickstart","version":"1"}}}' \
+  | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}' | tr -d '\r')
+
+curl -s "$BASE" -H 'Content-Type: application/json' -H "$ACCEPT" -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null
+
+# Responses come back as SSE frames, so strip the "data: " prefix before jq.
+curl -s "$BASE" -H 'Content-Type: application/json' -H "$ACCEPT" -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | sed -n 's/^data: //p' | jq '.result.tools[] | {name, inputSchema, description}'
 ```
 
 Expect: every tool listed; `inputSchema == {"type":"object"}` on every **upstream**

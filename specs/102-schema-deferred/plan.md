@@ -274,9 +274,10 @@ does not apply here. `internal/toolsig` gains one method, no structural change.
 
 ## Test Strategy (incl. frozen-golden handling — FR-010/SC-004)
 
-**The four frozen gates, by name, and how each is handled** (the fourth pins
+**The five frozen gates, by name, and how each is handled** (the fourth pins
 describe_tool *response* bytes, not tools/list bytes, and was missed by the first
-draft of research.md R2):
+draft of research.md R2; the fifth is a token budget rather than a golden, and is
+the one with the least headroom):
 
 1. `TestMenuSurface_ExactDeltaFromPreFeature` (`mcp_menu_surface_test.go`,
    baseline `testdata/tools_list_prefeature.golden.json`, pre-085 capture):
@@ -313,6 +314,18 @@ draft of research.md R2):
    these bytes today — a task MUST re-run this gate after the D2 change rather
    than assume it.
 
+5. `TestDescribeTool_DefinitionTokenBudget` (`mcp_describe_tool_test.go:382`):
+   asserts describe_tool's own definition fits a **250-token budget**, measured
+   with the pinned encoder the spec-083 profiler uses (spec 099 FR-015). The
+   budget rose 150 → 250 when check mode added two parameters and the definition
+   currently measures ~243, so the FR-009 prose rewrite has only single-digit
+   headroom — and FR-009's whole point is to name BOTH id forms in the
+   description and the `tool_ids` parameter, which is exactly the kind of edit
+   that spends it. Handling: measure after the rewrite rather than assume;
+   if it overruns, shorten the prose first and only raise the budget with the
+   same deliberate, documented justification the 150 → 250 bump carried. This
+   gate is not in research.md R2's list either.
+
 **Existing assertion that must be inverted (not a golden — a hard-coded test):**
 `TestDescribeTool_RegisteredInRetrieveToolsModeOnly`
 (`mcp_describe_tool_test.go:342`) has a `"direct routing mode"` subtest
@@ -336,6 +349,26 @@ must read the live server, NOT `buildDirectModeTools()`'s return value: the dire
 server registers nothing at init today (`mcp_routing.go:651-653`), so a gate over
 the builder would pass while the served surface was empty (D15/R14). A later edit
 to either becomes a reviewable golden diff.
+
+⚠️ **`ListTools()` is the registration map, not the served listing — the gate must
+not conflate them.** `MCPServer.ListTools()` returns `map[string]*ServerTool`
+straight out of the registry (mcp-go `server/server.go:1032`), while
+`handleListTools` serves `filteredTools(ctx)` (`:1767`), which applies every
+`WithToolFilter`. `p.directServer` is the ONE routing-mode server that carries
+filters — `filterDirectModeToolsForAuth` and
+`filterDirectToolsForAgentCallability`, added to `directOpts` and to no other
+server (`mcp_routing.go:615-618`) — so on exactly the server this gate targets,
+"registered" and "served" can diverge. Left as written, the gate reproduces the
+D15/R14 mistake one level up: it would stay green while an over-broad filter
+emptied the real listing. Therefore: the built-ins golden asserts over the
+registry via `ListTools()` **and** a second assertion drives a real `tools/list`
+through the direct server on a session with no agent token, so the filtered
+result is pinned too; any difference between the two sets is itself a failure.
+
+⚠️ **`ListTools()` returns a map, so "byte-exact" needs an explicit order.** Go
+map iteration is randomized per run; a golden serialized straight from the map
+would be flaky. Sort by tool name before serializing, and say so in the test —
+this is also what makes a later diff reviewable.
 
 ⚠️ It MUST be a **standalone** test, not a new entry in `toolsListGoldenSurfaces`:
 `TestToolsListSnapshot_DeltaIsEnumerated` reads a frozen `pre099/<surface>.json`
