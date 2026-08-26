@@ -19,30 +19,6 @@ func requiredPermissionForDirectTool(annotations *config.ToolAnnotations) string
 	return contracts.ToolVariantToOperationType[contracts.DeriveCallWith(annotations)]
 }
 
-func (p *MCPProxyServer) setDirectToolPermissions(perms map[string]string) {
-	p.directToolPermsMu.Lock()
-	defer p.directToolPermsMu.Unlock()
-
-	if len(perms) == 0 {
-		p.directToolPerms = nil
-		return
-	}
-
-	copied := make(map[string]string, len(perms))
-	for name, perm := range perms {
-		copied[name] = perm
-	}
-	p.directToolPerms = copied
-}
-
-func (p *MCPProxyServer) lookupDirectToolPermission(directName string) (string, bool) {
-	p.directToolPermsMu.RLock()
-	defer p.directToolPermsMu.RUnlock()
-
-	perm, ok := p.directToolPerms[directName]
-	return perm, ok
-}
-
 // filterDirectModeToolsForAuth filters tools/list for scoped agent tokens and
 // for any request with an active profile.
 //
@@ -72,13 +48,49 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
-		serverName, _, ok := ParseDirectToolName(tool.Name)
-		if !ok {
+		// Resolve through the catalog, NOT by re-parsing the display name.
+		// ParseDirectToolName splits on the first "__", which mis-splits a server
+		// name that itself contains "__" — so this filter could scope-check one
+		// origin while dispatch executed another. The catalog resolves by the same
+		// mapping the handler was registered from (D10/FR-011).
+		entry, decision := p.resolveDirectTool(tool.Name)
+
+		switch decision {
+		case directResolveBuiltin:
+			// A tool this proxy serves itself. It has no owning upstream server,
+			// so neither profile scope nor token server-scope applies.
 			filtered = append(filtered, tool)
 			continue
+		case directResolveDenied:
+			// A catalog exists and does not admit this name: an unknown tool, or
+			// one withheld for a display-name collision. Dropping it is the point
+			// — re-parsing would pick an origin the catalog refused to choose.
+			continue
+		case directResolveNoCatalog:
+			// Nothing published yet. Fall back to parsing rather than deny, or a
+			// proxy still coming up would serve an empty listing.
+			serverName, _, ok := ParseDirectToolName(tool.Name)
+			if !ok || !profileScope.Allows(serverName) {
+				if !ok {
+					filtered = append(filtered, tool)
+				}
+				continue
+			}
+			if !isScopedAgent {
+				filtered = append(filtered, tool)
+				continue
+			}
+			if !authCtx.CanAccessServer(serverName) {
+				continue
+			}
+			// No catalog means no permission tier is known. Historically the
+			// missing-permission case DROPPED the tool for a scoped agent, and
+			// that stays: failing closed on an unknown tier is correct.
+			continue
+		case directResolveFound:
 		}
 
-		if !profileScope.Allows(serverName) {
+		if !profileScope.Allows(entry.ServerName) {
 			continue
 		}
 
@@ -87,16 +99,17 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 			continue
 		}
 
-		if !authCtx.CanAccessServer(serverName) {
+		if !authCtx.CanAccessServer(entry.ServerName) {
 			continue
 		}
 
-		requiredPerm, ok := p.lookupDirectToolPermission(tool.Name)
-		if !ok {
-			continue
-		}
-
-		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
+		// The tier is the catalog entry's, derived from UPSTREAM annotations
+		// exactly as dispatch derives it. Deriving it from the registered
+		// mcp.Tool would read mcp-go's NewTool defaults — destructiveHint=true on
+		// essentially every tool — and hide the catalog from read- and
+		// write-scoped tokens while dispatch happily allowed the same calls
+		// (D13 rule 3).
+		if entry.RequiredPermission != "" && !authCtx.HasPermission(entry.RequiredPermission) {
 			continue
 		}
 

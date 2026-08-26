@@ -93,7 +93,7 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 	proxy, cfg := pinnedProxy(t, []config.ProfileConfig{
 		{Name: "research", Servers: []string{"research-srv"}},
 	})
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		"research-srv__search": auth.PermRead,
 		"deploy-srv__ship":     auth.PermRead,
 	})

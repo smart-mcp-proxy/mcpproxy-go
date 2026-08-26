@@ -73,64 +73,79 @@ func FormatDirectPromptName(serverName, promptName string) string {
 // buildDirectModeTools builds MCP tool definitions for direct mode.
 // Each upstream tool is exposed directly with serverName__toolName naming.
 // Only tools from connected, enabled, non-quarantined servers are included.
-func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool {
+func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *directCatalog) {
 	ctx := context.Background()
 
-	// Use DiscoverTools which already filters for connected, enabled, non-quarantined servers
+	// DiscoverTools already filters to connected, enabled, non-quarantined
+	// servers — server-LEVEL filtering only. Tool-level state (pending/changed
+	// approval) is applied later by the callability filter.
 	tools, err := p.upstreamManager.DiscoverTools(ctx)
 	if err != nil {
-		p.setDirectToolPermissions(nil)
 		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
-		return nil
+		// A NON-NIL empty catalog, not nil (D13 rule 2). Returning nil here — as
+		// this path used to, via setDirectToolPermissions(nil) — would tell the
+		// discovery filters "no catalog yet, do not deny" at exactly the moment
+		// upstream discovery is failing, flipping them from deny-on-miss to
+		// allow-everything.
+		return nil, buildDirectCatalog(nil, p.logger)
 	}
 
-	serverTools := make([]mcpserver.ServerTool, 0, len(tools))
-	directToolPerms := make(map[string]string, len(tools))
-	for _, tool := range tools {
-		directName := FormatDirectToolName(tool.ServerName, tool.Name)
-		directToolPerms[directName] = requiredPermissionForDirectTool(tool.Annotations)
+	cat := buildDirectCatalog(tools, p.logger)
+	return p.renderDirectTools(cat), cat
+}
 
-		// Build MCP tool options
-		opts := []mcp.ToolOption{
-			mcp.WithDescription(fmt.Sprintf("[%s] %s", tool.ServerName, tool.Description)),
+// renderDirectTools turns a catalog into the registrable tool set.
+//
+// It renders FROM the catalog rather than from the raw projection, so the
+// listing and the catalog cannot disagree by construction: a display-name
+// collision withheld by the catalog is absent from the listing for free, rather
+// than needing the same rule implemented twice.
+func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.ServerTool {
+	names := cat.DisplayNames()
+	serverTools := make([]mcpserver.ServerTool, 0, len(names))
+
+	for _, name := range names {
+		entry, ok := cat.Lookup(name)
+		if !ok {
+			continue
 		}
 
-		// Apply annotations from upstream tool
-		if tool.Annotations != nil {
-			if tool.Annotations.Title != "" {
-				opts = append(opts, mcp.WithTitleAnnotation(tool.Annotations.Title))
+		rendered := fmt.Sprintf("[%s] %s", entry.ServerName, entry.Description)
+
+		opts := []mcp.ToolOption{mcp.WithDescription(rendered)}
+
+		if entry.Annotations != nil {
+			if entry.Annotations.Title != "" {
+				opts = append(opts, mcp.WithTitleAnnotation(entry.Annotations.Title))
 			}
-			if tool.Annotations.ReadOnlyHint != nil {
-				opts = append(opts, mcp.WithReadOnlyHintAnnotation(*tool.Annotations.ReadOnlyHint))
+			if entry.Annotations.ReadOnlyHint != nil {
+				opts = append(opts, mcp.WithReadOnlyHintAnnotation(*entry.Annotations.ReadOnlyHint))
 			}
-			if tool.Annotations.DestructiveHint != nil {
-				opts = append(opts, mcp.WithDestructiveHintAnnotation(*tool.Annotations.DestructiveHint))
+			if entry.Annotations.DestructiveHint != nil {
+				opts = append(opts, mcp.WithDestructiveHintAnnotation(*entry.Annotations.DestructiveHint))
 			}
-			if tool.Annotations.IdempotentHint != nil {
-				opts = append(opts, mcp.WithIdempotentHintAnnotation(*tool.Annotations.IdempotentHint))
+			if entry.Annotations.IdempotentHint != nil {
+				opts = append(opts, mcp.WithIdempotentHintAnnotation(*entry.Annotations.IdempotentHint))
 			}
-			if tool.Annotations.OpenWorldHint != nil {
-				opts = append(opts, mcp.WithOpenWorldHintAnnotation(*tool.Annotations.OpenWorldHint))
+			if entry.Annotations.OpenWorldHint != nil {
+				opts = append(opts, mcp.WithOpenWorldHintAnnotation(*entry.Annotations.OpenWorldHint))
 			}
 		}
 
-		mcpTool := mcp.NewTool(directName, opts...)
+		mcpTool := mcp.NewTool(entry.DisplayName, opts...)
 
-		// Apply input schema from upstream tool
-		if tool.ParamsJSON != "" {
+		if entry.ParamsJSON != "" {
 			var schema map[string]interface{}
-			if err := json.Unmarshal([]byte(tool.ParamsJSON), &schema); err == nil {
-				mcpTool.InputSchema = mcp.ToolInputSchema{
-					Type: "object",
-				}
+			if err := json.Unmarshal([]byte(entry.ParamsJSON), &schema); err == nil {
+				mcpTool.InputSchema = mcp.ToolInputSchema{Type: "object"}
 				if props, ok := schema["properties"].(map[string]interface{}); ok {
 					mcpTool.InputSchema.Properties = props
 				}
 				if req, ok := schema["required"].([]interface{}); ok {
 					reqStrings := make([]string, 0, len(req))
 					for _, r := range req {
-						if s, ok := r.(string); ok {
-							reqStrings = append(reqStrings, s)
+						if str, ok := r.(string); ok {
+							reqStrings = append(reqStrings, str)
 						}
 					}
 					mcpTool.InputSchema.Required = reqStrings
@@ -138,20 +153,20 @@ func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool {
 			}
 		}
 
-		// Apply output schema from upstream tool so direct-mode tools/list preserves
-		// the full MCP tool contract exposed by the upstream server.
-		applyToolOutputSchemaJSON(&mcpTool, tool.OutputSchemaJSON)
+		applyToolOutputSchemaJSON(&mcpTool, entry.OutputSchemaJSON)
+
+		// Captured at render time and never recomputed: the signature cache
+		// mutates independently of rebuilds, so re-rendering later to compare
+		// would report a cache warm/evict as a catalog change (D13 rule 5).
+		entry.RenderedDescription = rendered
 
 		serverTools = append(serverTools, mcpserver.ServerTool{
 			Tool:    mcpTool,
-			Handler: p.makeDirectModeHandler(tool.ServerName, tool.Name, tool.Annotations),
+			Handler: p.makeDirectModeHandler(entry.ServerName, entry.ToolName, entry.Annotations),
 		})
 	}
 
-	p.setDirectToolPermissions(directToolPerms)
-
-	p.logger.Info("built direct mode tools",
-		zap.Int("tool_count", len(serverTools)))
+	p.logger.Info("built direct mode tools", zap.Int("tool_count", len(serverTools)))
 
 	return serverTools
 }
@@ -672,17 +687,23 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 		return
 	}
 
-	directTools := p.buildDirectModeTools()
+	directTools, cat := p.buildDirectModeTools()
 
-	// Convert to the format needed by SetTools
 	serverTools := make([]mcpserver.ServerTool, len(directTools))
 	copy(serverTools, directTools)
 
-	// Replace all tools atomically
+	// ORDER IS LOAD-BEARING (D13 rule 1). SetTools lands the registry first, the
+	// catalog is published immediately after. The two are separate publications
+	// and cannot be made one transaction — mcp-go owns its registry read — so the
+	// guarantee is directional: a request may see a registry entry whose catalog
+	// entry has not landed yet (the filters deny it, which is safe), but never a
+	// catalog entry for a name the registry is not serving.
 	p.directServer.SetTools(serverTools...)
+	p.publishDirectCatalog(cat)
 
 	p.logger.Info("refreshed direct mode tools",
-		zap.Int("tool_count", len(directTools)))
+		zap.Int("tool_count", len(directTools)),
+		zap.Uint64("catalog_generation", cat.Generation()))
 }
 
 // RefreshCodeExecModeTools rebuilds the code execution mode server's tool catalog description.

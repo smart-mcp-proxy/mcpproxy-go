@@ -366,7 +366,8 @@ func TestDescribeTool_RegisteredInRetrieveToolsModeOnly(t *testing.T) {
 	})
 
 	t.Run("direct routing mode", func(t *testing.T) {
-		for _, st := range proxy.buildDirectModeTools() {
+		directTools, _ := proxy.buildDirectModeTools()
+		for _, st := range directTools {
 			assert.NotEqual(t, "describe_tool", st.Tool.Name,
 				"describe_tool must NOT be exposed in direct mode (v1)")
 		}

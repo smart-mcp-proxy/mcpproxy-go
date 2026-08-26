@@ -59,10 +59,31 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	evaluator := newDirectCallabilityEvaluator(p)
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
-		serverName, toolName, ok := ParseDirectToolName(tool.Name)
-		if !ok {
+		// Same catalog resolution as filterDirectModeToolsForAuth (D10). The two
+		// filters run over the same listing, so if they resolved names
+		// differently — one by catalog, one by first-"__" parse — a server whose
+		// name contains "__" could be scope-checked as one origin and
+		// callability-checked as another.
+		entry, decision := p.resolveDirectTool(tool.Name)
+
+		var serverName, toolName string
+		switch decision {
+		case directResolveBuiltin:
+			// Built-ins are this proxy's own tools; there is no upstream
+			// approval record to evaluate.
 			filtered = append(filtered, tool)
 			continue
+		case directResolveDenied:
+			continue
+		case directResolveNoCatalog:
+			var ok bool
+			serverName, toolName, ok = ParseDirectToolName(tool.Name)
+			if !ok {
+				filtered = append(filtered, tool)
+				continue
+			}
+		case directResolveFound:
+			serverName, toolName = entry.ServerName, entry.ToolName
 		}
 
 		if evaluator.evaluate(serverName, toolName).callable {

@@ -215,3 +215,90 @@ func (c *directCatalog) Generation() uint64 {
 	}
 	return c.generation
 }
+
+// directResolveDecision is the three-way outcome of resolving a direct display
+// name, which is deliberately NOT a bool.
+//
+// "Not found" and "no catalog" must not collapse into one answer: an empty
+// catalog means the build ran and admitted nothing, so every name should be
+// denied; a nil catalog means the build has not run yet, and denying there would
+// blank the surface during startup. The old directToolPermissions map could not
+// express the difference — a nil map and an empty map both missed — which is why
+// the distinction gets its own type here (D13 rule 2).
+type directResolveDecision int
+
+const (
+	// directResolveFound: the catalog admits this name; the entry is returned.
+	directResolveFound directResolveDecision = iota
+	// directResolveDenied: a catalog exists and does not admit this name.
+	directResolveDenied
+	// directResolveBuiltin: a tool this proxy serves itself, not an upstream
+	// projection. Built-ins carry no server__tool form, so without an explicit
+	// set they would be denied off their own surface.
+	directResolveBuiltin
+	// directResolveNoCatalog: nothing published yet — callers must fall back to
+	// their pre-catalog behaviour rather than deny.
+	directResolveNoCatalog
+)
+
+// builtinDirectToolNames is an explicit allowlist for built-ins whose display
+// name WOULD parse as server__tool and so cannot be recognised structurally.
+// Empty today; it exists so adding such a built-in is a deliberate act rather
+// than an accidental denial.
+var builtinDirectToolNames = map[string]struct{}{}
+
+// resolveDirectTool maps a direct display name to its catalog entry.
+//
+// This replaces ParseDirectToolName as the resolution path for the discovery
+// filters. Parsing splits on the FIRST "__", which mis-splits any server name
+// that itself contains "__" — so the filters could scope-check one origin while
+// dispatch executed another. The catalog resolves by the same mapping the
+// handler was registered from, which is what makes listing, describe and
+// dispatch agree by construction (FR-011, D10).
+func (p *MCPProxyServer) resolveDirectTool(displayName string) (*directCatalogEntry, directResolveDecision) {
+	if _, ok := builtinDirectToolNames[displayName]; ok {
+		return nil, directResolveBuiltin
+	}
+
+	// A name with no "__" separator cannot be an upstream projection: every
+	// upstream tool is named through FormatDirectToolName, which always inserts
+	// one. So it is something this proxy registered itself — describe_tool,
+	// retrieve_tools on a shared surface — and denying it would delete built-ins
+	// off their own surface.
+	//
+	// This is the structural half of D13 rule 2's "built-ins by explicit name
+	// set". The set above covers the residual case a structural test cannot: a
+	// built-in whose name happens to contain "__".
+	if _, _, ok := ParseDirectToolName(displayName); !ok {
+		return nil, directResolveBuiltin
+	}
+
+	cat := p.loadDirectCatalog()
+	if cat == nil {
+		return nil, directResolveNoCatalog
+	}
+
+	if entry, ok := cat.Lookup(displayName); ok {
+		return entry, directResolveFound
+	}
+	return nil, directResolveDenied
+}
+
+// publishDirectCatalog swaps in a new snapshot and stamps its generation.
+//
+// D13 rule 1: only the publisher calls this, and only AFTER SetTools has landed
+// the matching tool set. The builder must never publish — if it did, a caller
+// could observe a catalog describing tools the registry is not yet serving.
+func (p *MCPProxyServer) publishDirectCatalog(cat *directCatalog) {
+	if cat == nil {
+		p.directCatalogPtr.Store(nil)
+		return
+	}
+	cat.generation = p.directCatalogGeneration.Add(1)
+	p.directCatalogPtr.Store(cat)
+}
+
+// loadDirectCatalog returns the live snapshot, or nil if none is published.
+func (p *MCPProxyServer) loadDirectCatalog() *directCatalog {
+	return p.directCatalogPtr.Load()
+}

@@ -496,12 +496,17 @@ func TestSetDirectToolPermissions_DefensivelyCopiesMap(t *testing.T) {
 		toolName: auth.PermRead,
 	}
 
-	proxy.setDirectToolPermissions(perms)
+	publishPermsCatalog(proxy, perms)
+	// Mutating the caller's map after publication must not reach the published
+	// snapshot. The catalog is immutable by construction — the entries are built
+	// from the map, not backed by it — where the retired directToolPermissions
+	// map had to defensively copy to get the same property.
 	perms[toolName] = auth.PermDestructive
 
-	got, ok := proxy.lookupDirectToolPermission(toolName)
-	require.True(t, ok)
-	assert.Equal(t, auth.PermRead, got)
+	entry, decision := proxy.resolveDirectTool(toolName)
+	require.Equal(t, directResolveFound, decision)
+	require.NotNil(t, entry)
+	assert.Equal(t, auth.PermRead, entry.RequiredPermission)
 }
 
 func TestFilterDirectModeToolsForAuth_DoesNotMutateInputSlice(t *testing.T) {
@@ -514,7 +519,7 @@ func TestFilterDirectModeToolsForAuth_DoesNotMutateInputSlice(t *testing.T) {
 	}
 	original := append([]mcp.Tool(nil), tools...)
 
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		allowed: auth.PermRead,
 		denied:  auth.PermRead,
 	})
@@ -540,7 +545,7 @@ func TestFilterDirectModeToolsForAuth_AgentServerAndPermissionScope(t *testing.T
 	githubDestroy := FormatDirectToolName("github", "delete_repo")
 	gitlabRead := FormatDirectToolName("gitlab", "get_issue")
 
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		githubRead:    auth.PermRead,
 		githubWrite:   auth.PermWrite,
 		githubDestroy: auth.PermDestructive,
@@ -584,7 +589,7 @@ func TestFilterDirectModeToolsForAuth_FailsClosedOnMissingPermissionMetadata(t *
 
 	visible := FormatDirectToolName("github", "get_issue")
 	missing := FormatDirectToolName("github", "unknown")
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		visible: auth.PermRead,
 	})
 
@@ -608,7 +613,7 @@ func TestFilterDirectModeToolsForAuth_KeepsNonDirectTools(t *testing.T) {
 
 	direct := FormatDirectToolName("github", "get_issue")
 	nonDirect := "retrieve_tools"
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		direct: auth.PermRead,
 	})
 
