@@ -14,16 +14,27 @@
 
 ---
 
-## ⚠️ Phase 0: Open approvals (BLOCKING — do not start Phase 1 until resolved)
+## ⚠️ Phase 0: Open approvals (each blocks its OWN dependents, not everything)
 
-plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs**, each ending *"needs the maintainer's assent at the tasks stage"*. That stage is now. These are not implementation choices — each one changes what the spec promises, so they must be answered before code is written, and the answer recorded in spec.md rather than left in the plan's appendix.
+plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs**, each ending *"needs the maintainer's assent at the tasks stage"*. That stage is now. These are not implementation choices — each one changes what the spec promises, so the answer belongs in spec.md, not in the plan's appendix.
+
+**They do not all block everything.** An earlier draft made Phase 0 a blanket gate; that stalls work the approvals cannot affect. The real dependencies:
+
+| Approval | Blocks | Does NOT block |
+|---|---|---|
+| T001 (FR-017 atomicity) | catalog **publication** (T017–T020) | config axis, `Peek`, rendering |
+| T002 (stale schema) | pre-dispatch validation semantics (Phase 5) and the skew residual tests (T072+) | everything else |
+| T003 (stale annotations) | the permission-tier and annotations-override work (T024, T053) | everything else |
+| T004 (fold D1/D2/D3 into spec.md) | **Phase 1** — the config key it names is what Phase 1 builds | — |
+
+So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise concurrent with it.
 
 - [ ] T001 Obtain and record the maintainer's decision on narrowing 1: **FR-017's "rebuilt atomically, so no window exposes one without the other" ships as a safety property, not a transaction.** The catalog and mcp-go's tool registry are two publications and cannot be made one without forking mcp-go or taking the direct listing off `SetTools`. Record the accepted wording in `specs/102-schema-deferred/spec.md` FR-017 (amend the MUST, or add an explicit "delivered as" clause naming D13's five rules).
 - [ ] T002 Obtain and record the maintainer's decision on narrowing 2: **a schema-only change (input or output) can be described one generation stale for the width of the publication window** — also a narrowing of SC-007. Record in `specs/102-schema-deferred/spec.md` beside FR-017/SC-007, including that the input case self-heals via the pre-dispatch validator (US3) and the output case does not but is advisory only.
 - [ ] T003 Obtain and record the maintainer's decision on narrowing 3: **an annotations-only change can be listed/described one generation stale** — a narrowing of FR-011 and SC-005. Record in `specs/102-schema-deferred/spec.md`, including the compensating property that call-time authorization never reads the catalog (`makeDirectModeHandler` re-derives the tier from its own captured upstream annotations).
 - [ ] T004 Fold the plan's D1, D2 and D3 resolutions back into `specs/102-schema-deferred/spec.md`, removing the `[NEEDS CLARIFICATION]` markers in FR-001 (dedicated `direct_tool_response_mode` key), FR-006 (deferred entries strip `outputSchema`; `describe_tool` definitions gain additive `output_schema`) and the FR-009 batch-cap question (cap stays 5; 50 for `check:true`). A spec carrying unresolved markers while its plan treats them as decided is the drift this task exists to close.
 
-**Checkpoint**: spec.md contains no `[NEEDS CLARIFICATION]` marker and no normative MUST that the plan silently narrows.
+**Checkpoint**: spec.md contains no `[NEEDS CLARIFICATION]` marker and no normative MUST that the plan silently narrows. T004 is done before Phase 1 starts; T001–T003 are done before their named dependents.
 
 ---
 
@@ -31,9 +42,9 @@ plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs
 
 **Purpose**: the config axis and the one cache primitive everything else reads through. No behavior change on any surface yet.
 
-- [ ] T005 [P] Add `DirectToolResponseMode` field and the `ToolResponseModeDeferred` constant beside the existing `ToolResponseMode` declarations in `internal/config/config.go`, defaulting to `"full"`.
+- [ ] T005 Add `DirectToolResponseMode` field and the `ToolResponseModeDeferred` constant beside the existing `ToolResponseMode` declarations in `internal/config/config.go`, defaulting to `"full"`.
 - [ ] T006 Add validation for `direct_tool_response_mode` (accepted values `full`, `deferred`) beside the existing `tool_response_mode` validation block in `internal/config/config.go`, and extend `routing_mode` validation so `"schema_deferred"` is rejected with a message naming the supported composition (`routing_mode: "direct"` + `direct_tool_response_mode: "deferred"`) per FR-002.
-- [ ] T007 [P] Write failing test for config validation messages and default resolution in `internal/config/config_test.go`: default is `full`; `deferred` accepted; an unknown value names both accepted values; `routing_mode: "schema_deferred"` produces the composition-naming error.
+- [ ] T007 Write failing test (before T005/T006) for config validation messages and default resolution in `internal/config/config_test.go`: default is `full`; `deferred` accepted; an unknown value names both accepted values; `routing_mode: "schema_deferred"` produces the composition-naming error.
 - [ ] T008 [P] Add the `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` environment alias beside the existing `MCPPROXY_TOOL_RESPONSE_MODE` alias in `internal/config/loader.go`.
 - [ ] T009 [P] Add the `--direct-tool-response-mode` serve flag in `cmd/mcpproxy/main.go`, following the existing `--tool-response-mode` flag pattern, with help text that says *direct* surface (the existing flag's help says "retrieve_tools serialization mode" and must stay that way — FR-001 parity requirement).
 - [ ] T010 [P] Write failing test for env/flag/config precedence for the new axis in `internal/config/loader_test.go`, mirroring the existing `tool_response_mode` precedence test.
@@ -51,17 +62,19 @@ plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs
 **⚠️ D13 rule 1 is structural, not stylistic**: the builder must not publish. `buildDirectModeTools` returns the catalog alongside the tool set so the single publisher can `SetTools` *first* and swap the catalog immediately after.
 
 - [ ] T013 Write failing test for the pure builder seam in `internal/server/mcp_direct_catalog_test.go`: driving `buildDirectCatalog` with a fixture `[]*config.ToolMetadata` produces one entry per tool carrying display name, `(server, tool)` pair, description, `ParamsJSON`, `OutputSchemaJSON`, Spec-032 `Hash`, annotations and `requiredPermission`. Fixture-driven because `upstream.Manager` is concrete and `DiscoverTools` only returns tools from connected clients (research.md R12).
-- [ ] T014 Write failing test for display-name collision withholding in `internal/server/mcp_direct_catalog_test.go`: server `a` + tool `b__c` and server `a__b` + tool `c` flatten to the same `a__b__c`; assert **neither** is listed, **neither** is describable, and a warning names both origins — in both flattening directions (D6/D13 rule 5). Today's code is undefined here, not merely non-deterministic.
+- [ ] T014 Write failing test for display-name collision withholding in `internal/server/mcp_direct_catalog_test.go`: server `a` + tool `b__c` and server `a__b` + tool `c` flatten to the same `a__b__c`; assert **neither is listed** and **neither resolves through the catalog**, and that a warning names both origins — in both flattening directions (D6/D13 rule 5). Today's code is undefined here, not merely non-deterministic. The matching *"neither is describable"* assertion is deliberately NOT here: describe resolution does not exist until T045/T046, so bundling it would make this Phase 2 test un-greenable inside Phase 2. It lands as T046a.
 - [ ] T015 Create `internal/server/mcp_direct_catalog.go` with the immutable `directCatalog` type, a sorted deterministic build, collision withholding with both origins logged, and a `generation` counter logged per publish (D13).
 - [ ] T016 Add the `atomic.Pointer[directCatalog]` field to `MCPProxyServer` in `internal/server/mcp.go` and the `publishDirectCatalog` swap in `internal/server/mcp_direct_catalog.go`; retire the mutex-guarded `directToolPermissions` map the catalog absorbs.
 - [ ] T017 Write failing test in `internal/server/mcp_direct_catalog_test.go` asserting the catalog pointer is **never** swapped from inside the builder, and that the publisher orders `SetTools` strictly before `publishDirectCatalog` (D13 rule 1).
 - [ ] T018 Split `buildDirectModeTools` into the pure pair `buildDirectCatalog` + `renderDirectTools` in `internal/server/mcp_routing.go`, returning `([]ServerTool, *directCatalog)` — a **non-nil catalog on every return path**, including the `DiscoverTools` error path that returns `nil` early today (D12).
 - [ ] T019 Update the two `RefreshDirectModeTools` / test call sites for the new builder signature in `internal/server/mcp_routing.go`, making `RefreshDirectModeTools` the single publisher.
-- [ ] T020 [P] Update `makeDirectModeHandler` call sites for the signature change (it now captures its catalog entry) in `internal/server/mcp_routing_test.go`, `internal/server/toon_surface_isolation_test.go`, `internal/server/profile_pin_enforcement_test.go` and `internal/server/mcp_direct_callability_test.go`.
+- [ ] T019a Change `makeDirectModeHandler`'s signature in `internal/server/mcp_routing.go` so it takes and captures its own `*directCatalogEntry`, and have `renderDirectTools` pass each entry as it builds the handler. **This production task was missing entirely from an earlier draft** — T020 updated call sites for a signature change no task performed, and Phase 5's validation task consumed a captured entry nothing had captured. The closure capture is what makes R9's "a dispatch can never validate against a definition other than the one its own registration advertised" true, so it belongs here, in the foundational phase, not with the validator that later reads it.
+- [ ] T019b Append the `describe_tool` registration inside direct tool-set **construction** in `internal/server/mcp_routing.go`, on **every** return path including the `DiscoverTools` error path (FR-018). **Moved out of Phase 4**: T024 asserts a freshly initialized proxy already lists `describe_tool`, so leaving the registration in the describe phase made Phase 2 depend on Phase 4 — a cycle through its own prerequisite. Registration is a one-line append with no resolver behind it; the describe *handler* work stays in Phase 4, where it belongs.
+- [ ] T020 Update `makeDirectModeHandler` call sites for the T019a signature change in `internal/server/mcp_routing_test.go`, `internal/server/toon_surface_isolation_test.go`, `internal/server/profile_pin_enforcement_test.go` and `internal/server/mcp_direct_callability_test.go`. Not `[P]`: it follows T019a, and two of these files also move under T023.
 - [ ] T021 Write failing test for deny-on-catalog-miss in `internal/server/mcp_direct_scope_test.go`: an unknown display name is denied by the filters, built-ins are allowed by explicit name set, and a **nil** catalog is not treated as a miss (D13 rule 2).
 - [ ] T022 Rewrite `filterDirectModeToolsForAuth` in `internal/server/mcp_direct_scope.go` to resolve `(server, tool)` through the catalog instead of `ParseDirectToolName`, taking the permission tier from the entry's upstream-derived `requiredPermission` — **never** from the registered `mcp.Tool.Annotations`, which carry mcp-go's `destructiveHint=true` default (D10/D13 rule 3). Retire `lookupDirectToolPermission`'s separate map.
 - [ ] T023 [P] Rewrite `filterDirectToolsForAgentCallability` in `internal/server/mcp_direct_callability.go` to use the same catalog resolution (D10).
-- [ ] T024 Write failing test for the D15 initial rebuild in `internal/server/mcp_routing_test.go`: on a freshly initialized proxy with **zero** upstream servers, `p.directServer` already lists `describe_tool` before any `servers.changed` fires.
+- [ ] T024 Write failing test for the D15 initial rebuild in `internal/server/mcp_routing_test.go`: on a freshly initialized proxy with **zero** upstream servers, the catalog is non-nil and `p.directServer` already lists `describe_tool` before any `servers.changed` fires. Depends on T019b for the registration and, for the tier assertions it makes, on approval T003.
 - [ ] T025 Make `initRoutingModeServers` perform the initial direct rebuild by **calling** `RefreshDirectModeTools()` (not a second copy of the ordering) in `internal/server/mcp_routing.go` (D15).
 - [ ] T026 Write failing regression test in `internal/server/server_test.go`: a `servers.changed` published immediately after `NewServer` returns still reaches the direct rebuild (R14).
 - [ ] T027 Hoist `SubscribeEvents()` out of the listener goroutine into the constructor, ahead of `StartBackgroundInitialization`, in `internal/server/server.go` — publishing an empty catalog at init retires the nil-catalog accidental self-heal, so a dropped first `servers.changed` no longer recovers (D15/R14).
@@ -76,14 +89,16 @@ plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs
 
 **Independent test**: enable deferral on a fixture proxy with multiple upstreams, fetch `tools/list` on the direct surface, and assert every tool present, no upstream schema properties, signature-suffixed descriptions, and ≥70% token reduction against the frozen 45-tool corpus.
 
-- [ ] T028 [P] [US1] Write failing test for deferred entry rendering in `internal/server/mcp_routing_deferred_test.go`: the marshalled `inputSchema` is byte-exactly `{"type":"object"}` — asserted **on the JSON, not the Go struct**, since `mcp.NewTool` marshals `{"properties":{},"required":[],"type":"object"}` (R11/D9); no upstream properties or required list; the description is the existing `[server] …` text with the Spec-085 signature appended.
-- [ ] T029 [P] [US1] Write failing test for annotations parity in `internal/server/mcp_routing_deferred_test.go`: the marshalled `annotations` object is **byte-identical to full mode's** for three fixtures — nil upstream annotations, one hint set, all five set — proving the raw-schema constructor was seeded with mcp-go's `NewTool` defaults (D9). Also assert a deferred entry marshals without `errToolSchemaConflict`.
-- [ ] T030 [P] [US1] Write failing test for the signature cache miss path in `internal/server/mcp_routing_deferred_test.go`: a tool whose hash is not warmed is listed **without** a signature suffix — never dropped, never delayed (FR-005).
+- [ ] T028 [US1] Write failing tests for deferred entry rendering in `internal/server/mcp_routing_deferred_test.go`: the marshalled `inputSchema` is byte-exactly `{"type":"object"}` — asserted **on the JSON, not the Go struct**, since `mcp.NewTool` marshals `{"properties":{},"required":[],"type":"object"}` (R11/D9); no upstream properties or required list; the description is the existing `[server] …` text with the Spec-085 signature appended.
+- [ ] T029 [US1] Write failing test for annotations parity in `internal/server/mcp_routing_deferred_test.go`: the marshalled `annotations` object is **byte-identical to full mode's** for three fixtures — nil upstream annotations, one hint set, all five set — proving the raw-schema constructor was seeded with mcp-go's `NewTool` defaults (D9). Also assert a deferred entry marshals without `errToolSchemaConflict`.
+- [ ] T030 [US1] Write failing test for the signature cache miss path in `internal/server/mcp_routing_deferred_test.go`: a tool whose hash is not warmed is listed **without** a signature suffix — never dropped, never delayed (FR-005).
 - [ ] T031 [US1] Implement the deferred branch of `renderDirectTools` in `internal/server/mcp_routing.go` using `mcp.NewToolWithRawSchema(…, json.RawMessage(`{"type":"object"}`))`, seeded with mcp-go's `NewTool` annotation defaults and *then* given the upstream overrides (D9), reading signatures via `toolsig.Cache.Peek`. Leave the full-mode `NewTool` path untouched (FR-015).
 - [ ] T032 [US1] Write failing test for set identity across modes in `internal/server/mcp_routing_deferred_test.go`: same names, count, annotations and ordering source in full and deferred (FR-008), including under agent-token and profile filters (SC-005/FR-016).
 - [ ] T033 [US1] Write failing test for FR-015 byte-stability in `internal/server/mcp_routing_deferred_test.go` using the **live stdio fixture** form (reuse the `preflight_e2e_test.go` harness + `testdata/preflight_fixture_server.js`), which runs unchanged at the merge-base and on this branch. Assert deferral-off rendering is byte-identical to pre-feature output modulo the appended `describe_tool` entry. Fall back to the same-tree differential form only if the fixture is judged too heavy — and say which was used in the test's doc comment.
-- [ ] T034 [P] [US1] Write failing test for the direct-server instructions in `internal/server/mcp_routing_test.go`: a custom `instructions` config value still appears on the direct server's `initialize`, with the deferral legend appended, in **both** modes (D11).
-- [ ] T035 [US1] Add `resolveDirectInstructions(custom string)` in `internal/server/mcp_routing.go` — custom when non-empty, else a **direct-specific default**, then the legend — and attach it via `WithInstructions` on `directServer` in `initRoutingModeServers`. Deliberately **not** `resolveInstructions`, whose `defaultInstructions` advertises `retrieve_tools` and `call_tool_*`; the direct default names only `server__tool` calling, `describe_tool` and the ABOUT links — never `upstream_servers`, which this surface does not register (D16).
+- [ ] T034 [US1] Write failing test for the direct-server instructions in `internal/server/mcp_routing_test.go`: a custom `instructions` config value still appears on the direct server's `initialize`, with the deferral legend appended, in **both** modes (D11).
+- [ ] T035 [US1] Add `resolveDirectInstructions(custom string)` in `internal/server/mcp_routing.go` — custom when non-empty, else a **direct-specific default**, then the legend — and attach it via `WithInstructions` on `directServer` in `initRoutingModeServers`. Deliberately **not** `resolveInstructions`, whose `defaultInstructions` advertises `retrieve_tools` and `call_tool_*`; the direct default names only `server__tool` calling, `describe_tool` and the ABOUT links — never `upstream_servers`, which this surface does not register (D16). Safe only because T019b registers `describe_tool` back in Phase 2: naming a tool the surface does not expose would be exactly the D16 mistake one level up.
+
+- [ ] T035a [US1] Run the SC-001/SC-002 token gates for this phase's own claim: US1's stated independent test asserts **≥70% payload reduction** on the frozen 45-tool corpus, and no other Phase 3 task measures it. Use the spec-083 profiler pipeline directly here; the reusable `bench/arms/` arm and its render golden stay T075/T076 in Polish. Without this, Phase 3 cannot be signed off against the criterion it declares.
 
 **Checkpoint**: US1 is independently demonstrable — flip the config, fetch `tools/list`, observe the token drop with the full tool set intact.
 
@@ -101,23 +116,25 @@ plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs
 - [ ] T039 [US2] Re-measure `TestDescribeTool_DefinitionTokenBudget` (`internal/server/mcp_describe_tool_test.go`) after T038. The 250-token budget currently sits at ~243, so naming both id forms may overrun it. If it does: shorten the prose first; raise the budget only with the same deliberate, documented justification the 150 → 250 bump carried.
 - [ ] T040 [US2] Regenerate exactly `default_server.json` and `retrieve_tools_mode.json` under `internal/server/testdata/toolslist_goldens/` via the documented `MCPPROXY_WRITE_TOOLSLIST_GOLDENS` flow — the one enumerated FR-010 exception. `code_execution_mode.json` and the frozen `pre099/` baseline are **never** regenerated; a diff in either means the change reached further than claimed.
 - [ ] T041 [US2] Extend `describePlainDelta` in `internal/server/describe_plain_corpus_test.go` with the named remediation substitutions, keeping `testdata/describe_plain_corpus/pre099.json` frozen. Widen the delta value to an ordered slice of substitutions if one string needs more than one — and update the assertion site accordingly.
-- [ ] T042 [P] [US2] Write failing test for both id forms in `internal/server/mcp_describe_direct_test.go`: canonical `server:tool` and direct `server__tool` resolve to the same definition through the **registration mapping**, including a server name that itself contains `__` — never by re-parsing the display name.
-- [ ] T043 [P] [US2] Write failing test for the permission-tier gate in `internal/server/mcp_describe_direct_test.go`: a read-scoped token gets `not_found` for a destructive tool absent from its own listing (the disclosure hole the existing resolver leaves open).
-- [ ] T044 [P] [US2] Write failing test for the catalog-divergence case in `internal/server/mcp_describe_direct_test.go`: a listed pending/changed tool returns its **snapshot-backed definition** in definition mode and a `pending_approval` / `changed` verdict under `check: true` (SC-007, FR-011/FR-017) — the case where a naive index-backed resolver answers `not_found` and makes deferral strictly worse than full mode.
+- [ ] T042 [US2] Write failing test for both id forms in `internal/server/mcp_describe_direct_test.go`: canonical `server:tool` and direct `server__tool` resolve to the same definition through the **registration mapping**, including a server name that itself contains `__` — never by re-parsing the display name.
+- [ ] T043 [US2] Write failing test for the permission-tier gate in `internal/server/mcp_describe_direct_test.go`: a read-scoped token gets `not_found` for a destructive tool absent from its own listing (the disclosure hole the existing resolver leaves open).
+- [ ] T044 [US2] Write failing test for the catalog-divergence case in `internal/server/mcp_describe_direct_test.go`: a listed pending/changed tool returns its **snapshot-backed definition** in definition mode and a `pending_approval` / `changed` verdict under `check: true` (SC-007, FR-011/FR-017) — the case where a naive index-backed resolver answers `not_found` and makes deferral strictly worse than full mode.
 - [ ] T045 [US2] Create `internal/server/mcp_describe_direct.go`: the catalog-backed direct resolver with listing-parity gates (token server scope + operation-permission tier + profile + agent callability), plain `not_found` for invisible ids in both modes, snapshot-backed definitions for visible ids.
 - [ ] T046 [US2] Add the per-surface resolver seam to the `describe_tool` handler in `internal/server/mcp_describe_tool.go` — existing surfaces keep the index-backed `toolVisibleToSession` **byte-identical**; the direct surface gets the T045 resolver.
+- [ ] T046a [US2] Write failing test for the collision case's describe half in `internal/server/mcp_describe_direct_test.go`: a withheld `__` collision resolves in **neither** id form — the assertion split out of T014, which could not go green inside Phase 2 because no resolver existed yet.
+- [ ] T046b [US2] Write failing test for `output_schema` in `internal/server/mcp_describe_direct_test.go`: present iff the tool declares one, absent otherwise. **Before T047**, not after — an earlier draft ordered this test after its implementation, which cannot fail first and so does not satisfy the constitution's test-first gate.
 - [ ] T047 [US2] Add the additive `output_schema` field at the **definition-assembly seam** in `internal/server/mcp_describe_tool.go` (D2), not in `buildFullToolEntry`, so full-mode retrieve_tools bytes are untouched (R2).
 - [ ] T048 [US2] Re-run gate 4 (`TestDescribeToolPlainCorpus_ByteIdenticalWithOneEnumeratedDelta`) after T047 rather than assuming it: `output_schema` is `omitempty` and today's fixture tools declare none, but that must be verified, not asserted from the plan.
-- [ ] T049 [P] [US2] Write failing test for the annotations-override case in `internal/server/mcp_describe_direct_test.go`: a listed pending/changed **destructive** tool describes with its real annotations and `call_with: "destructive"` — `buildFullToolEntry` otherwise reads annotations from the StateView and would silently downgrade the safety hint to `read` (D10).
+- [ ] T049 [US2] Write failing test for the annotations-override case in `internal/server/mcp_describe_direct_test.go`: a listed pending/changed **destructive** tool describes with its real annotations and `call_with: "destructive"` — `buildFullToolEntry` otherwise reads annotations from the StateView and would silently downgrade the safety hint to `read` (D10).
 - [ ] T050 [US2] Add the optional catalog-supplied annotations override at the definition-assembly seam in `internal/server/mcp_entry_builder.go`, unused on the retrieve path so `TestRetrieveToolsFullMode_GoldenByteIdentity` passes unregenerated on **both** its goldens.
-- [ ] T051 [P] [US2] Write failing test for the check-mode adapter in `internal/server/mcp_describe_direct_test.go`: a `server__tool` id under `check: true` returns its verdict **under the id the caller sent** (D14) — without the canonicalize-and-restore path every direct id answers `not_found`, since `preflight.Evaluate` accepts colon ids only.
+- [ ] T051 [US2] Write failing test for the check-mode adapter in `internal/server/mcp_describe_direct_test.go`: a `server__tool` id under `check: true` returns its verdict **under the id the caller sent** (D14) — without the canonicalize-and-restore path every direct id answers `not_found`, since `preflight.Evaluate` accepts colon ids only.
 - [ ] T052 [US2] Implement the check-mode adapter in `internal/server/mcp_describe_direct.go`: canonicalize `server__tool` → `server:tool` before `preflight.Evaluate`, gate invisibility **without** consulting the evaluator, project `status`/`reason`/`action`/`retryable` through untouched, and restore the caller's original id and ordering in both the response and the activity record (D14).
 - [ ] T053 [US2] Add the id-gate seam for the direct surface in `internal/server/mcp_describe_check.go`, leaving verdict logic unchanged.
 - [ ] T054 [US2] Create `internal/server/preflight_glue.go`'s `directCatalogIndexReader` and pass it as `preflight.EvalContext.Index` on the direct surface, so id resolution **and** the `did_you_mean` corpus share the catalog authority (D10/FR-017).
-- [ ] T055 [P] [US2] Write failing test for suggestion discipline in `internal/server/mcp_describe_direct_test.go`: a read-scoped token's `check: true` miss returns no `did_you_mean` entry naming a destructive tool absent from its own listing, and the definition-mode case-correction suggestion is gated by the same catalog-backed resolver (D10).
+- [ ] T055 [US2] Write failing test for suggestion discipline in `internal/server/mcp_describe_direct_test.go`: a read-scoped token's `check: true` miss returns no `did_you_mean` entry naming a destructive tool absent from its own listing, and the definition-mode case-correction suggestion is gated by the same catalog-backed resolver (D10).
 - [ ] T056 [US2] Add the resolver seam to `suggestCanonicalToolID` in `internal/server/mcp_visibility.go`, keeping the existing retrieve-surface resolvers byte-identical.
 - [ ] T057 [US2] Write failing test for listing↔describe parity **in both directions** in `internal/server/mcp_describe_direct_test.go`: with a server whose name contains `__`, compare the session's rendered `tools/list` name set against the set of ids that resolve in definition mode, for an admin session, a read-scoped token, a write-scoped token and a profile-pinned session. No id may be describable-but-unlisted (disclosure) or listed-but-undescribable (SC-007).
-- [ ] T058 [P] [US2] Write failing test in `internal/server/mcp_describe_direct_test.go` for a server removed between `tools/list` and `describe_tool`: the stale id returns a per-id not-found **without failing the batch**; and `output_schema` is present iff the tool declares one.
+- [ ] T058 [US2] Write failing test in `internal/server/mcp_describe_direct_test.go` for a server removed between `tools/list` and `describe_tool`: the stale id returns a per-id not-found **without failing the batch**. (The `output_schema` half moved to T046b, where it precedes its implementation.)
 
 **Checkpoint**: Catalog → Inspect → Execute is complete on one surface. US1 + US2 together are the shippable increment.
 
@@ -129,12 +146,14 @@ plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs
 
 **Independent test**: call a direct tool omitting a required parameter; assert the error embeds the full input schema and a hint, and that a transport-level failure attaches no schema.
 
-- [ ] T059 [P] [US3] Write failing test for pre-dispatch validation in `internal/server/mcp_routing_validation_test.go`: a missing required argument yields `invalid_params` with the tool's **full** input schema and a one-line hint embedded, in **both** serialization modes (self-healing is mode-independent).
-- [ ] T060 [P] [US3] Write failing test in `internal/server/mcp_routing_validation_test.go` that validation runs against the **stored upstream schema**, never the advertised `{"type":"object"}` placeholder — the stale-full-mode-client scenario (US3 scenario 4).
-- [ ] T061 [P] [US3] Write failing test in `internal/server/mcp_routing_validation_test.go` for fail-open: an uncompilable or unsupported stored schema dispatches exactly as today, counted in logs, never blocking a call a schemaless proxy would have allowed (FR-013b).
-- [ ] T062 [P] [US3] Write failing test in `internal/server/mcp_routing_validation_test.go` that non-argument failures (upstream down, auth, timeout) attach **no** schema and keep their current shapes.
-- [ ] T063 [US3] Call `p.inputValidator.validateArgs` against the captured catalog entry's `ParamsJSON` in `makeDirectModeHandler` (`internal/server/mcp_routing.go`), placed **immediately after** `directToolCallabilityBlockWithReason` and **before** `markSessionWorked`, rendering the existing `invalidParamsErrorResult` on failure.
-- [ ] T064 [US3] Emit the `emitActivityToolCallStarted` + `emitActivityToolCallCompleted("error", …)` pair on a validation failure in `internal/server/mcp_routing.go`, matching the Spec-085 `call_tool_*` path, so the availability funnel keeps the blind-spot-free property issue #969 established for this handler. The unconditional `emitActivityToolCallStarted` stays on the dispatch path only.
+- [ ] T059 [US3] Write failing test for pre-dispatch validation in `internal/server/mcp_routing_validation_test.go`: a missing required argument yields `invalid_params` with the tool's **full** input schema and a one-line hint embedded, in **both** serialization modes (self-healing is mode-independent).
+- [ ] T060 [US3] Write failing test in `internal/server/mcp_routing_validation_test.go` that validation runs against the **stored upstream schema**, never the advertised `{"type":"object"}` placeholder — the stale-full-mode-client scenario (US3 scenario 4).
+- [ ] T061 [US3] Write failing test in `internal/server/mcp_routing_validation_test.go` for fail-open: an uncompilable or unsupported stored schema dispatches exactly as today, counted in logs, never blocking a call a schemaless proxy would have allowed (FR-013b).
+- [ ] T062 [US3] Write failing test in `internal/server/mcp_routing_validation_test.go` that non-argument failures (upstream down, auth, timeout) attach **no** schema and keep their current shapes.
+- [ ] T063 [US3] Write failing test in `internal/server/mcp_routing_validation_test.go` asserting that a validation failure emits the `emitActivityToolCallStarted` + `emitActivityToolCallCompleted("error", …)` pair, so the rejected call is visible in the availability funnel.
+- [ ] T064 [US3] Add pre-dispatch validation **and** its activity emission in one change in `internal/server/mcp_routing.go`: call `p.inputValidator.validateArgs` against the captured catalog entry's `ParamsJSON` (captured by T019a), placed **immediately after** `directToolCallabilityBlockWithReason` and **before** `markSessionWorked`, render the existing `invalidParamsErrorResult` on failure, and emit the started/completed-error pair matching the Spec-085 `call_tool_*` path. The unconditional `emitActivityToolCallStarted` stays on the dispatch path only.
+
+  **These are deliberately one task.** An earlier draft split validation from its activity emission; landing the first alone would start rejecting calls that appear nowhere in the funnel — creating precisely the observability blind spot issue #969 established this handler must not have, and calling it an intermediate state.
 
 **Checkpoint**: deferral's worst case is one retry.
 
@@ -147,13 +166,13 @@ plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs
 **Independent test**: with a client connected, flip the config value; assert a `notifications/tools/list_changed` is emitted, the next `tools/list` reflects the new serialization, and the tool set is identical across the flip.
 
 - [ ] T065 [P] [US4] Add the `direct_tool_response_mode` clause to `DetectConfigChanges` in `internal/runtime/config_hotreload.go`, beside the existing `tool_response_mode` clause.
-- [ ] T066 [P] [US4] Write failing test in `internal/runtime/config_hotreload_test.go` that a change to the new field is detected and an unrelated edit is not.
+- [ ] T066 [US4] Write failing test in `internal/runtime/config_hotreload_test.go` that a change to the new field is detected and an unrelated edit is not.
 - [ ] T067 [US4] Write failing test for the rebuild guard in `internal/server/server_test.go`: a serialization flip triggers a rebuild **and** a notification; an unrelated config edit triggers **no** `SetTools` and **no** notification (the FR-014 no-churn rule, which a nil catalog would otherwise defeat).
 - [ ] T068 [US4] Add the guarded direct rebuild to the `config.reloaded` branch of `listenForRoutingModeRefresh` in `internal/server/server.go`: compare the mode the current catalog was built with against the live effective mode read via `p.currentConfig()` — **never** construction-time `p.config` — and rebuild only on a real change.
-- [ ] T069 [P] [US4] Write failing test in `internal/server/server_test.go` that a flip while `DiscoverTools` is failing still rebuilds and is not lost: an empty catalog is published with the new mode recorded (R8).
-- [ ] T070 [US4] Write the eight publication-skew interleaving tests in `internal/server/mcp_direct_skew_test.go` (D13), with a rebuild paused between `SetTools` and the catalog publish and a concurrent scoped `tools/list` + `describe_tool`, in three groups: (1) closed by design — added name, removed name, description-visible change, origin flip; (2) closed by withholding — a within-generation display-name collision; (3) the three documented residuals — input-schema-only, output-schema-only, annotations-only (read → destructive). The input-schema case **must** be semantically different but signature-identical (a nested-property edit the 085 grammar collapses to `~`) with the new hash warmed before the rebuild renders, or `Peek` misses and the description changes visibly instead; a canonicalization-equal edit will not do, since `hash` re-marshals the parsed schema.
+- [ ] T069 [US4] Write failing test (alongside T067, same file, before T068) in `internal/server/server_test.go` that a flip while `DiscoverTools` is failing still rebuilds and is not lost: an empty catalog is published with the new mode recorded (R8).
+- [ ] T070 [US4] **Requires Phase 5 complete.** Write the eight publication-skew interleaving tests in `internal/server/mcp_direct_skew_test.go` (D13), with a rebuild paused between `SetTools` and the catalog publish and a concurrent scoped `tools/list` + `describe_tool`, in three groups: (1) closed by design — added name, removed name, description-visible change, origin flip; (2) closed by withholding — a within-generation display-name collision; (3) the three documented residuals — input-schema-only, output-schema-only, annotations-only (read → destructive). The input-schema case **must** be semantically different but signature-identical (a nested-property edit the 085 grammar collapses to `~`) with the new hash warmed before the rebuild renders, or `Peek` misses and the description changes visibly instead; a canonicalization-equal edit will not do, since `hash` re-marshals the parsed schema.
 - [ ] T071 [US4] Write the two **no-rebuild** cache tests in `internal/server/mcp_direct_skew_test.go`: a signature-cache miss→warm and a hit→eviction between registration and a later filter/describe call must both leave the tool listed and describable — proof that the discriminator reads the **stored** `renderedDescription` rather than re-rendering.
-- [ ] T072 [US4] Assert across the whole skew set in `internal/server/mcp_direct_skew_test.go`: no describable-but-unlisted id; no entry scope-checked against one origin while its handler dispatches to another; no read-scoped token having a destructive tool's **call** admitted; `generation` increments exactly once per paused rebuild and not at all on a guarded no-op reload; and no stale definition leading to a call that *succeeds* against the wrong schema.
+- [ ] T072 [US4] **Requires Phase 5 complete** — its self-healing assertions are Phase 5 behaviour. Assert across the whole skew set in `internal/server/mcp_direct_skew_test.go`: no describable-but-unlisted id; no entry scope-checked against one origin while its handler dispatches to another; no read-scoped token having a destructive tool's **call** admitted; `generation` increments exactly once per paused rebuild and not at all on a guarded no-op reload; and no stale definition leading to a call that *succeeds* against the wrong schema.
 
 **Checkpoint**: the feature is operable on a running proxy and the concurrency story is proven rather than asserted.
 
@@ -178,19 +197,28 @@ plan.md's Complexity Tracking records **three narrowings of normative spec MUSTs
 ## Dependencies & execution order
 
 ```text
-Phase 0 (approvals)  ──► BLOCKS EVERYTHING
-      │
-Phase 1 (config + Peek)
-      │
-Phase 2 (catalog)    ──► BLOCKS ALL USER STORIES
-      │
-      ├─► Phase 3 (US1, P1) ──┐
-      │                       ├─► Phase 5 (US3, P2)  [needs the catalog entry capture from Phase 2]
-      ├─► Phase 4 (US2, P1) ──┘
-      │                       └─► Phase 6 (US4, P2)  [needs a rebuild path to guard]
-      │
-      └─► Phase 7 (polish)  [T073/T074 need Phase 4; T075/T076 need Phase 3]
+T004 (fold D1/D2/D3 into spec.md) ──► Phase 1 (config axis + Peek)
+T001 (FR-017 atomicity)           ──► catalog publication (T017–T020)
+T002 (stale schema)               ──► Phase 5, and T070/T072's residual cases
+T003 (stale annotations)          ──► T024, T053
+
+Phase 1 ──► Phase 2 (catalog; includes T019a handler capture + T019b describe_tool registration)
+              │
+              ├─► Phase 3 (US1, P1)
+              ├─► Phase 4 (US2, P1)   [T046a completes the T014 collision assertion]
+              │
+              ├─► Phase 5 (US3, P2)   [needs T019a's captured entry; independent of US1/US2]
+              │        │
+              │        └─► Phase 6 (US4, P2)  ── T070/T072 assert self-healing, which is Phase 5
+              │
+              └─► Phase 7 (polish)  [T073/T074 need Phase 4; T075/T076 generalize T035a]
 ```
+
+Three edges an earlier draft got wrong, all of them cycles or silent gaps:
+
+- **Phase 2 used to depend on Phase 4.** T024 asserts a fresh proxy lists `describe_tool`, but the registration sat in Phase 4 — so the foundational phase could not go green until the phase built on top of it had landed. Fixed by moving the one-line registration to T019b.
+- **Nothing changed `makeDirectModeHandler`'s signature.** T020 updated call sites for a change no task made, and Phase 5 read a captured entry nothing had captured. Fixed by T019a.
+- **Phase 6 quietly needed Phase 5.** T070's input-schema residual asserts the stale-schema case self-heals on one retry, and T072 asserts no call succeeds against the wrong schema — both are pre-dispatch-validation behaviour.
 
 - **US1 and US2 are independent of each other** once Phase 2 lands, and can proceed in parallel by different agents: US1 touches `renderDirectTools` and the instructions helper; US2 touches the describe seam and the direct resolver. They meet only at the shared `buildDirectModeTools` return path (T031 / T037) — sequence those two, or land T037 first since it is a one-line append.
 - **US3 depends on Phase 2 only** (the handler's captured catalog entry), not on US1 — it can land before deferral is switchable.
@@ -198,17 +226,19 @@ Phase 2 (catalog)    ──► BLOCKS ALL USER STORIES
 
 ## Parallel execution examples
 
-**Phase 1** — T005, T007, T008, T009, T010, T011 are all different files; T006 follows T005 and T012 follows T011.
+`[P]` means **a different file**, so the marker was removed everywhere it contradicted that — T028/T029/T030 share one new test file, as do T042–T058, T059–T062, and T067/T069. They are still *batchable*, which is not the same thing:
 
-**Phase 3 (US1)** — T028, T029, T030 are three test cases in one new file: write them together, then T031 makes all three pass at once.
+**Phase 1** — T008 (`loader.go`), T009 (`main.go`), T010 and T011 are genuinely different files and keep `[P]`. T005/T006/T007 all touch `config.go` (or test it) and are sequential.
 
-**Phase 4 (US2)** — the test tasks T042, T043, T044, T049, T051, T055, T058 all land in `mcp_describe_direct_test.go` and can be written as one batch; the implementation tasks T045–T054 are sequential because they share `mcp_describe_tool.go` and `mcp_describe_direct.go`.
+**Phase 3 (US1)** — T028, T029, T030 are three cases in one file: write them as one sitting, then T031 makes all three pass.
 
-**Phase 7** — T075, T077, T078, T079, T080, T081 touch six different trees and are fully parallel.
+**Phase 4 (US2)** — the test tasks all land in `mcp_describe_direct_test.go`: write them as one batch, in the listed order, then the implementation tasks T045–T054 follow sequentially (shared files).
+
+**Phase 7** — T075, T077, T078, T079, T080, T081 touch six different trees and are genuinely parallel.
 
 ## Implementation strategy
 
-**MVP = Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4.** US1 without US2 is not shippable — the spec says so directly ("deferral without the second stage trades tokens for failed calls"), and the catalog-divergence edge case makes an unrecovered deferred listing *strictly worse* than full mode for pending/changed tools. Ship the two P1 stories together.
+**MVP = Phase 0 (T004 + T001) + Phase 1 + Phase 2 + Phase 3 + Phase 4**, and it includes **T035a** — the token measurement. Shipping US1 without measuring the reduction would mean shipping the feature without evidence for the one number that justifies it; the earlier draft left that gate in Polish, outside the MVP that claims it. US1 without US2 is not shippable — the spec says so directly ("deferral without the second stage trades tokens for failed calls"), and the catalog-divergence edge case makes an unrecovered deferred listing *strictly worse* than full mode for pending/changed tools. Ship the two P1 stories together.
 
 **Increment 2**: US3. Turns the worst case from an opaque failure into one bounded retry. Independently valuable — it improves direct mode even with deferral off.
 
@@ -218,7 +248,7 @@ Phase 2 (catalog)    ──► BLOCKS ALL USER STORIES
 
 ## Notes
 
-- Total: **83 tasks** — 4 approvals, 8 setup, 15 foundational, 8 (US1), 23 (US2), 6 (US3), 8 (US4), 11 polish.
+- Total: **88 tasks**. Six were added by cross-model review: T019a (handler signature + entry capture), T019b (describe_tool registration moved out of Phase 4), T035a (Phase 3's own token gate), T046a (collision describe half), T046b (output_schema test before its implementation), and the T063/T064 merge-and-split around activity emission.
 - Commits reference `Related #971` — never `Fixes` or `Closes`.
 - Local `internal/server` runs need the CI skip regex; a bare `go test ./internal/server` hangs to a 7-minute timeout panic, and `scripts/test-api-e2e.sh` must never be run against a shared machine (it blanket-kills other cores).
 - Every task naming a line number in plan.md should re-locate the symbol before editing: the plan's references were accurate at its merge-base and `internal/server/mcp_routing.go` has moved since.

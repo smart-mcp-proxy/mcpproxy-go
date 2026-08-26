@@ -804,4 +804,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 26/33 (79%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
-| [102-schema-deferred](./specs/102-schema-deferred/) | `drafted` | 0/83 (0%) |
+| [102-schema-deferred](./specs/102-schema-deferred/) | `drafted` | 0/88 (0%) |
