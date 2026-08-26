@@ -125,23 +125,35 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 	for _, name := range order {
 		group := grouped[name]
 
-		if len(group) > 1 {
+		// A collision is two DISTINCT origins flattening to one display name, not
+		// merely two entries under one name. The same (server, tool) appearing
+		// twice in the projection — a duplicate, e.g. from a reindex race — is
+		// not ambiguous: both entries denote the same tool, so withholding it
+		// would delete a legitimate tool over a bookkeeping artefact.
+		origins := make([]directCatalogOrigin, 0, len(group))
+		seenOrigin := make(map[directCatalogOrigin]struct{}, len(group))
+		for _, t := range group {
+			o := directCatalogOrigin{ServerName: t.ServerName, ToolName: t.Name}
+			if _, dup := seenOrigin[o]; dup {
+				continue
+			}
+			seenOrigin[o] = struct{}{}
+			origins = append(origins, o)
+		}
+
+		if len(origins) > 1 {
 			// A display name must never denote two origins. Withhold ALL of
 			// them: picking a winner would hand one caller the other tool's
 			// schema, and the loser is invisible either way.
-			collision := directCatalogCollision{DisplayName: name}
-			for _, t := range group {
-				collision.Origins = append(collision.Origins, directCatalogOrigin{
-					ServerName: t.ServerName,
-					ToolName:   t.Name,
-				})
-			}
-			cat.withheld = append(cat.withheld, collision)
+			cat.withheld = append(cat.withheld, directCatalogCollision{
+				DisplayName: name,
+				Origins:     origins,
+			})
 
 			if logger != nil {
 				logger.Warn("Withholding colliding direct display name: two upstream tools flatten to one name, so neither is listed or describable",
 					zap.String("display_name", name),
-					zap.Any("origins", collision.Origins))
+					zap.Any("origins", origins))
 			}
 			continue
 		}

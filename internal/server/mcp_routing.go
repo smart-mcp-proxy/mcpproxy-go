@@ -687,6 +687,17 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 		return
 	}
 
+	// Serialize rebuilds. Today there is exactly one caller — the single serial
+	// event loop in listenForRoutingModeRefresh — so this lock is uncontended.
+	// It is here because this feature's own roadmap adds two more callers: the
+	// initial rebuild in initRoutingModeServers (on the CONSTRUCTOR goroutine,
+	// not the listener's) and the config.reloaded branch. Without it, two
+	// concurrent rebuilds can interleave as SetTools(A), SetTools(B),
+	// publish(A) — leaving catalog A paired with tool map B, which is exactly
+	// the mismatch the SetTools-then-publish ordering exists to prevent.
+	p.directRefreshMu.Lock()
+	defer p.directRefreshMu.Unlock()
+
 	directTools, cat := p.buildDirectModeTools()
 
 	serverTools := make([]mcpserver.ServerTool, len(directTools))

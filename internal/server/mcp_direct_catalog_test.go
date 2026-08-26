@@ -136,3 +136,28 @@ func TestBuildDirectCatalog_EmptyInputIsAnEmptyCatalogNotNil(t *testing.T) {
 	assert.Equal(t, 0, cat.Len())
 	assert.Empty(t, cat.DisplayNames())
 }
+
+// TestBuildDirectCatalog_DuplicateOriginIsNotACollision guards the distinction
+// cross-model review caught: a collision is two DISTINCT origins flattening to
+// one display name, not merely two entries under one name.
+//
+// The same (server, tool) appearing twice — a reindex race, a double-append —
+// is not ambiguous: both entries denote the same tool. Counting entries instead
+// of origins would withhold a perfectly good tool over a bookkeeping artefact,
+// and the operator would see it vanish with a "colliding display name" warning
+// naming the same origin twice.
+func TestBuildDirectCatalog_DuplicateOriginIsNotACollision(t *testing.T) {
+	dup := []*config.ToolMetadata{
+		{ServerName: "github", Name: "read_file", Description: "Read a file", Hash: "h1"},
+		{ServerName: "github", Name: "read_file", Description: "Read a file", Hash: "h1"},
+	}
+
+	cat := buildDirectCatalog(dup, nil)
+
+	entry, ok := cat.Lookup("github__read_file")
+	require.True(t, ok, "a duplicated origin must still be served — it is one tool, listed twice")
+	assert.Equal(t, "github", entry.ServerName)
+	assert.Empty(t, cat.Withheld(), "a duplicate is not a collision and must not be reported as one")
+	assert.Equal(t, []string{"github__read_file"}, cat.DisplayNames(),
+		"the tool must appear exactly once in the listing")
+}

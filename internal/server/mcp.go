@@ -202,6 +202,10 @@ type MCPProxyServer struct {
 	directCatalogPtr        atomic.Pointer[directCatalog]
 	directCatalogGeneration atomic.Uint64
 
+	// directRefreshMu serializes whole rebuilds so SetTools and the matching
+	// publishDirectCatalog cannot interleave with another rebuild's pair.
+	directRefreshMu sync.Mutex
+
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64
