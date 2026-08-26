@@ -119,7 +119,28 @@ type OnboardingState struct {
 const (
 	SchemaVersionKey       = "schema"
 	DockerRecoveryStateKey = "docker_recovery_state"
+	// BaselineSweepDoneKey marks that the one-shot informational baseline scan
+	// sweep has already run on this installation. Presence of the record — not
+	// its contents — is what suppresses a re-run, so the sweep stays one-shot
+	// across restarts and upgrades.
+	BaselineSweepDoneKey = "baseline_sweep_done"
 )
+
+// BaselineSweepState records the outcome of the one-shot informational baseline
+// scan sweep (the post-upgrade catch-up that scans pre-existing servers which
+// have never been scanned). Stored in MetaBucket under BaselineSweepDoneKey.
+// Absence of the record means "the sweep has never completed here".
+type BaselineSweepState struct {
+	// Version is the mcpproxy build version that completed the sweep. Recorded
+	// for diagnostics; the sweep does not re-run on a version change.
+	Version string `json:"version,omitempty"`
+	// CompletedAt is when the sweep finished.
+	CompletedAt time.Time `json:"completed_at"`
+	// ServersScanned is how many servers the sweep actually scanned.
+	ServersScanned int `json:"servers_scanned"`
+	// Findings is the total number of findings the sweep's scans produced.
+	Findings int `json:"findings"`
+}
 
 // Current schema version
 const CurrentSchemaVersion = 3

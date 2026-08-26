@@ -40,6 +40,14 @@ type HealthCalculatorInput struct {
 	Connected bool
 	LastError string
 
+	// HasEndpointURL reports whether this server is addressed by a configured
+	// URL (an HTTP/SSE server) rather than by a spawned command (stdio). It
+	// gates ActionEditURL: a stdio server can perfectly well emit "no such
+	// host" — an npx/uvx install failing to reach its package registry does
+	// exactly that — and offering "Edit URL" for it would point the user at a
+	// field that does not exist.
+	HasEndpointURL bool
+
 	// OAuth state (only for OAuth-enabled servers)
 	OAuthRequired   bool
 	OAuthStatus     string     // "authenticated", "expired", "error", "none"
@@ -142,6 +150,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		level := LevelUnhealthy
 		action := ActionRestart
 		summary := formatErrorSummary(input.LastError)
+		if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
+			action = ActionEditURL
+		}
 		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
 			level, action, summary = oauthAttentionState(input.LastError)
 		}
@@ -158,11 +169,27 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		action := ActionRestart
 		if input.LastError != "" {
 			summary = formatErrorSummary(input.LastError)
+			if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
+				action = ActionEditURL
+			}
 			// For OAuth-required servers with OAuth-related errors, suggest login
 			if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
 				level, action, summary = oauthAttentionState(input.LastError)
 			}
 		}
+		return &contracts.HealthStatus{
+			Level:      level,
+			AdminState: StateEnabled,
+			Summary:    summary,
+			Detail:     input.LastError,
+			Action:     action,
+		}
+	case "pending auth", "pending_auth":
+		// Parked awaiting user login (#1013): the client stopped redialing on
+		// purpose, so this never "resolves on its own" — it is always an
+		// attention item with a Sign-in CTA, regardless of OAuthRequired (a
+		// header-auth server whose token expired is parked the same way).
+		level, action, summary := oauthAttentionState(input.LastError)
 		return &contracts.HealthStatus{
 			Level:      level,
 			AdminState: StateEnabled,
@@ -400,6 +427,36 @@ func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError 
 	}
 
 	return detail
+}
+
+// isEndpointAddressError reports whether a connection failure is caused by the
+// configured address itself rather than by a transient outage. DNS resolution
+// failures, unsupported/absent schemes and unparseable URLs cannot be fixed by
+// restarting the server — offering "Restart" for them sends the user in a loop
+// (audit F11). "connection refused" is deliberately NOT in this set: the host
+// resolved, so the address is plausibly right and the peer merely down.
+//
+// Callers MUST gate this behind HasEndpointURL: the same phrases appear in the
+// output of a stdio server's own failed network calls, and a stdio server has
+// no URL field to send the user to.
+func isEndpointAddressError(err string) bool {
+	if err == "" {
+		return false
+	}
+	addressPatterns := []string{
+		"no such host",
+		"unsupported protocol scheme",
+		"missing protocol scheme",
+		"invalid url",
+		"invalid uri",
+		"first path segment in url",
+	}
+	for _, pattern := range addressPatterns {
+		if stringutil.ContainsIgnoreCase(err, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // isOAuthRelatedError checks if the error message indicates an OAuth issue.

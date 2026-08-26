@@ -888,8 +888,11 @@ jobs:
           # Create a flat structure to avoid duplicates
           mkdir -p release-files
 
-          # Copy archives (tar.gz and zip files) - only versioned, no latest for prereleases
-          find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
+          # Copy archives (tar.gz and zip files) - only versioned, no latest for prereleases.
+          # The QA gate runs as a reusable workflow of THIS run, so its artifacts land
+          # in dist/ too; its Playwright HTML report stores traces as
+          # playwright-report/data/<sha>.zip and must never become a release asset.
+          find dist -not -path "*/web-ui-sweep-playwright-report/*" \( -name "*.tar.gz" -o -name "*.zip" \) | while read file; do
             filename=$(basename "$file")
             cp "$file" "release-files/$filename"
           done

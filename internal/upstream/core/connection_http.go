@@ -162,7 +162,7 @@ func (c *Client) canUseHeadersStrategy() bool {
 // strategy, threading the per-user brokered credential through so the transport
 // layer injects it (spec 074 FR-016/FR-017).
 func (c *Client) brokeredHTTPConfig() *transport.HTTPTransportConfig {
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, nil)
+	httpConfig := c.httpTransportConfig(c.config, nil)
 	httpConfig.BrokeredAuth = c.brokeredAuth
 	return httpConfig
 }
@@ -201,7 +201,7 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 	configNoAuth := *c.config
 	configNoAuth.Headers = nil
 
-	httpConfig := transport.CreateHTTPTransportConfig(&configNoAuth, nil)
+	httpConfig := c.httpTransportConfig(&configNoAuth, nil)
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP client without auth: %w", err)
@@ -270,7 +270,7 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	configNoAuth := *c.config
 	configNoAuth.Headers = nil
 
-	httpConfig := transport.CreateHTTPTransportConfig(&configNoAuth, nil)
+	httpConfig := c.httpTransportConfig(&configNoAuth, nil)
 	sseClient, err := transport.CreateSSEClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create SSE client without auth: %w", err)

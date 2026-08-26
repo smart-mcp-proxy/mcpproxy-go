@@ -96,7 +96,28 @@ import (
 // the shape on the wire form (rule "v8_field_invalid"): tpa_scanner must be
 // an object whose keys are whitelisted, whose scalar values are non-negative
 // integers, and whose findings keys are members of the severity enum.
-const SchemaVersion = 8
+// Schema v9 makes the TPA funnel measurable. Two additions:
+//
+//   - tpa_scanner.tool_change_gate_scans / tpa_scanner.prompt_scans: delta
+//     counters for the two SYNCHRONOUS detection paths that run for ordinary
+//     users — the trust_mode:scan tool-change gate
+//     (internal/runtime.scanChangeIsClean) and the aggregated-prompt poisoning
+//     filter (internal/server.scanAggregatedPrompts). Neither emitted anything
+//     before v9, so the v8 job counters alone made the fleet look like it never
+//     scanned. Same window and reset semantics as every other registry counter
+//     (zeroed only after an accepted send), and the whole tpa_scanner
+//     sub-object is still omitted when every counter — v8 and v9 — is zero.
+//   - trust_mode_distribution: a STATE field (not a delta), the count of
+//     configured servers per config.ServerConfig.EffectiveTrustMode(), keyed by
+//     the fixed auto|scan|manual enum and computed fresh at heartbeat build
+//     time. It is the denominator the gate counter needs: gate scans are only
+//     possible on servers in "scan" mode.
+//
+// Anonymity posture is unchanged: non-negative integer counts and fixed enum
+// keys only. ScanForPII re-asserts both shapes on the wire form (rules
+// "v8_field_invalid" for the widened tpa_scanner whitelist and
+// "trust_mode_field_invalid" for the histogram).
+const SchemaVersion = 9
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -290,6 +311,15 @@ type HeartbeatPayload struct {
 	// non-negative counts keyed by the fixed severity enum only; never a
 	// scanned server name, scanner id, rule id, or finding title.
 	TPAScanner *TPAScannerStats `json:"tpa_scanner,omitempty"`
+
+	// Schema v9: count of configured servers per effective trust tier, keyed
+	// exclusively by the fixed auto|scan|manual enum (all three keys always
+	// present, even at zero — the protocol-counts convention). A STATE field,
+	// recomputed from the live config on every heartbeat and never reset. It
+	// gives the tpa_scanner gate counter its denominator: only servers in
+	// "scan" mode can produce a tool-change gate scan at all. No PII: counts
+	// only, no server names, no raw config strings.
+	TrustModeDistribution map[string]int `json:"trust_mode_distribution,omitempty"`
 }
 
 // OnboardingSnapshot is the data the telemetry service needs to populate
@@ -432,11 +462,35 @@ type Service struct {
 	startMu sync.Mutex
 	started bool
 	stopped bool
+
+	// Graceful-shutdown flush. Counters live in memory and are only reset after
+	// an ACCEPTED send, so everything recorded after the last accepted heartbeat
+	// (in practice: everything after the 5-minute first heartbeat, for any
+	// process that does not survive to the 24h tick) was previously dropped on
+	// exit. Stop now performs ONE final send after joining the loop.
+	//
+	// flushEligible is set by Start once it has passed every emission gate
+	// (env / config / semver) and ensured the anonymous id — i.e. exactly when a
+	// heartbeat from this process would have been legitimate. Stop consults it
+	// so a disabled or dev build never sends on shutdown.
+	//
+	// flushOnce keeps the flush single-shot across the idempotent Stop.
+	// flushTimeout is overridable in tests; see shutdownFlushTimeout.
+	flushEligible atomic.Bool
+	flushOnce     sync.Once
+	flushTimeout  time.Duration
 }
 
 // optOutBeaconTimeout bounds the best-effort opt-out beacon send so a slow or
 // unreachable endpoint never delays the config save that triggered it.
 const optOutBeaconTimeout = 5 * time.Second
+
+// shutdownFlushTimeout hard-bounds the final heartbeat sent on graceful
+// shutdown. It is deliberately much shorter than the HTTP client's own 10s
+// timeout: a dead or blackholed endpoint must never turn a user's quit into a
+// visible hang. The send is best-effort — on timeout the counters are simply
+// retained (no 2xx ⇒ no Reset) and the next run reports them.
+const shutdownFlushTimeout = 4 * time.Second
 
 // New creates a new telemetry service.
 func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logger) *Service {
@@ -455,6 +509,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		envDisabledReason: envReason,
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
+		flushTimeout:      shutdownFlushTimeout,
 		resolvedEnabled:   EffectiveTelemetryEnabled(cfg),
 		done:              make(chan struct{}),
 	}
@@ -593,13 +648,30 @@ func (s *Service) preflightSink() (PreflightCounterStore, *bbolt.DB) {
 	if s.optedOut.Load() {
 		return nil, nil
 	}
-	s.mu.Lock()
-	cfg := s.config
-	s.mu.Unlock()
-	if !EffectiveTelemetryEnabled(cfg) {
+	if !s.telemetryEnabledLive() {
 		return nil, nil
 	}
 	return s.preflightStore, s.preflightDB
+}
+
+// telemetryEnabledLive resolves EffectiveTelemetryEnabled against the live
+// config with s.mu held for the WHOLE evaluation.
+//
+// Snapshotting the pointer and then dereferencing it after unlocking is NOT
+// enough: config.IsTelemetryEnabled reads cfg.Telemetry, and both
+// ensureAnonymousIDOnce and advanceUpgradeFunnelOnce install that pointer on a
+// config that arrived without a telemetry block (`cfg.Telemetry =
+// &config.TelemetryConfig{}`) while holding s.mu. A locked write paired with an
+// unlocked read is still a data race — the request path (Record*) and the
+// heartbeat loop hit exactly that pair on a fresh install. Proven under -race
+// by TestPreflightSinkTelemetryPointerRace.
+//
+// EffectiveTelemetryEnabled only reads env vars and config fields, so calling
+// it under the lock cannot re-enter the Service.
+func (s *Service) telemetryEnabledLive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return EffectiveTelemetryEnabled(s.config)
 }
 
 // preflightDebug logs a counter-persistence failure without ever propagating it
@@ -690,8 +762,18 @@ func (s *Service) SetOnboardingProvider(fn func() *OnboardingSnapshot) {
 // falls through to the runtime detector — this preserves liveness of the
 // heartbeat pipeline at the cost of losing the "installer" classification
 // for this one cycle.
-func (s *Service) resolveLaunchSource() LaunchSource {
-	if s.activationStore != nil && s.activationDB != nil {
+//
+// consumeInstallerPending is false ONLY on the graceful-shutdown flush. Clearing
+// the flag happens at BUILD time, before the send is known to have been
+// accepted, which is a deliberate trade-off for the long-running loop (a crash
+// mid-send must not re-emit "installer" forever). On the shutdown flush that
+// trade-off inverts: the process is about to exit, so a flush that fails —
+// offline machine, 4s timeout — would destroy an attribution that previously
+// survived intact into the next run. The flush therefore leaves the flag ALONE
+// and reports the runtime-detected source; the next run's first heartbeat still
+// claims "installer" exactly once.
+func (s *Service) resolveLaunchSource(consumeInstallerPending bool) LaunchSource {
+	if consumeInstallerPending && s.activationStore != nil && s.activationDB != nil {
 		pending, err := s.activationStore.IsInstallerPending(s.activationDB)
 		if err == nil && pending {
 			// Clear the flag synchronously so a crash before the HTTP POST
@@ -743,8 +825,10 @@ func (s *Service) Start(ctx context.Context) {
 		return
 	}
 
-	// Skip if telemetry is disabled
-	if !s.config.IsTelemetryEnabled() {
+	// Skip if telemetry is disabled. Resolved under s.mu (telemetryEnabledLive):
+	// Start runs on its own goroutine, so both the s.config pointer read and the
+	// cfg.Telemetry dereference behind it race the config-reload path.
+	if !s.telemetryEnabledLive() {
 		s.logger.Info("Telemetry disabled by configuration")
 		return
 	}
@@ -764,8 +848,15 @@ func (s *Service) Start(ctx context.Context) {
 	// leaks before they leave the machine. Idempotent.
 	PopulateBlockedValues()
 
+	// Every emission gate above has passed and the anonymous id exists, so a
+	// heartbeat from this process is legitimate from here on. Arm the
+	// graceful-shutdown flush (see flushFinalHeartbeat): even if the process
+	// exits before the initial delay elapses, whatever it recorded is worth one
+	// bounded final send.
+	s.flushEligible.Store(true)
+
 	s.logger.Info("Telemetry service starting",
-		zap.String("endpoint", s.endpoint),
+		zap.String("endpoint", s.liveEndpoint()),
 		zap.Duration("initial_delay", s.initialDelay),
 		zap.Duration("interval", s.heartbeatInterval))
 
@@ -807,6 +898,15 @@ func (s *Service) Start(ctx context.Context) {
 // Runtime.Close relies on this so no telemetry BBolt write can land after
 // the clean-shutdown marker resolves or after the DB closes (Spec 080
 // FR-010, review round 6).
+//
+// After the loop has been joined, Stop performs ONE bounded final heartbeat
+// (flushFinalHeartbeat) so counters recorded since the last accepted send are
+// not lost on exit. Doing it AFTER the join — not from a second goroutine
+// racing the loop — is what keeps the "the loop owns sends" invariant intact:
+// at that point there is provably no other sender, so the send+reset path
+// cannot interleave with a tick. Runtime.Close calls Stop while the BBolt
+// handle is still open and before the clean-shutdown marker resolves, so the
+// flush's buildHeartbeat writes are still legal there.
 func (s *Service) Stop() {
 	s.startMu.Lock()
 	s.stopped = true
@@ -818,16 +918,87 @@ func (s *Service) Stop() {
 	// Start ran (or is running): its defer guarantees done closes on every
 	// exit path, including the disabled-by-env/config early returns.
 	<-s.done
+
+	s.flushFinalHeartbeat()
+}
+
+// flushFinalHeartbeat sends at most one final heartbeat on the graceful
+// shutdown path. Called by Stop AFTER the heartbeat loop has exited, so it is
+// never concurrent with a tick.
+//
+// It reuses sendHeartbeat's send+reset path verbatim, which is what preserves
+// the counter contract: counters are zeroed ONLY on a 2xx, so a failed or
+// timed-out flush drops nothing (the next run reports the same counts) and an
+// accepted flush cannot double-count with a later start.
+//
+// Delivery is AT-LEAST-ONCE, exactly as it already is between ticks. When a send
+// is aborted after the endpoint accepted it but before the client observed the
+// 2xx — the app context is cancelled a moment into an in-flight tick, say — the
+// counters stay pending and this flush re-sends them, so the endpoint can see
+// the same window twice. That is undecidable client-side (a lost response is
+// indistinguishable from a lost request) and is the pre-existing retry semantic
+// of Reset-on-2xx; the alternative is dropping the window entirely, which is the
+// bug this flush exists to fix. Receivers must treat heartbeats as idempotent
+// per (anonymous_id, timestamp) rather than assume exactly-once.
+//
+// Skipped when: Start never armed it (telemetry disabled by env/config, dev
+// build), the user opted out, telemetry was turned off mid-run, or nothing has
+// been recorded since the last accepted send.
+//
+// The send runs on a FRESH context, not the loop's: Runtime.Close cancels the
+// app context before calling Stop, so a derived context would abort the flush
+// instantly. It is hard-bounded by flushTimeout so a dead endpoint cannot hang
+// shutdown.
+//
+// Build-time one-shot side effects are suppressed here (consumeOneShots=false):
+// the 365-day anonymous-id rotation, which rewrites the whole config file at the
+// worst possible moment (the daemon's other config writers are winding down),
+// and the installer_heartbeat_pending flag, which is cleared at build time and
+// would be destroyed by a flush that never lands. Both fire on the next run's
+// first heartbeat instead. See buildHeartbeatWithOneShots.
+func (s *Service) flushFinalHeartbeat() {
+	s.flushOnce.Do(func() {
+		if !s.flushEligible.Load() {
+			return
+		}
+		if s.optedOut.Load() {
+			return
+		}
+		if !s.telemetryEnabledLive() {
+			return
+		}
+		if !s.registry.HasPendingCounters() {
+			s.logger.Debug("Skipping telemetry shutdown flush: no counters recorded since the last accepted heartbeat")
+			return
+		}
+
+		timeout := s.flushTimeout
+		if timeout <= 0 {
+			timeout = shutdownFlushTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		s.logger.Debug("Flushing final telemetry heartbeat on shutdown",
+			zap.Duration("timeout", timeout))
+		s.sendHeartbeatWithOneShots(ctx, false)
+	})
 }
 
 func (s *Service) sendHeartbeat(ctx context.Context) {
+	s.sendHeartbeatWithOneShots(ctx, true)
+}
+
+// sendHeartbeatWithOneShots is sendHeartbeat's body. consumeOneShots is false
+// only on the shutdown-flush path; see flushFinalHeartbeat.
+func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots bool) {
 	// MCP-2482: once the user has opted out, no further telemetry is emitted —
 	// even if the long-running heartbeat loop is still ticking.
 	if s.optedOut.Load() {
 		return
 	}
 
-	payload := s.buildHeartbeat()
+	payload := s.buildHeartbeatWithOneShots(consumeOneShots)
 
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -856,7 +1027,7 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 		return
 	}
 
-	url := s.endpoint + "/heartbeat"
+	url := s.liveEndpoint() + "/heartbeat"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		s.logger.Debug("Failed to create heartbeat request", zap.Error(err))
@@ -891,20 +1062,52 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 }
 
 // advanceUpgradeFunnel persists the current version as last_reported_version.
-// Called only on successful heartbeat send.
+// Called only on successful heartbeat send. Reads the live config through
+// liveConfig for the same reason buildHeartbeat does: this runs on the
+// heartbeat loop, concurrently with the NotifyConfigChanged pointer swap.
+//
+// The cursor is NOT self-healing on a skipped write: leaving it unadvanced
+// makes the next heartbeat report the same previous_version again, so one
+// upgrade is counted twice. If the config was swapped between the read and the
+// guarded write, redo the advance against the new live config. Two attempts is
+// enough — a second swap in the same window leaves the cursor for the next
+// heartbeat, which is the pre-existing (rare, bounded) double-report.
 func (s *Service) advanceUpgradeFunnel() {
-	if s.config.Telemetry == nil {
-		s.config.Telemetry = &config.TelemetryConfig{}
-	}
-	if s.config.Telemetry.LastReportedVersion == s.version {
-		return
-	}
-	s.config.Telemetry.LastReportedVersion = s.version
-	if s.cfgPath != "" {
-		if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
-			s.logger.Debug("Failed to persist last_reported_version", zap.Error(err))
+	for attempt := 0; attempt < 2; attempt++ {
+		if s.advanceUpgradeFunnelOnce() {
+			return
 		}
 	}
+}
+
+// advanceUpgradeFunnelOnce runs ONE resolve -> check -> mutate -> persist pass
+// and reports whether the cursor is settled (nothing to do, or the advance was
+// written). It holds s.mu across the whole pass for two reasons:
+//
+//   - the mutation writes cfg.Telemetry, which buildHeartbeat reads (via
+//     telemetryCursor) and maybeRotateAnonymousID writes. Mutating it outside
+//     the mutex is a genuine data race with a concurrent BuildPayload — that
+//     path is exported and served from an HTTP handler (internal/httpapi), so a
+//     `telemetry show-payload` request lands on the heartbeat loop's post-send
+//     advance. Proven under -race by TestAdvanceUpgradeFunnelConfigRace.
+//   - the liveness check inside persistConfigLocked has to be atomic with the
+//     mutation it is guarding, exactly as in maybeRotateAnonymousID.
+func (s *Service) advanceUpgradeFunnelOnce() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.config
+	if cfg == nil {
+		return true
+	}
+	if cfg.Telemetry == nil {
+		cfg.Telemetry = &config.TelemetryConfig{}
+	}
+	if cfg.Telemetry.LastReportedVersion == s.version {
+		return true
+	}
+	cfg.Telemetry.LastReportedVersion = s.version
+	return s.persistConfigLocked(cfg, "Advanced last_reported_version")
 }
 
 // BuildPayload renders the heartbeat payload at the current point in time.
@@ -914,12 +1117,123 @@ func (s *Service) BuildPayload() HeartbeatPayload {
 	return s.buildHeartbeat()
 }
 
+// liveConfig returns the service's current *config.Config, read under s.mu.
+// NotifyConfigChanged replaces the pointer wholesale when the live config is
+// reloaded, so every read outside that critical section must go through here:
+// an unsynchronized read of the field is a data race with the swap.
+//
+// Callers get the pointer, not a deep copy — the pointed-to config is still
+// shared with the rest of the daemon and must be treated as read-only.
+func (s *Service) liveConfig() *config.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.config
+}
+
+// liveEndpoint returns the service's current telemetry endpoint, read under
+// s.mu. NotifyConfigChanged rewrites s.endpoint on a live config reload, so
+// every read must take the same lock the write does — an unlocked read is a
+// data race, not merely a stale value. The shutdown flush made this reachable in
+// practice (it sends after the loop has been joined, i.e. from whichever
+// goroutine called Stop), and it is equally reachable from the feedback and
+// opt-out-beacon paths.
+func (s *Service) liveEndpoint() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endpoint
+}
+
+// liveAnonymousID returns the anonymous install id from the service's current
+// config, read under s.mu — the same lock NotifyConfigChanged takes to swap
+// s.config, and the same one ensureAnonymousIDOnce / advanceUpgradeFunnelOnce
+// take to install cfg.Telemetry on a config that arrived without one.
+//
+// Snapshotting the pointer and dereferencing it after unlocking would NOT be
+// enough, for exactly the reason telemetryEnabledLive documents:
+// GetAnonymousID reads cfg.Telemetry, so the whole read has to happen inside
+// the critical section. The opt-out beacon read it unlocked in both of its
+// eligibility gates — two lines above the endpoint read this PR moved under the
+// lock — which the race detector confirms (see
+// TestOptOutBeaconReadsAnonymousIDUnderLock).
+//
+// config.GetAnonymousID only reads config fields, so calling it under the lock
+// cannot re-enter the Service.
+func (s *Service) liveAnonymousID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.config == nil {
+		return ""
+	}
+	return s.config.GetAnonymousID()
+}
+
+// telemetryCursor reads the four cfg.Telemetry scalars the heartbeat reports,
+// in one hold of s.mu. Every writer of these fields — maybeRotateAnonymousID
+// and advanceUpgradeFunnelOnce — mutates them under the same mutex, so the read
+// side must take it too: a locked write paired with an unlocked read is still a
+// data race. Taking all four in one pass also means the reported id and its
+// created_at can never straddle a rotation.
+//
+// cfg is the caller's snapshot (see liveConfig); a nil cfg or nil cfg.Telemetry
+// yields empty strings, which is what a fresh install reports anyway.
+func (s *Service) telemetryCursor(cfg *config.Config) (anonID, createdAt, previousVersion, lastStartupOutcome string) {
+	if cfg == nil {
+		return "", "", "", ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg.Telemetry == nil {
+		return "", "", "", ""
+	}
+	return cfg.Telemetry.AnonymousID,
+		cfg.Telemetry.AnonymousIDCreatedAt,
+		cfg.Telemetry.LastReportedVersion,
+		cfg.Telemetry.LastStartupOutcome
+}
+
 func (s *Service) buildHeartbeat() HeartbeatPayload {
-	// Spec 042: rotate the anonymous ID if it's older than 365 days.
-	s.maybeRotateAnonymousID(time.Now().UTC())
+	return s.buildHeartbeatWithOneShots(true)
+}
+
+// buildHeartbeatWithOneShots is buildHeartbeat's body.
+//
+// consumeOneShots gates every side effect this build performs on state that
+// only fires ONCE and is consumed at build time rather than on a 2xx:
+//   - the 365-day anonymous-id rotation (rewrites the config FILE), and
+//   - the installer_heartbeat_pending flag (BBolt one-shot, see
+//     resolveLaunchSource).
+//
+// It is false only on the shutdown-flush path. Both effects are irreversible
+// the moment they run, so performing them for a send that may never be accepted
+// — the flush runs while the daemon tears down, on a 4s budget, possibly
+// offline — would destroy state that previously survived intact into the next
+// run. The next run's first heartbeat performs both instead. Everything else in
+// this build (BBolt reads, funnel activity marking, counter snapshots) is
+// idempotent or reset-on-2xx and is therefore unconditional.
+func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayload {
+	// Take ONE snapshot of the live config pointer under s.mu and read only that
+	// below. NotifyConfigChanged swaps s.config wholesale on a reload, so an
+	// unsynchronized read of the field races that swap; snapshotting also means a
+	// reload landing mid-build cannot splice fields from two different configs
+	// into one payload. The lock is released immediately — nothing below may hold
+	// it, because preflightSink() takes the same non-reentrant mutex.
+	cfg := s.liveConfig()
+
+	// Spec 042: rotate the anonymous ID if it's older than 365 days. Runs on the
+	// snapshot, so the rotated ID is the one this payload reports.
+	if consumeOneShots {
+		s.maybeRotateAnonymousID(cfg, time.Now().UTC())
+	}
+
+	// Read every cfg.Telemetry-derived scalar in ONE locked pass. These four
+	// fields are written under s.mu by maybeRotateAnonymousID (anonymous id +
+	// created_at) and advanceUpgradeFunnelOnce (last_reported_version), both of
+	// which can run on another goroutine while this payload is being built —
+	// reading them unlocked is a data race, not merely a torn view.
+	anonID, anonCreatedAt, prevVersion, lastStartupOutcome := s.telemetryCursor(cfg)
 
 	payload := HeartbeatPayload{
-		AnonymousID:    s.config.GetAnonymousID(),
+		AnonymousID:    anonID,
 		Version:        s.version,
 		Edition:        s.edition,
 		OS:             runtime.GOOS,
@@ -935,11 +1249,9 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		MachineID: resolveMachineID(),
 	}
 
-	if s.config.Telemetry != nil {
-		payload.AnonymousIDCreatedAt = s.config.Telemetry.AnonymousIDCreatedAt
-		payload.PreviousVersion = s.config.Telemetry.LastReportedVersion
-		payload.LastStartupOutcome = s.config.Telemetry.LastStartupOutcome
-	}
+	payload.AnonymousIDCreatedAt = anonCreatedAt
+	payload.PreviousVersion = prevVersion
+	payload.LastStartupOutcome = lastStartupOutcome
 
 	if s.stats != nil {
 		payload.ServerCount = s.stats.GetServerCount()
@@ -954,7 +1266,7 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// Spec 042: feature-flag snapshot. Schema v3: BuildFeatureFlagSnapshot
 	// does not probe Docker — we splice the runtime probe result in here
 	// so the snapshot helper stays cheap and side-effect-free.
-	payload.FeatureFlags = BuildFeatureFlagSnapshot(s.config)
+	payload.FeatureFlags = BuildFeatureFlagSnapshot(cfg)
 	if s.stats != nil && payload.FeatureFlags != nil {
 		payload.FeatureFlags.DockerAvailable = s.stats.IsDockerAvailable()
 		// Schema v5 (MCP-2745): coarse docker-CLI resolution branch (the #696
@@ -967,7 +1279,12 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// unknown values at debug level via the service logger (bucketed into
 	// "auto") so operators can spot mis-typed config without polluting the
 	// telemetry cardinality.
-	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(s.config, s.logger)
+	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(cfg, s.logger)
+
+	// Schema v9: fixed-key histogram over cfg.Servers by EffectiveTrustMode.
+	// Computed fresh each heartbeat so a mid-window trust-tier change is
+	// reflected on the next send (state, not a delta counter).
+	payload.TrustModeDistribution = buildTrustModeDistribution(cfg)
 
 	// Spec 044: ground-truth environment classification. Cached after first
 	// call so repeated heartbeats do not re-probe the filesystem.
@@ -1002,7 +1319,7 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// the installer_heartbeat_pending flag set at process startup when
 	// MCPPROXY_LAUNCHED_BY=installer was observed. Otherwise the runtime
 	// detector result (tray/login_item/cli/unknown) is emitted.
-	payload.LaunchSource = string(s.resolveLaunchSource())
+	payload.LaunchSource = string(s.resolveLaunchSource(consumeOneShots))
 
 	// Spec 044 (T051): AutostartEnabled. Tri-state; nil when the tray sidecar
 	// is absent/unreachable/malformed (Linux always falls here).
@@ -1015,8 +1332,8 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		// into the same root it hands the core, and MCPPROXY_HOME moves both
 		// (GH #936).
 		dataDir := ""
-		if s.config != nil {
-			dataDir = s.config.DataDir
+		if cfg != nil {
+			dataDir = cfg.DataDir
 		}
 		s.autostartReader = AutostartReaderForDataDir(dataDir)
 		payload.AutostartEnabled = s.autostartReader.Read()
@@ -1118,57 +1435,119 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	return payload
 }
 
+// ensureAnonymousID gives the install an anonymous id, generating and
+// persisting one on first run. Start() launches on its own goroutine
+// (runtime/lifecycle.go `go r.telemetryService.Start(...)`), so this runs
+// concurrently with the daemon's config-reload path: reading s.config unlocked
+// races NotifyConfigChanged's pointer swap, and saving it directly would write
+// a whole config file that may already be stale. Both hazards are handled the
+// same way as maybeRotateAnonymousID — one locked pass, persisted only while
+// the snapshot is still live — retried once if the pointer moved underneath.
 func (s *Service) ensureAnonymousID() {
-	if s.config.GetAnonymousID() != "" {
+	for attempt := 0; attempt < 2; attempt++ {
+		if s.ensureAnonymousIDOnce() {
+			return
+		}
+	}
+}
+
+// ensureAnonymousIDOnce runs ONE locked resolve -> check -> mutate -> persist
+// pass and reports whether the id is settled (already present, or written).
+// It returns false only when the live config was swapped out from under the
+// snapshot, which is the caller's cue to redo the work against the new one.
+func (s *Service) ensureAnonymousIDOnce() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.config
+	if cfg == nil {
+		return true
+	}
+	if cfg.Telemetry == nil {
+		cfg.Telemetry = &config.TelemetryConfig{}
+	}
+
+	if cfg.Telemetry.AnonymousID != "" {
 		// Spec 042: legacy installs need created_at initialized for rotation.
-		if s.config.Telemetry != nil && s.config.Telemetry.AnonymousIDCreatedAt == "" {
-			s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-			s.persistConfig("Initialized anonymous_id_created_at for legacy install")
+		if cfg.Telemetry.AnonymousIDCreatedAt != "" {
+			return true
 		}
-		return
+		cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
+		if !s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at for legacy install") && s.config != cfg {
+			cfg.Telemetry.AnonymousIDCreatedAt = ""
+			return false
+		}
+		return true
 	}
 
-	// Generate a new UUIDv4
 	newID := uuid.New().String()
+	cfg.Telemetry.AnonymousID = newID
+	cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	// Persist to config
-	if s.config.Telemetry == nil {
-		s.config.Telemetry = &config.TelemetryConfig{}
+	if s.persistConfigLocked(cfg, "Generated anonymous telemetry ID") {
+		s.logger.Info("Generated and persisted anonymous telemetry ID",
+			zap.String("id", newID))
+		return true
 	}
-	s.config.Telemetry.AnonymousID = newID
-	s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	// Save config to disk
-	if s.cfgPath != "" {
-		if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
-			s.logger.Warn("Failed to persist anonymous telemetry ID",
-				zap.Error(err))
-		} else {
-			s.logger.Info("Generated and persisted anonymous telemetry ID",
-				zap.String("id", newID))
-		}
+	if s.config != cfg {
+		// The live config moved on: this id is neither on disk nor in the
+		// config the daemon now reads. Undo it so the snapshot cannot hand out
+		// an identity nothing else will ever agree with, and retry against the
+		// new live config.
+		cfg.Telemetry.AnonymousID = ""
+		cfg.Telemetry.AnonymousIDCreatedAt = ""
+		return false
 	}
+	// A genuine write failure on the still-live config. Keep the in-memory id
+	// (pre-existing behaviour) so this process at least reports one stable
+	// identity for its lifetime.
+	s.logger.Warn("Failed to persist anonymous telemetry ID; continuing with in-memory id",
+		zap.String("id", newID))
+	return true
 }
 
 // maybeRotateAnonymousID rotates the anonymous ID once it's older than 365
 // days. Spec 042 (User Story 8). Clock skew (created_at in the future) is
 // treated as "not yet expired".
-func (s *Service) maybeRotateAnonymousID(now time.Time) {
-	if s.config.Telemetry == nil || s.config.Telemetry.AnonymousID == "" {
+//
+// cfg is passed in rather than read off s.config so the caller's snapshot is
+// the one mutated and persisted: buildHeartbeat resolves the live config once
+// (liveConfig) and everything downstream — this rotation included — must act on
+// that same pointer, or a config swap landing mid-heartbeat would rotate the ID
+// on a config the payload never read.
+//
+// The ENTIRE check -> generate -> mutate -> persist-or-rollback sequence runs
+// under s.mu, so it is atomic against both the NotifyConfigChanged pointer swap
+// and a second rotation racing on the same snapshot. That second racer is real,
+// not theoretical: BuildPayload is exported and served from an HTTP handler
+// (internal/httpapi), so a request can build a heartbeat alongside the loop.
+// With two rotations interleaving, one could capture the OTHER's freshly
+// generated id as its "previous" value and restore that on rollback, leaving a
+// never-persisted id in the config the payload then transmits — exactly the
+// identity fragmentation the rollback exists to prevent. Serializing makes the
+// loser observe the winner's refreshed created_at and do nothing.
+func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
+	if cfg == nil {
 		return
 	}
-	createdAtStr := s.config.Telemetry.AnonymousIDCreatedAt
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cfg.Telemetry == nil || cfg.Telemetry.AnonymousID == "" {
+		return
+	}
+	createdAtStr := cfg.Telemetry.AnonymousIDCreatedAt
 	if createdAtStr == "" {
 		// Legacy install — initialize without rotating.
-		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig("Initialized anonymous_id_created_at")
+		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at")
 		return
 	}
 	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		// Corrupt timestamp: reset to now without rotating.
-		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig("Reset corrupt anonymous_id_created_at")
+		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfigLocked(cfg, "Reset corrupt anonymous_id_created_at")
 		return
 	}
 	if !createdAt.Before(now) {
@@ -1179,22 +1558,76 @@ func (s *Service) maybeRotateAnonymousID(now time.Time) {
 		return
 	}
 
-	// Rotate.
-	newID := uuid.New().String()
-	s.config.Telemetry.AnonymousID = newID
-	s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-	s.persistConfig("Rotated anonymous_id (annual)")
+	// Rotate. The caller reports cfg's anonymous_id in the payload it is
+	// building, so the rotation must be all-or-nothing: an id that was never
+	// written to disk must never be transmitted, or one annual rotation would
+	// show up as TWO identities (this heartbeat's unpersisted id, then the id
+	// the next heartbeat rotates the live config to) and fragment the install's
+	// telemetry continuity.
+	prevID := cfg.Telemetry.AnonymousID
+	prevCreatedAt := cfg.Telemetry.AnonymousIDCreatedAt
+	cfg.Telemetry.AnonymousID = uuid.New().String()
+	cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+	if !s.persistConfigLocked(cfg, "Rotated anonymous_id (annual)") {
+		// The live config was swapped out from under this snapshot, so the new
+		// id is not on disk. Put the snapshot back the way we found it and let
+		// the next heartbeat rotate the live config instead.
+		cfg.Telemetry.AnonymousID = prevID
+		cfg.Telemetry.AnonymousIDCreatedAt = prevCreatedAt
+	}
 }
 
-func (s *Service) persistConfig(reason string) {
-	if s.cfgPath == "" {
-		return
+// persistConfig writes cfg to disk, but ONLY while cfg is still the service's
+// live config. It reports whether the write actually happened, so callers can
+// undo or retry a mutation that was never persisted.
+//
+// This writes the WHOLE config file, so a write must never be issued against a
+// pointer the daemon has already swapped out: the heartbeat path works from a
+// snapshot (liveConfig), and if NotifyConfigChanged installs a newer config
+// while that heartbeat is in flight, saving the snapshot would silently roll
+// the user's change back on disk. The liveness check and the write share one
+// s.mu hold so the swap cannot slip between them.
+//
+// KNOWN RESIDUAL WINDOW (pre-existing, not closed here): the daemon's config
+// writers save the new file BEFORE calling NotifyConfigChanged, so between
+// those two steps s.config still points at the old config and a write issued
+// here would pass the liveness check and land on top of the just-saved file.
+// Closing that needs single-writer ownership of the config file (or a
+// mtime/CAS check), which is a config-layer change, not a telemetry one. The
+// guard narrows the exposure to that gap; it does not eliminate it.
+func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistConfigLocked(cfg, reason)
+}
+
+// persistConfigLocked is persistConfig's body. The caller MUST already hold
+// s.mu. It exists so a caller whose whole check-mutate-persist sequence has to
+// be atomic — maybeRotateAnonymousID, which must not interleave with another
+// rotation — can hold the lock across all of it instead of reacquiring here
+// (s.mu is not reentrant).
+func (s *Service) persistConfigLocked(cfg *config.Config, reason string) bool {
+	if cfg == nil {
+		return false
 	}
-	if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
+	if s.cfgPath == "" {
+		// No config FILE backs this service (in-memory/CLI use). There is no
+		// on-disk state for the in-memory mutation to be inconsistent with, so
+		// report success: this is "nothing to persist", not a failed write, and
+		// callers must not roll their mutation back.
+		return true
+	}
+	if s.config != cfg {
+		s.logger.Debug("Skipped telemetry config persist: live config was swapped",
+			zap.String("reason", reason))
+		return false
+	}
+	if err := config.SaveConfig(cfg, s.cfgPath); err != nil {
 		s.logger.Debug("Failed to persist telemetry config", zap.String("reason", reason), zap.Error(err))
-		return
+		return false
 	}
 	s.logger.Debug("Persisted telemetry config", zap.String("reason", reason))
+	return true
 }
 
 // IsValidSemverVersion reports whether a build version is a released (semver)

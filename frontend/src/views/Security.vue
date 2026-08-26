@@ -7,12 +7,16 @@
         <p class="text-base-content/70 mt-1">Configure security scanner plugins and review scan results</p>
       </div>
       <div class="flex gap-2">
-        <div
-          v-if="(overview?.scanners_enabled ?? overview?.scanners_installed ?? 0) > 0"
-          class="tooltip"
-          :data-tip="!overview?.docker_available ? 'Docker is required to run security scanners' : ''"
-        >
-          <button @click="startScanAll" :disabled="loading || scanAllRunning || !overview?.docker_available" class="btn btn-primary">
+        <!-- The offline baseline scanner is built in and always runs, so this
+             action is never gated on Docker or on an installed deep scanner
+             (mirrors the per-server Scan Now button, spec 088 FR-016). -->
+        <div class="tooltip" :data-tip="scanAllTooltip(overview?.docker_available)">
+          <button
+            @click="startScanAll"
+            :disabled="loading || scanAllRunning"
+            class="btn btn-primary"
+            data-test="scan-all-button"
+          >
             <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
             {{ scanAllRunning ? 'Scanning...' : 'Scan All Servers' }}
           </button>
@@ -119,27 +123,42 @@
       </div>
     </div>
 
-    <!-- Overview Stats -->
-    <div class="stats shadow bg-base-100 w-full">
-      <div class="stat">
-        <div class="stat-title">Scanners Installed</div>
-        <div class="stat-value">{{ overview.scanners_installed || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Total Scans</div>
-        <div class="stat-value">{{ overview.total_scans || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Active Scans</div>
-        <div class="stat-value" :class="overview.active_scans > 0 ? 'text-warning' : ''">{{ overview.active_scans || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Findings</div>
-        <div class="stat-value" :class="totalFindings > 0 ? 'text-error' : 'text-success'">{{ totalFindings }}</div>
-        <div class="stat-desc" v-if="overview.findings_by_severity">
-          {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
+    <!-- Overview Stats.
+         Until the first /security/overview lands, `overview` is {} and every
+         tile used to render a hard `0` — a security page stating "0 findings"
+         before it has looked is worse than one that admits it is still looking
+         (audit F15). Skeletons hold the layout instead. -->
+    <div class="stats shadow bg-base-100 w-full" data-test="security-overview-stats">
+      <template v-if="!overviewLoaded">
+        <div v-for="tile in PENDING_STAT_TILES" :key="tile" class="stat" data-test="overview-stat-skeleton">
+          <div class="stat-title">{{ tile }}</div>
+          <div class="stat-value">
+            <span class="skeleton inline-block h-8 w-12 align-middle" aria-hidden="true"></span>
+            <span class="sr-only">Loading</span>
+          </div>
         </div>
-      </div>
+      </template>
+      <template v-else>
+        <div class="stat">
+          <div class="stat-title">Scanners Installed</div>
+          <div class="stat-value">{{ overview.scanners_installed || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Total Scans</div>
+          <div class="stat-value">{{ overview.total_scans || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Active Scans</div>
+          <div class="stat-value" :class="overview.active_scans > 0 ? 'text-warning' : ''">{{ overview.active_scans || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Findings</div>
+          <div class="stat-value" :class="totalFindings > 0 ? 'text-error' : 'text-success'">{{ totalFindings }}</div>
+          <div class="stat-desc" v-if="overview.findings_by_severity">
+            {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
+          </div>
+        </div>
+      </template>
       <!-- Offline TPA signature corpus (spec 086 FR-019 / #938): which
            signatures are live, where they came from, and how fresh they are. -->
       <div v-if="signatureBundle" class="stat" data-test="signature-bundle-stat">
@@ -151,12 +170,13 @@
       </div>
     </div>
 
-    <!-- Docker unavailable warning (only after overview has loaded) -->
-    <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning">
+    <!-- Docker unavailable warning (only after overview has loaded). Scanning
+         still works: only the optional deep scanners need Docker. -->
+    <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning" data-test="docker-unavailable-alert">
       <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
       </svg>
-      <span>Docker is not running. Security scanners require Docker to analyze MCP servers.</span>
+      <span>Docker is not running, so the optional deep scanners are skipped. The built-in offline baseline scan still runs.</span>
     </div>
 
     <!-- Docker isolation nudge: show only when Docker is available, global
@@ -513,7 +533,7 @@ import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerSt
 import { useSystemStore } from '@/stores/system'
 import { scanReportPath } from '@/utils/serverRoute'
 import { formatSignatureBundle } from '@/utils/signatureBundle'
-import { deepScanSummary, enabledDockerScanners, scannerWontRun } from './security/deepScanState'
+import { deepScanSummary, enabledDockerScanners, scanAllTooltip, scannerWontRun } from './security/deepScanState'
 
 const systemStore = useSystemStore()
 
@@ -539,6 +559,9 @@ const overview = ref<any>({})
 // this to avoid flashing a false warning while the initial request is still
 // in flight (overview.docker_available is undefined before the fetch lands).
 const overviewLoaded = ref(false)
+// Titles rendered above the loading skeletons, so the tiles keep their labels
+// (and their width) while the numbers are still unknown.
+const PENDING_STAT_TILES = ['Scanners Installed', 'Total Scans', 'Active Scans', 'Findings'] as const
 const installing = ref<string | null>(null)
 
 // Deep-scan master state. `null` until the config loads, so the truth badges

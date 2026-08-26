@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -190,6 +191,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	contractActivities := make([]contracts.ActivityRecord, len(activities))
 	for i, a := range activities {
 		contractActivities[i] = storageToContractActivity(a)
+		s.maskActivityPayloads(&contractActivities[i])
 		if excludePayloads {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
@@ -241,11 +243,62 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	record := storageToContractActivity(activity)
+	s.maskActivityPayloads(&record)
+
 	response := contracts.ActivityDetailResponse{
-		Activity: storageToContractActivity(activity),
+		Activity: record,
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// maskActivityPayloads sanitises a record's request/response payloads before
+// they leave the process.
+//
+// Two separate problems, deliberately handled differently:
+//
+//   - Internal `_auth_*` arguments are MCPProxy's own plumbing, never something
+//     the caller sent, so they are dropped from EVERY record unconditionally.
+//   - A record the detector flagged carries the very credential the detection
+//     exists to warn about. The drawer that renders it is the surface most
+//     likely to end up in a screenshot or a screen-share, so the secret is
+//     replaced with a recognisable preview (`AKIA…****`) HERE, on the server:
+//     redacting in the client would leave the raw value on the wire and in the
+//     browser's network log, which is not a fix.
+//
+// Masking is scoped to flagged records so an unflagged payload costs nothing —
+// the detector already ran asynchronously when the call was recorded, and its
+// verdict is what `has_sensitive_data` reports.
+//
+// Full values remain reachable through the deliberate, separately-flagged
+// export path (`GET /api/v1/activity/export?include_bodies=true`), which is the
+// compliance/incident-response surface rather than a browsing one.
+func (s *Server) maskActivityPayloads(record *contracts.ActivityRecord) {
+	record.Arguments = security.StripInternalArgs(record.Arguments)
+
+	if !record.HasSensitiveData || s.sensitiveMasker == nil {
+		return
+	}
+
+	record.Arguments = s.sensitiveMasker.MaskArguments(record.Arguments)
+	if record.Response != "" {
+		masked, _ := s.sensitiveMasker.MaskText(record.Response)
+		record.Response = masked
+	}
+	// An upstream error commonly quotes the request or the response it choked
+	// on, so a failed call can carry the same credential the successful one
+	// would have — masking the body and not the error would just move the leak.
+	if record.ErrorMessage != "" {
+		masked, _ := s.sensitiveMasker.MaskText(record.ErrorMessage)
+		record.ErrorMessage = masked
+	}
+	// Metadata is not all machine-generated: `intent.reason` is prose the
+	// calling agent wrote, and an agent explaining itself ("rotating
+	// AKIA…") lands the same value in a field nobody was masking. The
+	// detection block itself is short identifiers no pattern matches, so the
+	// sweep passes over it untouched.
+	record.Metadata = s.sensitiveMasker.MaskArguments(record.Metadata)
 }
 
 // contextualMetadataKeys are the top-level metadata keys that survive the
@@ -651,7 +704,8 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	filter.Limit = 0
 
 	// Calculate summary statistics
-	var totalCount, successCount, errorCount, blockedCount, rejectedCount int
+	var totalCount, successCount, errorCount, blockedCount, rejectedCount, otherCount int
+	var callCount, callErrorCount int
 	serverCounts := make(map[string]int)
 	toolCounts := make(map[string]int)
 
@@ -659,6 +713,19 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	// closed, so this loop must always run to completion.
 	for a := range s.controller.StreamActivities(filter) {
 		totalCount++
+
+		// "How many rows" (totalCount) and "how many calls" (callCount) are
+		// different questions, and the Activity Log used to print the first
+		// under the second's label while the Usage tab printed the second —
+		// same instance, same window, different numbers (F1, #1046). One shared
+		// definition, in storage, settles it for both surfaces.
+		if counted, isError := storage.CountsAsCall(a); counted {
+			callCount++
+			if isError {
+				callErrorCount++
+			}
+		}
+
 		switch a.Status {
 		case storage.ActivityStatusSuccess:
 			successCount++
@@ -671,6 +738,13 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 			// out of the error bucket so a saturated limiter does not read as an
 			// upstream outage.
 			rejectedCount++
+		default:
+			// Not a tool-call outcome at all: a quarantine change stores its
+			// action in Status ("approved"), a policy decision its verdict
+			// ("allow"). Counting them here — rather than letting them fall
+			// silently into the total only — is what makes the five tiles a
+			// partition of the denominator they sit under (F2, #1046).
+			otherCount++
 		}
 
 		// Count by server
@@ -692,16 +766,19 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	topTools := buildTopTools(toolCounts, 5)
 
 	response := contracts.ActivitySummaryResponse{
-		Period:        period,
-		TotalCount:    totalCount,
-		SuccessCount:  successCount,
-		ErrorCount:    errorCount,
-		BlockedCount:  blockedCount,
-		RejectedCount: rejectedCount,
-		TopServers:    topServers,
-		TopTools:      topTools,
-		StartTime:     startTime.Format(time.RFC3339),
-		EndTime:       endTime.Format(time.RFC3339),
+		Period:         period,
+		TotalCount:     totalCount,
+		SuccessCount:   successCount,
+		ErrorCount:     errorCount,
+		BlockedCount:   blockedCount,
+		RejectedCount:  rejectedCount,
+		OtherCount:     otherCount,
+		CallCount:      callCount,
+		CallErrorCount: callErrorCount,
+		TopServers:     topServers,
+		TopTools:       topTools,
+		StartTime:      startTime.Format(time.RFC3339),
+		EndTime:        endTime.Format(time.RFC3339),
 	}
 
 	s.writeSuccess(w, response)
@@ -991,7 +1068,10 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	}
 	resp.Tools = rows
 
-	// Timeline: global buckets trimmed to the window span.
+	// Timeline: global buckets trimmed to the window span. Its sum is also the
+	// window's headline count — computed here, server-side, from the same bars
+	// the response carries, so the tiles and the histogram beneath them agree
+	// and so the Activity Log can print the same number (F1, #1046).
 	for _, b := range snap.Timeline() {
 		if bounded && b.Start.Before(start) {
 			continue
@@ -1002,6 +1082,8 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 			Errors:         b.Errors,
 			TotalRespBytes: b.RespBytesSum,
 		})
+		resp.TotalCalls += b.Calls
+		resp.TotalErrors += b.Errors
 	}
 
 	return resp
@@ -1029,6 +1111,8 @@ func usageMatchesStatus(tu *internalRuntime.ToolUsage, status string) bool {
 
 // usageToolStat projects a runtime ToolUsage into the API contract row.
 func usageToolStat(tu *internalRuntime.ToolUsage) contracts.UsageToolStat {
+	p50, p50Exceeds := tu.Percentile(0.50)
+	p95, p95Exceeds := tu.Percentile(0.95)
 	row := contracts.UsageToolStat{
 		Server:         tu.Server,
 		Tool:           tu.Tool,
@@ -1040,8 +1124,10 @@ func usageToolStat(tu *internalRuntime.ToolUsage) contracts.UsageToolStat {
 		TotalRespBytes: tu.RespBytesSum,
 		TotalReqBytes:  tu.ReqBytesSum,
 		SizedCalls:     tu.SizedRespCalls,
-		P50Ms:          tu.Percentile(0.50),
-		P95Ms:          tu.Percentile(0.95),
+		P50Ms:          p50,
+		P50Exceeds:     p50Exceeds,
+		P95Ms:          p95,
+		P95Exceeds:     p95Exceeds,
 		LastUsed:       tu.LastUsed,
 	}
 	if avg, ok := tu.AvgRespBytes(); ok {
@@ -1070,6 +1156,14 @@ func sortUsageRows(rows []contracts.UsageToolStat, key string) {
 		case "p95":
 			if a.P95Ms != b.P95Ms {
 				return a.P95Ms > b.P95Ms
+			}
+			// Both sit on the last histogram bound, but one of them is only
+			// BOUNDED there and the other ran PAST it. "Sort by p95 latency"
+			// exists to surface the slowest tools, and top-N truncation means
+			// losing that tie-break can drop the genuinely slow one off the
+			// chart in favour of a tool that merely touched the ceiling.
+			if a.P95Exceeds != b.P95Exceeds {
+				return a.P95Exceeds
 			}
 		default: // resp_bytes
 			if a.TotalRespBytes != b.TotalRespBytes {

@@ -145,23 +145,32 @@ type Service struct {
 	// resolver. Nil ⇒ fall back to the engine-wide default.
 	isolationModeResolver func(serverName string) string
 
-	// In-memory scan summary cache — avoids expensive BBolt reads per server
-	summaryCache   map[string]*ScanSummary
-	summaryCacheMu sync.RWMutex
+	// In-memory scan summary cache — avoids expensive BBolt reads per server.
+	//
+	// summaryCacheGen is a per-server invalidation counter. GetScanSummary
+	// computes a summary from BBolt OUTSIDE the cache lock, so a scan that
+	// starts mid-computation would otherwise have its invalidation overwritten
+	// by the in-flight reader storing the pre-scan summary — leaving a stale
+	// "clean" verdict cached for a server whose scan is running. The reader
+	// samples the generation on the cache miss and refuses to store if it moved.
+	summaryCache    map[string]*ScanSummary
+	summaryCacheGen map[string]uint64
+	summaryCacheMu  sync.RWMutex
 }
 
 // NewService creates a new SecurityService
 func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataDir string, logger *zap.Logger) *Service {
 	engine := NewEngine(docker, registry, dataDir, logger)
 	svc := &Service{
-		storage:        storage,
-		engine:         engine,
-		registry:       registry,
-		docker:         docker,
-		sourceResolver: NewSourceResolver(logger),
-		queue:          NewScanQueue(logger),
-		summaryCache:   make(map[string]*ScanSummary),
-		logger:         logger,
+		storage:         storage,
+		engine:          engine,
+		registry:        registry,
+		docker:          docker,
+		sourceResolver:  NewSourceResolver(logger),
+		queue:           NewScanQueue(logger),
+		summaryCache:    make(map[string]*ScanSummary),
+		summaryCacheGen: make(map[string]uint64),
+		logger:          logger,
 	}
 	var noop EventEmitter = &NoopEmitter{}
 	svc.emitter.Store(&noop)
@@ -477,11 +486,11 @@ func (s *Service) syncRegistryFromStorage() {
 		}
 
 		_ = s.registry.UpdateStatus(inst.ID, inst.Status)
-		// Also update configured env so the engine can pass it to containers
+		// Also update configured env so the engine can pass it to containers.
+		// Registry.Get hands back a copy, so this must go through the locked
+		// setter to actually land on the record the engine reads.
 		if inst.ConfiguredEnv != nil {
-			if reg, err := s.registry.Get(inst.ID); err == nil {
-				reg.ConfiguredEnv = inst.ConfiguredEnv
-			}
+			_ = s.registry.SetConfiguredEnv(inst.ID, inst.ConfiguredEnv)
 		}
 	}
 	s.logger.Info("Synced scanner registry from storage", zap.Int("count", len(installed)))
@@ -573,6 +582,8 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 
 	// Reuse any previously-stored configured env / image override so that
 	// toggling the scanner off and back on doesn't wipe the user's API keys.
+	// `scanner` is a copy of the registry record, so the reused values are
+	// written back through the locked setter for the engine to see them.
 	if existing, err := s.storage.GetScanner(id); err == nil && existing != nil {
 		if len(existing.ConfiguredEnv) > 0 {
 			scanner.ConfiguredEnv = existing.ConfiguredEnv
@@ -580,6 +591,7 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 		if existing.ImageOverride != "" {
 			scanner.ImageOverride = existing.ImageOverride
 		}
+		_ = s.registry.SetRuntimeConfig(id, scanner.ConfiguredEnv, scanner.ImageOverride)
 	}
 
 	// In-process scanners (e.g. tpa-descriptions) run in Go with no Docker
@@ -801,11 +813,9 @@ func (s *Service) ConfigureScanner(_ context.Context, id string, env map[string]
 	_ = s.registry.UpdateStatus(id, sc.Status)
 
 	// Also update the registry's ConfiguredEnv and ImageOverride so the engine
-	// picks up changes without requiring a restart
-	if reg, err := s.registry.Get(id); err == nil {
-		reg.ConfiguredEnv = sc.ConfiguredEnv
-		reg.ImageOverride = sc.ImageOverride
-	}
+	// picks up changes without requiring a restart. Both fields land in one
+	// locked update — a reader never sees the new env against the old image.
+	_ = s.registry.SetRuntimeConfig(id, sc.ConfiguredEnv, sc.ImageOverride)
 
 	s.emit().EmitSecurityScannerChanged(id, sc.Status, "")
 
@@ -1148,6 +1158,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 	}
 	job, err := s.engine.StartScan(ctx, req, callback)
 	if err != nil {
+		// The callback owns resolvedCleanup, but the engine only ever invokes
+		// the callback for a scan it ACCEPTED. Every rejection path here —
+		// "scan already in progress", scanner resolution failure, no scanners
+		// installed — returns before OnScanStarted, so the temp source
+		// directory prepared above would be orphaned on disk. Release it on the
+		// way out; the automatic baseline paths retry, and the concurrent-scan
+		// rejection is exactly what they hit when they race a manual scan.
+		if resolvedCleanup != nil {
+			resolvedCleanup()
+		}
 		return nil, err
 	}
 
@@ -1840,17 +1860,36 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 	overview := &SecurityOverview{}
 
 	// Count installed scanners. ScannersInstalled is the total number of
-	// scanners persisted in storage; ScannersEnabled is the subset the engine
-	// will actually run (status installed or configured). UI uses
-	// ScannersEnabled to decide whether to show scan-trigger buttons.
+	// scanners the proxy holds an install record for; ScannersEnabled is the
+	// subset the engine will actually run (status installed or configured). UI
+	// uses ScannersEnabled to decide whether to show scan-trigger buttons.
+	//
+	// Both counts have to include the in-process baseline scanner
+	// (tpa-descriptions), which is always installed+enabled and lives in the
+	// in-memory registry — nothing persists it to BBolt until a Docker scanner
+	// is installed. Counting storage alone reported 0/0 on a fresh install and
+	// hid the web UI's "Scan All Servers" button on exactly the installs that
+	// have never scanned anything.
+	seen := make(map[string]bool)
 	scanners, err := s.storage.ListScanners()
 	if err == nil {
 		overview.ScannersInstalled = len(scanners)
 		for _, sc := range scanners {
+			seen[sc.ID] = true
 			if sc.Status == ScannerStatusInstalled || sc.Status == ScannerStatusConfigured {
 				overview.ScannersEnabled++
 			}
 		}
+	}
+	// InProcessRunnableIDs resolves the predicate under the registry lock:
+	// List() returns the live *ScannerPlugin records that UpdateStatus mutates,
+	// so reading Status out here would race with a concurrent install/pull.
+	for _, id := range s.registry.InProcessRunnableIDs() {
+		if seen[id] {
+			continue
+		}
+		overview.ScannersInstalled++
+		overview.ScannersEnabled++
 	}
 
 	// Count scan jobs
@@ -1944,6 +1983,11 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		s.summaryCacheMu.RUnlock()
 		return cached
 	}
+	// Sample the invalidation generation in the same critical section as the
+	// miss. Everything below reads BBolt with no lock held, so this is the
+	// token that lets cacheScanSummary tell "still current" from "a scan
+	// started while I was computing".
+	cacheGen := s.summaryCacheGen[serverName]
 	s.summaryCacheMu.RUnlock()
 
 	// Check for active scan (Pass 1 takes priority in status display)
@@ -1965,7 +2009,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		// Only cache the explicit "no scans found" sentinel — transient
 		// I/O errors must retry on the next call.
 		if errors.Is(err, errNoScans) {
-			s.cacheScanSummary(serverName, nil)
+			s.cacheScanSummary(serverName, nil, cacheGen)
 		}
 		return nil
 	}
@@ -1991,7 +2035,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// Check if the primary job failed
 	if primaryJob.Status == ScanJobStatusFailed {
 		summary.Status = "failed"
-		s.cacheScanSummary(serverName, summary)
+		s.cacheScanSummary(serverName, summary, cacheGen)
 		return summary
 	}
 
@@ -2011,7 +2055,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		}
 		if summary.ScannersRun == 0 {
 			summary.Status = "failed"
-			s.cacheScanSummary(serverName, summary)
+			s.cacheScanSummary(serverName, summary, cacheGen)
 			return summary
 		}
 	}
@@ -2054,7 +2098,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 				summary.Status = "failed"
 			}
 		}
-		s.cacheScanSummary(serverName, summary)
+		s.cacheScanSummary(serverName, summary, cacheGen)
 		return summary
 	}
 
@@ -2071,7 +2115,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	summary.Status = verdict
 
 	// Cache for fast subsequent reads
-	s.cacheScanSummary(serverName, summary)
+	s.cacheScanSummary(serverName, summary, cacheGen)
 	return summary
 }
 
@@ -2205,10 +2249,14 @@ type FindingCounts struct {
 }
 
 // invalidateScanSummaryCache removes a server's cached scan summary,
-// forcing the next GetScanSummary call to recompute from storage.
+// forcing the next GetScanSummary call to recompute from storage. It also bumps
+// the server's cache generation so any GetScanSummary already mid-flight — it
+// read BBolt before this scan existed — cannot store its now-stale result on
+// top of this invalidation.
 func (s *Service) invalidateScanSummaryCache(serverName string) {
 	s.summaryCacheMu.Lock()
 	delete(s.summaryCache, serverName)
+	s.summaryCacheGen[serverName]++
 	s.summaryCacheMu.Unlock()
 }
 
@@ -2216,10 +2264,21 @@ func (s *Service) invalidateScanSummaryCache(serverName string) {
 // is stored as a sentinel meaning "we already checked, this server has no
 // scans" — used by spec 047 to avoid re-scanning the BBolt scan-job bucket on
 // every poll for untouched servers.
-func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary) {
+//
+// gen is the generation sampled when the caller missed the cache. If the server
+// was invalidated since (a scan started, progressed or finished while this
+// summary was being computed) the result describes a superseded state, so it is
+// dropped rather than published: a resurrected pre-scan summary would report a
+// stale "clean" verdict for a server that is being scanned right now, and
+// quarantine_security's scan_server/get_scan_report hand that verdict straight
+// to an agent.
+func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary, gen uint64) {
 	s.summaryCacheMu.Lock()
+	defer s.summaryCacheMu.Unlock()
+	if s.summaryCacheGen[serverName] != gen {
+		return
+	}
 	s.summaryCache[serverName] = summary
-	s.summaryCacheMu.Unlock()
 }
 
 // waitForConnection polls IsConnected until the server connects or the timeout expires.

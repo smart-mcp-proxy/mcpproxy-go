@@ -59,6 +59,7 @@ vi.mock('@/services/api', () => {
         ok({
           period: '24h',
           total_count: 54,
+          call_count: 42,
           success_count: 47,
           error_count: 6,
           blocked_count: 1,
@@ -104,7 +105,9 @@ describe('Activity Log — compact header', () => {
 
     const strip = wrapper.find('[data-test="activity-compact-summary"]')
     expect(strip.exists()).toBe(true)
-    expect(strip.text()).toContain('54 calls')
+    // Rows in the window are events; only 42 of them are calls (F1, #1046).
+    expect(strip.text()).toContain('54 events')
+    expect(strip.text()).toContain('42 calls')
     expect(strip.text()).toContain('6 errors')
     expect(strip.text()).toContain('1 blocked')
     // Zero rejected never earns a segment.

@@ -48,15 +48,15 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Security quarantine management for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs). Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.",
+    "description": "Security quarantine management AND TPA scanning for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs), and scan a server for them: 'scan_server' runs the always-on offline baseline scan (in-process, no Docker required) and 'get_scan_report' returns the latest verdict and findings. Every listing/inspection response also carries a one-line scan status, so an unscanned server is visible as unscanned. Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.",
     "inputSchema": {
       "properties": {
         "name": {
-          "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, approve_prompt, approve_all_prompts)",
+          "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, approve_prompt, approve_all_prompts, scan_server, get_scan_report)",
           "type": "string"
         },
         "operation": {
-          "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool, inspect_prompts, approve_prompt, approve_all_prompts. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled. The prompt operations (spec 100) manage aggregated upstream prompts held by the metadata rug-pull baseline: a prompt whose advertised metadata changed since approval is withheld from prompts/list until approved.",
+          "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool, inspect_prompts, approve_prompt, approve_all_prompts, scan_server, get_scan_report. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled. The prompt operations (spec 100) manage aggregated upstream prompts held by the metadata rug-pull baseline: a prompt whose advertised metadata changed since approval is withheld from prompts/list until approved. 'scan_server' starts the offline TPA baseline scan for one server (no Docker needed) and returns the verdict once it settles, or a job id to poll; 'get_scan_report' returns that server's latest verdict, counts and findings.",
           "enum": [
             "list_quarantined",
             "inspect_quarantined",
@@ -70,7 +70,9 @@
             "disable_tool",
             "inspect_prompts",
             "approve_prompt",
-            "approve_all_prompts"
+            "approve_all_prompts",
+            "scan_server",
+            "get_scan_report"
           ],
           "type": "string"
         },

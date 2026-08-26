@@ -798,6 +798,70 @@ func (m *Manager) ClearDockerRecoveryState() error {
 	})
 }
 
+// Informational baseline scan sweep marker
+
+// SaveBaselineSweepState persists the one-shot informational baseline sweep
+// marker. Once this record exists the sweep never runs again on this
+// installation, so it is written only after a sweep actually completed.
+func (m *Manager) SaveBaselineSweepState(state *BaselineSweepState) error {
+	if state == nil {
+		return fmt.Errorf("baseline sweep state is nil")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+		if err != nil {
+			return fmt.Errorf("failed to create meta bucket: %w", err)
+		}
+
+		data, err := json.Marshal(state)
+		if err != nil {
+			return fmt.Errorf("failed to marshal baseline sweep state: %w", err)
+		}
+
+		return bucket.Put([]byte(BaselineSweepDoneKey), data)
+	})
+}
+
+// LoadBaselineSweepState returns the one-shot baseline sweep marker, or
+// (nil, nil) when the sweep has never completed on this installation. A read
+// error is returned as an error — callers must treat "unknown" as "do not
+// sweep" rather than re-running the sweep on every start.
+func (m *Manager) LoadBaselineSweepState() (*BaselineSweepState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var state *BaselineSweepState
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			return nil
+		}
+
+		data := bucket.Get([]byte(BaselineSweepDoneKey))
+		if data == nil {
+			return nil
+		}
+
+		parsed := &BaselineSweepState{}
+		if err := json.Unmarshal(data, parsed); err != nil {
+			return err
+		}
+		state = parsed
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to load baseline sweep state: %w", err)
+	}
+
+	return state, nil
+}
+
 // Maintenance operations
 
 // Backup creates a backup of the database

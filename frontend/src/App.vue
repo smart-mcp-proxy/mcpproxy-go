@@ -12,8 +12,11 @@
       <!-- Top Header -->
       <TopHeader />
 
-      <!-- Page content -->
-      <main class="overflow-y-auto p-6">
+      <!-- Page content. `min-h-0` / `min-w-0`: a grid item defaults to
+           `min-height:auto`, so a tall page pushed this scroll container past
+           its track and the footer ended up overlapping the last row at 390px
+           (UX audit F14). -->
+      <main class="overflow-y-auto min-h-0 min-w-0 p-4 sm:p-6">
         <router-view />
       </main>
 
@@ -73,11 +76,13 @@ let removeAPIListener: (() => void) | null = null
 function handleAuthModalClose() {
   authModal.show = false
   authModal.lastError = ''
+  systemStore.setAuthRequired(false)
 }
 
 function handleAuthModalAuthenticated() {
   authModal.show = false
   authModal.lastError = ''
+  systemStore.setAuthRequired(false)
 
   // Refresh data now that we're authenticated
   systemStore.connectEventSource()
@@ -87,6 +92,7 @@ function handleAuthModalAuthenticated() {
 function handleAuthModalRefresh() {
   authModal.show = false
   authModal.lastError = ''
+  systemStore.setAuthRequired(false)
 
   // Reconnect with potentially new API key
   systemStore.connectEventSource()
@@ -98,6 +104,9 @@ function handleAuthError(event: APIAuthEvent) {
   console.log('Global auth error received:', event)
   authModal.lastError = event.error
   authModal.show = true
+  // Audit F28: one cause, one message. The modal now suppresses the reconnect
+  // toast and the inline load errors it would otherwise compete with.
+  systemStore.setAuthRequired(true)
 }
 
 onMounted(async () => {

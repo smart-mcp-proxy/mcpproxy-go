@@ -254,6 +254,11 @@ func (h *AdminHandlers) getActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// NOTE: raw storage records, serialised as-is — safe only while
+	// activityFilter is nil (setup.go wires nil today). Whoever wires it must
+	// mask first, as the personal-edition activity API does
+	// (httpapi.maskActivityPayloads), or flagged credentials are served in
+	// cleartext (audit F13).
 	writeJSON(w, http.StatusOK, ActivityListResponse{
 		Items: records,
 		Total: total,

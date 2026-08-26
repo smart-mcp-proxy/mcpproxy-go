@@ -1,9 +1,11 @@
 package upstream
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	uptransport "github.com/mark3labs/mcp-go/client/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -13,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // TestRefreshOAuthToken_DynamicOAuthDiscovery tests that RefreshOAuthToken works
@@ -54,8 +57,8 @@ func TestRefreshOAuthToken_DynamicOAuthDiscovery(t *testing.T) {
 	// Store an OAuth token for the server (as if it had authenticated previously)
 	// The ServerName field is used as the storage key (must match GenerateServerKey output)
 	token := &storage.OAuthTokenRecord{
-		ServerName:   serverKey,             // Key used for storage lookup (hash-based)
-		DisplayName:  "test-dynamic-oauth",  // Human-readable name for RefreshManager
+		ServerName:   serverKey,            // Key used for storage lookup (hash-based)
+		DisplayName:  "test-dynamic-oauth", // Human-readable name for RefreshManager
 		AccessToken:  "expired-access-token",
 		RefreshToken: "valid-refresh-token",
 		TokenType:    "Bearer",
@@ -175,4 +178,132 @@ func TestRefreshOAuthToken_ServerNotFound(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server not found")
+}
+
+// TestTokenFingerprint verifies the identity used to decide whether a persisted
+// token is NEW: the same untouched token must compare equal (so the scan does
+// not redial), any re-issue must not.
+func TestTokenFingerprint(t *testing.T) {
+	expires := time.Now().Add(time.Hour).UTC()
+	written := time.Now().UTC()
+	base := &uptransport.Token{AccessToken: "at", RefreshToken: "rt", ExpiresAt: expires}
+	fp := tokenFingerprint(base, written)
+
+	assert.Equal(t, fp, tokenFingerprint(&uptransport.Token{
+		AccessToken: "at", RefreshToken: "rt", ExpiresAt: expires,
+	}, written), "same token, same write: must fingerprint the same")
+
+	assert.NotEqual(t, fp, tokenFingerprint(&uptransport.Token{
+		AccessToken: "at2", RefreshToken: "rt", ExpiresAt: expires,
+	}, written), "a new access token must fingerprint differently")
+
+	assert.NotEqual(t, fp, tokenFingerprint(&uptransport.Token{
+		AccessToken: "at", RefreshToken: "rt", ExpiresAt: expires.Add(time.Minute),
+	}, written), "a refreshed expiry must fingerprint differently")
+
+	// A provider may re-issue a byte-identical token; the write stamp is what
+	// keeps that from silently suppressing the wake.
+	assert.NotEqual(t, fp, tokenFingerprint(base, written.Add(time.Second)),
+		"a token rewritten identically must still fingerprint differently")
+
+	assert.NotContains(t, fp, "at", "the fingerprint must not carry the token")
+	assert.Empty(t, tokenFingerprint(nil, written))
+}
+
+// TestScanForNewTokens_OnlyOnNewToken pins the fix for the 5s redial loop: the
+// scan must fire when a login/refresh writes a NEW token, not on every pass just
+// because the server still holds the stale token it already failed with (#1013).
+func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
+	logger := zap.NewNop()
+	tempDir := t.TempDir()
+	db, err := storage.NewBoltDB(tempDir, logger.Sugar())
+	require.NoError(t, err)
+	defer db.Close()
+
+	serverConfig := &config.ServerConfig{
+		Name:     "parked-server",
+		URL:      "http://127.0.0.1:1/mcp", // refused immediately; no real upstream needed
+		Protocol: "http",
+		Enabled:  true,
+		Created:  time.Now(),
+	}
+	serverKey := oauth.GenerateServerKey(serverConfig.Name, serverConfig.URL)
+	saveToken := func(access string) {
+		require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{
+			ServerName:  serverKey,
+			DisplayName: serverConfig.Name,
+			AccessToken: access,
+			TokenType:   "Bearer",
+			ExpiresAt:   time.Now().Add(time.Hour),
+			Created:     time.Now(),
+			Updated:     time.Now(),
+		}))
+	}
+	saveToken("stale-token")
+
+	manager := &Manager{
+		clients:           make(map[string]*managed.Client),
+		logger:            logger,
+		storage:           db,
+		secretResolver:    secret.NewResolver(),
+		tokenReconnect:    make(map[string]time.Time),
+		tokenFingerprints: make(map[string]string),
+	}
+
+	client, err := managed.NewClient("parked-server", serverConfig, logger, nil, &config.Config{}, db, secret.NewResolver())
+	require.NoError(t, err)
+	manager.clients["parked-server"] = client
+
+	// Park the client exactly as a deferred-OAuth connect failure would.
+	client.StateManager.SetPendingAuth(errors.New("OAuth authentication required for parked-server: login available via Web UI"))
+
+	// A triggered scan calls RetryConnection, which reconnects in the background
+	// (the dial is refused immediately, but not synchronously). Wait for the
+	// client to settle back into a state the scan considers before the next leg,
+	// otherwise a leg can land while it is still Connecting and be skipped for a
+	// reason the test is not about.
+	settled := func() {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			st := client.GetState()
+			return st == types.StatePendingAuth || st == types.StateError
+		}, 30*time.Second, 10*time.Millisecond, "client never settled into a scannable state")
+	}
+	// Pretend the per-server rate limit has expired so it cannot mask the result.
+	expireRateLimit := func() {
+		t.Helper()
+		settled()
+		manager.tokenReconnect["parked-server"] = time.Now().Add(-time.Minute)
+	}
+
+	expireRateLimit()
+	manager.scanForNewTokens()
+	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
+		"first scan must retry with the stored token")
+	require.NotEmpty(t, manager.tokenFingerprints["parked-server"])
+
+	// Same token, rate limit expired: must NOT redial again.
+	expireRateLimit()
+	before := manager.tokenReconnect["parked-server"]
+	manager.scanForNewTokens()
+	require.Equal(t, before, manager.tokenReconnect["parked-server"],
+		"scan redialed a parked server for a token it had already tried")
+
+	// A fresh token (login completed) must wake it.
+	saveToken("fresh-token")
+	expireRateLimit()
+	manager.scanForNewTokens()
+	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
+		"scan did not wake the parked server when a new token appeared")
+
+	// A re-login that happens to persist a byte-identical token is still a new
+	// write, and this scan is the fallback wake when the CLI could not record an
+	// OAuth completion event — it must not be swallowed. SaveOAuthToken stamps
+	// Updated with the wall clock, so give it a distinct instant.
+	time.Sleep(2 * time.Millisecond)
+	saveToken("fresh-token")
+	expireRateLimit()
+	manager.scanForNewTokens()
+	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
+		"scan ignored an identically-rewritten token")
 }

@@ -37,20 +37,64 @@
 
     <!-- Tokens-saved headline (FR-007) -->
     <div v-if="data" class="stats stats-vertical sm:stats-horizontal shadow w-full" data-test="usage-tokens-saved">
-      <div class="stat">
-        <div class="stat-title">Tokens saved</div>
-        <div class="stat-value text-success">{{ formatNumber(data.tokens_saved) }}</div>
-        <div class="stat-desc">{{ data.tokens_saved_percentage.toFixed(1) }}% reduction via BM25 discovery</div>
+      <!--
+        Audit finding F23 (#1046): this tile "did not move" after 16 further
+        tool calls. It is not supposed to. It is a STRUCTURAL estimate computed
+        from the current tool catalog — the cost of putting every upstream tool
+        in the agent's context versus what retrieve_tools returns for one query —
+        so it moves when servers or tools change, never per call. The number was
+        right; the label ("Tokens saved", beside per-window call counts) said
+        cumulative-savings-so-far. It now says what it measures, and the tooltip
+        says how it is derived.
+      -->
+      <div class="stat" data-test="usage-tokens-saved-tile">
+        <div class="stat-title flex items-center gap-1">
+          Tokens saved per request
+          <span
+            class="cursor-help opacity-50"
+            aria-hidden="true"
+            :title="tokensSavedExplainer"
+          >ⓘ</span>
+        </div>
+        <div class="stat-value text-success" :title="tokensSavedExplainer">
+          {{ formatNumber(data.tokens_saved) }}
+        </div>
+        <div class="stat-desc">
+          {{ data.tokens_saved_percentage.toFixed(1) }}% smaller tool context via BM25 discovery ·
+          <span class="opacity-70">tracks your catalog, not your call volume</span>
+        </div>
       </div>
-      <div class="stat">
-        <div class="stat-title">Tool calls</div>
-        <div class="stat-value">{{ formatNumber(totalCalls) }}</div>
-        <div class="stat-desc">{{ data.tools.length }} active tool{{ data.tools.length === 1 ? '' : 's' }} ({{ windowLabel }})</div>
+      <!--
+        Calls and errors come from the response, which counts the same
+        population as the Activity Log's own header — see usageHeadline for why
+        summing `tools` here was wrong (F1, #1046).
+      -->
+      <div class="stat" data-test="usage-calls-tile">
+        <div class="stat-title">Calls</div>
+        <div class="stat-value">{{ formatNumber(headline.calls) }}</div>
+        <!--
+          "Active tools" counts the same population the charts below chart:
+          names that have completed at least one call (F22, #1046). Counting the
+          whole rollup here would print "6 active tools" over a histogram
+          labelled "3 tools" on the same screen.
+        -->
+        <div class="stat-desc">
+          {{ activeToolCount }} active tool{{ activeToolCount === 1 ? '' : 's' }}
+          <!--
+            The per-tool list is truncated to top-N server-side, so this count
+            is of what is CHARTED, not of everything that ran. Say so rather
+            than print a total that quietly excludes the tail.
+          -->
+          <span v-if="data.other" :title="`${data.other.tools_folded} further tools are folded into “other”`">
+            (+{{ data.other.tools_folded }} folded)
+          </span>
+          ({{ windowLabel }})
+        </div>
       </div>
-      <div class="stat">
+      <div class="stat" data-test="usage-errors-tile">
         <div class="stat-title">Errors</div>
-        <div class="stat-value" :class="totalErrors > 0 ? 'text-error' : ''">{{ formatNumber(totalErrors) }}</div>
-        <div class="stat-desc">{{ overallErrorRate }}% overall error rate</div>
+        <div class="stat-value" :class="headline.errors > 0 ? 'text-error' : ''">{{ formatNumber(headline.errors) }}</div>
+        <div class="stat-desc">{{ headline.errorRate }}% overall error rate</div>
       </div>
     </div>
 
@@ -122,7 +166,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
 import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
-import { formatNumber } from '@/utils/usageFormat'
+import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
 import ResponseSizeRanking from '@/components/usage/ResponseSizeRanking.vue'
 import ErrorRateChart from '@/components/usage/ErrorRateChart.vue'
@@ -151,12 +195,23 @@ const windowLabel = computed(() => {
   }
 })
 
-const totalCalls = computed(() => data.value?.tools.reduce((s, t) => s + t.calls, 0) ?? 0)
-const totalErrors = computed(() => data.value?.tools.reduce((s, t) => s + t.errors, 0) ?? 0)
-const overallErrorRate = computed(() => {
-  const c = totalCalls.value
-  return c > 0 ? ((totalErrors.value / c) * 100).toFixed(1) : '0.0'
-})
+const headline = computed(() => usageHeadline(data.value))
+
+/** Tools that have completed at least one call — what the charts below chart. */
+const activeToolCount = computed(
+  () => partitionUsageTools(data.value?.tools ?? []).completed.length
+)
+
+/**
+ * How the tokens-saved figure is derived, in one sentence an operator can act
+ * on. F23 (#1046): the chip and this tile carried the product's headline claim
+ * with no explanation of what window it covered or why it never moved.
+ */
+const tokensSavedExplainer =
+  'Estimated per-request saving: the tokens it would take to put every ' +
+  'upstream tool definition in your agent\'s context, minus what retrieve_tools ' +
+  'returns for one query. It is a property of your current tool catalog, so it ' +
+  'changes when you add, remove or reconnect servers — not with each call.'
 
 const isEmpty = computed(() => {
   if (!data.value) return false
@@ -170,7 +225,14 @@ const freshnessLabel = computed(() => {
   return `${Math.round(ms / 60_000)}m ago`
 })
 
+// Requests can overlap — the 30s auto-refresh, a window switch and a filter
+// reset all call reload() and there is no cancellation. Without sequencing, a
+// slower earlier response can land last and repaint the panel with data for a
+// window the user already moved off. Only the newest request may write state.
+let reloadSeq = 0
+
 async function reload() {
+  const seq = ++reloadSeq
   loading.value = true
   error.value = null
   try {
@@ -179,15 +241,20 @@ async function reload() {
       status: status.value || undefined,
       sort: sort.value,
     })
+    if (seq !== reloadSeq) return
     if (resp.success && resp.data) {
       data.value = resp.data
     } else {
       error.value = resp.error || 'Failed to load usage data'
     }
   } catch (e) {
+    if (seq !== reloadSeq) return
     error.value = e instanceof Error ? e.message : 'Failed to load usage data'
   } finally {
-    loading.value = false
+    // A superseded request must not clear the spinner the newest one owns.
+    if (seq === reloadSeq) {
+      loading.value = false
+    }
   }
 }
 

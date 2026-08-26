@@ -62,6 +62,14 @@ func TestRedactSensitiveData(t *testing.T) {
 }
 
 func TestRedactHeaders(t *testing.T) {
+	t.Run("redacts custom credential header names", func(t *testing.T) {
+		const plaintext = "fixture-access-token-value"
+		got := RedactHeaders(http.Header{"access_token": []string{plaintext}})
+
+		assert.NotEqual(t, plaintext, got["access_token"])
+		assert.NotContains(t, got["access_token"], plaintext)
+	})
+
 	t.Run("redacts authorization header", func(t *testing.T) {
 		headers := http.Header{
 			"Authorization": []string{"Bearer secret-token"},
@@ -90,10 +98,14 @@ func TestRedactHeaders(t *testing.T) {
 		headers := http.Header{
 			"Content-Type": []string{"application/json"},
 			"Accept":       []string{"*/*"},
+			"X-Author-ID":  []string{"42"},
+			"X-Monkey-ID":  []string{"capuchin"},
 		}
 		result := RedactHeaders(headers)
 		assert.Equal(t, "application/json", result["Content-Type"])
 		assert.Equal(t, "*/*", result["Accept"])
+		assert.Equal(t, "42", result["X-Author-ID"])
+		assert.Equal(t, "capuchin", result["X-Monkey-ID"])
 	})
 
 	t.Run("handles multiple values", func(t *testing.T) {
@@ -115,6 +127,21 @@ func TestRedactHeaders(t *testing.T) {
 }
 
 func TestRedactStringHeaders(t *testing.T) {
+	t.Run("redacts custom credential header names", func(t *testing.T) {
+		headerValues := map[string]string{
+			"access_token":        "fixture-access-token-value",
+			"X-Custom-Secret":     "fixture-custom-secret-value",
+			"X-Client-Credential": "fixture-client-credential-value",
+		}
+
+		got := RedactStringHeaders(headerValues)
+
+		for name, plaintext := range headerValues {
+			assert.NotEqual(t, plaintext, got[name], "header %q must be masked", name)
+			assert.NotContains(t, got[name], plaintext, "header %q leaked plaintext", name)
+		}
+	})
+
 	// The mask format mirrors the Web UI / macOS tray client-side
 	// display: `••••<last2> (<N> chars)`. Keeping length + the last
 	// two characters helps operators identify which token is in use
@@ -131,6 +158,16 @@ func TestRedactStringHeaders(t *testing.T) {
 		assert.NotContains(t, got["Authorization"], "fake-test-token",
 			"plaintext must not survive the mask")
 		assert.Equal(t, "pull_requests", got["X-MCP-Toolsets"])
+	})
+
+	t.Run("preserves words that only contain sensitive substrings", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{
+			"X-Author-ID": "42",
+			"X-Monkey-ID": "capuchin",
+		})
+
+		assert.Equal(t, "42", got["X-Author-ID"])
+		assert.Equal(t, "capuchin", got["X-Monkey-ID"])
 	})
 
 	t.Run("redacts x-api-key", func(t *testing.T) {

@@ -233,9 +233,10 @@ epics:
         depends_on: []
       - id: analytics-default-landing
         title: Make dashboard the default landing page
-        status: todo
+        status: in_review
         spec: specs/039-connect-and-dashboard
         depends_on: [analytics-token-drain-graphs]
+        note: "PR: `/` now opens the Dashboard on its Usage (analytics) panel; `/usage` + `/overview` added as deep-linkable routes rendering the same component (tab clicks rewrite the URL, no remount). Zero-servers first run shows an 'add your first server' CTA in place of empty charts instead of conditional routing."
 
   - id: registries-search-add
     title: Registries — easier search + add-server
@@ -295,10 +296,12 @@ epics:
 
   - id: tpa-db
     title: "tpa-db: versioned TPA signature database for the offline scanner"
-    status: todo
+    status: in_review
     priority: P1
+    spec: specs/101-tpa-db
+    pr: "#1028"
     depends_on: [scanner-simplification]
-    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate."
+    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db is in review as #1028 (merge-on-convergence armed); no implementation has started, so every child task stays todo."
     tasks:
       - id: tpa-db-format
         title: "Signature DB format + loader (versioned, signed, bundled default)"
@@ -337,6 +340,63 @@ epics:
         title: "Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker"
         status: todo
         depends_on: [tunnel-orchestration, tunnel-exposure-allowlist]
+
+  - id: schema-deferred
+    title: "Deferred-schema serialization for the direct tools/list surface (spec 102)"
+    status: in_progress
+    priority: P1
+    spec: specs/102-schema-deferred
+    depends_on: []
+    note: "Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema (~88% smaller listing), with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction); plan in progress."
+
+  - id: token-bench
+    title: "Token-efficiency benchmark: measured savings, published results"
+    status: todo
+    priority: P1
+    depends_on: [schema-deferred]
+    note: "Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix."
+    tasks:
+      - id: token-bench-harness
+        title: "Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries"
+        status: todo
+        depends_on: []
+        note: "Absorbs discovery-eval-harness (spec 065 second half) — the same harness measures retrieval recall."
+      - id: token-bench-public
+        title: "Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results"
+        status: todo
+        depends_on: [token-bench-harness]
+      - id: token-bench-blog
+        title: "Publish results + methodology on mcpproxy.app/blog"
+        status: todo
+        depends_on: [token-bench-public]
+      - id: token-bench-telemetry
+        title: "Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation"
+        status: todo
+        depends_on: []
+
+  - id: tool-graph
+    title: "Tool co-occurrence graph (experimental, feature-flagged)"
+    status: todo
+    priority: P2
+    depends_on: []
+    note: "Local-only co-occurrence graph mined from the activity log: suggests likely-next tools to agents and surfaces usage-chain analytics. Everything sits behind experimental.tool_graph, off by default — nothing leaves the machine."
+    tasks:
+      - id: tool-graph-core
+        title: "Co-occurrence graph from the activity log + related_tools hint in call_tool responses (flag-gated)"
+        status: todo
+        depends_on: []
+      - id: tool-graph-ranking
+        title: "Session-aware rank boost in retrieve_tools"
+        status: todo
+        depends_on: [tool-graph-core]
+      - id: tool-graph-mining
+        title: "Workflow mining: frequent chains → suggested stored scripts (spec 097 synergy)"
+        status: todo
+        depends_on: [tool-graph-core]
+      - id: tool-graph-analytics
+        title: "Usage-chain analytics on the dashboard/stats page"
+        status: todo
+        depends_on: [tool-graph-core, analytics-default-landing]
 
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
@@ -449,8 +509,10 @@ epics:
         depends_on: []
       - id: release-qa-gate-playwright
         title: "T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only)"
-        status: todo
+        status: done
+        pr: "#1030"
         priority: P2
+        note: "Landed ADVISORY, not blocking (FR-016 wants blocking eventually). The sweep itself is now committed (e2e/web-ui-sweep: servers list, server detail + security tab, tools page + search, activity log, settings; uncaught page exceptions fail it) and scripts/run-web-smoke.sh — previously dead, it pointed at a spec file that lives in a gitignored dir — is its single launcher for both `./scripts/run-web-smoke.sh` by hand and the gate's `web-ui-sweep` job. Advisory is enforced twice: continue-on-error on the job (a failing job inside a reusable workflow would otherwise become the workflow_call conclusion the publishers gate on) and a non-blocking manifest entry advisory/web-ui-sweep (renamed from reserved/web-ui-sweep) whose failures land in advisory_failures via the new `release-gate run-suite --advisory` flag. Promotion to blocking = Blocking:true + drop continue-on-error, after 3 consecutive clean tags."
         depends_on: [release-qa-gate-matrix]
       - id: release-qa-gate-macos
         title: "T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app)"
@@ -602,11 +664,12 @@ epics:
   # are the genuinely-unbuilt ones. See docs/personal-edition-polish.md audit.
   - id: mcp-2026-upgrade
     title: MCP protocol upgrade to 2026-07-28 revision
-    status: blocked
+    status: in_progress
     priority: P3
     spec: specs/058-mcp-2026-upgrade
+    pr: "#1033"
     depends_on: []
-    note: "BLOCKED on mcp-go shipping 2026-07-28 (pinned v0.55.x tops out at 2025-11-25). CROSS-SPEC CONFLICT: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug>. Must reconcile at plan time (058 spec now carries a Cross-Spec Reconciliation note). 028 agent-token scoping is already compatible (header-carried)."
+    note: "UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision in review as #1033: final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532."
   - id: security-gateway-cd
     title: Security gateway Tracks C/D (per-arg least-privilege + signature provenance)
     status: todo
@@ -619,5 +682,5 @@ epics:
     status: todo
     priority: P3
     spec: specs/065-evaluation-foundation
-    depends_on: []
-    note: "Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness."
+    depends_on: [token-bench-harness]
+    note: "SUPERSEDED — folded into token-bench-harness: the token-efficiency replay harness re-runs real sessions under every mode combo and measures retrieval recall on the same corpus, so a separate discovery-quality harness would duplicate it. Kept here as a pointer (the id is a stable depends_on target); do not build standalone. Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness."

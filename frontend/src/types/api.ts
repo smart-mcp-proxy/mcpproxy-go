@@ -410,6 +410,9 @@ export interface StatusUpdate {
   }
   status: Record<string, any>
   timestamp: number
+  // Unix seconds at which the core process started. Absent on older cores and
+  // on SSE status frames that don't carry it — treat it as optional.
+  started_at?: number
 }
 
 // Routing mode types
@@ -517,8 +520,13 @@ export interface UsageToolStat {
   total_req_bytes: number
   avg_req_bytes: number | null
   sized_calls: number
+  // Bucket BOUNDS, not measurements: the true percentile is at or below the
+  // value, except in the unbounded overflow bucket, where *_exceeds flips it to
+  // a floor. Render through formatLatencyBound (audit finding F22, #1046).
   p50_ms: number
+  p50_exceeds: boolean
   p95_ms: number
+  p95_exceeds: boolean
   last_used: string
 }
 
@@ -545,6 +553,12 @@ export interface UsageAggregateResponse {
   tools: UsageToolStat[]
   other?: UsageOtherBucket | null   // present only when list truncated to top-N
   timeline: UsageTimeBucket[]
+  // Headline counts for the window, computed server-side as the sum of the
+  // timeline above. NOT a sum of `tools`: that list is lifetime-cumulative,
+  // upstream-only and truncated to top-N. Same population as
+  // ActivitySummaryResponse.call_count (audit finding F1, #1046).
+  total_calls: number
+  total_errors: number
 }
 
 export type UsageWindow = '24h' | '7d' | 'all'
@@ -807,6 +821,20 @@ export interface ActivitySummaryResponse {
   error_count: number
   blocked_count: number
   rejected_count: number
+  // Rows whose status is outside the tool-call vocabulary — a quarantine
+  // change's action, a policy decision's verdict. Present so that
+  // success + error + blocked + rejected + other == total_count, which is what
+  // makes the status tiles a partition instead of four numbers that add up to
+  // less than the denominator printed beside them (audit finding F2, #1046).
+  other_count: number
+  // total_count is how many ROWS the log has in the period; call_count is how
+  // many of them are calls the user made (the rest — system starts, security
+  // scans, quarantine auto-approvals, management chatter — are events). The
+  // Usage tab counts the second population, so the header must label the two
+  // apart or the same instance reports different totals on two screens
+  // (audit finding F1/F24, #1046).
+  call_count: number
+  call_error_count: number
   top_servers?: ActivityTopServer[]
   top_tools?: ActivityTopTool[]
   start_time: string
@@ -913,7 +941,22 @@ export interface ClientStatus {
   // Every config location the existence check consults, highest precedence
   // first (e.g. OpenCode's opencode.jsonc then opencode.json).
   checked_paths?: string[]
+  // This instance's own MCP endpoint. Config-derived, so it is present on both
+  // the stat-only listing and the on-demand per-client read.
+  proxy_url?: string
+  // The endpoint the client's existing entry actually points at, projected
+  // through the same sanitizer as a connect preview's entry summary: scheme,
+  // host and path only (query — the ?apikey= carrier — userinfo and fragment
+  // are dropped). Resolved only by the on-demand read.
+  registered_url?: string
+  // How registered_url relates to proxy_url. `connected` only ever meant "an
+  // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
+  // so a row can be connected to a different instance entirely (audit F18).
+  endpoint_match?: EndpointMatch
 }
+
+// How a client's registered endpoint relates to this instance (audit F18).
+export type EndpointMatch = 'this' | 'other' | 'unknown'
 
 export interface ConnectResult {
   success: boolean

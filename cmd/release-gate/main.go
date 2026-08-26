@@ -76,7 +76,7 @@ usage:
                           [--work-dir DIR] [--cell-timeout 300s]
   release-gate invariants --state-file FILE --report-dir DIR [--prev-binary PATH] [--skip-upgrade] \
                           [--upgrade-repo owner/repo] [--keep-core]
-  release-gate run-suite  --name suite/api-e2e --report-dir DIR -- CMD [ARGS...]
+  release-gate run-suite  --name suite/api-e2e --report-dir DIR [--advisory] -- CMD [ARGS...]
   release-gate report     --report-dir DIR [--out gate-report.json] [--summary summary.md]
 `)
 }
@@ -128,6 +128,7 @@ func cmdRunSuite(ctx context.Context, args []string) (bool, error) {
 	fs := flag.NewFlagSet("run-suite", flag.ExitOnError)
 	name := fs.String("name", "", "manifest entry name (e.g. suite/api-e2e)")
 	reportDir := fs.String("report-dir", "", "directory for report fragments (required)")
+	advisory := fs.Bool("advisory", false, "non-blocking entry: record failures as advisory-fail")
 	if err := fs.Parse(args); err != nil {
 		return false, err
 	}
@@ -138,7 +139,7 @@ func cmdRunSuite(ctx context.Context, args []string) (bool, error) {
 	if len(cmdArgs) == 0 {
 		return false, fmt.Errorf("no command given after flags (use: run-suite --name N --report-dir D -- CMD ARGS)")
 	}
-	return runSuite(ctx, *name, *reportDir, cmdArgs)
+	return runSuite(ctx, *name, *reportDir, *advisory, cmdArgs)
 }
 
 func mustAbs(p string) string {

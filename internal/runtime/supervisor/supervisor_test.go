@@ -1132,7 +1132,7 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 
 	// First reconciliation - server is added and connected
 	require.NoError(t, supervisor.reconcile(configSvc.Current()))
-	time.Sleep(50 * time.Millisecond)
+	supervisor.actionWg.Wait()
 
 	setConnectionState := func(connected bool, info *types.ConnectionInfo) {
 		mockUpstream.mu.Lock()
@@ -1148,6 +1148,15 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 		defer mockUpstream.mu.Unlock()
 		return mockUpstream.connected["flaky-server"]
 	}
+	// reconcile dispatches its actions into goroutines tracked by actionWg, so
+	// draining that group is an exact barrier: after it returns, either the
+	// connect ran or none was planned. A fixed sleep would let the negative
+	// assertions below pass before an erroneous redial had a chance to execute.
+	reconcileAndDrain := func() {
+		t.Helper()
+		require.NoError(t, supervisor.reconcile(configSvc.Current()))
+		supervisor.actionWg.Wait()
+	}
 
 	// Simulate a connection failure with the backoff window still open:
 	// reconciliation must NOT re-dial.
@@ -1156,20 +1165,31 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 		RetryCount:    5,
 		LastRetryTime: time.Now(),
 	})
-	require.NoError(t, supervisor.reconcile(configSvc.Current()))
-	time.Sleep(50 * time.Millisecond)
+	reconcileAndDrain()
 	require.False(t, isConnected(), "supervisor re-dialed a failed server inside its backoff window")
 
-	// A server that gave up after max retries must not be re-dialed either.
+	// A server that gave up after max retries must not be re-dialed either,
+	// until the give-up probe interval has elapsed (see below).
 	setConnectionState(false, &types.ConnectionInfo{
 		State:         types.StateError,
 		RetryCount:    types.MaxConnectionRetries,
 		GaveUp:        true,
-		LastRetryTime: time.Now().Add(-time.Hour),
+		LastRetryTime: time.Now().Add(-time.Minute),
 	})
-	require.NoError(t, supervisor.reconcile(configSvc.Current()))
-	time.Sleep(50 * time.Millisecond)
+	reconcileAndDrain()
 	require.False(t, isConnected(), "supervisor re-dialed a server that gave up after max retries")
+
+	// An OAuth-classified failure is paced by the OAuth ladder, which bumps
+	// OAuthRetryCount and never RetryCount — without that gate it reads as
+	// "no failures yet" and is re-dialed on every tick forever (#1013).
+	setConnectionState(false, &types.ConnectionInfo{
+		State:            types.StateError,
+		IsOAuthError:     true,
+		OAuthRetryCount:  2,
+		LastOAuthAttempt: time.Now().Add(-time.Minute),
+	})
+	reconcileAndDrain()
+	require.False(t, isConnected(), "supervisor re-dialed a server inside its OAuth backoff window")
 
 	// A server parked in PendingAuth (waiting for user OAuth login) must not be
 	// re-dialed - each attempt fires real requests at the upstream and cannot
@@ -1177,8 +1197,7 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 	setConnectionState(false, &types.ConnectionInfo{
 		State: types.StatePendingAuth,
 	})
-	require.NoError(t, supervisor.reconcile(configSvc.Current()))
-	time.Sleep(50 * time.Millisecond)
+	reconcileAndDrain()
 	require.False(t, isConnected(), "supervisor re-dialed a server pending OAuth login")
 
 	// Once the backoff window has elapsed, reconciliation reconnects as before.
@@ -1187,7 +1206,18 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 		RetryCount:    3,
 		LastRetryTime: time.Now().Add(-10 * time.Second), // backoff for 3 failures is 4s
 	})
-	require.NoError(t, supervisor.reconcile(configSvc.Current()))
-	time.Sleep(50 * time.Millisecond)
+	reconcileAndDrain()
 	require.True(t, isConnected(), "supervisor did not reconnect after the backoff window elapsed")
+
+	// A given-up server is still probed once per GaveUpProbeInterval, so an
+	// outage longer than the retry ladder (sleep, VPN, maintenance) self-heals
+	// instead of leaving the upstream silently dead until a human notices.
+	setConnectionState(false, &types.ConnectionInfo{
+		State:         types.StateError,
+		RetryCount:    types.MaxConnectionRetries,
+		GaveUp:        true,
+		LastRetryTime: time.Now().Add(-types.GaveUpProbeInterval - time.Minute),
+	})
+	reconcileAndDrain()
+	require.True(t, isConnected(), "supervisor never probes a given-up server again")
 }

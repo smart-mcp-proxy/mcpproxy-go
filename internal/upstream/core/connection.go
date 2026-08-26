@@ -87,6 +87,15 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}
 
+	// Start each attempt with an empty rate-limit slate (#1040). Without this a
+	// hint recorded during an earlier attempt outlives it: a manual reconnect
+	// that then fails for an unrelated reason (connection refused, DNS) would be
+	// re-parked for the remainder of a window the upstream never repeated.
+	// Whatever this attempt observes is recorded again, on its own merits.
+	// A swap, not a Clear: a request still in flight on the superseded client
+	// keeps the recorder it was built with instead of writing into this attempt.
+	c.beginRetryAfterGeneration()
+
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("server", c.config.Name),
 		zap.String("url", c.config.URL),
@@ -235,6 +244,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	// both client.Start() AND c.initialize() to ensure OAuth errors are properly detected
 
 	c.connected = true
+
+	// The upstream answered, so any rate-limit window we were holding is spent.
+	// Dropping it here keeps a stale hint from parking a future reconnect (#1040).
+	c.ClearRetryAfter()
 
 	// If we had an OAuth flow in progress and connection succeeded, mark OAuth as complete
 	if c.isOAuthInProgress() {

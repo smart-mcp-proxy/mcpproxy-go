@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -526,7 +527,12 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			d.Code = stringifyDiagnosticField(diagRaw["code"])
 			d.Severity = stringifyDiagnosticField(diagRaw["severity"])
 			if cause, ok := diagRaw["cause"].(string); ok {
-				d.Cause = cause
+				// Audit F12: same double-wrapper the runtime already collapses on
+				// last_error — mcp-go's transport wraps a send failure with
+				// "failed to send request" at two nesting levels. The diagnostic
+				// takes its cause straight from the raw connect error, so it
+				// needs the same treatment or the detail panel repeats itself.
+				d.Cause = stringutil.CollapseRepeatedErrorWrappers(cause)
 			}
 			if detected, ok := diagRaw["detected_at"].(time.Time); ok && !detected.IsZero() {
 				t := detected

@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Pinned types (view layer depends on these — do not rename)
 
-enum ConfigControl { case toggle, select, number, text, secret, duration, multiselect }
+enum ConfigControl { case toggle, select, number, text, textarea, secret, duration, multiselect }
 enum ConfigValueKind { case hostport, bytesize, cpu, hostname, url, secretkey }
 
 struct ConfigOption: Identifiable { let value: String; let label: String; var id: String { value } }
@@ -22,6 +22,10 @@ struct ConfigField: Identifiable {
     var options: [ConfigOption] = []
     var min: Double? = nil
     var max: Double? = nil
+    // Increment for a `.number` stepper. Mirrors `step` in fields.ts — without
+    // it a fractional field (entropy 4.5, OAuth warning 1.5h) can only be typed,
+    // never nudged (F13).
+    var step: Double? = nil
     var restart: Bool = false
     var docs: String? = nil         // doc path on docs.mcpproxy.app
     var valueKind: ConfigValueKind? = nil
@@ -66,7 +70,8 @@ enum SettingsCatalog {
             control: .secret,
             restart: true,
             valueKind: .secretkey,
-            optional: true
+            optional: true,
+            placeholder: "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022} (unchanged \u{2014} type to replace)"
         ),
         ConfigField(
             key: "require_mcp_auth",
@@ -82,6 +87,16 @@ enum SettingsCatalog {
             docs: "/features/security-quarantine",
             dangerMessage: "Disabling quarantine removes Tool Poisoning Attack protection — new servers and changed tools will run without your approval. Continue?",
             dangerConfirmValue: false
+        ),
+        // Spec 088 US4 / FR-018 — the deep-scan layer was reachable only by
+        // hand-editing this key, and the tray's Raw tab is read-only, so it was
+        // unreachable from the tray entirely (F6).
+        ConfigField(
+            key: "security.deep_scan.enabled",
+            label: "Deep scan (Docker scanners)",
+            help: "The deterministic offline baseline scan is always on and needs no setup. Turning this on adds the opt-in Docker-based deep scanners (source-level analysis of the server\u{2019}s published package) on top of it. Requires Docker; a deep-scan failure is informational and never changes the baseline verdict.",
+            control: .toggle,
+            docs: "/features/security-scanner-plugins"
         ),
         ConfigField(
             key: "docker_isolation.enabled",
@@ -125,6 +140,7 @@ enum SettingsCatalog {
             control: .text,
             restart: true,
             valueKind: .hostport,
+            placeholder: "127.0.0.1:8080",
             dangerMessage: "Binding to a non-loopback address (e.g. 0.0.0.0) exposes mcpproxy to your network. Make sure \u{201C}Require API key for MCP clients\u{201D} is enabled. Continue?"
         ),
     ]
@@ -175,10 +191,10 @@ enum SettingsCatalog {
         ConfigField(
             key: "telemetry.enabled",
             label: "Anonymous usage telemetry",
-            help: "Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time.",
+            help: "Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time. Disabling sends a single anonymous opt-out signal, then stops all telemetry.",
             control: .toggle,
             docs: "/features/telemetry",
-            dangerMessage: "Anonymous telemetry is how we see which features matter and catch problems — it never includes your tool arguments, content, or any identifying info. Turning it off removes that signal. Turn it off anyway?",
+            dangerMessage: "Anonymous telemetry is how we see which features matter and catch problems — it never includes your tool arguments, content, or any identifying info. Turning it off removes that signal, and sends a single anonymous opt-out signal before all telemetry stops. Turn it off anyway?",
             dangerConfirmValue: false,
             dangerInfoTone: true
         ),
@@ -192,6 +208,27 @@ enum SettingsCatalog {
 
     // ---- Section 3: Advanced (subsystem accordions) ----
     static let advanced: [ConfigSection] = [
+        // The whole accordion was missing from the tray (F6): the one setting
+        // that changes what every connected AI client is told about the proxy
+        // could not be edited outside the Web UI.
+        ConfigSection(
+            id: "mcp",
+            title: "MCP server instructions",
+            help: "Text sent to AI clients in the MCP initialize response, guiding how to use the proxy. Power-user, set-once option.",
+            fields: [
+                ConfigField(
+                    key: "instructions",
+                    label: "Server instructions",
+                    // Empty saves "" — Go maps that back to the built-in
+                    // default, fetched live into the placeholder (see
+                    // ConfigStore.defaultInstructions) so it never drifts.
+                    help: "Leave blank to use the built-in default (shown greyed-out). Applied on the next client connect, not to already-connected sessions.",
+                    control: .textarea,
+                    optional: true,
+                    placeholder: "Loading built-in default…"
+                ),
+            ]
+        ),
         ConfigSection(
             id: "code-execution",
             title: "Code execution",
@@ -200,7 +237,9 @@ enum SettingsCatalog {
             fields: [
                 ConfigField(key: "code_execution_timeout_ms", label: "Max run time per execution (ms)", control: .number, min: 1, max: 600000),
                 ConfigField(key: "code_execution_max_tool_calls", label: "Max tool calls per execution", help: "0 = unlimited.", control: .number, min: 0),
-                ConfigField(key: "code_execution_pool_size", label: "JavaScript runtime pool size", help: "How many sandboxes run concurrently.", control: .number, min: 1, max: 100),
+                ConfigField(key: "code_execution_pool_size", label: "JavaScript runtime pool size", help: "How many sandboxes run concurrently. Takes effect after restart.", control: .number, min: 1, max: 100, restart: true),
+                // Spec 096 field, added web-side only (F6).
+                ConfigField(key: "code_execution_max_parallel", label: "Parallel calls per call_tools() batch", help: "Default concurrency for batched tool calls; a script can override it per call (1-32).", control: .number, min: 1, max: 32),
             ]
         ),
         ConfigSection(
@@ -210,9 +249,9 @@ enum SettingsCatalog {
             docs: "/features/docker-isolation",
             fields: [
                 ConfigField(key: "docker_isolation.network_mode", label: "Container network", help: "none = no network (most secure), bridge = NAT, host = share host network.", control: .select, options: ["bridge", "none", "host"].map { ConfigOption(value: $0, label: $0) }),
-                ConfigField(key: "docker_isolation.memory_limit", label: "Memory limit per container", control: .text, valueKind: .bytesize, optional: true),
-                ConfigField(key: "docker_isolation.cpu_limit", label: "CPU limit per container", control: .text, valueKind: .cpu, optional: true),
-                ConfigField(key: "docker_isolation.registry", label: "Container image registry", control: .text, valueKind: .hostname, optional: true),
+                ConfigField(key: "docker_isolation.memory_limit", label: "Memory limit per container", control: .text, valueKind: .bytesize, optional: true, placeholder: "512m"),
+                ConfigField(key: "docker_isolation.cpu_limit", label: "CPU limit per container", control: .text, valueKind: .cpu, optional: true, placeholder: "1.0"),
+                ConfigField(key: "docker_isolation.registry", label: "Container image registry", control: .text, valueKind: .hostname, optional: true, placeholder: "docker.io"),
                 ConfigField(key: "docker_isolation.enable_cache_volume", label: "Share a package cache volume", help: "Speeds up repeated npm/uvx installs by caching across containers.", control: .toggle),
             ]
         ),
@@ -225,7 +264,7 @@ enum SettingsCatalog {
                 ConfigField(key: "sensitive_data_detection.scan_requests", label: "Scan tool arguments", control: .toggle),
                 ConfigField(key: "sensitive_data_detection.scan_responses", label: "Scan tool responses", control: .toggle),
                 ConfigField(key: "sensitive_data_detection.max_payload_size_kb", label: "Max payload scanned (KB)", help: "Larger payloads are scanned only up to this size.", control: .number, min: 1),
-                ConfigField(key: "sensitive_data_detection.entropy_threshold", label: "Randomness threshold", help: "Higher = fewer false positives when flagging random-looking strings (default 4.5).", control: .number, min: 0, max: 8),
+                ConfigField(key: "sensitive_data_detection.entropy_threshold", label: "Randomness threshold", help: "Higher = fewer false positives when flagging random-looking strings (default 4.5).", control: .number, min: 0, max: 8, step: 0.1),
             ]
         ),
         ConfigSection(
@@ -298,7 +337,7 @@ enum SettingsCatalog {
             title: "Other",
             fields: [
                 ConfigField(key: "max_result_size_chars", label: "Max inline response to the client (characters)", help: "Hard ceiling on a single response sent inline. 0 = no ceiling.", control: .number, min: 0),
-                ConfigField(key: "oauth_expiry_warning_hours", label: "Warn before OAuth token expires (hours)", help: "How early a server is shown as \u{201C}degraded\u{201D} before its OAuth token expires.", control: .number, min: 0),
+                ConfigField(key: "oauth_expiry_warning_hours", label: "Warn before OAuth token expires (hours)", help: "How early a server is shown as \u{201C}degraded\u{201D} before its OAuth token expires.", control: .number, min: 0, step: 0.5),
                 ConfigField(key: "disable_management", label: "Block agents from managing servers", help: "Prevents agents from using the upstream_servers management tool.", control: .toggle, dangerMessage: "This prevents agents from adding or removing servers via the management tool. Continue?", dangerConfirmValue: true),
                 ConfigField(key: "allow_server_add", label: "Let agents add servers", control: .toggle),
                 ConfigField(key: "allow_server_remove", label: "Let agents remove servers", control: .toggle),
@@ -349,8 +388,12 @@ func configSet(_ obj: inout [String: Any], _ path: String, _ value: Any?) {
 /// stored verbatim. This keeps a blank optional field from being sent as ""
 /// (which the backend can't parse as a duration) and from reading as dirty
 /// against an absent key.
+/// Whitespace here means newlines too: the textarea (`instructions`) shares
+/// this binding, and a box holding nothing but a stray newline must read as
+/// "unset" — otherwise the user thinks they cleared it back to the default and
+/// silently saved a blank line as their custom instructions.
 func optionalScalarStored(_ s: String) -> Any? {
-    s.trimmingCharacters(in: .whitespaces).isEmpty ? nil : s
+    s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : s
 }
 
 /// Assembles a nested object containing ONLY the given dot-path keys, read from

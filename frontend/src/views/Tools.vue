@@ -99,7 +99,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Server</span>
             </label>
-            <select v-model="filterServer" class="select select-bordered select-sm" data-test="filter-server">
+            <select v-model="filterServer" class="select select-bordered select-sm" aria-label="Filter by server" data-test="filter-server">
               <option value="">All Servers</option>
               <option v-for="srv in availableServers" :key="srv" :value="srv">{{ srv }}</option>
             </select>
@@ -110,7 +110,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Status</span>
             </label>
-            <select v-model="filterStatus" class="select select-bordered select-sm" data-test="filter-status">
+            <select v-model="filterStatus" class="select select-bordered select-sm" aria-label="Filter by status" data-test="filter-status">
               <option value="">All</option>
               <option value="enabled">Enabled</option>
               <option value="disabled">Disabled</option>
@@ -123,7 +123,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Risk</span>
             </label>
-            <select v-model="filterRisk" class="select select-bordered select-sm" data-test="filter-risk">
+            <select v-model="filterRisk" class="select select-bordered select-sm" aria-label="Filter by risk" data-test="filter-risk">
               <option value="">All</option>
               <option value="read">Read</option>
               <option value="write">Write</option>
@@ -136,7 +136,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Approval</span>
             </label>
-            <select v-model="filterApproval" class="select select-bordered select-sm" data-test="filter-approval">
+            <select v-model="filterApproval" class="select select-bordered select-sm" aria-label="Filter by approval state" data-test="filter-approval">
               <option value="">All</option>
               <option value="awaiting">Awaiting approval</option>
               <option value="approved">Approved</option>
@@ -266,6 +266,7 @@
                   <input
                     type="checkbox"
                     class="checkbox checkbox-sm"
+                    aria-label="Select all tools on this page"
                     :checked="allPageSelected"
                     :indeterminate="somePageSelected && !allPageSelected"
                     @change="toggleSelectAll"
@@ -309,6 +310,7 @@
                   <input
                     type="checkbox"
                     class="checkbox checkbox-sm"
+                    :aria-label="`Select tool ${tool.name}`"
                     :checked="selectedKeys.has(toolKey(tool))"
                     @change="toggleSelect(tool)"
                   />
@@ -326,7 +328,14 @@
                   </router-link>
                 </td>
                 <td>
-                  <div class="max-w-xs truncate text-sm text-base-content/70">
+                  <!-- Descriptions are clipped to keep the row height stable;
+                       without a title the clipped half was unreadable without
+                       opening the tool (audit F36) — expose the full text on
+                       hover/focus instead of losing it entirely. -->
+                  <div
+                    class="max-w-xs truncate text-sm text-base-content/70"
+                    :title="tool.description || undefined"
+                  >
                     {{ tool.description || '—' }}
                   </div>
                 </td>
@@ -409,7 +418,7 @@
               <button @click="currentPage = totalPages" :disabled="currentPage === totalPages" class="join-item btn btn-sm">»</button>
             </div>
             <div class="form-control">
-              <select v-model.number="pageSize" class="select select-bordered select-sm">
+              <select v-model.number="pageSize" class="select select-bordered select-sm" aria-label="Rows per page">
                 <option :value="25">25 / page</option>
                 <option :value="50">50 / page</option>
                 <option :value="100">100 / page</option>
@@ -502,7 +511,9 @@
 
 <script setup lang="ts">
 import { serverDetailPath } from '@/utils/serverRoute'
+import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
@@ -511,6 +522,9 @@ import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 
 const systemStore = useSystemStore()
+// Undefined when the view is mounted without a router — several unit suites do
+// exactly that, and a query prefill is not worth making them install one.
+const route = useRoute() as ReturnType<typeof useRoute> | undefined
 
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
@@ -983,7 +997,7 @@ function formatRelativeTime(ts: string): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
   if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`
-  return new Date(ts).toLocaleDateString()
+  return formatDate(ts)
 }
 
 // Reset page when filters/sort change
@@ -1023,6 +1037,25 @@ const toolsHints = computed<Hint[]>(() => [
 
 // ---- Lifecycle ----
 onMounted(() => {
+  // Tools is the canonical search surface (audit F20): the header box and the
+  // retired /search route both arrive here with ?q=, so the query has to
+  // prefill the filter rather than being silently dropped.
+  applyQueryParam()
   loadTools()
 })
+
+// A second search from the header while Tools is already open is a route query
+// change, not a remount — without this watch the box would appear to do nothing.
+watch(
+  () => route?.query.q,
+  () => applyQueryParam()
+)
+
+function applyQueryParam() {
+  const q = route?.query.q
+  if (typeof q === 'string' && q !== searchQuery.value) {
+    searchQuery.value = q
+    currentPage.value = 1
+  }
+}
 </script>

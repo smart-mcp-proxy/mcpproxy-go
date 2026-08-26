@@ -1,14 +1,41 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, onScopeDispose } from 'vue'
 import type { StatusUpdate, Theme, Toast, InfoResponse, RoutingInfo } from '@/types'
 import api from '@/services/api'
+
+/** Pseudo-theme: follow the operating system's light/dark preference. */
+export const SYSTEM_THEME = 'system'
+/** The daisyUI themes `system` resolves to. */
+export const SYSTEM_LIGHT_THEME = 'corporate'
+export const SYSTEM_DARK_THEME = 'dark'
+export const THEME_STORAGE_KEY = 'mcpproxy-theme'
+
+/** `true` when the OS asks for a dark UI (false in environments without matchMedia). */
+export function prefersDarkColorScheme(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+  } catch {
+    return false
+  }
+}
+
+/** Map a stored selection to the daisyUI theme that should be applied. */
+export function resolveThemeName(selection: string): string {
+  if (selection !== SYSTEM_THEME) return selection
+  return prefersDarkColorScheme() ? SYSTEM_DARK_THEME : SYSTEM_LIGHT_THEME
+}
 
 export const useSystemStore = defineStore('system', () => {
   // State
   const status = ref<StatusUpdate | null>(null)
   const eventSource = ref<EventSource | null>(null)
   const connected = ref(false)
-  const currentTheme = ref<string>('corporate')
+  // The user's *selection*. `system` is not a daisyUI theme — it is a
+  // pseudo-theme that follows the OS `prefers-color-scheme` (UX audit F29).
+  const currentTheme = ref<string>(SYSTEM_THEME)
+  // The daisyUI theme actually applied to <html data-theme>.
+  const resolvedTheme = ref<string>(SYSTEM_LIGHT_THEME)
   const sidebarCollapsed = ref<boolean>(
     (() => {
       try {
@@ -24,8 +51,20 @@ export const useSystemStore = defineStore('system', () => {
   const checkingForUpdates = ref(false)
   const updateCheckedAt = ref<string | null>(null)
 
-  // Available themes
+  // Audit F28: with no API key the user saw three messages for one cause — the
+  // "Authentication Required" modal, a red inline load error behind it, and a
+  // "Connection Lost — Reconnecting" toast. While the modal owns the screen it
+  // owns the message too; the downstream surfaces read this flag and stay quiet.
+  const authRequired = ref(false)
+
+  function setAuthRequired(value: boolean) {
+    authRequired.value = value
+  }
+
+  // Available themes. `system` leads the list and is the default: a user on a
+  // dark OS should not get a light UI on first run (UX audit F29).
   const themes: Theme[] = [
+    { name: SYSTEM_THEME, displayName: 'System', dark: false },
     { name: 'light', displayName: 'Light', dark: false },
     { name: 'dark', displayName: 'Dark', dark: true },
     { name: 'corporate', displayName: 'Corporate', dark: false },
@@ -208,11 +247,15 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
-    // Listen for activity events (tool calls, policy decisions, etc.)
+    // Listen for activity events (tool calls, policy decisions, etc.).
+    //
+    // These payloads carry the call's raw arguments and response, so they are
+    // NOT logged: `console.log(data)` printed whatever secret the call carried
+    // straight into the DevTools console, which is the same leak the activity
+    // drawer was fixed for (audit F13). Only parse failures are logged.
     es.addEventListener('activity.tool_call.started', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.tool_call.started event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-started', { detail: payload }))
@@ -224,7 +267,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity.tool_call.completed', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.tool_call.completed event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: payload }))
@@ -236,7 +278,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity.policy_decision', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.policy_decision event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-policy', { detail: payload }))
@@ -248,7 +289,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity event received:', data)
         // Extract payload - SSE wraps activity data in {payload: ..., timestamp: ...}
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity', { detail: payload }))
@@ -261,7 +301,6 @@ export const useSystemStore = defineStore('system', () => {
     es.addEventListener('activity.internal_tool_call.completed', (event) => {
       try {
         const data = JSON.parse(event.data)
-        console.log('SSE activity.internal_tool_call.completed event received:', data)
         const payload = data.payload || data
         window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: payload }))
       } catch (error) {
@@ -337,22 +376,73 @@ export const useSystemStore = defineStore('system', () => {
     connected.value = false
   }
 
+  /** Applies the resolved daisyUI theme to <html> without touching the selection. */
+  function applyResolvedTheme() {
+    const resolved = resolveThemeName(currentTheme.value)
+    resolvedTheme.value = resolved
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-theme', resolved)
+    }
+  }
+
+  // While `system` is selected the UI has to follow the OS flipping between
+  // light and dark; an explicit choice ignores the media query entirely.
+  let colorSchemeQuery: MediaQueryList | null = null
+  function watchColorScheme() {
+    if (colorSchemeQuery) return
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    try {
+      colorSchemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
+    } catch {
+      return
+    }
+    const query = colorSchemeQuery
+    const onChange = () => {
+      if (currentTheme.value === SYSTEM_THEME) applyResolvedTheme()
+    }
+    const detach = () => {
+      if (typeof query.removeEventListener === 'function') {
+        query.removeEventListener('change', onChange)
+      } else if (typeof query.removeListener === 'function') {
+        query.removeListener(onChange)
+      }
+      colorSchemeQuery = null
+    }
+    if (typeof query.addEventListener === 'function') {
+      query.addEventListener('change', onChange)
+    } else if (typeof query.addListener === 'function') {
+      // Safari < 14
+      query.addListener(onChange)
+    }
+    // The store outlives most things, but HMR and tests dispose and recreate it;
+    // without this each incarnation would leave its listener behind.
+    onScopeDispose(detach)
+  }
+
   function setTheme(themeName: string) {
     const theme = themes.find(t => t.name === themeName)
-    if (theme) {
-      currentTheme.value = themeName
-      document.documentElement.setAttribute('data-theme', themeName)
-      localStorage.setItem('mcpproxy-theme', themeName)
+    if (!theme) return
+    currentTheme.value = themeName
+    applyResolvedTheme()
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, themeName)
+    } catch {
+      // localStorage unavailable (private browsing, etc.) — keep in-memory
     }
   }
 
   function loadTheme() {
-    const savedTheme = localStorage.getItem('mcpproxy-theme')
-    if (savedTheme && themes.find(t => t.name === savedTheme)) {
-      setTheme(savedTheme)
-    } else {
-      setTheme('corporate')
+    let savedTheme: string | null = null
+    try {
+      savedTheme = localStorage.getItem(THEME_STORAGE_KEY)
+    } catch {
+      savedTheme = null
     }
+    // No stored choice (or a theme that no longer exists) => follow the OS.
+    currentTheme.value =
+      savedTheme && themes.some(t => t.name === savedTheme) ? savedTheme : SYSTEM_THEME
+    applyResolvedTheme()
+    watchColorScheme()
   }
 
   function toggleSidebar() {
@@ -486,12 +576,14 @@ export const useSystemStore = defineStore('system', () => {
     status,
     connected,
     currentTheme,
+    resolvedTheme,
     toasts,
     themes,
     info,
     routing,
     checkingForUpdates,
     updateCheckedAt,
+    authRequired,
 
     // Computed
     isRunning,
@@ -519,5 +611,6 @@ export const useSystemStore = defineStore('system', () => {
     fetchInfo,
     fetchRouting,
     checkForUpdates,
+    setAuthRequired,
   }
 })

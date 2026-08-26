@@ -220,8 +220,20 @@ func TestConnectionInfo_ShouldAutoReconnect(t *testing.T) {
 		{"error within backoff window", &ConnectionInfo{State: StateError, RetryCount: 5, LastRetryTime: now.Add(-1 * time.Second)}, false},
 		{"error with backoff elapsed", &ConnectionInfo{State: StateError, RetryCount: 3, LastRetryTime: now.Add(-10 * time.Second)}, true},
 		{"error no failures yet", &ConnectionInfo{State: StateError, RetryCount: 0}, true},
-		{"gave up flag", &ConnectionInfo{State: StateError, GaveUp: true, LastRetryTime: now.Add(-time.Hour)}, false},
-		{"retry count at max", &ConnectionInfo{State: StateError, RetryCount: MaxConnectionRetries, LastRetryTime: now.Add(-time.Hour)}, false},
+		{"gave up flag", &ConnectionInfo{State: StateError, GaveUp: true, LastRetryTime: now.Add(-time.Minute)}, false},
+		{"retry count at max", &ConnectionInfo{State: StateError, RetryCount: MaxConnectionRetries, LastRetryTime: now.Add(-time.Minute)}, false},
+		// Given up, but the probe interval has elapsed: one attempt is allowed so a
+		// long outage (sleep, VPN, maintenance) still self-heals without a human.
+		{"gave up, probe interval elapsed", &ConnectionInfo{State: StateError, GaveUp: true, LastRetryTime: now.Add(-GaveUpProbeInterval - time.Second)}, true},
+		{"retry count at max, probe interval elapsed", &ConnectionInfo{State: StateError, RetryCount: MaxConnectionRetries, LastRetryTime: now.Add(-time.Hour)}, true},
+		// OAuth failures are paced by the OAuth ladder, not RetryCount (which
+		// SetOAuthError never bumps) — the 30s storm's remaining hole (#1013).
+		{"oauth error, ladder window open", &ConnectionInfo{State: StateError, IsOAuthError: true, OAuthRetryCount: 1, LastOAuthAttempt: now.Add(-time.Minute)}, false},
+		{"oauth error, ladder elapsed", &ConnectionInfo{State: StateError, IsOAuthError: true, OAuthRetryCount: 1, LastOAuthAttempt: now.Add(-6 * time.Minute)}, true},
+		{"oauth error, long ladder still open", &ConnectionInfo{State: StateError, IsOAuthError: true, OAuthRetryCount: 5, LastOAuthAttempt: now.Add(-5 * time.Hour)}, false},
+		{"oauth error, no oauth attempt recorded", &ConnectionInfo{State: StateError, IsOAuthError: true}, true},
+		// Both ladders apply to an OAuth failure that also bumped RetryCount.
+		{"oauth ladder elapsed but plain backoff open", &ConnectionInfo{State: StateError, IsOAuthError: true, OAuthRetryCount: 1, LastOAuthAttempt: now.Add(-time.Hour), RetryCount: 8, LastRetryTime: now}, false},
 	}
 
 	for _, tt := range tests {
@@ -229,4 +241,59 @@ func TestConnectionInfo_ShouldAutoReconnect(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.info.ShouldAutoReconnect(now))
 		})
 	}
+}
+
+// TestOAuthRetryBackoffDuration pins the coarse OAuth ladder shared by
+// StateManager.ShouldRetryOAuth and the supervisor's reconnect gate.
+func TestOAuthRetryBackoffDuration(t *testing.T) {
+	tests := []struct {
+		oauthRetryCount int
+		expected        time.Duration
+	}{
+		{0, 5 * time.Minute},
+		{1, 5 * time.Minute},
+		{2, 15 * time.Minute},
+		{3, 1 * time.Hour},
+		{4, 4 * time.Hour},
+		{5, 24 * time.Hour},
+		{50, 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.expected, OAuthRetryBackoffDuration(tt.oauthRetryCount), "oauthRetryCount=%d", tt.oauthRetryCount)
+	}
+}
+
+// TestSetPendingAuth verifies that parking a connection in PendingAuth sticks:
+// the pre-existing spelling (TransitionTo + SetError) silently forced StateError,
+// so every consumer saw a plain error and kept redialing (#1013).
+func TestSetPendingAuth(t *testing.T) {
+	sm := NewStateManager()
+	sm.TransitionTo(StateConnecting)
+
+	stateChanges := make(chan ConnectionState, 4)
+	sm.SetStateChangeCallback(func(_, newState ConnectionState, _ *ConnectionInfo) {
+		stateChanges <- newState
+	})
+
+	pendingErr := errors.New("OAuth authentication required for test-server: login available via Web UI")
+	sm.SetPendingAuth(pendingErr)
+
+	info := sm.GetConnectionInfo()
+	assert.Equal(t, StatePendingAuth, info.State, "PendingAuth must survive - it is the parked state")
+	assert.Equal(t, pendingErr, info.LastError, "the deferred-OAuth error must stay attached")
+	assert.Equal(t, 0, info.RetryCount, "a parked server is not retrying, so no ladder is advanced")
+	assert.False(t, info.ShouldAutoReconnect(time.Now()), "a parked server must not be auto-redialed")
+	assert.False(t, sm.ShouldRetry(), "ConnectAll must not redial a parked server either")
+
+	select {
+	case got := <-stateChanges:
+		assert.Equal(t, StatePendingAuth, got, "consumers must be told about the park")
+	case <-time.After(2 * time.Second):
+		t.Fatal("no state-change callback fired for SetPendingAuth")
+	}
+
+	// The wake path (user login / manual reconnect) must be a legal transition.
+	assert.NoError(t, sm.ValidateTransition(StatePendingAuth, StateConnecting))
+	assert.NoError(t, sm.ValidateTransition(StateConnecting, StatePendingAuth))
 }

@@ -515,8 +515,17 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 
 // buildCodeExecutionTool builds the code_execution tool for routing mode servers.
 // Returns a slice (either 1 tool or 1 disabled stub) for easy appending.
+//
+// UX audit F16: this reads the LIVE snapshot, never the construction-time
+// p.config. Settings advertises enable_code_execution as an instantly-applied
+// field; when this read was pinned to startup, flipping it on left the disabled
+// stub — whose handler refuses unconditionally — on the /mcp surface, so the
+// tool kept answering "Code execution is disabled" until a restart even though
+// the handler-level gate (mcp_code_execution.go) had already gone live. The
+// paired half of the fix is RefreshCallToolModeTools/RefreshCodeExecModeTools
+// being called on config.reloaded.
 func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
-	if p.config != nil && !p.config.EnableCodeExecution {
+	if cfg := p.currentConfig(); cfg != nil && !cfg.EnableCodeExecution {
 		// Disabled stub
 		codeExecutionTool := mcp.NewTool("code_execution",
 			mcp.WithDescription("Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config."),
@@ -691,6 +700,47 @@ func (p *MCPProxyServer) RefreshCodeExecModeTools() {
 
 	p.logger.Info("refreshed code execution mode tools",
 		zap.Int("tool_count", len(codeExecTools)))
+}
+
+// RefreshCallToolModeTools rebuilds the call-tool mode server's tool set.
+//
+// UX audit F16: callToolServer is the surface behind /mcp in the DEFAULT
+// routing mode (retrieve_tools), and its tools were registered exactly once in
+// initRoutingModeServers. Its code_execution entry is therefore the one a
+// client sees, and a hot enable_code_execution toggle had no way to replace it.
+// buildCallToolModeTools reads the live config snapshot, so re-running it on
+// config.reloaded swaps the disabled stub for the live tool (and back).
+func (p *MCPProxyServer) RefreshCallToolModeTools() {
+	if p.callToolServer == nil {
+		return
+	}
+
+	callToolTools := p.buildCallToolModeTools()
+	serverTools := make([]mcpserver.ServerTool, len(callToolTools))
+	copy(serverTools, callToolTools)
+
+	p.callToolServer.SetTools(serverTools...)
+
+	p.logger.Info("refreshed call tool mode tools",
+		zap.Int("tool_count", len(callToolTools)))
+}
+
+// RefreshCodeExecutionAvailability re-advertises code_execution on every tool
+// surface that carries it, so an enable_code_execution flip applies without a
+// restart (UX audit F16). directServer is deliberately absent — direct mode
+// does not expose code_execution at all.
+//
+// The stdio surface (p.server) is updated with AddTools rather than SetTools:
+// its tool set is assembled once by registerTools and SetTools would drop
+// everything else. AddTools replaces the entry with the same name in place, so
+// a startup-disabled server that never registered code_execution gains it, and
+// an enabled one has it swapped for the disabled stub.
+func (p *MCPProxyServer) RefreshCodeExecutionAvailability() {
+	p.RefreshCallToolModeTools()
+	p.RefreshCodeExecModeTools()
+	if p.server != nil {
+		p.server.AddTools(p.buildCodeExecutionTool()...)
+	}
 }
 
 // buildAggregatedServerPrompts combines built-in prompts with upstream
@@ -869,6 +919,10 @@ func (p *MCPProxyServer) scanAggregatedPrompts(prompts []mcp.Prompt) []mcp.Promp
 			Name:        promptName,
 			Description: promptScanText(pr),
 		}
+		// Schema v9: one counter increment per PROMPT actually put through the
+		// scanner (malformed names short-circuit above and are not counted).
+		// Invocation count only — never the prompt, the server, or the verdict.
+		telemetry.RecordTPAPromptScanOn(p.telemetryRegistry())
 		verdict, findings, _ := scanner.ScanToolMetadataVerdict(serverName, []*config.ToolMetadata{meta}, nil)
 		if verdict == "dangerous" {
 			signals := make([]string, 0, len(findings))

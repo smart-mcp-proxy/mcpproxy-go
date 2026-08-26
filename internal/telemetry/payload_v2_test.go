@@ -88,8 +88,8 @@ func TestHeartbeatPayloadV2Marshal(t *testing.T) {
 
 	payload := svc.BuildPayload()
 
-	if payload.SchemaVersion != 8 {
-		t.Errorf("schema_version = %d, want 8", payload.SchemaVersion)
+	if payload.SchemaVersion != 9 {
+		t.Errorf("schema_version = %d, want 9", payload.SchemaVersion)
 	}
 	if payload.AnonymousID != "fixed-id" {
 		t.Errorf("anonymous_id = %q", payload.AnonymousID)
@@ -135,7 +135,7 @@ func TestHeartbeatPayloadV2Marshal(t *testing.T) {
 	}
 	js := string(data)
 	for _, key := range []string{
-		`"schema_version":8`,
+		`"schema_version":9`,
 		`"surface_requests"`,
 		`"builtin_tool_calls"`,
 		`"upstream_tool_call_count_bucket":"11-100"`,

@@ -36,6 +36,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolsig"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -776,6 +777,13 @@ func (r *Runtime) Close() error {
 	// ActivityService.Stop above — terminally stops the service so a Start
 	// goroutine not yet scheduled (lifecycle.go launches it via `go`) becomes
 	// a no-op instead of writing after this point.
+	//
+	// Stop also performs the graceful-shutdown heartbeat flush — one bounded
+	// (4s) final send of the counters recorded since the last accepted
+	// heartbeat, which would otherwise die with the process. It runs after the
+	// loop is joined, so it is the only sender at that moment, and it happens
+	// HERE — while the BBolt handle is still open and before the marker
+	// resolves below — because its buildHeartbeat writes funnel activity.
 	if r.telemetryService != nil {
 		r.telemetryService.Stop()
 	}
@@ -2155,6 +2163,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			}
 		}
 
+		// Audit F12: mcp-go's streamable-HTTP transport wraps a send failure with
+		// the same "failed to send request" text at two nesting levels, so the
+		// error the UI shows repeats itself. Collapse adjacent duplicate wrappers
+		// once, here, so every consumer (Web UI, tray, CLI) gets the clean chain.
+		lastError := stringutil.CollapseRepeatedErrorWrappers(serverStatus.LastError)
+
 		serverMap := map[string]interface{}{
 			"id":              serverStatus.Name,
 			"name":            serverStatus.Name,
@@ -2167,7 +2181,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			"connected":       connected,
 			"connecting":      connecting,
 			"tool_count":      serverStatus.ToolCount,
-			"last_error":      serverStatus.LastError,
+			"last_error":      lastError,
 			"status":          status,
 			"should_retry":    false,
 			"retry_count":     serverStatus.RetryCount,
@@ -2325,20 +2339,23 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		healthInput := health.HealthCalculatorInput{
-			Name:                  serverStatus.Name,
-			Enabled:               serverStatus.Enabled,
-			Quarantined:           serverStatus.Quarantined,
-			State:                 serverStatus.State,
-			Connected:             connected,
-			LastError:             serverStatus.LastError,
+			Name:        serverStatus.Name,
+			Enabled:     serverStatus.Enabled,
+			Quarantined: serverStatus.Quarantined,
+			State:       serverStatus.State,
+			Connected:   connected,
+			LastError:   lastError,
+			// Only a URL-addressed server has an endpoint the user can edit; a
+			// stdio server's own network failures must not offer "Edit URL".
+			HasEndpointURL:        url != "",
 			OAuthRequired:         oauthConfig != nil,
 			OAuthStatus:           oauthStatus,
 			HasRefreshToken:       hasRefreshToken,
 			UserLoggedOut:         userLoggedOut,
 			CallTimeOAuthRequired: callTimeOAuthRequired,
 			ToolCount:             serverStatus.ToolCount,
-			MissingSecret:         health.ExtractMissingSecret(serverStatus.LastError),
-			OAuthConfigErr:        health.ExtractOAuthConfigError(serverStatus.LastError),
+			MissingSecret:         health.ExtractMissingSecret(lastError),
+			OAuthConfigErr:        health.ExtractOAuthConfigError(lastError),
 		}
 		if !tokenExpiresAt.IsZero() {
 			healthInput.TokenExpiresAt = &tokenExpiresAt

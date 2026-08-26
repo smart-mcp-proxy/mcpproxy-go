@@ -1166,18 +1166,18 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 	// quarantine_security - Security quarantine management
 	{
 		quarantineSecurityTool := mcp.NewTool("quarantine_security",
-			mcp.WithDescription("Security quarantine management for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs). Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
+			mcp.WithDescription("Security quarantine management AND TPA scanning for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs), and scan a server for them: 'scan_server' runs the always-on offline baseline scan (in-process, no Docker required) and 'get_scan_report' returns the latest verdict and findings. Every listing/inspection response also carries a one-line scan status, so an unscanned server is visible as unscanned. Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security."),
 			mcp.WithTitleAnnotation("Quarantine Security"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithReadOnlyHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool, inspect_prompts, approve_prompt, approve_all_prompts. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled. The prompt operations (spec 100) manage aggregated upstream prompts held by the metadata rug-pull baseline: a prompt whose advertised metadata changed since approval is withheld from prompts/list until approved."),
-				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "block_tool", "block_all_tools", "enable_tool", "disable_tool", "inspect_prompts", "approve_prompt", "approve_all_prompts"),
+				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool, inspect_prompts, approve_prompt, approve_all_prompts, scan_server, get_scan_report. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled. The prompt operations (spec 100) manage aggregated upstream prompts held by the metadata rug-pull baseline: a prompt whose advertised metadata changed since approval is withheld from prompts/list until approved. 'scan_server' starts the offline TPA baseline scan for one server (no Docker needed) and returns the verdict once it settles, or a job id to poll; 'get_scan_report' returns that server's latest verdict, counts and findings."),
+				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "block_tool", "block_all_tools", "enable_tool", "disable_tool", "inspect_prompts", "approve_prompt", "approve_all_prompts", "scan_server", "get_scan_report"),
 			),
 			mcp.WithString("name",
-				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, approve_prompt, approve_all_prompts)"),
+				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, approve_prompt, approve_all_prompts, scan_server, get_scan_report)"),
 			),
 			mcp.WithString("tool_name",
 				mcp.Description("Tool name (required for approve_tool and block_tool operations)"),
@@ -3404,10 +3404,16 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		result, opErr = p.handleListQuarantinedUpstreams(ctx)
 	case "inspect_quarantined":
 		result, opErr = p.handleInspectQuarantinedTools(ctx, request)
-	case "quarantine":
+	// "quarantine_server" is the name advertised in the operation enum;
+	// "quarantine" is the historical spelling kept working for older agents.
+	case "quarantine_server", "quarantine":
 		result, opErr = p.handleQuarantineUpstream(ctx, request)
 	case "inspect_tools":
-		result, opErr = p.handleInspectToolApprovals(request)
+		result, opErr = p.handleInspectToolApprovals(ctx, request)
+	case "scan_server":
+		result, opErr = p.handleScanServer(ctx, request)
+	case "get_scan_report":
+		result, opErr = p.handleGetScanReport(ctx, request)
 	case "approve_tool":
 		result, opErr = p.handleApproveToolByName(request)
 	case "approve_all_tools":
@@ -3457,7 +3463,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 }
 
 // handleInspectToolApprovals shows tool-level quarantine status for a server (Spec 032)
-func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleInspectToolApprovals(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	serverName := request.GetString("name", "")
 	if serverName == "" {
 		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
@@ -3468,8 +3474,10 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to list tool approvals: %v", err)), nil
 	}
 
+	scanStatus := p.scanStatusLine(ctx, serverName)
+
 	if len(records) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No tool approval records found for server '%s'", serverName)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("No tool approval records found for server '%s' (scan status: %s)", serverName, scanStatus)), nil
 	}
 
 	pendingCount, changedCount, approvedCount, disabledCount := 0, 0, 0, 0
@@ -3509,6 +3517,7 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 
 	result := map[string]interface{}{
 		"server_name":    serverName,
+		"scan_status":    scanStatus,
 		"tools":          toolList,
 		"total":          len(records),
 		"approved_count": approvedCount,
@@ -3777,6 +3786,11 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			ToolCount:      toolCount,
 			MissingSecret:  health.ExtractMissingSecret(lastError),
 			OAuthConfigErr: health.ExtractOAuthConfigError(lastError),
+			// Gates the "Edit URL" remedy — a stdio server emits the same
+			// address phrases from its own failed network calls but has no URL
+			// to edit. Must be supplied at every CalculateHealth call site or
+			// the REST, MCP and tray surfaces disagree about the remedy.
+			HasEndpointURL: server.URL != "",
 		}
 
 		// T032: Wire refresh state into health calculation (Spec 023)
@@ -4095,15 +4109,26 @@ func (p *MCPProxyServer) getDockerContainerInfo(client *managed.Client) map[stri
 	return result
 }
 
-func (p *MCPProxyServer) handleListQuarantinedUpstreams(_ context.Context) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleListQuarantinedUpstreams(ctx context.Context) (*mcp.CallToolResult, error) {
 	servers, err := p.storage.ListQuarantinedUpstreamServers()
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to list quarantined upstreams: %v", err)), nil
 	}
 
+	names := make([]string, 0, len(servers))
+	for _, sc := range servers {
+		if sc != nil {
+			names = append(names, sc.Name)
+		}
+	}
+
 	jsonResult, err := json.Marshal(map[string]interface{}{
 		"servers": servers,
 		"total":   len(servers),
+		// One line per server so "nobody ever scanned this" is visible right
+		// here, next to the decision it should inform.
+		"scan_status": p.scanStatusLines(ctx, names),
+		"scan_hint":   "Use operation='scan_server' name='<server>' to run the offline TPA baseline scan, then operation='get_scan_report' for the findings.",
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize quarantined upstreams: %v", err)), nil
@@ -4369,6 +4394,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 	response := map[string]interface{}{
 		"server":            serverName,
 		"quarantine_status": "ACTIVE",
+		"scan_status":       p.scanStatusLine(ctx, serverName),
 		"tools":             toolsAnalysis,
 		"total_tools":       len(toolsAnalysis),
 		"analysis_purpose":  "SECURITY_INSPECTION",
@@ -5702,6 +5728,11 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 					return "ready", "Server connected and ready"
 				case types.StateError:
 					return "error", fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+				case types.StatePendingAuth:
+					// Parked awaiting user login (#1013): waiting out the monitor
+					// timeout would just stall the caller — nothing will change
+					// until a human signs in.
+					return statusError, fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
 				case types.StateDisconnected:
 					// If server is explicitly disconnected and enabled is false, return disabled
 					for _, serverConfig := range p.config.Servers {

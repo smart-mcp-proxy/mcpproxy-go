@@ -48,6 +48,23 @@ export function enabledDockerScanners(scanners: ScannerLike[]): number {
 }
 
 /**
+ * Tooltip for the page-level "Scan All Servers" action.
+ *
+ * Docker is NOT a precondition for scanning: the offline baseline scanner is
+ * built into mcpproxy and runs in-process for every server. Only the optional
+ * deep scanners need Docker. The old copy ("Docker is required to run security
+ * scanners") came with a hard `disabled` on the button, which left a default
+ * install — no Docker, no installed scanner — with no way to scan at all, the
+ * same bug already fixed for the per-server Scan Now button (spec 088 FR-016).
+ */
+export function scanAllTooltip(dockerAvailable: boolean | null | undefined): string {
+  if (dockerAvailable === false) {
+    return 'Optional deep scanners need Docker; the offline baseline scan is built in'
+  }
+  return 'Runs the built-in offline baseline scan on every server'
+}
+
+/**
  * The master card's one-line status. Names what a scan will do right now,
  * from the operator's side of the screen.
  */
