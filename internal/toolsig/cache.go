@@ -38,6 +38,24 @@ func NewCache() *Cache {
 	return &Cache{m: make(map[string]Signature)}
 }
 
+// Peek returns the Signature for hash if it is already cached, and reports
+// whether it was. It never compiles and never memoizes (Spec 102 FR-005).
+//
+// This is deliberately NOT Get with different arguments. Get compiles on a
+// miss, which the deferred direct listing cannot use for two reasons: it would
+// put per-request compilation on the tools/list path that FR-005 exists to keep
+// off it, and — worse — it would make the miss invisible, since a caller that
+// always receives a Signature cannot tell "warmed at index time" from "compiled
+// just now for you". The deferred renderer needs to SEE the miss so it can list
+// the entry without a signature suffix rather than dropping or delaying it
+// (FR-004). Existing Get and Warm callers are unaffected.
+func (c *Cache) Peek(hash string) (Signature, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sig, ok := c.m[hash]
+	return sig, ok
+}
+
 // Get returns the Signature for hash, compiling (and memoizing) it from
 // paramsJSON/description on a miss. Concurrent callers may compile
 // redundantly under contention, but exactly one result is stored and counted.

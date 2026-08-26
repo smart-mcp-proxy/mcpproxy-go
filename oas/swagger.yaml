@@ -88,6 +88,20 @@ components:
           type: string
         debug_search:
           type: boolean
+        direct_tool_response_mode:
+          description: |-
+            DirectToolResponseMode selects the serialization of the DIRECT
+            enumeration surface (Spec 102). Valid values: "" (= full), "full"
+            (default: today's schema-bearing entries), "deferred" (description +
+            compact signature, with a minimal permissive input schema; upstream
+            inputSchema and outputSchema are stripped and recovered on demand via
+            describe_tool).
+
+            Deliberately NOT an extension of tool_response_mode: reusing that axis
+            would silently change /mcp/all output for every deployment already
+            running compact, which FR-015 forbids. Serialization-only — it never
+            changes WHICH tools are listed, only how (FR-008). Hot-reloadable.
+          type: string
         disable_management:
           type: boolean
         docker_isolation:

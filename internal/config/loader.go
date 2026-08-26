@@ -717,6 +717,14 @@ func applyTLSEnvOverrides(cfg *Config) {
 		cfg.ToolResponseMode = value
 	}
 
+	// Override DIRECT-surface serialization mode from environment (Spec 102).
+	// A separate variable from MCPPROXY_TOOL_RESPONSE_MODE above, matching the
+	// separate config axis: that one governs retrieve_tools, this one governs
+	// the direct enumeration surface. Setting one must never move the other.
+	if value := os.Getenv("MCPPROXY_DIRECT_TOOL_RESPONSE_MODE"); value != "" {
+		cfg.DirectToolResponseMode = value
+	}
+
 	// Override the GLOBAL aggregate concurrency limiter from environment
 	// (spec 093 FR-022, GH #955). Only this scope has an env scheme: the
 	// per-server default set and per-server overrides are file/API-configured.

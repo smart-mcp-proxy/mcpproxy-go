@@ -24,6 +24,15 @@ const (
 	// Tool response mode constants (Spec 085)
 	ToolResponseModeFull    = "full"    // Default: today's schema-bearing retrieve_tools entries
 	ToolResponseModeCompact = "compact" // Compact signatures + first-sentence descriptions
+
+	// Direct-surface serialization constants (Spec 102). A SEPARATE axis from
+	// ToolResponseMode above: that one governs the retrieve_tools surface, this
+	// one governs the direct enumeration surface (/mcp/all, and /mcp plus the
+	// legacy aliases when routing_mode is "direct"). They are orthogonal, and
+	// compact + deferred is a legal combination in which each governs only its
+	// own surface (plan.md D1).
+	DirectToolResponseModeFull     = "full"     // Default: today's schema-bearing direct entries
+	DirectToolResponseModeDeferred = "deferred" // Signature-suffixed descriptions, permissive schema
 )
 
 // Duration is a wrapper around time.Duration that can be marshaled to/from JSON.
@@ -483,6 +492,19 @@ type Config struct {
 	// SERIALIZATION within the retrieve_tools surface. Serialization-only: it
 	// never affects the query, ranking, or result set. Hot-reloadable.
 	ToolResponseMode string `json:"tool_response_mode,omitempty" mapstructure:"tool-response-mode"`
+
+	// DirectToolResponseMode selects the serialization of the DIRECT
+	// enumeration surface (Spec 102). Valid values: "" (= full), "full"
+	// (default: today's schema-bearing entries), "deferred" (description +
+	// compact signature, with a minimal permissive input schema; upstream
+	// inputSchema and outputSchema are stripped and recovered on demand via
+	// describe_tool).
+	//
+	// Deliberately NOT an extension of tool_response_mode: reusing that axis
+	// would silently change /mcp/all output for every deployment already
+	// running compact, which FR-015 forbids. Serialization-only — it never
+	// changes WHICH tools are listed, only how (FR-008). Hot-reloadable.
+	DirectToolResponseMode string `json:"direct_tool_response_mode,omitempty" mapstructure:"direct-tool-response-mode"`
 
 	// Instructions text returned in the MCP initialize response to guide AI agents.
 	// When empty, a built-in default is used that explains retrieve_tools workflow.
@@ -2202,9 +2224,17 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			RoutingModeCodeExecution: true,
 		}
 		if !validRoutingModes[c.RoutingMode] {
+			msg := fmt.Sprintf("invalid routing mode: %s (must be retrieve_tools, direct, or code_execution)", c.RoutingMode)
+			// Spec 102 FR-002: "schema_deferred" is the config shape proposed in
+			// issue #971. It is not a routing mode here — the same capability is
+			// a composition of an existing mode and the new serialization axis.
+			// Say so, rather than making the user infer it from a list of three.
+			if c.RoutingMode == "schema_deferred" {
+				msg += `; "schema_deferred" is not a routing mode — use routing_mode: "direct" with direct_tool_response_mode: "deferred"`
+			}
 			errors = append(errors, ValidationError{
 				Field:   "routing_mode",
-				Message: fmt.Sprintf("invalid routing mode: %s (must be retrieve_tools, direct, or code_execution)", c.RoutingMode),
+				Message: msg,
 			})
 		}
 	}
@@ -2231,6 +2261,20 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		errors = append(errors, ValidationError{
 			Field:   "tool_response_mode",
 			Message: fmt.Sprintf("invalid tool response mode: %s (must be full or compact)", c.ToolResponseMode),
+		})
+	}
+
+	// Validate direct-surface response mode (Spec 102 FR-001). Empty is allowed
+	// (= full). "compact" is called out because it is the likeliest wrong value:
+	// it is legal on the OTHER axis, so an operator who knows tool_response_mode
+	// will reach for it here.
+	if c.DirectToolResponseMode != "" &&
+		c.DirectToolResponseMode != DirectToolResponseModeFull &&
+		c.DirectToolResponseMode != DirectToolResponseModeDeferred {
+		errors = append(errors, ValidationError{
+			Field: "direct_tool_response_mode",
+			Message: fmt.Sprintf("invalid direct tool response mode: %s (must be %q or %q)",
+				c.DirectToolResponseMode, DirectToolResponseModeFull, DirectToolResponseModeDeferred),
 		})
 	}
 
