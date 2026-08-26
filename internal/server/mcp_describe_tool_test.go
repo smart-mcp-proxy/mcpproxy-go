@@ -365,12 +365,19 @@ func TestDescribeTool_RegisteredInRetrieveToolsModeOnly(t *testing.T) {
 		}
 	})
 
-	t.Run("direct routing mode", func(t *testing.T) {
+	t.Run("direct routing mode exposes describe_tool", func(t *testing.T) {
+		// Spec 102 FR-009/FR-018 deliberately REVERSES the spec-085 v1 decision
+		// asserted here before: deferral without a schema-recovery stage on the
+		// same surface trades tokens for failed calls, so the Inspect step has to
+		// live where the Catalog is.
 		directTools, _ := proxy.buildDirectModeTools()
+		found := false
 		for _, st := range directTools {
-			assert.NotEqual(t, "describe_tool", st.Tool.Name,
-				"describe_tool must NOT be exposed in direct mode (v1)")
+			if st.Tool.Name == "describe_tool" {
+				found = true
+			}
 		}
+		assert.True(t, found, "describe_tool must be exposed in direct mode (spec 102 FR-009)")
 	})
 }
 

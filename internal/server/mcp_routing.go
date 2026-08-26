@@ -79,6 +79,14 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 	// DiscoverTools already filters to connected, enabled, non-quarantined
 	// servers — server-LEVEL filtering only. Tool-level state (pending/changed
 	// approval) is applied later by the callability filter.
+	// The initial rebuild (D15) runs during construction, so this can be reached
+	// before the upstream manager is wired. Treat it exactly like a discovery
+	// failure rather than panicking: built-ins still register, the catalog is
+	// still published, and the next servers.changed fills in the upstreams.
+	if p.upstreamManager == nil {
+		return p.withDirectBuiltins(nil), buildDirectCatalog(nil, p.logger)
+	}
+
 	tools, err := p.upstreamManager.DiscoverTools(ctx)
 	if err != nil {
 		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
@@ -87,11 +95,32 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 		// discovery filters "no catalog yet, do not deny" at exactly the moment
 		// upstream discovery is failing, flipping them from deny-on-miss to
 		// allow-everything.
-		return nil, buildDirectCatalog(nil, p.logger)
+		return p.withDirectBuiltins(nil), buildDirectCatalog(nil, p.logger)
 	}
 
 	cat := buildDirectCatalog(tools, p.logger)
-	return p.renderDirectTools(cat), cat
+	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat
+}
+
+// withDirectBuiltins appends the tools mcpproxy serves itself on the direct
+// surface (FR-009/FR-018).
+//
+// It is applied on EVERY return path of buildDirectModeTools, including the
+// failure paths, because SetTools REPLACES the whole registry: a rebuild that
+// omitted the built-ins would delete describe_tool from the live surface until
+// some later successful rebuild happened to restore it. A built-in that
+// disappears on the first upstream hiccup is not a built-in.
+//
+// NOTE: describe_tool's direct-id resolver is Phase 4 work. Until it lands, the
+// tool is LISTED here and resolves canonical `server:tool` ids only; a direct
+// `server__tool` id answers not_found. That is the intended intermediate state —
+// FR-009 requires presence in both serialization modes, and presence is what
+// this task delivers.
+func (p *MCPProxyServer) withDirectBuiltins(tools []mcpserver.ServerTool) []mcpserver.ServerTool {
+	return append(tools, mcpserver.ServerTool{
+		Tool:    buildDescribeToolTool(),
+		Handler: p.handleDescribeTool,
+	})
 }
 
 // renderDirectTools turns a catalog into the registrable tool set.
@@ -672,9 +701,17 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		p.callToolServer.AddTool(st.Tool, st.Handler)
 	}
 
-	// Note: Direct mode tools are built lazily/on-demand via RefreshDirectModeTools
-	// because upstream servers may not be connected yet during initialization.
-	// The servers.changed event will trigger a refresh.
+	// Initial direct rebuild (D15). Done by CALLING RefreshDirectModeTools so
+	// there is exactly ONE publisher and one copy of the SetTools-then-publish
+	// ordering — a second inline copy here would be the obvious way to introduce
+	// the mismatch that ordering exists to prevent.
+	//
+	// Upstreams are typically not connected yet, so this registers the built-ins
+	// and publishes an EMPTY catalog. Both matter: FR-009 needs describe_tool on
+	// the surface from the first request rather than from the first upstream
+	// reconcile, and a published (non-nil) catalog puts the discovery filters in
+	// deny-on-miss immediately instead of leaving them permissive until then.
+	p.RefreshDirectModeTools()
 
 	p.logger.Info("routing mode servers initialized",
 		zap.String("default_mode", p.config.RoutingMode))

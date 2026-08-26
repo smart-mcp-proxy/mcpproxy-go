@@ -299,7 +299,23 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	server.mcpProxy = mcpProxy
 
 	go server.forwardRuntimeStatus()
-	go server.listenForRoutingModeRefresh()
+
+	// Subscribe BEFORE StartBackgroundInitialization, not inside the listener
+	// goroutine (R14). The goroutine used to call SubscribeEvents itself, which
+	// races the line below: if background initialization publishes
+	// servers.changed before the goroutine is scheduled far enough to subscribe,
+	// that first event is dropped.
+	//
+	// That used to self-heal by accident — with no direct catalog published the
+	// discovery filters declined to deny, so the surface still worked until some
+	// later event. Spec 102's initial rebuild (D15) publishes an EMPTY catalog at
+	// init, which retires that accident: after it, a dropped first
+	// servers.changed leaves the filters denying against an empty catalog and the
+	// direct surface stays blank until an unrelated reconcile. Subscribing here
+	// closes the window rather than depending on goroutine scheduling.
+	routingEvents := server.runtime.SubscribeEvents()
+	go server.listenForRoutingModeRefresh(routingEvents)
+
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
@@ -526,8 +542,7 @@ func (s *Server) forwardRuntimeStatus() {
 // listenForRoutingModeRefresh subscribes to server events and refreshes routing
 // mode tool sets when upstream servers change (Spec 031), and re-applies the
 // security scanner's opt-in deep-scan gate on config hot-reload (Spec 077 US3).
-func (s *Server) listenForRoutingModeRefresh() {
-	eventCh := s.runtime.SubscribeEvents()
+func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 	defer s.runtime.UnsubscribeEvents(eventCh)
 
 	for evt := range eventCh {
