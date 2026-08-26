@@ -16,6 +16,20 @@ generated over the real `/mcp` endpoint (reads, writes, destructive calls, failu
 hit, repeated identical calls).
 **Screenshots are not committed** — each finding names the state to reproduce.
 
+> **Status — this is the audit record, not an open backlog.** Everything below describes **v0.60.0
+> @ `20a3e50`** and is written in the present tense as audited. Eight PRs merged on 2026-08-25
+> ([#1044](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1044),
+> [#1048](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1048),
+> [#1049](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1049),
+> [#1050](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1050),
+> [#1051](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1051),
+> [#1052](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1052),
+> [#1053](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1053),
+> [#1054](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1054))
+> close the backlog. **§ Resolution** at the end records what a live re-check on **v0.61.0** actually
+> confirmed, what it could not reach, and five defects found on `main` that are not in this audit. Re-verify against
+> current `main` before re-filing anything from here.
+
 ## Heuristics used
 
 Standard: Nielsen's 10, information scent, empty/error/loading-state completeness, WCAG 2.1 AA
@@ -487,6 +501,117 @@ clips its label onto two cut-off lines; the Tools table's **Approval** column sh
 rows (zero variance, wasted width) while descriptions truncate with no tooltip; the collapsed sidebar is
 icon-only, relying on hover `title` alone to disambiguate six similar glyphs; the telemetry banner takes
 the top of the Dashboard on every visit until dismissed. **Effort:** S each
+
+---
+
+## Resolution
+
+The backlog was closed by eight PRs merged on 2026-08-25:
+
+| PR | Findings it names |
+|---|---|
+| [#1044](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1044) `feat(webui): make the analytics dashboard the default landing page` | F4 |
+| [#1048](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1048) `fix(activity): count calls once, so Activity and Usage agree` | F1, F24 |
+| [#1049](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1049) `fix(webui): first-run call to action …` | F3, F4, F19, F36 |
+| [#1050](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1050) `fix(webui): forms & modals UX audit` | F6, F8, F16, F36 |
+| [#1051](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1051) `fix(ui): mask flagged secrets server-side …` | F13, F15, F20, F31, F32, F33, F36 |
+| [#1052](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1052) `fix(webui): make the Activity and Usage numbers say what they mean` | F2, F5, F22, F23, F25, F26, F27, F36 |
+| [#1053](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1053) `fix(webui): honest server, connection and connect-modal states` | F7 and F12 (verified live, below); by its diff and test names also F10 (`live-clients.spec.ts`), F11 (`internal/health/calculator.go`, `ConnectionStatus.vue`), F17 (`repositories-card-selector.spec.ts`), F18 (`connect-modal.spec.ts`, `connect-endpoint-truth.spec.ts`) and F28 (`auth-single-surface.spec.ts`). **Its body text names F1–F16 — that is a mis-paste of the *tray* audit's numbering; the tray PR is [#1055](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1055) and #1053 touches no Swift file.** F34's coverage is not evidenced either way. |
+| [#1054](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1054) `fix(webui): AA contrast, system theme, mobile layout and a11y gaps` | F9, F14, F21, F29, F30, F32, F35, F36 |
+
+### Re-checked live on v0.61.0
+
+Confirmed fixed against a running core (isolated instance, scratch `--config` **and** `--data-dir`, real
+`/mcp` traffic — reads, writes, destructive, failures, a sensitive-data hit, repeated identical calls):
+
+- **F1** — Activity header `22 calls · 3 errors · 1 blocked` reconciles with the Usage tiles `Calls 22 /
+  Errors 4`; Usage folds `blocked` into `errors`, Activity splits it, and both match
+  `GET /api/v1/activity/usage` (`total_calls: 22, total_errors: 4`). The 70-vs-42 split is gone.
+- **F4** — `/ui/` opens the Usage analytics panel; `/ui/overview` and `/ui/usage` are real routes with
+  their own titles.
+- **F5** — a `Group repeats` control folds runs (`echo ×5`, `2ms–5ms`) and the footer reads
+  `1-25 of 56 (63 rows, repeats folded)`. No **visible** Success badge: only `Error` and `Blocked` are
+  marked, and the word "Success" is present as an `sr-only` label, which is H3-compliant.
+- **F6** — focus enters the Add Server dialog on open, submit sits in a sticky footer, and Escape closes
+  it (see the note below on how not to measure that).
+- **F7** — a quarantined server card carries **Review · Approve · Scan**.
+- **F8** — Secrets has **Add Secret** in the header *and* in the empty state, with a one-line why.
+- **F12** — the Go error dump is behind a `Technical details` disclosure under a plain-language summary.
+- **F13** — masking is server-side: the drawer renders `AKIA…****` and states that full values come only
+  from `mcpproxy activity export --include-bodies`.
+- **F20** — `/ui/search` redirects to `/ui/tools`.
+- **F24** — the Activity header separates `events` from `calls`.
+- **F26** — the Sensitive and Intent columns have real headers.
+- **F33** — `/servers` (no `/ui` prefix) redirects to `/ui/servers`; no raw Go 404.
+
+### Nothing left open from this audit
+
+F6 deserves a note, because re-checking it produced a false negative first. Escape sent through the
+browser-automation layer appeared not to close the Add Server dialog; it never reached the page's
+`document` keydown listener. Dispatching the same event in-page
+(`document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))`) closes the dialog immediately.
+F6 is fixed in full by [#1050](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1050):
+`frontend/src/composables/useModalA11y.ts` supplies Escape-to-close, initial focus into the dialog, a Tab
+trap and focus restoration for the five `<dialog :open>` modals, which get none of that from the browser
+because they are opened by the `open` attribute rather than `showModal()`. Verified live: opening Add
+Server or Add Secret moves focus into the dialog, and an in-page Escape closes it.
+
+The lesson for the sweep this document proposes: **assert modal Escape with an in-page dispatch, not a
+synthetic key press**, or the assertion silently tests the automation layer instead of the app.
+
+### Not re-checked
+
+F2, F9, F10, F11, F14, F15, F16, F17, F18, F19, F21, F22, F23, F25, F27, F28, F29, F30, F31, F32, F34,
+F35, F36 were not re-verified live; they are recorded as closed on the strength of the PRs above. F28 is the exception in that list: its "key called optional" half is confirmed fixed, but the three-surfaces-at-once state is still reproducible (see new defect 5). F3 and
+F19 need a first-run (empty-config) instance, and F9/F14/F29/F30 need the contrast/responsive/a11y sweep,
+neither of which this pass ran.
+
+### Corrections to the audit itself
+
+Two findings were not quite right as written, independent of whether they were fixed:
+
+- **F23** ("the token-savings headline does not move") mis-diagnoses a stale aggregation. The figure is a
+  per-request *structural* estimate over the current tool catalog
+  (`runtime.CalculateTokenSavings` → `tokens.CalculateProxySavings`), so it is window-independent by
+  design and correctly does not move when call volume changes. The real complaint is that the label reads
+  like a windowed metric — which is what the fix addressed.
+- **F31**'s `Manual` half is wrong. That per-card badge is the spec-088 trust-mode badge and it already
+  carried a `title` tooltip (`ServerCard.vue` / `utils/trustMode.ts`) at the time of the audit. Only the
+  `Mode: Retrieve` half was a real gap.
+
+### New defects found while re-checking (not in the audit above)
+
+These are on `main` today and are **not** regressions of anything listed above:
+
+1. **Quarantining a server through the config file leaves its tools in the search index.** With
+   `memory` quarantined (`quarantined: true` written to the config file, hot-reloaded), `retrieve_tools`
+   still returns all nine of its tools — name, full description and a `call_with` variant — and the call
+   is then refused with `SECURITY BLOCK`. Quarantine exists to keep an unreviewed server's tool
+   *descriptions* away from the agent, which is where a Tool Poisoning Attack lives, so this defeats its
+   purpose on the file path. `POST /api/v1/servers/{id}/quarantine` does **not** have the bug:
+   `Runtime.QuarantineServer` (`internal/runtime/lifecycle.go`) calls `indexManager.DeleteServerTools`
+   explicitly. The reload path (`LoadConfiguredServers`, same file) detects the `Quarantined` transition
+   — it is in the `hasChanged` test and logged as `quarantined_changed: true` — but only acts on
+   `oauthChanged`, so no purge runs. Disabling via the config file is unaffected (a disabled server drops
+   out of the active set the orphan sweep uses). The purge belongs on the transition, not on the two API
+   handlers that currently carry it.
+2. **Tool counts advertise quarantined and disabled servers as available.** Servers page reads
+   `Total Tools 22 — Available across all servers` (and the header chip `22 Tools`) while `memory` is
+   quarantined; on a second instance the same total counted a server that was quarantined *and* another
+   that was disabled *and* disconnected. `GET /api/v1/tools` returns them too, while
+   `GET /api/v1/index/search` correctly returns nothing for them — so the count contradicts the index it
+   claims to describe, and none of those tools is callable.
+3. **A server card can assert two contradictory security states at once**: `memory` renders a green
+   `Clean` scan verdict directly above a yellow `Quarantined — needs security review` banner.
+4. **The Activity Type column mixes two vocabularies**: humanised (`Quarantine Change`, `Policy
+   Decision`, `Internal Tool Call`) and raw snake_case (`tool_quarantine_change`) in the same column, on
+   the same screen.
+5. **A stale auth error survives a successful sign-in.** With no stored key, `/ui/activity` shows the
+   Authentication Required modal *plus* an inline red `Invalid or missing API key / Retry` panel *plus* a
+   `Disconnected` chip. Entering a valid key and pressing **Set Key** re-authenticates the header (server
+   counts, tool count and the `Live` badge all come back) but the view body keeps the red panel and
+   renders zero rows until the user clicks **Retry** by hand. The key half of F28 that *is* fixed is the
+   wording — the field now reads `API key (required)`, not optional.
 
 ---
 
