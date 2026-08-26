@@ -1051,6 +1051,19 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			oauthChanged ||
 			exposePromptsChanged
 
+		// Security (issue #1061): a server that just BECAME quarantined on this
+		// path must lose its indexed tools, exactly as it does when the API
+		// handler sets the flag. The purge used to live only in
+		// Runtime.QuarantineServer, so a quarantine written into the config file
+		// — by an operator edit, by the config-load admission gate re-holding an
+		// unreviewed server, or by any future writer — was detected here and then
+		// ignored, leaving the tool descriptions retrievable indefinitely.
+		//
+		// Only the false -> true transition purges. Doing it whenever the flag is
+		// true would re-delete on every unrelated reload, and doing it on
+		// true -> false would blank the catalog until the next discovery pass.
+		newlyQuarantined := existsInStorage && !storedServer.Quarantined && serverCfg.Quarantined
+
 		if hasChanged {
 			changed = true
 			r.logger.Info("Server configuration changed, updating storage",
@@ -1059,6 +1072,10 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				zap.Bool("enabled_changed", existsInStorage && storedServer.Enabled != serverCfg.Enabled),
 				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined),
 				zap.Bool("oauth_changed", oauthChanged))
+
+			if newlyQuarantined {
+				r.purgeQuarantinedServerFromIndex(serverCfg.Name)
+			}
 
 			// Clear OAuth state if OAuth config changed
 			if oauthChanged && r.storageManager != nil {
@@ -1492,6 +1509,40 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 	return nil
 }
 
+// purgeQuarantinedServerFromIndex removes a now-quarantined server's tools from
+// the search index and refreshes any per-profile index that included it.
+//
+// Security (issue #1061): this is not an optimisation, it is the control.
+// Quarantine exists to keep an unreviewed server's tool DESCRIPTIONS away from
+// the agent, because that is where a Tool Poisoning Attack payload lives, and
+// the description-bearing branch of the search path has no query-time quarantine
+// filter — absence from the index IS the enforcement. So this must run on EVERY
+// path that can set the flag, not only on the API handler that first grew it: a
+// quarantine applied through the config file used to leave every tool indexed
+// and retrievable via retrieve_tools, complete with its description and a
+// call_with recommendation, right up until the call was refused.
+//
+// Failure is logged and swallowed rather than propagated: the server is
+// quarantined either way, and refusing the state change because the index write
+// failed would leave the caller believing the server is still live.
+func (r *Runtime) purgeQuarantinedServerFromIndex(serverName string) {
+	if r.indexManager == nil {
+		return
+	}
+
+	if err := r.indexManager.DeleteServerTools(serverName); err != nil {
+		r.logger.Warn("Failed to remove quarantined server tools from index",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+
+	r.logger.Info("Removed quarantined server tools from index",
+		zap.String("server", serverName))
+	// Refresh per-profile indexes that include this now-quarantined server.
+	r.reindexAffectedProfiles(serverName)
+}
+
 // QuarantineServer updates the quarantine state and persists the change.
 // Security: When quarantining a server, all its tools are removed from the index
 // to prevent Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
@@ -1507,18 +1558,8 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 
 	// Security: When quarantining a server, immediately remove its tools from the index
 	// to prevent TPA exposure through search results
-	if quarantined && r.indexManager != nil {
-		if err := r.indexManager.DeleteServerTools(serverName); err != nil {
-			r.logger.Warn("Failed to remove quarantined server tools from index",
-				zap.String("server", serverName),
-				zap.Error(err))
-			// Continue even if deletion fails - the server is still quarantined
-		} else {
-			r.logger.Info("Removed quarantined server tools from index",
-				zap.String("server", serverName))
-			// Refresh per-profile indexes that include this now-quarantined server.
-			r.reindexAffectedProfiles(serverName)
-		}
+	if quarantined {
+		r.purgeQuarantinedServerFromIndex(serverName)
 	}
 
 	// A human toggling quarantine IS a statement about this server (issue #937).
