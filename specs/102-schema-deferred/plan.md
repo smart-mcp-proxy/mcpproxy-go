@@ -63,9 +63,10 @@ Technical approach, grounded in the code:
   (`mcp_routing.go:81-85`) and would otherwise drop the built-in on the first
   upstream hiccup. The built-in is appended on **every** return path, and the
   direct built-in golden's zero-upstream fixture is exactly that shape. One `buildDescribeToolTool`
-  builder still feeds all surfaces — its **four** retrieve_tools-specific strings
-  (tool description, both parameter descriptions, and the two shared remediation
-  constants) are rewritten surface-neutral, the one-time enumerated golden regen
+  builder still feeds all surfaces — its **five** retrieve_tools-specific strings
+  (the tool description `:64`, the `tool_ids` `:71` and `filters` `:82` parameter
+  descriptions, the `describeNotFoundRemediation` constant `:50`, and the inline
+  malformed-id remediation `:195`) are rewritten surface-neutral, the one-time enumerated golden regen
   of FR-010 plus named `describePlainDelta` substitutions (research.md R5). The
   `tool_ids` prose must also name both accepted id forms, since FR-011 requires
   `server__tool` here. The handler gains a
@@ -151,7 +152,7 @@ Resolved in [research.md](research.md); recorded here as the plan of record:
 | D2 | Deferred entries strip `outputSchema` too; `describe_tool` definitions gain additive `output_schema` (all surfaces, definition-assembly seam only) | R2 |
 | D3 | describe_tool batch cap stays 5 (50 for `check:true`) on every surface | R3 |
 | D4 | FR-007 channel = static instructions on the direct server, both modes, conditionally phrased; `initialize` delta enumerated (composition with the operator's `instructions` key: D11) | R4 |
-| D5 | FR-009 prose = surface-neutral rewrite of ALL FOUR retrieve_tools strings (description, both param descriptions, the two shared remediation constants), single builder kept; one-time regen of the two describe_tool-bearing goldens plus named `describePlainDelta` substitutions | R5 |
+| D5 | FR-009 prose = surface-neutral rewrite of ALL FIVE retrieve_tools strings (description, both param descriptions, `describeNotFoundRemediation`, the inline malformed-id remediation), single builder kept; one-time regen of the two describe_tool-bearing goldens plus named `describePlainDelta` substitutions | R5 |
 | D6 | FR-017 = immutable `directCatalog` snapshot, atomic swap, **colliding display names withheld** (not first-writer-wins — D13 rule 5); handlers capture their own schema | R9 |
 | D7 | FR-011 = catalog-backed direct resolver with listing-parity gates incl. permission tier; plain `not_found` for invisible ids in both modes; snapshot-backed definitions for visible ids; check-mode verdicts via shared preflight evaluator | R10 |
 | D8 | Rollout default = **opt-in, off**; no default flip in this feature (spec Non-Goals; any future flip is its own evidence-gated decision) | spec |
@@ -183,12 +184,12 @@ Resolved in [research.md](research.md); recorded here as the plan of record:
 specs/102-schema-deferred/
 ├── spec.md              # Feature spec (merged; normative)
 ├── plan.md              # This file
-├── research.md          # Phase 0: D1–D8 resolutions + mechanical findings R1–R10
+├── research.md          # Phase 0: D1–D16 resolutions + mechanical findings R1–R14
 ├── data-model.md        # Phase 1: directCatalog, deferred entry, mode resolution, id forms
 ├── quickstart.md        # Phase 1: build/enable/verify walkthrough
 ├── contracts/
 │   └── direct-deferred-surface.md   # Deferred entry shape, instructions text, describe_tool-on-direct deltas & error parity
-└── tasks.md             # Phase 2 (/speckit.tasks — NOT created by this plan)
+└── tasks.md             # Phase 2 (/speckit.tasks)
 ```
 
 ### Source Code (repository root) — REAL paths
@@ -230,7 +231,7 @@ internal/
 │   │                                #   retires lookupDirectToolPermission's separate map, keeps
 │   │                                #   requiredPermissionForDirectTool as the catalog's derivation
 │   ├── mcp_direct_callability.go    # filterDirectToolsForAgentCallability: same catalog resolution (D10)
-│   ├── mcp_describe_tool.go         # Surface-neutral prose — all FOUR retrieve_tools strings (D5/R5); resolver seam
+│   ├── mcp_describe_tool.go         # Surface-neutral prose — all FIVE retrieve_tools strings (D5/R5); resolver seam
 │   │                                #   parameter; additive output_schema at definition assembly (D2)
 │   ├── mcp_entry_builder.go         # definition-assembly seam: optional annotations override so the direct surface
 │   │                                #   sources them from the catalog, not the StateView (D10); full-mode retrieve
