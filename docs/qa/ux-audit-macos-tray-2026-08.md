@@ -1,9 +1,11 @@
 # macOS Tray UX + Settings-Parity Audit — 2026-08
 
 **Epic**: `ux-audit` · **Task**: `ux-audit-macos-sweep`
-**Audited build**: running production tray `com.smartmcpproxy.mcpproxy` **v0.60.0** (pid 14593), against repo `main` at tag `v0.60.0` — no version skew, so every finding below is reproducible from source.
+**Audited build**: running production tray `com.smartmcpproxy.mcpproxy` **v0.60.0** (pid 14593), against repo `main` at tag `v0.60.0` — no version skew *at the time of the walk*, so every finding was reproducible from source **as audited**.
 **Method**: full accessibility-tree walk of the live status-bar menu (`mcpproxy-ui-test` → `list_menu_items`, `read_status_bar`, `check_accessibility`), read-only. No binary swap, no destructive clicks. Settings and window surfaces compared statically: `native/macos/MCPProxy/MCPProxy/**` vs `frontend/src/**`.
 **Live proxy state during the walk**: 29 servers (13 connected), 942 tools, 5 needing attention, 2 profiles, 1 idle client.
+
+> **Status — all 16 findings are FIXED on `main`.** This document is the audit record, not an open backlog. [#1055](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1055) addresses **F1–F16** in the sequence §5 suggests. Read every finding below in the past tense: it describes v0.60.0. Do not re-file from this document — check `native/macos/MCPProxy/` at current `main` first.
 
 Screenshots are deliberately absent: `screenshot_status_bar_menu` returns an all-black PNG on this machine (known Screen-Recording/TCC limitation), so the accessibility tree is the authoritative record. The verbatim dump is in the appendix.
 
@@ -195,6 +197,17 @@ The glance block is the strongest part of the tray. The findings below are conce
 2. **Next**: F1 + F3 + F4 — the three that decide whether the tray can be trusted at a glance.
 3. **Then**: F6 with its parity gate (stops the drift recurring), F10, F11, F15.
 4. **Roadmap-sized**: F8(b) security surface, F16 tool search.
+
+## 6. Resolution
+
+**All 16 findings (F1–F16) were fixed by [#1055](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1055)** (`fix(tray): close the 16 findings of the macOS tray UX + settings-parity audit`), with [#1056](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1056) as a catalogue follow-up, in the order §5 suggests. Every finding above therefore describes v0.60.0 in the past tense. Nothing here is an open backlog item; check `native/macos/MCPProxy/` at current `main` before re-filing any of it.
+
+Two fixes are worth recording because the obvious implementation is wrong:
+
+- **F1** — the severity dot is drawn by `updateStatusIcon()` as an attributed-title glyph, *not* as a composite image. The status-bar image must stay `isTemplate` so it follows the menu bar, and a template image is re-rendered monochrome, which would erase a coloured badge composited into it.
+- **F6** — the missing keys (`security.deep_scan.enabled`, `instructions`, `code_execution_max_parallel`) were added to `SettingsCatalog.swift` *and* backed by a parity gate, so the next Web-UI-first field cannot drift in silently.
+
+**Verification caveat**: the review pass that added this section could **not** re-walk the live tray — macOS Accessibility permission was revoked on the reviewing machine (`mcpproxy-ui-test` → `check_accessibility`: `trusted: false`), so `list_menu_items` / `read_status_bar` were unavailable. The resolution above is taken from the #1055 diff (`Menu/TrayIcon.swift` deleted, `TokensView` now reachable from `Views/MainWindow.swift`, `MCPProxyTests/TrayAuditMenuTests.swift` added), not from a second live walk. A follow-up walk on a machine with Accessibility granted is the remaining verification step.
 
 ---
 
