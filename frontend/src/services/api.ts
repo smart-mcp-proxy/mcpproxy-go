@@ -647,9 +647,15 @@ class APIService {
   }
 
   // Session management endpoints
-  async getSessions(limit?: number): Promise<APIResponse<GetSessionsResponse>> {
-    const url = `/api/v1/sessions${limit ? `?limit=${limit}` : ''}`
-    return this.request<GetSessionsResponse>(url)
+  // status narrows the listing server-side ('active' | 'closed'). Without it the
+  // backend returns the most recent sessions of ANY status, so a small limit can
+  // be filled entirely by closed ones and hide a live client (audit F10).
+  async getSessions(limit?: number, status?: 'active' | 'closed'): Promise<APIResponse<GetSessionsResponse>> {
+    const params = new URLSearchParams()
+    if (limit) params.set('limit', String(limit))
+    if (status) params.set('status', status)
+    const query = params.toString()
+    return this.request<GetSessionsResponse>(`/api/v1/sessions${query ? `?${query}` : ''}`)
   }
 
   async getSessionDetail(sessionId: string): Promise<APIResponse<GetSessionDetailResponse>> {

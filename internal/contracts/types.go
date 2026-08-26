@@ -399,25 +399,54 @@ type UsageAggregateResponse struct {
 	Tools                 []UsageToolStat   `json:"tools"`
 	Other                 *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
 	Timeline              []UsageTimeBucket `json:"timeline"`
+	// TotalCalls and TotalErrors are the headline counts for the window: the sum
+	// of the timeline this same response carries, so the tiles and the histogram
+	// under them cannot disagree. They are NOT the sum of Tools — that list is
+	// lifetime-cumulative, upstream-only and truncated to top-N, and summing it
+	// client-side is what made the Usage tab print a third number for the same
+	// 24 hours (audit finding F1, #1046). The population is
+	// storage.CountsAsCall, shared with ActivitySummaryResponse.CallCount.
+	//
+	// Two bounds on how exactly this matches the Activity Log's own count.
+	// Both are bounded and disclosed, unlike the population mismatch they
+	// replace, which was unbounded and silent:
+	//
+	//   - Window granularity is the timeline's: whole hour buckets, so the span
+	//     is the requested window rounded up to a bucket edge.
+	//   - This response is served from a snapshot behind a short read cache
+	//     (observability.usage_cache_ttl, 5s by default) so the endpoint never
+	//     scans the activity log per request, while the summary endpoint counts
+	//     live. Calls that land inside that window appear on the Activity Log
+	//     first. FreshnessMs and GeneratedAt say how old the figures are, and
+	//     the Usage tab prints it ("Updated 3s ago").
+	TotalCalls  int64 `json:"total_calls"`
+	TotalErrors int64 `json:"total_errors"`
 }
 
 // UsageToolStat is the per-(server,tool) rollup row in UsageAggregateResponse.
 type UsageToolStat struct {
-	Server         string    `json:"server"`
-	Tool           string    `json:"tool"`
-	Calls          int64     `json:"calls"`
-	Errors         int64     `json:"errors"`
-	ErrorRate      float64   `json:"error_rate"`
-	Blocked        int64     `json:"blocked"`
-	Rejected       int64     `json:"rejected"` // spec 093: shed by a concurrency limit; never executed, so excluded from calls/latency
-	TotalRespBytes int64     `json:"total_resp_bytes"`
-	AvgRespBytes   *int64    `json:"avg_resp_bytes"` // null when sized_calls == 0 (only legacy 0-byte calls)
-	TotalReqBytes  int64     `json:"total_req_bytes"`
-	AvgReqBytes    *int64    `json:"avg_req_bytes"` // null when no sized request calls
-	SizedCalls     int64     `json:"sized_calls"`   // calls with known response size (basis for avg_resp_bytes)
-	P50Ms          int64     `json:"p50_ms"`
-	P95Ms          int64     `json:"p95_ms"`
-	LastUsed       time.Time `json:"last_used"`
+	Server         string  `json:"server"`
+	Tool           string  `json:"tool"`
+	Calls          int64   `json:"calls"`
+	Errors         int64   `json:"errors"`
+	ErrorRate      float64 `json:"error_rate"`
+	Blocked        int64   `json:"blocked"`
+	Rejected       int64   `json:"rejected"` // spec 093: shed by a concurrency limit; never executed, so excluded from calls/latency
+	TotalRespBytes int64   `json:"total_resp_bytes"`
+	AvgRespBytes   *int64  `json:"avg_resp_bytes"` // null when sized_calls == 0 (only legacy 0-byte calls)
+	TotalReqBytes  int64   `json:"total_req_bytes"`
+	AvgReqBytes    *int64  `json:"avg_req_bytes"` // null when no sized request calls
+	SizedCalls     int64   `json:"sized_calls"`   // calls with known response size (basis for avg_resp_bytes)
+	// P50Ms and P95Ms are read off a fixed latency histogram, so they are BUCKET
+	// BOUNDS, not measured durations: the true percentile is at or below the
+	// value, and a client must render it as a bound ("≤ 5 ms"). P50Exceeds /
+	// P95Exceeds flip that reading for the unbounded overflow bucket, where the
+	// value is the last bound and the truth is above it ("> 10 s").
+	P50Ms      int64     `json:"p50_ms"`
+	P50Exceeds bool      `json:"p50_exceeds"`
+	P95Ms      int64     `json:"p95_ms"`
+	P95Exceeds bool      `json:"p95_exceeds"`
+	LastUsed   time.Time `json:"last_used"`
 }
 
 // UsageOtherBucket folds the tail of the per-tool list beyond top-N (FR: charts
@@ -1163,7 +1192,7 @@ type HealthStatus struct {
 	// Detail is an optional longer explanation of the status
 	Detail string `json:"detail,omitempty"`
 
-	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", "set_secret", "configure", or "" (none)
+	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", "set_secret", "configure", "edit_url", or "" (none)
 	Action string `json:"action,omitempty"`
 }
 

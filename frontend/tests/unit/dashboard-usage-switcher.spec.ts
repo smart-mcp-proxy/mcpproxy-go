@@ -2,12 +2,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ref } from 'vue'
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { createRouter, createMemoryHistory } from 'vue-router'
 
-// Spec 069 B1 (T016): Dashboard carries an Overview↔Usage switcher. Overview
-// state must survive a switch-back (SC-006 → rendered with v-show, never v-if),
-// the Usage aggregate must be fetched lazily on first activation (SC-004, so
-// the Overview first paint is never blocked) and re-fetched when the window
+// Spec 069 B1 (T016): Dashboard carries a Usage↔Overview switcher. Both panels
+// stay in the DOM (SC-006 → rendered with v-show, never v-if) so switching
+// preserves their state, and the usage aggregate is re-fetched when the window
 // selector (24h/7d/all) changes.
+//
+// Usage is now the default panel (analytics dashboard as the default landing
+// page), so the aggregate is fetched on mount rather than on first activation;
+// it stays code-split behind Suspense so the Dashboard shell paints first.
 
 const usageSpy = vi.hoisted(() =>
   vi.fn().mockResolvedValue({
@@ -32,6 +36,9 @@ vi.mock('@/services/api', () => {
   }
   const base: Record<string, unknown> = {
     getActivityUsage: usageSpy,
+    // One configured server, so the Dashboard renders the real usage panel
+    // rather than the zero-servers first-run CTA.
+    getServers: ok({ servers: [{ name: 'srv-a', enabled: true, connected: true, tool_count: 1 }] }),
     createEventSource: vi.fn(() => fakeEventSource),
     hasAPIKey: vi.fn(() => true),
     getAPIKeyPreview: vi.fn(() => 'test…'),
@@ -74,10 +81,26 @@ class FakeEventSource {
   onerror: ((e: unknown) => void) | null = null
 }
 
-function mountDashboard() {
+// The switcher rewrites the URL, so the component needs a real router.
+function makeRouter() {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', name: 'dashboard', component: Dashboard, meta: { dashboardView: 'usage' } },
+      { path: '/usage', name: 'usage', component: Dashboard, meta: { dashboardView: 'usage' } },
+      { path: '/overview', name: 'dashboard-overview', component: Dashboard, meta: { dashboardView: 'overview' } },
+      { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
+    ],
+  })
+}
+
+async function mountDashboard(path = '/') {
+  const router = makeRouter()
+  router.push(path)
+  await router.isReady()
   return shallowMount(Dashboard, {
     global: {
-      plugins: [createPinia()],
+      plugins: [createPinia(), router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
         // Un-stub the <Suspense> wrapper that shallowMount would otherwise
@@ -93,51 +116,46 @@ function mountDashboard() {
   })
 }
 
-describe('Dashboard Overview↔Usage switcher', () => {
+describe('Dashboard Usage↔Overview switcher', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     usageSpy.mockClear()
     ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
   })
 
-  it('defaults to the Overview tab and does not fetch usage on first paint (SC-004)', async () => {
-    const wrapper = mountDashboard()
+  it('opens on the Usage panel and fetches the aggregate (24h default)', async () => {
+    const wrapper = await mountDashboard()
     await flushPromises()
 
     const overview = wrapper.find('[data-test="dashboard-overview-panel"]')
     const usage = wrapper.find('[data-test="dashboard-usage-panel"]')
     expect(overview.exists()).toBe(true)
     expect(usage.exists()).toBe(true)
-    // Overview visible, Usage hidden — both kept in the DOM (v-show), so the
-    // Overview subtree is never torn down (SC-006).
-    expect(overview.isVisible()).toBe(true)
-    expect(usage.isVisible()).toBe(false)
-    // Usage data is not fetched until the tab is opened.
-    expect(usageSpy).not.toHaveBeenCalled()
-  })
-
-  it('switches to Usage, keeps Overview mounted, and lazily fetches the aggregate', async () => {
-    const wrapper = mountDashboard()
-    await flushPromises()
-
-    await wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
-    await flushPromises()
-
-    const overview = wrapper.find('[data-test="dashboard-overview-panel"]')
-    const usage = wrapper.find('[data-test="dashboard-usage-panel"]')
-    // Overview still in the DOM (state preserved) but hidden.
-    expect(overview.exists()).toBe(true)
-    expect(overview.isVisible()).toBe(false)
+    // Usage visible, Overview hidden — both kept in the DOM (v-show), so
+    // neither subtree is torn down when switching (SC-006).
     expect(usage.isVisible()).toBe(true)
-    // Default window is 24h on first load.
+    expect(overview.isVisible()).toBe(false)
     expect(usageSpy).toHaveBeenCalledTimes(1)
     expect(usageSpy).toHaveBeenLastCalledWith(expect.objectContaining({ window: '24h' }))
   })
 
-  it('re-fetches with the selected window when the window selector changes', async () => {
-    const wrapper = mountDashboard()
+  it('switches to Overview and keeps the Usage panel mounted', async () => {
+    const wrapper = await mountDashboard()
     await flushPromises()
-    await wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
+
+    await wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
+    await flushPromises()
+
+    const overview = wrapper.find('[data-test="dashboard-overview-panel"]')
+    const usage = wrapper.find('[data-test="dashboard-usage-panel"]')
+    expect(overview.isVisible()).toBe(true)
+    // Usage still in the DOM (state preserved) but hidden.
+    expect(usage.exists()).toBe(true)
+    expect(usage.isVisible()).toBe(false)
+  })
+
+  it('re-fetches with the selected window when the window selector changes', async () => {
+    const wrapper = await mountDashboard()
     await flushPromises()
     usageSpy.mockClear()
 
@@ -148,18 +166,18 @@ describe('Dashboard Overview↔Usage switcher', () => {
     expect(usageSpy).toHaveBeenLastCalledWith(expect.objectContaining({ window: '7d' }))
   })
 
-  it('switches back to Overview without re-fetching usage (cached, state preserved)', async () => {
-    const wrapper = mountDashboard()
+  it('switches back to Usage without re-fetching the aggregate (cached, state preserved)', async () => {
+    const wrapper = await mountDashboard()
     await flushPromises()
-    await wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
+    await wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
     await flushPromises()
     usageSpy.mockClear()
 
-    await wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
+    await wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
     await flushPromises()
 
-    const overview = wrapper.find('[data-test="dashboard-overview-panel"]')
-    expect(overview.isVisible()).toBe(true)
+    const usage = wrapper.find('[data-test="dashboard-usage-panel"]')
+    expect(usage.isVisible()).toBe(true)
     expect(usageSpy).not.toHaveBeenCalled()
   })
 })

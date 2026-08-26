@@ -133,12 +133,54 @@ func TestToolUsage_Percentile_FromLatencyBuckets(t *testing.T) {
 	}
 	tu := agg.Tools[toolKey("s", "t")]
 
-	p50 := tu.Percentile(0.50)
-	p95 := tu.Percentile(0.95)
+	p50, p50Exceeds := tu.Percentile(0.50)
+	p95, p95Exceeds := tu.Percentile(0.95)
 	// p50 sits in the fast band, p95 must reflect the slow tail.
 	assert.LessOrEqual(t, p50, int64(50), "p50 ~ fast band")
 	assert.Greater(t, p95, int64(1000), "p95 must capture the slow tail")
 	assert.GreaterOrEqual(t, p95, p50)
+	assert.False(t, p50Exceeds, "a bounded bucket reads as an upper bound")
+	assert.False(t, p95Exceeds, "3000ms is inside the histogram, not past its end")
+}
+
+// A sub-10ms tool must not report 10ms. Every local stdio server lives in this
+// band, and before the low end of latencyBucketBoundsMs was refined, every row
+// of the Usage latency table read exactly "10 ms" while the Activity Log showed
+// 3/4/5 ms for the same calls (audit finding F22, #1046).
+func TestToolUsage_Percentile_ResolvesSubTenMilliseconds(t *testing.T) {
+	agg := newUsageAggregate()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		agg.Apply(toolCall("s", "t", "success", 3, 0, 100, ts))
+	}
+	tu := agg.Tools[toolKey("s", "t")]
+
+	p50, exceeds := tu.Percentile(0.50)
+	assert.Equal(t, int64(5), p50, "3ms calls bound at 5ms, not at 10ms")
+	assert.False(t, exceeds)
+}
+
+// The overflow bucket is unbounded: its value is a FLOOR, and saying so is the
+// difference between "≤ 10 s" (false) and "> 10 s" (true).
+func TestToolUsage_Percentile_OverflowReportsExceeds(t *testing.T) {
+	agg := newUsageAggregate()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		agg.Apply(toolCall("s", "t", "success", 45_000, 0, 100, ts))
+	}
+	tu := agg.Tools[toolKey("s", "t")]
+
+	p95, exceeds := tu.Percentile(0.95)
+	assert.Equal(t, int64(10000), p95, "the last bound is all the histogram knows")
+	assert.True(t, exceeds, "the true latency is above that bound, not below it")
+}
+
+// An empty histogram has no bound to report either way.
+func TestToolUsage_Percentile_EmptyHistogram(t *testing.T) {
+	tu := &ToolUsage{LatencyBuckets: make([]int64, numLatencyBuckets())}
+	ms, exceeds := tu.Percentile(0.95)
+	assert.Equal(t, int64(0), ms)
+	assert.False(t, exceeds)
 }
 
 func TestUsageAggregate_TimeBuckets_PerHour(t *testing.T) {

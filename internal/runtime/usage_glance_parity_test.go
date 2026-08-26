@@ -36,16 +36,27 @@ func glanceRows(records []*storage.ActivityRecord) int {
 		if !filter.Matches(rec) {
 			continue
 		}
-		if rec.Type == storage.ActivityTypeInternalToolCall {
+		switch rec.Type {
+		case storage.ActivityTypeToolCall:
+			if rec.Status == storage.ActivityStatusRejected {
+				continue // spec 093: a shed call never executed
+			}
+		case storage.ActivityTypeInternalToolCall:
 			if management[rec.ToolName] {
 				continue // rule 1: never a row, whatever the status
 			}
 			if rec.Status == storage.ActivityStatusSuccess && !rowsOnSuccess[rec.ToolName] {
 				continue // rule 3: on success, only the discovery built-ins row
 			}
-		}
-		if rec.Type == storage.ActivityTypeToolCall && rec.Status == storage.ActivityStatusRejected {
-			continue // spec 093: a shed call never executed
+		case storage.ActivityTypePolicyDecision:
+			if rec.Status != storage.ActivityStatusBlocked && rec.Status != storage.ActivityStatusRejected {
+				continue // rule 6: only a decision that actually STOPPED the call
+			}
+		default:
+			// GlanceSelection.qualifies ends in `return false`: system starts,
+			// security scans, quarantine and config changes are events the
+			// Activity Log lists, not calls the glance rows.
+			continue
 		}
 		n++
 	}
@@ -206,4 +217,52 @@ func TestUsageAggregate_ManagementBuiltinsNeverEnterTheTimeline(t *testing.T) {
 	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "upstream_servers", Status: storage.ActivityStatusError, Timestamp: ts})
 	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeInternalToolCall, ToolName: "quarantine_security", Status: storage.ActivityStatusError, Timestamp: ts})
 	assert.Empty(t, agg.Timeline(), "rule 1 hides these rows whatever their status, so no bars")
+}
+
+// The timeline and the Activity Log's own "N calls" now come from ONE
+// definition — storage.CountsAsCall — so the two surfaces cannot drift apart
+// (audit finding F1, #1046). This asserts the aggregate really consults it,
+// record by record, rather than carrying a second copy of the rules that
+// happens to agree today.
+func TestUsageAggregate_TimelineIsExactlyTheSharedCallPopulation(t *testing.T) {
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	records := []*storage.ActivityRecord{
+		{Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search", Status: storage.ActivityStatusSuccess, DurationMs: 12, Timestamp: ts},
+		{Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search", Status: storage.ActivityStatusError, DurationMs: 8, Timestamp: ts},
+		{Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search", Status: storage.ActivityStatusBlocked, Timestamp: ts},
+		{Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search", Status: storage.ActivityStatusRejected, Timestamp: ts},
+		{Type: storage.ActivityTypeInternalToolCall, ToolName: "retrieve_tools", Status: storage.ActivityStatusSuccess, DurationMs: 5, Timestamp: ts},
+		{Type: storage.ActivityTypeInternalToolCall, ToolName: "describe_tool", Status: storage.ActivityStatusError, DurationMs: 2, Timestamp: ts},
+		{Type: storage.ActivityTypeInternalToolCall, ToolName: "code_execution", Status: storage.ActivityStatusSuccess, DurationMs: 400, Timestamp: ts},
+		{Type: storage.ActivityTypeInternalToolCall, ToolName: "code_execution", Status: storage.ActivityStatusError, DurationMs: 3, Timestamp: ts},
+		{Type: storage.ActivityTypeInternalToolCall, ToolName: "upstream_servers", Status: storage.ActivityStatusSuccess, Timestamp: ts},
+		{Type: storage.ActivityTypeInternalToolCall, ServerName: "github", ToolName: "call_tool_read", Status: storage.ActivityStatusSuccess, Timestamp: ts},
+		{Type: storage.ActivityTypePolicyDecision, ServerName: "evil", ToolName: "exfil", Status: storage.ActivityStatusBlocked, Timestamp: ts},
+		{Type: storage.ActivityTypeSystemStart, ToolName: "startup", Status: storage.ActivityStatusSuccess, Timestamp: ts},
+		{Type: storage.ActivityTypeSecurityScan, ServerName: "github", ToolName: "search", Status: storage.ActivityStatusSuccess, Timestamp: ts},
+		{Type: storage.ActivityTypeToolQuarantineChange, ServerName: "github", ToolName: "search", Status: "tool_auto_approved", Timestamp: ts},
+	}
+
+	var wantCalls, wantErrors int64
+	for _, rec := range records {
+		if counted, isError := storage.CountsAsCall(rec); counted {
+			wantCalls++
+			if isError {
+				wantErrors++
+			}
+		}
+	}
+
+	agg := newUsageAggregate()
+	for _, rec := range records {
+		agg.Apply(rec)
+	}
+
+	timeline := agg.Timeline()
+	require.Len(t, timeline, 1)
+	assert.Equal(t, wantCalls, timeline[0].Calls, "the bars are the shared call population, nothing else")
+	assert.Equal(t, wantErrors, timeline[0].Errors, "and so are the failures within them")
+	assert.EqualValues(t, glanceRows(records), timeline[0].Calls,
+		"which is still, independently, the set of rows the glance renders")
 }

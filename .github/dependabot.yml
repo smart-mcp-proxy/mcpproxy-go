@@ -7,6 +7,13 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # mcp-go bumps are managed deliberately by the MCP protocol-upgrade
+      # track (#532): the SDK pin interacts with the frozen tool-surface
+      # goldens and the protocol-era behavior, so it must never ride the
+      # weekly go-dependencies group (a stray qa-gate nearly auto-merged
+      # v0.58.0 via #1017). Bump it in its own reviewed PR.
+      - dependency-name: "github.com/mark3labs/mcp-go"
     groups:
       go-dependencies:
         patterns:

@@ -225,9 +225,15 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    const button = wrapper.find('button.btn-ghost')
+    // Audit F18: Disconnect rewrites a user-owned config, so it now confirms
+    // before acting.
+    const button = wrapper.find('[data-test="connect-disconnect-opencode"]')
     expect(button.exists()).toBe(true)
     await button.trigger('click')
+    await flushPromises()
+    expect(disconnectSpy).not.toHaveBeenCalled()
+
+    await wrapper.find('[data-test="connect-disconnect-confirm-button"]').trigger('click')
     await flushPromises()
 
     expect(disconnectSpy).toHaveBeenCalledWith('opencode', 'proxy-alt')
@@ -286,7 +292,7 @@ describe('ConnectModal', () => {
     await flushPromises()
 
     // codex resolved as connected -> Disconnect button.
-    const codexRow = wrapper.find('button.btn-ghost.text-error')
+    const codexRow = wrapper.find('[data-test="connect-disconnect-codex"]')
     expect(codexRow.exists()).toBe(true)
     expect(codexRow.text()).toContain('Disconnect')
 
@@ -536,7 +542,9 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    await wrapper.find('button.btn-ghost.text-error').trigger('click')
+    await wrapper.find('[data-test="connect-disconnect-opencode"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-disconnect-confirm-button"]').trigger('click')
     await flushPromises()
 
     const backup = wrapper.find('[data-test="connect-backup-path"]')
@@ -611,10 +619,10 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    const connectAllBtn = wrapper
-      .findAll('button')
-      .find(b => b.text().includes('Connect All'))!
-    expect(connectAllBtn).toBeTruthy()
+    // Audit F18: the footer primary now names the count it would change.
+    const connectAllBtn = wrapper.find('[data-test="connect-all"]')
+    expect(connectAllBtn.exists()).toBe(true)
+    expect(connectAllBtn.text()).toContain('Connect 3 clients')
     await connectAllBtn.trigger('click')
     await flushPromises()
 

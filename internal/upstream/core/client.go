@@ -85,6 +85,20 @@ type Client struct {
 	// behaviour).
 	brokeredAuth *proxytransport.BrokeredAuth
 
+	// retryAfter collects the `Retry-After` hints this upstream's HTTP/SSE
+	// responses carry. mcp-go flattens a 429 into an error string long before
+	// the connection state machine sees it, so the hint is captured by a
+	// RoundTripper installed under the MCP client and read back here via
+	// RetryAfterDeadline (#1040).
+	//
+	// It is a generation pointer, not a fixed recorder: each connect attempt
+	// swaps in a fresh one (beginRetryAfterGeneration). Transports built for an
+	// earlier attempt keep the recorder they captured at construction, so a
+	// request still in flight on a superseded client cannot write into the
+	// current attempt's slate — and the current attempt starts empty by
+	// construction rather than by racing a Clear.
+	retryAfter atomic.Pointer[proxytransport.RetryAfterRecorder]
+
 	// Transport type and stderr access (for stdio)
 	transportType string
 	stderr        io.Reader
@@ -179,6 +193,7 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		),
 	}
 	c.exposePrompts.Store(resolvedServerConfig.ExposePrompts)
+	c.retryAfter.Store(proxytransport.NewRetryAfterRecorder())
 
 	// Create secure environment manager
 	var envConfig *secureenv.EnvConfig
@@ -520,6 +535,44 @@ func (c *Client) GetConnectionInfo() types.ConnectionInfo {
 		State:      state,
 		ServerName: c.getServerName(),
 	}
+}
+
+// httpTransportConfig builds the transport config for this client's HTTP/SSE
+// connections, threading the per-server Retry-After recorder (#1040) into every
+// mcp-go client we construct. Every HTTP/SSE connect path must go through it —
+// a branch that calls proxytransport.CreateHTTPTransportConfig directly would
+// silently lose the rate-limit hint for that auth strategy.
+func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthConfig *client.OAuthConfig) *proxytransport.HTTPTransportConfig {
+	cfg := proxytransport.CreateHTTPTransportConfig(serverConfig, oauthConfig)
+	// The transport captures THIS generation's recorder. A later attempt swaps
+	// the pointer, and this client keeps writing to the recorder it was built
+	// with — which is exactly what keeps generations from bleeding into each
+	// other (#1040).
+	cfg.RetryAfter = c.retryAfter.Load()
+	return cfg
+}
+
+// beginRetryAfterGeneration retires the current recorder and installs a fresh
+// one for a new connect attempt. Swapping rather than clearing means a request
+// still in flight on a superseded transport writes into the retired recorder,
+// where it can no longer be mistaken for something this attempt observed.
+func (c *Client) beginRetryAfterGeneration() {
+	c.retryAfter.Store(proxytransport.NewRetryAfterRecorder())
+}
+
+// RetryAfterDeadline reports the instant before which this upstream asked us not
+// to come back (from a `Retry-After` on a 429/503), or the zero time when it gave
+// no such hint. The managed client stamps it onto the state machine so both
+// reconnect gates honour it (#1040).
+func (c *Client) RetryAfterDeadline() time.Time {
+	return c.retryAfter.Load().Deadline()
+}
+
+// ClearRetryAfter drops any recorded rate-limit hint. Called once a connection
+// succeeds so a hint observed by an auth strategy that was superseded by a
+// working one cannot hold back a later, unrelated reconnect.
+func (c *Client) ClearRetryAfter() {
+	c.retryAfter.Load().Clear()
 }
 
 // GetServerInfo returns server information from initialization

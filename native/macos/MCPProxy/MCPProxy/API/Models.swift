@@ -796,6 +796,11 @@ struct StatusResponse: Codable {
     let routingMode: String?
     let upstreamStats: UpstreamStats?
     let timestamp: Int64?
+    /// MCP-2176: the core's built-in default MCP instructions, rendered as the
+    /// placeholder of the Settings → Advanced instructions field so the shown
+    /// default never drifts from `resolveInstructions("")`. Optional — a core
+    /// older than the field simply omits it.
+    let defaultInstructions: String?
 
     enum CodingKeys: String, CodingKey {
         case running
@@ -804,6 +809,7 @@ struct StatusResponse: Codable {
         case routingMode = "routing_mode"
         case upstreamStats = "upstream_stats"
         case timestamp
+        case defaultInstructions = "default_instructions"
     }
 }
 

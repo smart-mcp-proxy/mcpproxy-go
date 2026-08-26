@@ -65,6 +65,11 @@ type ConnectionInfo struct {
 	OAuthRetryCount  int             `json:"oauth_retry_count"`
 	IsOAuthError     bool            `json:"is_oauth_error"`
 	GaveUp           bool            `json:"gave_up"` // True when max retries exceeded
+	// RetryAfter is the instant before which the upstream asked us not to come
+	// back, captured from a `Retry-After` header on a rate-limited response
+	// (#1040). Zero when the upstream gave no hint. It acts as a floor under the
+	// retry ladder — the effective delay is max(backoff, Retry-After).
+	RetryAfter time.Time `json:"retry_after,omitempty"`
 }
 
 // RetryBackoffDuration returns the exponential backoff to wait after the given
@@ -124,6 +129,13 @@ func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 	if ci == nil {
 		return true
 	}
+	// A `Retry-After` from a rate-limited upstream is a floor under every other
+	// rung of the ladder: the vendor told us in so many words when to come back,
+	// and dialing earlier only burns quota. It applies whatever the state,
+	// because a 429 can arrive on a tool call as easily as on connect (#1040).
+	if !ci.RetryAfter.IsZero() && now.Before(ci.RetryAfter) {
+		return false
+	}
 	switch ci.State {
 	case StatePendingAuth:
 		return false
@@ -169,6 +181,10 @@ type StateManager struct {
 	oauthRetryCount  int
 	isOAuthError     bool
 	userLoggedOut    bool // When true, prevents auto-reconnection until user explicitly logs in
+	// retryAfter is the upstream-supplied park deadline from a rate-limited
+	// response (#1040), set by SetRetryAfter and cleared on a successful
+	// connection or an explicit Reset.
+	retryAfter time.Time
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
@@ -217,6 +233,7 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
 		GaveUp:           sm.retryCount >= MaxConnectionRetries,
 	}
 }
@@ -242,6 +259,7 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 		sm.isOAuthError = false
 		sm.oauthRetryCount = 0
 		sm.userLoggedOut = false // Clear logout flag on successful connection
+		sm.retryAfter = time.Time{}
 	}
 
 	info := ConnectionInfo{
@@ -254,6 +272,7 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
 	}
 
 	callback := sm.onStateChange
@@ -286,6 +305,7 @@ func (sm *StateManager) SetError(err error) {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
 	}
 
 	callback := sm.onStateChange
@@ -325,6 +345,7 @@ func (sm *StateManager) SetPendingAuth(err error) {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
 		GaveUp:           sm.retryCount >= MaxConnectionRetries,
 	}
 
@@ -341,6 +362,32 @@ func (sm *StateManager) SetPendingAuth(err error) {
 	if callback != nil {
 		callback(oldState, StatePendingAuth, &info)
 	}
+}
+
+// SetRetryAfter records an upstream-supplied park deadline captured from a
+// `Retry-After` header on a rate-limited (429 / 503) response (#1040).
+//
+// It only ever EXTENDS the window: a later, shorter hint must not shorten a wait
+// the upstream already asked for, and an already-elapsed deadline is dropped
+// rather than stored. Call it BEFORE SetError/SetOAuthError so the resulting
+// ConnectionInfo the state-change callback publishes already carries the window.
+func (sm *StateManager) SetRetryAfter(deadline time.Time) {
+	if deadline.IsZero() || !deadline.After(time.Now()) {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if deadline.After(sm.retryAfter) {
+		sm.retryAfter = deadline
+	}
+}
+
+// RetryAfter returns the current park deadline, or the zero time when the
+// upstream has given no rate-limit hint.
+func (sm *StateManager) RetryAfter() time.Time {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.retryAfter
 }
 
 // SetServerInfo sets the server information
@@ -373,6 +420,12 @@ func (sm *StateManager) ShouldRetry() bool {
 
 	// Don't auto-reconnect if user explicitly logged out
 	if sm.userLoggedOut {
+		return false
+	}
+
+	// Honour an upstream-supplied Retry-After window (#1040) — the same floor
+	// ConnectionInfo.ShouldAutoReconnect applies for the supervisor.
+	if !sm.retryAfter.IsZero() && time.Now().Before(sm.retryAfter) {
 		return false
 	}
 
@@ -456,6 +509,7 @@ func (sm *StateManager) Reset() {
 	sm.lastOAuthAttempt = time.Time{}
 	sm.oauthRetryCount = 0
 	sm.isOAuthError = false
+	sm.retryAfter = time.Time{}
 
 	info := ConnectionInfo{
 		State:            sm.currentState,
@@ -467,6 +521,7 @@ func (sm *StateManager) Reset() {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
 	}
 
 	callback := sm.onStateChange
@@ -501,6 +556,7 @@ func (sm *StateManager) ResetForReconnect() {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
 	}
 
 	callback := sm.onStateChange
@@ -532,6 +588,7 @@ func (sm *StateManager) SetOAuthError(err error) {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
 	}
 
 	callback := sm.onStateChange
@@ -550,6 +607,13 @@ func (sm *StateManager) ShouldRetryOAuth() bool {
 
 	// Don't auto-retry OAuth flows if the user explicitly logged out
 	if sm.userLoggedOut {
+		return false
+	}
+
+	// A rate-limit window outranks the OAuth ladder too (#1040): an upstream
+	// that answered 429 will answer 429 to the token exchange as well, and the
+	// OAuth ladder can be shorter than the window the upstream asked for.
+	if !sm.retryAfter.IsZero() && time.Now().Before(sm.retryAfter) {
 		return false
 	}
 

@@ -188,6 +188,32 @@ func TestUnmaskHeaders_RestoresEchoedMask(t *testing.T) {
 	assert.Equal(t, "Bearer realtokenvalue123", got["Authorization"])
 }
 
+// The read path (RedactStringHeaders) and the write path (UnmaskHeaders via
+// maskedHeaderValue) must agree on which header names are sensitive. When the
+// read path masks a custom credential header but the write path does not
+// recognise its own mask, an unedited echo persists `••••ue (16 chars)` OVER the
+// real credential (PATCH /api/v1/servers/{id}, upstream_servers patch).
+func TestUnmaskHeaders_RestoresEchoedMask_CustomCredentialHeaders(t *testing.T) {
+	stored := map[string]string{
+		"X-Custom-Secret":     "supersecretvalue",
+		"X-Client-Credential": "clientcredvalue",
+		"access_token":        "accesstokenvalue",
+	}
+	masked := RedactStringHeaders(stored)
+	incoming := make(map[string]string, len(masked))
+	for k, v := range masked {
+		require.NotContains(t, v, stored[k], "read path must mask %q", k)
+		incoming[k] = v
+	}
+
+	got := UnmaskHeaders(incoming, stored)
+
+	for k, plaintext := range stored {
+		assert.Equal(t, plaintext, got[k],
+			"echoed mask for %q must round-trip back to the stored credential", k)
+	}
+}
+
 // --- Codex round 2 ---
 
 // FINDING 1 (round 2) — UnmaskURL must NOT move a stored secret onto a different

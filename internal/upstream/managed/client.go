@@ -314,6 +314,13 @@ func (mc *Client) Connect(ctx context.Context) error {
 	defer mc.mu.Unlock()
 
 	if connectErr != nil {
+		// A rate-limited upstream (429, or 503 with a hint) told us when to come
+		// back. mcp-go flattened that response into connectErr's string, so the
+		// deadline comes from the recorder the transport RoundTripper fed (#1040).
+		// Stamp it BEFORE the SetError/SetOAuthError branches below so the
+		// ConnectionInfo their callbacks publish already carries the window.
+		mc.syncRetryAfterFromTransport()
+
 		// Check if this is a deferred OAuth requirement (pending user action)
 		if core.IsOAuthPending(connectErr) {
 			mc.logger.Info("⏳ OAuth authentication pending user action",
@@ -777,6 +784,12 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 	result, err := invoker.CallTool(ctx, toolName, args)
 	if err != nil {
 		mc.recordCallToolOAuthSignal(toolName, err)
+		// A 429 answered to a tools/call is the same instruction as one answered
+		// to connect (#1040). Recording it here does NOT mark the server
+		// unhealthy — the classification below owns that — it only makes sure
+		// the hint survives into the state machine, where the reconnect gates
+		// can honour it if this upstream later needs redialing.
+		mc.syncRetryAfterFromTransport()
 		// GH #965: a canceled or timed-out CALL is not a dead SERVER. SetError
 		// flips the whole upstream to Error and burns a retry, evicting it for
 		// every other client — so only hard evidence of a broken transport may
@@ -1259,6 +1272,15 @@ func (mc *Client) performHealthCheck() {
 	err := prober.Ping(ctx)
 
 	if err != nil {
+		// Pick up any rate-limit hint this ping's response carried, BEFORE the
+		// classification below (#1040). A 429 does not read as a connection
+		// error — isConnectionError matches transport-level failures, not HTTP
+		// statuses — so gating the sync on that branch would make it
+		// unreachable for exactly the case it exists for. Recording the window
+		// does not change the health verdict; it only stops the automatic
+		// reconnect paths from returning before the upstream said we may.
+		mc.syncRetryAfterFromTransport()
+
 		// Only mark as error if it's a real connection issue, not timeout during high activity
 		if mc.isConnectionError(err) {
 			if mc.recordHealthCheckFailure(err) {
@@ -1297,6 +1319,30 @@ func (mc *Client) performHealthCheck() {
 // failures (connection refused, host unreachable, DNS gone) trigger Error
 // immediately because waiting buys nothing — the server is genuinely
 // unreachable and the user should see that.
+// syncRetryAfterFromTransport copies any rate-limit hint the transport
+// RoundTripper recorded for this upstream into the state machine, where both
+// reconnect gates can see it (#1040).
+//
+// It is called from every path that turns an upstream failure into Error state,
+// not just connect: a 429 answered to a tools/call or to the health-check ping
+// is just as much a "come back later" as one answered to initialize, and the
+// recorder is the only place that hint exists — mcp-go has already flattened
+// the response into a string by the time the error reaches us.
+func (mc *Client) syncRetryAfterFromTransport() {
+	if mc.coreClient == nil {
+		return
+	}
+	deadline := mc.coreClient.RetryAfterDeadline()
+	if deadline.IsZero() {
+		return
+	}
+	mc.logger.Warn("Upstream rate-limited us; parking reconnects until it says we may return",
+		zap.String("server", mc.GetConfig().Name),
+		zap.Time("retry_not_before", deadline),
+		zap.Duration("retry_after", time.Until(deadline)))
+	mc.StateManager.SetRetryAfter(deadline)
+}
+
 func (mc *Client) recordHealthCheckFailure(err error) bool {
 	mc.consecutiveHealthFailures++
 	if !isTransientHealthCheckError(err) {

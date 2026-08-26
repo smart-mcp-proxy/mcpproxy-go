@@ -43,8 +43,12 @@ graph LR
   scanner_simplification["Scanner simplification (deterministic d…"]
   tpa_db["tpa-db: versioned TPA signature databas…"]
   remote_access_tunnel["Remote access tunnel (feature-flagged M…"]
+  schema_deferred["Deferred-schema serialization for the d…"]
+  token_bench["Token-efficiency benchmark: measured sa…"]
+  tool_graph["Tool co-occurrence graph (experimental,…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
+  discovery_eval_harness["Discovery-quality eval harness (Spec 06…"]
 
   scanner_v2 --> sandbox_isolation
   ux_audit --> action_log_transparency
@@ -54,21 +58,26 @@ graph LR
   tpa_db --> remote_access_tunnel
   ux_audit --> remote_access_tunnel
   analytics_dashboard --> remote_access_tunnel
+  schema_deferred --> token_bench
+  analytics_dashboard --> tool_graph
   telemetry_identity --> telemetry_v7_churn
+  token_bench --> discovery_eval_harness
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,scanner_simplification done;
-  class analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
-  class ux_audit,action_log_transparency,tpa_db,remote_access_tunnel todo;
+  class analytics_dashboard,schema_deferred,telemetry_identity,telemetry_v7_churn in_progress;
+  class tpa_db in_review;
+  class ux_audit,action_log_transparency,remote_access_tunnel,token_bench,tool_graph,discovery_eval_harness todo;
 ```
 
-**Independent epics** (15) — no cross-epic prerequisites; each stands alone:
+**Independent epics** (14) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
+- 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P3
 - 🟡 **Windows native tray app** — In review · P2
-- 🔴 **MCP protocol upgrade to 2026-07-28 revision** — Blocked · P3
 - ⚪ **Planning/docs truth automation** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -76,7 +85,6 @@ graph LR
 - ⚫ **SDK v1 migration** — Todo · P3 · parked
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
-- ⚪ **Discovery-quality eval harness (Spec 065 second half)** — Todo · P3
 - 🟢 **Upgrade awareness & guided update** — Done · P0
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
@@ -105,17 +113,15 @@ graph LR
   release_qa_gate_matrix --> release_qa_gate_consistency
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class release_qa_gate_matrix done;
-  class release_qa_gate_playwright in_review;
+  class release_qa_gate_matrix,release_qa_gate_playwright done;
   class release_qa_gate_macos,release_qa_gate_consistency todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags | 🟢 Done | #819 |
-| T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only) | 🟡 In review | — |
+| T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only) | 🟢 Done | #1030 |
 | T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app) | ⚪ Todo | — |
 | T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states) | ⚪ Todo | — |
 
@@ -136,15 +142,24 @@ graph LR
   analytics_token_drain_graphs --> analytics_default_landing
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   class analytics_token_drain_graphs done;
-  class analytics_default_landing todo;
+  class analytics_default_landing in_review;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | Per-server / per-tool token-drain graphs | 🟢 Done | — |
-| Make dashboard the default landing page | ⚪ Todo | — |
+| Make dashboard the default landing page | 🟡 In review | — |
+
+</details>
+
+<details>
+<summary>🔵 Deferred-schema serialization for the direct tools/list surface (spec 102) — In progress · P1</summary>
+
+> Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema (~88% smaller listing), with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction); plan in progress.
+
+Spec: [102-schema-deferred](./specs/102-schema-deferred/)
 
 </details>
 
@@ -217,6 +232,43 @@ graph LR
 </details>
 
 <details>
+<summary>🔵 MCP protocol upgrade to 2026-07-28 revision — In progress · P3</summary>
+
+> UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision in review as #1033: final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
+
+Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) · PR: #1033
+
+</details>
+
+<details>
+<summary>🟡 tpa-db: versioned TPA signature database for the offline scanner — In review · P1</summary>
+
+> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db is in review as #1028 (merge-on-convergence armed); no implementation has started, so every child task stays todo.
+
+Spec: [101-tpa-db](./specs/101-tpa-db/) · PR: #1028
+
+```mermaid
+graph LR
+  tpa_db_format["Signature DB format + loader (versioned, sign…"]
+  tpa_db_corpus["Seed corpus: catalog known public TPA campaig…"]
+  tpa_db_refresh["Out-of-band refresh (offline-friendly: manual…"]
+
+  tpa_db_format --> tpa_db_corpus
+  tpa_db_format --> tpa_db_refresh
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class tpa_db_format,tpa_db_corpus,tpa_db_refresh todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
+| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
+| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
+
+</details>
+
+<details>
 <summary>🟡 Windows native tray app — In review · P2 · MCP-43</summary>
 
 > No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first.
@@ -238,15 +290,6 @@ graph LR
 | --- | --- | --- |
 | Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work) | ⚪ Todo | — |
 | WebView2 native window + profile submenu | 🟡 In review | `MCP-43` |
-
-</details>
-
-<details>
-<summary>🔴 MCP protocol upgrade to 2026-07-28 revision — Blocked · P3</summary>
-
-> BLOCKED on mcp-go shipping 2026-07-28 (pinned v0.55.x tops out at 2025-11-25). CROSS-SPEC CONFLICT: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug>. Must reconcile at plan time (058 spec now carries a Cross-Spec Reconciliation note). 028 agent-token scoping is already compatible (header-carried).
-
-Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
 
 </details>
 
@@ -305,28 +348,30 @@ graph LR
 </details>
 
 <details>
-<summary>⚪ tpa-db: versioned TPA signature database for the offline scanner — Todo · P1</summary>
+<summary>⚪ Token-efficiency benchmark: measured savings, published results — Todo · P1</summary>
 
-> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate.
+> Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix.
 
 ```mermaid
 graph LR
-  tpa_db_format["Signature DB format + loader (versioned, sign…"]
-  tpa_db_corpus["Seed corpus: catalog known public TPA campaig…"]
-  tpa_db_refresh["Out-of-band refresh (offline-friendly: manual…"]
+  token_bench_harness["Replay harness: activity-log sessions re-run…"]
+  token_bench_public["Run public suites locally (τ-bench / BFCL / M…"]
+  token_bench_blog["Publish results + methodology on mcpproxy.app…"]
+  token_bench_telemetry["Heartbeat v10: per-tool_response_mode token c…"]
 
-  tpa_db_format --> tpa_db_corpus
-  tpa_db_format --> tpa_db_refresh
+  token_bench_harness --> token_bench_public
+  token_bench_public --> token_bench_blog
 
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tpa_db_format,tpa_db_corpus,tpa_db_refresh todo;
+  class token_bench_harness,token_bench_public,token_bench_blog,token_bench_telemetry todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
-| Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
-| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
-| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
+| Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries | ⚪ Todo | — |
+| Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results | ⚪ Todo | — |
+| Publish results + methodology on mcpproxy.app/blog | ⚪ Todo | — |
+| Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation | ⚪ Todo | — |
 
 </details>
 
@@ -358,6 +403,35 @@ graph LR
 | cloudflared quick-tunnel orchestration (detect/launch/supervise/parse URL) + feature flag + never-auto-start | ⚪ Todo | — |
 | Per-server exposure allowlist (default none; quarantined non-exposable; hot-reload) | ⚪ Todo | — |
 | Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Tool co-occurrence graph (experimental, feature-flagged) — Todo · P2</summary>
+
+> Local-only co-occurrence graph mined from the activity log: suggests likely-next tools to agents and surfaces usage-chain analytics. Everything sits behind experimental.tool_graph, off by default — nothing leaves the machine.
+
+```mermaid
+graph LR
+  tool_graph_core["Co-occurrence graph from the activity log + r…"]
+  tool_graph_ranking["Session-aware rank boost in retrieve_tools"]
+  tool_graph_mining["Workflow mining: frequent chains → suggested…"]
+  tool_graph_analytics["Usage-chain analytics on the dashboard/stats…"]
+
+  tool_graph_core --> tool_graph_ranking
+  tool_graph_core --> tool_graph_mining
+  tool_graph_core --> tool_graph_analytics
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class tool_graph_core,tool_graph_ranking,tool_graph_mining,tool_graph_analytics todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Co-occurrence graph from the activity log + related_tools hint in call_tool responses (flag-gated) | ⚪ Todo | — |
+| Session-aware rank boost in retrieve_tools | ⚪ Todo | — |
+| Workflow mining: frequent chains → suggested stored scripts (spec 097 synergy) | ⚪ Todo | — |
+| Usage-chain analytics on the dashboard/stats page | ⚪ Todo | — |
 
 </details>
 
@@ -408,7 +482,7 @@ Spec: [054-mcp-security-gateway](./specs/054-mcp-security-gateway/)
 <details>
 <summary>⚪ Discovery-quality eval harness (Spec 065 second half) — Todo · P3</summary>
 
-> Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness.
+> SUPERSEDED — folded into token-bench-harness: the token-efficiency replay harness re-runs real sessions under every mode combo and measures retrieval recall on the same corpus, so a separate discovery-quality harness would duplicate it. Kept here as a pointer (the id is a stable depends_on target); do not build standalone. Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness.
 
 Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 
@@ -666,14 +740,17 @@ graph LR
 | --- | --- | --- | --- | --- | --- |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
+| Deferred-schema serialization for the direct tools/list surface (spec 102) | In progress | P1 | 0/88 (0%) | [102-schema-deferred](./specs/102-schema-deferred/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
+| MCP protocol upgrade to 2026-07-28 revision | In progress | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | #1033 |
+| tpa-db: versioned TPA signature database for the offline scanner | In review | P1 | — | [101-tpa-db](./specs/101-tpa-db/) | #1028 |
 | Windows native tray app `MCP-43` | In review | P2 | — |  |  |
-| MCP protocol upgrade to 2026-07-28 revision | Blocked | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Web UI + macOS app UX audit | Todo | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | P1 | — |  |  |
-| tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — |  |  |
+| Token-efficiency benchmark: measured savings, published results | Todo | P1 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
+| Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
 | Planning/docs truth automation | Todo | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |

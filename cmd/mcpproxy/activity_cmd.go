@@ -1790,6 +1790,8 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	// Table output
 	period := getStringField(summary, "period")
 	totalCount := getIntField(summary, "total_count")
+	callCount := getIntField(summary, "call_count")
+	callErrorCount := getIntField(summary, "call_error_count")
 	successCount := getIntField(summary, "success_count")
 	errorCount := getIntField(summary, "error_count")
 	blockedCount := getIntField(summary, "blocked_count")
@@ -1808,9 +1810,20 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 		blockedPct = float64(blockedCount) / float64(totalCount) * 100
 	}
 
+	// "Total Calls" used to print total_count, which counts every activity
+	// record — security scans, quarantine auto-approvals, system starts — so the
+	// CLI, the Web UI's Usage tab and the tray all reported different totals for
+	// the same window (audit finding F1, #1046). Events and calls are separate
+	// rows now, and the call row is the number every other surface shows.
+	callErrorPct := float64(0)
+	if callCount > 0 {
+		callErrorPct = float64(callErrorCount) / float64(callCount) * 100
+	}
+
 	fmt.Printf("%-15s %s\n", "METRIC", "VALUE")
 	fmt.Printf("%-15s %s\n", strings.Repeat("-", 15), strings.Repeat("-", 20))
-	fmt.Printf("%-15s %d\n", "Total Calls", totalCount)
+	fmt.Printf("%-15s %d\n", "Total Events", totalCount)
+	fmt.Printf("%-15s %d (%.1f%% failed)\n", "Calls", callCount, callErrorPct)
 	fmt.Printf("%-15s %d (%.1f%%)\n", "Successful", successCount, successPct)
 	fmt.Printf("%-15s %d (%.1f%%)\n", "Errors", errorCount, errorPct)
 	fmt.Printf("%-15s %d (%.1f%%)\n", "Blocked", blockedCount, blockedPct)

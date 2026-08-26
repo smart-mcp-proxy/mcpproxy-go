@@ -300,7 +300,7 @@ set +e
   MCPPROXY_API_KEY="$API_KEY" \
   SWEEP_SERVER_NAME="$SWEEP_SERVER_NAME" \
   SWEEP_REPORT_DIR="$REPORT_DIR" \
-    "$PLAYWRIGHT_BIN" test web-ui-sweep.spec.ts
+    "$PLAYWRIGHT_BIN" test web-ui-sweep.spec.ts visual-a11y-sweep.spec.ts
 )
 PLAYWRIGHT_STATUS=$?
 set -e

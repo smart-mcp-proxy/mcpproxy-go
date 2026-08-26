@@ -35,6 +35,19 @@
               <div class="min-w-0 flex-1">
                 <div class="font-medium text-sm truncate">{{ client.name }}</div>
                 <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
+                <!-- Audit F18: "which endpoint am I registered to?" was
+                     unanswerable — a config merely holding an entry NAMED
+                     mcpproxy read as connected, even pointing at another
+                     instance on another port. Say where it points. -->
+                <div
+                  v-if="client.connected && client.registered_url"
+                  class="text-xs mt-0.5 truncate"
+                  :class="client.endpoint_match === 'other' ? 'text-warning' : 'opacity-60'"
+                  :title="endpointTitle(client)"
+                  :data-test="`connect-endpoint-${client.id}`"
+                >
+                  → {{ client.registered_url }}
+                </div>
                 <div v-if="client.note" class="text-xs opacity-60 italic mt-0.5" :title="client.note">{{ client.note }}</div>
               </div>
             </div>
@@ -57,11 +70,31 @@
                 class="badge badge-warning badge-sm"
                 title="Config exists but could not be parsed"
               >Unreadable config</span>
-              <span v-else-if="!client.exists && !client.bridge" class="text-xs opacity-40">Config not found</span>
+              <!-- Audit F18: one action pattern for every actionable row — a
+                   button in one of three states — instead of a bare red text
+                   link on some rows and a primary button on others. -->
+              <span
+                v-else-if="!client.exists && !client.bridge"
+                class="badge badge-ghost badge-sm"
+                :title="notFoundTitle(client)"
+                :data-test="`connect-not-found-${client.id}`"
+              >Not installed</span>
+              <button
+                v-else-if="client.connected && client.endpoint_match === 'other'"
+                :data-test="`connect-repoint-${client.id}`"
+                @click="startConnect(client.id)"
+                class="btn btn-warning btn-xs"
+                :disabled="loading.clients[client.id] || previewLoading[client.id]"
+                title="This client points at a different MCPProxy instance — review the change to repoint it here"
+              >
+                <span v-if="loading.clients[client.id] || previewLoading[client.id]" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Point here</span>
+              </button>
               <button
                 v-else-if="client.connected"
-                @click="disconnect(client.id)"
-                class="btn btn-ghost btn-xs text-error"
+                :data-test="`connect-disconnect-${client.id}`"
+                @click="askDisconnect(client)"
+                class="btn btn-outline btn-error btn-xs"
                 :disabled="loading.clients[client.id]"
               >
                 <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
@@ -75,21 +108,32 @@
                 :disabled="loading.clients[client.id] || previewLoading[client.id]"
               >
                 <span v-if="loading.clients[client.id] || previewLoading[client.id]" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Review & connect</span>
+                <span v-else>Review &amp; connect</span>
               </button>
+              <span
+                v-if="client.connected && client.endpoint_match === 'other'"
+                class="text-[0.7rem] text-warning"
+                :data-test="`connect-other-instance-${client.id}`"
+              >Connected to another instance</span>
               <!-- Spec 075 US1: explicit, no-eager-read access check. The stat-only
                    listing leaves installed clients 'unknown'; this is the only
                    action that reads the config (the sole macOS privacy-prompt site). -->
+              <!-- Also offered for a row whose `connected` came from the merged
+                   onboarding ids rather than a content read: that path knows the
+                   entry exists but not which endpoint it names, and the read
+                   stays an explicit user action (audit F18 + Spec 075). -->
               <button
-                v-if="client.exists && accessState(client) === 'unknown' && !client.connected"
+                v-if="client.exists && accessState(client) === 'unknown' && !client.endpoint_match"
                 data-test="connect-check-access"
                 @click="checkAccess(client.id)"
                 class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-[0.7rem] opacity-60 hover:opacity-100"
                 :disabled="checking[client.id]"
-                title="Read this client's config now to verify access (may prompt on macOS)"
+                :title="client.connected
+                  ? `Read this client's config now to see which MCPProxy endpoint it points at (may prompt on macOS)`
+                  : `Read this client's config now to verify access (may prompt on macOS)`"
               >
                 <span v-if="checking[client.id]" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Check access</span>
+                <span v-else>{{ client.connected ? 'Verify endpoint' : 'Check access' }}</span>
               </button>
             </div>
           </div>
@@ -336,15 +380,58 @@
         </div>
       </div>
 
-      <div class="modal-action">
+      <!-- Audit F18: the footer's primary said a bare "Connect All" while every
+           actionable row already said Disconnect, and went disabled with no
+           explanation. It now names the count it would change, and says why it
+           is off when it is. -->
+      <div class="modal-action items-center">
+        <span
+          v-if="connectableClients.length === 0 && !loading.initial"
+          class="text-xs opacity-60 mr-auto"
+          data-test="connect-all-hint"
+        >{{ connectAllDisabledReason }}</span>
         <button
           @click="connectAll"
           class="btn btn-primary btn-sm"
-          :disabled="allConnected || connectableClients.length === 0"
+          data-test="connect-all"
+          :disabled="connectableClients.length === 0"
+          :title="connectableClients.length === 0 ? connectAllDisabledReason : ''"
         >
-          Connect All
+          {{ connectableClients.length === 0
+            ? 'Connect All'
+            : `Connect ${connectableClients.length} client${connectableClients.length === 1 ? '' : 's'}` }}
         </button>
         <button @click="close" class="btn btn-ghost btn-sm">Close</button>
+      </div>
+
+      <!-- Audit F18: disconnecting rewrites a user-owned config file. That is
+           never a one-click, unconfirmed text link. -->
+      <div v-if="disconnectTarget" class="modal modal-open" data-test="connect-disconnect-confirm">
+        <div class="modal-box max-w-md">
+          <h3 class="font-bold text-lg">Disconnect {{ disconnectTarget.name }}?</h3>
+          <p class="text-sm mt-2">
+            This removes the
+            <code class="font-mono">{{ disconnectTarget.server_name || 'mcpproxy' }}</code>
+            entry from
+            <code class="font-mono break-all">{{ disconnectTarget.config_path }}</code>.
+          </p>
+          <p class="text-sm text-base-content/70 mt-2">
+            A timestamped backup of the file is written first, and the path is shown afterwards
+            so you can restore it.
+          </p>
+          <div class="modal-action">
+            <button class="btn btn-ghost btn-sm" data-test="connect-disconnect-cancel" @click="disconnectTarget = null">Cancel</button>
+            <button
+              class="btn btn-error btn-sm"
+              data-test="connect-disconnect-confirm-button"
+              :disabled="loading.clients[disconnectTarget.id]"
+              @click="confirmDisconnect"
+            >
+              <span v-if="loading.clients[disconnectTarget.id]" class="loading loading-spinner loading-xs"></span>
+              Disconnect
+            </button>
+          </div>
+        </div>
       </div>
     </div>
     <form method="dialog" class="modal-backdrop" @click.prevent="close"><button>close</button></form>
@@ -445,14 +532,54 @@ const connectableClients = computed(() =>
   // Bridge clients (e.g. Claude Desktop) can be connected even without an
   // existing config file — Connect creates it. A client macOS has blocked
   // ('denied') is excluded: the write would fail with the same privacy error.
+  // A row pointing at ANOTHER instance is excluded too: repointing someone
+  // else's config is a deliberate per-row decision, not a bulk side effect.
   mergedClients.value.filter(
-    c => c.supported && (c.exists || c.bridge) && !c.connected && accessState(c) !== 'denied'
+    c =>
+      c.supported &&
+      (c.exists || c.bridge) &&
+      !c.connected &&
+      accessState(c) !== 'denied'
   )
 )
 
-const allConnected = computed(() =>
-  connectableClients.value.length === 0
-)
+// Audit F18: a disabled primary must say what would enable it. The reasons are
+// mutually exclusive in practice, so the most specific one wins.
+const connectAllDisabledReason = computed(() => {
+  const supported = mergedClients.value.filter(c => c.supported)
+  if (supported.length === 0) return 'No supported MCP clients found on this machine.'
+  if (supported.every(c => c.connected)) return 'Every supported client is already connected.'
+  if (supported.some(c => accessState(c) === 'denied')) {
+    return 'The remaining clients are blocked by macOS — fix access above first.'
+  }
+  return 'No client on this machine is ready to connect.'
+})
+
+function endpointTitle(client: ClientStatus): string {
+  if (client.endpoint_match === 'other') {
+    return `This client is registered to ${client.registered_url}, not to this instance (${client.proxy_url ?? 'unknown'}).`
+  }
+  return `Registered to ${client.registered_url}`
+}
+
+function notFoundTitle(client: ClientStatus): string {
+  const paths = client.checked_paths?.length ? client.checked_paths : [client.config_path]
+  return `No config file found. Looked in:\n${paths.join('\n')}`
+}
+
+// --- Disconnect confirmation (audit F18) ---
+const disconnectTarget = ref<ClientStatus | null>(null)
+
+function askDisconnect(client: ClientStatus) {
+  disconnectTarget.value = client
+}
+
+async function confirmDisconnect() {
+  const target = disconnectTarget.value
+  if (!target) return
+  await disconnect(target.id)
+  disconnectTarget.value = null
+}
 
 function clientIcon(client: ClientStatus): string {
   // Map client icons based on id/name

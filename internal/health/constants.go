@@ -31,6 +31,10 @@ const (
 	ActionViewLogs  = "view_logs"
 	ActionSetSecret = "set_secret"
 	ActionConfigure = "configure"
+	// ActionEditURL is offered when the endpoint itself is unusable — the host
+	// does not resolve, the scheme is unsupported, or the URL is malformed.
+	// Restarting cannot fix any of those; editing the address can.
+	ActionEditURL = "edit_url"
 )
 
 // IsHealthy returns true if the server is considered healthy.

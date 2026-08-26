@@ -1,10 +1,36 @@
 <template>
   <dialog :open="show" class="modal" data-test="add-server-modal">
-    <div class="modal-box max-w-3xl" data-test="add-server-modal-box">
-      <h3 class="font-bold text-lg mb-4">Add New Server</h3>
+    <!--
+      UX audit F6: the box is a flex column with its own scroll region so the
+      submit row stays pinned to the bottom instead of falling below the fold,
+      and it carries the ARIA dialog contract (role/aria-modal/labelledby) that
+      `<dialog open>` does not provide on its own.
+    -->
+    <div
+      ref="dialogRef"
+      class="modal-box max-w-3xl flex flex-col max-h-[85vh] p-0 overflow-hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="add-server-modal-title"
+      data-test="add-server-modal-box"
+    >
+      <!-- Header -->
+      <div class="flex items-start justify-between gap-4 px-6 pt-6 pb-4">
+        <h3 id="add-server-modal-title" class="font-bold text-lg">Add New Server</h3>
+        <button
+          type="button"
+          class="btn btn-sm btn-circle btn-ghost"
+          data-modal-close-button
+          data-test="add-server-modal-close"
+          aria-label="Close"
+          @click="handleClose"
+        >
+          ✕
+        </button>
+      </div>
 
       <!-- Tab Selection -->
-      <div class="tabs tabs-box mb-4">
+      <div class="tabs tabs-box mx-6 mb-4">
         <a
           :class="['tab', activeTab === 'manual' ? 'tab-active' : '']"
           @click="activeTab = 'manual'"
@@ -20,8 +46,9 @@
       </div>
 
       <!-- Manual Tab -->
-      <div v-if="activeTab === 'manual'">
-        <form @submit.prevent="handleSubmit">
+      <div v-if="activeTab === 'manual'" class="flex flex-col flex-1 min-h-0">
+        <form @submit.prevent="handleSubmit" class="flex flex-col flex-1 min-h-0">
+          <div class="flex-1 min-h-0 overflow-y-auto px-6 pb-4" data-test="add-server-modal-body">
           <!-- Server Type Selection -->
           <div class="form-control mb-4">
             <label class="label">
@@ -87,7 +114,7 @@
               <label class="label">
                 <span class="label-text font-semibold">Command</span>
               </label>
-              <select v-model="formData.command" class="select select-bordered" required>
+              <select v-model="formData.command" class="select select-bordered" aria-label="Command" required>
                 <option value="">Select command</option>
                 <option value="npx">npx (Node.js)</option>
                 <option value="uvx">uvx (Python)</option>
@@ -245,9 +272,13 @@
             </svg>
             <span>{{ error }}</span>
           </div>
+          </div>
 
-          <!-- Actions -->
-          <div class="modal-action">
+          <!-- Actions (sticky footer — F6) -->
+          <div
+            class="modal-action mt-0 px-6 py-4 border-t border-base-300 bg-base-100"
+            data-test="add-server-modal-footer"
+          >
             <button type="button" @click="handleClose" class="btn btn-ghost">Cancel</button>
             <button type="submit" class="btn btn-primary" :disabled="loading">
               <span v-if="loading" class="loading loading-spinner loading-sm"></span>
@@ -258,7 +289,8 @@
       </div>
 
       <!-- Import Tab -->
-      <div v-if="activeTab === 'import'">
+      <div v-if="activeTab === 'import'" class="flex flex-col flex-1 min-h-0">
+        <div class="flex-1 min-h-0 overflow-y-auto px-6 pb-4">
         <!-- Input Method Tabs -->
         <div class="flex gap-2 mb-4">
           <button
@@ -531,9 +563,10 @@ Example (Claude Desktop):
             <div class="text-sm mt-2">Deselect these servers or fix the configuration before importing.</div>
           </div>
         </div>
+        </div>
 
-        <!-- Actions -->
-        <div class="modal-action">
+        <!-- Actions (sticky footer — F6) -->
+        <div class="modal-action mt-0 px-6 py-4 border-t border-base-300 bg-base-100">
           <button type="button" @click="handleClose" class="btn btn-ghost">Cancel</button>
           <button
             @click="handleImport"
@@ -558,6 +591,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import api, { type CanonicalConfigPath } from '@/services/api'
 import TrustModeSelector from '@/components/TrustModeSelector.vue'
+import { useModalA11y } from '@/composables/useModalA11y'
 import type { TrustMode } from '@/utils/trustMode'
 import type { ImportResponse, ImportedServer } from '@/types'
 
@@ -572,6 +606,10 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+
+// UX audit F6: Escape closes, focus enters the dialog on open and is trapped
+// inside it, and returns to the trigger on close.
+const { dialogRef } = useModalA11y(() => props.show, () => handleClose())
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
