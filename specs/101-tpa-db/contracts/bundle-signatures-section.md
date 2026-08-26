@@ -64,12 +64,15 @@ signatures[] ──1─────*── rules[]
 A bundle failing any of these is **rejected whole**, exactly like any other contract violation:
 
 1. every `signatures[]` entry names ≥1 rule id that exists in `rules[]`;
-2. every rule with gating intent is named by **exactly one** signature entry — not zero (an ungoverned gating rule has no provenance and no eval evidence) and not two (ambiguous campaign attribution);
+2. every **hard-tier** rule is named by exactly one `gating: true` signature entry — not zero (an ungoverned gating rule has no provenance and no eval evidence) and not two (ambiguous campaign attribution).
+
+   **"Gating" must be mechanical, because `rules[]` has no such field.** Its keys are `category, confidence, detector, engine, flags, id, indicators, level, pattern, severity, target, type` — nothing that says "this rule gates approvals". Left as prose about intent, the check is unenforceable and a hard-tier rule can evade attribution entirely, or be attached to a `gating: false` signature and thereby dodge the FR-013 eval-evidence requirement while still driving the approval gate at runtime. The build MUST therefore derive it from `level` — a rule is gating **iff** it emits at the hard tier, which is exactly what FR-014 says gating means and exactly what the eval gate and the `scan`-mode approval gates score — and MUST reject any bundle where a hard-tier rule's owning signature has `gating: false`. `signatures[].gating` is then a declaration that is *checked* against the rules it names, not an independent switch;
 3. `id` values are unique;
 4. `license` is in the allowlist;
-5. every `gating: true` signature has its FR-013 eval pair in the frozen dataset — ≥1 labeled gated-malicious sample and ≥1 category-matched hard negative following the `hn_<attack_category>_*` naming the dataset validator enforces.
+5. every `gating: true` signature has its FR-013 eval pair in the frozen dataset — ≥1 labeled gated-malicious sample and ≥1 category-matched hard negative following the `hn_<attack_category>_*` naming the dataset validator enforces;
+6. every `gating: true` signature's `category` resolves to a **registered** `categoryCheck` entry in the gate. §5 below explains why an unmapped category is scored vacuously; that explanation is not enforcement, so this rule is what actually stops one shipping. A bundle naming a category the gate cannot enforce is rejected at build, not merely noted.
 
-Direction 2 is the one a naive implementation drops, and it is the one that matters: checking only "signatures point at real rules" lets a gating rule ship with no campaign record at all, which is the state the corpus is in today.
+Direction 2 is the one a naive implementation drops, and it is the one that matters: checking only "signatures point at real rules" lets a gating rule ship with no campaign record at all, which is the state the corpus is in today. Rule 6 is the same failure one level up — a campaign record that exists but that the gate silently declines to score.
 
 ## 5. Interaction with the eval gate
 

@@ -21,7 +21,7 @@ Existing fields keep their meaning and their names. `Fingerprint` stays the 12-h
 | `staleness_days` | **new** | derived from `generated_at` |
 | `coverage_degraded` | **new** | bool |
 | `degraded_reason` | **new** | enum, §3 |
-| `last_rejection` | **new** | `{reason, at}`, §2 — retained across a successful load so "what did it refuse, and when" survives |
+| `last_rejection` | **new** | `{reason, detail, at}`, §2 — retained across a successful load so "what did it refuse, and when" survives. `detail` is a short human string carrying the part the enum cannot (which ceiling was exceeded and by how much, which key id was untrusted, which epoch was expected); it is never parsed, and `reason` is the only field anything branches on |
 
 ## 2. Rejection reasons
 
@@ -36,7 +36,7 @@ The vocabulary an operator reads to tell a tamper attempt from a stale epoch fro
 | `authority_not_active` | verified against a real key of the **non-active** authority (FR-004b) |
 | `rollback_target_mismatch` | the loaded artifact's full digest ≠ the digest the operator named |
 | `gate_failure` | activation self-check (Spec 087 FR-008) rejected the candidate |
-| `ceiling_exceeded` | over one of FR-011's four limits (which one is in the message) |
+| `ceiling_exceeded` | over one of FR-011's four limits — which limit, and the observed value, in `detail` |
 | `not_regular_file` | candidate was a FIFO/device/socket, or a symlink to one |
 | `read_timeout` | the 5 s read budget expired; the single-flight slot was released |
 | `sidecar_*`, `key_*`, `signature_invalid`, `sequence_mismatch` | the sidecar grammar — see [sidecar-format.md](sidecar-format.md) §3 |
