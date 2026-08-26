@@ -43,12 +43,12 @@ Quit MCPProxy                          ⌘Q
 | Window | Sections |
 |---|---|
 | Main window (`MainWindow.swift`) | Dashboard · Servers (→ Server Detail: Tools / Logs / Config) · Registries (→ Browse) · Activity Log · Secrets |
-| Settings (`SettingsView.swift`) | App · Security · General · Advanced · Raw JSON |
+| Settings (`SettingsView.swift`) | App · Security · General · Advanced · Raw |
 | Modal flows | Add Server · Connect Client · First-run dialog · Update-failure dialog |
 
 ### 1.3 Web UI routes (personal edition)
 
-Dashboard · Servers · Server Detail · Repositories · Search · Tools · Activity · Security (+ Scan Report) · Sessions · Secrets · Agent Tokens · Settings (Configuration) · Feedback · Usage.
+Dashboard · Servers · Server Detail · Repositories · Search · Tools · Activity · Security (+ Scan Report) · Sessions · Secrets · Agent Tokens · Settings (Configuration) · Feedback. (Usage is a Dashboard tab, not a route, in v0.60.0.)
 
 ---
 
@@ -67,12 +67,12 @@ Dashboard · Servers · Server Detail · Repositories · Search · Tools · Acti
 | MCP sessions / clients | ✅ Dashboard + glance | ✅ Sessions | **both** |
 | Connect a client (wizard) | ✅ native form | ✅ modal | **both** |
 | Add server | ✅ native form | ✅ | **both** |
-| Configuration editor | ✅ 5 tabs incl. Raw JSON | ✅ | **inconsistent** — 3 fields missing (F6) |
+| Configuration editor | ✅ 5 tabs incl. Raw | ✅ | **inconsistent** — 3 fields missing (F6) |
 | **Agent tokens** | ❌ view exists but unreachable | ✅ `/tokens` | **web-only** (F5) |
 | **Security: deep scan, scan reports, TPA report** | ❌ | ✅ `/security`, `/security/scans/:id` | **web-only** (F8) |
 | **Global tool search / all-tools list** | ❌ | ✅ `/search`, `/tools` | **web-only** (F16) |
 | **Send feedback / report an issue** | ❌ (`ProjectLinks.issues` unused) | ✅ `/feedback` | **web-only** (F14) |
-| Usage report | ⚠️ savings % on Dashboard | ✅ `/usage` | **inconsistent** |
+| Usage report | ⚠️ savings % on Dashboard | ✅ Dashboard → Usage tab (no standalone route in v0.60.0) | **inconsistent** |
 | Core lifecycle (start / stop / restart core) | ✅ | ❌ | **tray-only** (correct) |
 | Launch at login / start core on launch | ✅ | ❌ | **tray-only** (correct) |
 | App updates (Sparkle) | ✅ | ❌ | **tray-only** (correct) |
@@ -85,7 +85,7 @@ The Swift file's own header says it "mirrors the Web UI 1:1". It does not:
 
 | Key | Web UI | Tray | Note |
 |---|---|---|---|
-| `security.deep_scan.enabled` | ✅ Security | ❌ | Docker scanner opt-in — unreachable outside Raw JSON |
+| `security.deep_scan.enabled` | ✅ Security | ❌ | Docker scanner opt-in — unreachable outside the Raw tab |
 | `instructions` | ✅ Advanced → "MCP server instructions" (whole accordion) | ❌ | Web UI also prefills the live built-in default as placeholder |
 | `code_execution_max_parallel` | ✅ Advanced → Code execution | ❌ | Spec 096 field, added web-side only |
 | `server_edition.*` (3) | ✅ (server edition) | ❌ | **N/A** — server edition is not shipped in the personal tray |
@@ -156,7 +156,7 @@ The glance block is the strongest part of the tray. The findings below are conce
 
 ### P2
 
-**F6 · Settings drift with no parity gate.** Three non-deprecated Web UI settings are missing from the tray catalogue — `security.deep_scan.enabled`, `instructions`, `code_execution_max_parallel` — while `SettingsCatalog.swift` claims to mirror `fields.ts` 1:1 and `SettingsView.swift` claims "every backend setting is edited here". They are only reachable via the Raw JSON tab, which is exactly the escape hatch the catalogue exists to avoid. The only test touching the catalogue (`SettingsDiscoveryFieldsTests`) checks duration validation, not key coverage — nothing prevents the next Web-UI-first field from drifting too.
+**F6 · Settings drift with no parity gate.** Three non-deprecated Web UI settings are missing from the tray catalogue — `security.deep_scan.enabled`, `instructions`, `code_execution_max_parallel` — while `SettingsCatalog.swift` claims to mirror `fields.ts` 1:1 and `SettingsView.swift` claims "every backend setting is edited here". They are only reachable via the Raw tab, which is exactly the escape hatch the catalogue exists to avoid. The only test touching the catalogue (`SettingsDiscoveryFieldsTests`) checks duration validation, not key coverage — nothing prevents the next Web-UI-first field from drifting too.
 *Fix*: add the three fields, then add a parity test — a small CI step that extracts `key:` literals from `fields.ts` (minus `server_edition.*`) and diffs them against a Swift-side dump of `SettingsCatalog` keys. **Effort: M (1 day incl. the gate).**
 
 **F7 · One operation, two verb pairs, contradicting the status line.** `MCPProxyApp.swift:1152-1163` labels the same `enabled` flag `Stop`/`Start` for stdio servers and `Disable`/`Enable` for everything else. The result inside a single submenu: status line **"Disabled"**, action **"Start"** — two different mental models (transient process control vs. persistent admin state) for one config write. The Web UI says Enable/Disable everywhere; the tray's own Server Detail says Enable/Disable too.
@@ -206,6 +206,16 @@ Two fixes are worth recording because the obvious implementation is wrong:
 
 - **F1** — the severity dot is drawn by `updateStatusIcon()` as an attributed-title glyph, *not* as a composite image. The status-bar image must stay `isTemplate` so it follows the menu bar, and a template image is re-rendered monochrome, which would erase a coloured badge composited into it.
 - **F6** — the missing keys (`security.deep_scan.enabled`, `instructions`, `code_execution_max_parallel`) were added to `SettingsCatalog.swift` *and* backed by a parity gate, so the next Web-UI-first field cannot drift in silently.
+
+The §1.1 menu capture is a v0.60.0 snapshot and three of its labels have since changed as part of F9:
+`Open MCPProxy...` → **Open MCPProxy Window**, `Open Web UI` → **Open Web UI in Browser**, and
+`Run at Startup` → **Launch at Login** (`MCPProxyApp.swift`).
+
+Two claims in §1 were also wrong at the time of the walk, independent of the fixes, and are corrected in
+place above: the Settings tab is named **Raw**, not "Raw JSON" (`Views/SettingsView.swift` at `v0.60.0`),
+and the Web UI had **no `/usage` route** in v0.60.0 — Usage was a Dashboard tab, and `/usage` only became
+a real route later, in #1044. The parity matrix's "✅ `/usage`" therefore overstated the Web UI side of
+that row.
 
 **Verification caveat**: the review pass that added this section could **not** re-walk the live tray — macOS Accessibility permission was revoked on the reviewing machine (`mcpproxy-ui-test` → `check_accessibility`: `trusted: false`), so `list_menu_items` / `read_status_bar` were unavailable. The resolution above is taken from the #1055 diff (`Menu/TrayIcon.swift` deleted, `TokensView` now reachable from `Views/MainWindow.swift`, `MCPProxyTests/TrayAuditMenuTests.swift` added), not from a second live walk. A follow-up walk on a machine with Accessibility granted is the remaining verification step.
 
