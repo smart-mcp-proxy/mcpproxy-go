@@ -580,7 +580,7 @@ func UnmaskHeaders(incoming, stored map[string]string) map[string]string {
 // renders one (key, value) pair; reused by UnmaskHeaders to recognise echoed
 // masks.
 func maskedHeaderValue(key, value string) string {
-	if sensitiveHeaders[strings.ToLower(key)] {
+	if isSensitiveHeaderKey(key) {
 		return MaskValue(value)
 	}
 	return RedactSensitiveData(value)
