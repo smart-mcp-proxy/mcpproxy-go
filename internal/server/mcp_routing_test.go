@@ -309,7 +309,7 @@ func TestDirectModeHandler_PermissionDenied(t *testing.T) {
 	annotations := &config.ToolAnnotations{
 		ReadOnlyHint: &readOnlyHint,
 	}
-	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: annotations})
 
 	// Create a context with agent token that only has write permission (no read)
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -339,7 +339,7 @@ func TestDirectModeHandler_ServerAccessDenied(t *testing.T) {
 		config: &config.Config{},
 	}
 
-	handler := proxy.makeDirectModeHandler("gitlab", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "gitlab", ToolName: "list_repos", DisplayName: FormatDirectToolName("gitlab", "list_repos"), Annotations: nil})
 
 	// Create a context with agent token that only has access to github
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -374,7 +374,7 @@ func TestDirectModeHandler_AgentWithCorrectPermissions(t *testing.T) {
 	annotations := &config.ToolAnnotations{
 		ReadOnlyHint: &readOnlyHint,
 	}
-	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: annotations})
 
 	// Agent with read permission and github access should pass auth checks
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -414,7 +414,7 @@ func TestDirectModeHandler_DestructiveToolNeedsDestructivePermission(t *testing.
 	annotations := &config.ToolAnnotations{
 		DestructiveHint: &destructiveHint,
 	}
-	handler := proxy.makeDirectModeHandler("github", "delete_repo", annotations)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "delete_repo", DisplayName: FormatDirectToolName("github", "delete_repo"), Annotations: annotations})
 
 	// Agent with only read+write but no destructive permission
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -648,7 +648,7 @@ func TestDirectModeHandler_NoAuthContext(t *testing.T) {
 		config: &config.Config{},
 	}
 
-	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
 
 	// No auth context in context - should pass auth checks (backward compatible)
 	request := mcp.CallToolRequest{
@@ -869,7 +869,7 @@ func TestDirectModeHandler_CallabilityBlock_CarriesRequestID(t *testing.T) {
 	})
 	probe := watchPolicyDecisions(t, rt)
 
-	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
 	result, err := handler(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Name: "github__list_repos"},
 	})
@@ -894,7 +894,7 @@ func TestDirectModeHandler_CallabilityBlock_PrefersContextRequestID(t *testing.T
 	probe := watchPolicyDecisions(t, rt)
 
 	ctx := reqcontext.WithRequestID(context.Background(), "req-from-transport")
-	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
 	_, err := handler(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Name: "github__list_repos"},
 	})

@@ -186,7 +186,7 @@ func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.Serve
 
 		serverTools = append(serverTools, mcpserver.ServerTool{
 			Tool:    mcpTool,
-			Handler: p.makeDirectModeHandler(entry.ServerName, entry.ToolName, entry.Annotations),
+			Handler: p.makeDirectModeHandler(entry),
 		})
 	}
 
@@ -345,7 +345,22 @@ func (p *MCPProxyServer) directSignatureSuffix(entry *directCatalogEntry) string
 
 // makeDirectModeHandler creates a handler function for a direct mode tool.
 // It handles auth checks, permission enforcement, and upstream calls.
-func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, annotations *config.ToolAnnotations) mcpserver.ToolHandlerFunc {
+//
+// The handler closes over its OWN catalog entry (research.md R9). That is what
+// makes "a dispatch can never validate against a definition other than the one
+// its own registration advertised" literally true rather than a hope: the entry
+// is immutable after publication, and a rebuild produces new entries with new
+// handlers, so a request already in flight keeps the definition it was
+// dispatched under even as the catalog is swapped underneath it.
+//
+// Passing (serverName, toolName, annotations) instead — as this did before —
+// would have left US3's validator reading the schema of whatever the catalog
+// happens to hold when the call lands, which is precisely the skew D13 exists
+// to bound.
+func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpserver.ToolHandlerFunc {
+	serverName, toolName := entry.ServerName, entry.ToolName
+	annotations := entry.Annotations
+
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		startTime := time.Now()
 
@@ -424,9 +439,59 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			return blocked, nil
 		}
 
+		// Spec 102 US3 (FR-013): pre-dispatch argument validation, against the
+		// schema of THIS handler's own catalog entry.
+		//
+		// This is what bounds the cost of deferral. A deferred listing
+		// advertises `{"type":"object"}`, so an agent guesses its arguments from
+		// a compact signature; when the signature was lossy the guess can be
+		// wrong, and without this the agent learns that from an opaque upstream
+		// error and starts an unbounded debugging loop. Rejecting here, with the
+		// FULL stored schema attached, costs exactly one retry.
+		//
+		// The schema source is entry.ParamsJSON — the STORED upstream schema,
+		// never the placeholder the listing advertised, which would accept
+		// everything and validate nothing. It is also mode-INDEPENDENT: a
+		// full-mode client that guessed wrong gets the same help, because the
+		// validator never consults the serialization mode (US3 scenario 3).
+		//
+		// Validating `args` rather than `enrichedArgs`: injectAuthMetadata adds
+		// properties the upstream schema never declared, which a schema with
+		// additionalProperties:false would reject — turning our own bookkeeping
+		// into the agent's bug. Matches the call_tool_* path (mcp.go).
+		//
+		// Fail-open is inherited from the validator (FR-013b): an uncompilable
+		// or absent schema dispatches exactly as a schemaless proxy would.
+		if ok, verr, _ := p.inputValidator.validateArgs(entry.DisplayName, entry.Hash, entry.ParamsJSON, args); !ok {
+			detail := oneLineValidationDetail(verr)
+			errMsg := fmt.Sprintf("invalid arguments for %s: %s", entry.DisplayName, detail)
+			p.logger.Debug("direct mode: pre-dispatch argument validation failed",
+				zap.String("server_name", serverName),
+				zap.String("tool_name", toolName),
+				zap.String("detail", detail))
+
+			// The started/completed-error PAIR, not a bare rejection. A call
+			// rejected here never reaches the unconditional
+			// emitActivityToolCallStarted below, so without this the funnel
+			// would show the call never happening at all — precisely the
+			// observability blind spot issue #969 established this handler must
+			// not have. Shapes match the sibling upstream-error emission a few
+			// lines down, so the two are one series to a consumer.
+			p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
+			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", errMsg,
+				time.Since(startTime).Milliseconds(), enrichedArgs, "", false, "", nil,
+				contracts.ContentTrustForTool(annotations), "", 0, 0, "", nil, "")
+
+			return invalidParamsErrorResult(entry.DisplayName, entry.ParamsJSON, detail), nil
+		}
+
 		// Spec 082: a direct tool call is real work — it earns the session a
 		// durable record, and does so BEFORE any activity is emitted so the
 		// records carry the right work session.
+		//
+		// Deliberately AFTER validation: a call rejected for bad arguments did
+		// no work upstream, so it does not earn a durable work session, exactly
+		// like the policy blocks above it.
 		p.markSessionWorked(ctx, sessionID)
 
 		// Emit activity event
