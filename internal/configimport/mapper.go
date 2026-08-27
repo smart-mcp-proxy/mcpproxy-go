@@ -1,6 +1,7 @@
 package configimport
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -63,6 +64,17 @@ func MapToServerConfig(parsed *ParsedServer, now time.Time) (*config.ServerConfi
 		}
 	case FormatGemini:
 		if oauth := mapGeminiOAuth(parsed.Fields); oauth != nil {
+			// Gemini's redirect_uri uses its own callback path (typically
+			// http://localhost:7777/oauth2callback), which mcpproxy's loopback
+			// callback server cannot serve. Copying it verbatim turned an
+			// importable server into a permanent connect failure, so drop the
+			// value and let mcpproxy allocate its own callback instead.
+			if oauth.RedirectURI != "" {
+				if err := oauth.Validate(); err != nil {
+					warnings = append(warnings, fmt.Sprintf("oauth.redirect_uri %q is not usable by mcpproxy and was dropped (%v); mcpproxy will allocate its own callback URL", oauth.RedirectURI, err))
+					oauth.RedirectURI = ""
+				}
+			}
 			server.OAuth = oauth
 			warnings = append(warnings, "OAuth credentials imported; you may need to reconfigure")
 		}

@@ -2100,8 +2100,49 @@ func (v ValidationError) Error() string {
 	return fmt.Sprintf("%s: %s", v.Field, v.Message)
 }
 
-// ValidateDetailed performs detailed validation and returns all errors
+// ValidateDetailed performs detailed validation and returns all errors.
+//
+// It is the shared gate for every *write* surface: the REST config API
+// (POST /api/v1/config/validate, POST /api/v1/config/apply, PATCH /api/v1/config
+// all funnel through Runtime.ValidateConfig / Runtime.ApplyConfig) and the MCP
+// `upstream_servers` tool. Anything appended here is therefore rejected before
+// it is persisted.
+//
+// The boot path is deliberately NOT this function — see Validate(), which runs
+// validateDetailedCore() so that a pre-existing bad value on disk cannot brick
+// a load that has nothing to do with the offending server.
 func (c *Config) ValidateDetailed() []ValidationError {
+	return append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+}
+
+// oauthRedirectURIErrors reports every per-server `oauth.redirect_uri` that the
+// loopback callback listener cannot honor.
+//
+// Kept separate from validateDetailedCore because the two callers want opposite
+// behavior: a write surface must reject the value (it is a permanent connect
+// failure otherwise, with an error that never names redirect_uri), while
+// config.Load must tolerate one already on disk and let it fail loudly at
+// connect time instead.
+func (c *Config) oauthRedirectURIErrors() []ValidationError {
+	var errors []ValidationError
+	for i, server := range c.Servers {
+		if server == nil || server.OAuth == nil {
+			continue
+		}
+		if strings.TrimSpace(server.OAuth.RedirectURI) == "" {
+			continue
+		}
+		if _, _, err := ParseLoopbackRedirectURI(server.OAuth.RedirectURI); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("mcpServers[%d].oauth.redirect_uri", i),
+				Message: err.Error(),
+			})
+		}
+	}
+	return errors
+}
+
+func (c *Config) validateDetailedCore() []ValidationError {
 	var errors []ValidationError
 
 	// Validate listen address format
@@ -2482,8 +2523,16 @@ func (c *Config) Validate() error {
 		c.RoutingMode = RoutingModeRetrieveTools
 	}
 
-	// Then perform detailed validation
-	errors := c.ValidateDetailed()
+	// Then perform detailed validation.
+	//
+	// validateDetailedCore(), NOT ValidateDetailed(): a malformed per-server
+	// `oauth.redirect_uri` must not brick the boot. Failing the load would take
+	// every other server down with it over a field only one server uses, and the
+	// value is already surfaced loudly at connect time (internal/oauth returns an
+	// explicit "invalid oauth.redirect_uri for server X" error). The write
+	// surfaces reject it via ValidateDetailed() instead — that is where the
+	// operator is actually typing it.
+	errors := c.validateDetailedCore()
 	if len(errors) > 0 {
 		// Return first error for backward compatibility
 		return fmt.Errorf("%s", errors[0].Error())

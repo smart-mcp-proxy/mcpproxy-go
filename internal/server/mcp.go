@@ -4601,6 +4601,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		if err := json.Unmarshal([]byte(oauthJSON), &oauthConfig); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Invalid oauth_json format: %v", err)), nil
 		}
+		// Reject a malformed oauth.redirect_uri here, where the caller is
+		// typing it: it is otherwise a permanent connect failure.
+		if err := oauthConfig.Validate(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid oauth_json: %v", err)), nil
+		}
 		oauth = &oauthConfig
 	}
 
@@ -5193,6 +5198,9 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			var oauth config.OAuthConfig
 			if err := json.Unmarshal([]byte(oauthJSON), &oauth); err != nil {
 				return nil, opts, fmt.Errorf("invalid oauth_json format: %v", err)
+			}
+			if err := oauth.Validate(); err != nil {
+				return nil, opts, fmt.Errorf("invalid oauth_json: %w", err)
 			}
 			patch.OAuth = &oauth
 		}
