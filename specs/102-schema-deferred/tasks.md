@@ -169,6 +169,36 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 
 **Checkpoint**: Catalog → Inspect → Execute is complete on one surface. US1 + US2 together are the shippable increment.
 
+> ### Known limitations closed out with Phase 4 (from the cross-model review)
+>
+> - **A server name containing `:` has no check-mode verdict.** `preflight` ids
+>   are `<server>:<tool>` split on the FIRST colon, so such a server cannot be
+>   named to the evaluator at all — canonicalizing would hand it a different
+>   (server, tool) pair and it would answer confidently about another tool. The
+>   tool stays listed and fully describable (definition mode reads the snapshot
+>   and never canonicalizes); only `check: true` refuses it, as `not_found`.
+>   A wrong verdict is worse than no verdict. Config validation only requires a
+>   server name to be non-empty, so this is reachable, and it is a property of
+>   the repo-wide canonical id grammar rather than of this feature — the index,
+>   `call_tool_*` and the retrieve surfaces share it. Fixing it properly means
+>   changing that grammar, which is out of scope here.
+>   Test: `TestDescribeDirectCheck_ColonInServerNameIsRefusedNotMisEvaluated`.
+> - **`did_you_mean` formatting differs between a gated and an
+>   evaluator-produced `not_found`.** Gated ids suggest in both accepted
+>   grammars (the caller's own vocabulary); the evaluator suggests canonical ids
+>   only. This is not a disclosure — both corpora are the SAME
+>   session-visible snapshot (`directCatalogIndexReader` is built from it), so
+>   neither can name anything the caller could not list; only the formatting
+>   differs.
+> - **Listing↔describe parity holds WITHIN a catalog generation.** Across the
+>   `SetTools`-then-publish window a request can see registry N+1 with catalog N,
+>   so a just-added tool is listed but not yet describable. That is D13's
+>   documented one-directional guarantee, accepted at T001 as a safety property
+>   rather than a transaction, and it fails in the safe direction (never
+>   describable-but-unlisted). Phase 4 additionally pins ONE snapshot per
+>   describe/check call, so a rebuild cannot make two ids of the same batch — or
+>   a batch and its own suggestion corpus — disagree.
+
 ---
 
 ## Phase 5: User Story 3 — Self-healing direct calls (Priority: P2)

@@ -329,32 +329,18 @@ func (r *preflightIndexReader) ToolsByServer(serverName string) ([]preflight.Ind
 // `did_you_mean` is drawn from the same filtered corpus, so a suggestion cannot
 // name a tool the caller could not list — the disclosure a shared-index corpus
 // would reintroduce for exactly the ids most likely to be mistyped.
+// It holds a RESOLVED slice rather than the catalog plus a predicate: the
+// visibility predicate is storage-backed, and re-running it inside every
+// ToolsByServer would both cost a read per catalog entry per server and let a
+// concurrent write make two reader calls disagree about the same tool within one
+// evaluation.
 type directCatalogIndexReader struct {
-	catalog *directCatalog
-	visible func(entry *directCatalogEntry) bool
-}
-
-func (r *directCatalogIndexReader) entries() []*directCatalogEntry {
-	if r == nil || r.catalog == nil {
-		return nil
-	}
-	out := make([]*directCatalogEntry, 0, r.catalog.Len())
-	for _, name := range r.catalog.DisplayNames() {
-		entry, ok := r.catalog.Lookup(name)
-		if !ok || entry == nil {
-			continue
-		}
-		if r.visible != nil && !r.visible(entry) {
-			continue
-		}
-		out = append(out, entry)
-	}
-	return out
+	entries []*directCatalogEntry
 }
 
 func (r *directCatalogIndexReader) ToolsByServer(serverName string) ([]preflight.IndexedTool, error) {
 	var out []preflight.IndexedTool
-	for _, entry := range r.entries() {
+	for _, entry := range r.entries {
 		if entry.ServerName != serverName {
 			continue
 		}
@@ -375,7 +361,7 @@ func (r *directCatalogIndexReader) ToolsByServer(serverName string) ([]preflight
 func (r *directCatalogIndexReader) IndexedServerNames() ([]string, error) {
 	seen := make(map[string]struct{})
 	names := make([]string, 0, 8)
-	for _, entry := range r.entries() {
+	for _, entry := range r.entries {
 		if _, ok := seen[entry.ServerName]; ok {
 			continue
 		}

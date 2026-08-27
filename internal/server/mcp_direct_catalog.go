@@ -236,6 +236,30 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 		cat.byCanonical[canonical] = entry
 	}
 
+	// Cross-namespace ambiguity: one string can be entry A's DISPLAY name and
+	// entry B's CANONICAL id at the same time. Server "x" with tool "y:z"
+	// displays as "x__y:z"; server "x__y" with tool "z" canonicalizes to
+	// "x__y:z". Resolution tries the display map first, so without this the
+	// canonical id would silently answer with the other tool's definition.
+	//
+	// Only the CANONICAL form is withdrawn, not the display one. The display
+	// map is the listing's own key space and is unambiguous within itself, so
+	// withdrawing that instead would unlist two working tools to resolve a
+	// question about a third id form. Both tools stay listed and describable by
+	// display name; the ambiguous canonical id resolves to nothing.
+	for canonical, entry := range cat.byCanonical {
+		other, clash := cat.byDisplayName[canonical]
+		if !clash || other == entry {
+			continue
+		}
+		delete(cat.byCanonical, canonical)
+		cat.ambiguousCanonical[canonical] = struct{}{}
+		if logger != nil {
+			logger.Warn("Withholding ambiguous direct id: it is one tool's display name and another's canonical id, so it resolves only as the display name",
+				zap.String("id", canonical))
+		}
+	}
+
 	// Sorted so the listing order — and therefore the FR-010 built-ins golden —
 	// is stable across runs. Go randomizes map iteration, so without this the
 	// golden would be flaky by construction.

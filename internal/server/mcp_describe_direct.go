@@ -43,13 +43,27 @@ import (
 // Invisible and nonexistent are ONE answer on purpose: a distinct code would
 // confirm that a tool the session may not see exists.
 func (p *MCPProxyServer) resolveDirectDescribeID(ctx context.Context, id string) (*directCatalogEntry, bool) {
-	cat := p.loadDirectCatalog()
+	return p.resolveDirectDescribeIDIn(ctx, p.loadDirectCatalog(), id)
+}
+
+// resolveDirectDescribeIDIn resolves against a CALLER-SUPPLIED snapshot, so a
+// batch can pin one generation for its whole lifetime. A rebuild landing between
+// two ids of the same request would otherwise let them be answered from
+// different catalogs — and the check-mode planner and its evaluator corpus from
+// different ones again.
+func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *directCatalog, id string) (*directCatalogEntry, bool) {
 	if cat == nil {
 		// Nothing published yet. Unlike the discovery filters — which fall back
 		// to permissive so a proxy still coming up does not serve an empty
 		// listing — describe answers not_found: there is no snapshot to answer
 		// FROM, and inventing one from the index would reintroduce exactly the
 		// wrong authority this resolver exists to avoid.
+		//
+		// The two therefore disagree for as long as no catalog exists, in the
+		// SAFE direction (listed, not describable). In production that window is
+		// empty: the constructor publishes an empty catalog before serving its
+		// first request (Phase 2 T025), so loadDirectCatalog is non-nil from
+		// then on. It is reachable only by a test that builds a bare proxy.
 		return nil, false
 	}
 
@@ -163,8 +177,10 @@ type directCheckPlan struct {
 	// subset only.
 	refs []preflight.ToolRef
 
-	// callerID maps a canonical id back to the caller's original form.
-	callerID map[string]string
+	// canonicalID maps each caller id to the canonical id it was evaluated
+	// under. It is deliberately many-to-one: two caller ids may name the same
+	// tool in the two accepted grammars, and both must get that tool's verdict.
+	canonicalID map[string]string
 
 	// gated is the set of caller ids answered WITHOUT consulting the evaluator.
 	gated map[string]struct{}
@@ -204,27 +220,23 @@ func (plan directCheckPlan) notFound(callerID string) preflight.Result {
 // says it does not. Gating first means one answer, and it is the evaluator's own
 // not_found bytes (preflight.NotFound), so a gated id is indistinguishable from
 // an absent one.
-func (p *MCPProxyServer) planDirectCheck(ctx context.Context, rawIDs []string) directCheckPlan {
+func (p *MCPProxyServer) planDirectCheck(ctx context.Context, cat *directCatalog, visible []*directCatalogEntry, rawIDs []string) directCheckPlan {
 	plan := directCheckPlan{
-		callerID: make(map[string]string, len(rawIDs)),
-		gated:    make(map[string]struct{}, len(rawIDs)),
+		canonicalID: make(map[string]string, len(rawIDs)),
+		gated:       make(map[string]struct{}, len(rawIDs)),
 	}
 
 	// Built once per call from the catalog, filtered by this session's own
-	// visibility predicate.
-	if cat := p.loadDirectCatalog(); cat != nil {
-		for _, name := range cat.DisplayNames() {
-			entry, ok := cat.Lookup(name)
-			if !ok || entry == nil || !p.directEntryVisibleToSession(ctx, entry) {
-				continue
-			}
-			plan.suggestions = append(plan.suggestions,
-				entry.DisplayName,
-				entry.ServerName+":"+entry.ToolName)
-		}
+	// visibility predicate — the same snapshot the evaluator's index reader
+	// gets, so a gated id and an evaluated one suggest from one corpus.
+	for _, entry := range visible {
+		plan.suggestions = append(plan.suggestions,
+			entry.DisplayName,
+			entry.ServerName+":"+entry.ToolName)
 	}
 
 	seen := make(map[string]struct{}, len(rawIDs))
+	seenCanonical := make(map[string]struct{}, len(rawIDs))
 	for _, raw := range rawIDs {
 		// Trimmed and deduplicated exactly as normalizeDescribeCheckIDs does, so
 		// the two surfaces agree on what one id means.
@@ -235,23 +247,38 @@ func (p *MCPProxyServer) planDirectCheck(ctx context.Context, rawIDs []string) d
 		seen[id] = struct{}{}
 		plan.order = append(plan.order, id)
 
-		entry, ok := p.resolveDirectDescribeID(ctx, id)
+		entry, ok := p.resolveDirectDescribeIDIn(ctx, cat, id)
 		if !ok {
 			plan.gated[id] = struct{}{}
 			continue
 		}
 
-		canonical := entry.ServerName + ":" + entry.ToolName
-		// A canonical id already claimed by another caller id would make the
-		// restore ambiguous. It cannot happen — resolveDirectDescribeID resolves
-		// through maps the catalog keeps unambiguous — but if it ever did, the
-		// safe answer is the one that discloses nothing.
-		if _, clash := plan.callerID[canonical]; clash {
+		// preflight ids are "<server>:<tool>", split on the FIRST colon. A
+		// server name containing a colon therefore cannot be named in that
+		// grammar at all: canonicalizing would hand the evaluator a different
+		// (server, tool) pair and it would answer about another tool — or about
+		// nothing, confidently. Refusing to evaluate is the lesser failure, and
+		// it is loud: the id is listed and DESCRIBABLE (definition mode reads
+		// the snapshot directly and never canonicalizes), only its availability
+		// verdict is unavailable. Recorded as a known limitation in
+		// specs/102-schema-deferred/tasks.md rather than papered over.
+		if strings.Contains(entry.ServerName, ":") {
 			plan.gated[id] = struct{}{}
 			continue
 		}
-		plan.callerID[canonical] = id
-		plan.refs = append(plan.refs, preflight.ToolRef{ID: canonical})
+
+		canonical := entry.ServerName + ":" + entry.ToolName
+		plan.canonicalID[id] = canonical
+		// Two caller ids may legitimately name ONE tool — "gh__read_file" and
+		// "gh:read_file" in the same batch are both valid on this surface. They
+		// share a canonical ref (deduped here so the evaluator is asked once)
+		// and both get that ref's verdict back under their own id. Gating the
+		// second, as an earlier draft did, answered not_found for a tool the
+		// caller could see and had just been told about.
+		if _, queued := seenCanonical[canonical]; !queued {
+			seenCanonical[canonical] = struct{}{}
+			plan.refs = append(plan.refs, preflight.ToolRef{ID: canonical})
+		}
 	}
 
 	return plan
@@ -277,15 +304,7 @@ func (plan directCheckPlan) restore(outcome preflight.Outcome) preflight.Outcome
 			results = append(results, plan.notFound(callerID))
 			continue
 		}
-		// The canonical form this caller id was evaluated under.
-		var canonical string
-		for canon, caller := range plan.callerID {
-			if caller == callerID {
-				canonical = canon
-				break
-			}
-		}
-		result, ok := evaluated[canonical]
+		result, ok := evaluated[plan.canonicalID[callerID]]
 		if !ok {
 			// The evaluator dropped an id it was handed. Answering "ready"
 			// because nothing came back would be the worst possible default.
@@ -304,13 +323,35 @@ func (plan directCheckPlan) restore(outcome preflight.Outcome) preflight.Outcome
 	}
 }
 
+// visibleDirectEntries snapshots the catalog entries this session can list, in
+// the catalog's own order.
+func (p *MCPProxyServer) visibleDirectEntriesIn(ctx context.Context, cat *directCatalog) []*directCatalogEntry {
+	if cat == nil {
+		return nil
+	}
+	out := make([]*directCatalogEntry, 0, cat.Len())
+	for _, name := range cat.DisplayNames() {
+		entry, ok := cat.Lookup(name)
+		if !ok || entry == nil || !p.directEntryVisibleToSession(ctx, entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // runDirectCheck evaluates one direct-surface check-mode batch.
 func (p *MCPProxyServer) runDirectCheck(
 	ctx context.Context,
 	rawIDs []string,
 	filters toolannotations.Filters,
 ) (preflight.Outcome, error) {
-	plan := p.planDirectCheck(ctx, rawIDs)
+	// ONE snapshot for the whole call: the plan, the suggestion corpus and the
+	// evaluator's index reader all resolve against the same generation, so a
+	// rebuild mid-request cannot make them disagree about what exists.
+	cat := p.loadDirectCatalog()
+	visible := p.visibleDirectEntriesIn(ctx, cat)
+	plan := p.planDirectCheck(ctx, cat, visible, rawIDs)
 
 	// Every id was gated: there is nothing to evaluate, and calling the
 	// evaluator with an empty ref set would still cost a state snapshot.
@@ -323,12 +364,12 @@ func (p *MCPProxyServer) runDirectCheck(
 		return preflight.Outcome{}, err
 	}
 
-	reader := &directCatalogIndexReader{
-		catalog: p.loadDirectCatalog(),
-		visible: func(entry *directCatalogEntry) bool {
-			return p.directEntryVisibleToSession(ctx, entry)
-		},
-	}
+	// The visible corpus is resolved ONCE, here, and handed to the reader as a
+	// fixed slice. Recomputing it per reader call would re-run a storage-backed
+	// callability check for every catalog entry on every ToolsByServer — and,
+	// worse, would let a storage write land mid-evaluation and make
+	// IndexedServerNames and ToolsByServer disagree about the same tool.
+	reader := &directCatalogIndexReader{entries: visible}
 
 	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader)
 	if err != nil {

@@ -482,3 +482,45 @@ func TestDescribeDirect_ServerRemovedBetweenListAndDescribe(t *testing.T) {
 	require.Contains(t, byID, "we__ird__do_thing")
 	assert.Equal(t, describeErrNotFound, byID["we__ird__do_thing"]["error"])
 }
+
+// Cross-model review, High-4: one string can be entry A's DISPLAY name and
+// entry B's CANONICAL id. Resolution prefers the display map, so without the
+// catalog withdrawing the canonical form that id would silently answer with the
+// wrong tool's definition.
+func TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap(t *testing.T) {
+	// "x__y:z" is both.
+	tools := []*config.ToolMetadata{
+		{ServerName: "x", Name: "y:z", Description: "Display-name owner",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-display"},
+		{ServerName: "x__y", Name: "z", Description: "Canonical-id owner",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-canonical"},
+	}
+	require.Equal(t, FormatDirectToolName("x", "y:z"), "x__y"+":"+"z",
+		"the fixture must actually collide, or this test proves nothing")
+
+	p := createTestMCPProxyServer(t)
+	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+
+	// Both tools stay LISTED: the display key space is unambiguous within
+	// itself, so withdrawing display names would unlist two working tools.
+	resp := callDescribeDirect(t, p, context.Background(),
+		[]interface{}{"x__y:z", "x__y__z"})
+
+	byName := map[string]map[string]interface{}{}
+	for _, def := range resp.Definitions {
+		byName[def["name"].(string)] = def
+	}
+
+	// "x__y:z" resolves as a DISPLAY name only — to server "x".
+	require.Contains(t, byName, "x:y:z")
+	assert.Equal(t, "x", byName["x:y:z"]["server"])
+
+	// The other tool is reachable by its own display name, and its canonical
+	// form is withheld because it cannot name one of the two.
+	require.Contains(t, byName, "x__y:z")
+	assert.Equal(t, "x__y", byName["x__y:z"]["server"])
+
+	cat := p.loadDirectCatalog()
+	_, resolvesCanonically := cat.LookupCanonical("x__y:z")
+	assert.False(t, resolvesCanonically, "the ambiguous canonical id must resolve to nothing")
+}

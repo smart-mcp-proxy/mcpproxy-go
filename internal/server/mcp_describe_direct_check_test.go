@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -207,4 +208,56 @@ func TestDescribeCheck_IndexedSurfaceStillRejectsDirectIDs(t *testing.T) {
 	require.Len(t, payload.Results, 1)
 	assert.Equal(t, string(preflight.StatusUnavailable), payload.Results[0].Status)
 	assert.Equal(t, string(preflight.ReasonNotFound), payload.Results[0].Reason)
+}
+
+// Cross-model review, High-2: two caller ids may legitimately name ONE tool —
+// the two accepted grammars in a single batch. Both must get that tool's
+// verdict; an earlier draft gated the second as not_found, answering "gone" for
+// a tool the caller had just been listed.
+func TestDescribeDirectCheck_BothGrammarsOfOneToolInOneBatch(t *testing.T) {
+	f := newDirectCheckFixture(t)
+
+	payload := f.check(t, context.Background(), []interface{}{"github__read_file", "github:read_file"})
+
+	require.Len(t, payload.Results, 2)
+	assert.Equal(t, []string{"github__read_file", "github:read_file"},
+		[]string{payload.Results[0].ID, payload.Results[1].ID})
+	for _, r := range payload.Results {
+		assert.Equalf(t, string(preflight.StatusReady), r.Status,
+			"both grammars of one tool must get that tool's verdict, got %+v", r)
+	}
+}
+
+// Cross-model review, High-3: preflight ids split on the FIRST colon, so a
+// server name containing one cannot be named to the evaluator at all. Refuse to
+// evaluate rather than report another tool's verdict — but keep the tool
+// listed and describable, since definition mode never canonicalizes.
+func TestDescribeDirectCheck_ColonInServerNameIsRefusedNotMisEvaluated(t *testing.T) {
+	tools := append(describeDirectFixture(), &config.ToolMetadata{
+		ServerName:  "od:d",
+		Name:        "tool",
+		Description: "On a server whose name contains a colon",
+		ParamsJSON:  `{"type":"object"}`,
+		Hash:        "h-odd",
+		Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+	})
+
+	f := newDirectCheckFixture(t)
+	require.NoError(t, f.proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "od:d", Enabled: true}))
+	require.NoError(t, f.proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "od:d", ToolName: "tool", Status: storage.ToolApprovalStatusApproved,
+	}))
+	f.proxy.publishDirectCatalog(buildDirectCatalog(tools, nil))
+
+	// Definition mode is unaffected — it reads the snapshot directly.
+	def := callDescribeDirect(t, f.proxy, context.Background(), []interface{}{"od:d__tool"})
+	require.Empty(t, def.Errors, "the tool must stay describable")
+	require.Len(t, def.Definitions, 1)
+
+	// Check mode refuses rather than evaluating "od" : "d:tool".
+	payload := f.check(t, context.Background(), []interface{}{"od:d__tool"})
+	require.Len(t, payload.Results, 1)
+	assert.Equal(t, "od:d__tool", payload.Results[0].ID)
+	assert.Equal(t, string(preflight.ReasonNotFound), payload.Results[0].Reason,
+		"a verdict about a DIFFERENT tool would be worse than no verdict")
 }
