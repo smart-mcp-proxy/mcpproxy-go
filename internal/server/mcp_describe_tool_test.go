@@ -133,8 +133,12 @@ func TestDescribeTool_MixedValidAndUnknownIDs(t *testing.T) {
 	}
 	require.Contains(t, byID, "github:no_such_tool")
 	assert.Equal(t, "not_found", byID["github:no_such_tool"]["error"])
-	assert.Contains(t, byID["github:no_such_tool"]["remediation"], "retrieve_tools",
+	// Spec 102 FR-009: the hint points at discovery WITHOUT naming
+	// retrieve_tools, which the direct surface does not expose.
+	assert.Equal(t, describeNotFoundRemediation, byID["github:no_such_tool"]["remediation"],
 		"remediation must point the agent back at discovery")
+	assert.NotContains(t, byID["github:no_such_tool"]["remediation"], "retrieve_tools",
+		"the shared remediation must stay surface-neutral")
 	require.Contains(t, byID, "not-a-valid-id")
 	assert.Equal(t, "not_found", byID["not-a-valid-id"]["error"])
 }
@@ -257,7 +261,7 @@ func TestDescribeTool_TrimsWhitespaceInIDs(t *testing.T) {
 // Server/tool ids are case-sensitive by design (approval, quarantine and
 // agent-scope stores all key on exact case). A miscased id must therefore NOT
 // resolve, but the remediation must name the canonical id instead of the
-// generic "re-run retrieve_tools" hint.
+// generic not-found hint.
 func TestDescribeTool_CaseMismatchDidYouMean(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 	seedEntryBuilderFixture(t, proxy)

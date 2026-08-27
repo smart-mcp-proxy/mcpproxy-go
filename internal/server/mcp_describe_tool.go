@@ -44,10 +44,19 @@ const (
 	describeErrDisabled        = "disabled"
 )
 
-// describeNotFoundRemediation is the standard "gone between search and
+// describeNotFoundRemediation is the standard "gone between listing and
 // describe" hint (spec edge case). Deliberately reused for out-of-scope ids so
 // the remediation text never confirms that an invisible tool exists.
-const describeNotFoundRemediation = "Tool not found or no longer available; re-run retrieve_tools."
+//
+// Spec 102 FR-009 made it surface-neutral: describe_tool is now registered on
+// the direct surface too, where retrieve_tools is not exposed at all, so the
+// old text told a stuck agent to call a tool it cannot see.
+const describeNotFoundRemediation = "Tool not found or no longer available; list tools again."
+
+// describeMalformedIDRemediation is the answer to an id that does not parse.
+// Promoted from an inline literal so the two accepted forms are stated in
+// exactly one place alongside the tool_ids prose that advertises them.
+const describeMalformedIDRemediation = "Tool ids must be '<server>:<tool>' or '<server>__<tool>', exactly as listed."
 
 // buildDescribeToolTool constructs the describe_tool definition (Spec 085
 // FR-010/FR-011, Spec 099 FR-001/FR-002/FR-007). ONE builder feeds both
@@ -61,25 +70,28 @@ const describeNotFoundRemediation = "Tool not found or no longer available; re-r
 // shows up as a reviewable diff rather than silent drift under the ceiling.
 func buildDescribeToolTool() mcp.Tool {
 	return mcp.NewTool("describe_tool",
-		mcp.WithDescription("Return full JSON Schema + long description for specific tools found via retrieve_tools. Use when a compact signature is marked lossy ('~') or you need the exact schema before calling. With check:true it returns one availability verdict per id instead of schemas ('ready', or a reason code with retryable/action), to gate a plan before its first call."),
+		mcp.WithDescription("Return full JSON Schema + long description for listed tools. Use when a signature is marked lossy ('~') or you need the exact schema before calling. With check:true it returns one availability verdict per id, not schemas ('ready', or a reason code with retryable/action), to gate a plan before its first call."),
 		mcp.WithTitleAnnotation("Describe Tool"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithArray("tool_ids",
 			mcp.Required(),
-			mcp.Description("Tool ids in '<server>:<tool>' format from retrieve_tools. Max 5, or 50 with check:true."),
+			mcp.Description("Tool ids as listed: '<server>:<tool>' or '<server>__<tool>'. Max 5, or 50 with check:true."),
 			mcp.WithStringItems(),
 		),
 		mcp.WithBoolean("check",
-			mcp.Description("Check availability only, no schemas (default: false)."),
+			mcp.Description("Check availability only, no schemas (default false)."),
 		),
 		// The three annotation filters carry no per-property prose: their names
-		// and semantics are the ones retrieve_tools already teaches, and
-		// restating them here priced ~18 tokens on every session of two
-		// surfaces (FR-007/FR-015).
+		// and semantics are the ones the discovery surfaces already teach, and
+		// restating them here priced ~18 tokens on every session of every
+		// surface that registers this tool (FR-007/FR-015). The surface that
+		// taught them is no longer named either: describe_tool is registered on
+		// the direct surface too (Spec 102 FR-009), where retrieve_tools does
+		// not exist.
 		mcp.WithObject("filters",
-			mcp.Description("check:true only. Annotation filters, as in retrieve_tools."),
+			mcp.Description("check:true only. Annotation filters."),
 			mcp.Properties(map[string]any{
 				"read_only_only":      map[string]any{"type": "boolean"},
 				"exclude_destructive": map[string]any{"type": "boolean"},
@@ -192,7 +204,7 @@ func (p *MCPProxyServer) handleDescribeTool(ctx context.Context, request mcp.Cal
 		serverName, toolName, ok := splitServerTool(id)
 		if !ok {
 			idErrors = append(idErrors, describeToolIDError(id, describeErrNotFound,
-				"Tool ids must use '<server>:<tool>' format, exactly as returned by retrieve_tools."))
+				describeMalformedIDRemediation))
 			continue
 		}
 

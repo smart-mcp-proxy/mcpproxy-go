@@ -24,11 +24,14 @@ import (
 // corpus of plain-mode calls and compares each response BYTE FOR BYTE against a
 // capture taken from the pre-099 handler.
 //
-// Exactly one difference is permitted, and it is named rather than tolerated:
-// an out-of-scope id's per-id `error` moves from the retired `invisible` to
-// `not_found` (the `remediation` was already the shared not-found string, so
-// nothing else on the entry moves). Any second difference — a reordered key, a
-// reworded remediation, a changed cap message — fails.
+// Every difference is named rather than tolerated, and each named substitution
+// must actually apply. Spec 099 permitted one: an out-of-scope id's per-id
+// `error` moving from the retired `invisible` to `not_found`. Spec 102 adds the
+// two remediation rewordings FR-009 required, because describe_tool is now
+// registered on the direct surface, where retrieve_tools does not exist and the
+// old text named a tool the agent cannot call. Any difference beyond the
+// enumeration — a reordered key, an unlisted rewording, a changed cap message —
+// still fails.
 //
 // The golden was captured with this exact file copied into a throwaway
 // `git worktree` of the pre-099 commit and run with
@@ -40,14 +43,51 @@ const (
 	describePlainCorpusWriteEnv = "MCPPROXY_WRITE_DESCRIBE_PLAIN_CORPUS"
 )
 
-// describePlainDelta lists the corpus scenarios spec 099 is allowed to change,
-// with the exact substitution that must account for the whole difference.
-// A MISCASED out-of-scope id is deliberately absent: it never reached the scope
-// gate — an id that is not in the index at all resolves to not_found first — so
-// it answered not_found before this change too, and must still.
-var describePlainDelta = map[string]struct{ from, to string }{
-	"out_of_scope_id":             {`"error":"invisible"`, `"error":"not_found"`},
-	"out_of_scope_id_among_valid": {`"error":"invisible"`, `"error":"not_found"`},
+// describePlainSubstitution is one enumerated text change: every byte a
+// permitted scenario differs by must be accounted for by applying these, in
+// order, to the frozen capture.
+type describePlainSubstitution struct{ from, to string }
+
+// The two remediation strings spec 102 FR-009 rewrote. describe_tool is now
+// registered on the DIRECT surface too, where retrieve_tools is not exposed at
+// all — so the old text answered a stuck agent by naming a tool it cannot see.
+// Written as the serialized bytes ('<' encodes as \u003c inside the captured
+// JSON), because the comparison is on the response text, not on a decoded
+// structure.
+const (
+	describeCorpusNotFoundFrom = `Tool not found or no longer available; re-run retrieve_tools.`
+	describeCorpusNotFoundTo   = `Tool not found or no longer available; list tools again.`
+
+	describeCorpusMalformedFrom = `Tool ids must use '\u003cserver\u003e:\u003ctool\u003e' format, exactly as returned by retrieve_tools.`
+	describeCorpusMalformedTo   = `Tool ids must be '\u003cserver\u003e:\u003ctool\u003e' or '\u003cserver\u003e__\u003ctool\u003e', exactly as listed.`
+)
+
+// describePlainDelta lists the corpus scenarios later specs are allowed to
+// change, with the exact substitutions that must account for the WHOLE
+// difference. The value is an ordered slice rather than a single pair because
+// spec 102 gives some scenarios two independent changes (an out-of-scope id
+// carries both spec 099's retired code and spec 102's reworded remediation);
+// collapsing them would let one of the two pass unenumerated.
+//
+// A MISCASED out-of-scope id is present for the remediation change only: it
+// never reached the scope gate — an id that is not in the index at all resolves
+// to not_found first — so it answered not_found before spec 099 too, and still
+// does. Only its remediation text moved.
+var describePlainDelta = map[string][]describePlainSubstitution{
+	// spec 099: the retired `invisible` code. spec 102: the remediation text.
+	"out_of_scope_id": {
+		{`"error":"invisible"`, `"error":"not_found"`},
+		{describeCorpusNotFoundFrom, describeCorpusNotFoundTo},
+	},
+	"out_of_scope_id_among_valid": {
+		{`"error":"invisible"`, `"error":"not_found"`},
+		{describeCorpusNotFoundFrom, describeCorpusNotFoundTo},
+	},
+	// spec 102 only.
+	"out_of_scope_case_mismatch_id": {{describeCorpusNotFoundFrom, describeCorpusNotFoundTo}},
+	"unknown_id":                    {{describeCorpusNotFoundFrom, describeCorpusNotFoundTo}},
+	"malformed_id":                  {{describeCorpusMalformedFrom, describeCorpusMalformedTo}},
+	"mixed_valid_and_errors":        {{describeCorpusMalformedFrom, describeCorpusMalformedTo}},
 }
 
 // scopedSessionContext is the agent session the scope cases are observed under:
@@ -162,18 +202,26 @@ func TestDescribeToolPlainCorpus_ByteIdenticalWithOneEnumeratedDelta(t *testing.
 		}
 		changed = append(changed, name)
 
-		delta, allowed := describePlainDelta[name]
-		if !assert.Truef(t, allowed, "scenario %s changed, and spec 099 permits no delta there:\nwant %s\ngot  %s", name, wantText, gotText) {
+		deltas, allowed := describePlainDelta[name]
+		if !assert.Truef(t, allowed, "scenario %s changed, and no spec permits a delta there:\nwant %s\ngot  %s", name, wantText, gotText) {
 			continue
 		}
-		assert.Equalf(t, strings.ReplaceAll(wantText, delta.from, delta.to), gotText,
-			"scenario %s may differ ONLY by %s -> %s; anything else is a second, unenumerated delta", name, delta.from, delta.to)
-		assert.Containsf(t, wantText, delta.from, "scenario %s: the pre-099 capture must actually contain the retired code", name)
+		substituted := wantText
+		for _, delta := range deltas {
+			// Each enumerated substitution must actually apply: a stale entry
+			// that no longer matches anything would silently widen the
+			// allowance for whatever else changed.
+			assert.Containsf(t, substituted, delta.from,
+				"scenario %s: the frozen capture must actually contain %q", name, delta.from)
+			substituted = strings.ReplaceAll(substituted, delta.from, delta.to)
+		}
+		assert.Equalf(t, substituted, gotText,
+			"scenario %s may differ ONLY by its %d enumerated substitution(s); anything else is unenumerated", name, len(deltas))
 	}
 
 	sort.Strings(changed)
 	assert.Equal(t, sortedKeys(describePlainDelta), changed,
-		"the enumerated delta must be exactly the out-of-scope scenarios — no more (a regression) and no fewer (a stale enumeration)")
+		"the enumerated delta must be exactly the scenarios listed — no more (a regression) and no fewer (a stale enumeration)")
 }
 
 func sortedKeys[V any](m map[string]V) []string {
