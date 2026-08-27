@@ -817,6 +817,12 @@ const directDeferralLegend = "Some tool descriptions end with a compact signatur
 // The custom branch matters (D11): without it, attaching instructions to this
 // server would make the operator-configurable `instructions` key silently
 // unreachable on the direct surface — a regression dressed up as a feature.
+//
+// Resolved at server-CONSTRUCTION time, not per request: mcp-go fixes
+// WithInstructions on the server instance. That matches the default server
+// (mcp.go's NewMCPProxyServer), so editing `instructions` needs a restart on
+// both surfaces — deliberately unlike the serialization mode, which is read
+// live per rebuild because FR-001 requires it to be hot-reloadable.
 func resolveDirectInstructions(custom string) string {
 	base := custom
 	if base == "" {

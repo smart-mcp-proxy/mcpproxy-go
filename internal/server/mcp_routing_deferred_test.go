@@ -110,19 +110,17 @@ func TestDeferredDirectEntry_MarshalledShape(t *testing.T) {
 	// prefix is this renderer's job.
 	var desc string
 	require.NoError(t, json.Unmarshal(m["description"], &desc))
-	sig, ok := p085Signature(t, fixtureTools()[0])
-	require.True(t, ok)
-	assert.Equal(t, "[github] Create an issue\ncreate_issue"+sig.Sig, desc)
+	assert.Equal(t, "[github] Create an issue\ncreate_issue"+p085Signature(t, fixtureTools()[0]).Sig, desc)
 	assert.Contains(t, desc, "title*", "a required param is never elided (FR-004)")
 }
 
 // p085Signature renders a fixture tool's signature through the same grammar the
 // renderer reads from the cache, so the expectation is not a hand-copied string.
-func p085Signature(t *testing.T, tool *config.ToolMetadata) (toolsig.Signature, bool) {
+func p085Signature(t *testing.T, tool *config.ToolMetadata) toolsig.Signature {
 	t.Helper()
 	sig, err := toolsig.Render(tool.ParamsJSON, tool.Description)
 	require.NoError(t, err)
-	return sig, true
+	return sig
 }
 
 // T029: annotations parity. The raw-schema constructor leaves every hint nil
@@ -134,6 +132,9 @@ func TestDeferredDirectEntry_AnnotationsByteIdenticalToFullMode(t *testing.T) {
 	fixtures := map[string]*config.ToolAnnotations{
 		"nil_annotations": nil,
 		"one_hint":        {ReadOnlyHint: boolPtr(true)},
+		// Title-only exercises the one override that is a plain string rather
+		// than a *bool, and so takes a different branch from the four hints.
+		"title_only": {Title: "Only A Title"},
 		"all_five": {
 			Title:           "All Five",
 			ReadOnlyHint:    boolPtr(false),
@@ -166,10 +167,15 @@ func TestDeferredDirectEntry_AnnotationsByteIdenticalToFullMode(t *testing.T) {
 			full := render(config.DirectToolResponseModeFull)
 			deferred := render(config.DirectToolResponseModeDeferred)
 
-			assert.JSONEq(t,
+			// Byte equality, not JSONEq: FR-004 says "unchanged annotations", and
+			// two objects that differ only in key order are not unchanged bytes
+			// on the wire. Both sides marshal the same Go type through the same
+			// marshaller, so byte equality is achievable and is the stronger
+			// claim.
+			assert.Equal(t,
 				string(fieldOf(t, full, "annotations")),
 				string(fieldOf(t, deferred, "annotations")),
-				"annotations must be identical across serialization modes (FR-004/D9)")
+				"annotations must be byte-identical across serialization modes (FR-004/D9)")
 		})
 	}
 }
@@ -255,10 +261,10 @@ func TestDirectModes_SetIdentity(t *testing.T) {
 	fullEntries := renderedByName(t, fullTools)
 	deferredEntries := renderedByName(t, deferredTools)
 	for name, fullRaw := range fullEntries {
-		assert.JSONEq(t,
+		assert.Equal(t,
 			string(fieldOf(t, fullRaw, "annotations")),
 			string(fieldOf(t, deferredEntries[name], "annotations")),
-			"annotations for %q must match across modes", name)
+			"annotations for %q must be byte-identical across modes", name)
 	}
 
 	// Full mode DOES carry the upstream schema and outputSchema — the control
@@ -269,9 +275,10 @@ func TestDirectModes_SetIdentity(t *testing.T) {
 	assert.Contains(t, fullMap, "outputSchema")
 
 	// Under both direct-surface filters, for a scoped agent token and for a
-	// profile-pinned one. The filters resolve through the published catalog, so
-	// each mode gets its own proxy with the same catalog published.
-	catalog := buildDirectCatalog(tools, nil)
+	// profile-pinned one. Each mode gets its own proxy AND its own catalog:
+	// renderDirectTools stamps RenderedDescription onto the entries it renders,
+	// so sharing one catalog across two renders would have the second mode
+	// overwrite the first's stamp on a snapshot the proxy has already published.
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
 		AgentName:      "reader",
@@ -304,9 +311,10 @@ func TestDirectModes_SetIdentity(t *testing.T) {
 			}))
 		}
 		warmFixtureSignatures(p, tools)
+		catalog := buildDirectCatalog(tools, nil)
+		rendered := p.renderDirectTools(catalog)
 		p.publishDirectCatalog(catalog)
 
-		rendered := p.renderDirectTools(catalog)
 		mcpTools := make([]mcp.Tool, 0, len(rendered))
 		for _, st := range rendered {
 			mcpTools = append(mcpTools, st.Tool)

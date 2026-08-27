@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,6 +56,20 @@ const directPrefeatureGoldenPath = "testdata/direct_full_prefeature.golden.json"
 // asserted separately below, so excluding them cannot hide their removal.
 var directSurfaceBuiltins = []string{"describe_tool"}
 
+// directFixtureUpstreamToolCount is how many UPSTREAM tools the shared preflight
+// fixture config eventually projects onto the direct surface: main 5, denied 2,
+// killable 1, scoped 1, slow 1. The `offline` server is configured
+// enabled:false and never contributes.
+//
+// This constant is load-bearing, not decoration. The direct listing is a
+// projection of live upstream discovery, so a tools/list issued before the
+// upstreams have connected answers with the built-ins alone — and the test
+// would then compare an effectively empty set against the golden, passing
+// vacuously in write mode and failing spuriously in compare mode. A plain
+// non-empty check does not catch it either, because describe_tool is always
+// there. So the listing is polled until the upstream projection is complete.
+const directFixtureUpstreamToolCount = 10
+
 // mcpJSONRPC posts one JSON-RPC message to an MCP route and returns the decoded
 // envelope. Streamable HTTP may answer either as plain JSON or as a single SSE
 // event, so both framings are accepted.
@@ -85,11 +101,39 @@ func mcpJSONRPC(t *testing.T, e *preflightE2E, route, sessionID, body string) (m
 		return nil, resp.Header.Get("Mcp-Session-Id")
 	}
 
-	var envelope map[string]json.RawMessage
-	require.NoErrorf(t, json.Unmarshal(raw, &envelope), "decode %s response: %s", route, raw)
+	// The stream may carry MORE than the reply: mcp-go pushes
+	// notifications/tools/list_changed down the same channel when a rebuild
+	// lands mid-request, so the payload is a CONCATENATION of JSON values.
+	// Decoding it as one object fails intermittently, which is a test-only
+	// heisenbug that looks exactly like a server fault. Decode value by value
+	// and keep the one that is actually a response.
+	envelope := findMCPResponse(t, route, raw)
+	require.NotNilf(t, envelope, "%s produced no JSON-RPC response: %s", route, raw)
 	require.NotContainsf(t, envelope, "error", "%s returned an error: %s", route, raw)
 
 	return envelope, resp.Header.Get("Mcp-Session-Id")
+}
+
+// findMCPResponse returns the first JSON-RPC value in raw that carries a result
+// or an error — i.e. the reply, skipping any notifications sharing the stream.
+func findMCPResponse(t *testing.T, route string, raw []byte) map[string]json.RawMessage {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	for {
+		var value map[string]json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			t.Fatalf("decode %s stream: %v (payload: %s)", route, err, raw)
+		}
+		if _, ok := value["result"]; ok {
+			return value
+		}
+		if _, ok := value["error"]; ok {
+			return value
+		}
+	}
 }
 
 // readMCPPayload unwraps a single SSE event, or returns the body verbatim when
@@ -117,8 +161,13 @@ func readMCPPayload(resp *http.Response) ([]byte, error) {
 }
 
 // directToolsListEntries returns the direct surface's tools/list entries as raw
-// JSON, keyed by tool name.
-func directToolsListEntries(t *testing.T, e *preflightE2E) map[string]json.RawMessage {
+// JSON, keyed by tool name, plus the ORDER they arrived in.
+//
+// The order is returned separately because the golden is a name-keyed map: the
+// per-entry bytes survive verbatim as json.RawMessage, but the array's sequence
+// does not, and FR-008 names ordering source as part of what must not change.
+// The caller asserts it explicitly rather than letting the map launder it.
+func directToolsListEntries(t *testing.T, e *preflightE2E) (map[string]json.RawMessage, []string) {
 	t.Helper()
 
 	const route = "/mcp/all"
@@ -138,14 +187,16 @@ func directToolsListEntries(t *testing.T, e *preflightE2E) map[string]json.RawMe
 	require.NoError(t, json.Unmarshal(envelope["result"], &result))
 
 	entries := make(map[string]json.RawMessage, len(result.Tools))
+	order := make([]string, 0, len(result.Tools))
 	for _, raw := range result.Tools {
 		var named struct {
 			Name string `json:"name"`
 		}
 		require.NoError(t, json.Unmarshal(raw, &named))
 		entries[named.Name] = raw
+		order = append(order, named.Name)
 	}
-	return entries
+	return entries, order
 }
 
 // stripCR normalizes CRLF so the golden compares equal on Windows runners.
@@ -181,8 +232,24 @@ func TestDirectFullMode_ByteStableAgainstPreFeatureE2E(t *testing.T) {
 
 	// Direct mode is served at /mcp/all regardless of routing_mode, and the
 	// fixture config sets none — so this is the default (deferral-off) path.
-	entries := directToolsListEntries(t, env)
-	require.NotEmpty(t, entries, "the fixture must produce a non-empty direct listing")
+	//
+	// Polled rather than read once: proxy readiness (the HTTP API answering) and
+	// upstream tool discovery are separate events, and this listing is a
+	// projection of the second.
+	var entries map[string]json.RawMessage
+	var order []string
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		entries, order = directToolsListEntries(t, env)
+		if len(entries)-len(directSurfaceBuiltins) >= directFixtureUpstreamToolCount {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("upstream projection never completed: got %d entries, want %d upstream + %d built-in",
+				len(entries), directFixtureUpstreamToolCount, len(directSurfaceBuiltins))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	if dir := os.Getenv(directPrefeatureGoldenEnv); dir != "" {
 		require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -193,6 +260,16 @@ func TestDirectFullMode_ByteStableAgainstPreFeatureE2E(t *testing.T) {
 		t.Logf("wrote %s (%d entries)", out, len(entries))
 		t.Skip("golden written; comparison skipped")
 	}
+
+	// FR-008 names the ordering SOURCE as part of what deferral must not change,
+	// and a name-keyed golden cannot see order at all — the map launders it. So
+	// assert it directly: mcp-go's handleListTools sorts the served array by
+	// name, built-ins included (describe_tool lands between denied__* and
+	// killable__* here, not at the end), and the catalog's own sorted display
+	// names feed that. Anything else means the ordering source moved.
+	wantOrder := append([]string(nil), order...)
+	sort.Strings(wantOrder)
+	assert.Equal(t, wantOrder, order, "direct tools/list must be served sorted by tool name")
 
 	for _, builtin := range directSurfaceBuiltins {
 		assert.Containsf(t, entries, builtin,
