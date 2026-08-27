@@ -109,7 +109,9 @@ interface Props {
 interface Emits {
   (e: 'close'): void
   (e: 'authenticated'): void
-  (e: 'refresh'): void
+  // `verified` says whether the reloaded key actually authenticated. App.vue
+  // only invalidates views when it did (#1065).
+  (e: 'refresh', verified: boolean): void
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -175,10 +177,27 @@ async function handleSetAPIKey() {
   }
 }
 
-function handleRefresh() {
-  // Reinitialize API key from URL/localStorage
-  api.reinitializeAPIKey()
-  emit('refresh')
+async function handleRefresh() {
+  // Reinitialize API key from URL/localStorage, then VERIFY it before telling
+  // the app auth is repaired. Without the verification this path could only
+  // assert recovery, so it could not safely invalidate the views holding stale
+  // auth errors -- and #1065's stale red panel survived on this path.
+  isValidating.value = true
+  inputError.value = ''
+  try {
+    api.reinitializeAPIKey()
+    const isValid = await api.validateAPIKey()
+    emit('refresh', isValid)
+    if (!isValid) {
+      inputError.value = 'No valid API key found — enter one above'
+    }
+  } catch (error) {
+    console.error('API key refresh error:', error)
+    inputError.value = error instanceof Error ? error.message : 'Refresh failed'
+    emit('refresh', false)
+  } finally {
+    isValidating.value = false
+  }
 }
 
 function handleClose() {

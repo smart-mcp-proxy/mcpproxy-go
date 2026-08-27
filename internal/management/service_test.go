@@ -324,6 +324,59 @@ func TestListServers(t *testing.T) {
 		}
 	})
 
+	// Issue #1064: a quarantined server stays connected and status ready -- that
+	// is deliberate, the tray and Web UI must inspect it for review -- so the
+	// enabled-only guard above never fired for it and its tools were still
+	// summed as "Available across all servers" while every call to them was
+	// refused.
+	t.Run("TotalTools excludes quarantined servers", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":          "server1",
+				"name":        "clean-server",
+				"enabled":     true,
+				"connected":   true,
+				"quarantined": false,
+				"tool_count":  5,
+			},
+			{
+				"id":          "server2",
+				"name":        "quarantined-server",
+				"enabled":     true,
+				"connected":   true, // still dialed, for security inspection
+				"quarantined": true,
+				"tool_count":  7, // must NOT be counted
+			},
+			{
+				"id":          "server3",
+				"name":        "disabled-server",
+				"enabled":     false,
+				"connected":   false,
+				"quarantined": false,
+				"tool_count":  3, // must NOT be counted (issue #285)
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, stats, err := svc.ListServers(context.Background())
+
+		require.NoError(t, err)
+		assert.Len(t, servers, 3)
+		assert.Equal(t, 5, stats.TotalTools,
+			"TotalTools must exclude both quarantined and disabled servers")
+
+		// The quarantined server is still listed and still flagged: the review
+		// surface must not go dark just because the count went to zero.
+		byName := map[string]*contracts.Server{}
+		for i := range servers {
+			byName[servers[i].Name] = servers[i]
+		}
+		require.Contains(t, byName, "quarantined-server")
+		assert.True(t, byName["quarantined-server"].Quarantined)
+		assert.Equal(t, 1, stats.QuarantinedServers)
+	})
+
 	t.Run("runtime error", func(t *testing.T) {
 		runtime := newMockRuntime()
 		runtime.getAllError = fmt.Errorf("runtime error")

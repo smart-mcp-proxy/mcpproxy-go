@@ -237,6 +237,15 @@ func TestServerEligibleForIndexing(t *testing.T) {
 	assert.False(t, rt.serverEligibleForIndexing("quarantined"), "quarantined server is ineligible")
 	assert.False(t, rt.serverEligibleForIndexing("disabled"), "disabled server is ineligible")
 	assert.False(t, rt.serverEligibleForIndexing("absent"), "server absent from config is ineligible")
+
+	// #1064: the availability predicate (what gets COUNTED) must agree with this
+	// security predicate (what gets INDEXED) for every enabled/quarantined pair.
+	// They diverged once already -- the index was purged on quarantine while the
+	// counting surfaces went on reporting the pre-quarantine number.
+	for _, srv := range rt.Config().Servers {
+		assert.Equalf(t, rt.serverEligibleForIndexing(srv.Name), srv.ContributesTools(),
+			"serverEligibleForIndexing and ContributesTools disagree about %q", srv.Name)
+	}
 }
 
 // TestReindexAfterApproval_QuarantinedServerNotIndexed guards the TOCTOU

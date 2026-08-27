@@ -85,7 +85,14 @@
       <!-- Security scan badge (Spec 039)
            Wrapped in a DaisyUI tooltip that explains the state and carries a
            disclaimer that the risk score is an experimental heuristic. -->
-      <div v-if="server.security_scan" class="flex items-center gap-2 mb-4">
+      <!-- #1065: hidden while the server is quarantined. A scan verdict is
+           about CONTENT; quarantine is about REVIEW STATE. Stacked as siblings
+           they read as contradictory claims about the same server ("Clean"
+           directly above "needs security review"). While quarantined the
+           verdict is folded into the banner below as a subordinate clause, so
+           the card carries exactly one security headline -- the subordination
+           ServerDetail's spec-088 banner already does. -->
+      <div v-if="server.security_scan && !server.quarantined" class="flex items-center gap-2 mb-4">
         <div
           class="flex items-center gap-1.5 text-sm tooltip tooltip-right tooltip-bottom max-w-xs"
           :data-tip="securityBadgeTooltip"
@@ -147,11 +154,18 @@
            ("needs security review") so it must also afford it — Review opens the
            server's Security tab, where the spec-088 banner carries the verdict
            and the approve/scan actions. -->
-      <div v-if="server.quarantined" class="alert alert-warning alert-sm mb-4" data-test="server-card-quarantine">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div v-if="server.quarantined" class="alert alert-warning alert-sm mb-4 items-start" data-test="server-card-quarantine">
+        <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
         </svg>
-        <span class="text-xs flex-1">Quarantined — needs security review</span>
+        <div class="min-w-0 flex-1">
+          <div class="text-xs">Quarantined — needs security review</div>
+          <div
+            v-if="quarantineScanNote"
+            class="text-[11px] opacity-80 mt-0.5"
+            data-test="server-card-quarantine-scan-note"
+          >{{ quarantineScanNote }}</div>
+        </div>
         <router-link
           :to="serverDetailPath(server.name, 'security')"
           class="btn btn-xs btn-warning"
@@ -693,6 +707,36 @@ const securityBadgeTooltip = computed(() => {
       return 'Security scan in progress…'
     default:
       return disclaimer
+  }
+})
+
+// #1065: the subordinate half of the quarantine banner. Same reasoning as the
+// #938 held-tools downgrade above, one level up -- a reassuring statement must
+// never sit as a peer of a warning one. While quarantined the standalone badge
+// is suppressed and its verdict is restated here as a clause of the quarantine
+// headline: the verdict informs the review, it does not settle it. Returns ''
+// when there is nothing worth saying, keeping the banner a one-liner.
+const quarantineScanNote = computed(() => {
+  const scan = props.server.security_scan
+  const status = scan?.status
+  if (!scan || !status || status === 'not_scanned') return ''
+  switch (status) {
+    case 'scanning':
+      return 'Security scan in progress…'
+    case 'failed':
+      // A failed scan is an INCOMPLETE scan, never a threat verdict -- mirrors
+      // the scan-failed precaution branch in utils/quarantineBanner.ts.
+      return 'Last scan could not complete — still needs review'
+    case 'clean':
+      return 'Last scan: clean — still needs review'
+    case 'warnings': {
+      const n = scan.finding_counts?.warning ?? 0
+      return `Last scan: ${n} warning${n !== 1 ? 's' : ''} — needs review`
+    }
+    case 'dangerous':
+      return 'Last scan: dangerous findings — needs review'
+    default:
+      return ''
   }
 })
 

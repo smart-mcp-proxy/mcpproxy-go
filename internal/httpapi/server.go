@@ -3199,11 +3199,14 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use the same management-service path as the per-server tools endpoint so
-	// behaviour is consistent: a disabled / not-connected server returns an
-	// empty tool set (NOT an error), so it contributes zero tools without
-	// being mislabelled as a failed server. Fall back to the controller path
-	// when the management service is unavailable (keeps unit tests + minimal
-	// deployments working).
+	// behaviour is consistent. A disabled / not-connected server reaches us as
+	// an empty tool set (NOT an error) because disabling disconnects it, so it
+	// contributes zero tools without being mislabelled as a failed server.
+	// Quarantine is neither of those things -- a quarantined server stays
+	// dialed for security inspection and status stays ready -- so it needs the
+	// explicit guard in the loop below (#1064). Fall back to the controller
+	// path when the management service is unavailable (keeps unit tests +
+	// minimal deployments working).
 	mgmtSvc, hasMgmt := s.controller.GetManagementService().(interface {
 		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
 	})
@@ -3225,6 +3228,15 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 	for _, srv := range allServers {
 		name, _ := srv["name"].(string)
 		if name == "" {
+			continue
+		}
+		// #1064: a quarantined server contributes nothing here -- its tools are
+		// unreachable (SECURITY BLOCK at dispatch) and its descriptions are the
+		// TPA payload #1061 removed from the index. Skipping is not a failure,
+		// so it must not set Partial / FailedServers. Disabled servers still
+		// appear, per the GlobalToolsResponse contract; the review surface
+		// GET /api/v1/servers/{id}/tools is likewise untouched.
+		if quarantined, _ := srv["quarantined"].(bool); quarantined {
 			continue
 		}
 
@@ -5784,6 +5796,11 @@ func (s *Server) handleAnnotationCoverage(w http.ResponseWriter, r *http.Request
 	for _, srv := range allServers {
 		name, _ := srv["name"].(string)
 		if name == "" {
+			continue
+		}
+		// #1064: a quarantined server's tools are not available, so they are
+		// not part of the annotation-coverage denominator either.
+		if quarantined, _ := srv["quarantined"].(bool); quarantined {
 			continue
 		}
 

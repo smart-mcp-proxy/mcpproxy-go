@@ -57,8 +57,28 @@ export const useSystemStore = defineStore('system', () => {
   // owns the message too; the downstream surfaces read this flag and stay quiet.
   const authRequired = ref(false)
 
+  // Bumped when a failed auth is repaired with a VALIDATED key (#1065). Views
+  // keep their load errors in component-local refs that nothing outside the
+  // component can reach, so signing in left the header re-authenticated while
+  // the view body kept a red "Invalid or missing API key" panel and zero rows
+  // until the user clicked Retry by hand. App.vue keys <router-view> on this,
+  // so a repaired auth remounts the current view: its error, loading state and
+  // data reset to their declared initial values and onMounted re-runs.
+  const authEpoch = ref(0)
+
   function setAuthRequired(value: boolean) {
     authRequired.value = value
+  }
+
+  // Clear the auth-required flag AND invalidate the views that failed while it
+  // was set. Only for paths that actually verified the new key -- a path that
+  // merely re-reads the key from disk must use setAuthRequired(false), or every
+  // view remounts onto a possibly-still-401 epoch.
+  function markAuthRecovered() {
+    if (authRequired.value) {
+      authEpoch.value++
+    }
+    authRequired.value = false
   }
 
   // Available themes. `system` leads the list and is the default: a user on a
@@ -584,6 +604,7 @@ export const useSystemStore = defineStore('system', () => {
     checkingForUpdates,
     updateCheckedAt,
     authRequired,
+    authEpoch,
 
     // Computed
     isRunning,
@@ -612,5 +633,6 @@ export const useSystemStore = defineStore('system', () => {
     fetchRouting,
     checkForUpdates,
     setAuthRequired,
+    markAuthRecovered,
   }
 })

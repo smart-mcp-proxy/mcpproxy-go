@@ -17,7 +17,14 @@
            its track and the footer ended up overlapping the last row at 390px
            (UX audit F14). -->
       <main class="overflow-y-auto min-h-0 min-w-0 p-4 sm:p-6">
-        <router-view />
+        <!-- #1065: keyed on authEpoch so repairing a failed auth remounts the
+             current view. Views hold their load errors in component-local refs
+             that nothing outside can reach, so a successful sign-in used to
+             leave a stale red error panel and zero rows behind the recovered
+             header. Key on authEpoch ONLY -- folding in the route path would
+             remount ServerDetail on every :serverName change and break the
+             Dashboard's single instance across /, /usage and /overview. -->
+        <router-view :key="systemStore.authEpoch" />
       </main>
 
       <!-- Persistent footer with project links (discussion #948) -->
@@ -79,24 +86,44 @@ function handleAuthModalClose() {
   systemStore.setAuthRequired(false)
 }
 
+// Re-prime everything that only loads at mount. The <router-view> key covers
+// the routed view, but these surfaces live outside it and would otherwise keep
+// their failed state until a full page reload (#1065).
+async function reloadAfterAuth() {
+  systemStore.connectEventSource()
+  serversStore.fetchServers()
+  systemStore.fetchInfo() // TopHeader version / update state
+  systemStore.fetchRouting() // TopHeader routing chip
+  // Server-edition role-based nav. The router guard does not run for a
+  // key-driven remount, so re-check here.
+  await authStore.checkAuth()
+}
+
 function handleAuthModalAuthenticated() {
   authModal.show = false
   authModal.lastError = ''
-  systemStore.setAuthRequired(false)
+  // markAuthRecovered, not setAuthRequired(false): this path validated the key,
+  // so it is safe to invalidate every view that failed while auth was broken.
+  systemStore.markAuthRecovered()
 
-  // Refresh data now that we're authenticated
-  systemStore.connectEventSource()
-  serversStore.fetchServers()
+  void reloadAfterAuth()
 }
 
-function handleAuthModalRefresh() {
+function handleAuthModalRefresh(verified: boolean) {
+  if (!verified) {
+    // The reloaded key did not authenticate. Leave the modal and the
+    // auth-required flag in place rather than remounting every view onto a
+    // key that is still 401.
+    return
+  }
+
   authModal.show = false
   authModal.lastError = ''
-  systemStore.setAuthRequired(false)
+  // The modal verified the reloaded key, so this is a real recovery and the
+  // views holding stale auth errors must be invalidated too (#1065).
+  systemStore.markAuthRecovered()
 
-  // Reconnect with potentially new API key
-  systemStore.connectEventSource()
-  serversStore.fetchServers()
+  void reloadAfterAuth()
 }
 
 // Handle API authentication errors
