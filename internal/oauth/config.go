@@ -34,6 +34,62 @@ const (
 	resourceDetectRequestTimeout = 5 * time.Second  // Timeout for preflight requests
 )
 
+// ParsePinnedRedirectURI validates an operator-pinned OAuth redirect URI (the
+// per-server `oauth.redirect_uri` config field) and returns the loopback port it
+// pins.
+//
+// Providers such as GitHub OAuth Apps require the callback URL to match the
+// registered one exactly and reject wildcards, so operators need a way to nail
+// the loopback port down instead of letting mcpproxy allocate a fresh one per
+// login. The URI must therefore be an RFC 8252 loopback redirect with an
+// explicit port and mcpproxy's callback path, e.g.
+//
+//	http://127.0.0.1:54108/oauth/callback
+//
+// Anything else is rejected with an actionable error rather than silently
+// downgraded to dynamic allocation.
+func ParsePinnedRedirectURI(rawURI string) (int, error) {
+	trimmed := strings.TrimSpace(rawURI)
+	if trimmed == "" {
+		return 0, fmt.Errorf("oauth.redirect_uri is empty")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("oauth.redirect_uri %q is not a valid URL: %w", trimmed, err)
+	}
+
+	if parsed.Scheme != "http" {
+		return 0, fmt.Errorf("oauth.redirect_uri %q must use the http scheme for a loopback redirect (RFC 8252), got %q", trimmed, parsed.Scheme)
+	}
+
+	switch parsed.Hostname() {
+	case "127.0.0.1", "localhost", "::1":
+	default:
+		return 0, fmt.Errorf("oauth.redirect_uri %q must use a loopback host (127.0.0.1, localhost or ::1), got %q", trimmed, parsed.Hostname())
+	}
+
+	if parsed.Path != DefaultRedirectPath {
+		return 0, fmt.Errorf("oauth.redirect_uri %q must use the callback path %q, got %q", trimmed, DefaultRedirectPath, parsed.Path)
+	}
+
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return 0, fmt.Errorf("oauth.redirect_uri %q must not contain a query string or fragment", trimmed)
+	}
+
+	portStr := parsed.Port()
+	if portStr == "" {
+		return 0, fmt.Errorf("oauth.redirect_uri %q must include an explicit port to pin (e.g. %s:54108%s)", trimmed, DefaultRedirectURIBase, DefaultRedirectPath)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("oauth.redirect_uri %q has an invalid port %q (expected 1-65535)", trimmed, portStr)
+	}
+
+	return port, nil
+}
+
 // CallbackServerManager manages OAuth callback servers for dynamic port allocation
 type CallbackServerManager struct {
 	servers map[string]*CallbackServer
@@ -792,18 +848,60 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.String("hint", "Set oauth.scopes in server config or ensure PRM/AS metadata advertises scopes_supported"))
 	}
 
+	// A static client_id in the server config is an operator-supplied credential.
+	// It is never obtained from — nor refreshable by — Dynamic Client Registration,
+	// so the DCR "clear and re-register" recovery paths below must never wipe it.
+	hasStaticClientID := serverConfig.OAuth != nil && serverConfig.OAuth.ClientID != ""
+
+	// An explicit `oauth.redirect_uri` pins the loopback callback port. Providers
+	// such as GitHub OAuth Apps match the callback URL exactly and reject
+	// wildcards, so an operator must be able to nail the port down (issue #975).
+	var pinnedRedirectURI string
+	var pinnedPort int
+	if serverConfig.OAuth != nil && strings.TrimSpace(serverConfig.OAuth.RedirectURI) != "" {
+		port, err := ParsePinnedRedirectURI(serverConfig.OAuth.RedirectURI)
+		if err != nil {
+			// Fail loudly: silently falling back to a random port would leave the
+			// operator believing they pinned the callback URL when they had not.
+			logger.Error("❌ Invalid oauth.redirect_uri in server config - refusing to fall back to a random callback port",
+				zap.String("server", serverConfig.Name),
+				zap.String("redirect_uri", serverConfig.OAuth.RedirectURI),
+				zap.Error(err),
+				zap.String("expected_format", "http://127.0.0.1:<port>"+DefaultRedirectPath))
+			return nil
+		}
+		pinnedRedirectURI = strings.TrimSpace(serverConfig.OAuth.RedirectURI)
+		pinnedPort = port
+	}
+
 	// Check for stored callback port from previous DCR (Spec 022: OAuth Redirect URI Port Persistence)
 	var preferredPort int
 	var serverKey string
 	if storage != nil {
 		serverKey = GenerateServerKey(serverConfig.Name, serverConfig.URL)
+	}
+
+	switch {
+	case pinnedPort > 0:
+		preferredPort = pinnedPort
+		logger.Info("📌 Using operator-pinned OAuth callback port from oauth.redirect_uri",
+			zap.String("server", serverConfig.Name),
+			zap.String("redirect_uri", pinnedRedirectURI),
+			zap.Int("preferred_port", preferredPort))
+	case storage != nil:
 		storedClientID, _, storedPort, err := storage.GetOAuthClientCredentials(serverKey)
-		if err == nil && storedPort > 0 {
+		switch {
+		case err == nil && storedPort > 0:
 			preferredPort = storedPort
-			logger.Info("🔄 Found stored callback port from previous DCR",
+			logger.Info("🔄 Found stored callback port from previous OAuth login",
 				zap.String("server", serverConfig.Name),
 				zap.Int("preferred_port", preferredPort))
-		} else if err == nil && storedClientID != "" && storedPort == 0 {
+		case err == nil && storedClientID != "" && storedPort == 0 && hasStaticClientID:
+			// Static credentials are configured by hand; there is nothing to
+			// re-register, so keep the record and let this login persist its port.
+			logger.Debug("Static OAuth client has no stored callback port yet; keeping credentials",
+				zap.String("server", serverConfig.Name))
+		case err == nil && storedClientID != "" && storedPort == 0:
 			// Spec 022: Legacy DCR credentials exist but port is unknown
 			// Clear them to force fresh registration with port tracking
 			logger.Warn("⚠️ Legacy DCR credentials found without stored port, clearing for re-registration",
@@ -835,27 +933,60 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	// Spec 022: Detect port conflict and clear DCR credentials if port changed
 	// This forces fresh DCR with the new port
 	if preferredPort > 0 && callbackServer.Port != preferredPort {
-		logger.Warn("⚠️ Callback port changed, clearing DCR credentials for re-registration",
-			zap.String("server", serverConfig.Name),
-			zap.Int("stored_port", preferredPort),
-			zap.Int("new_port", callbackServer.Port))
-		if storage != nil {
-			if err := storage.ClearOAuthClientCredentials(serverKey); err != nil {
-				logger.Warn("Failed to clear DCR credentials after port change",
+		switch {
+		case pinnedPort > 0:
+			// The operator pinned this port; any other port produces a
+			// redirect_uri the provider will reject. Abort instead of pretending.
+			logger.Error("❌ Pinned OAuth callback port is unavailable - cannot honor oauth.redirect_uri",
+				zap.String("server", serverConfig.Name),
+				zap.String("redirect_uri", pinnedRedirectURI),
+				zap.Int("pinned_port", pinnedPort),
+				zap.Int("bound_port", callbackServer.Port),
+				zap.String("hint", "free the pinned port, or change oauth.redirect_uri (and the provider's callback URL) to a free one"))
+			if stopErr := globalCallbackManager.StopCallbackServer(serverConfig.Name); stopErr != nil {
+				logger.Warn("Failed to stop callback server bound to the wrong port",
 					zap.String("server", serverConfig.Name),
-					zap.Error(err))
+					zap.Error(stopErr))
+			}
+			return nil
+		case hasStaticClientID:
+			// Static credentials are not re-registerable, so clearing them would
+			// only destroy the operator's configuration for no benefit.
+			logger.Warn("⚠️ Callback port changed for a statically configured OAuth client; keeping credentials",
+				zap.String("server", serverConfig.Name),
+				zap.Int("stored_port", preferredPort),
+				zap.Int("new_port", callbackServer.Port),
+				zap.String("hint", "pin the port with oauth.redirect_uri if the provider requires an exact callback URL"))
+		default:
+			logger.Warn("⚠️ Callback port changed, clearing DCR credentials for re-registration",
+				zap.String("server", serverConfig.Name),
+				zap.Int("stored_port", preferredPort),
+				zap.Int("new_port", callbackServer.Port))
+			if storage != nil {
+				if err := storage.ClearOAuthClientCredentials(serverKey); err != nil {
+					logger.Warn("Failed to clear DCR credentials after port change",
+						zap.String("server", serverConfig.Name),
+						zap.Error(err))
+				}
 			}
 		}
 	}
 
+	// The pinned URI is sent to the provider verbatim so the string matches the
+	// one registered there (host spelling included: localhost vs 127.0.0.1).
+	redirectURI := callbackServer.RedirectURI
+	if pinnedRedirectURI != "" {
+		redirectURI = pinnedRedirectURI
+	}
+
 	logger.Info("Using exact redirect URI from allocated callback server",
 		zap.String("server", serverConfig.Name),
-		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.String("redirect_uri", redirectURI),
 		zap.Int("port", callbackServer.Port))
 
 	logger.Info("OAuth callback server started successfully",
 		zap.String("server", serverConfig.Name),
-		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.String("redirect_uri", redirectURI),
 		zap.Int("port", callbackServer.Port))
 
 	// Try to find a working metadata URL by validating multiple URL patterns
@@ -987,7 +1118,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	oauthConfig := &client.OAuthConfig{
 		ClientID:              clientID,
 		ClientSecret:          clientSecret,
-		RedirectURI:           callbackServer.RedirectURI, // Exact redirect URI with allocated port
+		RedirectURI:           redirectURI, // Exact redirect URI: operator-pinned, or the allocated port
 		Scopes:                scopes,
 		TokenStore:            tokenStore,            // Shared token store for this server
 		PKCEEnabled:           true,                  // Always enable PKCE for security
@@ -999,7 +1130,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		zap.String("server", serverConfig.Name),
 		zap.Strings("scopes", scopes),
 		zap.Bool("pkce_enabled", true),
-		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.String("redirect_uri", redirectURI),
 		zap.String("auth_server_metadata_url", authServerMetadataURL),
 		zap.String("registration_mode", registrationMode),
 		zap.String("discovery_mode", "explicit metadata URL"), // Using explicit metadata URL to avoid discovery timeouts

@@ -126,12 +126,17 @@ func main() {
 		// Pre-register test-client for Playwright tests
 		Clients: []oauthserver.ClientConfig{
 			{
-				ClientID:     "test-client",
-				ClientName:   "Test Client",
+				ClientID:   "test-client",
+				ClientName: "Test Client",
 				RedirectURIs: []string{
 					"http://127.0.0.1/callback",
 					"http://localhost/callback",
 					"http://127.0.0.1:9000/callback", // Allow callback on same port as OAuth server
+					// mcpproxy's own loopback callback path (internal/oauth
+					// DefaultRedirectPath) — needed to drive a real login
+					// against this server.
+					"http://127.0.0.1/oauth/callback",
+					"http://localhost/oauth/callback",
 				},
 			},
 		},

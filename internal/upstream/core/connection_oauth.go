@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -1690,11 +1691,11 @@ func (c *Client) persistDCRCredentials() {
 
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 
-	// Preserve existing callbackPort from the record (set during the DCR flow)
-	callbackPort := 0
-	if record, err := c.storage.GetOAuthToken(serverKey); err == nil {
-		callbackPort = record.CallbackPort
-	}
+	// Persist the port this login actually used. Only DCR-succeeded flows used
+	// to record a port, so a static-client login persisted port 0 and the next
+	// login allocated a fresh loopback port — breaking providers that require an
+	// exact, unchanging callback URL (issue #975).
+	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage)
 
 	if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
@@ -1706,7 +1707,30 @@ func (c *Client) persistDCRCredentials() {
 	c.logger.Info("DCR credentials persisted for proactive token refresh",
 		zap.String("server", c.config.Name),
 		zap.String("client_id_prefix", clientID[:min(8, len(clientID))]+"..."),
-		zap.Bool("has_client_secret", clientSecret != ""))
+		zap.Bool("has_client_secret", clientSecret != ""),
+		zap.Int("callback_port", callbackPort))
+}
+
+// resolveCallbackPortForPersistence returns the loopback callback port to store
+// alongside the OAuth client credentials for serverName.
+//
+// The live callback server wins: it is the port the redirect_uri of the login
+// that just completed actually pointed at, so persisting it lets the next login
+// bind the same port and reuse the identical redirect_uri. Only when no callback
+// server is running do we fall back to whatever was stored previously, so a
+// refresh-only code path never downgrades a known port to 0.
+func resolveCallbackPortForPersistence(serverName, serverKey string, store *storage.BoltDB) int {
+	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.Port > 0 {
+		return callbackServer.Port
+	}
+
+	if store == nil {
+		return 0
+	}
+	if record, err := store.GetOAuthToken(serverKey); err == nil && record != nil {
+		return record.CallbackPort
+	}
+	return 0
 }
 
 // wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops
