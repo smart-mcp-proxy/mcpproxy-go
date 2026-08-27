@@ -5941,6 +5941,16 @@ func (p *MCPProxyServer) getVisibleToolCount(serverName string) int {
 		return 0
 	}
 
+	// #1064: a quarantined server contributes no AVAILABLE tools -- every
+	// dispatch to them is refused with a SECURITY BLOCK. Gated here rather than
+	// in isToolCallable, which is the search filter and must stay
+	// quarantine-blind to preserve merge-base retrieve_tools semantics
+	// (Spec 085 FR-006/FR-011). The tools themselves stay in the StateView so
+	// the review surface can still list them.
+	if cfg, err := p.storage.GetUpstreamServer(serverName); err == nil && cfg != nil && cfg.Quarantined {
+		return 0
+	}
+
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
 		return 0
@@ -6093,6 +6103,13 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 	if !serverConfig.Enabled {
 		return false
 	}
+
+	// NOTE: quarantine is deliberately NOT gated here. isToolCallable is the
+	// SEARCH filter and must reproduce merge-base semantics exactly (Spec 085
+	// FR-006/FR-011) -- retrieve_tools still surfaces a quarantined server's
+	// lingering indexed tools; the stricter p.toolVisibleToSession is what
+	// applies the quarantine gate. The #1064 counting fix lives in
+	// getVisibleToolCount instead.
 
 	// Config-layer filter — evaluated at call time, never written to BBolt.
 	// A tool absent from enabled_tools or present in disabled_tools is hard off.

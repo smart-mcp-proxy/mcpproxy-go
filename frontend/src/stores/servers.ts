@@ -44,10 +44,13 @@ export const useServersStore = defineStore('servers', () => {
     servers.value.filter(s => s.quarantined)
   )
 
-  // Only count tools from enabled servers (Issue #285 fix)
+  // Only count tools that are actually available: enabled servers (Issue #285)
+  // that are not quarantined (Issue #1064 -- a quarantined server's tools are
+  // refused at dispatch and purged from the search index, so counting them
+  // tells the operator N tools are available when none of them are callable).
   const totalTools = computed(() =>
     servers.value
-      .filter(s => s.enabled)
+      .filter(s => s.enabled && !s.quarantined)
       .reduce((sum, server) => sum + server.tool_count, 0)
   )
 

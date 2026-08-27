@@ -2169,6 +2169,17 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// once, here, so every consumer (Web UI, tray, CLI) gets the clean chain.
 		lastError := stringutil.CollapseRepeatedErrorWrappers(serverStatus.LastError)
 
+		// #1064: a quarantined server's tools are not available to an agent --
+		// every dispatch is refused and the search index is purged (#1061) --
+		// but the stale pre-quarantine count survives in the StateView because
+		// the supervisor re-sticks it on reconcile and AddServer re-dials the
+		// server for inspection. Zero it here, at the wire boundary, so every
+		// consumer of this projection agrees with the index.
+		availableToolCount := serverStatus.ToolCount
+		if serverStatus.Quarantined {
+			availableToolCount = 0
+		}
+
 		serverMap := map[string]interface{}{
 			"id":              serverStatus.Name,
 			"name":            serverStatus.Name,
@@ -2180,7 +2191,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			"created":         created,
 			"connected":       connected,
 			"connecting":      connecting,
-			"tool_count":      serverStatus.ToolCount,
+			"tool_count":      availableToolCount,
 			"last_error":      lastError,
 			"status":          status,
 			"should_retry":    false,
@@ -2353,7 +2364,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			HasRefreshToken:       hasRefreshToken,
 			UserLoggedOut:         userLoggedOut,
 			CallTimeOAuthRequired: callTimeOAuthRequired,
-			ToolCount:             serverStatus.ToolCount,
+			ToolCount:             availableToolCount,
 			MissingSecret:         health.ExtractMissingSecret(lastError),
 			OAuthConfigErr:        health.ExtractOAuthConfigError(lastError),
 		}

@@ -1772,7 +1772,10 @@ func (m *Manager) GetTotalToolCount() int {
 		}
 		// Read config through the thread-safe accessor (MCP-770).
 		cfg := client.GetConfig()
-		if cfg == nil || !cfg.Enabled || !client.IsConnected() {
+		// #1064: a quarantined server stays dialed for security inspection, so
+		// IsConnected() is true and its cached count is still the pre-quarantine
+		// number -- exclude it explicitly.
+		if cfg == nil || !cfg.ContributesTools() || !client.IsConnected() {
 			continue
 		}
 

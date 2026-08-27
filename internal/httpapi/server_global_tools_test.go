@@ -214,3 +214,65 @@ func TestGlobalTools_ScanHoldEvidenceSurfaced(t *testing.T) {
 	assert.NotContains(t, legacy, "held_reason", "records without hold evidence must stay unchanged")
 	assert.NotContains(t, legacy, "held_signals")
 }
+
+// Issue #1064: a quarantined server kept reporting its tools as available.
+// Unlike the DISABLED case — which reaches this handler as an empty tool set
+// only because disabling disconnects the server — quarantine leaves the server
+// dialed for security inspection with status ready, so the tools came straight
+// through while every call to them was refused and the search index correctly
+// held nothing.
+func TestGlobalTools_QuarantinedServerContributesNothing(t *testing.T) {
+	ctrl := &globalToolsController{
+		allServers: []map[string]interface{}{
+			{"name": "github", "quarantined": false},
+			{"name": "memory", "quarantined": true},
+			// A disabled server must STILL contribute its tools: the
+			// GlobalToolsResponse contract lists them as disabled rather than
+			// hiding them.
+			{"name": "notes", "quarantined": false},
+		},
+		serverTools: map[string][]map[string]interface{}{
+			"github": {
+				{"name": "create_issue", "description": "Create issue"},
+				{"name": "delete_repo", "description": "Delete repo"},
+			},
+			"memory": {
+				{"name": "store", "description": "Store memory"},
+				{"name": "recall", "description": "Recall memory"},
+				{"name": "forget", "description": "Forget memory"},
+			},
+			"notes": {
+				{"name": "append", "description": "Append note"},
+			},
+		},
+		configDenied: map[string]bool{"notes\x00append": true},
+	}
+
+	data := doGlobalTools(t, ctrl)
+
+	tools := data["tools"].([]interface{})
+	byName := map[string]string{}
+	for _, x := range tools {
+		tm := x.(map[string]interface{})
+		byName[tm["name"].(string)] = tm["server_name"].(string)
+	}
+
+	assert.Contains(t, byName, "create_issue")
+	assert.Contains(t, byName, "delete_repo")
+	assert.Contains(t, byName, "append", "a disabled server's tools must still be listed")
+
+	for _, quarantined := range []string{"store", "recall", "forget"} {
+		assert.NotContains(t, byName, quarantined,
+			"quarantined server's tools must not be reported as available")
+	}
+
+	stats := data["stats"].(map[string]interface{})
+	assert.Equal(t, float64(3), stats["total"])
+
+	// Skipping a quarantined server is a deliberate exclusion, not a fetch
+	// failure — it must not be reported as a degraded response.
+	assert.NotEqual(t, true, data["partial"])
+	if failed, ok := data["failed_servers"]; ok {
+		assert.Empty(t, failed, "a quarantined server is not a failed server")
+	}
+}

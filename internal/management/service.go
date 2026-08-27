@@ -457,8 +457,10 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// Extract numeric fields
 		if toolCount, ok := srvRaw["tool_count"].(int); ok {
 			srv.ToolCount = toolCount
-			// Only count tools from enabled servers in the total
-			if srv.Enabled {
+			// Only count tools from servers that actually contribute available
+			// tools: enabled, and not quarantined (#1064 -- a quarantined
+			// server's tools are refused at dispatch and purged from the index).
+			if config.ServerContributesTools(srv.Enabled, srv.Quarantined) {
 				stats.TotalTools += toolCount
 			}
 		}

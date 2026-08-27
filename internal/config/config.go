@@ -2036,6 +2036,23 @@ func (sc *ServerConfig) IsQuarantineSkipped() bool {
 	return sc.EffectiveTrustMode() == TrustModeAuto
 }
 
+// ServerContributesTools reports whether a server's tools count as AVAILABLE to
+// an agent. A quarantined server's tools are refused by every dispatch path
+// (the SECURITY BLOCK in internal/server/mcp.go) and are withheld from the
+// search index (#1061), so it contributes zero — the same answer the index
+// writer's serverEligibleForIndexing and preflight.ClassifyTool already give.
+// Takes plain bools because most callers hold a stateview server status rather
+// than a *ServerConfig. Issue #1064.
+func ServerContributesTools(enabled, quarantined bool) bool {
+	return enabled && !quarantined
+}
+
+// ContributesTools is the *ServerConfig form of ServerContributesTools. A nil
+// receiver contributes nothing.
+func (sc *ServerConfig) ContributesTools() bool {
+	return sc != nil && ServerContributesTools(sc.Enabled, sc.Quarantined)
+}
+
 // IsAutoApproveToolChanges reports the configured per-server intent to auto-approve
 // tool changes/additions (disabling per-server rug-pull protection). It is provided
 // for the runtime consumers that adopt it in MCP-2931 and is NOT yet consulted at
