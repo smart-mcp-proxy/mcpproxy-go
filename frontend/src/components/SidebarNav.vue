@@ -475,7 +475,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref, type FunctionalComponent } from 'vue'
+import { computed, h, onMounted, ref, watch, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { formatDateTime } from '@/utils/datetime'
@@ -518,15 +518,24 @@ function onClickSetup() {
   }
 }
 
-onMounted(() => {
-  // Pull initial state so the badge is correct on first render. Personal-
-  // edition only — the surrounding template gates this for personal users.
+function loadBadgeCounts() {
+  // Personal-edition only — the surrounding template gates this for personal users.
   if (!authStore.isTeamsEdition) {
     void onboardingStore.fetchState()
     void fetchToolCount()
     void fetchSecretCount()
   }
+}
+
+onMounted(() => {
+  // Pull initial state so the badge is correct on first render.
+  loadBadgeCounts()
 })
+
+// #1065: the sidebar sits outside <router-view>, so App.vue's authEpoch key
+// cannot remount it. Without this, badge counts that failed while auth was
+// broken keep their stale values until a full page reload.
+watch(() => systemStore.authEpoch, loadBadgeCounts)
 
 const collapsed = computed(() => systemStore.sidebarCollapsed)
 
