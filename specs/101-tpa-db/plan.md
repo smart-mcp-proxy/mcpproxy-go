@@ -53,7 +53,7 @@ Resolved in [research.md](research.md); recorded here as the plan of record.
 | # | Decision | Where resolved |
 |---|----------|----------------|
 | D1 | Publication channel = **GitHub Releases on the corpus repo**, immutable per-sequence asset names, `latest` resolved via the Releases API (not a mutable file) | R-D1 |
-| D2 | **OPEN — maintainer's call.** The ratchet only arms *after* a first signed activation, so "no flip" leaves fresh installs accepting an attacker's unsigned drop. Recommendation: default-on for external candidates with an explicit opt-out, accepting a loud breaking change for existing 086 unsigned droppers | R-D2 |
+| D2 | **LOCKED: `require_signed_bundle` stays default-OFF.** Recommendation was to flip it on; maintainer chose off, keeping existing 086 unsigned file-drops working across the upgrade. Consequence: FR-007's degraded coverage + FR-020's surfacing are the only mitigation for a fresh install, so they are mandatory rather than polish | R-D2 |
 | D3 | Sidecar = one-line JSON, exactly five keys (`sidecar_version`, `algorithm`, `key_id`, `signature`, `sequence`), total deterministic rejection, Ed25519-only in v1 | R-D3, contracts/sidecar-format.md |
 | D4 | `signatures[]` additive top-level section keyed by TPA id, many-to-one to `rules[]`, bidirectional referential integrity enforced at build, licence from an SPDX allowlist | R-D4, contracts/bundle-signatures-section.md |
 | D5 | Read budget = `O_NOFOLLOW\|O_NONBLOCK` open + descriptor `fstat` + ceiling from that `FileInfo`; context-cancelled reader goroutine, never `SetReadDeadline`; abandoned readers capped at one per path; Windows build-tagged and explicitly weaker | R-D5 |

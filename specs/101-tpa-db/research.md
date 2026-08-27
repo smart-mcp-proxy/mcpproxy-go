@@ -79,7 +79,7 @@ BBolt is transactionally consistent and checksummed against corruption; it is no
 
 ### D2 — `require_signed_bundle` stays **opt-in indefinitely** (resolves the Assumptions marker)
 
-**Decision**: **OPEN — needs the maintainer's call.** The draft answer was "no flip, the ratchet does the work". Cross-model review showed that reasoning is incomplete, and the honest resolution is a back-compat judgement I should not make silently.
+**Decision (LOCKED 2026-08-26, maintainer): `require_signed_bundle` stays DEFAULT-OFF.** The trade below was put to the maintainer with the recommendation to flip it on; the call is to keep it off for now.
 
 **Why the draft rationale fails.** It argued that a flip "would change behavior only for installs that have never seen a signed bundle". That is true — and it is the wrong conclusion, because **those installs are exactly the unprotected population**. The ratchet only arms after a first signed activation; before that, an attacker who can write the bundle path (in scope) can drop an unsigned corpus and have it activate. Saying the ratchet "does the work" describes installs that are already safe.
 
@@ -93,9 +93,11 @@ BBolt is transactionally consistent and checksummed against corruption; it is no
 
 Unsigned file drops are a shipped 086 capability (`security.tpa_bundle_path`), so default-on is a **user-visible breaking change on upgrade** — loud rather than silent (the rejection reason is surfaced per FR-020), but breaking.
 
-**Recommendation**: flip to default-on for EXTERNAL candidates with an explicit `require_signed_bundle: false` opt-out, and call it out in the release notes. The failure it prevents is silent and security-relevant; the failure it causes is loud and self-describing, and that asymmetry is the usual reason to prefer the breaking change.
+**Recommendation as put** was to flip to default-on for EXTERNAL candidates with an explicit opt-out. **The maintainer chose default-off**, which keeps every existing 086 unsigned file-drop working across the upgrade — the breaking change was the whole cost of the alternative, and the population it would protect (installs that have never activated a signed bundle) is the same population that has not yet adopted signing at all.
 
-**This is a spec-level decision** — it resolves an Assumptions marker in spec.md — so it is recorded here as a recommendation with its cost, not applied unilaterally. Tasks MUST NOT begin the config work until it is settled.
+**What that obliges this spec to carry, so the residual is not silent**: while an unsigned EXTERNAL bundle is active, FR-007 already degrades coverage and suspends `scan`-mode auto-approval, and FR-020 requires that state and its reason to be surfaced. Those are now the ONLY thing standing between a fresh install and an attacker-supplied unsigned corpus, so they are not optional polish — a task that ships the loader without the degraded-state surfacing has shipped the risk without the mitigation.
+
+**Revisit trigger**: SC-006 telemetry showing a material population running unsigned external bundles long-term. That is the evidence a future flip would need, and it is now measurable by design.
 
 ### D3 — Sidecar wire format (resolves FR-003's "MUST be specified in design")
 
