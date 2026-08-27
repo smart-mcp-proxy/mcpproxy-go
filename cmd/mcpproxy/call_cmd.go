@@ -130,6 +130,11 @@ Examples:
 	// Intent flags for tool variant commands
 	callIntentReason      string
 	callIntentSensitivity string
+
+	// save_to_file flags for tool variant commands (Spec 076)
+	callSaveToFile    string
+	callSaveFormat    string
+	callSaveOverwrite bool
 )
 
 // GetCallCommand returns the call command for adding to the root command
@@ -187,6 +192,11 @@ func setupToolVariantFlags(cmd *cobra.Command) {
 	// Intent-specific flags
 	cmd.Flags().StringVar(&callIntentReason, "reason", "", "Human-readable explanation for the operation (max 1000 chars)")
 	cmd.Flags().StringVar(&callIntentSensitivity, "sensitivity", "", "Data sensitivity classification: public, internal, private, unknown")
+
+	// save_to_file flags (Spec 076) — mirrors the call_tool_* MCP tool params
+	cmd.Flags().StringVar(&callSaveToFile, "save-to-file", "", "Absolute path under a configured tool_output_roots entry; writes the full untruncated response there instead of printing it")
+	cmd.Flags().StringVar(&callSaveFormat, "save-format", "", "Format for --save-to-file: text (default) or json")
+	cmd.Flags().BoolVar(&callSaveOverwrite, "save-overwrite", false, "Overwrite an existing file at --save-to-file instead of failing")
 
 	// Mark required flags
 	if err := cmd.MarkFlagRequired("tool-name"); err != nil {
@@ -362,6 +372,21 @@ func runCallToolVariant(toolVariant, operationType string) error {
 	if callIntentReason != "" {
 		variantArgs["intent_reason"] = callIntentReason
 	}
+	// Add flat save_to_file params (Spec 076). The server rejects
+	// save_format/save_overwrite without save_to_file too; failing here first
+	// gives the user the answer without a round trip.
+	if callSaveToFile == "" && (callSaveFormat != "" || callSaveOverwrite) {
+		return fmt.Errorf("--save-format/--save-overwrite require --save-to-file")
+	}
+	if callSaveToFile != "" {
+		variantArgs["save_to_file"] = callSaveToFile
+	}
+	if callSaveFormat != "" {
+		variantArgs["save_format"] = callSaveFormat
+	}
+	if callSaveOverwrite {
+		variantArgs["save_overwrite"] = callSaveOverwrite
+	}
 
 	// Load configuration
 	globalConfig, err := loadCallConfig()
@@ -384,6 +409,9 @@ func runCallToolVariant(toolVariant, operationType string) error {
 	}
 	if callIntentReason != "" {
 		fmt.Printf("   Reason: %s\n", callIntentReason)
+	}
+	if callSaveToFile != "" {
+		fmt.Printf("   Save to file: %s\n", callSaveToFile)
 	}
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 

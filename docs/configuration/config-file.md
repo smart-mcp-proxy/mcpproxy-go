@@ -31,6 +31,8 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "tool_discovery_interval": "5m",
   "tools_limit": 15,
   "tool_response_limit": 20000,
+  "tool_output_roots": [],
+  "tool_output_max_bytes": 52428800,
   "enable_code_execution": false,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
@@ -65,6 +67,8 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 |--------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum tools to return in a single request |
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool response |
+| `tool_output_roots` | array of strings | `[]` (disabled) | Absolute directory paths the `save_to_file` param of `call_tool_read`/`call_tool_write`/`call_tool_destructive` may write under. Empty disables the feature. See [Save Tool Output to File](../configuration.md#save-tool-output-to-file). |
+| `tool_output_max_bytes` | integer | `52428800` | Maximum bytes a single `save_to_file` write may produce. |
 
 ### Tool Discovery & Health Check Intervals
 

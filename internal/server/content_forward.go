@@ -2,11 +2,16 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputfile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 )
 
@@ -236,4 +241,359 @@ func joinTextParts(parts []string) string {
 		out = append(out, p...)
 	}
 	return string(out)
+}
+
+// --- save_to_file (Spec 076) ---
+//
+// Separates "get the data complete" from "read it into context": when the
+// agent sets save_to_file on a call_tool_read/write/destructive call, the
+// FULL upstream response is written to a config-whitelisted file instead of
+// being (possibly truncated) forwarded inline.
+
+// saveToFileParams carries the (optional) save_to_file request parameters
+// parsed from a call_tool_* invocation. An empty Path means save_to_file was
+// not requested for this call.
+type saveToFileParams struct {
+	Path      string
+	Format    string // "text" (default) or "json"
+	Overwrite bool
+}
+
+// saveToFileConfig carries the server-side whitelist configuration needed to
+// resolve and write save_to_file targets (internal/config.Config's
+// ToolOutputRoots / ToolOutputMaxBytes, threaded through rather than
+// importing internal/config here to keep this file's dependency surface
+// small and testable).
+type saveToFileConfig struct {
+	Roots    []string
+	MaxBytes int64
+}
+
+// saveToFileEnvelope is the JSON body returned to the agent in place of the
+// (possibly huge) upstream response when save_to_file succeeds. Field names
+// are part of the save_to_file contract (Spec 076) — do not rename without
+// updating the tool schema description in mcp.go.
+type saveToFileEnvelope struct {
+	SavedTo          string `json:"saved_to"`
+	Bytes            int64  `json:"bytes"`
+	SHA256           string `json:"sha256"`
+	Format           string `json:"format"`
+	ContentBlocks    int    `json:"content_blocks"`
+	NonTextBlocks    int    `json:"non_text_blocks"`
+	Preview          string `json:"preview"`
+	TruncatedPreview bool   `json:"truncated_preview"`
+}
+
+// previewRuneLimit bounds the "preview" envelope field.
+const previewRuneLimit = 1000
+
+// maybeSaveToFile implements the save_to_file capability. It MUST be called
+// before any ShouldTruncate/Truncate so the file it writes is always the
+// complete, untruncated upstream response — never the possibly-truncated one
+// forwardContentResult would otherwise produce.
+//
+// Returns handled=false when save_to_file was not requested (params.Path ==
+// "") or when the upstream result is itself an error result — in both cases
+// the caller must fall through to the normal forwardContentResult truncation
+// path completely unchanged (agents must always see upstream errors inline;
+// save_to_file never intercepts them). Returns handled=true in every other
+// case (success or a save_to_file-specific failure), together with the
+// *mcp.CallToolResult the caller should return to the agent AS-IS, skipping
+// forwardContentResult entirely.
+//
+// On a resolve/write failure this returns a tool error result whose text is
+// "save_to_file: <reason>" — errors never fall back to returning the
+// (possibly huge) upstream body inline; the caller explicitly asked for a
+// file, so a silent fallback to the old behavior would hide the failure.
+// Never logs or echoes file CONTENT — only the resolved path, byte count,
+// sha256 and a ≤1000-rune preview ever leave this function.
+func maybeSaveToFile(result interface{}, params saveToFileParams, cfg saveToFileConfig) (forwarded *mcp.CallToolResult, handled bool) {
+	if params.Path == "" {
+		return nil, false
+	}
+
+	format := params.Format
+	if format == "" {
+		format = "text"
+	}
+	if format != "text" && format != "json" {
+		return saveToFileErrorResult(fmt.Errorf("invalid save_format %q (must be \"text\" or \"json\")", params.Format)), true
+	}
+
+	ctr, ok := result.(*mcp.CallToolResult)
+	if !ok || ctr == nil {
+		// A legacy, non-*mcp.CallToolResult upstream result still honors an
+		// explicit save_to_file request rather than silently ignoring it
+		// (silently falling through to forwardContentResult would forward/
+		// truncate the response inline as if save_to_file had never been
+		// set). "text" has nothing well-defined to concatenate for an
+		// arbitrary interface{}, so only "json" (the whole result,
+		// JSON-marshaled) is supported on this path.
+		if format == "text" {
+			return saveToFileErrorResult(errors.New("unsupported upstream result type for text format; use save_format=\"json\"")), true
+		}
+		data, err := json.Marshal(result)
+		if err != nil {
+			return saveToFileErrorResult(fmt.Errorf("failed to encode response as json: %w", err)), true
+		}
+		return writeSaveToFile(params, cfg, format, data, 0, 0, "")
+	}
+	if ctr.IsError {
+		// Agents must always see errors; never divert an error result to a
+		// file. Let the existing (unchanged) error-forwarding path run.
+		return nil, false
+	}
+
+	totalBlocks, nonTextBlocks := countContentBlocks(ctr)
+	// The preview — and the format:"text" payload — is always the
+	// concatenated TextContent blocks only (no placeholders for
+	// image/audio/unknown blocks). This is what makes non_text_blocks > 0
+	// with format:"text" meaningful: those blocks are genuinely absent from
+	// the saved file, not just replaced with a placeholder string.
+	textForm := concatSaveableTextBlocks(ctr)
+
+	// format:"text" with content blocks present but none of them
+	// non-empty text (e.g. an image-only response, or a lone empty-string
+	// text block) must fail loudly instead of silently writing a 0-byte
+	// file with a success envelope. A genuinely empty response (zero
+	// content blocks at all) is unaffected — that is a real empty upstream
+	// result, not text dropped by this filter.
+	if format == "text" && textForm == "" && totalBlocks > 0 {
+		return saveToFileErrorResult(errors.New("response has no non-empty text content; use save_format=\"json\"")), true
+	}
+
+	var data []byte
+	if format == "json" {
+		b, err := json.Marshal(ctr)
+		if err != nil {
+			return saveToFileErrorResult(fmt.Errorf("failed to encode response as json: %w", err)), true
+		}
+		data = b
+	} else {
+		data = []byte(textForm)
+	}
+
+	return writeSaveToFile(params, cfg, format, data, totalBlocks, nonTextBlocks, textForm)
+}
+
+// writeSaveToFile resolves params.Path against cfg's whitelist, writes data,
+// and builds the success envelope. Shared by both the normal
+// *mcp.CallToolResult path and the legacy non-*mcp.CallToolResult path
+// above; the latter always passes totalBlocks=0, nonTextBlocks=0,
+// textForm="" since those concepts don't apply to an arbitrary
+// JSON-marshaled interface{}, so the envelope's preview is empty and
+// content_blocks/non_text_blocks are 0.
+func writeSaveToFile(params saveToFileParams, cfg saveToFileConfig, format string, data []byte, totalBlocks, nonTextBlocks int, textForm string) (*mcp.CallToolResult, bool) {
+	target, err := outputfile.Resolve(cfg.Roots, params.Path, params.Overwrite)
+	if err != nil {
+		return saveToFileErrorResult(err), true
+	}
+	// Resolve opens (and identity-checks) target.Handle — an *os.Root — as
+	// part of validating the path (see outputfile.Resolve); this call owns
+	// that handle's lifecycle from here on and must close it on every
+	// return path, success or failure.
+	defer func() { _ = target.Close() }()
+
+	info, err := outputfile.Write(target, data, cfg.MaxBytes, params.Overwrite)
+	if err != nil {
+		return saveToFileErrorResult(err), true
+	}
+
+	preview, truncatedPreview := previewRunes(textForm, previewRuneLimit)
+	envJSON, err := json.Marshal(saveToFileEnvelope{
+		SavedTo:          info.Path,
+		Bytes:            info.Bytes,
+		SHA256:           info.SHA256,
+		Format:           format,
+		ContentBlocks:    totalBlocks,
+		NonTextBlocks:    nonTextBlocks,
+		Preview:          preview,
+		TruncatedPreview: truncatedPreview,
+	})
+	if err != nil {
+		return saveToFileErrorResult(fmt.Errorf("failed to encode result envelope: %w", err)), true
+	}
+
+	return mcp.NewToolResultText(string(envJSON)), true
+}
+
+// saveToFileErrorResult wraps err as the standard "save_to_file: <reason>"
+// tool error text mandated by the save_to_file contract (Spec 076).
+func saveToFileErrorResult(err error) *mcp.CallToolResult {
+	return mcp.NewToolResultError(fmt.Sprintf("save_to_file: %v", err))
+}
+
+// recountSaveOrTruncateTokenMetrics corrects tokenMetrics.OutputTokens/
+// TotalTokens to reflect what the agent actually received, for the two
+// cases where the raw upstream-body token count computed earlier is wrong:
+// a truncated response (wasTruncated) or a save_to_file-diverted response
+// (savedToFile) — in both cases the agent saw a shorter forwarded/response
+// text, not the full upstream body. tokenMetrics.SavedToFile is always set
+// unconditionally (independent of whether a recount is possible below) so a
+// caller can tell "this call went through the save path" apart from "this
+// call had a coincidentally small body", even when tokenizer is nil or
+// errors.
+//
+// When neither flag is set, this is a no-op beyond setting SavedToFile.
+// When a flag is set and tokenizer successfully recounts response, that
+// recount wins. When tokenizer is nil, or CountTokensForModel errors, a
+// save_to_file response STILL gets corrected to OutputTokens=0/
+// TotalTokens=InputTokens (the agent never saw the un-recountable full
+// body either way) — but a truncated-without-save response keeps its
+// original (uncorrected, full-body) count, since fixing that pre-existing
+// gap is out of scope for this fix pass.
+//
+// Returns true if tokenMetrics was mutated in a way the caller should
+// propagate onto its own copy (toolCallRecord.Metrics = tokenMetrics).
+func recountSaveOrTruncateTokenMetrics(tokenMetrics *storage.TokenMetrics, wasTruncated, savedToFile bool, response string, tokenizer tokens.Tokenizer) bool {
+	if tokenMetrics == nil {
+		return false
+	}
+	tokenMetrics.SavedToFile = savedToFile
+	if !wasTruncated && !savedToFile {
+		return false
+	}
+	if tokenizer != nil {
+		if recountedTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model); err == nil {
+			tokenMetrics.WasTruncated = wasTruncated
+			tokenMetrics.OutputTokens = recountedTokens
+			tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
+			return true
+		}
+	}
+	if savedToFile {
+		tokenMetrics.WasTruncated = wasTruncated
+		tokenMetrics.OutputTokens = 0
+		tokenMetrics.TotalTokens = tokenMetrics.InputTokens
+		return true
+	}
+	return false
+}
+
+// validateSaveToFileArgTypes checks the RAW, un-coerced argument map for the
+// save_to_file/save_format/save_overwrite keys before they are parsed with
+// mcp-go's lenient request.GetString/GetBool (which silently fall back to
+// the zero value on a type mismatch instead of erroring). Without this, a
+// caller that accidentally sends save_to_file as a JSON number, or
+// save_overwrite as a string, would have the request silently treated as
+// "save_to_file not requested" / "overwrite not requested" — the request
+// then proceeds and returns the (possibly truncated) inline response, with
+// no indication the parameter was ignored. Also rejects an invalid
+// save_format enum value here (pre-dispatch), not just a type mismatch — the
+// same check maybeSaveToFile makes post-dispatch runs again there as
+// defence-in-depth, but catching it here avoids running the (possibly
+// destructive) upstream call only to discard its result for a save_format
+// typo. Also rejects two shapes that would otherwise be silently
+// misinterpreted: a present-but-empty save_to_file string (which downstream
+// code treats identically to save_to_file being absent), and save_format or
+// save_overwrite supplied without a (non-empty) save_to_file alongside them.
+// Returns a non-nil tool-error result if any present argument has the wrong
+// type, save_to_file is present but empty, save_format/save_overwrite are
+// present without save_to_file, or save_format is present but not "",
+// "text", or "json"; nil if every present argument (if any) is well-typed
+// and valid.
+func validateSaveToFileArgTypes(request mcp.CallToolRequest) *mcp.CallToolResult {
+	args := request.GetArguments()
+	saveToFileRequested := false
+	if v, ok := args["save_to_file"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			return saveToFileErrorResult(fmt.Errorf("parameter save_to_file must be a string"))
+		}
+		// A present-but-empty save_to_file is exactly the silent-ignore
+		// failure mode this function exists to prevent: downstream code
+		// treats "" the same as "key absent" (params.Path == ""), so a
+		// caller who meant to request a save would instead get the normal
+		// (possibly truncated) inline response with no indication their
+		// save_to_file was ignored.
+		if s == "" {
+			return saveToFileErrorResult(errors.New("must be a non-empty absolute path"))
+		}
+		saveToFileRequested = true
+	}
+	if v, ok := args["save_format"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			return saveToFileErrorResult(fmt.Errorf("parameter save_format must be a string"))
+		}
+		if !saveToFileRequested {
+			return saveToFileErrorResult(errors.New("save_format/save_overwrite require save_to_file"))
+		}
+		if s != "" && s != "text" && s != "json" {
+			return saveToFileErrorResult(fmt.Errorf("invalid save_format %q (must be \"text\" or \"json\")", s))
+		}
+	}
+	if v, ok := args["save_overwrite"]; ok {
+		if _, isBool := v.(bool); !isBool {
+			return saveToFileErrorResult(fmt.Errorf("parameter save_overwrite must be a bool"))
+		}
+		if !saveToFileRequested {
+			return saveToFileErrorResult(errors.New("save_format/save_overwrite require save_to_file"))
+		}
+	}
+	return nil
+}
+
+// saveToFileTextContent returns a content block's text and true if the
+// block is a text block, accepting both the value form (mcp.TextContent, as
+// produced by mcp.NewTextContent) and the pointer form (*mcp.TextContent) —
+// a bare `c.(mcp.TextContent)` type assertion would mis-classify the
+// pointer form as a non-text block and silently drop it from both the
+// block count and the saved text, even though it carries real text.
+func saveToFileTextContent(c mcp.Content) (string, bool) {
+	switch tc := c.(type) {
+	case mcp.TextContent:
+		return tc.Text, true
+	case *mcp.TextContent:
+		if tc == nil {
+			return "", false
+		}
+		return tc.Text, true
+	default:
+		return "", false
+	}
+}
+
+// countContentBlocks reports the total number of content blocks in ctr and
+// how many of those are NOT text (image, audio, embedded resource, or any
+// other unknown type) — see saveToFileTextContent for what counts as text.
+func countContentBlocks(ctr *mcp.CallToolResult) (total, nonText int) {
+	total = len(ctr.Content)
+	for _, c := range ctr.Content {
+		if _, ok := saveToFileTextContent(c); !ok {
+			nonText++
+		}
+	}
+	return total, nonText
+}
+
+// concatSaveableTextBlocks concatenates every text block in ctr.Content
+// (see saveToFileTextContent), newline-separated. This is the save_to_file
+// path's own text extraction — kept separate from the shared
+// concatTextBlocks in output_sanitisation.go (which only recognizes the
+// value form) so this fix does not change behavior for other callers of
+// that function.
+func concatSaveableTextBlocks(ctr *mcp.CallToolResult) string {
+	var b strings.Builder
+	for _, c := range ctr.Content {
+		if txt, ok := saveToFileTextContent(c); ok {
+			// Intentional: gating on b.Len() > 0 drops a leading empty text
+			// block's separator (["","A","","B"] -> "A\n\nB"); interior/trailing empty blocks still keep theirs.
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(txt)
+		}
+	}
+	return b.String()
+}
+
+// previewRunes returns the first maxRunes runes of s and whether s had more
+// than that.
+func previewRunes(s string, maxRunes int) (preview string, truncated bool) {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s, false
+	}
+	return string(runes[:maxRunes]), true
 }

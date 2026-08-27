@@ -239,6 +239,14 @@ export const GENERAL_FIELDS: SettingField[] = [
   },
   { key: 'tools_limit', label: 'Search results limit', help: 'How many tools a single tool-search returns to the agent.', control: 'number', min: 1, max: 1000 },
   { key: 'tool_response_limit', label: 'Max tool response size (characters)', help: 'Responses larger than this are truncated and cached so the agent can page through them. 0 = never truncate.', control: 'number', min: 0 },
+  // Spec 076 — save_to_file. tool_output_roots ([]string) is intentionally
+  // NOT exposed here: SettingField's free-text controls (including
+  // 'textarea') bind a plain string and emit a plain string on change, with
+  // no newline<->array coercion, so wiring it up here would silently
+  // corrupt the array on save. Configure tool_output_roots in the JSON
+  // config file directly (see docs/configuration.md) until a dedicated
+  // array-of-strings control exists.
+  { key: 'tool_output_max_bytes', label: 'Max save_to_file write size (bytes)', help: 'Maximum size of a single save_to_file write. 0 = use the built-in default (50 MiB).', control: 'number', min: 0, docs: '/configuration#save-tool-output-to-file' },
   { key: 'call_tool_timeout', label: 'Tool call timeout', help: 'How long to wait for a single tool call before giving up. e.g. 2m, 90s, 30s.', control: 'duration', placeholder: '2m' },
   {
     key: 'logging.level',

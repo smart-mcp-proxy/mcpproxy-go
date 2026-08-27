@@ -54,6 +54,7 @@ type TokenMetrics struct {
 	EstimatedCost   float64 `json:"estimated_cost,omitempty"`   // Optional cost estimate
 	TruncatedTokens int     `json:"truncated_tokens,omitempty"` // Tokens removed by truncation
 	WasTruncated    bool    `json:"was_truncated"`              // Whether response was truncated
+	SavedToFile     bool    `json:"saved_to_file,omitempty"`    // Whether save_to_file diverted the response to a file (OutputTokens then counts the envelope/error, not the full upstream body)
 }
 
 // ToolCallRecord represents a tool call with server context

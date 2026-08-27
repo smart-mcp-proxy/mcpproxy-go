@@ -550,6 +550,16 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 		mcp.WithString("intent_reason",
 			mcp.Description(reasonDesc),
 		),
+		mcp.WithString("save_to_file",
+			mcp.Description("Absolute path under a configured tool_output_roots entry. Writes the full untruncated response there and returns a short JSON envelope instead. See docs/configuration.md#save-tool-output-to-file."),
+		),
+		mcp.WithString("save_format",
+			mcp.Enum("text", "json"),
+			mcp.Description("Only used with save_to_file. 'text' (default) writes the concatenated text content blocks — the same blocks the response-limit truncator would otherwise truncate one at a time — untruncated; 'json' writes the full result including non-text content. See docs/configuration.md#save-tool-output-to-file."),
+		),
+		mcp.WithBoolean("save_overwrite",
+			mcp.Description("Only used with save_to_file. Default false rejects an existing target file; set true to replace it. See docs/configuration.md#save-tool-output-to-file."),
+		),
 	)
 
 	return mcp.NewTool(variant, allOpts...)
@@ -1558,6 +1568,25 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
+	// save_to_file (Spec 076): parsed here (rather than deep in the response
+	// handling below) so it lives right next to the other request-parameter
+	// extraction. An empty Path means the feature was not requested for this
+	// call — see maybeSaveToFile in content_forward.go.
+	// request.GetString/GetBool are lenient: a wrong-typed argument (e.g. a
+	// JSON number for save_to_file) silently falls back to the default
+	// ("" / false) rather than erroring, which would make save_to_file
+	// silently not happen instead of surfacing the caller's mistake. Check
+	// the raw argument types explicitly before parsing.
+	if errResult := validateSaveToFileArgTypes(request); errResult != nil {
+		return errResult, nil
+	}
+
+	saveParams := saveToFileParams{
+		Path:      request.GetString("save_to_file", ""),
+		Format:    request.GetString("save_format", ""),
+		Overwrite: request.GetBool("save_overwrite", false),
+	}
+
 	// Handle upstream tools via upstream manager (requires server:tool format)
 	if !strings.Contains(toolName, ":") {
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)), nil
@@ -1898,56 +1927,117 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	activityResponseBytes := rawByteSize(result)
 	activityRequestBytes := rawByteSize(activityArgs)
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
-
-	// Spec 056: output-schema validation. Strict mode blocks a violating result
-	// (returns an error); warn mode forwards unchanged after recording a
-	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
-		return blockResult, nil
+	// save_to_file (Spec 076): must run BEFORE forwardContentResult's
+	// truncation so the file it writes is always the complete, untruncated
+	// response. It runs AFTER applyOutputSanitisation above (redact/strip/
+	// block), so a saved file never contains an unredacted secret, and it
+	// never intercepts an upstream error result (maybeSaveToFile returns
+	// handled=false for those — see its doc comment).
+	//
+	// tool_output_roots/tool_output_max_bytes are read from the LIVE config
+	// snapshot, not p.config: p.config is captured once in NewMCPProxyServer
+	// and never reassigned, so a hot-reloaded change to these settings would
+	// otherwise silently not take effect until a full restart. This mirrors
+	// the pattern used for the tokenizer model just above.
+	saveCfg := saveToFileConfig{
+		Roots:    p.config.ToolOutputRoots,
+		MaxBytes: p.config.ToolOutputMaxBytes,
 	}
-
-	// Spec 054 Track B (post-forward): spotlight untrusted text in
-	// source-identifying delimiters. Lossless and non-cacheable, so it runs
-	// after truncation. response is refreshed so logs/metrics match agent output.
-	p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
-	response = forwardedText(forwarded, response)
-
-	// Track truncation in token metrics
-	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
-		tokenizer := p.mainServer.runtime.Tokenizer()
-		if tokenizer != nil {
-			truncatedTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
-			if err == nil {
-				tokenMetrics.WasTruncated = true
-				tokenMetrics.OutputTokens = truncatedTokens
-				tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
-				toolCallRecord.Metrics = tokenMetrics
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if live := p.mainServer.runtime.Config(); live != nil {
+			saveCfg = saveToFileConfig{
+				Roots:    live.ToolOutputRoots,
+				MaxBytes: live.ToolOutputMaxBytes,
 			}
 		}
 	}
 
-	// Store successful tool call in history
-	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
-		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
+	var forwarded *mcp.CallToolResult
+	var response string
+	var wasTruncated bool
+	var savedToFile bool
+	if saveResult, saveHandled := maybeSaveToFile(result, saveParams, saveCfg); saveHandled {
+		// A failed save_to_file (invalid/outside-roots path, write error, ...)
+		// still already executed the upstream call, so it must NOT skip the
+		// audit trail below (RecordToolCall/UpdateSessionStats/emitActivity*) —
+		// it falls through exactly like a successful save. toolCallRecord.Error
+		// is set here so history reflects the save failure specifically.
+		savedToFile = true
+		forwarded = saveResult
+		response = forwardedText(forwarded, "")
+		if saveResult.IsError {
+			toolCallRecord.Error = response
+		}
+		// The envelope/error text IS the response — skip forwardContentResult
+		// (no truncation applies to it) and the output-schema/spotlight passes
+		// below: its shape intentionally doesn't match the upstream tool's own
+		// declared output schema, and there is no untrusted upstream text left
+		// in it worth spotlighting, in both the success and failure case.
+	} else {
+		forwarded, response, wasTruncated = forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
+
+		// Spec 056: output-schema validation. Strict mode blocks a violating result
+		// (returns an error); warn mode forwards unchanged after recording a
+		// policy_decision. No-op when disabled / no schema / error result.
+		if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
+			return blockResult, nil
+		}
+
+		// Spec 054 Track B (post-forward): spotlight untrusted text in
+		// source-identifying delimiters. Lossless and non-cacheable, so it runs
+		// after truncation. response is refreshed so logs/metrics match agent output.
+		p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
+		response = forwardedText(forwarded, response)
 	}
 
-	// Update session stats for successful call
+	// Correct tokenMetrics for a truncated or save_to_file-diverted response —
+	// see recountSaveOrTruncateTokenMetrics's doc comment for why this needs
+	// its own fallback path (tokenizer nil / erroring) rather than just
+	// skipping the correction. Factored into a pure, directly unit-testable
+	// function (save_to_file_test.go: TestRecountSaveOrTruncateTokenMetrics_*)
+	// rather than inlined here, since this block's own logic — not the
+	// surrounding request plumbing — is what the fix pass changed.
+	var tokenizerForRecount tokens.Tokenizer
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizerForRecount = p.mainServer.runtime.Tokenizer()
+	}
+	if recountSaveOrTruncateTokenMetrics(tokenMetrics, wasTruncated, savedToFile, response, tokenizerForRecount) {
+		toolCallRecord.Metrics = tokenMetrics
+	}
+
+	// Store tool call in history — a failed save_to_file still recorded an
+	// upstream call (toolCallRecord.Error is set above for that case), so
+	// this must run for every path (success, save success, save failure).
+	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
+		p.logger.Warn("Failed to record tool call", zap.Error(err))
+	}
+
+	// Update session stats for the call
 	if sessionID != "" && tokenMetrics != nil {
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success (with intent metadata for Spec 018)
+	// Emit activity completed event (with intent metadata for Spec 018).
+	// A failed save_to_file is reported as status "error" — the upstream call
+	// executed but the caller did not get the file it asked for. The non-save
+	// path is unchanged: an upstream tool-level error result (IsError set by
+	// the upstream) keeps reporting "success" here exactly as before.
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
+	status := "success"
+	errText := ""
+	if savedToFile && forwarded != nil && forwarded.IsError {
+		status = "error"
+		errText = response
+	}
 	var intentMap map[string]interface{}
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, status, errText, duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes)
 
-	// Spec 024: Emit internal tool call event for success
+	// Spec 024: Emit internal tool call event
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
-	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "success", "", time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
+	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, status, errText, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
 
 	return forwarded, nil
 }

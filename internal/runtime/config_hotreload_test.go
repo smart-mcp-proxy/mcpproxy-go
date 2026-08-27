@@ -258,6 +258,28 @@ func TestDetectConfigChanges(t *testing.T) {
 			expectRequiresRestart: false,
 			expectChangedFields:   []string{"tools_limit", "tool_response_limit", "call_tool_timeout"},
 		},
+		{
+			name:      "hot-reloadable: save_to_file config changed (Spec 076)",
+			oldConfig: baseConfig,
+			newConfig: &config.Config{
+				Listen:             "127.0.0.1:8080",
+				DataDir:            "/test/data",
+				APIKey:             "test-key",
+				ToolsLimit:         15,
+				ToolResponseLimit:  1000,
+				ToolOutputRoots:    []string{"/tmp/mcpproxy-out"}, // Changed
+				ToolOutputMaxBytes: 10485760,                      // Changed
+				CallToolTimeout:    config.Duration(60 * time.Second),
+				Servers:            []*config.ServerConfig{},
+				TLS: &config.TLSConfig{
+					Enabled: false,
+				},
+			},
+			expectSuccess:         true,
+			expectAppliedNow:      true,
+			expectRequiresRestart: false,
+			expectChangedFields:   []string{"tool_output_roots", "tool_output_max_bytes"},
+		},
 	}
 
 	for _, tt := range tests {

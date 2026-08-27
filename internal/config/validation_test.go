@@ -294,6 +294,54 @@ func TestValidateDetailed(t *testing.T) {
 			expectedErrors: 0,
 			errorFields:    []string{},
 		},
+		{
+			name: "tool_output_roots relative path rejected",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				ToolOutputRoots:   []string{"relative/path"},
+			},
+			expectedErrors: 1,
+			errorFields:    []string{"tool_output_roots"},
+		},
+		{
+			name: "tool_output_roots absolute path is valid",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				ToolOutputRoots:   []string{"/tmp/mcpproxy-out"},
+			},
+			expectedErrors: 0,
+			errorFields:    []string{},
+		},
+		{
+			name: "tool_output_roots filesystem root rejected",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				ToolOutputRoots:   []string{"/"},
+			},
+			expectedErrors: 1,
+			errorFields:    []string{"tool_output_roots"},
+		},
+		{
+			name: "tool_output_max_bytes negative rejected",
+			config: &Config{
+				Listen:             ":8080",
+				ToolsLimit:         15,
+				ToolResponseLimit:  1000,
+				CallToolTimeout:    Duration(60000000000),
+				ToolOutputMaxBytes: -1,
+			},
+			expectedErrors: 1,
+			errorFields:    []string{"tool_output_max_bytes"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -363,4 +411,53 @@ func TestValidateWithDefaults(t *testing.T) {
 	assert.Equal(t, 15, cfg.ToolsLimit)
 	assert.Equal(t, 0, cfg.ToolResponseLimit)
 	assert.Greater(t, cfg.CallToolTimeout.Duration().Seconds(), 0.0)
+}
+
+func TestValidate_ToolOutputMaxBytesDefaultsWhenZero(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:         15,
+		ToolResponseLimit:  1000,
+		CallToolTimeout:    Duration(60000000000),
+		ToolOutputMaxBytes: 0, // unset -> should become the built-in default, NOT stay 0
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.EqualValues(t, defaultToolOutputMaxBytes, cfg.ToolOutputMaxBytes)
+}
+
+func TestValidate_ToolOutputRootsCleaned(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:        15,
+		ToolResponseLimit: 1000,
+		CallToolTimeout:   Duration(60000000000),
+		ToolOutputRoots:   []string{"/tmp/a/../b/"},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/tmp/b"}, cfg.ToolOutputRoots)
+}
+
+func TestValidate_ToolOutputRootsFilesystemRootIsLoadError(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:        15,
+		ToolResponseLimit: 1000,
+		CallToolTimeout:   Duration(60000000000),
+		ToolOutputRoots:   []string{"/"},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_roots")
+	assert.Contains(t, err.Error(), "filesystem root")
+}
+
+func TestValidate_ToolOutputRootsRelativeIsLoadError(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:        15,
+		ToolResponseLimit: 1000,
+		CallToolTimeout:   Duration(60000000000),
+		ToolOutputRoots:   []string{"relative/dir"},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_roots")
 }

@@ -95,6 +95,22 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if oldCfg.ToolResponseLimit != newCfg.ToolResponseLimit {
 		result.ChangedFields = append(result.ChangedFields, "tool_response_limit")
 	}
+	// save_to_file (Spec 076): this block only affects the human-readable
+	// changed-fields log below, NOT whether the setting actually takes effect
+	// live. The whole-config-pointer swap (r.cfg = newCfg, in ApplyConfig)
+	// makes runtime.Config() return the new values immediately, but that is
+	// only "hot" for a reader that fetches config through runtime.Config() at
+	// call time — internal/server.MCPProxyServer.handleCallToolVariant reads
+	// ToolOutputRoots/ToolOutputMaxBytes via exactly that live-config pattern
+	// (mirroring the tokenizer-model lookup already used there), not via its
+	// own p.config field (captured once in NewMCPProxyServer and never
+	// reassigned by this swap).
+	if !reflect.DeepEqual(oldCfg.ToolOutputRoots, newCfg.ToolOutputRoots) {
+		result.ChangedFields = append(result.ChangedFields, "tool_output_roots")
+	}
+	if oldCfg.ToolOutputMaxBytes != newCfg.ToolOutputMaxBytes {
+		result.ChangedFields = append(result.ChangedFields, "tool_output_max_bytes")
+	}
 	if oldCfg.CallToolTimeout != newCfg.CallToolTimeout {
 		result.ChangedFields = append(result.ChangedFields, "call_tool_timeout")
 	}

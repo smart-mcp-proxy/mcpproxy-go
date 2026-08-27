@@ -191,6 +191,19 @@ components:
           $ref: '#/components/schemas/config.TokenizerConfig'
         tool_discovery_interval:
           type: string
+        tool_output_max_bytes:
+          description: |-
+            ToolOutputMaxBytes caps the size of a single save_to_file write (Spec 076).
+            0 means "use the built-in default" (50 MiB); negative values are a config error.
+          type: integer
+        tool_output_roots:
+          description: |-
+            ToolOutputRoots is the whitelist of absolute directory prefixes the
+            save_to_file parameter on call_tool_read/write/destructive is allowed
+            to write under (Spec 076). Empty (the default) disables the feature.
+          items:
+            type: string
+          type: array
         tool_response_limit:
           type: integer
         tool_response_session_risk_warning:

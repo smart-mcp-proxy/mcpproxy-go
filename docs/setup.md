@@ -780,6 +780,13 @@ tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 }
 ```
 
+Need the *full* untruncated response instead of a bigger limit? `call_tool_read` /
+`call_tool_write` / `call_tool_destructive` support a `save_to_file` parameter
+that writes it straight to disk — see [Save Tool Output to File](configuration.md#save-tool-output-to-file).
+When mcpproxy runs as a background daemon, `save_to_file` writes as whatever
+user/filesystem context the daemon process itself runs under, not the CLI
+caller — make sure `tool_output_roots` points somewhere that user can write.
+
 ### OAuth Configuration
 
 For servers requiring authentication:
