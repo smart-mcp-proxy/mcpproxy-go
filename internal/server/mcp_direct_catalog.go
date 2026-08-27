@@ -32,6 +32,25 @@ type directCatalog struct {
 	byDisplayName map[string]*directCatalogEntry
 	displayNames  []string // sorted; the deterministic listing order
 	withheld      []directCatalogCollision
+
+	// byCanonical maps "<server>:<tool>" onto the SAME entry pointers as
+	// byDisplayName. It exists because describe_tool accepts both id forms
+	// (Spec 102 FR-011) and neither may be resolved by re-parsing the other:
+	// "we__ird__do_thing" splits on the first "__" into ("we", "ird__do_thing"),
+	// a different tool. Two maps over one entry set is what makes the two forms
+	// answer identically by construction rather than by agreement.
+	//
+	// An entry is admitted here only if its canonical form is unambiguous —
+	// see ambiguousCanonical.
+	byCanonical map[string]*directCatalogEntry
+
+	// ambiguousCanonical holds canonical ids that two admitted DISPLAY names
+	// flatten onto: server "a" + tool "b:c" and server "a:b" + tool "c" are
+	// distinct, unambiguous display names ("a__b:c", "a:b__c") whose canonical
+	// forms are both "a:b:c". Those entries stay listed and describable by
+	// display name; only the canonical form is withheld, because it cannot name
+	// one of them.
+	ambiguousCanonical map[string]struct{}
 }
 
 // directCatalogEntry is one tool as the direct surface sees it.
@@ -72,6 +91,28 @@ type directCatalogEntry struct {
 	RequiredPermission string
 }
 
+// toolMetadata projects an entry back onto the shape the shared entry builder
+// consumes, so a direct definition and a retrieve_tools definition render
+// through ONE builder and cannot drift on the fields they share.
+//
+// Name carries the canonical "<server>:<tool>" prefix because that is what
+// buildFullToolEntry treats as the id (#871), and what describe_tool has always
+// returned as `name` on every other surface.
+func (e *directCatalogEntry) toolMetadata() *config.ToolMetadata {
+	if e == nil {
+		return nil
+	}
+	return &config.ToolMetadata{
+		ServerName:       e.ServerName,
+		Name:             e.ServerName + ":" + e.ToolName,
+		Description:      e.Description,
+		ParamsJSON:       e.ParamsJSON,
+		OutputSchemaJSON: e.OutputSchemaJSON,
+		Hash:             e.Hash,
+		Annotations:      e.Annotations,
+	}
+}
+
 // directCatalogCollision records a display name that two distinct upstream
 // pairs flatten to. Both are withheld; this is what lets an operator find out
 // why a tool they expect is missing.
@@ -101,8 +142,10 @@ type directCatalogOrigin struct {
 // failing.
 func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *directCatalog {
 	cat := &directCatalog{
-		byDisplayName: make(map[string]*directCatalogEntry, len(tools)),
-		displayNames:  make([]string, 0, len(tools)),
+		byDisplayName:      make(map[string]*directCatalogEntry, len(tools)),
+		displayNames:       make([]string, 0, len(tools)),
+		byCanonical:        make(map[string]*directCatalogEntry, len(tools)),
+		ambiguousCanonical: make(map[string]struct{}),
 	}
 
 	// First pass: group by display name so a collision is detected before any
@@ -159,7 +202,7 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 		}
 
 		t := group[0]
-		cat.byDisplayName[name] = &directCatalogEntry{
+		entry := &directCatalogEntry{
 			DisplayName:        name,
 			ServerName:         t.ServerName,
 			ToolName:           t.Name,
@@ -170,7 +213,27 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 			Annotations:        t.Annotations,
 			RequiredPermission: requiredPermissionForDirectTool(t.Annotations),
 		}
+		cat.byDisplayName[name] = entry
 		cat.displayNames = append(cat.displayNames, name)
+
+		// Canonical index, with the same "never pick a winner" rule the display
+		// map applies: if two admitted entries flatten onto one canonical id,
+		// BOTH lose the canonical form rather than one silently shadowing the
+		// other.
+		canonical := entry.ServerName + ":" + entry.ToolName
+		if _, dup := cat.byCanonical[canonical]; dup {
+			delete(cat.byCanonical, canonical)
+			cat.ambiguousCanonical[canonical] = struct{}{}
+			if logger != nil {
+				logger.Warn("Withholding ambiguous canonical direct id: two distinct display names flatten to it, so it resolves in neither form",
+					zap.String("canonical_id", canonical))
+			}
+			continue
+		}
+		if _, ambiguous := cat.ambiguousCanonical[canonical]; ambiguous {
+			continue
+		}
+		cat.byCanonical[canonical] = entry
 	}
 
 	// Sorted so the listing order — and therefore the FR-010 built-ins golden —
@@ -188,6 +251,17 @@ func (c *directCatalog) Lookup(displayName string) (*directCatalogEntry, bool) {
 		return nil, false
 	}
 	e, ok := c.byDisplayName[displayName]
+	return e, ok
+}
+
+// LookupCanonical resolves a "<server>:<tool>" id to its entry. A withheld
+// display-name collision is absent from this map too (it was never admitted),
+// and so is an ambiguous canonical id.
+func (c *directCatalog) LookupCanonical(canonicalID string) (*directCatalogEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	e, ok := c.byCanonical[canonicalID]
 	return e, ok
 }
 

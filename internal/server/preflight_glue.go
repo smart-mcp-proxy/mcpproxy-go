@@ -56,7 +56,7 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 		tier = preflight.TierOperator
 	}
 
-	return p.evaluatePreflight(ctx, params.Tools, tier, scope, params.Filters)
+	return p.evaluatePreflight(ctx, params.Tools, tier, scope, params.Filters, nil)
 }
 
 // preflightRuntimeConfig is the shared "can this process answer at all" guard:
@@ -78,12 +78,16 @@ func (p *MCPProxyServer) preflightRuntimeConfig() (*config.Config, error) {
 // in-band check mode's RunPreflightForSession (which projects the session's own
 // visibility predicate, spec 099 FR-003/FR-009a) — end here, so the two
 // surfaces cannot drift in what they read or how they read it.
+// evaluatePreflight runs one evaluation. indexReader selects the CORPUS an id
+// resolves against and the corpus did_you_mean draws from; nil means the shared
+// search index, which is every surface except spec 102's direct describe.
 func (p *MCPProxyServer) evaluatePreflight(
 	ctx context.Context,
 	refs []preflight.ToolRef,
 	tier preflight.Tier,
 	scope *preflight.Scope,
 	filters toolannotations.Filters,
+	indexReader preflight.IndexReader,
 ) (preflight.Outcome, error) {
 	cfg, err := p.preflightRuntimeConfig()
 	if err != nil {
@@ -99,8 +103,12 @@ func (p *MCPProxyServer) evaluatePreflight(
 		return preflight.Outcome{}, err
 	}
 
+	if indexReader == nil {
+		indexReader = &preflightIndexReader{index: p.index, annotations: annotations}
+	}
+
 	ec := preflight.EvalContext{
-		Index:     &preflightIndexReader{index: p.index, annotations: annotations},
+		Index:     indexReader,
 		Approvals: &preflightApprovalReader{storage: p.storage},
 		State:     state,
 		Policy:    &preflightConfigPolicy{proxy: p, cfg: cfg},
@@ -184,7 +192,7 @@ func (p *MCPProxyServer) RunPreflightForSession(ctx context.Context, refs []pref
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
-	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters)
+	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters, nil)
 }
 
 // sessionPreflightScope projects the session's OWN visibility predicate onto a
@@ -310,6 +318,71 @@ func (r *preflightIndexReader) ToolsByServer(serverName string) ([]preflight.Ind
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+// directCatalogIndexReader is the IndexReader for spec 102's direct surface: the
+// published catalog, filtered to what THIS session can list (T054).
+//
+// Two things follow from using it, and both are the point. Id resolution
+// happens against the same snapshot tools/list rendered from, so a check can
+// never disagree with the listing about whether a tool exists. And
+// `did_you_mean` is drawn from the same filtered corpus, so a suggestion cannot
+// name a tool the caller could not list — the disclosure a shared-index corpus
+// would reintroduce for exactly the ids most likely to be mistyped.
+type directCatalogIndexReader struct {
+	catalog *directCatalog
+	visible func(entry *directCatalogEntry) bool
+}
+
+func (r *directCatalogIndexReader) entries() []*directCatalogEntry {
+	if r == nil || r.catalog == nil {
+		return nil
+	}
+	out := make([]*directCatalogEntry, 0, r.catalog.Len())
+	for _, name := range r.catalog.DisplayNames() {
+		entry, ok := r.catalog.Lookup(name)
+		if !ok || entry == nil {
+			continue
+		}
+		if r.visible != nil && !r.visible(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func (r *directCatalogIndexReader) ToolsByServer(serverName string) ([]preflight.IndexedTool, error) {
+	var out []preflight.IndexedTool
+	for _, entry := range r.entries() {
+		if entry.ServerName != serverName {
+			continue
+		}
+		// The catalog carries the UPSTREAM annotations, so unlike the index
+		// reader there is nothing to enrich from a second source — which is also
+		// why the annotation filters see the same values dispatch does.
+		out = append(out, preflight.IndexedTool{
+			Name:        entry.ServerName + ":" + entry.ToolName,
+			Annotations: entry.Annotations,
+		})
+	}
+	if out == nil {
+		out = []preflight.IndexedTool{}
+	}
+	return out, nil
+}
+
+func (r *directCatalogIndexReader) IndexedServerNames() ([]string, error) {
+	seen := make(map[string]struct{})
+	names := make([]string, 0, 8)
+	for _, entry := range r.entries() {
+		if _, ok := seen[entry.ServerName]; ok {
+			continue
+		}
+		seen[entry.ServerName] = struct{}{}
+		names = append(names, entry.ServerName)
+	}
+	return names, nil
 }
 
 // bareToolName strips the "<server>:" prefix the index stores on canonical

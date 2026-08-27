@@ -119,15 +119,16 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 // some later successful rebuild happened to restore it. A built-in that
 // disappears on the first upstream hiccup is not a built-in.
 //
-// NOTE: describe_tool's direct-id resolver is Phase 4 work. Until it lands, the
-// tool is LISTED here and resolves canonical `server:tool` ids only; a direct
-// `server__tool` id answers not_found. That is the intended intermediate state —
-// FR-009 requires presence in both serialization modes, and presence is what
-// this task delivers.
+// The DEFINITION is the shared one — the schemas and response shape must not
+// drift between surfaces — but the HANDLER is the direct-surface variant, which
+// resolves ids through the published catalog rather than the search index
+// (FR-011). Which corpus an id resolves against is a property of the
+// registration, not of the request, so it is bound here rather than sniffed
+// from the context.
 func (p *MCPProxyServer) withDirectBuiltins(tools []mcpserver.ServerTool) []mcpserver.ServerTool {
 	return append(tools, mcpserver.ServerTool{
 		Tool:    buildDescribeToolTool(),
-		Handler: p.handleDescribeTool,
+		Handler: p.describeToolHandler(describeSurfaceDirect),
 	})
 }
 

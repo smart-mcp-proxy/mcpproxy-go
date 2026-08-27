@@ -91,6 +91,24 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	return filtered
 }
 
+// directEntryCallable is the agent-callability half of the direct listing gate,
+// for callers that already hold a resolved catalog entry (Spec 102 US2).
+//
+// Non-agent sessions are unfiltered here, exactly as the loop above leaves them:
+// the direct listing deliberately RETAINS tool-level pending/changed/disabled
+// states for an operator, and describe_tool must therefore keep describing them
+// — a listed tool is never undescribable (SC-007). Only agent tokens, which
+// cannot see those tools in their own listing, are gated.
+func (p *MCPProxyServer) directEntryCallable(authCtx *auth.AuthContext, entry *directCatalogEntry) bool {
+	if entry == nil {
+		return false
+	}
+	if authCtx == nil || authCtx.Type != auth.AuthTypeAgent {
+		return true
+	}
+	return newDirectCallabilityEvaluator(p).evaluate(entry.ServerName, entry.ToolName).callable
+}
+
 // directToolCallabilityBlock returns a policy response when a direct-mode tool
 // is not callable. It mirrors the call_tool_* policy boundary so direct mode
 // cannot bypass disabled-tool, server-quarantine, or tool-approval controls.

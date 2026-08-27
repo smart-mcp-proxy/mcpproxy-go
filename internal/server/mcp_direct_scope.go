@@ -8,6 +8,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // requiredPermissionForDirectTool derives the agent-token permission a direct
@@ -91,26 +92,7 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 		case directResolveFound:
 		}
 
-		if !profileScope.Allows(entry.ServerName) {
-			continue
-		}
-
-		if !isScopedAgent {
-			filtered = append(filtered, tool)
-			continue
-		}
-
-		if !authCtx.CanAccessServer(entry.ServerName) {
-			continue
-		}
-
-		// The tier is the catalog entry's, derived from UPSTREAM annotations
-		// exactly as dispatch derives it. Deriving it from the registered
-		// mcp.Tool would read mcp-go's NewTool defaults — destructiveHint=true on
-		// essentially every tool — and hide the catalog from read- and
-		// write-scoped tokens while dispatch happily allowed the same calls
-		// (D13 rule 3).
-		if entry.RequiredPermission != "" && !authCtx.HasPermission(entry.RequiredPermission) {
+		if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
 			continue
 		}
 
@@ -118,6 +100,44 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 	}
 
 	return filtered
+}
+
+// directEntryInScope is the scope+tier half of the direct listing gate, factored
+// out of the loop above so describe_tool can apply the SAME test rather than a
+// second copy of it (Spec 102 FR-011/SC-007).
+//
+// Sharing it is the point: listing-parity is the whole contract of describe on
+// this surface — no id may be describable-but-unlisted, and none listed-but-
+// undescribable — and a mirrored predicate is exactly how that drifts. The
+// remaining half (agent callability) is directEntryCallable below.
+func directEntryInScope(
+	authCtx *auth.AuthContext,
+	profileScope *profile.ProfileScope,
+	isScopedAgent bool,
+	entry *directCatalogEntry,
+) bool {
+	if entry == nil {
+		return false
+	}
+	if !profileScope.Allows(entry.ServerName) {
+		return false
+	}
+	if !isScopedAgent {
+		return true
+	}
+	if !authCtx.CanAccessServer(entry.ServerName) {
+		return false
+	}
+	// The tier is the catalog entry's, derived from UPSTREAM annotations
+	// exactly as dispatch derives it. Deriving it from the registered
+	// mcp.Tool would read mcp-go's NewTool defaults — destructiveHint=true on
+	// essentially every tool — and hide the catalog from read- and
+	// write-scoped tokens while dispatch happily allowed the same calls
+	// (D13 rule 3).
+	if entry.RequiredPermission != "" && !authCtx.HasPermission(entry.RequiredPermission) {
+		return false
+	}
+	return true
 }
 
 // builtinPromptNames is the set of prompt display names mcpproxy serves itself

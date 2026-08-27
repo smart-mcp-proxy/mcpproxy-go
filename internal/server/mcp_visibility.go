@@ -194,7 +194,16 @@ func splitServerTool(id string) (serverName, toolName string, ok bool) {
 }
 
 // suggestCanonicalToolID resolves an id that differs from an indexed one only
-// by letter case to its canonical form. Case is NOT folded on any resolution
+// by letter case to its canonical form.
+//
+// Spec 102 T056: this stays the INDEX-backed resolver, byte-identical, for the
+// retrieve surfaces. The direct surface has its own — suggestDirectToolID in
+// mcp_describe_direct.go — because it must draw from the catalog and gate on the
+// direct listing's rules (the operation-permission tier and withheld display-
+// name collisions, neither of which exists here). The seam is therefore the
+// call site in resolveDescribeDefinition rather than a branch inside this
+// function: threading a surface flag through here would put direct-only rules
+// inside the predicate three retrieve-path callers share. Case is NOT folded on any resolution
 // path: server and tool names are exact keys in the approval, quarantine,
 // profile and agent-scope stores, so accepting a miscased id would route a
 // call around gates keyed on the exact name. The correction is therefore only

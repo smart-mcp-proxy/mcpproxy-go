@@ -212,6 +212,7 @@ func (p *MCPProxyServer) handleDescribeToolCheck(
 	ctx context.Context,
 	request mcp.CallToolRequest,
 	mode describeToolMode,
+	surface describeSurface,
 	sessionID, requestID string,
 ) (*mcp.CallToolResult, error) {
 	rawIDs, err := request.RequireStringSlice("tool_ids")
@@ -230,9 +231,11 @@ func (p *MCPProxyServer) handleDescribeToolCheck(
 			fmt.Sprintf("too many tool_ids: %d (max %d with check:true). Narrow your selection.", len(rawIDs), maxDescribeCheckIDs)), nil
 	}
 
-	refs := normalizeDescribeCheckIDs(rawIDs)
-
-	outcome, err := p.RunPreflightForSession(ctx, refs, mode.filters)
+	// T053 — the id-gate seam. Verdict logic is untouched on both branches:
+	// what differs is which corpus an id resolves against and, on the direct
+	// surface, that ids are canonicalized in and the caller's own forms restored
+	// out (D14).
+	outcome, err := p.runDescribeCheckForSurface(ctx, surface, rawIDs, mode.filters)
 	if err != nil {
 		return mcp.NewToolResultError(p.describeCheckRuntimeError(err)), nil
 	}
@@ -256,6 +259,20 @@ func (p *MCPProxyServer) handleDescribeToolCheck(
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize availability check: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// runDescribeCheckForSurface evaluates one check-mode batch against the corpus
+// the registering surface named.
+func (p *MCPProxyServer) runDescribeCheckForSurface(
+	ctx context.Context,
+	surface describeSurface,
+	rawIDs []string,
+	filters toolannotations.Filters,
+) (preflight.Outcome, error) {
+	if surface == describeSurfaceDirect {
+		return p.runDirectCheck(ctx, rawIDs, filters)
+	}
+	return p.RunPreflightForSession(ctx, normalizeDescribeCheckIDs(rawIDs), filters)
 }
 
 // describeCheckRuntimeError maps an evaluation failure onto the message the

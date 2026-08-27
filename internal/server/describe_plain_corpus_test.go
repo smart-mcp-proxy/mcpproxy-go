@@ -59,7 +59,7 @@ const (
 	describeCorpusNotFoundTo   = `Tool not found or no longer available; list tools again.`
 
 	describeCorpusMalformedFrom = `Tool ids must use '\u003cserver\u003e:\u003ctool\u003e' format, exactly as returned by retrieve_tools.`
-	describeCorpusMalformedTo   = `Tool ids must be '\u003cserver\u003e:\u003ctool\u003e' or '\u003cserver\u003e__\u003ctool\u003e', exactly as listed.`
+	describeCorpusMalformedTo   = `Tool ids must use '\u003cserver\u003e:\u003ctool\u003e' format, exactly as listed.`
 )
 
 // describePlainDelta lists the corpus scenarios later specs are allowed to
