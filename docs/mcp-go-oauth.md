@@ -208,8 +208,10 @@ This enables runtime onboarding of AI agents.
 - Providers that allow a loopback wildcard or prefix match (some self-hosted
   authorization servers, and the pattern RFC 8252 §7.3 recommends) can register
   `http://127.0.0.1:*` and let mcpproxy allocate a port per login.
-- Providers that require an **exact** callback URL — GitHub OAuth Apps among
-  them — reject wildcards outright. For those, pin the port with the per-server
+- Providers that require an **exact** port. GitHub OAuth Apps are the common
+  case: GitHub's wildcard matching covers subdomains and subdirectory paths, but
+  the host and port must still match the registered callback exactly, and
+  `http://127.0.0.1:*` is not valid syntax there. For those, pin the port with the per-server
   `oauth.redirect_uri` setting and register that exact string with the provider.
   See [Pinning the callback port](configuration.md#pinning-the-callback-port-with-redirect_uri).
 - Use Cloudflare Workers for fixed-domain callbacks.

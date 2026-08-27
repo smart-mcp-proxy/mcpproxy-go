@@ -549,9 +549,10 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 By default mcpproxy asks the OS for a free loopback port on the first OAuth
 login, then persists that port and tries to reuse it. If the saved port is taken
 next time, a different one is allocated — so the callback URL is not guaranteed
-to stay put. Some providers — notably GitHub OAuth Apps — require the callback
-URL to match the registered one **exactly** and reject wildcards, so the port
-must not move at all.
+to stay put. Some providers require the port to match the registered callback
+URL exactly, so it must not move at all. GitHub OAuth Apps are the common case:
+even with GitHub's wildcard matching enabled, that matching covers subdomains
+and subdirectory paths only — the host and port must still match exactly.
 
 Set `redirect_uri` to pin it. mcpproxy then binds that exact port and sends that
 exact string to the provider as `redirect_uri`:
