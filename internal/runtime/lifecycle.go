@@ -817,7 +817,6 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedAddedTools); err != nil {
 			return fmt.Errorf("failed to index added tools: %w", err)
 		}
-		r.warmSignatureCache(allowedAddedTools)
 	}
 
 	// 4. Re-index modified tools (excluding blocked)
@@ -839,8 +838,25 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedModifiedTools); err != nil {
 			return fmt.Errorf("failed to re-index modified tools: %w", err)
 		}
-		r.warmSignatureCache(allowedModifiedTools)
 	}
+
+	// 5. Warm the signature cache for every tool this server still serves —
+	// deliberately the WHOLE allowed set, not just what steps 3 and 4 touched.
+	//
+	// The narrow form (warming only added/modified tools) left the cache
+	// permanently empty on any restart against an existing index: the
+	// differential update finds nothing to do, so neither branch ran and nothing
+	// was ever warmed. Spec 085 did not notice, because its compact
+	// retrieve_tools reads through the COMPILING accessor and merely paid a
+	// first-call compile. Spec 102's deferred direct listing reads through Peek,
+	// which never compiles — so every entry silently lost its compact signature
+	// after a restart while the listing still looked well-formed. Found by live
+	// verification, not by a unit test; see
+	// TestApplyDifferentialToolUpdate_WarmsUnchangedToolsOnRestart.
+	//
+	// Idempotent and cheap: Warm returns on the first cache hit, so the steady
+	// state is one map lookup per tool per discovery.
+	r.warmSignatureCache(filterBlockedTools(newTools, approvalResult.BlockedTools))
 
 	// If the shared index changed for this server, refresh the per-profile indexes
 	// that include it (Profiles v2, Spec 057). Profiles without this server are

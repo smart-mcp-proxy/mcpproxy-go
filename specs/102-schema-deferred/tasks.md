@@ -89,18 +89,49 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 
 **Independent test**: enable deferral on a fixture proxy with multiple upstreams, fetch `tools/list` on the direct surface, and assert every tool present, no upstream schema properties, signature-suffixed descriptions, and ≥70% token reduction against the frozen 45-tool corpus.
 
-- [ ] T028 [US1] Write failing tests for deferred entry rendering in `internal/server/mcp_routing_deferred_test.go`: the marshalled `inputSchema` is byte-exactly `{"type":"object"}` — asserted **on the JSON, not the Go struct**, since `mcp.NewTool` marshals `{"properties":{},"required":[],"type":"object"}` (R11/D9); no upstream properties or required list; the description is the existing `[server] …` text with the Spec-085 signature appended.
-- [ ] T029 [US1] Write failing test for annotations parity in `internal/server/mcp_routing_deferred_test.go`: the marshalled `annotations` object is **byte-identical to full mode's** for three fixtures — nil upstream annotations, one hint set, all five set — proving the raw-schema constructor was seeded with mcp-go's `NewTool` defaults (D9). Also assert a deferred entry marshals without `errToolSchemaConflict`.
-- [ ] T030 [US1] Write failing test for the signature cache miss path in `internal/server/mcp_routing_deferred_test.go`: a tool whose hash is not warmed is listed **without** a signature suffix — never dropped, never delayed (FR-005).
-- [ ] T031 [US1] Implement the deferred branch of `renderDirectTools` in `internal/server/mcp_routing.go` using `mcp.NewToolWithRawSchema(…, json.RawMessage(`{"type":"object"}`))`, seeded with mcp-go's `NewTool` annotation defaults and *then* given the upstream overrides (D9), reading signatures via `toolsig.Cache.Peek`. Leave the full-mode `NewTool` path untouched (FR-015).
-- [ ] T032 [US1] Write failing test for set identity across modes in `internal/server/mcp_routing_deferred_test.go`: same names, count, annotations and ordering source in full and deferred (FR-008), including under agent-token and profile filters (SC-005/FR-016).
-- [ ] T033 [US1] Write failing test for FR-015 byte-stability in `internal/server/mcp_routing_deferred_test.go` using the **live stdio fixture** form (reuse the `preflight_e2e_test.go` harness + `testdata/preflight_fixture_server.js`), which runs unchanged at the merge-base and on this branch. Assert deferral-off rendering is byte-identical to pre-feature output modulo the appended `describe_tool` entry. Fall back to the same-tree differential form only if the fixture is judged too heavy — and say which was used in the test's doc comment.
-- [ ] T034 [US1] Write failing test for the direct-server instructions in `internal/server/mcp_routing_test.go`: a custom `instructions` config value still appears on the direct server's `initialize`, with the deferral legend appended, in **both** modes (D11).
-- [ ] T035 [US1] Add `resolveDirectInstructions(custom string)` in `internal/server/mcp_routing.go` — custom when non-empty, else a **direct-specific default**, then the legend — and attach it via `WithInstructions` on `directServer` in `initRoutingModeServers`. Deliberately **not** `resolveInstructions`, whose `defaultInstructions` advertises `retrieve_tools` and `call_tool_*`; the direct default names only `server__tool` calling, `describe_tool` and the ABOUT links — never `upstream_servers`, which this surface does not register (D16). Safe only because T019b registers `describe_tool` back in Phase 2: naming a tool the surface does not expose would be exactly the D16 mistake one level up.
+- [x] T028 [US1] Write failing tests for deferred entry rendering in `internal/server/mcp_routing_deferred_test.go`: the marshalled `inputSchema` is byte-exactly `{"type":"object"}` — asserted **on the JSON, not the Go struct**, since `mcp.NewTool` marshals `{"properties":{},"required":[],"type":"object"}` (R11/D9); no upstream properties or required list; the description is the existing `[server] …` text with the Spec-085 signature appended.
+- [x] T029 [US1] Write failing test for annotations parity in `internal/server/mcp_routing_deferred_test.go`: the marshalled `annotations` object is **byte-identical to full mode's** for three fixtures — nil upstream annotations, one hint set, all five set — proving the raw-schema constructor was seeded with mcp-go's `NewTool` defaults (D9). Also assert a deferred entry marshals without `errToolSchemaConflict`.
+- [x] T030 [US1] Write failing test for the signature cache miss path in `internal/server/mcp_routing_deferred_test.go`: a tool whose hash is not warmed is listed **without** a signature suffix — never dropped, never delayed (FR-005).
+- [x] T031 [US1] Implement the deferred branch of `renderDirectTools` in `internal/server/mcp_routing.go` using `mcp.NewToolWithRawSchema(…, json.RawMessage(`{"type":"object"}`))`, seeded with mcp-go's `NewTool` annotation defaults and *then* given the upstream overrides (D9), reading signatures via `toolsig.Cache.Peek`. Leave the full-mode `NewTool` path untouched (FR-015).
+- [x] T032 [US1] Write failing test for set identity across modes in `internal/server/mcp_routing_deferred_test.go`: same names, count, annotations and ordering source in full and deferred (FR-008), including under agent-token and profile filters (SC-005/FR-016).
+- [x] T033 [US1] Write failing test for FR-015 byte-stability in `internal/server/mcp_routing_deferred_test.go` using the **live stdio fixture** form (reuse the `preflight_e2e_test.go` harness + `testdata/preflight_fixture_server.js`), which runs unchanged at the merge-base and on this branch. Assert deferral-off rendering is byte-identical to pre-feature output modulo the appended `describe_tool` entry. Fall back to the same-tree differential form only if the fixture is judged too heavy — and say which was used in the test's doc comment. **Landed as the live-fixture form** in `internal/server/mcp_routing_deferred_e2e_test.go` rather than `mcp_routing_deferred_test.go`: the preflight harness is `//go:build !windows`, so the test must carry that tag and cannot share a file with the untagged unit tests. Golden `internal/server/testdata/direct_full_prefeature.golden.json` was captured by running this same file, unmodified, against a merge-base binary.
+- [x] T034 [US1] Write failing test for the direct-server instructions in `internal/server/mcp_routing_test.go`: a custom `instructions` config value still appears on the direct server's `initialize`, with the deferral legend appended, in **both** modes (D11).
+- [x] T035 [US1] Add `resolveDirectInstructions(custom string)` in `internal/server/mcp_routing.go` — custom when non-empty, else a **direct-specific default**, then the legend — and attach it via `WithInstructions` on `directServer` in `initRoutingModeServers`. Deliberately **not** `resolveInstructions`, whose `defaultInstructions` advertises `retrieve_tools` and `call_tool_*`; the direct default names only `server__tool` calling, `describe_tool` and the ABOUT links — never `upstream_servers`, which this surface does not register (D16). Safe only because T019b registers `describe_tool` back in Phase 2: naming a tool the surface does not expose would be exactly the D16 mistake one level up.
 
-- [ ] T035a [US1] Run the SC-001/SC-002 token gates for this phase's own claim: US1's stated independent test asserts **≥70% payload reduction** on the frozen 45-tool corpus, and no other Phase 3 task measures it. Use the spec-083 profiler pipeline directly here; the reusable `bench/arms/` arm and its render golden stay T075/T076 in Polish. Without this, Phase 3 cannot be signed off against the criterion it declares.
+- [x] T035a [US1] Run the SC-001/SC-002 token gates for this phase's own claim: US1's stated independent test asserts **≥70% payload reduction** on the frozen 45-tool corpus, and no other Phase 3 task measures it. Use the spec-083 profiler pipeline directly here; the reusable `bench/arms/` arm and its render golden stay T075/T076 in Polish. Without this, Phase 3 cannot be signed off against the criterion it declares.
+
+- [x] T035b [US1] **Found by live verification, not by any planned task.** Warm the signature cache for a server's WHOLE allowed tool set in `applyDifferentialToolUpdate` (`internal/runtime/lifecycle.go`), not only for the tools an update added or modified. The narrow form left the cache permanently empty on every restart against an existing index — the differential update finds nothing to do, so neither warm branch ran — and because `Peek` never compiles, the deferred listing then lost **every** compact signature for the life of the process while still looking well-formed. Spec 085 never saw this: its compact `retrieve_tools` reads through the compiling accessor and merely paid a first-call compile. Regression test: `TestApplyDifferentialToolUpdate_WarmsUnchangedToolsOnRestart` in `internal/runtime/sigcache_warm_test.go`; `renderDirectTools` also now logs `signature_misses` per rebuild, because a missing suffix is otherwise indistinguishable in the payload from a tool with no parameters.
 
 **Checkpoint**: US1 is independently demonstrable — flip the config, fetch `tools/list`, observe the token drop with the full tool set intact.
+
+> ### ⚠️ Escalation from T035a — SC-001's thresholds are not reachable
+>
+> T035a ran the gates and SC-002 passes (39/45 = 86.7% one-shot callable, floor
+> 80%). **SC-001 does not, and cannot on either dataset in this repo.** Measured
+> with the real renderer and the profiler's pinned `cl100k_base` encoder:
+>
+> | corpus | tools | full | deferred | reduction | SC-001 asks |
+> |---|---|---|---|---|---|
+> | `corpus_v2.tools.json` (frozen reference) | 45 | 6116 | 4301 | **29.7%** | ≥70% |
+> | `livemcptool_snapshot/tools.json` | 527 | 99918 | 65138 | **34.8%** | ≥85% |
+>
+> The shortfall is arithmetic. On corpus_v2 the upstream `inputSchema` is 2604 of
+> 6116 tokens (42.6%); the rest is description (1784), mcp-go's unconditional
+> `annotations` block (1125, ~25/entry, untouchable by any serialization change),
+> names (286) and punctuation. Deferral removes the schema and adds the FR-004
+> signature, so **even deleting the schema *and* the signature outright caps out
+> at 38.9%** — below SC-001's floor. FR-004 forbids closing the gap by
+> truncating descriptions, and Spec 085's first-sentence grammar only reaches
+> ~68% here.
+>
+> This is a **spec-numbers defect, not an implementation defect**: SC-001 assumes
+> the schema is a far larger share of a `tools/list` payload than it is in either
+> dataset. Resolution belongs to **T076** — restate the threshold per corpus
+> shape, or re-target the criterion at a schema-heavy corpus — and needs the
+> maintainer's decision. Until then `TestDeferredDirect_TokenReduction_Corpus45`
+> asserts a 25% **regression floor** (measured 29.7%) plus an upper guard that
+> fails if a future change ever does clear 70%, so this note cannot go stale
+> silently.
 
 ---
 
