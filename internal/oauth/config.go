@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -40,13 +41,22 @@ type CallbackServerManager struct {
 	logger  *zap.Logger
 }
 
-// CallbackServer represents an active OAuth callback server
+// CallbackServer represents an active OAuth callback server.
+//
+// Callback parameters are dispatched by the `state` parameter (issue #975):
+// every flow registers the state it minted before opening the browser and gets
+// its own single-use channel. A callback whose state nobody registered is
+// rejected with an explicit failure page instead of being handed to whichever
+// flow happened to be listening.
 type CallbackServer struct {
-	Port         int
-	RedirectURI  string
-	Server       *http.Server
-	CallbackChan chan map[string]string
-	logger       *zap.Logger
+	Port        int
+	RedirectURI string
+	Server      *http.Server
+	ServerName  string
+	logger      *zap.Logger
+
+	waitersMu sync.Mutex
+	waiters   map[string]chan map[string]string
 }
 
 var globalCallbackManager = &CallbackServerManager{
@@ -61,6 +71,7 @@ type TokenStoreManager struct {
 	mu                      sync.RWMutex
 	logger                  *zap.Logger
 	oauthCompletionCallback func(serverName string)                      // Callback when OAuth completes
+	oauthFailureCallback    func(serverName string, err error)           // Callback when an unattended OAuth flow fails
 	tokenSavedCallback      func(serverName string, expiresAt time.Time) // Callback when token is saved
 }
 
@@ -179,6 +190,37 @@ func (m *TokenStoreManager) SetOAuthCompletionCallback(callback func(serverName 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.oauthCompletionCallback = callback
+}
+
+// SetOAuthFailureCallback sets a callback invoked when an OAuth flow fails in a
+// place that has no caller to return the error to — a callback that could not
+// be delivered, a state mismatch, or a background token exchange that failed.
+// The upstream manager wires this to the server's connection status so the
+// failure is visible to the operator rather than only in the log (issue #975).
+// Pass nil to clear it.
+func (m *TokenStoreManager) SetOAuthFailureCallback(callback func(serverName string, err error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.oauthFailureCallback = callback
+}
+
+// RecordOAuthFailure reports an OAuth failure that nobody is waiting on.
+func (m *TokenStoreManager) RecordOAuthFailure(serverName string, err error) {
+	if err == nil {
+		return
+	}
+
+	m.mu.RLock()
+	callback := m.oauthFailureCallback
+	m.mu.RUnlock()
+
+	m.logger.Warn("OAuth failure recorded",
+		zap.String("server", serverName),
+		zap.Error(err))
+
+	if callback != nil {
+		callback(serverName, err)
+	}
 }
 
 // SetTokenSavedCallback sets a callback function to be called when a token is saved.
@@ -975,16 +1017,9 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 
 	// Check if we already have a server for this name
 	if existing, exists := m.servers[serverName]; exists {
-		// Drain any stale callback parameters from previous OAuth attempts
-		// This prevents state mismatch errors when OAuth fails/times out and is retried
-		select {
-		case staleParams := <-existing.CallbackChan:
-			m.logger.Warn("Drained stale OAuth callback params from previous attempt (prevents state mismatch)",
-				zap.String("server", serverName),
-				zap.String("stale_state", staleParams["state"]))
-		default:
-			// Channel is empty, nothing to drain
-		}
+		// No draining here (issue #975): params are dispatched per `state`, so a
+		// stale callback can no longer be mistaken for this attempt's, and a
+		// waiter already parked on this server must survive the reuse.
 		m.logger.Debug("Reusing existing callback server",
 			zap.String("server", serverName),
 			zap.Int("port", existing.Port))
@@ -1023,9 +1058,6 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 	port := addr.Port
 	redirectURI := fmt.Sprintf("%s:%d%s", DefaultRedirectURIBase, port, DefaultRedirectPath)
 
-	// Create callback channel
-	callbackChan := make(chan map[string]string, 1)
-
 	// Create HTTP server with dedicated mux
 	mux := http.NewServeMux()
 	server := &http.Server{
@@ -1038,11 +1070,12 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 
 	// Create callback server instance
 	callbackServer := &CallbackServer{
-		Port:         port,
-		RedirectURI:  redirectURI,
-		Server:       server,
-		CallbackChan: callbackChan,
-		logger:       m.logger.With(zap.String("server", serverName), zap.Int("port", port)),
+		Port:        port,
+		RedirectURI: redirectURI,
+		Server:      server,
+		ServerName:  serverName,
+		logger:      m.logger.With(zap.String("server", serverName), zap.Int("port", port)),
+		waiters:     make(map[string]chan map[string]string),
 	}
 
 	// Set up HTTP handler for OAuth callback
@@ -1101,6 +1134,113 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 	return callbackServer, nil
 }
 
+// RegisterState registers the OAuth `state` a flow just minted and returns the
+// channel its callback parameters will be delivered on. Call it BEFORE opening
+// the browser so a fast user cannot beat the registration, and pair it with
+// UnregisterState so a finished or cancelled flow's state cannot be reused.
+//
+// Registering the same state twice returns the same channel, which lets the
+// flow that mints the state register early and the goroutine that waits for it
+// obtain the same channel later without a second buffer.
+func (c *CallbackServer) RegisterState(state string) <-chan map[string]string {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+
+	if ch, exists := c.waiters[state]; exists {
+		return ch
+	}
+
+	ch := make(chan map[string]string, 1)
+	c.waiters[state] = ch
+	c.logger.Debug("Registered OAuth callback waiter", zap.String("state", state))
+	return ch
+}
+
+// UnregisterState drops the waiter for a state. Safe to call more than once and
+// safe to call after delivery (delivery already removes the waiter).
+func (c *CallbackServer) UnregisterState(state string) {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+
+	if _, exists := c.waiters[state]; exists {
+		delete(c.waiters, state)
+		c.logger.Debug("Unregistered OAuth callback waiter", zap.String("state", state))
+	}
+}
+
+// HasState reports whether a flow is currently waiting for this state.
+func (c *CallbackServer) HasState(state string) bool {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	_, exists := c.waiters[state]
+	return exists
+}
+
+// deliver hands the callback params to the flow that registered this state.
+// The waiter is single-use: it is removed on delivery so a replayed callback
+// cannot be delivered twice. Returns false when no flow is waiting.
+func (c *CallbackServer) deliver(state string, params map[string]string) bool {
+	c.waitersMu.Lock()
+	ch, exists := c.waiters[state]
+	if exists {
+		delete(c.waiters, state)
+	}
+	waiterCount := len(c.waiters)
+	c.waitersMu.Unlock()
+
+	if !exists {
+		c.logger.Warn("OAuth callback carries a state no flow is waiting for",
+			zap.String("state", state),
+			zap.Int("other_waiters", waiterCount))
+		return false
+	}
+
+	select {
+	case ch <- params:
+		return true
+	default:
+		// Cannot happen: the channel is buffered and single-use.
+		c.logger.Error("OAuth callback waiter channel unexpectedly full",
+			zap.String("state", state))
+		return false
+	}
+}
+
+// dropAllWaiters removes every registered waiter. Waiters unblock through their
+// own context deadline; the channels are deliberately left unclosed so a parked
+// flow never observes a zero-value callback as if it were a real one.
+func (c *CallbackServer) dropAllWaiters() int {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+
+	dropped := len(c.waiters)
+	c.waiters = make(map[string]chan map[string]string)
+	return dropped
+}
+
+// callbackPage renders the page the user's browser lands on. Success is only
+// ever reported when the authorization code was actually delivered to the flow
+// that asked for it (issue #975).
+func callbackPage(title, message string) string {
+	closeScript := ""
+	if title == "Authorization Successful" {
+		closeScript = `
+				<script>
+					setTimeout(function() {
+						window.close();
+					}, 2000);
+				</script>`
+	}
+	return fmt.Sprintf(`
+		<html>
+			<body>
+				<h1>%s</h1>
+				<p>%s</p>%s
+			</body>
+		</html>
+	`, html.EscapeString(title), html.EscapeString(message), closeScript)
+}
+
 // handleCallback handles OAuth callback requests
 func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 	c.logger.Info("🎯 OAuth callback received",
@@ -1126,32 +1266,57 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		zap.String("error_description", params["error_description"]),
 		zap.Int("total_params", len(params)))
 
-	// Send parameters to the channel (non-blocking)
-	select {
-	case c.CallbackChan <- params:
-		c.logger.Info("✅ OAuth callback parameters sent to channel successfully",
-			zap.Any("params", params))
-	default:
-		c.logger.Error("❌ OAuth callback channel full, dropping parameters - THIS IS BAD!",
-			zap.Any("params", params))
+	state := params["state"]
+
+	// Route the params to the flow that minted this state. A callback nobody is
+	// waiting for is NOT delivered to some other flow and NOT reported to the
+	// user as a success (issue #975).
+	if !c.deliver(state, params) {
+		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %q is unknown or expired "+
+			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, state)
+		if state == "" {
+			reason = fmt.Errorf("OAuth callback for server %q carried no state parameter and was rejected", c.ServerName)
+		}
+		c.logger.Error("❌ OAuth callback dropped - no flow is waiting for this state",
+			zap.String("state", state),
+			zap.String("error", params["error"]))
+
+		// Surface it to the operator instead of burying it in the log (issue #975).
+		GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
+
+		c.writePage(w, http.StatusBadRequest, callbackPage(
+			"Authorization Failed",
+			fmt.Sprintf("mcpproxy is not waiting for this sign-in (unknown or expired state). "+
+				"Nothing was signed in. Start the login again from mcpproxy for '%s'.", c.ServerName)))
+		return
 	}
 
-	// Respond to the user
+	c.logger.Info("✅ OAuth callback parameters delivered to the waiting flow",
+		zap.String("state", state))
+
+	// The provider itself reported a failure: the flow was told, but the user
+	// must not see a success page.
+	if providerErr := params["error"]; providerErr != "" {
+		message := providerErr
+		if desc := params["error_description"]; desc != "" {
+			message = providerErr + ": " + desc
+		}
+		c.writePage(w, http.StatusBadRequest, callbackPage(
+			"Authorization Failed",
+			fmt.Sprintf("The authorization server rejected the request (%s). You can close this window and try again.", message)))
+		return
+	}
+
+	c.writePage(w, http.StatusOK, callbackPage(
+		"Authorization Successful",
+		"You can now close this window and return to the application."))
+}
+
+// writePage writes an HTML response for the callback browser window.
+func (c *CallbackServer) writePage(w http.ResponseWriter, status int, page string) {
 	w.Header().Set("Content-Type", "text/html")
-	successPage := `
-		<html>
-			<body>
-				<h1>Authorization Successful</h1>
-				<p>You can now close this window and return to the application.</p>
-				<script>
-					setTimeout(function() {
-						window.close();
-					}, 2000);
-				</script>
-			</body>
-		</html>
-	`
-	if _, err := w.Write([]byte(successPage)); err != nil {
+	w.WriteHeader(status)
+	if _, err := w.Write([]byte(page)); err != nil {
 		c.logger.Error("Error writing OAuth callback response", zap.Error(err))
 	}
 }
@@ -1190,8 +1355,14 @@ func (m *CallbackServerManager) StopCallbackServer(serverName string) error {
 			zap.Error(err))
 	}
 
-	// Close the callback channel
-	close(server.CallbackChan)
+	// Drop any registered waiters. They unblock on their own context deadline;
+	// the channels are left unclosed so a parked flow never mistakes a
+	// zero-value receive for a real callback.
+	if dropped := server.dropAllWaiters(); dropped > 0 {
+		m.logger.Warn("Stopped OAuth callback server while flows were still waiting",
+			zap.String("server", serverName),
+			zap.Int("waiters", dropped))
+	}
 
 	// Remove from map
 	delete(m.servers, serverName)

@@ -224,6 +224,12 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		}
 	})
 
+	// Surface OAuth failures that have no caller to return an error to — an
+	// undeliverable callback, a state mismatch, a background token exchange
+	// that failed. Without this the CLI kept reporting "OAuth authentication
+	// flow initiated successfully" while the flow had already died (issue #975).
+	tokenManager.SetOAuthFailureCallback(manager.recordOAuthFailure)
+
 	// Start database event monitor for cross-process OAuth completion notifications
 	if boltStorage != nil {
 		manager.shutdownWg.Add(1)
@@ -1787,6 +1793,40 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 		servers[id] = client.GetConfig()
 	}
 	return servers
+}
+
+// recordOAuthFailure stamps an unattended OAuth failure onto the server's
+// connection status so it shows up in `mcpproxy upstream list`, the REST status
+// payload and the tray — the same place other auth failures land (issue #975).
+//
+// A server that is currently Ready is left alone: a late or orphaned callback
+// must never knock a working connection into Error.
+func (m *Manager) recordOAuthFailure(serverName string, cause error) {
+	if cause == nil {
+		return
+	}
+
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+	if !exists {
+		m.logger.Warn("OAuth failure reported for unknown server",
+			zap.String("server", serverName),
+			zap.Error(cause))
+		return
+	}
+
+	if client.StateManager.IsReady() {
+		m.logger.Warn("Ignoring OAuth failure for a server that is already connected",
+			zap.String("server", serverName),
+			zap.Error(cause))
+		return
+	}
+
+	m.logger.Warn("Recording OAuth failure on server status",
+		zap.String("server", serverName),
+		zap.Error(cause))
+	client.StateManager.SetOAuthError(cause)
 }
 
 // RetryConnection triggers a connection retry for a specific server
