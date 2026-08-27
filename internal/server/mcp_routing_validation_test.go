@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -85,16 +86,69 @@ func invalidParamsBody(t *testing.T, result *mcp.CallToolResult) map[string]inte
 	return body
 }
 
+// validationTool is validationEntry as an upstream projection, so a catalog can
+// be built from it and rendered through the real path.
+func validationTool() *config.ToolMetadata {
+	e := validationEntry()
+	return &config.ToolMetadata{
+		ServerName:  e.ServerName,
+		Name:        e.ToolName,
+		Description: e.Description,
+		ParamsJSON:  e.ParamsJSON,
+		Hash:        e.Hash,
+		Annotations: e.Annotations,
+	}
+}
+
+// renderedDirectHandler returns the handler the REAL render path produced for
+// the proxy's current serialization mode, plus the inputSchema that render
+// advertised on the wire.
+//
+// Building a handler by hand would produce the same object in both modes and
+// make any "in both modes" claim vacuous — the mode is read inside
+// renderDirectTools, nowhere else.
+func renderedDirectHandler(t *testing.T, p *MCPProxyServer, tool *config.ToolMetadata) (mcpserver.ToolHandlerFunc, string) {
+	t.Helper()
+	cat := buildDirectCatalog([]*config.ToolMetadata{tool}, nil)
+	p.sigCache.Warm(tool.Hash, tool.ParamsJSON, tool.Description)
+	p.publishDirectCatalog(cat)
+
+	display := FormatDirectToolName(tool.ServerName, tool.Name)
+	for _, st := range p.renderDirectTools(cat) {
+		if st.Tool.Name != display {
+			continue
+		}
+		raw, err := json.Marshal(st.Tool)
+		require.NoError(t, err)
+		var wire map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &wire))
+		return st.Handler, string(wire["inputSchema"])
+	}
+	t.Fatalf("render produced no entry for %q", display)
+	return nil, ""
+}
+
 // T059: a missing required argument is rejected before dispatch, with the full
 // schema and a hint — in BOTH serialization modes.
 func TestDirectValidation_MissingRequiredArgIsSelfHealing(t *testing.T) {
+	advertised := map[string]string{}
+
 	for _, mode := range []string{config.DirectToolResponseModeFull, config.DirectToolResponseModeDeferred} {
 		t.Run(mode, func(t *testing.T) {
 			p := newDirectValidationProxy(t)
 			p.config.DirectToolResponseMode = mode
 			entry := validationEntry()
 
-			result := callDirect(t, p, entry, map[string]interface{}{"depth": 2})
+			handler, schema := renderedDirectHandler(t, p, validationTool())
+			advertised[mode] = schema
+
+			req := mcp.CallToolRequest{}
+			req.Params.Name = entry.DisplayName
+			req.Params.Arguments = map[string]interface{}{"depth": 2}
+			result, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+
 			body := invalidParamsBody(t, result)
 
 			assert.Equal(t, "invalid_params", body["error_type"])
@@ -105,15 +159,23 @@ func TestDirectValidation_MissingRequiredArgIsSelfHealing(t *testing.T) {
 
 			// The FULL stored schema, not the advertised placeholder — this is
 			// what caps the cost of a lossy signature at one retry.
-			schema, ok := body["input_schema"].(map[string]interface{})
+			embedded, ok := body["input_schema"].(map[string]interface{})
 			require.True(t, ok, "the error must embed the input schema")
-			props, ok := schema["properties"].(map[string]interface{})
+			props, ok := embedded["properties"].(map[string]interface{})
 			require.True(t, ok)
 			assert.Contains(t, props, "path")
 			assert.Contains(t, props, "depth")
-			assert.Equal(t, []interface{}{"path"}, schema["required"])
+			assert.Equal(t, []interface{}{"path"}, embedded["required"])
 		})
 	}
+
+	// The two modes really did advertise different schemas — without this the
+	// loop above could pass while both subtests ran the same serialization.
+	require.Len(t, advertised, 2)
+	assert.JSONEq(t, `{"type":"object"}`, advertised[config.DirectToolResponseModeDeferred])
+	assert.Contains(t, advertised[config.DirectToolResponseModeFull], `"required"`)
+	assert.NotEqual(t, advertised[config.DirectToolResponseModeFull], advertised[config.DirectToolResponseModeDeferred],
+		"the modes must differ on the wire, or 'self-healing is mode-independent' is untested")
 }
 
 // T060: validation reads the STORED upstream schema, never the
