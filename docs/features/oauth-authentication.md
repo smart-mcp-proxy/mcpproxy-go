@@ -46,7 +46,7 @@ OAuth authentication is used when connecting to MCP servers that require authori
 |--------|------|-------------|
 | `client_id` | string | OAuth client identifier (uses Dynamic Client Registration if empty) |
 | `client_secret` | string | OAuth client secret (optional, can reference secure storage) |
-| `redirect_uri` | string | Pins the loopback callback URL. Must be `http`, a loopback host, an explicit port and the `/oauth/callback` path (e.g. `http://127.0.0.1:54108/oauth/callback`); register the identical URL with the provider. Omit it to let mcpproxy allocate a port and persist it. See [Pinning the callback port](../configuration.md#pinning-the-callback-port-with-redirect_uri). |
+| `redirect_uri` | string | Pins the loopback callback URL. Must be `http`, a loopback host, an explicit port and the `/oauth/callback` path (e.g. `http://127.0.0.1:54108/oauth/callback`); register the identical URL with the provider. Omit it to let mcpproxy allocate a port and persist it. See [Pinning the callback port](../configuration/upstream-servers.md#pinning-the-callback-port-with-redirect_uri). |
 | `scopes` | array | Requested OAuth scopes |
 | `pkce_enabled` | boolean | PKCE is always enabled for security; this flag is currently ignored |
 | `extra_params` | object | Additional authorization parameters (e.g., RFC 8707 resource) |

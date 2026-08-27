@@ -59,6 +59,43 @@ Servers requiring OAuth 2.1 authentication:
 }
 ```
 
+#### Pinning the callback port with `redirect_uri`
+
+By default mcpproxy asks the OS for a free loopback port on the first OAuth
+login, then persists that port and reuses it. If the saved port is taken next
+time, a different one is allocated — so the callback URL is not guaranteed to
+stay put.
+
+Some providers require the port to match the registered callback URL exactly.
+GitHub OAuth Apps are the common case: even with GitHub's wildcard matching
+enabled, that matching covers subdomains and subdirectory paths — the host and
+port must still match exactly. Set `redirect_uri` to pin it:
+
+```json
+{
+  "oauth": {
+    "client_id": "Iv1.abc123",
+    "redirect_uri": "http://127.0.0.1:54108/oauth/callback"
+  }
+}
+```
+
+mcpproxy binds that exact port and sends that exact string to the provider.
+Register the identical URL with the provider.
+
+The value must be an RFC 8252 loopback redirect: `http` scheme, a loopback host,
+an explicit port, and the `/oauth/callback` path. Prefer `127.0.0.1`;
+`localhost` is accepted but the listener binds `127.0.0.1`, while
+`http://[::1]:PORT/oauth/callback` binds the IPv6 loopback.
+
+A malformed value, or a pinned port already in use, fails the login with an
+error that names `oauth.redirect_uri` — in the connection error and the
+server's `health.detail`, in `mcpproxy upstream logs <name>`, and in the main
+log. The write surfaces (REST config API, Web UI, the `upstream_servers` MCP
+tool) reject a bad value up front; hand-editing `mcp_config.json` bypasses that
+by design, so a bad value already on disk is reported at connect time rather
+than stopping the daemon from booting.
+
 ## Configuration Options
 
 | Option | Type | Required | Description |

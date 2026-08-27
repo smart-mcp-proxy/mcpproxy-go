@@ -213,7 +213,7 @@ This enables runtime onboarding of AI agents.
   the host and port must still match the registered callback exactly, and
   `http://127.0.0.1:*` is not valid syntax there. For those, pin the port with the per-server
   `oauth.redirect_uri` setting and register that exact string with the provider.
-  See [Pinning the callback port](configuration.md#pinning-the-callback-port-with-redirect_uri).
+  See [Pinning the callback port](configuration/upstream-servers.md#pinning-the-callback-port-with-redirect_uri).
 - Use Cloudflare Workers for fixed-domain callbacks.
 
 **Go Code** (authorization-server side, only for servers that permit wildcards):
