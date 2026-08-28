@@ -157,6 +157,11 @@ enum SettingsCatalog {
                 ConfigOption(value: "direct", label: "Direct — list all tools"),
                 ConfigOption(value: "code_execution", label: "Code execution"),
             ],
+            // /mcp binds its routing mode once at startup and cannot rebind, so
+            // this genuinely needs a restart. The tray reads requires_restart
+            // from the apply response too, but the badge is what tells the
+            // operator BEFORE they save.
+            restart: true,
             docs: "/features/routing-modes"
         ),
         ConfigField(

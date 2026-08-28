@@ -36,6 +36,8 @@ func (fakeRuntimeStats) GetServerCount() int               { return 7 }
 func (fakeRuntimeStats) GetConnectedServerCount() int      { return 5 }
 func (fakeRuntimeStats) GetToolCount() int                 { return 42 }
 func (fakeRuntimeStats) GetRoutingMode() string            { return "retrieve_tools" }
+func (fakeRuntimeStats) GetToolResponseMode() string       { return "full" }
+func (fakeRuntimeStats) GetDirectToolResponseMode() string { return "full" }
 func (fakeRuntimeStats) IsQuarantineEnabled() bool         { return true }
 func (fakeRuntimeStats) IsDockerAvailable() bool           { return false }
 func (fakeRuntimeStats) GetDockerIsolatedServerCount() int { return 0 }

@@ -74,6 +74,33 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		return result
 	}
 
+	// 1b. Routing mode change (requires HTTP server rebind).
+	//
+	// /mcp is bound to ONE mcp-go server instance at startup, chosen from
+	// cfg.RoutingMode (internal/server/server.go StartServer →
+	// GetMCPServerForMode) and registered on an http.ServeMux, which cannot
+	// re-register a pattern. A routing_mode change therefore cannot take effect
+	// on a running proxy however much of the config is reloaded.
+	//
+	// Reporting it is what makes that honest. Before this clause the field was
+	// absent from detection entirely, so an API apply answered "No configuration
+	// changes detected" while writing the new value to disk — and
+	// /api/v1/status, /api/v1/routing, `mcpproxy doctor` and the Web UI header
+	// then all reported the configured INTENT while /mcp kept serving the old
+	// surface. Four surfaces agreeing on the same wrong answer, with the Web UI
+	// showing a green success toast because its warning branch keys on
+	// RequiresRestart.
+	//
+	// The dedicated routes (/mcp/all, /mcp/code, /mcp/call) are unaffected: each
+	// is permanently bound to its own mode by design (Spec 031).
+	if oldCfg.RoutingMode != newCfg.RoutingMode {
+		result.ChangedFields = append(result.ChangedFields, "routing_mode")
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		result.RestartReason = "Routing mode changed - /mcp is bound to its mode at startup and requires a restart"
+		return result
+	}
+
 	// 2. Data directory change (requires database reconnection)
 	if oldCfg.DataDir != newCfg.DataDir {
 		result.ChangedFields = append(result.ChangedFields, "data_dir")

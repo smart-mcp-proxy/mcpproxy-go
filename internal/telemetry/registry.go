@@ -73,6 +73,16 @@ var builtinToolAllowList = map[string]struct{}{
 	"upstream_servers":      {},
 	"quarantine_security":   {},
 	"code_execution":        {},
+	// describe_tool has been calling recordBuiltinTool since spec 085
+	// (internal/server/mcp_describe_tool.go) but was never added here, so every
+	// one of those calls hit RecordBuiltinTool's unknown-name early return and
+	// was silently dropped. The counter existed and always read zero.
+	//
+	// It matters most for spec 102: describe_tool is the escape hatch that makes
+	// the deferred direct listing workable, so "are agents actually redeeming
+	// lossy signatures?" is THE question about that feature — and the answer was
+	// unmeasurable in exactly the way that looks like "nobody uses it".
+	"describe_tool": {},
 }
 
 // IsBuiltinTool reports whether the given tool name is in the fixed enum.

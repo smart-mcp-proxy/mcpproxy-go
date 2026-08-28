@@ -1308,6 +1308,26 @@ func (r *Runtime) SaveConfiguration() error {
 		zap.Int("new_server_count", len(latestServers)),
 		zap.String("config_path", snapshot.Path))
 
+	// Telemetry keeps its OWN pointer to the live config (Service.config), and
+	// several heartbeat sections are computed from it rather than from the
+	// runtime: server_protocol_counts, trust_mode_distribution and the whole
+	// feature_flags block. That pointer moves only on NotifyConfigChanged, which
+	// until now was called from ApplyConfig and ReloadConfiguration but NOT from
+	// here — the path every server add/remove takes, whether it arrives via the
+	// REST API or the upstream_servers tool.
+	//
+	// The effect was silent and systematic: a fleet built up through the API
+	// reported {stdio:0, http:0, …} and an all-zero trust distribution until
+	// some UNRELATED edit to the config file happened to trigger a reload. The
+	// counts were not filtered or sampled — they were stale, and stale in the
+	// direction that makes adoption look like non-adoption.
+	//
+	// Fire-and-forget and cheap (a guarded pointer swap), matching the two
+	// existing call sites.
+	if r.telemetryService != nil {
+		r.telemetryService.NotifyConfigChanged(r.Config())
+	}
+
 	// Emit config.saved event to notify subscribers (Web UI, tray, etc.)
 	r.emitConfigSaved(snapshot.Path)
 

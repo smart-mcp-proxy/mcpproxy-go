@@ -976,3 +976,56 @@ func TestDetectConfigChanges_DirectToolResponseModeEmptyEqualsFull(t *testing.T)
 	real := DetectConfigChanges(mk(""), mk(config.DirectToolResponseModeDeferred))
 	assert.Contains(t, real.ChangedFields, "direct_tool_response_mode")
 }
+
+// TestDetectConfigChanges_RoutingModeRequiresRestart: /mcp is bound to ONE
+// mcp-go server instance at startup and registered on an http.ServeMux, which
+// cannot re-register a pattern — so a routing_mode change genuinely cannot take
+// effect on a running proxy.
+//
+// Before this clause the field was absent from detection entirely, which was
+// worse than silent: an API apply answered "No configuration changes detected"
+// while writing the new value to disk, so /api/v1/status, /api/v1/routing,
+// `mcpproxy doctor` and the Web UI header all reported the configured intent
+// while /mcp kept serving the old surface — and the Web UI showed a green
+// success toast, because its warning branch keys on RequiresRestart.
+func TestDetectConfigChanges_RoutingModeRequiresRestart(t *testing.T) {
+	mk := func(mode string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			RoutingMode: mode,
+		}
+	}
+
+	t.Run("a change is detected AND flagged for restart", func(t *testing.T) {
+		result := DetectConfigChanges(mk(config.RoutingModeRetrieveTools), mk(config.RoutingModeDirect))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "routing_mode",
+			"the field must be reported, or the caller is told nothing changed")
+		assert.True(t, result.RequiresRestart,
+			"/mcp cannot rebind its routing mode on a running proxy")
+		assert.False(t, result.AppliedImmediately)
+		assert.NotEmpty(t, result.RestartReason, "the operator must be told WHY a restart is needed")
+	})
+
+	t.Run("an unchanged mode is not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk(config.RoutingModeDirect), mk(config.RoutingModeDirect))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "routing_mode")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("it does not drag the serialization axes with it", func(t *testing.T) {
+		// The serialization axes ARE hot-reloadable. A routing_mode change must
+		// not make them look like they need a restart too, or an operator flips
+		// one and is told to restart for no reason.
+		before := mk(config.RoutingModeDirect)
+		after := mk(config.RoutingModeDirect)
+		after.DirectToolResponseMode = config.DirectToolResponseModeDeferred
+
+		result := DetectConfigChanges(before, after)
+		assert.Contains(t, result.ChangedFields, "direct_tool_response_mode")
+		assert.NotContains(t, result.ChangedFields, "routing_mode")
+		assert.False(t, result.RequiresRestart, "a serialization flip is hot-reloadable")
+		assert.True(t, result.AppliedImmediately)
+	})
+}

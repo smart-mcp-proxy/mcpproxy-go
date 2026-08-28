@@ -246,6 +246,11 @@ export const GENERAL_FIELDS: SettingField[] = [
       { value: 'direct', label: 'Direct — list all tools' },
       { value: 'code_execution', label: 'Code execution' },
     ],
+    // /mcp binds its routing mode once at startup and http.ServeMux cannot
+    // re-register, so this genuinely needs a restart. Without the flag the
+    // operator got a green "Configuration applied" toast while /mcp kept
+    // serving the old surface.
+    restart: true,
   },
   { key: 'tools_limit', label: 'Search results limit', help: 'How many tools a single tool-search returns to the agent.', control: 'number', min: 1, max: 1000 },
   { key: 'tool_response_limit', label: 'Max tool response size (characters)', help: 'Responses larger than this are truncated and cached so the agent can page through them. 0 = never truncate.', control: 'number', min: 0 },

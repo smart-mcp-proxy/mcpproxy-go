@@ -3150,6 +3150,32 @@ func (r *Runtime) GetRoutingMode() string {
 	return r.cfg.RoutingMode
 }
 
+// GetToolResponseMode returns the retrieve_tools serialization mode as a closed
+// enum (implements telemetry.RuntimeStats, schema v10).
+//
+// Reads the LIVE snapshot via Config() rather than the legacy r.cfg field the
+// older getters use: these are hot-reloadable settings, and a heartbeat that
+// reported the value an operator had at startup would be measuring the wrong
+// thing precisely for the installs that experimented with the mode.
+func (r *Runtime) GetToolResponseMode() string {
+	cfg := r.Config()
+	if cfg == nil || cfg.ToolResponseMode == "" {
+		return config.ToolResponseModeFull
+	}
+	return cfg.ToolResponseMode
+}
+
+// GetDirectToolResponseMode returns the direct-surface serialization mode as a
+// closed enum (implements telemetry.RuntimeStats, schema v10). Live-snapshot
+// read, for the same reason as above.
+func (r *Runtime) GetDirectToolResponseMode() string {
+	cfg := r.Config()
+	if cfg == nil || cfg.DirectToolResponseMode == "" {
+		return config.DirectToolResponseModeFull
+	}
+	return cfg.DirectToolResponseMode
+}
+
 // IsQuarantineEnabled returns whether tool-level quarantine is enabled (implements telemetry.RuntimeStats).
 func (r *Runtime) IsQuarantineEnabled() bool {
 	r.mu.RLock()
