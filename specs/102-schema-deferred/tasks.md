@@ -305,13 +305,24 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
   under the Phase 3 checkpoint for why the ceiling is arithmetic (38.9% even if the schema AND
   the signature were both deleted). **This is the one item in the spec that needs a maintainer
   decision rather than more implementation.**
-- [ ] T077 [P] Add E2E coverage in `internal/server/e2e_test.go`: live flip with a connected client (`notifications/tools/list_changed` observed, next listing reflects the mode, tool set identical — SC-006); guessed-wrong → one self-healing retry succeeds (SC-003); and the legacy aliases `/v1/tool_code` and `/v1/tool-code` covered by the **same** mode and notification assertions as `/mcp` (FR-003) — they are easy to miss and are explicitly in the direct-serving set.
+- [x] T077 [P] Add E2E coverage in `internal/server/e2e_test.go`: live flip with a connected client (`notifications/tools/list_changed` observed, next listing reflects the mode, tool set identical — SC-006); guessed-wrong → one self-healing retry succeeds (SC-003); and the legacy aliases `/v1/tool_code` and `/v1/tool-code` covered by the **same** mode and notification assertions as `/mcp` (FR-003) — they are easy to miss and are explicitly in the direct-serving set.
 - [x] T078 Run `make swagger` after the config struct change and commit the regenerated `oas/` artifacts. **Not deferrable to Polish, as an earlier draft had it**: the pre-push hook runs `swagger-verify` and rejects the push the moment the config struct changes, so this lands with T005 in Phase 1. Left listed here as the record of where it actually happened.
 - [x] T079 [P] Document `direct_tool_response_mode`, its env alias and its serve flag in `docs/configuration.md`.
 - [x] T080 [P] Write the feature doc under `docs/features/`: the deferral convention (`*`/`~` signature grammar), `describe_tool` on the direct surface, and the client-compat notes — schema-driven form UIs render empty forms; stale cached listings are safe in both directions; the `initialize` instructions delta.
 - [x] T081 [P] Update `CLAUDE.md`: the MCP-protocol built-ins line (`describe_tool` availability on the direct surface) and a Recent Changes entry.
-- [ ] T082 Run the full gate set before opening the PR: `go test -race ./internal/...` (using the CI skip regex for `internal/server` locally), `go build -tags server -o /dev/null ./cmd/mcpproxy`, and `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...` — the v2 linter CI uses, which is stricter than `scripts/run-linter.sh`.
-- [ ] T083 Verify the five frozen gates land as predicted: gates 1 and 3 pass **unregenerated**; gate 2 shows exactly the two enumerated regens; gate 4 passes with the extended `describePlainDelta`; gate 5 is re-measured, not assumed. A diff anywhere else is a regression to fix, not a baseline to update.
+- [x] T082 Run the full gate set before opening the PR: `go test -race ./internal/...` (using the CI skip regex for `internal/server` locally), `go build -tags server -o /dev/null ./cmd/mcpproxy`, and `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...` — the v2 linter CI uses, which is stricter than `scripts/run-linter.sh`.
+- [x] T083 Verify the five frozen gates land as predicted: gates 1 and 3 pass **unregenerated**; gate 2 shows exactly the two enumerated regens; gate 4 passes with the extended `describePlainDelta`; gate 5 is re-measured, not assumed. A diff anywhere else is a regression to fix, not a baseline to update.
+
+  **Verified, not assumed.** All five pass. Golden churn across the entire branch is exactly:
+  the two enumerated regens (`default_server.json`, `retrieve_tools_mode.json`) plus four NEW
+  files (`direct_full_prefeature.golden.json`, the two `direct_mode_builtins_*.json`, and the
+  bench arm golden). `code_execution_mode.json` and both `pre099/` baselines are untouched —
+  which is what confines the change to the two surfaces that register describe_tool.
+
+  `go test -race ./internal/...` is green except `TestResolveDockerStatusResolvableAndWorking`,
+  which passes in isolation and on a re-run of its own package: it writes a fake `docker` into
+  a TempDir and manipulates PATH, so it is PATH-sensitive under a parallel whole-tree race run.
+  Unrelated to this feature — it never touches the direct surface.
 
 ---
 
