@@ -24,12 +24,20 @@ final class TrayBadgeInStatusButtonTests: XCTestCase {
         super.tearDown()
     }
 
-    /// A real status item button, or nil when the environment has no status bar
-    /// to attach one to.
-    private func makeStatusButton() -> NSStatusBarButton? {
+    /// A real status item button.
+    ///
+    /// Throws `XCTSkip` — NOT a failure — when the environment has no status bar
+    /// to attach one to. `swift test` runs on a `macos-latest` runner whose
+    /// window-server state is not guaranteed; a headless agent returns a nil
+    /// `button`, and turning that into a red build would punish CI for
+    /// something this test cannot assert there. The assertions below are about
+    /// AppKit geometry, which only means anything with a real button.
+    private func makeStatusButton() throws -> NSStatusBarButton {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
-        guard let button = item.button else { return nil }
+        guard let button = item.button else {
+            throw XCTSkip("no window server / status bar in this environment")
+        }
         button.setFrameSize(NSSize(width: 36, height: 22))
         return button
     }
@@ -37,7 +45,7 @@ final class TrayBadgeInStatusButtonTests: XCTestCase {
     /// The assumption the whole design rests on. If this ever changes, the
     /// badge silently moves corners — so assert it rather than trusting it.
     func testTheStatusButtonIsFlippedButTheOverlayIsNot() throws {
-        let button = try XCTUnwrap(makeStatusButton(), "no status bar available")
+        let button = try makeStatusButton()
         XCTAssertTrue(button.isFlipped,
                       "NSStatusBarButton is expected to be flipped; the badge geometry depends on knowing that")
 
@@ -53,7 +61,7 @@ final class TrayBadgeInStatusButtonTests: XCTestCase {
     /// Bitmap rows count from the TOP, so "visually low" means a LARGE row
     /// index. The shipped bug put the dot at rows 5-14 of 44; correct is ~29-38.
     func testTheDotRendersInTheVisualBottomRightOfTheButton() throws {
-        let button = try XCTUnwrap(makeStatusButton(), "no status bar available")
+        let button = try makeStatusButton()
 
         let overlay = TrayBadgeDotView(frame: button.bounds)
         overlay.autoresizingMask = [.width, .height]
@@ -93,7 +101,7 @@ final class TrayBadgeInStatusButtonTests: XCTestCase {
     /// The overlay covers the whole button, so the button must still be
     /// clickable through it — otherwise the status item stops opening its menu.
     func testTheButtonIsStillClickableThroughTheOverlay() throws {
-        let button = try XCTUnwrap(makeStatusButton(), "no status bar available")
+        let button = try makeStatusButton()
         let overlay = TrayBadgeDotView(frame: button.bounds)
         overlay.autoresizingMask = [.width, .height]
         button.addSubview(overlay)
