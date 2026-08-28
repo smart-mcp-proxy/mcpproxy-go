@@ -1005,11 +1005,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             badgeDotView = dot
         }
 
-        // Bottom-right of the 18x18 icon, which AppKit centres in the button.
-        // The maths lives in TrayStatusIcon so it can be tested without a live
-        // menu bar (see TrayBadgeDotTests).
-        dot.frame = TrayStatusIcon.badgeDotFrame(inButtonSize: button.bounds.size)
-        dot.autoresizingMask = [.minXMargin, .maxYMargin]
+        // The overlay covers the WHOLE button and works out where the dot goes
+        // at draw time, from its own live bounds. A small subview pinned to the
+        // corner is wrong here on two counts — the button resizes
+        // asynchronously (so `bounds` read now can be stale) and the dot is
+        // anchored to the CENTRED icon, which moves at half the rate of the
+        // button's right edge. See TrayBadgeDotView's type comment.
+        dot.frame = button.bounds
+        dot.autoresizingMask = [.width, .height]
         dot.fillColor = severity == .error ? .systemRed : .systemOrange
     }
 
