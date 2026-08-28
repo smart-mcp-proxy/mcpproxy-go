@@ -273,9 +273,13 @@ func TestConfigWatcher_ReloadSyncsLegacyGetConfig(t *testing.T) {
 		return rt.ConfigSnapshot().Config.ToolResponseLimit == 77777
 	}, 5*time.Second, 25*time.Millisecond, "snapshot must pick up the external edit")
 
-	legacyCfg, err := rt.GetConfig()
-	require.NoError(t, err)
-	assert.Equal(t, 77777, legacyCfg.ToolResponseLimit,
+	// The reload publishes the configsvc snapshot BEFORE syncing the legacy
+	// r.cfg, so poll here too — a bare assert right after the snapshot wait
+	// races with that window.
+	require.Eventually(t, func() bool {
+		legacyCfg, err := rt.GetConfig()
+		return err == nil && legacyCfg != nil && legacyCfg.ToolResponseLimit == 77777
+	}, 5*time.Second, 25*time.Millisecond,
 		"legacy GetConfig (backing GET/PATCH /api/v1/config) must see the reloaded config")
 }
 
@@ -293,9 +297,13 @@ func TestConfigWatcher_ReloadPropagatesGlobalConfigToUpstream(t *testing.T) {
 		return rt.ConfigSnapshot().Config.ToolResponseLimit == 99999
 	}, 5*time.Second, 25*time.Millisecond, "snapshot must pick up the external edit")
 
-	gc := rt.upstreamManager.GlobalConfig()
-	require.NotNil(t, gc)
-	assert.Equal(t, 99999, gc.ToolResponseLimit,
+	// SetGlobalConfig runs AFTER the configsvc snapshot is published, so the
+	// snapshot wait above does not imply the upstream manager has caught up —
+	// poll instead of asserting once (flaky CI run 33043282299).
+	require.Eventually(t, func() bool {
+		gc := rt.upstreamManager.GlobalConfig()
+		return gc != nil && gc.ToolResponseLimit == 99999
+	}, 5*time.Second, 25*time.Millisecond,
 		"watcher reload must propagate the new global config to the upstream manager")
 }
 
