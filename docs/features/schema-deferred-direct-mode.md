@@ -140,7 +140,7 @@ The suffix is the tool's bare name followed by a parenthesised parameter list:
 
 ```
 create_issue(owner*:str, repo*:str, title*:str, labels:[str], milestone~:obj)
-fetch_page(origin*:str, ttl:int=3600, format:enum[json|text], account~:obj)
+fetch_page(origin*:str, account~:obj, format:enum[json|text], ttl:int=3600)
 list_repos()
 run_query(~)
 ```
@@ -154,8 +154,13 @@ run_query(~)
 
 Types abbreviate as `str`, `int`, `num`, `bool`, `obj`, `any`, arrays as `[str]`,
 unions as `str|int`, short enums as `enum[a|b|c]`. Scalar defaults are inlined
-(`ttl:int=3600`). Ordering and rendering are deterministic — the same schema
-always produces the same signature.
+(`ttl:int=3600`).
+
+**Ordering is deterministic and is not declaration order.** Required parameters
+come first, in the order the schema's `required` array lists them; optional ones
+follow, sorted by name. The same schema therefore always produces the same
+signature — but do not read the signature as telling you the order a schema
+declares its properties in, because it does not.
 
 **The rule for agents is one line long:**
 
