@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -23,8 +24,18 @@ import (
 
 const (
 	// Default OAuth redirect URI base - port will be dynamically assigned
-	DefaultRedirectURIBase = "http://127.0.0.1"
-	DefaultRedirectPath    = "/oauth/callback"
+	DefaultRedirectURIBase = "http://" + config.LoopbackIPv4Host
+	// DefaultRedirectPath aliases the canonical callback path. The constant is
+	// defined in internal/config because `oauth.redirect_uri` has to be
+	// validated where the operator types it, and internal/config cannot import
+	// this package.
+	DefaultRedirectPath = config.OAuthCallbackPath
+
+	// oauthLoggerName is the logger name every record in this package carries.
+	// Log filters and runbooks are written against it, so it is applied exactly
+	// once (see namedOAuthLogger).
+	oauthLoggerName         = "oauth"
+	oauthCallbackLoggerName = "oauth-callback"
 
 	// Rate limit retry constants for resource auto-detection
 	resourceDetectMaxRetries     = 3                // Maximum retry attempts on 429
@@ -33,25 +44,106 @@ const (
 	resourceDetectRequestTimeout = 5 * time.Second  // Timeout for preflight requests
 )
 
+// ParsePinnedRedirectURI validates an operator-pinned OAuth redirect URI (the
+// per-server `oauth.redirect_uri` config field) and returns the loopback port it
+// pins.
+//
+// The rules live in internal/config (ParseLoopbackRedirectURI) so that the REST
+// config API, the MCP `upstream_servers` tool and this flow all reject exactly
+// the same values. See that function for the rationale.
+func ParsePinnedRedirectURI(rawURI string) (int, error) {
+	_, port, err := config.ParseLoopbackRedirectURI(rawURI)
+	return port, err
+}
+
+// ParsePinnedRedirectURIBinding is ParsePinnedRedirectURI plus the loopback host
+// the callback listener must bind. A pinned `http://[::1]:PORT/oauth/callback`
+// is only honored if something actually listens on ::1 — binding 127.0.0.1 for
+// it produced an authorize URL nobody could call back to.
+func ParsePinnedRedirectURIBinding(rawURI string) (bindHost string, port int, err error) {
+	return config.ParseLoopbackRedirectURI(rawURI)
+}
+
+// namedOAuthLogger returns logger tagged with this package's logger name.
+//
+// It is idempotent: applying it twice must not produce "oauth.oauth" and break
+// every filter written against the documented name. A nil logger falls back to
+// the zap global, which is what the pre-logger-threading call sites used.
+func namedOAuthLogger(logger *zap.Logger) *zap.Logger {
+	if logger == nil {
+		return zap.L().Named(oauthLoggerName)
+	}
+	name := logger.Name()
+	if name == oauthLoggerName || strings.HasSuffix(name, "."+oauthLoggerName) {
+		return logger
+	}
+	return logger.Named(oauthLoggerName)
+}
+
 // CallbackServerManager manages OAuth callback servers for dynamic port allocation
 type CallbackServerManager struct {
 	servers map[string]*CallbackServer
 	mu      sync.RWMutex
-	logger  *zap.Logger
+
+	// logger is guarded by mu. It starts as the zap global, which in this
+	// binary is the NO-OP logger (zap.ReplaceGlobals is never called), so every
+	// record the callback surface emits would be silently discarded — the
+	// tear-down of a live listener, a dropped waiter, a failed bind on a pinned
+	// port, and "did the callback ever arrive?" all vanish. SetLogger (and the
+	// logger threaded through StartCallbackServerOnHost) replaces it with the
+	// caller's real logger the first time a flow runs.
+	logger *zap.Logger
 }
 
-// CallbackServer represents an active OAuth callback server
+// SetLogger installs a real logger on the manager. Safe to call repeatedly; a
+// nil logger is ignored so a caller without one cannot blind the manager again.
+func (m *CallbackServerManager) SetLogger(logger *zap.Logger) {
+	if logger == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.adoptLoggerLocked(logger)
+}
+
+// adoptLoggerLocked records the caller's logger as the manager logger and
+// returns the logger to use for this call. m.mu must be held.
+func (m *CallbackServerManager) adoptLoggerLocked(logger *zap.Logger) *zap.Logger {
+	if logger != nil {
+		m.logger = logger.Named(oauthCallbackLoggerName)
+	}
+	if m.logger == nil {
+		m.logger = zap.L().Named(oauthCallbackLoggerName)
+	}
+	return m.logger
+}
+
+// CallbackServer represents an active OAuth callback server.
+//
+// Callback parameters are dispatched by the `state` parameter (issue #975):
+// every flow registers the state it minted before opening the browser and gets
+// its own single-use channel. A callback whose state nobody registered is
+// rejected with an explicit failure page instead of being handed to whichever
+// flow happened to be listening.
 type CallbackServer struct {
-	Port         int
-	RedirectURI  string
-	Server       *http.Server
-	CallbackChan chan map[string]string
-	logger       *zap.Logger
+	Port        int
+	RedirectURI string
+	Server      *http.Server
+	ServerName  string
+	// BindHost is the loopback address the listener is actually bound to
+	// ("127.0.0.1" or "::1"). A pinned `http://[::1]:PORT/oauth/callback` is
+	// only honored when the listener is on the same family, so the binding is
+	// recorded rather than assumed.
+	BindHost string
+	logger   *zap.Logger
+
+	waitersMu sync.Mutex
+	waiters   map[string]chan map[string]string
 }
 
 var globalCallbackManager = &CallbackServerManager{
 	servers: make(map[string]*CallbackServer),
-	logger:  zap.L().Named("oauth-callback"),
+	logger:  zap.L().Named(oauthCallbackLoggerName),
 }
 
 // Global token store manager to persist tokens across client instances
@@ -61,6 +153,7 @@ type TokenStoreManager struct {
 	mu                      sync.RWMutex
 	logger                  *zap.Logger
 	oauthCompletionCallback func(serverName string)                      // Callback when OAuth completes
+	oauthFailureCallback    func(serverName string, err error)           // Callback when an unattended OAuth flow fails
 	tokenSavedCallback      func(serverName string, expiresAt time.Time) // Callback when token is saved
 }
 
@@ -179,6 +272,37 @@ func (m *TokenStoreManager) SetOAuthCompletionCallback(callback func(serverName 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.oauthCompletionCallback = callback
+}
+
+// SetOAuthFailureCallback sets a callback invoked when an OAuth flow fails in a
+// place that has no caller to return the error to — a callback that could not
+// be delivered, a state mismatch, or a background token exchange that failed.
+// The upstream manager wires this to the server's connection status so the
+// failure is visible to the operator rather than only in the log (issue #975).
+// Pass nil to clear it.
+func (m *TokenStoreManager) SetOAuthFailureCallback(callback func(serverName string, err error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.oauthFailureCallback = callback
+}
+
+// RecordOAuthFailure reports an OAuth failure that nobody is waiting on.
+func (m *TokenStoreManager) RecordOAuthFailure(serverName string, err error) {
+	if err == nil {
+		return
+	}
+
+	m.mu.RLock()
+	callback := m.oauthFailureCallback
+	m.mu.RUnlock()
+
+	m.logger.Warn("OAuth failure recorded",
+		zap.String("server", serverName),
+		zap.Error(err))
+
+	if callback != nil {
+		callback(serverName, err)
+	}
 }
 
 // SetTokenSavedCallback sets a callback function to be called when a token is saved.
@@ -343,7 +467,21 @@ func (m *TokenStoreManager) HasValidToken(ctx context.Context, serverName string
 //  2. Auto-detected resource from RFC 9728 Protected Resource Metadata
 //  3. Fallback to server URL if metadata is unavailable or lacks resource field
 func CreateOAuthConfigWithExtraParams(ctx context.Context, serverConfig *config.ServerConfig, storage *storage.BoltDB) (*client.OAuthConfig, map[string]string) {
-	logger := zap.L().Named("oauth")
+	cfg, extraParams, _ := CreateOAuthConfigWithExtraParamsAndLogger(ctx, serverConfig, storage, nil)
+	return cfg, extraParams
+}
+
+// CreateOAuthConfigWithExtraParamsAndLogger is CreateOAuthConfigWithExtraParams
+// with the caller's logger and the reason it failed.
+//
+// Both additions exist because this package used to log through zap.L(), and
+// zap.ReplaceGlobals is never called in this binary — so zap.L() is the NO-OP
+// logger and every diagnostic here was silently discarded, including the one
+// that names a malformed `oauth.redirect_uri`. Callers now pass a real logger
+// and surface the returned error instead of reporting the generic "server may
+// not support OAuth".
+func CreateOAuthConfigWithExtraParamsAndLogger(ctx context.Context, serverConfig *config.ServerConfig, storage *storage.BoltDB, logger *zap.Logger) (*client.OAuthConfig, map[string]string, error) {
+	logger = namedOAuthLogger(logger)
 
 	// Initialize extraParams map
 	extraParams := make(map[string]string)
@@ -369,9 +507,9 @@ func CreateOAuthConfigWithExtraParams(ctx context.Context, serverConfig *config.
 	}
 
 	// Create the base OAuth config, passing extraParams for transport wrapper injection
-	oauthConfig := createOAuthConfigInternal(serverConfig, storage, extraParams)
+	oauthConfig, err := createOAuthConfigInternal(serverConfig, storage, extraParams, logger)
 
-	return oauthConfig, extraParams
+	return oauthConfig, extraParams, err
 }
 
 // parseRateLimitWait extracts wait duration from a 429 response.
@@ -624,20 +762,47 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 // Note: For zero-config OAuth with auto-detected resource parameter, use
 // CreateOAuthConfigWithExtraParams() instead, which returns both config and extraParams.
 func CreateOAuthConfig(serverConfig *config.ServerConfig, storage *storage.BoltDB) *client.OAuthConfig {
+	cfg, _ := CreateOAuthConfigWithLogger(serverConfig, storage, nil)
+	return cfg
+}
+
+// CreateOAuthConfigWithLogger is CreateOAuthConfig with the caller's logger and
+// the reason it failed. See CreateOAuthConfigWithExtraParamsAndLogger.
+func CreateOAuthConfigWithLogger(serverConfig *config.ServerConfig, storage *storage.BoltDB, logger *zap.Logger) (*client.OAuthConfig, error) {
 	// Extract manual extra_params from config for backward compatibility
 	var extraParams map[string]string
 	if serverConfig.OAuth != nil && len(serverConfig.OAuth.ExtraParams) > 0 {
 		extraParams = serverConfig.OAuth.ExtraParams
 	}
-	return createOAuthConfigInternal(serverConfig, storage, extraParams)
+	return createOAuthConfigInternal(serverConfig, storage, extraParams, logger)
+}
+
+// clearOAuthCredentials drops a DCR registration so the next login re-registers.
+func clearOAuthCredentials(logger *zap.Logger, storage *storage.BoltDB, serverKey, serverName string) {
+	if storage == nil {
+		return
+	}
+	if err := storage.ClearOAuthClientCredentials(serverKey); err != nil {
+		logger.Warn("Failed to clear DCR credentials",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
 }
 
 // createOAuthConfigInternal is the internal implementation that accepts extraParams
 // for transport wrapper injection. This enables both manual and auto-detected params
 // to be injected into token exchange and refresh requests.
-func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *storage.BoltDB, extraParams map[string]string) *client.OAuthConfig {
+func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *storage.BoltDB, extraParams map[string]string, logger *zap.Logger) (*client.OAuthConfig, error) {
 	startTime := time.Now()
-	logger := zap.L().Named("oauth")
+	// Applied exactly once per record: namedOAuthLogger is idempotent, so the
+	// wrappers above may have named it already without producing "oauth.oauth".
+	logger = namedOAuthLogger(logger)
+
+	// Hand the real logger to the callback-server manager, whose own default is
+	// the no-op zap global. Without this the entire callback surface — the bind
+	// attempt on a pinned port, a tear-down, a dropped waiter, the arrival of
+	// the callback itself — is invisible in main.log and the per-server log.
+	globalCallbackManager.SetLogger(logger)
 
 	logger.Debug("🚀 Starting OAuth config creation",
 		zap.String("server", serverConfig.Name),
@@ -750,28 +915,101 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.String("hint", "Set oauth.scopes in server config or ensure PRM/AS metadata advertises scopes_supported"))
 	}
 
+	// A static client_id in the server config is an operator-supplied credential.
+	// It is never obtained from — nor refreshable by — Dynamic Client Registration,
+	// so the DCR "clear and re-register" recovery paths below must never wipe it.
+	hasStaticClientID := serverConfig.OAuth != nil && serverConfig.OAuth.ClientID != ""
+
+	// An explicit `oauth.redirect_uri` pins the loopback callback port. Providers
+	// such as GitHub OAuth Apps match the callback URL exactly and reject
+	// wildcards, so an operator must be able to nail the port down (issue #975).
+	var pinnedRedirectURI string
+	var pinnedPort int
+	bindHost := config.LoopbackIPv4Host
+	if serverConfig.OAuth != nil && strings.TrimSpace(serverConfig.OAuth.RedirectURI) != "" {
+		host, port, err := ParsePinnedRedirectURIBinding(serverConfig.OAuth.RedirectURI)
+		if err != nil {
+			// Fail loudly: silently falling back to a random port would leave the
+			// operator believing they pinned the callback URL when they had not.
+			logger.Error("❌ Invalid oauth.redirect_uri in server config - refusing to fall back to a random callback port",
+				zap.String("server", serverConfig.Name),
+				zap.String("redirect_uri", serverConfig.OAuth.RedirectURI),
+				zap.Error(err),
+				zap.String("expected_format", "http://127.0.0.1:<port>"+DefaultRedirectPath))
+			// Returned, not just logged: the caller's "server may not support
+			// OAuth" message never mentions redirect_uri, which made a typo here
+			// a permanent, undiagnosable connect failure.
+			return nil, fmt.Errorf("invalid oauth.redirect_uri for server %q: %w", serverConfig.Name, err)
+		}
+		pinnedRedirectURI = strings.TrimSpace(serverConfig.OAuth.RedirectURI)
+		pinnedPort = port
+		// Bind the family the operator pinned. Binding 127.0.0.1 for a pinned
+		// `http://[::1]:PORT/...` produced an authorize URL whose callback hit a
+		// closed port, and the login then hung to the callback timeout.
+		bindHost = host
+	}
+
 	// Check for stored callback port from previous DCR (Spec 022: OAuth Redirect URI Port Persistence)
+	//
+	// The stored record is read whether or not a port is pinned. A pin only
+	// short-circuits the PORT CHOICE; it must not short-circuit the Spec 022
+	// credential hygiene below, because a DCR client_id is registered against
+	// the redirect_uri it was created with. Skipping the read meant a stale
+	// registration was reused forever under a new pin, producing a permanent
+	// redirect_uri_mismatch that no retry could clear.
 	var preferredPort int
 	var serverKey string
+	var storedClientID string
+	var storedPort int
 	if storage != nil {
 		serverKey = GenerateServerKey(serverConfig.Name, serverConfig.URL)
-		storedClientID, _, storedPort, err := storage.GetOAuthClientCredentials(serverKey)
-		if err == nil && storedPort > 0 {
-			preferredPort = storedPort
-			logger.Info("🔄 Found stored callback port from previous DCR",
-				zap.String("server", serverConfig.Name),
-				zap.Int("preferred_port", preferredPort))
-		} else if err == nil && storedClientID != "" && storedPort == 0 {
-			// Spec 022: Legacy DCR credentials exist but port is unknown
-			// Clear them to force fresh registration with port tracking
+		var storedErr error
+		storedClientID, _, storedPort, storedErr = storage.GetOAuthClientCredentials(serverKey)
+		if storedErr != nil {
+			storedClientID, storedPort = "", 0
+		}
+	}
+
+	switch {
+	case pinnedPort > 0:
+		preferredPort = pinnedPort
+		logger.Info("📌 Using operator-pinned OAuth callback port from oauth.redirect_uri",
+			zap.String("server", serverConfig.Name),
+			zap.String("redirect_uri", pinnedRedirectURI),
+			zap.String("bind_host", bindHost),
+			zap.Int("preferred_port", preferredPort))
+	case storedPort > 0:
+		preferredPort = storedPort
+		logger.Info("🔄 Found stored callback port from previous OAuth login",
+			zap.String("server", serverConfig.Name),
+			zap.Int("preferred_port", preferredPort))
+	}
+
+	// Spec 022 credential hygiene, independent of the pin. Only DCR-issued
+	// credentials are ever cleared: a static client_id is operator-supplied,
+	// cannot be re-registered, and clearing it would only destroy configuration.
+	if storage != nil && storedClientID != "" && !hasStaticClientID {
+		switch {
+		case storedPort == 0:
+			// Legacy DCR credentials exist but the port is unknown. Clear them to
+			// force fresh registration with port tracking.
 			logger.Warn("⚠️ Legacy DCR credentials found without stored port, clearing for re-registration",
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID))
-			if clearErr := storage.ClearOAuthClientCredentials(serverKey); clearErr != nil {
-				logger.Warn("Failed to clear legacy DCR credentials",
-					zap.String("server", serverConfig.Name),
-					zap.Error(clearErr))
-			}
+			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+		case pinnedPort > 0 && storedPort != pinnedPort:
+			// The registration was created for a different callback port than the
+			// one now pinned, so the provider will reject the redirect_uri this
+			// client_id is paired with. This is the feature's most likely upgrade
+			// path: log in unpinned (DCR registers port A), then add
+			// oauth.redirect_uri with port B because the moving port was rejected.
+			// Re-register rather than fail forever.
+			logger.Warn("⚠️ Stored DCR credentials were registered for a different callback port than oauth.redirect_uri pins, clearing for re-registration",
+				zap.String("server", serverConfig.Name),
+				zap.String("client_id", storedClientID),
+				zap.Int("stored_port", storedPort),
+				zap.Int("pinned_port", pinnedPort))
+			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
 		}
 	}
 
@@ -782,38 +1020,71 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		zap.String("approach", "MCPProxy callback server coordination for exact URI matching"))
 
 	// Start our own callback server to get exact port for Cloudflare OAuth
-	callbackServer, err := globalCallbackManager.StartCallbackServer(serverConfig.Name, preferredPort)
+	callbackServer, err := globalCallbackManager.StartCallbackServerOnHost(serverConfig.Name, CallbackBinding{
+		Host:   bindHost,
+		Port:   preferredPort,
+		Pinned: pinnedPort > 0,
+		Logger: logger,
+	})
 	if err != nil {
 		logger.Error("Failed to start OAuth callback server",
 			zap.String("server", serverConfig.Name),
 			zap.Error(err))
-		return nil
+		return nil, fmt.Errorf("failed to start OAuth callback server for %q: %w", serverConfig.Name, err)
 	}
 
 	// Spec 022: Detect port conflict and clear DCR credentials if port changed
 	// This forces fresh DCR with the new port
 	if preferredPort > 0 && callbackServer.Port != preferredPort {
-		logger.Warn("⚠️ Callback port changed, clearing DCR credentials for re-registration",
-			zap.String("server", serverConfig.Name),
-			zap.Int("stored_port", preferredPort),
-			zap.Int("new_port", callbackServer.Port))
-		if storage != nil {
-			if err := storage.ClearOAuthClientCredentials(serverKey); err != nil {
-				logger.Warn("Failed to clear DCR credentials after port change",
+		switch {
+		case pinnedPort > 0:
+			// The operator pinned this port; any other port produces a
+			// redirect_uri the provider will reject. Abort instead of pretending.
+			logger.Error("❌ Pinned OAuth callback port is unavailable - cannot honor oauth.redirect_uri",
+				zap.String("server", serverConfig.Name),
+				zap.String("redirect_uri", pinnedRedirectURI),
+				zap.Int("pinned_port", pinnedPort),
+				zap.Int("bound_port", callbackServer.Port),
+				zap.String("hint", "free the pinned port, or change oauth.redirect_uri (and the provider's callback URL) to a free one"))
+			if stopErr := globalCallbackManager.StopCallbackServerWithLogger(serverConfig.Name, logger); stopErr != nil {
+				logger.Warn("Failed to stop callback server bound to the wrong port",
 					zap.String("server", serverConfig.Name),
-					zap.Error(err))
+					zap.Error(stopErr))
 			}
+			return nil, fmt.Errorf("pinned OAuth callback port %d for server %q is unavailable (bound %d instead); free it or change oauth.redirect_uri and the provider's callback URL",
+				pinnedPort, serverConfig.Name, callbackServer.Port)
+		case hasStaticClientID:
+			// Static credentials are not re-registerable, so clearing them would
+			// only destroy the operator's configuration for no benefit.
+			logger.Warn("⚠️ Callback port changed for a statically configured OAuth client; keeping credentials",
+				zap.String("server", serverConfig.Name),
+				zap.Int("stored_port", preferredPort),
+				zap.Int("new_port", callbackServer.Port),
+				zap.String("hint", "pin the port with oauth.redirect_uri if the provider requires an exact callback URL"))
+		default:
+			logger.Warn("⚠️ Callback port changed, clearing DCR credentials for re-registration",
+				zap.String("server", serverConfig.Name),
+				zap.Int("stored_port", preferredPort),
+				zap.Int("new_port", callbackServer.Port))
+			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
 		}
+	}
+
+	// The pinned URI is sent to the provider verbatim so the string matches the
+	// one registered there (host spelling included: localhost vs 127.0.0.1).
+	redirectURI := callbackServer.RedirectURI
+	if pinnedRedirectURI != "" {
+		redirectURI = pinnedRedirectURI
 	}
 
 	logger.Info("Using exact redirect URI from allocated callback server",
 		zap.String("server", serverConfig.Name),
-		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.String("redirect_uri", redirectURI),
 		zap.Int("port", callbackServer.Port))
 
 	logger.Info("OAuth callback server started successfully",
 		zap.String("server", serverConfig.Name),
-		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.String("redirect_uri", redirectURI),
 		zap.Int("port", callbackServer.Port))
 
 	// Try to find a working metadata URL by validating multiple URL patterns
@@ -911,9 +1182,11 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.String("server", serverConfig.Name),
 			zap.String("client_id", clientID))
 	} else {
-		// Try to load persisted DCR credentials for token refresh
+		// Try to load persisted DCR credentials for token refresh.
+		// Re-read rather than reuse the earlier snapshot: the Spec 022 hygiene
+		// above may have just cleared a registration that is no longer valid for
+		// this callback port.
 		if storage != nil {
-			serverKey := GenerateServerKey(serverConfig.Name, serverConfig.URL)
 			persistedClientID, persistedClientSecret, _, err := storage.GetOAuthClientCredentials(serverKey)
 			if err == nil && persistedClientID != "" {
 				clientID = persistedClientID
@@ -945,7 +1218,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	oauthConfig := &client.OAuthConfig{
 		ClientID:              clientID,
 		ClientSecret:          clientSecret,
-		RedirectURI:           callbackServer.RedirectURI, // Exact redirect URI with allocated port
+		RedirectURI:           redirectURI, // Exact redirect URI: operator-pinned, or the allocated port
 		Scopes:                scopes,
 		TokenStore:            tokenStore,            // Shared token store for this server
 		PKCEEnabled:           true,                  // Always enable PKCE for security
@@ -957,38 +1230,123 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		zap.String("server", serverConfig.Name),
 		zap.Strings("scopes", scopes),
 		zap.Bool("pkce_enabled", true),
-		zap.String("redirect_uri", callbackServer.RedirectURI),
+		zap.String("redirect_uri", redirectURI),
 		zap.String("auth_server_metadata_url", authServerMetadataURL),
 		zap.String("registration_mode", registrationMode),
 		zap.String("discovery_mode", "explicit metadata URL"), // Using explicit metadata URL to avoid discovery timeouts
 		zap.String("token_store", "shared"))                   // Using shared token store for token persistence
 
-	return oauthConfig
+	return oauthConfig, nil
+}
+
+// CallbackBinding describes the loopback endpoint a flow needs its OAuth
+// callback server on.
+type CallbackBinding struct {
+	// Host is the loopback address to listen on ("127.0.0.1" or "::1").
+	// Empty means 127.0.0.1.
+	Host string
+	// Port is the port to try first. 0 means dynamic allocation.
+	Port int
+	// Pinned reports whether Port came from an operator's `oauth.redirect_uri`
+	// rather than from the Spec 022 stored-port record.
+	//
+	// It is carried explicitly instead of being inferred from Port > 0 because
+	// the two cases need opposite handling when a cached server is already
+	// bound elsewhere: a pin CANNOT be satisfied by another port (the provider
+	// rejects the mismatched redirect_uri), whereas a stored port is only a
+	// preference and must never cost a live flow its listener.
+	Pinned bool
+	// Logger is the caller's real logger. Without it the callback surface logs
+	// into the no-op zap global and the whole flow is invisible.
+	Logger *zap.Logger
+}
+
+func (b CallbackBinding) host() string {
+	if b.Host == "" {
+		return config.LoopbackIPv4Host
+	}
+	return b.Host
 }
 
 // StartCallbackServer starts a new OAuth callback server for the given server name.
 // If preferredPort > 0, it attempts to bind to that port first for redirect URI persistence (Spec 022).
 // Falls back to dynamic allocation if the preferred port is unavailable.
+//
+// Deprecated in favour of StartCallbackServerOnHost, which can bind IPv6
+// loopback and carries the caller's logger. Kept for callers that have neither.
 func (m *CallbackServerManager) StartCallbackServer(serverName string, preferredPort int) (*CallbackServer, error) {
+	return m.StartCallbackServerOnHost(serverName, CallbackBinding{Port: preferredPort})
+}
+
+// StartCallbackServerOnHost starts (or reuses) the OAuth callback server for a
+// server name on the requested loopback binding.
+//
+// Reuse rules, in order:
+//
+//   - A cached server that already satisfies the binding is reused. Reuse must
+//     preserve parked waiters: callbacks are dispatched by `state` (issue #975),
+//     so several flows can safely share one listener.
+//   - A cached server bound elsewhere is REPLACED only when that cannot strand a
+//     live flow — i.e. when nothing is parked on it — or when the caller pinned
+//     the port, in which case reusing the wrong port would hand the provider a
+//     redirect_uri it rejects and the flow could never complete anyway.
+//   - Otherwise the cached server is reused despite the mismatch, and the
+//     mismatch is logged. This is the case that matters for a static client_id
+//     whose stored port is occupied by another process: attempt 1 falls back to
+//     a dynamic port and parks a waiter, attempt 2 still prefers the stored
+//     port, and tearing down attempt 1's listener would make that server
+//     impossible to log into for as long as the stored port stays occupied.
+func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, binding CallbackBinding) (*CallbackServer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	logger := m.adoptLoggerLocked(binding.Logger)
+	bindHost := binding.host()
+	preferredPort := binding.Port
+
 	// Check if we already have a server for this name
 	if existing, exists := m.servers[serverName]; exists {
-		// Drain any stale callback parameters from previous OAuth attempts
-		// This prevents state mismatch errors when OAuth fails/times out and is retried
-		select {
-		case staleParams := <-existing.CallbackChan:
-			m.logger.Warn("Drained stale OAuth callback params from previous attempt (prevents state mismatch)",
+		matchesBinding := existing.BindHost == bindHost &&
+			(preferredPort == 0 || existing.Port == preferredPort)
+
+		switch {
+		case matchesBinding:
+			// No draining here (issue #975): params are dispatched per `state`, so a
+			// stale callback can no longer be mistaken for this attempt's, and a
+			// waiter already parked on this server must survive the reuse.
+			logger.Debug("Reusing existing callback server",
 				zap.String("server", serverName),
-				zap.String("stale_state", staleParams["state"]))
+				zap.String("bind_host", existing.BindHost),
+				zap.Int("port", existing.Port))
+			return existing, nil
+
+		case existing.waiterCount() == 0 || binding.Pinned:
+			logger.Warn("Replacing stale OAuth callback server that does not match the requested binding",
+				zap.String("server", serverName),
+				zap.String("cached_bind_host", existing.BindHost),
+				zap.Int("cached_port", existing.Port),
+				zap.String("requested_bind_host", bindHost),
+				zap.Int("requested_port", preferredPort),
+				zap.Bool("pinned", binding.Pinned),
+				zap.Int("waiters_dropped", existing.waiterCount()))
+			if err := m.stopCallbackServerLocked(serverName, logger); err != nil {
+				logger.Warn("Failed to stop stale OAuth callback server",
+					zap.String("server", serverName),
+					zap.Error(err))
+			}
+
 		default:
-			// Channel is empty, nothing to drain
+			// A flow is parked on the cached listener. Dropping it would send a
+			// user's browser to a closed port; the preference is not worth that.
+			logger.Warn("Keeping the existing OAuth callback server: a flow is still waiting on it",
+				zap.String("server", serverName),
+				zap.String("cached_bind_host", existing.BindHost),
+				zap.Int("cached_port", existing.Port),
+				zap.Int("requested_port", preferredPort),
+				zap.Int("waiters", existing.waiterCount()),
+				zap.String("hint", "free the preferred port and retry once the pending login finishes or times out"))
+			return existing, nil
 		}
-		m.logger.Debug("Reusing existing callback server",
-			zap.String("server", serverName),
-			zap.Int("port", existing.Port))
-		return existing, nil
 	}
 
 	var listener net.Listener
@@ -996,40 +1354,43 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 
 	// Try preferred port first if specified (Spec 022: OAuth Redirect URI Port Persistence)
 	if preferredPort > 0 {
-		listener, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", preferredPort))
+		listener, err = net.Listen("tcp", net.JoinHostPort(bindHost, strconv.Itoa(preferredPort)))
 		if err != nil {
-			m.logger.Warn("Preferred port unavailable, falling back to dynamic allocation",
+			logger.Warn("Preferred port unavailable, falling back to dynamic allocation",
 				zap.String("server", serverName),
+				zap.String("bind_host", bindHost),
 				zap.Int("preferred_port", preferredPort),
+				zap.Bool("pinned", binding.Pinned),
 				zap.Error(err))
 			// Fall through to dynamic allocation
 		} else {
-			m.logger.Info("✅ Using preferred port for OAuth callback (port persistence)",
+			logger.Info("✅ Using preferred port for OAuth callback (port persistence)",
 				zap.String("server", serverName),
+				zap.String("bind_host", bindHost),
 				zap.Int("port", preferredPort))
 		}
 	}
 
 	// Fall back to dynamic port allocation if no listener yet
 	if listener == nil {
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		listener, err = net.Listen("tcp", net.JoinHostPort(bindHost, "0"))
 		if err != nil {
-			return nil, fmt.Errorf("failed to allocate dynamic port: %w", err)
+			return nil, fmt.Errorf("failed to allocate dynamic port on %s: %w", bindHost, err)
 		}
 	}
 
 	// Extract the dynamically allocated port
 	addr := listener.Addr().(*net.TCPAddr)
 	port := addr.Port
-	redirectURI := fmt.Sprintf("%s:%d%s", DefaultRedirectURIBase, port, DefaultRedirectPath)
-
-	// Create callback channel
-	callbackChan := make(chan map[string]string, 1)
+	listenAddr := net.JoinHostPort(bindHost, strconv.Itoa(port))
+	// JoinHostPort brackets an IPv6 literal, which is what the redirect URI
+	// needs too ("http://[::1]:PORT/oauth/callback").
+	redirectURI := fmt.Sprintf("http://%s%s", listenAddr, DefaultRedirectPath)
 
 	// Create HTTP server with dedicated mux
 	mux := http.NewServeMux()
 	server := &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
+		Addr:              listenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second, // Security: prevent Slowloris attacks
 		ReadTimeout:       30 * time.Second, // Extended timeout for OAuth discovery
@@ -1038,11 +1399,13 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 
 	// Create callback server instance
 	callbackServer := &CallbackServer{
-		Port:         port,
-		RedirectURI:  redirectURI,
-		Server:       server,
-		CallbackChan: callbackChan,
-		logger:       m.logger.With(zap.String("server", serverName), zap.Int("port", port)),
+		Port:        port,
+		RedirectURI: redirectURI,
+		Server:      server,
+		ServerName:  serverName,
+		BindHost:    bindHost,
+		logger:      logger.With(zap.String("server", serverName), zap.String("bind_host", bindHost), zap.Int("port", port)),
+		waiters:     make(map[string]chan map[string]string),
 	}
 
 	// Set up HTTP handler for OAuth callback
@@ -1073,7 +1436,7 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 						<p>Port: %d</p>
 					</body>
 				</html>
-			`, r.URL.Path, DefaultRedirectPath, serverName, port)
+			`, html.EscapeString(r.URL.Path), DefaultRedirectPath, html.EscapeString(serverName), port)
 			if _, err := w.Write([]byte(debugPage)); err != nil {
 				callbackServer.logger.Error("Error writing debug page", zap.Error(err))
 			}
@@ -1101,6 +1464,123 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string, preferred
 	return callbackServer, nil
 }
 
+// RegisterState registers the OAuth `state` a flow just minted and returns the
+// channel its callback parameters will be delivered on. Call it BEFORE opening
+// the browser so a fast user cannot beat the registration, and pair it with
+// UnregisterState so a finished or cancelled flow's state cannot be reused.
+//
+// Registering the same state twice returns the same channel, which lets the
+// flow that mints the state register early and the goroutine that waits for it
+// obtain the same channel later without a second buffer.
+func (c *CallbackServer) RegisterState(state string) <-chan map[string]string {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+
+	if ch, exists := c.waiters[state]; exists {
+		return ch
+	}
+
+	ch := make(chan map[string]string, 1)
+	c.waiters[state] = ch
+	c.logger.Debug("Registered OAuth callback waiter", zap.String("state", state))
+	return ch
+}
+
+// UnregisterState drops the waiter for a state. Safe to call more than once and
+// safe to call after delivery (delivery already removes the waiter).
+func (c *CallbackServer) UnregisterState(state string) {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+
+	if _, exists := c.waiters[state]; exists {
+		delete(c.waiters, state)
+		c.logger.Debug("Unregistered OAuth callback waiter", zap.String("state", state))
+	}
+}
+
+// waiterCount reports how many flows are currently parked on this server.
+// Used to decide whether a cached server may be torn down: replacing one that
+// still has a waiter drops a live flow, whose browser then lands on a closed
+// port (see StartCallbackServerOnHost).
+func (c *CallbackServer) waiterCount() int {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	return len(c.waiters)
+}
+
+// HasState reports whether a flow is currently waiting for this state.
+func (c *CallbackServer) HasState(state string) bool {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	_, exists := c.waiters[state]
+	return exists
+}
+
+// deliver hands the callback params to the flow that registered this state.
+// The waiter is single-use: it is removed on delivery so a replayed callback
+// cannot be delivered twice. Returns false when no flow is waiting.
+func (c *CallbackServer) deliver(state string, params map[string]string) bool {
+	c.waitersMu.Lock()
+	ch, exists := c.waiters[state]
+	if exists {
+		delete(c.waiters, state)
+	}
+	waiterCount := len(c.waiters)
+	c.waitersMu.Unlock()
+
+	if !exists {
+		c.logger.Warn("OAuth callback carries a state no flow is waiting for",
+			zap.String("state", state),
+			zap.Int("other_waiters", waiterCount))
+		return false
+	}
+
+	select {
+	case ch <- params:
+		return true
+	default:
+		// Cannot happen: the channel is buffered and single-use.
+		c.logger.Error("OAuth callback waiter channel unexpectedly full",
+			zap.String("state", state))
+		return false
+	}
+}
+
+// dropAllWaiters removes every registered waiter. Waiters unblock through their
+// own context deadline; the channels are deliberately left unclosed so a parked
+// flow never observes a zero-value callback as if it were a real one.
+func (c *CallbackServer) dropAllWaiters() int {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+
+	dropped := len(c.waiters)
+	c.waiters = make(map[string]chan map[string]string)
+	return dropped
+}
+
+// callbackPage renders the page the user's browser lands on. Success is only
+// ever reported when the authorization code was actually delivered to the flow
+// that asked for it (issue #975).
+func callbackPage(title, message string) string {
+	closeScript := ""
+	if title == "Authorization Successful" {
+		closeScript = `
+				<script>
+					setTimeout(function() {
+						window.close();
+					}, 2000);
+				</script>`
+	}
+	return fmt.Sprintf(`
+		<html>
+			<body>
+				<h1>%s</h1>
+				<p>%s</p>%s
+			</body>
+		</html>
+	`, html.EscapeString(title), html.EscapeString(message), closeScript)
+}
+
 // handleCallback handles OAuth callback requests
 func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 	c.logger.Info("🎯 OAuth callback received",
@@ -1126,32 +1606,57 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 		zap.String("error_description", params["error_description"]),
 		zap.Int("total_params", len(params)))
 
-	// Send parameters to the channel (non-blocking)
-	select {
-	case c.CallbackChan <- params:
-		c.logger.Info("✅ OAuth callback parameters sent to channel successfully",
-			zap.Any("params", params))
-	default:
-		c.logger.Error("❌ OAuth callback channel full, dropping parameters - THIS IS BAD!",
-			zap.Any("params", params))
+	state := params["state"]
+
+	// Route the params to the flow that minted this state. A callback nobody is
+	// waiting for is NOT delivered to some other flow and NOT reported to the
+	// user as a success (issue #975).
+	if !c.deliver(state, params) {
+		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %q is unknown or expired "+
+			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, state)
+		if state == "" {
+			reason = fmt.Errorf("OAuth callback for server %q carried no state parameter and was rejected", c.ServerName)
+		}
+		c.logger.Error("❌ OAuth callback dropped - no flow is waiting for this state",
+			zap.String("state", state),
+			zap.String("error", params["error"]))
+
+		// Surface it to the operator instead of burying it in the log (issue #975).
+		GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
+
+		c.writePage(w, http.StatusBadRequest, callbackPage(
+			"Authorization Failed",
+			fmt.Sprintf("mcpproxy is not waiting for this sign-in (unknown or expired state). "+
+				"Nothing was signed in. Start the login again from mcpproxy for '%s'.", c.ServerName)))
+		return
 	}
 
-	// Respond to the user
+	c.logger.Info("✅ OAuth callback parameters delivered to the waiting flow",
+		zap.String("state", state))
+
+	// The provider itself reported a failure: the flow was told, but the user
+	// must not see a success page.
+	if providerErr := params["error"]; providerErr != "" {
+		message := providerErr
+		if desc := params["error_description"]; desc != "" {
+			message = providerErr + ": " + desc
+		}
+		c.writePage(w, http.StatusBadRequest, callbackPage(
+			"Authorization Failed",
+			fmt.Sprintf("The authorization server rejected the request (%s). You can close this window and try again.", message)))
+		return
+	}
+
+	c.writePage(w, http.StatusOK, callbackPage(
+		"Authorization Successful",
+		"You can now close this window and return to the application."))
+}
+
+// writePage writes an HTML response for the callback browser window.
+func (c *CallbackServer) writePage(w http.ResponseWriter, status int, page string) {
 	w.Header().Set("Content-Type", "text/html")
-	successPage := `
-		<html>
-			<body>
-				<h1>Authorization Successful</h1>
-				<p>You can now close this window and return to the application.</p>
-				<script>
-					setTimeout(function() {
-						window.close();
-					}, 2000);
-				</script>
-			</body>
-		</html>
-	`
-	if _, err := w.Write([]byte(successPage)); err != nil {
+	w.WriteHeader(status)
+	if _, err := w.Write([]byte(page)); err != nil {
 		c.logger.Error("Error writing OAuth callback response", zap.Error(err))
 	}
 }
@@ -1172,9 +1677,21 @@ func GetCallbackServer(serverName string) (*CallbackServer, bool) {
 
 // StopCallbackServer stops and removes the callback server for a given server name
 func (m *CallbackServerManager) StopCallbackServer(serverName string) error {
+	return m.StopCallbackServerWithLogger(serverName, nil)
+}
+
+// StopCallbackServerWithLogger is StopCallbackServer with the caller's logger,
+// so the tear-down (and any waiter it drops) is actually recorded.
+func (m *CallbackServerManager) StopCallbackServerWithLogger(serverName string, logger *zap.Logger) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	return m.stopCallbackServerLocked(serverName, m.adoptLoggerLocked(logger))
+}
+
+// stopCallbackServerLocked shuts the server down and removes it from the map.
+// m.mu must be held.
+func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, logger *zap.Logger) error {
 	server, exists := m.servers[serverName]
 	if !exists {
 		return nil // Already stopped or never started
@@ -1185,19 +1702,26 @@ func (m *CallbackServerManager) StopCallbackServer(serverName string) error {
 	defer cancel()
 
 	if err := server.Server.Shutdown(ctx); err != nil {
-		m.logger.Error("Error shutting down OAuth callback server",
+		logger.Error("Error shutting down OAuth callback server",
 			zap.String("server", serverName),
 			zap.Error(err))
 	}
 
-	// Close the callback channel
-	close(server.CallbackChan)
+	// Drop any registered waiters. They unblock on their own context deadline;
+	// the channels are left unclosed so a parked flow never mistakes a
+	// zero-value receive for a real callback.
+	if dropped := server.dropAllWaiters(); dropped > 0 {
+		logger.Warn("Stopped OAuth callback server while flows were still waiting",
+			zap.String("server", serverName),
+			zap.Int("waiters", dropped))
+	}
 
 	// Remove from map
 	delete(m.servers, serverName)
 
-	m.logger.Info("OAuth callback server stopped",
+	logger.Info("OAuth callback server stopped",
 		zap.String("server", serverName),
+		zap.String("bind_host", server.BindHost),
 		zap.Int("port", server.Port))
 
 	return nil

@@ -42,6 +42,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var coreManager: CoreProcessManager?
 
     private var statusItem: NSStatusItem?
+    /// The corner severity dot overlaid on the status item button, when a
+    /// server severity is being badged. Held so `updateStatusIcon()` can reuse
+    /// one view across polls instead of rebuilding the button's subviews.
+    private var badgeDotView: TrayBadgeDotView?
 
     /// Where the tray menu lives. Assigned to `statusItem` at launch; injected
     /// by tests that drive the menu paths without a status bar item.
@@ -896,16 +900,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Update the status bar icon based on app state.
     ///
-    /// The icon itself is always the plain MCPProxy template glyph; the state
-    /// rides beside it as a coloured glyph in the button's attributed title.
-    /// See `TrayStatusIcon.glyph(for:)` for why the badge cannot be composited
-    /// into the image.
+    /// The icon itself is always the plain MCPProxy template glyph. Core states
+    /// ride beside it as a glyph in the button's attributed title; a server
+    /// severity rides ON it as a small corner dot. See
+    /// `TrayStatusIcon.glyph(for:)` for why the badge cannot be composited into
+    /// the image itself, and `TrayBadgeDotView` for how the dot gets its colour
+    /// without breaking the template.
     ///
-    /// - Running OK: plain MCPProxy icon, no glyph
+    /// - Running OK: plain MCPProxy icon, nothing else
     /// - Stopped: ⏹
     /// - Core error: ⚠
-    /// - Server warn/error diagnostics: an amber/red dot (F1 — before the audit
-    ///   the menu bar looked identical to all-healthy with five servers down)
+    /// - Server warn/error diagnostics: a small amber/red dot in the icon's
+    ///   bottom-right corner (F1 — before the audit the menu bar looked
+    ///   identical to all-healthy with five servers down)
     ///
     /// F2: every pass also publishes the state as text — accessibility
     /// description, accessibility label and tooltip — so a screen-reader user
@@ -931,7 +938,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             worstDiagnosticSeverity: appState.worstDiagnosticSeverity
         )
         // The count must be of the severity being badged, over the same
-        // (enabled, non-OAuth) set `worstDiagnosticSeverity` considers.
+        // (enabled, non-exempt) set `worstDiagnosticSeverity` considers.
         let badgedCount: Int
         if case .severity(let severity) = badge {
             badgedCount = appState.diagnosticCount(severity: severity.rawValue)
@@ -950,25 +957,63 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         base.accessibilityDescription = label
         button.image = base
 
-        // Show state indicator as text next to icon (keeps icon as pure template)
+        // Core states stay as text next to the icon (keeps icon a pure
+        // template). ⏹/⚠ take the menu bar's own label colour so they stay
+        // legible in both appearances.
         let glyph = TrayStatusIcon.glyph(for: badge)
         if glyph.isEmpty {
             button.attributedTitle = NSAttributedString(string: "")
             button.title = ""
         } else {
-            // Only the severity dot is coloured; ⏹/⚠ keep the menu bar's own
-            // label colour so they stay legible in both appearances.
-            var attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11)
-            ]
-            if case .severity(let severity) = badge {
-                attributes[.foregroundColor] = severity == .error ? NSColor.systemRed : NSColor.systemOrange
-            }
-            button.attributedTitle = NSAttributedString(string: " " + glyph, attributes: attributes)
+            button.attributedTitle = NSAttributedString(
+                string: " " + glyph,
+                attributes: [.font: NSFont.systemFont(ofSize: 11)])
         }
+
+        // Server severity rides ON the icon as a corner dot.
+        updateBadgeDot(on: button, severity: TrayStatusIcon.dotSeverity(for: badge))
 
         button.toolTip = label
         button.setAccessibilityLabel(label)
+    }
+
+    /// Attach / update / remove the corner badge dot on the status item button.
+    ///
+    /// The dot is a SUBVIEW rather than pixels composited into `button.image`
+    /// because that image must stay `isTemplate` to track the light/dark menu
+    /// bar and to invert correctly while the menu is open — and a template
+    /// image is re-rendered monochrome, so a red dot drawn into it would come
+    /// back black. A sibling view is the only place a colour survives all three
+    /// appearances.
+    ///
+    /// The view is created once and reused: rebuilding it on every state poll
+    /// would thrash the button's subview list several times a second.
+    private func updateBadgeDot(on button: NSStatusBarButton, severity: TrayIconSeverity?) {
+        guard let severity else {
+            badgeDotView?.removeFromSuperview()
+            badgeDotView = nil
+            return
+        }
+
+        let dot: TrayBadgeDotView
+        if let existing = badgeDotView, existing.superview === button {
+            dot = existing
+        } else {
+            badgeDotView?.removeFromSuperview()
+            dot = TrayBadgeDotView(frame: .zero)
+            button.addSubview(dot)
+            badgeDotView = dot
+        }
+
+        // The overlay covers the WHOLE button and works out where the dot goes
+        // at draw time, from its own live bounds. A small subview pinned to the
+        // corner is wrong here on two counts — the button resizes
+        // asynchronously (so `bounds` read now can be stale) and the dot is
+        // anchored to the CENTRED icon, which moves at half the rate of the
+        // button's right edge. See TrayBadgeDotView's type comment.
+        dot.frame = button.bounds
+        dot.autoresizingMask = [.width, .height]
+        dot.fillColor = severity == .error ? .systemRed : .systemOrange
     }
 
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)

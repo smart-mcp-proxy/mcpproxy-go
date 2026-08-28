@@ -26,7 +26,7 @@ RFC 7591-compliant DCR enables MCP clients to self-register with authorization s
 
 To prevent malicious registrations, MCP servers should require initial access tokens during registration, issued through out-of-band mechanisms. Metadata validation must enforce:
 - Scope restrictions limiting client permissions
-- Redirect URI pattern whitelisting  
+- Redirect URI pattern whitelisting
 - Software statement assertions for authenticity
 
 The `godoc-mcp` server exemplifies this by binding client registrations to PKCE-enhanced OAuth flows, ensuring only user-authorized agents gain access.
@@ -51,7 +51,7 @@ Post-registration, the client uses issued credentials for subsequent OAuth flows
 
 For local callback servers, Go implementations should:
 1. Bind to `localhost:0` to auto-assign ports
-2. Pass the derived port to redirect URIs  
+2. Pass the derived port to redirect URIs
 3. Handle OS port conflicts via retries
 
 As RFC 8252 notes, servers must accept any loopback port, requiring MCP servers to validate URIs using pattern matching (e.g., `http://127.0.0.1:*`) rather than exact matches.
@@ -86,7 +86,7 @@ This dynamically assigns ports, passing the URI to OAuth requests while handling
 
 RFC 8414 defines the `/.well-known/oauth-authorization-server` endpoint for disclosing OAuth configuration. MCP servers must publish:
 - `authorization_endpoint`
-- `token_endpoint`  
+- `token_endpoint`
 - `registration_endpoint`
 - `jwks_uri`
 
@@ -203,15 +203,27 @@ This enables runtime onboarding of AI agents.
 
 **Problem**: Authorization servers reject dynamically generated URIs.
 
-**Solution**:
-- Configure auth servers with wildcard redirect patterns (`http://127.0.0.1:*`)
-- Use Cloudflare Workers for fixed-domain callbacks
+**Solution** depends on what the provider accepts:
 
-**Go Code**:
+- Providers that allow a loopback wildcard or prefix match (some self-hosted
+  authorization servers, and the pattern RFC 8252 §7.3 recommends) can register
+  `http://127.0.0.1:*` and let mcpproxy allocate a port per login.
+- Providers that require an **exact** port. GitHub OAuth Apps are the common
+  case: GitHub's wildcard matching covers subdomains and subdirectory paths, but
+  the host and port must still match the registered callback exactly, and
+  `http://127.0.0.1:*` is not valid syntax there. For those, pin the port with the per-server
+  `oauth.redirect_uri` setting and register that exact string with the provider.
+  See [Pinning the callback port](configuration/upstream-servers.md#pinning-the-callback-port-with-redirect_uri).
+- Use Cloudflare Workers for fixed-domain callbacks.
+
+**Go Code** (authorization-server side, only for servers that permit wildcards):
 ```go
 // Auth server config
 AllowedRedirectURIs: []string{"http://127.0.0.1:*", "http://[::1]:*"}
 ```
+
+> Do not assume a wildcard registration will work against a public provider —
+> verify it in that provider's developer console first.
 
 ### 7.2 Token Management Failures
 
@@ -292,19 +304,19 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
     if err != nil {
         return nil, fmt.Errorf("failed to allocate dynamic port: %w", err)
     }
-    
+
     // Extract port and create redirect URI
     addr := listener.Addr().(*net.TCPAddr)
     port := addr.Port
     redirectURI := fmt.Sprintf("http://127.0.0.1:%d/oauth/callback", port)
-    
+
     // Create dedicated HTTP server for this callback
     mux := http.NewServeMux()
     server := &http.Server{
         Addr:    fmt.Sprintf("127.0.0.1:%d", port),
         Handler: mux,
     }
-    
+
     // Start server with proper callback handling
     callbackServer := &CallbackServer{
         Port:         port,
@@ -313,13 +325,13 @@ func (m *CallbackServerManager) StartCallbackServer(serverName string) (*Callbac
         CallbackChan: make(chan map[string]string, 1),
         logger:       m.logger.With(zap.String("server", serverName)),
     }
-    
+
     // Set up callback handler
     mux.HandleFunc("/oauth/callback", callbackServer.handleCallback)
-    
+
     // Start server on the allocated port
     go server.Serve(listener)
-    
+
     return callbackServer, nil
 }
 ```
@@ -333,7 +345,7 @@ func CreateOAuthConfig(serverConfig *config.ServerConfig) *client.OAuthConfig {
         logger.Error("Failed to start OAuth callback server", zap.Error(err))
         return nil
     }
-    
+
     // Use the exact redirect URI in OAuth config
     return &client.OAuthConfig{
         ClientID:              "",                         // Dynamic Client Registration
@@ -354,20 +366,20 @@ func (c *Client) handleOAuthFlow(oauthHandler *client.OAuthHandler) error {
     if err := oauthHandler.RegisterClient(ctx, "mcpproxy-go"); err != nil {
         return fmt.Errorf("DCR failed: %w", err)
     }
-    
+
     // Step 2: Generate PKCE and state parameters
     codeVerifier, _ := client.GenerateCodeVerifier()
     codeChallenge := client.GenerateCodeChallenge(codeVerifier)
     state, _ := client.GenerateState()
-    
+
     // Step 3: Get authorization URL (uses exact redirect URI from DCR)
     authURL, _ := oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
-    
+
     // Step 4: Open browser and wait for callback
     openBrowser(authURL)
-    
+
     callbackServer, _ := oauth.GetGlobalCallbackManager().GetCallbackServer(c.config.Name)
-    
+
     // Step 5: Wait for authorization code on our callback server
     select {
     case authParams := <-callbackServer.CallbackChan:
@@ -375,8 +387,8 @@ func (c *Client) handleOAuthFlow(oauthHandler *client.OAuthHandler) error {
         if authParams["state"] != state {
             return fmt.Errorf("OAuth state mismatch")
         }
-        
-        return oauthHandler.ProcessAuthorizationResponse(ctx, 
+
+        return oauthHandler.ProcessAuthorizationResponse(ctx,
             authParams["code"], state, codeVerifier)
     case <-time.After(5 * time.Minute):
         return fmt.Errorf("OAuth authorization timeout")
@@ -405,11 +417,11 @@ MCPProxy's implementation successfully handles:
 
 **Example Log Output:**
 ```
-2025-07-13T09:30:07.119 | INFO | OAuth callback server started successfully | 
+2025-07-13T09:30:07.119 | INFO | OAuth callback server started successfully |
   {"server": "cloudflare_autorag", "redirect_uri": "http://127.0.0.1:64020/oauth/callback", "port": 64020}
-2025-07-13T09:30:07.119 | INFO | Opening browser for OAuth authentication | 
+2025-07-13T09:30:07.119 | INFO | Opening browser for OAuth authentication |
   {"auth_url": "https://autorag.mcp.cloudflare.com/oauth/authorize?...&redirect_uri=http%3A%2F%2F127.0.0.1%3A64020%2Foauth%2Fcallback..."}
-2025-07-13T09:30:56.674 | INFO | OAuth callback received | 
+2025-07-13T09:30:56.674 | INFO | OAuth callback received |
   {"params": {"code": "...", "state": "..."}}
 2025-07-13T09:30:57.507 | INFO | OAuth authentication completed successfully
 ```
@@ -421,7 +433,7 @@ The integration of OAuth 2.1 with MCP servers in Go requires strict adherence to
 ### ✅ **Successfully Implemented Solutions**
 
 1. **Redirect URI Exact Matching**: **SOLVED** through our Global Callback Server Manager with dynamic port allocation and perfect URI consistency
-2. **RFC 8252 Compliance**: **ACHIEVED** with `127.0.0.1` loopback interface and OS-assigned ephemeral ports  
+2. **RFC 8252 Compliance**: **ACHIEVED** with `127.0.0.1` loopback interface and OS-assigned ephemeral ports
 3. **PKCE Security**: **IMPLEMENTED** with mandatory PKCE-S256 for all OAuth flows
 4. **Dynamic Client Registration**: **WORKING** seamlessly with Cloudflare and other OAuth providers
 5. **Token Management**: **AUTOMATED** with refresh token handling and secure storage
@@ -430,7 +442,7 @@ The integration of OAuth 2.1 with MCP servers in Go requires strict adherence to
 
 **For Cloudflare MCP OAuth** (and other strict providers):
 - ✅ **Perfect URI matching** with callback server coordination
-- ✅ **Zero port conflicts** through dedicated servers per OAuth flow  
+- ✅ **Zero port conflicts** through dedicated servers per OAuth flow
 - ✅ **Automatic retry** post-OAuth for seamless MCP connection
 - ✅ **Production-tested** with Cloudflare AutoRAG OAuth flows
 - ✅ **RFC 8252 compliant** with enhanced security
@@ -459,8 +471,8 @@ MCPProxy's architecture enables future enhancements:
 
 MCPProxy serves as a **reference implementation** for OAuth 2.1 with MCP servers, demonstrating:
 - How to solve the critical redirect URI exact matching challenge
-- Production-ready callback server coordination patterns  
+- Production-ready callback server coordination patterns
 - Seamless integration with the `mcp-go` library's OAuth capabilities
 - RFC 8252 compliance in real-world deployment scenarios
 
-The patterns documented and implemented in MCPProxy establish **secure, scalable MCP-OAuth integrations** for Go-based AI agent ecosystems, successfully balancing user consent with operational security while meeting the strict requirements of modern OAuth providers like Cloudflare. 
+The patterns documented and implemented in MCPProxy establish **secure, scalable MCP-OAuth integrations** for Go-based AI agent ecosystems, successfully balancing user consent with operational security while meeting the strict requirements of modern OAuth providers like Cloudflare.

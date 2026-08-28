@@ -1163,6 +1163,15 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 
 				connecting := strings.EqualFold(state, "connecting")
 
+				// #1064: a quarantined server contributes no available tools.
+				// This entry map carries no enabled/quarantined key, so
+				// downstream consumers (contracts.ConvertUpstreamStatsToServerStats)
+				// cannot gate on it -- the value has to be zeroed here.
+				availableToolCount := status.ToolCount
+				if status.Quarantined {
+					availableToolCount = 0
+				}
+
 				entry := map[string]interface{}{
 					"state":        state,
 					"connected":    status.Connected,
@@ -1170,7 +1179,7 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 					"retry_count":  status.RetryCount,
 					"should_retry": false,
 					"name":         status.Name,
-					"tool_count":   status.ToolCount,
+					"tool_count":   availableToolCount,
 				}
 
 				if entry["name"] == "" {
@@ -1218,7 +1227,9 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 				if status.Quarantined {
 					quarantinedCount++
 				}
-				totalTools += status.ToolCount
+				if config.ServerContributesTools(status.Enabled, status.Quarantined) {
+					totalTools += status.ToolCount
+				}
 
 				serverStats[name] = entry
 			}
@@ -1238,8 +1249,16 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 
 	// Enhance stats with tool counts per server when falling back
 	if servers, ok := stats["servers"].(map[string]interface{}); ok {
+		quarantined := s.quarantinedServerNames()
 		for id, serverInfo := range servers {
 			if serverMap, ok := serverInfo.(map[string]interface{}); ok {
+				// #1064: getServerToolCount reads the managed client's tool-count
+				// cache, which no quarantine path invalidates, so it would hand
+				// back the pre-quarantine number. Gate it on the config instead.
+				if quarantined[id] {
+					serverMap["tool_count"] = 0
+					continue
+				}
 				serverMap["tool_count"] = s.getServerToolCount(id)
 			}
 		}
@@ -1352,6 +1371,15 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 
 		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())
 
+		// #1064: quarantined tools are not available -- see the same guard in
+		// Runtime.GetAllServers. GetQuarantinedServers below deliberately keeps
+		// the real count: that view exists to tell a reviewer how many tools
+		// await approval.
+		availableToolCount := serverStatus.ToolCount
+		if serverStatus.Quarantined {
+			availableToolCount = 0
+		}
+
 		serverMap := map[string]interface{}{
 			"name":            serverStatus.Name,
 			"url":             url,
@@ -1364,7 +1392,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"created":         created,
 			"connected":       connected,
 			"connecting":      connecting,
-			"tool_count":      serverStatus.ToolCount,
+			"tool_count":      availableToolCount,
 			"last_error":      serverStatus.LastError,
 			"status":          status,
 			"should_retry":    false, // Managed by Actor internally now
@@ -1857,6 +1885,24 @@ func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 
 // getServerToolCount returns the number of tools for a specific server
 // Returns cached tool count only (non-blocking) to avoid stalling SSE/API responses
+// quarantinedServerNames returns the set of configured server names currently in
+// quarantine. Used to gate cached tool counts on the GetUpstreamStats fallback
+// path, where neither the manager stats entry nor getServerToolCount has access
+// to the server config. Issue #1064.
+func (s *Server) quarantinedServerNames() map[string]bool {
+	out := make(map[string]bool)
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return out
+	}
+	for _, srv := range cfg.Servers {
+		if srv != nil && srv.Quarantined {
+			out[srv.Name] = true
+		}
+	}
+	return out
+}
+
 func (s *Server) getServerToolCount(serverID string) int {
 	client, exists := s.runtime.UpstreamManager().GetClient(serverID)
 	if !exists {

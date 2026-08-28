@@ -48,6 +48,12 @@ const (
 	HTTPServerErr  Code = "MCPX_HTTP_5XX"
 	HTTPConnRefuse Code = "MCPX_HTTP_CONN_REFUSED"
 	HTTPTimeout    Code = "MCPX_HTTP_TIMEOUT"
+	// HTTPLegacySSE: the endpoint rejected the streamable-HTTP `initialize`
+	// POST with a 4xx. That is the signature of a server that only speaks the
+	// older SSE transport, so the fix is a transport change in config — not a
+	// credential or reachability problem, which is why it must not fall through
+	// to a generic MCPX_HTTP_4xx or to MCPX_UNKNOWN_UNCLASSIFIED.
+	HTTPLegacySSE Code = "MCPX_HTTP_LEGACY_SSE"
 )
 
 // DOCKER domain — Docker isolation subsystem failures.
@@ -74,6 +80,12 @@ const (
 	ConfigDeprecatedField Code = "MCPX_CONFIG_DEPRECATED_FIELD"
 	ConfigParseError      Code = "MCPX_CONFIG_PARSE_ERROR"
 	ConfigMissingSecret   Code = "MCPX_CONFIG_MISSING_SECRET"
+	// ConfigInvalidCommand: the server's stdio `command`/`args` pair cannot
+	// spawn anything useful — e.g. a package-runner (`npx`, `uvx`) with no
+	// package to run. mcpproxy detects this itself before spawning, so the
+	// message is ours and the user can fix it in mcp_config.json; surfacing it
+	// as UNKNOWN told them to file a bug against us instead.
+	ConfigInvalidCommand Code = "MCPX_CONFIG_INVALID_COMMAND"
 )
 
 // QUARANTINE domain — security quarantine failures.

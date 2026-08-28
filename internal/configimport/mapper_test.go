@@ -1,6 +1,7 @@
 package configimport
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -170,7 +171,7 @@ func TestMapToServerConfig(t *testing.T) {
 			},
 		}
 
-		server, _, _ := MapToServerConfig(parsed, now)
+		server, _, warnings := MapToServerConfig(parsed, now)
 
 		if server.OAuth == nil {
 			t.Fatal("OAuth should be set")
@@ -178,8 +179,48 @@ func TestMapToServerConfig(t *testing.T) {
 		if server.OAuth.ClientID != "gemini-client" {
 			t.Errorf("OAuth.ClientID = %s, want gemini-client", server.OAuth.ClientID)
 		}
-		if server.OAuth.RedirectURI != "http://localhost:3000/callback" {
-			t.Errorf("OAuth.RedirectURI = %s, want http://localhost:3000/callback", server.OAuth.RedirectURI)
+		// Gemini's redirect_uri uses its own callback path, which mcpproxy's
+		// loopback callback server does not serve. Since oauth.redirect_uri
+		// became load-bearing it PINS the callback URL, so copying such a value
+		// verbatim turns an importable server into a permanent connect failure
+		// ("must use the callback path \"/oauth/callback\""). Drop it and let
+		// mcpproxy allocate its own callback URL instead.
+		if server.OAuth.RedirectURI != "" {
+			t.Errorf("OAuth.RedirectURI = %s, want it dropped as unusable", server.OAuth.RedirectURI)
+		}
+		var warned bool
+		for _, w := range warnings {
+			if strings.Contains(w, "redirect_uri") && strings.Contains(w, "dropped") {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Errorf("dropping redirect_uri must be warned about, got %v", warnings)
+		}
+	})
+
+	t.Run("gemini_oauth_usable_redirect_uri_preserved", func(t *testing.T) {
+		parsed := &ParsedServer{
+			Name:         "oauth-server",
+			SourceFormat: FormatGemini,
+			Fields: map[string]interface{}{
+				"url":      "http://localhost:8080",
+				"protocol": "http",
+				"oauth": &GeminiOAuth{
+					Enabled:     true,
+					ClientID:    "gemini-client",
+					RedirectURI: "http://127.0.0.1:54108/oauth/callback",
+				},
+			},
+		}
+
+		server, _, _ := MapToServerConfig(parsed, now)
+		if server.OAuth == nil {
+			t.Fatal("OAuth should be set")
+		}
+		// A value mcpproxy CAN honor is a deliberate pin and must survive import.
+		if server.OAuth.RedirectURI != "http://127.0.0.1:54108/oauth/callback" {
+			t.Errorf("OAuth.RedirectURI = %s, want it preserved", server.OAuth.RedirectURI)
 		}
 	})
 

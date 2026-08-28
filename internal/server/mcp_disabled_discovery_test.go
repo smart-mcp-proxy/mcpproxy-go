@@ -238,3 +238,30 @@ func TestServerToolCounts_Conditional(t *testing.T) {
 	assert.NotContains(t, js, "pending_approval")
 	assert.NotContains(t, js, "server_disabled")
 }
+
+// Issue #1064: the visible tool count reported for a quarantined server must be
+// zero -- every dispatch to its tools is refused with a SECURITY BLOCK.
+//
+// The gate lives in getVisibleToolCount, NOT in isToolCallable: isToolCallable
+// is the SEARCH filter and must stay quarantine-blind so retrieve_tools keeps
+// its merge-base semantics (Spec 085 FR-006/FR-011, pinned by
+// TestToolVisibility_RetrieveParity_Admin, which requires a quarantined
+// server's lingering indexed tool to still be returned by search). This test
+// pins both halves so a future "fix" cannot collapse them again.
+func TestVisibleToolCount_QuarantinedServer(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "held", Enabled: true, Quarantined: true,
+	}))
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "clean", Enabled: true,
+	}))
+
+	assert.Equal(t, 0, proxy.getVisibleToolCount("held"),
+		"a quarantined server contributes no available tools")
+
+	// ...but the search filter still ignores quarantine, on purpose.
+	assert.True(t, proxy.isToolCallable("held", "store"),
+		"isToolCallable is the search filter and must stay quarantine-blind (Spec 085)")
+	assert.True(t, proxy.isToolCallable("clean", "store"))
+}

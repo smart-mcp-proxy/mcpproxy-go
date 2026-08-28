@@ -5,21 +5,39 @@
 
 import { formatDateTime } from './datetime'
 
-// Activity type labels
-const typeLabels: Record<string, string> = {
+// Activity type labels.
+//
+// Keyed by every constant in internal/storage/activity_models.go — a backend
+// type with no entry here used to fall through the old `|| type` passthrough
+// and paint the raw storage enum into the Activity table's Type column, beside
+// title-cased prose (#1065). internal/storage/activity_label_parity_test.go
+// fails if a new backend type is added without a label here. Declaration order
+// is the filter-dropdown order.
+export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
   'tool_call': 'Tool Call',
   'system_start': 'System Start',
   'system_stop': 'System Stop',
   'internal_tool_call': 'Internal Tool Call',
   'config_change': 'Config Change',
   'policy_decision': 'Policy Decision',
+  // Server-level quarantine. Deliberately NOT the same label as
+  // tool_quarantine_change below: collapsing the two is a real defect in the
+  // macOS tray's copy of this table.
   'quarantine_change': 'Quarantine Change',
   'server_change': 'Server Change',
   // Spec 098: one executed required-tools preflight.
-  'preflight': 'Preflight'
+  'preflight': 'Preflight',
+  // --- #1065: these four were emitted by the backend with no label ---
+  'tool_quarantine_change': 'Tool Quarantine Change', // Spec 032, tool-level
+  'security_scan': 'Security Scan', // Spec 077
+  'credential_broker': 'Credential Broker', // Spec 074, server edition only
+  'prompt_get': 'Prompt Fetch'
 }
 
-// Activity type icons
+const typeLabels = ACTIVITY_TYPE_LABELS
+
+// Activity type icons. Same keys as ACTIVITY_TYPE_LABELS; each distinct, so a
+// glyph identifies the type on its own.
 const typeIcons: Record<string, string> = {
   'tool_call': '🔧',
   'system_start': '🚀',
@@ -29,7 +47,11 @@ const typeIcons: Record<string, string> = {
   'policy_decision': '🛡️',
   'quarantine_change': '⚠️',
   'server_change': '🔄',
-  'preflight': '🛫'
+  'preflight': '🛫',
+  'tool_quarantine_change': '🧪',
+  'security_scan': '🔎',
+  'credential_broker': '🔑',
+  'prompt_get': '💬'
 }
 
 // Status labels
@@ -65,10 +87,23 @@ const intentClasses: Record<string, string> = {
 }
 
 /**
+ * snake_case -> Title Case. The last-resort fallback for formatType, so a
+ * backend value that has not been given a label yet still reads as prose
+ * instead of leaking the raw storage enum (#1065).
+ */
+export const humaniseType = (type: string): string => {
+  return type
+    .split('_')
+    .filter(Boolean)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+/**
  * Format activity type for display
  */
 export const formatType = (type: string): string => {
-  return typeLabels[type] || type
+  return typeLabels[type] ?? humaniseType(type)
 }
 
 /**

@@ -309,36 +309,45 @@ final class AppState: ObservableObject {
     /// warn/error severity. These drive the "Fix issues" menu group and the
     /// tray badge tint.
     ///
-    /// MCP-1819/T3: OAuth login-required servers are excluded. Pre-T1 the
-    /// backend classifies that state as an error-severity
-    /// MCPX_UNKNOWN_UNCLASSIFIED diagnostic, which would otherwise read as a
-    /// "file a bug" hard error. A server that just needs sign-in is surfaced
-    /// calmly via `serversNeedingAttention` (the "Sign in" affordance) instead.
+    /// Servers in an intentional non-connected state are excluded, via the same
+    /// `isBadgeExempt` predicate the badge uses — it was left on the narrower
+    /// OAuth-only check when that predicate was introduced, which quietly broke
+    /// the "these three filter identically" invariant at birth (verification
+    /// sweep, gap 1). Nothing consumes this today, which is exactly why the
+    /// drift would have gone unnoticed until something did.
+    ///
+    /// MCP-1819/T3, the original reason: the backend classifies OAuth
+    /// login-required as an error-severity MCPX_UNKNOWN_UNCLASSIFIED diagnostic,
+    /// which would otherwise read as a "file a bug" hard error. Such a server is
+    /// surfaced calmly via `serversNeedingAttention` instead — as is a
+    /// quarantined one, via "Review quarantine…".
     var serversWithDiagnostic: [ServerStatus] {
-        servers.filter { $0.hasAttentionDiagnostic && !$0.isOAuthLoginRequired }
+        servers.filter { $0.hasAttentionDiagnostic && !$0.isBadgeExempt }
     }
 
     /// How many servers carry the severity the tray icon is currently badging.
     ///
-    /// Must agree with `worstDiagnosticSeverity` exactly, or the status item
-    /// says "4 server errors" over a badge that counted three: that property
-    /// looks only at ENABLED servers, while `serversWithDiagnostic` includes
-    /// the disabled ones and both severities.
+    /// Must agree with `worstDiagnosticSeverity` exactly — including its
+    /// `isBadgeExempt` filter — or the status item says "4 server errors" over
+    /// a badge that counted three: that property looks only at ENABLED servers,
+    /// while `serversWithDiagnostic` includes the disabled ones and both
+    /// severities.
     func diagnosticCount(severity: String) -> Int {
         servers.filter {
-            $0.enabled && !$0.isOAuthLoginRequired && $0.diagnostic?.severity == severity
+            $0.enabled && !$0.isBadgeExempt && $0.diagnostic?.severity == severity
         }.count
     }
 
     /// Highest-severity diagnostic across enabled servers. Returns nil when
     /// no diagnostics are attached. Used by TrayIcon to colour the badge.
     ///
-    /// MCP-1819/T3: OAuth login-required servers are skipped so a server that
-    /// merely needs sign-in does not tint the tray icon badge red/orange — the
-    /// calm "Needs Attention / Sign in" path owns that state instead.
+    /// Servers in an INTENTIONAL non-connected state are skipped (see
+    /// `ServerStatus.isBadgeExempt`) so neither a pending sign-in nor a
+    /// quarantine review tints the tray icon badge red/orange — the calm
+    /// "Needs Attention" path owns those states instead.
     var worstDiagnosticSeverity: String? {
         var sawWarn = false
-        for srv in servers where srv.enabled && !srv.isOAuthLoginRequired {
+        for srv in servers where srv.enabled && !srv.isBadgeExempt {
             guard let d = srv.diagnostic else { continue }
             if d.severity == "error" { return "error" }
             if d.severity == "warn" { sawWarn = true }

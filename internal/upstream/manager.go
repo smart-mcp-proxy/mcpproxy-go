@@ -224,6 +224,12 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		}
 	})
 
+	// Surface OAuth failures that have no caller to return an error to — an
+	// undeliverable callback, a state mismatch, a background token exchange
+	// that failed. Without this the CLI kept reporting "OAuth authentication
+	// flow initiated successfully" while the flow had already died (issue #975).
+	tokenManager.SetOAuthFailureCallback(manager.recordOAuthFailure)
+
 	// Start database event monitor for cross-process OAuth completion notifications
 	if boltStorage != nil {
 		manager.shutdownWg.Add(1)
@@ -1164,7 +1170,12 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 		tools, err := client.ListTools(ctx)
 		if err != nil {
-			m.logger.Error("Failed to list tools from client",
+			// Warn, not Error: markSwept below is deliberately skipped so the
+			// next sweep retries this server. A failure the code already plans
+			// to retry is not an error — and on a healthy install with several
+			// stdio servers this fired ~1x/min each, forever, which is what
+			// made main.log rotate every couple of hours.
+			m.logger.Warn("Failed to list tools from client",
 				zap.String("id", snapshot.id),
 				zap.String("server", snapshot.name),
 				zap.Error(err))
@@ -1766,7 +1777,10 @@ func (m *Manager) GetTotalToolCount() int {
 		}
 		// Read config through the thread-safe accessor (MCP-770).
 		cfg := client.GetConfig()
-		if cfg == nil || !cfg.Enabled || !client.IsConnected() {
+		// #1064: a quarantined server stays dialed for security inspection, so
+		// IsConnected() is true and its cached count is still the pre-quarantine
+		// number -- exclude it explicitly.
+		if cfg == nil || !cfg.ContributesTools() || !client.IsConnected() {
 			continue
 		}
 
@@ -1787,6 +1801,40 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 		servers[id] = client.GetConfig()
 	}
 	return servers
+}
+
+// recordOAuthFailure stamps an unattended OAuth failure onto the server's
+// connection status so it shows up in `mcpproxy upstream list`, the REST status
+// payload and the tray — the same place other auth failures land (issue #975).
+//
+// A server that is currently Ready is left alone: a late or orphaned callback
+// must never knock a working connection into Error.
+func (m *Manager) recordOAuthFailure(serverName string, cause error) {
+	if cause == nil {
+		return
+	}
+
+	m.mu.RLock()
+	client, exists := m.clients[serverName]
+	m.mu.RUnlock()
+	if !exists {
+		m.logger.Warn("OAuth failure reported for unknown server",
+			zap.String("server", serverName),
+			zap.Error(cause))
+		return
+	}
+
+	if client.StateManager.IsReady() {
+		m.logger.Warn("Ignoring OAuth failure for a server that is already connected",
+			zap.String("server", serverName),
+			zap.Error(cause))
+		return
+	}
+
+	m.logger.Warn("Recording OAuth failure on server status",
+		zap.String("server", serverName),
+		zap.Error(cause))
+	client.StateManager.SetOAuthError(cause)
 }
 
 // RetryConnection triggers a connection retry for a specific server

@@ -105,6 +105,7 @@ import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
 import {
   formatPreflightSummary,
+  getTypeIcon,
   isChildCall,
   isPreflightActivity,
   statusPresentation,
@@ -159,18 +160,6 @@ const formatRelativeTime = (timestamp: string): string => {
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   return `${Math.floor(diff / 86400000)}d ago`
-}
-
-const getTypeIcon = (type: string): string => {
-  const typeIcons: Record<string, string> = {
-    'tool_call': '🔧',
-    'policy_decision': '🛡️',
-    'quarantine_change': '⚠️',
-    'server_change': '🔄',
-    // Spec 098: required-tools preflight
-    'preflight': '🛫'
-  }
-  return typeIcons[type] || '📋'
 }
 
 // Lifecycle

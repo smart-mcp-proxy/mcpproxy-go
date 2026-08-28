@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -225,15 +226,15 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	logger.Debug("🔧 Creating OAuth config with resource auto-detection")
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
 
 	c.logger.Debug("OAuth config created",
 		zap.Bool("config_nil", oauthConfig == nil),
 		zap.Int("extra_params_count", len(extraParams)))
 
 	if oauthConfig == nil {
-		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR")
-		oauthErr = fmt.Errorf("failed to create OAuth config")
+		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR", zap.Error(oauthConfigErr))
+		oauthErr = wrapOAuthConfigError(oauthConfigErr)
 		return oauthErr
 	}
 
@@ -665,9 +666,10 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	}
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
-		oauthErr = fmt.Errorf("failed to create OAuth config")
+		c.logger.Error("🚨 Failed to create OAuth config", zap.Error(oauthConfigErr))
+		oauthErr = wrapOAuthConfigError(oauthConfigErr)
 		return oauthErr
 	}
 
@@ -912,6 +914,17 @@ func (c *Client) isOAuthError(err error) bool {
 
 // handleOAuthAuthorization handles the manual OAuth flow.
 func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oauthConfig *client.OAuthConfig, extraParams map[string]string) error {
+	// Stand down while the user is completing a manual sign-in for this server
+	// (issue #975). A background reconnect that starts its own flow here opens a
+	// second browser tab and mints a second state; the callback is still routed
+	// correctly, but the competing flow is pure noise. Checking a flag is
+	// non-blocking, so the reconnect path cannot deadlock on it.
+	if !c.isManualOAuthFlow(ctx) && oauth.IsManualFlowActive(c.config.Name) {
+		c.logger.Info("⏸️ Skipping automatic OAuth flow - a manual sign-in is already in flight",
+			zap.String("server", c.config.Name))
+		return fmt.Errorf("OAuth sign-in already in progress for %s (started manually) - waiting for the user to finish", c.config.Name)
+	}
+
 	// Check if OAuth is already in progress to prevent duplicate flows (CRITICAL FIX for Phase 1)
 	if c.isOAuthInProgress() {
 		c.logger.Warn("⚠️ OAuth authorization already in progress, skipping duplicate attempt",
@@ -1009,6 +1022,17 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	c.logger.Info("🔑 Generated PKCE and state parameters",
 		zap.String("server", c.config.Name),
 		zap.String("state", state))
+
+	// Claim this state on the callback server BEFORE the browser is opened, so
+	// the callback can only ever be routed to THIS flow (issue #975). Another
+	// flow on the same server (a manual login, a background reconnect) keeps
+	// its own registration and cannot swallow our authorization code.
+	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
+	if !exists {
+		return fmt.Errorf("callback server not found for %s", c.config.Name)
+	}
+	callbackCh := callbackServer.RegisterState(state)
+	defer callbackServer.UnregisterState(state)
 
 	// Check if OAuth credentials are available (either from config or persisted DCR)
 	// oauthConfig.ClientID may contain persisted DCR credentials loaded by CreateOAuthConfig()
@@ -1237,15 +1261,9 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		zap.Duration("timeout", 120*time.Second),
 		zap.Time("wait_start", waitStartTime))
 
-	// Get our callback server that was started in OAuth config creation
-	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
-	if !exists {
-		return fmt.Errorf("callback server not found for %s", c.config.Name)
-	}
-
-	// Wait for the authorization code with extended timeout for remote/systemd scenarios
+	// Wait for the authorization code on THIS flow's channel (registered above)
 	select {
-	case params := <-callbackServer.CallbackChan:
+	case params := <-callbackCh:
 		waitDuration := time.Since(waitStartTime)
 		c.logger.Info("🎯 OAuth callback received",
 			zap.String("server", c.config.Name),
@@ -1323,6 +1341,10 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		c.oauthMu.Unlock()
 	}()
 
+	// Suppress background reconnect OAuth flows while this manual sign-in runs
+	// (issue #975).
+	defer oauth.BeginManualFlow(c.config.Name, 0)()
+
 	c.logger.Info("🔐 Starting manual OAuth authorization flow with result tracking",
 		zap.String("server", c.config.Name),
 		zap.String("correlation_id", result.CorrelationID))
@@ -1376,6 +1398,15 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	if err != nil {
 		return result, fmt.Errorf("failed to generate state: %w", err)
 	}
+
+	// Claim this state on the callback server before anything can redirect to
+	// it, so only this flow can consume its authorization code (issue #975).
+	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
+	if !exists {
+		return result, fmt.Errorf("callback server not found for %s", c.config.Name)
+	}
+	callbackCh := callbackServer.RegisterState(state)
+	defer callbackServer.UnregisterState(state)
 
 	// Check for existing credentials or attempt DCR
 	hasStaticCredentials := c.config.OAuth != nil && c.config.OAuth.ClientID != ""
@@ -1520,14 +1551,9 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	c.lastOAuthTimestamp = time.Now()
 	c.oauthMu.Unlock()
 
-	// Wait for the callback
-	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
-	if !exists {
-		return result, fmt.Errorf("callback server not found for %s", c.config.Name)
-	}
-
+	// Wait for the callback on THIS flow's channel (registered above)
 	select {
-	case params := <-callbackServer.CallbackChan:
+	case params := <-callbackCh:
 		c.logger.Info("🎯 OAuth callback received",
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", result.CorrelationID))
@@ -1666,11 +1692,11 @@ func (c *Client) persistDCRCredentials() {
 
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 
-	// Preserve existing callbackPort from the record (set during the DCR flow)
-	callbackPort := 0
-	if record, err := c.storage.GetOAuthToken(serverKey); err == nil {
-		callbackPort = record.CallbackPort
-	}
+	// Persist the port this login actually used. Only DCR-succeeded flows used
+	// to record a port, so a static-client login persisted port 0 and the next
+	// login allocated a fresh loopback port — breaking providers that require an
+	// exact, unchanging callback URL (issue #975).
+	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage)
 
 	if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
@@ -1682,7 +1708,30 @@ func (c *Client) persistDCRCredentials() {
 	c.logger.Info("DCR credentials persisted for proactive token refresh",
 		zap.String("server", c.config.Name),
 		zap.String("client_id_prefix", clientID[:min(8, len(clientID))]+"..."),
-		zap.Bool("has_client_secret", clientSecret != ""))
+		zap.Bool("has_client_secret", clientSecret != ""),
+		zap.Int("callback_port", callbackPort))
+}
+
+// resolveCallbackPortForPersistence returns the loopback callback port to store
+// alongside the OAuth client credentials for serverName.
+//
+// The live callback server wins: it is the port the redirect_uri of the login
+// that just completed actually pointed at, so persisting it lets the next login
+// bind the same port and reuse the identical redirect_uri. Only when no callback
+// server is running do we fall back to whatever was stored previously, so a
+// refresh-only code path never downgrades a known port to 0.
+func resolveCallbackPortForPersistence(serverName, serverKey string, store *storage.BoltDB) int {
+	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.Port > 0 {
+		return callbackServer.Port
+	}
+
+	if store == nil {
+		return 0
+	}
+	if record, err := store.GetOAuthToken(serverKey); err == nil && record != nil {
+		return record.CallbackPort
+	}
+	return 0
 }
 
 // wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops
@@ -1744,18 +1793,30 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	// Clear any existing OAuth state
 	c.clearOAuthState()
 
+	// Suppress background reconnect OAuth flows for this server until the user
+	// finishes (or the sign-in window expires) — issue #975. Ownership of the
+	// release moves to the background waiter once it is started.
+	releaseManualFlow := oauth.BeginManualFlow(c.config.Name, 0)
+	waiterOwnsRelease := false
+	defer func() {
+		if !waiterOwnsRelease {
+			releaseManualFlow()
+		}
+	}()
+
 	// Ensure transport type is determined
 	if c.transportType == "" {
 		c.transportType = transport.DetermineTransportType(c.config)
 	}
 
 	// Create OAuth config
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
-			zap.String("correlation_id", result.CorrelationID))
-		return result, fmt.Errorf("failed to create OAuth config - server may not support OAuth")
+			zap.String("correlation_id", result.CorrelationID),
+			zap.Error(oauthConfigErr))
+		return result, wrapOAuthConfigError(oauthConfigErr)
 	}
 
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
@@ -1810,7 +1871,11 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 		result.BrowserError = "HEADLESS mode - browser not opened. Please open the auth_url manually."
 
 		// Start OAuth callback handling in background
-		go c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+		waiterOwnsRelease = true
+		go func() {
+			defer releaseManualFlow()
+			c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+		}()
 
 		return result, nil
 	}
@@ -1830,7 +1895,11 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	}
 
 	// Start OAuth callback handling in background
-	go c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+	waiterOwnsRelease = true
+	go func() {
+		defer releaseManualFlow()
+		c.waitForOAuthCallbackAsync(ctx, oauthHandler, codeVerifier, state, result.CorrelationID)
+	}()
 
 	return result, nil
 }
@@ -1987,6 +2056,16 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		return "", nil, "", "", flowErr
 	}
 
+	// Claim the state on the callback server before handing the URL back — the
+	// caller opens the browser next, and the callback must be routed to this
+	// flow even if the user authorizes before waitForOAuthCallbackAsync is
+	// scheduled (issue #975). RegisterState is idempotent, so that goroutine
+	// obtains this same channel. Registering only on the success path keeps a
+	// failed flow from leaving a dangling waiter behind.
+	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
+		callbackServer.RegisterState(state)
+	}
+
 	return authURL, oauthHandler, codeVerifier, state, nil
 }
 
@@ -2058,30 +2137,44 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		c.oauthMu.Unlock()
 	}()
 
+	// The caller owns the deadline (the manager hands this flow a 30-minute
+	// context). A hardcoded 120s here used to abandon the login while the user
+	// was still finishing 2FA or waiting for org approval, leaving only
+	// background waiters behind (issue #975).
+	ctx, cancel := oauthCallbackWaitContext(ctx)
+	defer cancel()
+
+	waitDeadline, _ := ctx.Deadline()
 	c.logger.Info("⏳ Waiting for OAuth callback in background",
 		zap.String("server", c.config.Name),
-		zap.String("correlation_id", correlationID))
+		zap.String("correlation_id", correlationID),
+		zap.Time("deadline", waitDeadline))
 
 	// Get or create callback server
 	callbackServer, exists := oauth.GetCallbackServer(c.config.Name)
 	if !exists {
-		c.logger.Error("❌ Callback server not found",
-			zap.String("server", c.config.Name))
+		c.reportOAuthFailure(fmt.Errorf("OAuth callback server not found for %s - the authorization code cannot be received", c.config.Name))
 		return
 	}
 
+	// The state was registered when the authorization URL was built; this
+	// returns that same channel (issue #975).
+	callbackCh := callbackServer.RegisterState(state)
+	defer callbackServer.UnregisterState(state)
+
 	select {
-	case params := <-callbackServer.CallbackChan:
+	case params := <-callbackCh:
 		c.logger.Info("🎯 OAuth callback received",
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", correlationID))
 
-		// Verify state parameter
+		// Defensive: dispatch is by state, so this cannot normally fire.
 		if params["state"] != state {
 			c.logger.Error("❌ State mismatch in OAuth callback",
 				zap.String("server", c.config.Name),
 				zap.String("expected", state),
 				zap.String("got", params["state"]))
+			c.reportOAuthFailure(fmt.Errorf("OAuth callback state mismatch for %s - the sign-in was not completed, please try again", c.config.Name))
 			return
 		}
 
@@ -2093,7 +2186,11 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 					zap.String("server", c.config.Name),
 					zap.String("error", params["error"]),
 					zap.String("description", params["error_description"]))
+				c.reportOAuthFailure(fmt.Errorf("OAuth authorization failed for %s: %s - %s",
+					c.config.Name, params["error"], params["error_description"]))
+				return
 			}
+			c.reportOAuthFailure(fmt.Errorf("OAuth callback for %s carried no authorization code", c.config.Name))
 			return
 		}
 
@@ -2102,6 +2199,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 			c.logger.Error("❌ Failed to exchange authorization code",
 				zap.String("server", c.config.Name),
 				zap.Error(err))
+			c.reportOAuthFailure(fmt.Errorf("OAuth token exchange failed for %s: %w", c.config.Name, err))
 			return
 		}
 
@@ -2114,15 +2212,45 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		tokenManager := oauth.GetTokenStoreManager()
 		tokenManager.MarkOAuthCompleted(c.config.Name)
 
-	case <-time.After(120 * time.Second):
-		c.logger.Warn("⏱️ OAuth authorization timeout",
-			zap.String("server", c.config.Name),
-			zap.String("correlation_id", correlationID))
-
 	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			c.logger.Warn("⏱️ OAuth authorization timeout",
+				zap.String("server", c.config.Name),
+				zap.String("correlation_id", correlationID))
+			c.reportOAuthFailure(fmt.Errorf("OAuth authorization for %s was not completed before the sign-in window expired", c.config.Name))
+			return
+		}
 		c.logger.Info("OAuth flow cancelled",
 			zap.String("server", c.config.Name))
 	}
+}
+
+// defaultOAuthCallbackWait bounds the background callback wait when the caller
+// supplied no deadline of its own. Manual logins come in with the manager's
+// 30-minute context; this only covers callers that pass a plain background
+// context.
+const defaultOAuthCallbackWait = 30 * time.Minute
+
+// oauthCallbackWaitContext returns a context bounded by the caller's deadline,
+// falling back to defaultOAuthCallbackWait when the caller supplied none. The
+// wait must follow the caller (the manager gives manual logins 30 minutes)
+// rather than a hardcoded constant — a GitHub sign-in with 2FA or an org
+// approval routinely takes longer than two minutes (issue #975).
+func oauthCallbackWaitContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, defaultOAuthCallbackWait)
+}
+
+// reportOAuthFailure records an OAuth failure that has no caller to return an
+// error to (the background callback waiter), so the operator sees it on the
+// server's status instead of only in the log (issue #975).
+func (c *Client) reportOAuthFailure(err error) {
+	if err == nil {
+		return
+	}
+	oauth.GetTokenStoreManager().RecordOAuthFailure(c.config.Name, err)
 }
 
 // ForceOAuthFlowWithResult forces an OAuth authentication flow and returns the auth URL and browser status.
@@ -2161,12 +2289,31 @@ func (c *Client) ForceOAuthFlowWithResult(ctx context.Context) (*OAuthStartResul
 	}
 }
 
+// wrapOAuthConfigError turns a nil OAuth config into an error the operator can
+// act on.
+//
+// The historical message — "failed to create OAuth config - server may not
+// support OAuth" — never mentioned the actual cause. A malformed
+// `oauth.redirect_uri` is the common one, and it is a PERMANENT failure: the
+// operator saw a generic "server may not support OAuth" forever, with no hint
+// that a field they typed was to blame. When internal/oauth reports a reason,
+// carry it through so it reaches the connection error and the health detail.
+func wrapOAuthConfigError(err error) error {
+	if err != nil {
+		return fmt.Errorf("failed to create OAuth config: %w", err)
+	}
+	return fmt.Errorf("failed to create OAuth config - server may not support OAuth")
+}
+
 // forceHTTPOAuthFlowWithResult forces OAuth flow for HTTP transport and returns auth URL/browser status.
 func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
-		return nil, fmt.Errorf("failed to create OAuth config - server may not support OAuth")
+		c.logger.Error("❌ Failed to create OAuth config",
+			zap.String("server", c.config.Name),
+			zap.Error(oauthConfigErr))
+		return nil, wrapOAuthConfigError(oauthConfigErr)
 	}
 
 	c.logger.Info("🌐 Starting manual HTTP OAuth flow with result tracking...",
@@ -2229,9 +2376,12 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 // forceSSEOAuthFlowWithResult forces OAuth flow for SSE transport and returns auth URL/browser status.
 func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams := oauth.CreateOAuthConfigWithExtraParams(ctx, c.config, c.storage)
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
-		return nil, fmt.Errorf("failed to create OAuth config - server may not support OAuth")
+		c.logger.Error("❌ Failed to create OAuth config",
+			zap.String("server", c.config.Name),
+			zap.Error(oauthConfigErr))
+		return nil, wrapOAuthConfigError(oauthConfigErr)
 	}
 
 	c.logger.Info("🌐 Starting manual SSE OAuth flow with result tracking...",

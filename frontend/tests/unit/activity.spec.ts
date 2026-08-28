@@ -42,8 +42,8 @@ describe('Activity Type Rendering', () => {
       expect(formatType('server_change')).toBe('Server Change')
     })
 
-    it('returns unknown type as-is', () => {
-      expect(formatType('unknown_type')).toBe('unknown_type')
+    it('humanises an unknown type rather than leaking the raw enum (#1065)', () => {
+      expect(formatType('unknown_type')).toBe('Unknown Type')
     })
   })
 

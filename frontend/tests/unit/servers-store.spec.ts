@@ -281,3 +281,56 @@ describe('useServersStore — a successful list clears a stale error', () => {
     expect(store.servers).toHaveLength(1)
   })
 })
+
+// Issue #1064: a quarantined server's tools are refused at dispatch and purged
+// from the search index, so counting them under "Available across all servers"
+// tells the operator N tools are available when none of them are callable.
+describe('useServersStore — totalTools counts only available tools (#1064)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  function srv(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'srv',
+      protocol: 'http' as const,
+      enabled: true,
+      quarantined: false,
+      connected: true,
+      connecting: false,
+      tool_count: 0,
+      ...overrides,
+    }
+  }
+
+  async function load(servers: Record<string, unknown>[]) {
+    const store = useServersStore()
+    ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers } })
+    await store.fetchServers(true)
+    return store
+  }
+
+  it('excludes a quarantined server', async () => {
+    const store = await load([
+      srv({ name: 'clean', tool_count: 5 }),
+      srv({ name: 'held', quarantined: true, tool_count: 7 }),
+    ])
+    expect(store.totalTools).toBe(5)
+  })
+
+  it('still excludes a disabled server (issue #285)', async () => {
+    const store = await load([
+      srv({ name: 'clean', tool_count: 5 }),
+      srv({ name: 'off', enabled: false, tool_count: 3 }),
+    ])
+    expect(store.totalTools).toBe(5)
+  })
+
+  it('counts nothing when every server is quarantined', async () => {
+    const store = await load([srv({ name: 'held', quarantined: true, tool_count: 9 })])
+    expect(store.totalTools).toBe(0)
+    // ...while the server itself is still listed for review.
+    expect(store.quarantinedServers).toHaveLength(1)
+  })
+})

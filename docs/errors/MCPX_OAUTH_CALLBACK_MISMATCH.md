@@ -35,24 +35,30 @@ persisted port). Add that exact URI to your OAuth client's allowed redirect
 URIs in the provider's developer console.
 
 For most providers wildcards aren't allowed; you'll need to register the exact
-port. mcpproxy persists the port in the upstream config — see
-[`oauth_redirect_port`](../configuration/upstream-servers.md) — so you can
-register a stable URI.
+port. When `oauth.redirect_uri` is not set, mcpproxy allocates a loopback port
+on the first login and persists it, reusing it on subsequent logins — so the
+callback URL is usually stable, but it is not guaranteed if that port is taken
+later.
 
-### Re-pin the redirect port
+### Pin the redirect URI
 
-If you previously used a different port and want to restore it, set
-`oauth_redirect_port` explicitly:
+If the provider requires an exact callback URL, pin it with `oauth.redirect_uri`:
 
 ```json
 {
   "name": "my-server",
   "oauth": {
     "client_id": "...",
-    "redirect_port": 53412
+    "redirect_uri": "http://127.0.0.1:53412/oauth/callback"
   }
 }
 ```
+
+mcpproxy binds that exact port and sends that exact string to the provider. The
+value must be an RFC 8252 loopback redirect: `http` scheme, a loopback host, an
+explicit port, and the `/oauth/callback` path. A malformed value, or a pinned
+port already in use, fails the login with an explicit error naming
+`redirect_uri` rather than falling back to a random port.
 
 Then re-register that exact URI on the provider side.
 

@@ -275,7 +275,14 @@
           server.authenticated,
           server.trust_mode,
           server.quarantine?.pending_count,
-          server.quarantine?.changed_count
+          server.quarantine?.changed_count,
+          // #1065: the store updates server objects IN PLACE to preserve
+          // identity, so without these keys a scan settling on an already-
+          // quarantined server leaves the card's verdict stale. The warning
+          // count is tracked too -- the quarantine note renders it, so a rescan
+          // that stays `warnings` but changes the count must still re-render.
+          server.security_scan?.status,
+          server.security_scan?.finding_counts?.warning
         ]"
       />
     </TransitionGroup>

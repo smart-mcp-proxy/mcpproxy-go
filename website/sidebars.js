@@ -187,6 +187,7 @@ const sidebars = {
             'errors/MCPX_HTTP_404',
             'errors/MCPX_HTTP_5XX',
             'errors/MCPX_HTTP_CONN_REFUSED',
+            'errors/MCPX_HTTP_LEGACY_SSE',
           ],
         },
         {
@@ -207,6 +208,7 @@ const sidebars = {
             'errors/MCPX_CONFIG_DEPRECATED_FIELD',
             'errors/MCPX_CONFIG_PARSE_ERROR',
             'errors/MCPX_CONFIG_MISSING_SECRET',
+            'errors/MCPX_CONFIG_INVALID_COMMAND',
           ],
         },
         {

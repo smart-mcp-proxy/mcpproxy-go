@@ -529,7 +529,7 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
   "oauth": {
     "client_id": "your-client-id",
     "client_secret": "secret-reference",
-    "redirect_uri": "http://localhost:8080/oauth/callback",
+    "redirect_uri": "http://127.0.0.1:54108/oauth/callback",
     "scopes": ["repo", "user"],
     "pkce_enabled": true
   }
@@ -540,9 +540,67 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 |-------|------|----------|-------------|
 | `client_id` | string | No | OAuth client ID (uses Dynamic Client Registration if empty) |
 | `client_secret` | string | No | OAuth client secret (can reference secure storage) |
-| `redirect_uri` | string | No | OAuth redirect URI (auto-generated if not provided) |
+| `redirect_uri` | string | No | Pins the loopback callback URL (auto-allocated if not provided) |
 | `scopes` | array | No | OAuth scopes to request |
 | `pkce_enabled` | boolean | No | PKCE is always enabled for security; this flag is currently ignored |
+
+#### Pinning the callback port with `redirect_uri`
+
+By default mcpproxy asks the OS for a free loopback port on the first OAuth
+login, then persists that port and tries to reuse it. If the saved port is taken
+next time, a different one is allocated — so the callback URL is not guaranteed
+to stay put. Some providers require the port to match the registered callback
+URL exactly, so it must not move at all. GitHub OAuth Apps are the common case:
+even with GitHub's wildcard matching enabled, that matching covers subdomains
+and subdirectory paths only — the host and port must still match exactly.
+
+Set `redirect_uri` to pin it. mcpproxy then binds that exact port and sends that
+exact string to the provider as `redirect_uri`:
+
+```json
+{
+  "oauth": {
+    "client_id": "Iv1.abc123",
+    "redirect_uri": "http://127.0.0.1:54108/oauth/callback"
+  }
+}
+```
+
+The value must be an RFC 8252 loopback redirect: `http` scheme, a loopback host
+(`127.0.0.1`, `localhost` or `::1`), an explicit port, and the
+`/oauth/callback` path. Register the same URL with the provider.
+
+Prefer `127.0.0.1`. `localhost` is accepted, and the string is sent to the
+provider exactly as written, but the listener binds `127.0.0.1` — on a host
+whose browser resolves `localhost` to `::1` without falling back, the redirect
+would reach a closed port. Write `http://[::1]:PORT/oauth/callback` if you want
+the IPv6 loopback; mcpproxy then binds `::1` itself.
+
+A malformed value, or a pinned port that is already in use, fails the login with
+an explicit error rather than silently falling back to a random port. The error
+appears in three places:
+
+- the connection error and the server's `health.detail` (it names
+  `oauth.redirect_uri` and the reason),
+- `mcpproxy upstream logs <name>` (the per-server log), and
+- the main log (`~/Library/Logs/mcpproxy/main.log` on macOS,
+  `~/.mcpproxy/logs/main.log` on Linux), under the `oauth` logger name.
+
+A malformed value is also rejected up front by the write surfaces — the REST
+config API (`POST /api/v1/config/validate`, `POST /api/v1/config/apply`,
+`PATCH /api/v1/config`), the Web UI that calls them, and the MCP
+`upstream_servers` tool. Hand-editing `mcp_config.json` bypasses that check by
+design: a bad value already on disk must not stop the daemon from booting, so it
+is reported at connect time instead.
+
+When `redirect_uri` is not set, mcpproxy persists the port used by the first
+successful login and reuses it for subsequent logins.
+
+If the server previously logged in without a pin, its client registration was
+issued through Dynamic Client Registration against that old port. Adding a
+`redirect_uri` with a different port clears that registration automatically so
+the next login re-registers against the pinned URL; a statically configured
+`client_id` is never cleared.
 
 See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 

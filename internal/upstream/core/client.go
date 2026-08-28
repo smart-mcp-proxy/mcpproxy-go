@@ -28,6 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Client implements basic MCP client functionality without state management
@@ -338,7 +339,12 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	listReq := mcp.ListToolsRequest{}
 	toolsResult, err := client.ListTools(ctx, listReq)
 	if err != nil {
-		c.logger.Error("Failed to list tools via direct call to upstream server",
+		// Debug, not Error: both callers above (managed.Client.ListTools and
+		// upstream.Manager.discoverTools) log this same failure, so logging it
+		// here made one transient sweep miss cost three ERROR lines. The
+		// outermost caller is the only layer that knows whether the failure
+		// matters — a periodic sweep just retries on the next cycle.
+		c.logger.Debug("Failed to list tools via direct call to upstream server",
 			zap.String("server", c.config.Name),
 			zap.Error(err))
 		return nil, fmt.Errorf("failed to list tools: %w", err)
@@ -876,4 +882,30 @@ func containsString(str, substr string) bool {
 		}
 	}
 	return false
+}
+
+// oauthLogger returns the logger the OAuth layer should write through.
+//
+// It tees the main logger and this upstream's own per-server log. Both halves
+// matter:
+//
+//   - c.logger reaches main.log, where operators and the docs look first.
+//   - c.upstreamLogger writes server-<name>.log, which is what
+//     `mcpproxy upstream logs <name>` serves. docs/configuration.md points the
+//     operator at that command for a redirect_uri failure, so the records have
+//     to actually be there — otherwise they find nothing and conclude the
+//     diagnostic does not exist.
+//
+// Before this, internal/oauth logged through zap.L(), which is the no-op logger
+// in this binary (zap.ReplaceGlobals is never called), so neither destination
+// got anything at all.
+func (c *Client) oauthLogger() *zap.Logger {
+	switch {
+	case c.upstreamLogger == nil:
+		return c.logger
+	case c.logger == nil:
+		return c.upstreamLogger
+	default:
+		return zap.New(zapcore.NewTee(c.logger.Core(), c.upstreamLogger.Core()))
+	}
 }

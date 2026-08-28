@@ -1287,6 +1287,7 @@ import {
 // Spec 098: preflight records carry their verdict in metadata; the renderers
 // are shared (and unit-tested) rather than re-derived in the template.
 import {
+  ACTIVITY_TYPE_LABELS,
   activeFilterChips,
   compactSummaryParts,
   formatPreflightSummary,
@@ -1351,19 +1352,14 @@ const filterEndDate = ref('')
 // query param (so sub-calls beyond the 200 loaded rows are included).
 const filterParentId = ref('')
 
-// Activity types configuration (Spec 024: includes new types)
-const activityTypes = [
-  { value: 'tool_call', label: 'Tool Call', icon: '🔧' },
-  { value: 'system_start', label: 'System Start', icon: '🚀' },
-  { value: 'system_stop', label: 'System Stop', icon: '🛑' },
-  { value: 'internal_tool_call', label: 'Internal Tool Call', icon: '⚙️' },
-  { value: 'config_change', label: 'Config Change', icon: '⚡' },
-  { value: 'policy_decision', label: 'Policy Decision', icon: '🛡️' },
-  { value: 'quarantine_change', label: 'Quarantine Change', icon: '⚠️' },
-  { value: 'server_change', label: 'Server Change', icon: '🔄' },
-  // Spec 098: required-tools preflight (set-scoped record).
-  { value: 'preflight', label: 'Preflight', icon: '🛫' },
-]
+// Activity types configuration. Derived from the single label map in
+// utils/activity so the filter dropdown cannot drift from the Type column
+// (#1065 — this list used to be hand-copied and was three types short).
+const activityTypes = Object.keys(ACTIVITY_TYPE_LABELS).map(value => ({
+  value,
+  label: formatType(value),
+  icon: getTypeIcon(value),
+}))
 
 // Pagination
 const currentPage = ref(1)
