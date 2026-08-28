@@ -295,8 +295,15 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
   | **`direct_deferred`** | **3090** | **29.5%** |
 
   The in-process gate (`TestDeferredDirect_TokenReduction_Corpus45`, which measures the real
-  `renderDirectTools` output rather than an arm's re-encoding) says **29.7%**. The two differ
-  only by the annotations block the arm does not model, and it is a constant in both columns.
+  `renderDirectTools` output rather than an arm's re-encoding) says **29.7%**.
+
+  They are NOT the same measurement and should not be described as differing by one term: the
+  arm emits canonical JSON without `annotations` or mcp-go's `_meta`, while the in-process gate
+  counts the real marshalled `mcp.Tool` including both. (Adding a constant to both columns
+  lowers a savings percentage rather than cancelling — full-mode totals are 4386 vs 6116 tokens
+  for the same 45 tools, which is the size of the modelling gap.) What matters is that two
+  independently-built paths over the same corpus land **within 0.2 percentage points** of each
+  other, and both are less than half of what SC-001 asks for.
   SC-002 measures **86.7%** (39/45 non-lossy), comfortably over its 80% floor.
 
   So SC-001's ≥70% is **not met and not reachable**, confirmed independently of the
