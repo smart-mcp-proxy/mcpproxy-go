@@ -198,7 +198,15 @@
           @fixed="handleDiagnosticFixed"
         />
 
-        <div v-else-if="server.last_error" class="alert alert-error">
+        <!-- Issue #1076 — carries the same quarantine guard as the ErrorPanel
+             above it. Without it, suppressing the diagnostic panel would just
+             fall through to here and print the identical fault in a different
+             red box, directly above the calm quarantine banner. -->
+        <div
+          v-else-if="server.last_error && !quarantineSuppressesFaultAlerts"
+          data-test="server-detail-generic-error"
+          class="alert alert-error"
+        >
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -1803,12 +1811,23 @@ const healthLevelTone = computed(() => {
   }
 })
 
+// Issue #1076 — quarantine is an intentional admin state, not a fault. mcpproxy
+// still attempts a connection to a quarantined server so the scanner can export
+// its tool definitions; that attempt fails and leaves an error-severity
+// diagnostic (often the unclassified "file a bug report" one) behind, while the
+// health calculator short-circuits the server to healthy/quarantined. Both
+// facts arrive in one payload. The quarantine banner below already states the
+// situation and the action, so every red fault alert is suppressed here — the
+// same rule the tray applies via ServerStatus.isBadgeExempt.
+const quarantineSuppressesFaultAlerts = computed(() => !!server.value?.quarantined)
+
 // Spec 044 — render the structured diagnostic panel whenever a warn/error
 // diagnostic is attached. Info-level diagnostics are ignored (shown only in
 // verbose/admin views, per spec).
 const showDiagnosticPanel = computed(() => {
   const d = server.value?.diagnostic
   if (!d || !d.code) return false
+  if (quarantineSuppressesFaultAlerts.value) return false
   return d.severity === 'warn' || d.severity === 'error'
 })
 

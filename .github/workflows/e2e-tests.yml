@@ -95,8 +95,17 @@ jobs:
       - name: Run unit tests
         # -short skips the heavy property/timing tests (TestRapidQuarantine* etc.);
         # they run unguarded in the main-only stress-tests job below so coverage
-        # is preserved. Bumped to 4m for headroom under -race on slow runners.
-        run: go test -v -short -race -timeout 4m -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/...
+        # is preserved.
+        #
+        # Timeout is 10m to match the equivalent sweep in unit-tests.yml. It was
+        # 4m, which the windows-latest runner could not meet: internal/server
+        # took 240s and died at `panic: test timed out after 4m0s` — with a
+        # single test only 2s in, so cumulative slowness (Bleve index creation
+        # on the Windows filesystem), never a hang. That kept this job red on
+        # main from 2026-08-13 (issue #1034). Keep the two workflows' budgets in
+        # step; the same code timing out in one and passing in the other is the
+        # signature of this bug returning.
+        run: go test -v -short -race -timeout 10m -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/...
 
       # Binary tests are too flaky in CI due to server startup timing issues
       # All Binary tests consistently timeout waiting for server to be ready
