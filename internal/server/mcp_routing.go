@@ -1099,6 +1099,9 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 	// the schema- and annotations-only changes, which are invisible in the
 	// listing by construction.
 	p.directServer.SetTools(serverTools...)
+	if p.directRebuildPause != nil {
+		p.directRebuildPause()
+	}
 	p.publishDirectCatalog(cat)
 
 	p.logger.Info("refreshed direct mode tools",

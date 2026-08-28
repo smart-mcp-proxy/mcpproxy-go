@@ -206,6 +206,17 @@ type MCPProxyServer struct {
 	// publishDirectCatalog cannot interleave with another rebuild's pair.
 	directRefreshMu sync.Mutex
 
+	// directRebuildPause, when non-nil, is invoked BETWEEN SetTools and the
+	// catalog publish. Nil in production; the only writer is a test.
+	//
+	// It exists because the SetTools-then-publish order is load-bearing (D13
+	// rule 1) and is otherwise untestable: once a rebuild completes, the
+	// registry and the catalog agree whichever order they landed in, so
+	// inverting them is invisible from outside. Without this seam the ordering
+	// would be asserted only by a comment — and the skew suite would have to
+	// keep staging the window by hand instead of observing the real publisher.
+	directRebuildPause func()
+
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64

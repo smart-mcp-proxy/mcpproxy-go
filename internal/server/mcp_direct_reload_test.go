@@ -117,3 +117,56 @@ func TestReloadRebuild_BumpsGenerationExactlyOnce(t *testing.T) {
 	require.NotNil(t, p.directServer.GetTool("describe_tool"),
 		"describe_tool must survive a serialization flip (FR-018)")
 }
+
+// The skew tests stage the SetTools-then-publish window by hand, because
+// DiscoverTools has no injection seam (research.md R12). That leaves one thing
+// they cannot show: that the real publisher does the two operations in that
+// order and leaves them agreeing. This drives RefreshDirectModeTools itself and
+// checks the postcondition — every registered upstream name is admitted by the
+// catalog that was published with it, and vice versa.
+func TestRefreshDirectModeTools_LeavesRegistryAndCatalogAgreeing(t *testing.T) {
+	p := newReloadGuardProxy(t, config.DirectToolResponseModeDeferred)
+	p.RefreshDirectModeTools()
+
+	cat := p.loadDirectCatalog()
+	require.NotNil(t, cat)
+
+	admitted := map[string]struct{}{}
+	for _, name := range cat.DisplayNames() {
+		admitted[name] = struct{}{}
+	}
+
+	for name := range p.directServer.ListTools() {
+		if _, _, isUpstream := ParseDirectToolName(name); !isUpstream {
+			continue // a built-in: no catalog entry by design
+		}
+		assert.Containsf(t, admitted, name,
+			"registered %q has no entry in the catalog published with it", name)
+		delete(admitted, name)
+	}
+	assert.Emptyf(t, admitted,
+		"the catalog admits names the registry is not serving: %v", admitted)
+}
+
+// The SetTools-then-publish order is load-bearing (D13 rule 1) and is invisible
+// once a rebuild completes — both land consistently whichever way round they
+// went, so inverting them fails nothing. This observes the REAL publisher
+// mid-flight through the one seam that exists for it.
+func TestRefreshDirectModeTools_PublishesTheRegistryBeforeTheCatalog(t *testing.T) {
+	p := newReloadGuardProxy(t, config.DirectToolResponseModeFull)
+	generationBefore := p.loadDirectCatalog().Generation()
+
+	var sawRegistryAheadOfCatalog bool
+	p.directRebuildPause = func() {
+		// The registry has been replaced; the catalog has not been published
+		// yet, so the generation is still the previous one.
+		sawRegistryAheadOfCatalog = p.loadDirectCatalog().Generation() == generationBefore
+	}
+
+	p.config.DirectToolResponseMode = config.DirectToolResponseModeDeferred
+	p.RefreshDirectModeTools()
+
+	assert.True(t, sawRegistryAheadOfCatalog,
+		"the catalog must not be published until after SetTools has landed — publishing first would expose a catalog entry for a name the registry is not serving")
+	assert.Equal(t, generationBefore+1, p.loadDirectCatalog().Generation())
+}
