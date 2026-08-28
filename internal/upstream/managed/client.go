@@ -743,7 +743,11 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	mc.publishListToolsResult(tools, err)
 
 	if err != nil {
-		mc.logger.Error("ListTools operation failed",
+		// Debug for the same reason as the core layer: this is the middle of
+		// three logs of one failure. A ListTools miss that matters is either
+		// re-logged by the caller or promoted by the isConnectionError branch
+		// just below, which raises a Warn AND moves the state machine.
+		mc.logger.Debug("ListTools operation failed",
 			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 

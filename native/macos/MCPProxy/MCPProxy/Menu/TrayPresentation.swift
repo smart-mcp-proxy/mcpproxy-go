@@ -50,20 +50,80 @@ enum TrayStatusIcon {
         }
     }
 
-    /// The glyph drawn beside the template icon. Empty for `.none`.
+    /// The glyph drawn BESIDE the template icon. Empty for `.none` and for
+    /// `.severity`, which is drawn as a corner dot instead (see `dotSeverity`).
     ///
     /// Deliberately text, not a composited image: an NSStatusItem image must
     /// stay `isTemplate` to follow the light/dark menu bar, and a template
     /// image is re-rendered monochrome — a coloured dot drawn into it would
     /// come back black. The button's attributed title is the one place a
-    /// colour survives, and the existing ⏹ / ⚠ states already live there.
+    /// colour survives, and the ⏹ / ⚠ core states live there.
+    ///
+    /// `.severity` used to live here too, as a full-size "●" plus a leading
+    /// space. That widened the status item by roughly a character and read as a
+    /// second icon rather than a badge on the first. It now rides as a small
+    /// overlay dot in the icon's bottom-right corner, which is what a badge
+    /// looks like everywhere else on the platform — so this returns "" for it
+    /// and `dotSeverity(for:)` is what the button acts on.
     static func glyph(for badge: TrayIconBadge) -> String {
         switch badge {
         case .none: return ""
         case .stopped: return "⏹"
         case .coreError: return "⚠"
-        case .severity: return "●"
+        case .severity: return ""
         }
+    }
+
+    /// The severity to draw as a corner dot over the icon, or nil for no dot.
+    ///
+    /// Only `.severity` badges: a stopped or erroring CORE is about the proxy
+    /// itself rather than one server, so it keeps its full-size glyph — the
+    /// distinction is worth the width for a state that means "nothing is
+    /// working", and collapsing it into the same dot would lose it.
+    static func dotSeverity(for badge: TrayIconBadge) -> TrayIconSeverity? {
+        if case .severity(let severity) = badge { return severity }
+        return nil
+    }
+
+    /// Every badge must be visible somehow: as a glyph beside the icon, as a
+    /// corner dot, or both. A badge that is neither is an invisible state.
+    static func isVisible(_ badge: TrayIconBadge) -> Bool {
+        if badge == .none { return true }
+        return !glyph(for: badge).isEmpty || dotSeverity(for: badge) != nil
+    }
+
+    /// Default geometry for the corner dot. 6pt against an 18pt icon is small
+    /// enough to read as a badge rather than a second symbol — the complaint
+    /// that prompted the change was that a full-size "●" beside the icon was
+    /// simply too big.
+    static let badgeDotDiameter: CGFloat = 6
+    static let statusIconSide: CGFloat = 18
+
+    /// Where the corner dot sits, in BOTTOM-LEFT-ORIGIN coordinates.
+    ///
+    /// Read that twice before reusing this: it is the coordinate space of
+    /// `TrayBadgeDotView` (a plain, unflipped `NSView`), NOT of the status item
+    /// button that view sits in. `NSStatusBarButton.isFlipped` is `true`, so
+    /// applying this rect directly to a subview OF THE BUTTON puts the dot in
+    /// the icon's TOP-right corner. That bug shipped once already.
+    ///
+    /// Pure maths so the placement is testable without a live menu bar — this
+    /// machine cannot screenshot the status item without a Screen Recording
+    /// grant, and "it looked right once" is not a regression test.
+    ///
+    /// AppKit centres the icon in the button, so the dot is anchored to the
+    /// icon's bottom-right corner rather than the button's: the button is wider
+    /// than the icon, and hanging the dot off the button's edge would float it
+    /// away from the glyph it badges.
+    static func badgeDotFrame(inButtonSize buttonSize: CGSize,
+                              iconSide: CGFloat = statusIconSide,
+                              diameter: CGFloat = badgeDotDiameter) -> CGRect {
+        let originX = (buttonSize.width - iconSide) / 2
+        let originY = (buttonSize.height - iconSide) / 2
+        return CGRect(x: originX + iconSide - diameter,
+                      y: originY,
+                      width: diameter,
+                      height: diameter)
     }
 
     /// F2 · What VoiceOver and the tooltip say. `summary` is

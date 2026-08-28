@@ -42,10 +42,42 @@ final class TrayPresentationTests: XCTestCase {
             .coreError)
     }
 
-    func testEveryBadgeHasItsOwnGlyph() {
-        let glyphs = [TrayIconBadge.stopped, .coreError, .severity(.warn)].map(TrayStatusIcon.glyph(for:))
+    /// The two CORE states keep distinct full-size glyphs; server severity does
+    /// not use a glyph at all any more (it is a corner dot), so the uniqueness
+    /// rule applies to the states that still draw text.
+    func testEveryCoreBadgeHasItsOwnGlyph() {
+        let glyphs = [TrayIconBadge.stopped, .coreError].map(TrayStatusIcon.glyph(for:))
         XCTAssertEqual(Set(glyphs).count, glyphs.count, "two states drawn identically is no state at all")
         XCTAssertFalse(glyphs.contains(""), "a badged state with no glyph is invisible")
+    }
+
+    /// The whole point of the corner-dot change: a server severity must NOT
+    /// widen the status item with a full-size "● " beside the icon.
+    func testServerSeverityDrawsNoGlyphBesideTheIcon() {
+        XCTAssertEqual(TrayStatusIcon.glyph(for: .severity(.error)), "")
+        XCTAssertEqual(TrayStatusIcon.glyph(for: .severity(.warn)), "")
+    }
+
+    func testServerSeverityDrawsACornerDot() {
+        XCTAssertEqual(TrayStatusIcon.dotSeverity(for: .severity(.error)), .error)
+        XCTAssertEqual(TrayStatusIcon.dotSeverity(for: .severity(.warn)), .warn)
+    }
+
+    /// A core outage is about the proxy, not one server — it keeps the wider
+    /// glyph rather than collapsing into the same dot, which would lose the
+    /// distinction between "nothing works" and "one server is unhappy".
+    func testCoreStatesDoNotUseTheCornerDot() {
+        XCTAssertNil(TrayStatusIcon.dotSeverity(for: .stopped))
+        XCTAssertNil(TrayStatusIcon.dotSeverity(for: .coreError))
+        XCTAssertNil(TrayStatusIcon.dotSeverity(for: .none))
+    }
+
+    /// Moving a state between the glyph and the dot must never drop it: every
+    /// badge has to be visible through one channel or the other.
+    func testNoBadgeIsInvisible() {
+        for badge: TrayIconBadge in [.none, .stopped, .coreError, .severity(.warn), .severity(.error)] {
+            XCTAssertTrue(TrayStatusIcon.isVisible(badge), "\(badge) is drawn nowhere")
+        }
     }
 
     // MARK: - F2 · Spoken, not just drawn

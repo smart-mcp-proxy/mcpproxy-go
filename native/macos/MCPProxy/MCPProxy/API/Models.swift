@@ -353,6 +353,43 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         return d.severity == "warn" || d.severity == "error"
     }
 
+    /// True when the server is held for quarantine review — an intentional
+    /// admin state, not a fault, exactly like `isOAuthLoginRequired`.
+    ///
+    /// mcpproxy still *attempts* a connection to a quarantined server so the
+    /// security scanner can export its tool definitions, and a failed attempt
+    /// leaves an error-severity diagnostic behind. That diagnostic used to tint
+    /// the menu-bar badge red while the very same payload reported
+    /// `health.level == "healthy"` / `admin_state == "quarantined"` — so the
+    /// menu header drew a calm yellow dot under a red menu-bar dot, and the
+    /// user could not clear it without approving or disabling the server.
+    ///
+    /// The `admin_state` half is belt-and-braces, not a second independent
+    /// signal: the backend derives it FROM `quarantined`
+    /// (`internal/health/calculator.go` returns `AdminState: quarantined`
+    /// whenever the input is quarantined), so today it cannot be true while
+    /// `quarantined` is false. It is kept because `admin_state` is the
+    /// cross-surface contract CLI/REST/Web-UI/tray share, and this stays correct
+    /// if those two ever decouple.
+    var isQuarantineReview: Bool {
+        quarantined || health?.adminState == "quarantined"
+    }
+
+    /// Whether this server's diagnostic is allowed to tint the menu-bar badge.
+    ///
+    /// The badge answers "is something broken?", so a server sitting in a state
+    /// the user chose — or is being asked to act on calmly — must not turn it
+    /// red. Two such states exist, and both still carry an error-severity
+    /// diagnostic from the connect attempt that state implies:
+    /// waiting for sign-in, and held for quarantine review.
+    ///
+    /// Any future intentional non-connected state belongs here too, and must be
+    /// added to BOTH `worstDiagnosticSeverity` and `diagnosticCount` — they
+    /// share this predicate precisely so they cannot drift apart.
+    var isBadgeExempt: Bool {
+        isOAuthLoginRequired || isQuarantineReview
+    }
+
     /// True when the server is in the OAuth login-required state (MCP-1819/T3).
     /// `health.action == "login"` is the stable, cross-surface contract that
     /// CLI/REST/Web-UI/tray all key off. In this state the server needs a calm,

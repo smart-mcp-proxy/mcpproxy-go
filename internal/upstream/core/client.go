@@ -339,7 +339,12 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	listReq := mcp.ListToolsRequest{}
 	toolsResult, err := client.ListTools(ctx, listReq)
 	if err != nil {
-		c.logger.Error("Failed to list tools via direct call to upstream server",
+		// Debug, not Error: both callers above (managed.Client.ListTools and
+		// upstream.Manager.discoverTools) log this same failure, so logging it
+		// here made one transient sweep miss cost three ERROR lines. The
+		// outermost caller is the only layer that knows whether the failure
+		// matters — a periodic sweep just retries on the next cycle.
+		c.logger.Debug("Failed to list tools via direct call to upstream server",
 			zap.String("server", c.config.Name),
 			zap.Error(err))
 		return nil, fmt.Errorf("failed to list tools: %w", err)

@@ -63,6 +63,7 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 - [`MCPX_HTTP_404`](MCPX_HTTP_404.md) — Not Found
 - [`MCPX_HTTP_5XX`](MCPX_HTTP_5XX.md) — Server error
 - [`MCPX_HTTP_CONN_REFUSED`](MCPX_HTTP_CONN_REFUSED.md) — Connection refused
+- [`MCPX_HTTP_LEGACY_SSE`](MCPX_HTTP_LEGACY_SSE.md) — endpoint only speaks the legacy SSE transport
 
 ## Docker
 
@@ -77,6 +78,7 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 - [`MCPX_CONFIG_DEPRECATED_FIELD`](MCPX_CONFIG_DEPRECATED_FIELD.md) — deprecated field used
 - [`MCPX_CONFIG_PARSE_ERROR`](MCPX_CONFIG_PARSE_ERROR.md) — invalid JSON
 - [`MCPX_CONFIG_MISSING_SECRET`](MCPX_CONFIG_MISSING_SECRET.md) — secret reference unresolved
+- [`MCPX_CONFIG_INVALID_COMMAND`](MCPX_CONFIG_INVALID_COMMAND.md) — command has nothing to run (e.g. `npx` with no package)
 
 ## Quarantine
 
