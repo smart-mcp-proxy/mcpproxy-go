@@ -117,7 +117,7 @@ import (
 // keys only. ScanForPII re-asserts both shapes on the wire form (rules
 // "v8_field_invalid" for the widened tpa_scanner whitelist and
 // "trust_mode_field_invalid" for the histogram).
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -147,7 +147,25 @@ type HeartbeatPayload struct {
 	UptimeHours          int    `json:"uptime_hours"`
 	RoutingMode          string `json:"routing_mode"`
 	QuarantineEnabled    bool   `json:"quarantine_enabled"`
-	Timestamp            string `json:"timestamp"`
+	// ToolResponseMode and DirectToolResponseMode are the two SERIALIZATION
+	// axes, distinct from RoutingMode above (schema v10, Spec 102).
+	//
+	// routing_mode alone cannot answer the question these features exist to
+	// answer. It says which tool SURFACE an install serves; it says nothing
+	// about whether the operator ever turned on the compact or deferred
+	// rendering that the whole token-reduction effort is about. Without these
+	// two, adoption of Spec 085 and Spec 102 is unmeasurable — the same
+	// structural blind spot that made TPA adoption look like rejection when it
+	// was really "never switched on".
+	//
+	// Both are closed low-cardinality enums, never free text: "full"|"compact"
+	// and "full"|"deferred". The empty configured value is normalized to the
+	// mode it means, so "unset" and "explicitly full" are one bucket rather
+	// than two — the distinction is not interesting and splitting it would
+	// halve the signal.
+	ToolResponseMode       string `json:"tool_response_mode,omitempty"`
+	DirectToolResponseMode string `json:"direct_tool_response_mode,omitempty"`
+	Timestamp              string `json:"timestamp"`
 
 	// Spec 042 (Tier 2) additions
 	SchemaVersion               int                         `json:"schema_version,omitempty"`
@@ -342,6 +360,11 @@ type RuntimeStats interface {
 	GetConnectedServerCount() int
 	GetToolCount() int
 	GetRoutingMode() string
+	// GetToolResponseMode and GetDirectToolResponseMode return the two
+	// serialization axes as closed enums, with the empty configured value
+	// normalized to "full" (schema v10, Spec 102).
+	GetToolResponseMode() string
+	GetDirectToolResponseMode() string
 	IsQuarantineEnabled() bool
 	// Schema v3 additions.
 	// IsDockerAvailable reports whether the host has a reachable Docker
@@ -1258,6 +1281,8 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 		payload.ConnectedServerCount = s.stats.GetConnectedServerCount()
 		payload.ToolCount = s.stats.GetToolCount()
 		payload.RoutingMode = s.stats.GetRoutingMode()
+		payload.ToolResponseMode = s.stats.GetToolResponseMode()
+		payload.DirectToolResponseMode = s.stats.GetDirectToolResponseMode()
 		payload.QuarantineEnabled = s.stats.IsQuarantineEnabled()
 		// Schema v3 additions — forwarded from runtime wiring.
 		payload.ServerDockerIsolatedCount = s.stats.GetDockerIsolatedServerCount()

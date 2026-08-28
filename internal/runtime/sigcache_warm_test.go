@@ -123,3 +123,40 @@ func TestApplyDifferentialToolUpdate_WarmsSignatureCache(t *testing.T) {
 	assert.Equal(t, "(path*:str, head:int)", sigA2.Sig)
 	assert.Equal(t, int64(3), rt.SignatureCache().CompileCount())
 }
+
+// Spec 102 (found by live verification of Phase 3): the cache must be warm for
+// an UNCHANGED index too, not only for tools an update added or modified.
+//
+// Warming used to hang off the add/modify branches alone. On a restart against
+// an existing index those branches are both empty — the differential update
+// finds nothing to do — so the cache stayed permanently empty for the life of
+// the process. That was invisible to Spec 085, whose compact retrieve_tools
+// reads through a COMPILING accessor and simply paid a first-call compile. It
+// is not invisible to Spec 102: the deferred direct listing reads through
+// Peek, which never compiles, so every entry lost its compact signature after
+// any restart — the exact wire content FR-004 promises, gone, with the
+// listing still looking well-formed.
+func TestApplyDifferentialToolUpdate_WarmsUnchangedToolsOnRestart(t *testing.T) {
+	ctx := context.Background()
+	schema := `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`
+	tools := []*config.ToolMetadata{sigWarmTool("tool_a", "restart-hash-a", schema, "Read a file.")}
+
+	rt := newSigWarmRuntime(t)
+	require.NoError(t, rt.applyDifferentialToolUpdate(ctx, "sig-server", tools))
+	require.Equal(t, 1, rt.SignatureCache().Len())
+
+	// Stand in for a process restart: the index still holds the tool, but the
+	// process-local cache starts empty.
+	require.Equal(t, 1, rt.SignatureCache().RetainHashes(nil), "cache must start cold")
+	require.Zero(t, rt.SignatureCache().Len())
+
+	// The very same tool set is rediscovered — no adds, no modifications.
+	require.NoError(t, rt.applyDifferentialToolUpdate(ctx, "sig-server", tools))
+
+	assert.Equal(t, 1, rt.SignatureCache().Len(),
+		"an unchanged rediscovery must still leave the cache warm, or Peek-based consumers see nothing")
+
+	sig, ok := rt.SignatureCache().Peek("restart-hash-a")
+	require.True(t, ok, "Peek must hit after an unchanged rediscovery (Spec 102 FR-005)")
+	assert.Equal(t, "(path*:str)", sig.Sig)
+}

@@ -93,7 +93,7 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 	proxy, cfg := pinnedProxy(t, []config.ProfileConfig{
 		{Name: "research", Servers: []string{"research-srv"}},
 	})
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		"research-srv__search": auth.PermRead,
 		"deploy-srv__ship":     auth.PermRead,
 	})
@@ -111,7 +111,7 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 	assert.Equal(t, []string{"research-srv__search"}, names(proxy.filterDirectModeToolsForAuth(ctx, tools)),
 		"direct-mode discovery must drop tools outside the pinned profile")
 
-	handler := proxy.makeDirectModeHandler("deploy-srv", "ship", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "deploy-srv", ToolName: "ship", DisplayName: FormatDirectToolName("deploy-srv", "ship"), Annotations: nil})
 	result, err := handler(ctx, mcp.CallToolRequest{})
 	require.NoError(t, err)
 	require.True(t, result.IsError, "a call outside the pinned profile must be refused")
@@ -122,7 +122,7 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 	assert.Empty(t, proxy.filterDirectModeToolsForAuth(ctx, tools),
 		"a stale pin must hide every direct-mode tool")
 
-	handler = proxy.makeDirectModeHandler("research-srv", "search", nil)
+	handler = proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "research-srv", ToolName: "search", DisplayName: FormatDirectToolName("research-srv", "search"), Annotations: nil})
 	result, err = handler(ctx, mcp.CallToolRequest{})
 	require.NoError(t, err)
 	require.True(t, result.IsError, "a stale pin must refuse even the formerly pinned server")

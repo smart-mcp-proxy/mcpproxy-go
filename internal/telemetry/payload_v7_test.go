@@ -8,16 +8,17 @@ import (
 )
 
 // TestSchemaVersionIsAtLeastV7 pins FR-014: the Spec 080 payload contract
-// shipped at v7 and may only move forward. The current version is 9 (v8's
-// additive tpa_scanner / deep_scan_enabled bump, then v9's TPA funnel
-// counters + trust_mode_distribution); a downgrade below 7 would drop the
-// Spec 080 fields.
+// shipped at v7 and may only move forward. The current version is 10 (v8's
+// additive tpa_scanner / deep_scan_enabled bump, v9's TPA funnel counters +
+// trust_mode_distribution, then v10's tool_response_mode /
+// direct_tool_response_mode); a downgrade below 7 would drop the Spec 080
+// fields.
 func TestSchemaVersionIsAtLeastV7(t *testing.T) {
 	if SchemaVersion < 7 {
 		t.Fatalf("SchemaVersion = %d, want >= 7 (Spec 080 FR-014)", SchemaVersion)
 	}
-	if SchemaVersion != 9 {
-		t.Fatalf("SchemaVersion = %d, want 9 (v9 TPA funnel counters + trust_mode_distribution)", SchemaVersion)
+	if SchemaVersion != 10 {
+		t.Fatalf("SchemaVersion = %d, want 10 (v10 serialization-mode axes)", SchemaVersion)
 	}
 }
 
@@ -79,7 +80,7 @@ func TestPayloadV7_FullyPopulatedPassesScanner(t *testing.T) {
 	}
 
 	for _, required := range []string{
-		`"schema_version":9`,
+		`"schema_version":10`,
 		`"wizard_shown":true`,
 		`"wizard_connect_step":"completed_external"`,
 		`"web_ui_opened":3`,
@@ -110,7 +111,7 @@ func TestPayloadV7_ZeroNewFieldsShapeCompatibleWithV6(t *testing.T) {
 	}
 	js := string(data)
 
-	if !strings.Contains(js, `"schema_version":9`) {
+	if !strings.Contains(js, `"schema_version":10`) {
 		t.Errorf("expected schema_version:9 even on a zero-valued payload, got:\n%s", js)
 	}
 	for _, forbidden := range []string{

@@ -23,6 +23,21 @@ type toolEntryOpts struct {
 	// includeStats appends usage_count/last_used to full entries when the
 	// caller passed include_stats:true.
 	includeStats bool
+
+	// annotationsOverride, when non-nil, is used instead of the StateView
+	// lookup below (Spec 102 D10).
+	//
+	// The direct surface answers describe_tool from a catalog SNAPSHOT that
+	// carries the upstream annotations it was built from. The StateView does
+	// not necessarily carry them for the same tool — a listed-but-pending tool
+	// is exactly the case — and the fallback there is a nil annotation set,
+	// which DeriveCallWith reads as the read tier. That would hand an agent
+	// `call_with: "read"` for a destructive tool: a safety hint silently
+	// downgraded at the one moment it matters.
+	//
+	// Deliberately unused on the retrieve path, so the full-mode goldens pass
+	// unregenerated on both surfaces.
+	annotationsOverride *config.ToolAnnotations
 }
 
 // buildToolEntry renders ONE search result as a response entry for the given
@@ -133,14 +148,18 @@ func (p *MCPProxyServer) buildFullToolEntry(result *config.SearchResult, opts to
 		}
 	}
 
-	if serverName != "" {
+	switch {
+	case opts.annotationsOverride != nil:
+		mcpTool["annotations"] = opts.annotationsOverride
+		mcpTool["call_with"] = contracts.DeriveCallWith(opts.annotationsOverride)
+	case serverName != "":
 		annotations := p.lookupToolAnnotations(serverName, toolName)
 		if annotations != nil {
 			mcpTool["annotations"] = annotations
 		}
 		// Add call_with recommendation based on annotations
 		mcpTool["call_with"] = contracts.DeriveCallWith(annotations)
-	} else {
+	default:
 		mcpTool["call_with"] = contracts.ToolVariantRead // Default to read - safest option
 	}
 

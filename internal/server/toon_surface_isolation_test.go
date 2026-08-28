@@ -184,7 +184,7 @@ func TestSurfaceIsolation_DirectMode(t *testing.T) {
 	}
 
 	calls := installToonEncodeRecorder(t)
-	handler := proxy.makeDirectModeHandler("srv", "list_things", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "srv", ToolName: "list_things", DisplayName: FormatDirectToolName("srv", "list_things"), Annotations: nil})
 
 	req := mcp.CallToolRequest{}
 	req.Params.Name = "srv__list_things"

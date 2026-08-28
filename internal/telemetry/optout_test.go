@@ -288,6 +288,8 @@ func (h *hookStats) GetServerCount() int {
 func (h *hookStats) GetConnectedServerCount() int      { return 0 }
 func (h *hookStats) GetToolCount() int                 { return 0 }
 func (h *hookStats) GetRoutingMode() string            { return "retrieve_tools" }
+func (h *hookStats) GetToolResponseMode() string       { return "full" }
+func (h *hookStats) GetDirectToolResponseMode() string { return "full" }
 func (h *hookStats) IsQuarantineEnabled() bool         { return false }
 func (h *hookStats) IsDockerAvailable() bool           { return false }
 func (h *hookStats) GetDockerIsolatedServerCount() int { return 0 }

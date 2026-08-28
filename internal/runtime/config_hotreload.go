@@ -41,6 +41,15 @@ func changedHTTPTimeoutFields(oldCfg, newCfg *config.Config) []string {
 
 // DetectConfigChanges compares old and new configurations to determine what changed
 // and whether a restart is required
+// normalizeDirectToolResponseMode resolves the empty value to the mode it
+// means, so the two spellings of "full" compare equal.
+func normalizeDirectToolResponseMode(mode string) string {
+	if mode == "" {
+		return config.DirectToolResponseModeFull
+	}
+	return mode
+}
+
 func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	result := &ConfigApplyResult{
 		Success:            true,
@@ -62,6 +71,33 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.RequiresRestart = true
 		result.AppliedImmediately = false
 		result.RestartReason = "Listen address changed - requires HTTP server restart"
+		return result
+	}
+
+	// 1b. Routing mode change (requires HTTP server rebind).
+	//
+	// /mcp is bound to ONE mcp-go server instance at startup, chosen from
+	// cfg.RoutingMode (internal/server/server.go StartServer →
+	// GetMCPServerForMode) and registered on an http.ServeMux, which cannot
+	// re-register a pattern. A routing_mode change therefore cannot take effect
+	// on a running proxy however much of the config is reloaded.
+	//
+	// Reporting it is what makes that honest. Before this clause the field was
+	// absent from detection entirely, so an API apply answered "No configuration
+	// changes detected" while writing the new value to disk — and
+	// /api/v1/status, /api/v1/routing, `mcpproxy doctor` and the Web UI header
+	// then all reported the configured INTENT while /mcp kept serving the old
+	// surface. Four surfaces agreeing on the same wrong answer, with the Web UI
+	// showing a green success toast because its warning branch keys on
+	// RequiresRestart.
+	//
+	// The dedicated routes (/mcp/all, /mcp/code, /mcp/call) are unaffected: each
+	// is permanently bound to its own mode by design (Spec 031).
+	if oldCfg.RoutingMode != newCfg.RoutingMode {
+		result.ChangedFields = append(result.ChangedFields, "routing_mode")
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		result.RestartReason = "Routing mode changed - /mcp is bound to its mode at startup and requires a restart"
 		return result
 	}
 
@@ -174,6 +210,28 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// reporting the change is all the propagation needed.
 	if oldCfg.ToolResponseMode != newCfg.ToolResponseMode {
 		result.ChangedFields = append(result.ChangedFields, "tool_response_mode")
+	}
+
+	// Direct-surface serialization (Spec 102 FR-014 — hot-reloadable,
+	// serialization only). A SEPARATE clause from the one above, not a shared
+	// one: the two axes govern different surfaces, so folding them together
+	// would make an operator's edit to retrieve_tools rebuild the direct
+	// listing and notify every connected client for nothing.
+	//
+	// Unlike the retrieve axis, reporting the change is NOT all the propagation
+	// needed: the direct listing is registered state, not rendered per request,
+	// so listenForRoutingModeRefresh's config.reloaded branch has to rebuild it.
+	// This clause is what makes that branch reachable at all — without it the
+	// apply computes empty ChangedFields and is swallowed as "no changes
+	// detected".
+	// Compared NORMALIZED: "" and "full" are the same mode (config.go documents
+	// the empty value as the default), so an operator deleting the key — or a
+	// PATCH round-trip dropping it — is not a change. Comparing raw strings
+	// reports a field that did not move, which the rebuild guard downstream
+	// would suppress but the apply RESULT would still misreport to the caller.
+	if normalizeDirectToolResponseMode(oldCfg.DirectToolResponseMode) !=
+		normalizeDirectToolResponseMode(newCfg.DirectToolResponseMode) {
+		result.ChangedFields = append(result.ChangedFields, "direct_tool_response_mode")
 	}
 
 	// Upstream prompt aggregation (PR #973 — hot-reloadable, opt-in). Without

@@ -185,12 +185,37 @@ type MCPProxyServer struct {
 	// Hooks shared across all routing mode servers
 	hooks *mcpserver.Hooks
 
-	// directToolPerms maps direct-mode tool names (server__tool) to the
-	// operation permission required to call them. It is populated with the
-	// direct-mode registry and used only to filter tools/list for scoped agent
-	// tokens; execution-time authorization remains authoritative.
-	directToolPermsMu sync.RWMutex
-	directToolPerms   map[string]string
+	// directCatalogPtr holds the immutable directCatalog snapshot (Spec 102
+	// FR-017): the single source for direct-surface listing, describe_tool
+	// resolution, signature lookup and pre-dispatch validation.
+	//
+	// It replaces the mutex-guarded directToolPerms map, which answered only one
+	// of those questions and could not distinguish "built and empty" from "not
+	// built yet" — a nil map and an empty map both missed, so a discovery filter
+	// keyed on it could not tell a denial from a startup race.
+	//
+	// An atomic pointer to an immutable value rather than an actor: the snapshot
+	// is written only by the routing-refresh goroutine and read on every direct
+	// tools/list, describe_tool and dispatch, and it never mutates after
+	// publication. This is the same read-mostly trade Spec 085 accepted for the
+	// signature cache, and it reduces the read path's lock scope to zero.
+	directCatalogPtr        atomic.Pointer[directCatalog]
+	directCatalogGeneration atomic.Uint64
+
+	// directRefreshMu serializes whole rebuilds so SetTools and the matching
+	// publishDirectCatalog cannot interleave with another rebuild's pair.
+	directRefreshMu sync.Mutex
+
+	// directRebuildPause, when non-nil, is invoked BETWEEN SetTools and the
+	// catalog publish. Nil in production; the only writer is a test.
+	//
+	// It exists because the SetTools-then-publish order is load-bearing (D13
+	// rule 1) and is otherwise untestable: once a rebuild completes, the
+	// registry and the catalog agree whichever order they landed in, so
+	// inverting them is invisible from outside. Without this seam the ordering
+	// would be asserted only by a comment — and the skew suite would have to
+	// keep staging the window by hand instead of observing the real publisher.
+	directRebuildPause func()
 
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).

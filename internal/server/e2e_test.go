@@ -3592,3 +3592,489 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 	require.NoError(t, err)
 	assertFullShape(retrieveResponse(), "api-apply-unset")
 }
+
+// ---------------------------------------------------------------------------
+// Spec 102 — schema-deferred direct mode (T077).
+//
+// These exercise the DIRECT enumeration surface end to end over HTTP, which the
+// unit-level tests in mcp_routing_deferred_test.go cannot: they build a proxy in
+// process, so nothing there proves that a client which is already connected and
+// has already listed the tool set is served the new serialization, nor that the
+// legacy routes reach the same surface as /mcp/all.
+// ---------------------------------------------------------------------------
+
+// directDeferredFixtureTools is the upstream tool set every Spec 102 E2E below
+// enumerates.
+//
+// Both tools carry populated schemas on purpose. A deferred entry is only
+// distinguishable from a full one when the full one has properties to lose, and
+// the compact signature has nothing to render for a parameterless tool — a
+// fixture with empty schemas would let a broken deferral pass.
+func directDeferredFixtureTools() []mcp.Tool {
+	return []mcp.Tool{
+		{
+			Name:        "create_widget",
+			Description: "Create a widget in the demo store.",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"name":  map[string]interface{}{"type": "string"},
+					"color": map[string]interface{}{"type": "string"},
+				},
+				Required: []string{"name"},
+			},
+		},
+		{
+			Name:        "list_widgets",
+			Description: "List widgets in the demo store.",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"limit": map[string]interface{}{"type": "integer"},
+				},
+			},
+		},
+	}
+}
+
+// connectDirectClient opens an MCP client against one of the proxy's
+// direct-serving routes ("/mcp/all", or "/mcp" and its legacy aliases when
+// routing_mode is direct).
+//
+// WithContinuousListening is what makes the SC-006 notification assertion
+// possible at all: without the standing GET stream a streamable-HTTP client only
+// ever hears the server while one of its own requests is open, so a
+// notifications/tools/list_changed pushed by a rebuild BETWEEN two calls is
+// simply dropped — the test would then be measuring the client transport rather
+// than the server. onNotify is registered before Initialize so no notification
+// can slip through the handshake window; pass nil when the test does not care.
+func connectDirectClient(t *testing.T, env *TestEnvironment, route string, onNotify func(mcp.JSONRPCNotification)) *client.Client {
+	t.Helper()
+
+	base := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	httpTransport, err := transport.NewStreamableHTTP(base+route, transport.WithContinuousListening())
+	require.NoError(t, err)
+
+	mcpClient := client.NewClient(httpTransport)
+	if onNotify != nil {
+		mcpClient.OnNotification(onNotify)
+	}
+	env.ConnectClient(mcpClient)
+	return mcpClient
+}
+
+// listDirectTools is the non-failing lister used inside require.Eventually
+// conditions, which run on their own goroutine where require's FailNow would be
+// undefined behaviour.
+func listDirectTools(mcpClient *client.Client) ([]mcp.Tool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return result.Tools, nil
+}
+
+func mustListDirectTools(t *testing.T, mcpClient *client.Client) []mcp.Tool {
+	t.Helper()
+
+	tools, err := listDirectTools(mcpClient)
+	require.NoError(t, err)
+	return tools
+}
+
+func directToolNames(tools []mcp.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func findDirectTool(tools []mcp.Tool, name string) *mcp.Tool {
+	for i := range tools {
+		if tools[i].Name == name {
+			return &tools[i]
+		}
+	}
+	return nil
+}
+
+func requireDirectTool(t *testing.T, tools []mcp.Tool, name string) mcp.Tool {
+	t.Helper()
+
+	tool := findDirectTool(tools, name)
+	require.NotNilf(t, tool, "%s missing from the direct listing %v", name, directToolNames(tools))
+	return *tool
+}
+
+// normalizeHarnessConfigForApply gives the in-memory harness config the
+// production defaults ValidateDetailed insists on. Without it every
+// /api/v1/config/apply below fails on tools_limit being zero rather than on the
+// field the test is actually about.
+func normalizeHarnessConfigForApply(t *testing.T, env *TestEnvironment) {
+	t.Helper()
+
+	def := config.DefaultConfig()
+	cfg := env.proxyServer.runtime.Config()
+	cfg.ToolsLimit = def.ToolsLimit
+	cfg.CallToolTimeout = def.CallToolTimeout
+	require.Empty(t, cfg.ValidateDetailed(),
+		"normalized harness config must validate — otherwise the apply legs cannot isolate direct_tool_response_mode")
+}
+
+// applyDirectToolResponseMode flips direct_tool_response_mode through the same
+// REST path an operator uses and returns the apply result.
+func applyDirectToolResponseMode(t *testing.T, env *TestEnvironment, mode string) *contracts.ConfigApplyResult {
+	t.Helper()
+
+	apiCfg, err := env.GetConfig()
+	require.NoError(t, err)
+	apiCfg.DirectToolResponseMode = mode
+
+	result, err := env.ApplyConfig(apiCfg)
+	require.NoError(t, err)
+	return result
+}
+
+// startDirectFixtureUpstream mounts the fixture upstream and waits until the
+// direct surface enumerates both of its tools.
+//
+// Onboarding goes through storage + LoadConfiguredServers rather than the
+// upstream_servers meta-tool the neighbouring E2Es call, because the alias test
+// below runs with routing_mode "direct", where the management tools are not on
+// the surface at all — one recipe that works in every routing mode beats two.
+func startDirectFixtureUpstream(t *testing.T, env *TestEnvironment, serverName string, directClient *client.Client) {
+	t.Helper()
+
+	ctx := context.Background()
+	mockServer := env.CreateMockUpstreamServer(serverName, directDeferredFixtureTools())
+
+	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(&config.ServerConfig{
+		Name:     serverName,
+		URL:      mockServer.addr,
+		Protocol: "streamable-http",
+		Enabled:  true,
+		// Quarantined stays false: a quarantined server never reaches the direct
+		// catalog, so the listing under test would never appear.
+	}))
+
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+
+	// Connect and discovery are async and the direct listing is a projection of
+	// discovery, so re-trigger indexing until both fixture tools are on the
+	// surface. Indexing is also what warms the signature cache the deferred
+	// rendering reads (Peek, never compile-on-miss), so a listing that has
+	// settled here is one whose signatures are available to the next rebuild.
+	require.Eventually(t, func() bool {
+		_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+		tools, lErr := listDirectTools(directClient)
+		if lErr != nil {
+			return false
+		}
+		return findDirectTool(tools, FormatDirectToolName(serverName, "create_widget")) != nil &&
+			findDirectTool(tools, FormatDirectToolName(serverName, "list_widgets")) != nil
+	}, 40*time.Second, 500*time.Millisecond, "the direct surface must enumerate the fixture upstream")
+}
+
+// TestE2E_DirectDeferredLiveFlipWithConnectedClient is the Spec 102 SC-006 E2E:
+// on a RUNNING proxy with an already-initialized client that has already listed
+// the tool set, flipping direct_tool_response_mode full→deferred changes the
+// serialization of the very next tools/list — and changes nothing else.
+//
+// The client is deliberately never reconnected. A reconnect would prove only
+// that a fresh session is built from current config, which is the easy half; the
+// hard half is that a LIVE session's registered surface is rebuilt underneath it
+// and that the client is told (notifications/tools/list_changed) rather than
+// left holding a listing it has no reason to re-fetch.
+func TestE2E_DirectDeferredLiveFlipWithConnectedClient(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	normalizeHarnessConfigForApply(t, env)
+
+	// Buffered so the transport's reader goroutine is never blocked by a test
+	// that has stopped draining: a notification handler that back-pressures the
+	// stream would deadlock the client, not just the assertion.
+	notifications := make(chan string, 64)
+	directClient := connectDirectClient(t, env, "/mcp/all", func(n mcp.JSONRPCNotification) {
+		select {
+		case notifications <- n.Method:
+		default:
+		}
+	})
+	defer directClient.Close()
+
+	const serverName = "flipdemo"
+	startDirectFixtureUpstream(t, env, serverName, directClient)
+
+	createWidget := FormatDirectToolName(serverName, "create_widget")
+
+	// ---- Before: the default (unset) mode is full (FR-001) ----
+	before := mustListDirectTools(t, directClient)
+	beforeEntry := requireDirectTool(t, before, createWidget)
+	assert.NotEmpty(t, beforeEntry.InputSchema.Properties, "full mode advertises the upstream schema")
+	assert.Contains(t, beforeEntry.InputSchema.Required, "name")
+	assert.NotContains(t, beforeEntry.Description, "\n", "a full-mode description carries no signature line")
+
+	// ---- The flip ----
+	// Drain everything the fixture setup emitted. Adding and indexing an upstream
+	// itself triggers rebuilds, so the channel already holds
+	// tools/list_changed frames that have nothing to do with the flip — and the
+	// assertion below would happily consume one of those and pass without the
+	// flip ever notifying anyone.
+	for draining := true; draining; {
+		select {
+		case <-notifications:
+		default:
+			draining = false
+		}
+	}
+
+	applyResult := applyDirectToolResponseMode(t, env, config.DirectToolResponseModeDeferred)
+	assert.Contains(t, applyResult.ChangedFields, "direct_tool_response_mode",
+		"DetectConfigChanges must report the flip — otherwise the apply is swallowed as 'no changes' and nothing rebuilds")
+	assert.False(t, applyResult.RequiresRestart, "the flip is hot-reloadable (FR-014 / SC-006)")
+
+	// ---- After: same session, new serialization ----
+	require.Eventually(t, func() bool {
+		tools, lErr := listDirectTools(directClient)
+		if lErr != nil {
+			return false
+		}
+		tool := findDirectTool(tools, createWidget)
+		return tool != nil && strings.Contains(tool.Description, "\ncreate_widget(")
+	}, 20*time.Second, 250*time.Millisecond,
+		"the connected client's next tools/list must reflect the deferred serialization")
+
+	after := mustListDirectTools(t, directClient)
+	afterEntry := requireDirectTool(t, after, createWidget)
+
+	assert.Equal(t, "object", afterEntry.InputSchema.Type)
+	assert.Empty(t, afterEntry.InputSchema.Properties, "a deferred entry advertises no properties (FR-004)")
+	assert.Empty(t, afterEntry.InputSchema.Required, "a deferred entry advertises no required list (FR-004)")
+	assert.Empty(t, afterEntry.OutputSchema.Properties, "a deferred entry advertises no schema in either direction (FR-006)")
+	assert.Contains(t, afterEntry.Description, "[flipdemo] Create a widget in the demo store.",
+		"the description keeps its upstream text; the signature is appended to it")
+	assert.Contains(t, afterEntry.Description, "name*:str",
+		"the appended signature marks the required parameter")
+
+	// The point of deferral is that the agent still sees EVERYTHING. Names are
+	// the enumeration surface, so a flip that changed the name set would be a
+	// different feature — and the built-in describe_tool must survive the
+	// rebuild too, since SetTools replaces the whole registry.
+	assert.ElementsMatch(t, directToolNames(before), directToolNames(after),
+		"the flip changes serialization only — the tool NAME set is identical (FR-002)")
+	assert.NotNil(t, findDirectTool(after, "describe_tool"),
+		"describe_tool is how a deferred listing is redeemed; it must be on the surface")
+
+	// The rebuild must TELL the connected client, or an agent that already
+	// listed keeps using schemas the server no longer serves.
+	sawListChanged := false
+	deadline := time.After(15 * time.Second)
+	for !sawListChanged {
+		select {
+		case method := <-notifications:
+			sawListChanged = method == "notifications/tools/list_changed"
+		case <-deadline:
+			t.Fatal("no notifications/tools/list_changed reached the connected client after the flip")
+		}
+	}
+}
+
+// TestE2E_DirectDeferredSelfHealingInvalidParams is the Spec 102 SC-003 E2E: a
+// wrong argument guess against a DEFERRED direct tool costs exactly one retry.
+//
+// This is the price of deferral. The listing advertises {"type":"object"}, so
+// the agent guesses from a compact signature and can guess wrong; the pre-dispatch
+// rejection has to hand back enough to fix the call in one move, which means the
+// FULL stored schema — not the placeholder the listing advertised, which would
+// accept everything and teach nothing.
+func TestE2E_DirectDeferredSelfHealingInvalidParams(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	ctx := context.Background()
+	normalizeHarnessConfigForApply(t, env)
+
+	// Deferred BEFORE the upstream is mounted, so the fixture is rendered
+	// deferred from its first appearance and the call below is made by a client
+	// that never saw the schema.
+	applyResult := applyDirectToolResponseMode(t, env, config.DirectToolResponseModeDeferred)
+	assert.Contains(t, applyResult.ChangedFields, "direct_tool_response_mode")
+
+	directClient := connectDirectClient(t, env, "/mcp/all", nil)
+	defer directClient.Close()
+
+	const serverName = "healdemo"
+	startDirectFixtureUpstream(t, env, serverName, directClient)
+
+	createWidget := FormatDirectToolName(serverName, "create_widget")
+	entry := requireDirectTool(t, mustListDirectTools(t, directClient), createWidget)
+	require.Empty(t, entry.InputSchema.Properties, "the fixture must be listed deferred for this test to mean anything")
+
+	// The wrong guess: required "name" omitted.
+	callRequest := mcp.CallToolRequest{}
+	callRequest.Params.Name = createWidget
+	callRequest.Params.Arguments = map[string]interface{}{"color": "red"}
+	callResult, err := directClient.CallTool(ctx, callRequest)
+	require.NoError(t, err)
+	require.True(t, callResult.IsError, "a missing required argument must be rejected pre-dispatch")
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(getToolResultText(callResult)), &body),
+		"error body must be JSON: %s", getToolResultText(callResult))
+	assert.Equal(t, "invalid_params", body["error_type"])
+	assert.Equal(t, createWidget, body["tool"])
+	assert.Contains(t, body["error"], "name", "the error names the missing property")
+	assert.Contains(t, body["hint"], "describe_tool")
+
+	// The embedded schema is the FULL stored one, so the retry is schema-informed
+	// rather than another guess.
+	schema, ok := body["input_schema"].(map[string]interface{})
+	require.True(t, ok, "input_schema must be embedded: %s", getToolResultText(callResult))
+	properties, ok := schema["properties"].(map[string]interface{})
+	require.True(t, ok, "input_schema must carry the upstream properties, not the deferred placeholder")
+	assert.Contains(t, properties, "name")
+	assert.Contains(t, properties, "color")
+	required, ok := schema["required"].([]interface{})
+	require.True(t, ok, "input_schema.required must be present")
+	require.Contains(t, required, "name")
+
+	retryArgs := map[string]interface{}{"color": "red"}
+	for _, prop := range required {
+		// Checked rather than a bare assertion: a non-string here means the
+		// embedded schema is malformed, which is a finding worth reporting as a
+		// failed assertion — not a panic that takes the whole test binary with it
+		// and buries the reason.
+		name, ok := prop.(string)
+		require.Truef(t, ok, "input_schema.required must contain strings, got %T", prop)
+		retryArgs[name] = "from-schema"
+	}
+	retryRequest := mcp.CallToolRequest{}
+	retryRequest.Params.Name = createWidget
+	retryRequest.Params.Arguments = retryArgs
+	retryResult, err := directClient.CallTool(ctx, retryRequest)
+	require.NoError(t, err)
+	require.False(t, retryResult.IsError,
+		"one schema-informed retry must succeed (SC-003): %v", getToolResultText(retryResult))
+	assert.Contains(t, getToolResultText(retryResult), "create_widget",
+		"the retry must have reached the upstream tool")
+}
+
+// restartWithRoutingMode restarts the harness's HTTP listener under a different
+// routing_mode.
+//
+// routing_mode is read once, when Start builds the mux, so /mcp and the two
+// legacy aliases bound to its handler are pinned to whichever routing-mode
+// server the config named at that moment — there is no hot path for it. A
+// restart is therefore the only honest way to observe the aliases in direct
+// mode. It runs before any upstream is mounted, so the stop's ShutdownAll has
+// nothing to tear down and the fixture that follows connects exactly once.
+func restartWithRoutingMode(t *testing.T, env *TestEnvironment, mode string) {
+	t.Helper()
+
+	require.NoError(t, env.proxyServer.StopServer())
+
+	// StopServer cancels the server context on its way out, which wakes the
+	// previous Start's shutdown watchdog; that goroutine calls StopServer once
+	// more and must be allowed to observe running=false BEFORE the restart flips
+	// it back, or it would tear down the server we are about to start.
+	time.Sleep(500 * time.Millisecond)
+	require.False(t, env.proxyServer.IsRunning(), "the old listener must be down before rebinding its port")
+
+	env.proxyServer.runtime.Config().RoutingMode = mode
+	require.NoError(t, env.proxyServer.StartServer(context.Background()))
+	env.waitForServerReady()
+}
+
+// TestE2E_DirectModeLegacyAliasesFollowSerializationMode is the Spec 102 FR-003
+// E2E: /v1/tool_code and /v1/tool-code are bound to the same handler as /mcp, so
+// under routing_mode "direct" they are direct-serving routes too — and are the
+// easiest members of that set to forget, being registered ~40 lines away from
+// the /mcp/all block and named after a feature that no longer exists.
+//
+// Every route is asserted against /mcp/all rather than against a hand-written
+// expectation, so the test states the actual invariant (the aliases serve the
+// SAME listing) instead of re-encoding the renderer.
+func TestE2E_DirectModeLegacyAliasesFollowSerializationMode(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	restartWithRoutingMode(t, env, config.RoutingModeDirect)
+	normalizeHarnessConfigForApply(t, env)
+
+	directClient := connectDirectClient(t, env, "/mcp/all", nil)
+	defer directClient.Close()
+
+	const serverName = "aliasdemo"
+	startDirectFixtureUpstream(t, env, serverName, directClient)
+
+	aliasRoutes := []string{"/mcp", "/v1/tool_code", "/v1/tool-code"}
+	aliasClients := make(map[string]*client.Client, len(aliasRoutes))
+	for _, route := range aliasRoutes {
+		aliasClient := connectDirectClient(t, env, route, nil)
+		defer aliasClient.Close()
+		aliasClients[route] = aliasClient
+	}
+
+	// The listing is compared as a name→definition projection rather than as raw
+	// bytes: the mcp-go client decodes into mcp.Tool, so re-marshalling launders
+	// the deferred entry's raw schema back into the typed shape. That is fine
+	// HERE, where the claim is that two routes agree with each other; wire-level
+	// fidelity of the direct payload is pinned by the golden in
+	// mcp_routing_deferred_e2e_test.go.
+	projection := func(tools []mcp.Tool) map[string]string {
+		out := make(map[string]string, len(tools))
+		for _, tool := range tools {
+			encoded, err := json.Marshal(tool)
+			require.NoError(t, err)
+			out[tool.Name] = string(encoded)
+		}
+		return out
+	}
+
+	createWidget := FormatDirectToolName(serverName, "create_widget")
+
+	assertAliasesMatchDirect := func(leg string, deferred bool) {
+		expected := projection(mustListDirectTools(t, directClient))
+		reference := requireDirectTool(t, mustListDirectTools(t, directClient), createWidget)
+		if deferred {
+			require.Empty(t, reference.InputSchema.Properties, "%s: /mcp/all must be serving deferred entries", leg)
+			require.Contains(t, reference.Description, "\ncreate_widget(", "%s: /mcp/all must carry the signature", leg)
+		} else {
+			require.NotEmpty(t, reference.InputSchema.Properties, "%s: /mcp/all must be serving full entries", leg)
+		}
+
+		for _, route := range aliasRoutes {
+			tools := mustListDirectTools(t, aliasClients[route])
+			assert.Equal(t, expected, projection(tools),
+				"%s: %s must serve the same direct listing as /mcp/all (FR-003)", leg, route)
+		}
+	}
+
+	assertAliasesMatchDirect("default-full", false)
+
+	applyResult := applyDirectToolResponseMode(t, env, config.DirectToolResponseModeDeferred)
+	assert.Contains(t, applyResult.ChangedFields, "direct_tool_response_mode")
+
+	// The rebuild is asynchronous (config.reloaded → listener → SetTools), so
+	// settle on /mcp/all first; the aliases share the registry, so once it has
+	// flipped there is nothing left to wait for.
+	require.Eventually(t, func() bool {
+		tools, lErr := listDirectTools(directClient)
+		if lErr != nil {
+			return false
+		}
+		tool := findDirectTool(tools, createWidget)
+		return tool != nil && strings.Contains(tool.Description, "\ncreate_widget(")
+	}, 20*time.Second, 250*time.Millisecond, "/mcp/all must flip to the deferred serialization")
+
+	assertAliasesMatchDirect("deferred", true)
+}

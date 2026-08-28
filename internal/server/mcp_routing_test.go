@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -308,7 +309,7 @@ func TestDirectModeHandler_PermissionDenied(t *testing.T) {
 	annotations := &config.ToolAnnotations{
 		ReadOnlyHint: &readOnlyHint,
 	}
-	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: annotations})
 
 	// Create a context with agent token that only has write permission (no read)
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -338,7 +339,7 @@ func TestDirectModeHandler_ServerAccessDenied(t *testing.T) {
 		config: &config.Config{},
 	}
 
-	handler := proxy.makeDirectModeHandler("gitlab", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "gitlab", ToolName: "list_repos", DisplayName: FormatDirectToolName("gitlab", "list_repos"), Annotations: nil})
 
 	// Create a context with agent token that only has access to github
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -373,7 +374,7 @@ func TestDirectModeHandler_AgentWithCorrectPermissions(t *testing.T) {
 	annotations := &config.ToolAnnotations{
 		ReadOnlyHint: &readOnlyHint,
 	}
-	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: annotations})
 
 	// Agent with read permission and github access should pass auth checks
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -413,7 +414,7 @@ func TestDirectModeHandler_DestructiveToolNeedsDestructivePermission(t *testing.
 	annotations := &config.ToolAnnotations{
 		DestructiveHint: &destructiveHint,
 	}
-	handler := proxy.makeDirectModeHandler("github", "delete_repo", annotations)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "delete_repo", DisplayName: FormatDirectToolName("github", "delete_repo"), Annotations: annotations})
 
 	// Agent with only read+write but no destructive permission
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
@@ -496,12 +497,17 @@ func TestSetDirectToolPermissions_DefensivelyCopiesMap(t *testing.T) {
 		toolName: auth.PermRead,
 	}
 
-	proxy.setDirectToolPermissions(perms)
+	publishPermsCatalog(proxy, perms)
+	// Mutating the caller's map after publication must not reach the published
+	// snapshot. The catalog is immutable by construction — the entries are built
+	// from the map, not backed by it — where the retired directToolPermissions
+	// map had to defensively copy to get the same property.
 	perms[toolName] = auth.PermDestructive
 
-	got, ok := proxy.lookupDirectToolPermission(toolName)
-	require.True(t, ok)
-	assert.Equal(t, auth.PermRead, got)
+	entry, decision := proxy.resolveDirectTool(toolName)
+	require.Equal(t, directResolveFound, decision)
+	require.NotNil(t, entry)
+	assert.Equal(t, auth.PermRead, entry.RequiredPermission)
 }
 
 func TestFilterDirectModeToolsForAuth_DoesNotMutateInputSlice(t *testing.T) {
@@ -514,7 +520,7 @@ func TestFilterDirectModeToolsForAuth_DoesNotMutateInputSlice(t *testing.T) {
 	}
 	original := append([]mcp.Tool(nil), tools...)
 
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		allowed: auth.PermRead,
 		denied:  auth.PermRead,
 	})
@@ -540,7 +546,7 @@ func TestFilterDirectModeToolsForAuth_AgentServerAndPermissionScope(t *testing.T
 	githubDestroy := FormatDirectToolName("github", "delete_repo")
 	gitlabRead := FormatDirectToolName("gitlab", "get_issue")
 
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		githubRead:    auth.PermRead,
 		githubWrite:   auth.PermWrite,
 		githubDestroy: auth.PermDestructive,
@@ -584,7 +590,7 @@ func TestFilterDirectModeToolsForAuth_FailsClosedOnMissingPermissionMetadata(t *
 
 	visible := FormatDirectToolName("github", "get_issue")
 	missing := FormatDirectToolName("github", "unknown")
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		visible: auth.PermRead,
 	})
 
@@ -608,7 +614,7 @@ func TestFilterDirectModeToolsForAuth_KeepsNonDirectTools(t *testing.T) {
 
 	direct := FormatDirectToolName("github", "get_issue")
 	nonDirect := "retrieve_tools"
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		direct: auth.PermRead,
 	})
 
@@ -642,7 +648,7 @@ func TestDirectModeHandler_NoAuthContext(t *testing.T) {
 		config: &config.Config{},
 	}
 
-	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
 
 	// No auth context in context - should pass auth checks (backward compatible)
 	request := mcp.CallToolRequest{
@@ -863,7 +869,7 @@ func TestDirectModeHandler_CallabilityBlock_CarriesRequestID(t *testing.T) {
 	})
 	probe := watchPolicyDecisions(t, rt)
 
-	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
 	result, err := handler(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Name: "github__list_repos"},
 	})
@@ -888,7 +894,7 @@ func TestDirectModeHandler_CallabilityBlock_PrefersContextRequestID(t *testing.T
 	probe := watchPolicyDecisions(t, rt)
 
 	ctx := reqcontext.WithRequestID(context.Background(), "req-from-transport")
-	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
 	_, err := handler(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Name: "github__list_repos"},
 	})
@@ -1188,4 +1194,96 @@ func TestBuildAggregatedServerPrompts_CollisionKeepsFirst(t *testing.T) {
 	}
 	assert.Equal(t, []string{"gh__issue__create"}, names, "colliding display name must appear once (first kept)")
 	require.Equal(t, 1, logs.FilterMessage("dropping upstream prompt: display-name collision (kept first)").Len())
+}
+
+// Spec 102 FR-007 / D11 / D16 (T034): the direct server carries instructions on
+// its initialize response, in BOTH serialization modes, and an operator's
+// configured `instructions` value is not lost here.
+
+func directInitializeInstructions(t *testing.T, p *MCPProxyServer) string {
+	t.Helper()
+	raw := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{` +
+		`"protocolVersion":"2025-03-26","capabilities":{},` +
+		`"clientInfo":{"name":"spec102-test","version":"0"}}}`)
+
+	msg := p.directServer.HandleMessage(context.Background(), raw)
+	encoded, err := json.Marshal(msg)
+	require.NoError(t, err)
+
+	var envelope struct {
+		Error  *struct{ Message string } `json:"error"`
+		Result struct {
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &envelope))
+	require.Nil(t, envelope.Error, "initialize must succeed: %s", encoded)
+	return envelope.Result.Instructions
+}
+
+func newDirectInstructionsProxy(t *testing.T, custom, mode string) *MCPProxyServer {
+	t.Helper()
+	p := &MCPProxyServer{
+		config: &config.Config{
+			RoutingMode:            config.RoutingModeDirect,
+			Instructions:           custom,
+			DirectToolResponseMode: mode,
+		},
+		logger: zap.NewNop(),
+	}
+	p.initRoutingModeServers()
+	return p
+}
+
+func TestDirectServerInstructions_CustomSurvivesInBothModes(t *testing.T) {
+	const custom = "House rules: ask before writing."
+
+	for _, mode := range []string{config.DirectToolResponseModeFull, config.DirectToolResponseModeDeferred} {
+		t.Run(mode, func(t *testing.T) {
+			got := directInitializeInstructions(t, newDirectInstructionsProxy(t, custom, mode))
+
+			require.NotEmpty(t, got, "the direct server must carry instructions (FR-007)")
+			assert.True(t, strings.HasPrefix(got, custom),
+				"an operator's configured instructions must lead, not be replaced (D11)")
+			assert.Contains(t, got, directDeferralLegend,
+				"the deferral legend is appended in BOTH modes (D4)")
+			assert.NotContains(t, got, defaultDirectInstructions,
+				"a custom value replaces the default, it does not stack with it")
+		})
+	}
+}
+
+func TestDirectServerInstructions_DefaultIsDirectSpecific(t *testing.T) {
+	got := directInitializeInstructions(t, newDirectInstructionsProxy(t, "", ""))
+
+	assert.True(t, strings.HasPrefix(got, defaultDirectInstructions))
+	assert.Contains(t, got, directDeferralLegend)
+
+	// D16: the direct default must name ONLY what this surface exposes.
+	// resolveInstructions' defaultInstructions advertises retrieve_tools,
+	// call_tool_* and upstream_servers, none of which buildDirectModeTools
+	// registers — naming one would be the D16 mistake the helper exists to
+	// avoid.
+	assert.Contains(t, got, "server__tool")
+	assert.Contains(t, got, "describe_tool")
+	for _, absent := range []string{"retrieve_tools", "call_tool_read", "call_tool_write", "call_tool_destructive", "upstream_servers", "search_servers", "code_execution"} {
+		assert.NotContainsf(t, got, absent, "the direct instructions must not advertise %q — this surface does not expose it (D16)", absent)
+	}
+
+	assert.NotEqual(t, resolveInstructions(""), got,
+		"the direct surface must not reuse the retrieve_tools default (D16)")
+}
+
+func TestResolveDirectInstructions_ComposesCustomThenLegend(t *testing.T) {
+	assert.Equal(t, defaultDirectInstructions+"\n\n"+directDeferralLegend, resolveDirectInstructions(""))
+	assert.Equal(t, "custom"+"\n\n"+directDeferralLegend, resolveDirectInstructions("custom"))
+}
+
+// The legend must describe the markers the Spec-085 grammar actually emits, or
+// an agent reading it will mis-read the signatures it is meant to explain.
+func TestDirectDeferralLegend_ExplainsTheMarkers(t *testing.T) {
+	assert.Contains(t, directDeferralLegend, "*")
+	assert.Contains(t, directDeferralLegend, "~")
+	assert.Contains(t, directDeferralLegend, "describe_tool")
+	assert.Contains(t, directDeferralLegend, "placeholder")
 }

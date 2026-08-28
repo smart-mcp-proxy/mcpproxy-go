@@ -740,7 +740,7 @@ graph LR
 | --- | --- | --- | --- | --- | --- |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
-| Deferred-schema serialization for the direct tools/list surface (spec 102) | In progress | P1 | — | [102-schema-deferred](./specs/102-schema-deferred/) |  |
+| Deferred-schema serialization for the direct tools/list surface (spec 102) | In progress | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | #1033 |
@@ -882,4 +882,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
 | [101-tpa-db](./specs/101-tpa-db/) | — | — |
-| [102-schema-deferred](./specs/102-schema-deferred/) | — | — |
+| [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |

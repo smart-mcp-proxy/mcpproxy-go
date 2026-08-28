@@ -13,9 +13,15 @@ import (
 
 // TestSchemaVersionIsV9 pins the schema bump that carries the TPA funnel
 // counters plus trust_mode_distribution.
+//
+// A FLOOR, not an equality: these fields shipped at v9 and must survive every
+// later bump, so pinning equality would force whoever bumps the version next to
+// edit this test — and an edit made to get a green run is exactly how a "the v9
+// fields are still here" guarantee quietly stops checking anything. (Made a
+// floor when v10 added the serialization axes.)
 func TestSchemaVersionIsV9(t *testing.T) {
-	if SchemaVersion != 9 {
-		t.Fatalf("SchemaVersion = %d, want 9", SchemaVersion)
+	if SchemaVersion < 9 {
+		t.Fatalf("SchemaVersion = %d, want >= 9 (the TPA funnel fields shipped at v9)", SchemaVersion)
 	}
 }
 
@@ -223,8 +229,8 @@ func TestPayloadV9_TrustModeDistributionAndFunnelCounters(t *testing.T) {
 
 	payload := svc.BuildPayload()
 
-	if payload.SchemaVersion != 9 {
-		t.Errorf("schema_version = %d, want 9", payload.SchemaVersion)
+	if payload.SchemaVersion < 9 {
+		t.Errorf("schema_version = %d, want >= 9", payload.SchemaVersion)
 	}
 	if payload.TrustModeDistribution == nil {
 		t.Fatal("payload.trust_mode_distribution = nil, want the v9 histogram")
@@ -254,7 +260,7 @@ func TestPayloadV9_TrustModeDistributionAndFunnelCounters(t *testing.T) {
 	}
 	js := string(data)
 	for _, required := range []string{
-		`"schema_version":9`,
+		`"schema_version":10`,
 		`"trust_mode_distribution":`,
 		`"tool_change_gate_scans":2`,
 		`"prompt_scans":1`,

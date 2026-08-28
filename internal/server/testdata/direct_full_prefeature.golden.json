@@ -1,0 +1,182 @@
+{
+  "denied__hidden_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[denied] denied by config",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "denied__hidden_tool"
+  },
+  "denied__visible_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[denied] allowed",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "denied__visible_tool"
+  },
+  "killable__killable_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[killable] killable_tool v1",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "killable__killable_tool"
+  },
+  "main__blocked_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[main] blockable",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main__blocked_tool"
+  },
+  "main__drift_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[main] drift v1",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main__drift_tool"
+  },
+  "main__noann_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "description": "[main] no annotations at all",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main__noann_tool"
+  },
+  "main__ready_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[main] ready v1",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main__ready_tool"
+  },
+  "main__unsafe_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "description": "[main] explicitly unsafe",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main__unsafe_tool"
+  },
+  "scoped__scoped_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[scoped] scoped_tool v1",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "scoped__scoped_tool"
+  },
+  "slow__slow_tool": {
+    "_meta": {
+      "anthropic/maxResultSizeChars": 500000
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "[slow] slow_tool v1",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "slow__slow_tool"
+  }
+}

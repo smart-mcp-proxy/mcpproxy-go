@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -24,6 +25,13 @@ const (
 	// DirectModeToolSeparator is the separator between server name and tool name in direct mode.
 	// Using double underscore to avoid conflicts with single underscores in tool names.
 	DirectModeToolSeparator = "__"
+
+	// deferredDirectInputSchema is the minimal permissive input schema every
+	// deferred direct entry advertises (Spec 102 FR-004). The BYTES are
+	// normative: never literal "{}" (which some strict clients reject as a
+	// schema), never absent, and never carrying the upstream properties or
+	// required list.
+	deferredDirectInputSchema = `{"type":"object"}`
 )
 
 // safeTruncateBytes returns the largest cut length <= limit at which s can be
@@ -73,92 +81,314 @@ func FormatDirectPromptName(serverName, promptName string) string {
 // buildDirectModeTools builds MCP tool definitions for direct mode.
 // Each upstream tool is exposed directly with serverName__toolName naming.
 // Only tools from connected, enabled, non-quarantined servers are included.
-func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool {
+func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *directCatalog) {
 	ctx := context.Background()
 
-	// Use DiscoverTools which already filters for connected, enabled, non-quarantined servers
-	tools, err := p.upstreamManager.DiscoverTools(ctx)
-	if err != nil {
-		p.setDirectToolPermissions(nil)
-		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
-		return nil
+	// Resolved ONCE for this rebuild and stamped on whichever catalog we end up
+	// publishing, including the failure paths: T069 requires a flip made while
+	// discovery is failing to still record the new mode, or the guarded reload
+	// would see no drift afterwards and the operator's change would be lost
+	// until something unrelated happened to rebuild.
+	//
+	// The consequence, accepted rather than hidden: after such a failure the
+	// stamp says "deferred" although nothing was ever RENDERED deferred, so a
+	// later config reload sees no drift and will not retry. Recovery does not
+	// depend on the reload path — the empty listing is itself the problem, and
+	// the servers.changed that fixes discovery rebuilds unconditionally, in
+	// whatever mode is then configured. Making the guard retry instead would
+	// mean rebuilding on every reload for as long as discovery stayed down.
+	mode := p.effectiveDirectToolResponseMode()
+
+	// DiscoverTools already filters to connected, enabled, non-quarantined
+	// servers — server-LEVEL filtering only. Tool-level state (pending/changed
+	// approval) is applied later by the callability filter.
+	// The initial rebuild (D15) runs during construction, so this can be reached
+	// before the upstream manager is wired. Treat it exactly like a discovery
+	// failure rather than panicking: built-ins still register, the catalog is
+	// still published, and the next servers.changed fills in the upstreams.
+	if p.upstreamManager == nil {
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
 	}
 
-	serverTools := make([]mcpserver.ServerTool, 0, len(tools))
-	directToolPerms := make(map[string]string, len(tools))
-	for _, tool := range tools {
-		directName := FormatDirectToolName(tool.ServerName, tool.Name)
-		directToolPerms[directName] = requiredPermissionForDirectTool(tool.Annotations)
+	tools, err := p.upstreamManager.DiscoverTools(ctx)
+	if err != nil {
+		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
+		// A NON-NIL empty catalog, not nil (D13 rule 2). Returning nil here — as
+		// this path used to, via setDirectToolPermissions(nil) — would tell the
+		// discovery filters "no catalog yet, do not deny" at exactly the moment
+		// upstream discovery is failing, flipping them from deny-on-miss to
+		// allow-everything.
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
+	}
 
-		// Build MCP tool options
-		opts := []mcp.ToolOption{
-			mcp.WithDescription(fmt.Sprintf("[%s] %s", tool.ServerName, tool.Description)),
+	cat := buildDirectCatalog(tools, p.logger)
+	cat.mode = mode
+	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat
+}
+
+// withDirectBuiltins appends the tools mcpproxy serves itself on the direct
+// surface (FR-009/FR-018).
+//
+// It is applied on EVERY return path of buildDirectModeTools, including the
+// failure paths, because SetTools REPLACES the whole registry: a rebuild that
+// omitted the built-ins would delete describe_tool from the live surface until
+// some later successful rebuild happened to restore it. A built-in that
+// disappears on the first upstream hiccup is not a built-in.
+//
+// The DEFINITION is the shared one — the schemas and response shape must not
+// drift between surfaces — but the HANDLER is the direct-surface variant, which
+// resolves ids through the published catalog rather than the search index
+// (FR-011). Which corpus an id resolves against is a property of the
+// registration, not of the request, so it is bound here rather than sniffed
+// from the context.
+func (p *MCPProxyServer) withDirectBuiltins(tools []mcpserver.ServerTool) []mcpserver.ServerTool {
+	return append(tools, mcpserver.ServerTool{
+		Tool:    buildDescribeToolTool(),
+		Handler: p.describeToolHandler(describeSurfaceDirect),
+	})
+}
+
+// renderDirectTools turns a catalog into the registrable tool set.
+//
+// It renders FROM the catalog rather than from the raw projection, so the
+// listing and the catalog cannot disagree by construction: a display-name
+// collision withheld by the catalog is absent from the listing for free, rather
+// than needing the same rule implemented twice.
+func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.ServerTool {
+	names := cat.DisplayNames()
+	serverTools := make([]mcpserver.ServerTool, 0, len(names))
+
+	// Read from the SNAPSHOT, not from config. Every entry of a published
+	// generation must share one serialization — resolving per entry would let a
+	// reload landing mid-loop publish a listing that straddles both, which no
+	// consumer (or test) can describe — and the same stamp is what the FR-014
+	// reload guard later compares against, so the render and the guard cannot
+	// disagree about what was published.
+	deferred := cat.Mode() == config.DirectToolResponseModeDeferred
+
+	// Counted and logged because a signature miss is INVISIBLE in the payload —
+	// a deferred entry without a suffix looks exactly like a tool whose schema
+	// happens to be empty. Without this, "deferral is on but nothing has
+	// signatures" (the rebuild ran before the index warmed it) is indistinguishable
+	// from "the signatures are all empty", and the first is a real, recoverable
+	// operational state (FR-005).
+	signatureMisses := 0
+
+	for _, name := range names {
+		entry, ok := cat.Lookup(name)
+		if !ok {
+			continue
 		}
 
-		// Apply annotations from upstream tool
-		if tool.Annotations != nil {
-			if tool.Annotations.Title != "" {
-				opts = append(opts, mcp.WithTitleAnnotation(tool.Annotations.Title))
+		rendered := fmt.Sprintf("[%s] %s", entry.ServerName, entry.Description)
+
+		var mcpTool mcp.Tool
+		if deferred {
+			suffix := p.directSignatureSuffix(entry)
+			if suffix == "" {
+				signatureMisses++
 			}
-			if tool.Annotations.ReadOnlyHint != nil {
-				opts = append(opts, mcp.WithReadOnlyHintAnnotation(*tool.Annotations.ReadOnlyHint))
-			}
-			if tool.Annotations.DestructiveHint != nil {
-				opts = append(opts, mcp.WithDestructiveHintAnnotation(*tool.Annotations.DestructiveHint))
-			}
-			if tool.Annotations.IdempotentHint != nil {
-				opts = append(opts, mcp.WithIdempotentHintAnnotation(*tool.Annotations.IdempotentHint))
-			}
-			if tool.Annotations.OpenWorldHint != nil {
-				opts = append(opts, mcp.WithOpenWorldHintAnnotation(*tool.Annotations.OpenWorldHint))
-			}
+			rendered += suffix
+			mcpTool = renderDeferredDirectTool(entry, rendered)
+		} else {
+			mcpTool = renderFullDirectTool(entry, rendered)
 		}
 
-		mcpTool := mcp.NewTool(directName, opts...)
-
-		// Apply input schema from upstream tool
-		if tool.ParamsJSON != "" {
-			var schema map[string]interface{}
-			if err := json.Unmarshal([]byte(tool.ParamsJSON), &schema); err == nil {
-				mcpTool.InputSchema = mcp.ToolInputSchema{
-					Type: "object",
-				}
-				if props, ok := schema["properties"].(map[string]interface{}); ok {
-					mcpTool.InputSchema.Properties = props
-				}
-				if req, ok := schema["required"].([]interface{}); ok {
-					reqStrings := make([]string, 0, len(req))
-					for _, r := range req {
-						if s, ok := r.(string); ok {
-							reqStrings = append(reqStrings, s)
-						}
-					}
-					mcpTool.InputSchema.Required = reqStrings
-				}
-			}
-		}
-
-		// Apply output schema from upstream tool so direct-mode tools/list preserves
-		// the full MCP tool contract exposed by the upstream server.
-		applyToolOutputSchemaJSON(&mcpTool, tool.OutputSchemaJSON)
+		// Captured at render time and never recomputed: the signature cache
+		// mutates independently of rebuilds, so re-rendering later to compare
+		// would report a cache warm/evict as a catalog change (D13 rule 5).
+		// In deferred mode this is the description WITH its signature suffix —
+		// what was actually registered, which is the only thing a later
+		// comparison can honestly be against.
+		entry.RenderedDescription = rendered
 
 		serverTools = append(serverTools, mcpserver.ServerTool{
 			Tool:    mcpTool,
-			Handler: p.makeDirectModeHandler(tool.ServerName, tool.Name, tool.Annotations),
+			Handler: p.makeDirectModeHandler(entry),
 		})
 	}
 
-	p.setDirectToolPermissions(directToolPerms)
-
 	p.logger.Info("built direct mode tools",
-		zap.Int("tool_count", len(serverTools)))
+		zap.Int("tool_count", len(serverTools)),
+		zap.Bool("schema_deferred", deferred),
+		zap.Int("signature_misses", signatureMisses))
 
 	return serverTools
 }
 
+// emptyDirectCatalog is the non-nil empty snapshot the failure paths publish,
+// carrying the mode this rebuild resolved. Non-nil matters (D13 rule 2): a nil
+// catalog tells the discovery filters "not built yet, do not deny" at exactly
+// the moment discovery is failing.
+func emptyDirectCatalog(mode string, logger *zap.Logger) *directCatalog {
+	cat := buildDirectCatalog(nil, logger)
+	cat.mode = mode
+	return cat
+}
+
+// renderFullDirectTool is the pre-Spec-102 rendering, moved verbatim out of the
+// loop and otherwise untouched (FR-015): with deferral off, direct-surface
+// tools/list payloads must stay byte-identical to pre-feature behavior.
+func renderFullDirectTool(entry *directCatalogEntry, description string) mcp.Tool {
+	opts := []mcp.ToolOption{mcp.WithDescription(description)}
+
+	if entry.Annotations != nil {
+		if entry.Annotations.Title != "" {
+			opts = append(opts, mcp.WithTitleAnnotation(entry.Annotations.Title))
+		}
+		if entry.Annotations.ReadOnlyHint != nil {
+			opts = append(opts, mcp.WithReadOnlyHintAnnotation(*entry.Annotations.ReadOnlyHint))
+		}
+		if entry.Annotations.DestructiveHint != nil {
+			opts = append(opts, mcp.WithDestructiveHintAnnotation(*entry.Annotations.DestructiveHint))
+		}
+		if entry.Annotations.IdempotentHint != nil {
+			opts = append(opts, mcp.WithIdempotentHintAnnotation(*entry.Annotations.IdempotentHint))
+		}
+		if entry.Annotations.OpenWorldHint != nil {
+			opts = append(opts, mcp.WithOpenWorldHintAnnotation(*entry.Annotations.OpenWorldHint))
+		}
+	}
+
+	mcpTool := mcp.NewTool(entry.DisplayName, opts...)
+
+	if entry.ParamsJSON != "" {
+		var schema map[string]interface{}
+		if err := json.Unmarshal([]byte(entry.ParamsJSON), &schema); err == nil {
+			mcpTool.InputSchema = mcp.ToolInputSchema{Type: "object"}
+			if props, ok := schema["properties"].(map[string]interface{}); ok {
+				mcpTool.InputSchema.Properties = props
+			}
+			if req, ok := schema["required"].([]interface{}); ok {
+				reqStrings := make([]string, 0, len(req))
+				for _, r := range req {
+					if str, ok := r.(string); ok {
+						reqStrings = append(reqStrings, str)
+					}
+				}
+				mcpTool.InputSchema.Required = reqStrings
+			}
+		}
+	}
+
+	applyToolOutputSchemaJSON(&mcpTool, entry.OutputSchemaJSON)
+
+	return mcpTool
+}
+
+// renderDeferredDirectTool builds one FR-004 deferred entry.
+//
+// mcp.NewTool CANNOT produce this wire shape: its marshaller always emits
+// "properties":{} and "required":[], which re-opens the arg-pruning hazard the
+// placeholder exists to close. So the schema goes in raw — and because
+// NewToolWithRawSchema accepts no ToolOptions and leaves InputSchema zero,
+// nothing here may touch mcpTool.InputSchema either: Tool.MarshalJSON returns
+// errToolSchemaConflict the moment RawInputSchema and a typed InputSchema.Type
+// are both set.
+//
+// outputSchema is deliberately not applied (FR-006/R2): a deferred entry
+// advertises no schema in either direction.
+func renderDeferredDirectTool(entry *directCatalogEntry, description string) mcp.Tool {
+	mcpTool := mcp.NewToolWithRawSchema(entry.DisplayName, description, json.RawMessage(deferredDirectInputSchema))
+	mcpTool.Annotations = directToolAnnotations(entry.Annotations)
+	return mcpTool
+}
+
+// directToolAnnotations reproduces, as a struct, exactly what the full-mode
+// mcp.NewTool + WithXAnnotation chain in renderFullDirectTool produces.
+//
+// This exists because NewToolWithRawSchema seeds NOTHING while NewTool seeds
+// readOnly=false, destructive=true, idempotent=false, openWorld=true before any
+// option runs — and mcp.Tool.MarshalJSON emits "annotations" unconditionally
+// (the field carries no omitempty). Copying only the upstream hints would
+// therefore marshal a different, usually near-empty, annotations object for the
+// same tool in deferred mode, breaking FR-004's "unchanged annotations" and
+// FR-008's cross-mode identity (D9).
+//
+// It is NOT used by the full path: FR-015 keeps that path byte-for-byte as it
+// was, and the two are pinned together by the cross-mode annotations test
+// rather than by sharing code.
+func directToolAnnotations(annotations *config.ToolAnnotations) mcp.ToolAnnotation {
+	out := mcp.ToolAnnotation{
+		Title:           "",
+		ReadOnlyHint:    mcp.ToBoolPtr(false),
+		DestructiveHint: mcp.ToBoolPtr(true),
+		IdempotentHint:  mcp.ToBoolPtr(false),
+		OpenWorldHint:   mcp.ToBoolPtr(true),
+	}
+
+	if annotations == nil {
+		return out
+	}
+
+	// Only a SET upstream hint overrides its default, mirroring the option
+	// chain, which appends an option only for a non-nil pointer.
+	if annotations.Title != "" {
+		out.Title = annotations.Title
+	}
+	if annotations.ReadOnlyHint != nil {
+		out.ReadOnlyHint = mcp.ToBoolPtr(*annotations.ReadOnlyHint)
+	}
+	if annotations.DestructiveHint != nil {
+		out.DestructiveHint = mcp.ToBoolPtr(*annotations.DestructiveHint)
+	}
+	if annotations.IdempotentHint != nil {
+		out.IdempotentHint = mcp.ToBoolPtr(*annotations.IdempotentHint)
+	}
+	if annotations.OpenWorldHint != nil {
+		out.OpenWorldHint = mcp.ToBoolPtr(*annotations.OpenWorldHint)
+	}
+
+	return out
+}
+
+// directSignatureSuffix returns the newline + bare tool name + Spec-085 compact
+// signature appended to a deferred description, or "" when no signature is
+// available.
+//
+// The lookup is Peek, never Get: Get compiles and memoizes on a miss, which
+// would put per-request compilation on the listing path FR-005 exists to keep
+// it off, and — worse — would hide the miss, since a caller that always gets a
+// Signature back cannot tell "warmed at index time" from "compiled just now".
+// On a miss the whole suffix is absent and the entry is otherwise unchanged:
+// never dropped, never delayed.
+//
+// The tool-name prefix is this renderer's job. toolsig.Signature.Sig is the
+// parenthesized parameter list alone and carries no name, so appending Sig by
+// itself would emit a bare "(owner*:str, …)" with nothing to attach it to.
+func (p *MCPProxyServer) directSignatureSuffix(entry *directCatalogEntry) string {
+	// A hashless entry cannot be looked up: the cache is keyed by the Spec-032
+	// per-tool hash, and "" is not a key any Warm ever wrote.
+	if p.sigCache == nil || entry.Hash == "" {
+		return ""
+	}
+
+	sig, ok := p.sigCache.Peek(entry.Hash)
+	if !ok || sig.Sig == "" {
+		return ""
+	}
+
+	return "\n" + entry.ToolName + sig.Sig
+}
+
 // makeDirectModeHandler creates a handler function for a direct mode tool.
 // It handles auth checks, permission enforcement, and upstream calls.
-func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, annotations *config.ToolAnnotations) mcpserver.ToolHandlerFunc {
+//
+// The handler closes over its OWN catalog entry (research.md R9). That is what
+// makes "a dispatch can never validate against a definition other than the one
+// its own registration advertised" literally true rather than a hope: the entry
+// is immutable after publication, and a rebuild produces new entries with new
+// handlers, so a request already in flight keeps the definition it was
+// dispatched under even as the catalog is swapped underneath it.
+//
+// Passing (serverName, toolName, annotations) instead — as this did before —
+// would have left US3's validator reading the schema of whatever the catalog
+// happens to hold when the call lands, which is precisely the skew D13 exists
+// to bound.
+func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpserver.ToolHandlerFunc {
+	serverName, toolName := entry.ServerName, entry.ToolName
+	annotations := entry.Annotations
+
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		startTime := time.Now()
 
@@ -237,9 +467,59 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			return blocked, nil
 		}
 
+		// Spec 102 US3 (FR-013): pre-dispatch argument validation, against the
+		// schema of THIS handler's own catalog entry.
+		//
+		// This is what bounds the cost of deferral. A deferred listing
+		// advertises `{"type":"object"}`, so an agent guesses its arguments from
+		// a compact signature; when the signature was lossy the guess can be
+		// wrong, and without this the agent learns that from an opaque upstream
+		// error and starts an unbounded debugging loop. Rejecting here, with the
+		// FULL stored schema attached, costs exactly one retry.
+		//
+		// The schema source is entry.ParamsJSON — the STORED upstream schema,
+		// never the placeholder the listing advertised, which would accept
+		// everything and validate nothing. It is also mode-INDEPENDENT: a
+		// full-mode client that guessed wrong gets the same help, because the
+		// validator never consults the serialization mode (US3 scenario 3).
+		//
+		// Validating `args` rather than `enrichedArgs`: injectAuthMetadata adds
+		// properties the upstream schema never declared, which a schema with
+		// additionalProperties:false would reject — turning our own bookkeeping
+		// into the agent's bug. Matches the call_tool_* path (mcp.go).
+		//
+		// Fail-open is inherited from the validator (FR-013b): an uncompilable
+		// or absent schema dispatches exactly as a schemaless proxy would.
+		if ok, verr, _ := p.inputValidator.validateArgs(entry.DisplayName, entry.Hash, entry.ParamsJSON, args); !ok {
+			detail := oneLineValidationDetail(verr)
+			errMsg := fmt.Sprintf("invalid arguments for %s: %s", entry.DisplayName, detail)
+			p.logger.Debug("direct mode: pre-dispatch argument validation failed",
+				zap.String("server_name", serverName),
+				zap.String("tool_name", toolName),
+				zap.String("detail", detail))
+
+			// The started/completed-error PAIR, not a bare rejection. A call
+			// rejected here never reaches the unconditional
+			// emitActivityToolCallStarted below, so without this the funnel
+			// would show the call never happening at all — precisely the
+			// observability blind spot issue #969 established this handler must
+			// not have. Shapes match the sibling upstream-error emission a few
+			// lines down, so the two are one series to a consumer.
+			p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
+			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", errMsg,
+				time.Since(startTime).Milliseconds(), enrichedArgs, "", false, "", nil,
+				contracts.ContentTrustForTool(annotations), "", 0, 0, "", nil, "")
+
+			return invalidParamsErrorResult(entry.DisplayName, entry.ParamsJSON, detail), nil
+		}
+
 		// Spec 082: a direct tool call is real work — it earns the session a
 		// durable record, and does so BEFORE any activity is emitted so the
 		// records carry the right work session.
+		//
+		// Deliberately AFTER validation: a call rejected for bad arguments did
+		// no work upstream, so it does not earn a durable work session, exactly
+		// like the policy blocks above it.
 		p.markSessionWorked(ctx, sessionID)
 
 		// Emit activity event
@@ -590,6 +870,71 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 // initRoutingModeServers creates separate MCP server instances for each routing mode.
 // Each server instance has its own set of tools registered appropriate for that mode.
 // The main "server" field remains the retrieve_tools mode server (default).
+// defaultDirectInstructions is the direct surface's own initialize
+// instructions, used when the operator configured none (Spec 102 FR-007/D16).
+//
+// It is deliberately NOT resolveInstructions' defaultInstructions. That text
+// tells agents to "Use 'retrieve_tools'", to call 'call_tool_read/write/
+// destructive', and to reach for 'upstream_servers' — none of which
+// buildDirectModeTools registers. Advertising a workflow this surface cannot
+// serve is worse than saying nothing: the agent's first move fails with an
+// unknown tool. So this names only what is actually here: 'server__tool'
+// calling and 'describe_tool'.
+//
+// Naming 'describe_tool' is safe only because it IS registered on this surface
+// (withDirectBuiltins, on every rebuild path). If that ever stops being true,
+// this string is the second place to fix.
+const defaultDirectInstructions = "This is mcpproxy-go, an MCP aggregator proxy that connects multiple upstream MCP servers. " +
+	"This endpoint lists every tool of every connected server directly. " +
+	"CALLING: each upstream tool appears under its own 'server__tool' name — call it by that name. " +
+	"SCHEMAS: call 'describe_tool' with a listed tool name to get its full input schema. " +
+	// Discussion #948: carry the project links at the protocol level, matching
+	// the default server's instructions.
+	"ABOUT: MCPProxy homepage " + branding.Homepage + ", source " + branding.Repo + ", docs " + branding.Docs + "."
+
+// directDeferralLegend explains the compact-signature convention in-band
+// (FR-007). It is static across both serialization modes and phrased
+// conditionally ("Some tool descriptions…") so it stays true in full mode,
+// where no entry carries a signature — the alternative, emitting it only under
+// deferral, would make the initialize response depend on a serialization
+// setting and give clients two shapes to cache instead of one.
+const directDeferralLegend = "Some tool descriptions end with a compact signature `(param*:type, ...)`: " +
+	"`*` marks a required parameter and `~` marks collapsed/lossy details. " +
+	"When a signature is present the listed inputSchema is a placeholder, not the real schema — " +
+	"flat signatures are directly callable, and for `~`-marked tools call 'describe_tool' " +
+	"with the listed tool name to get the full schema."
+
+// resolveDirectInstructions composes the direct server's initialize
+// instructions: the operator's configured value when non-empty, otherwise the
+// direct-specific default, then a blank line and the deferral legend.
+//
+// The custom branch matters (D11): without it, attaching instructions to this
+// server would make the operator-configurable `instructions` key silently
+// unreachable on the direct surface — a regression dressed up as a feature.
+//
+// Resolved at server-CONSTRUCTION time, not per request: mcp-go fixes
+// WithInstructions on the server instance. That matches the default server
+// (mcp.go's NewMCPProxyServer), so editing `instructions` needs a restart on
+// both surfaces — deliberately unlike the serialization mode, which is read
+// live per rebuild because FR-001 requires it to be hot-reloadable.
+func resolveDirectInstructions(custom string) string {
+	base := custom
+	if base == "" {
+		base = defaultDirectInstructions
+	}
+	return base + "\n\n" + directDeferralLegend
+}
+
+// directCustomInstructions reads the operator's configured instructions,
+// tolerating a nil config the way the rest of initRoutingModeServers' callers
+// do not have to (unit tests construct bare proxies).
+func directCustomInstructions(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Instructions
+}
+
 func (p *MCPProxyServer) initRoutingModeServers() {
 	// All routing mode servers share the same hooks for session tracking
 	opts := []mcpserver.ServerOption{
@@ -624,6 +969,10 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	directOpts = append(directOpts,
 		mcpserver.WithToolFilter(p.filterDirectModeToolsForAuth),
 		mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability),
+		// FR-007: the in-band convention channel. Until now no routing-mode
+		// server carried instructions at all — only the default retrieve_tools
+		// server did — so this changes the direct server's initialize response.
+		mcpserver.WithInstructions(resolveDirectInstructions(directCustomInstructions(p.config))),
 	)
 	p.directServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
@@ -657,12 +1006,74 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		p.callToolServer.AddTool(st.Tool, st.Handler)
 	}
 
-	// Note: Direct mode tools are built lazily/on-demand via RefreshDirectModeTools
-	// because upstream servers may not be connected yet during initialization.
-	// The servers.changed event will trigger a refresh.
+	// Initial direct rebuild (D15). Done by CALLING RefreshDirectModeTools so
+	// there is exactly ONE publisher and one copy of the SetTools-then-publish
+	// ordering — a second inline copy here would be the obvious way to introduce
+	// the mismatch that ordering exists to prevent.
+	//
+	// Upstreams are typically not connected yet, so this registers the built-ins
+	// and publishes an EMPTY catalog. Both matter: FR-009 needs describe_tool on
+	// the surface from the first request rather than from the first upstream
+	// reconcile, and a published (non-nil) catalog puts the discovery filters in
+	// deny-on-miss immediately instead of leaving them permissive until then.
+	p.RefreshDirectModeTools()
 
 	p.logger.Info("routing mode servers initialized",
 		zap.String("default_mode", p.config.RoutingMode))
+}
+
+// directSerializationDrifted reports whether the live effective direct
+// serialization differs from the one the PUBLISHED catalog was rendered with
+// (Spec 102 FR-014 / T068).
+//
+// The comparison is against the snapshot, not against a remembered config
+// value, because only the snapshot knows what connected clients were actually
+// served. Reading the live side through currentConfig() — never
+// construction-time p.config — is what makes a hot reload visible here at all.
+//
+// A nil catalog is deliberately NOT drift. Nothing is published, so there is no
+// "what we served" to compare against, and answering true would rebuild the
+// whole surface on every unrelated config reload — the churn FR-014 forbids. In
+// production the window does not exist: the constructor publishes a catalog
+// before serving its first request (D15/T025), and a nil one would still be
+// filled by the next servers.changed.
+func (p *MCPProxyServer) directSerializationDrifted() bool {
+	cat := p.loadDirectCatalog()
+	if cat == nil {
+		return false
+	}
+	return cat.Mode() != p.effectiveDirectToolResponseMode()
+}
+
+// RefreshDirectModeToolsOnSerializationChange rebuilds the direct surface iff
+// the operator's serialization choice has actually moved.
+//
+// Exported for the config.reloaded listener, which must not simply call
+// RefreshDirectModeTools: that would re-register every tool and push a
+// notifications/tools/list_changed to every connected client on any config edit
+// at all — a "no changes for you" reload that looks, to a client, exactly like
+// the tool set having changed.
+func (p *MCPProxyServer) RefreshDirectModeToolsOnSerializationChange() {
+	if p.directServer == nil {
+		return
+	}
+
+	// The drift check and the rebuild it authorizes must be ONE critical
+	// section. Checking outside the lock lets two concurrent reloads both
+	// observe drift, then serialize inside RefreshDirectModeTools and publish
+	// two generations — the second no longer justified by any flip, and pushing
+	// a second notifications/tools/list_changed to every client. That is the
+	// churn the guard exists to prevent, reintroduced by the guard's own
+	// racy read.
+	p.directRefreshMu.Lock()
+	defer p.directRefreshMu.Unlock()
+
+	if !p.directSerializationDrifted() {
+		return
+	}
+	p.logger.Info("direct serialization mode changed; rebuilding the direct tool surface",
+		zap.String("mode", p.effectiveDirectToolResponseMode()))
+	p.refreshDirectModeToolsLocked()
 }
 
 // RefreshDirectModeTools rebuilds the direct mode server's tool set.
@@ -672,17 +1083,59 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 		return
 	}
 
-	directTools := p.buildDirectModeTools()
+	// Serialize rebuilds. Today there is exactly one caller — the single serial
+	// event loop in listenForRoutingModeRefresh — so this lock is uncontended.
+	// It is here because this feature's own roadmap adds two more callers: the
+	// initial rebuild in initRoutingModeServers (on the CONSTRUCTOR goroutine,
+	// not the listener's) and the config.reloaded branch. Without it, two
+	// concurrent rebuilds can interleave as SetTools(A), SetTools(B),
+	// publish(A) — leaving catalog A paired with tool map B, which is exactly
+	// the mismatch the SetTools-then-publish ordering exists to prevent.
+	p.directRefreshMu.Lock()
+	defer p.directRefreshMu.Unlock()
 
-	// Convert to the format needed by SetTools
+	p.refreshDirectModeToolsLocked()
+}
+
+// refreshDirectModeToolsLocked is the rebuild body. The caller MUST hold
+// directRefreshMu — split out so the reload guard can hold the lock across its
+// drift check and the rebuild that check authorizes.
+func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
+	directTools, cat := p.buildDirectModeTools()
+
 	serverTools := make([]mcpserver.ServerTool, len(directTools))
 	copy(serverTools, directTools)
 
-	// Replace all tools atomically
+	// ORDER IS LOAD-BEARING (D13 rule 1). SetTools lands the registry first, the
+	// catalog is published immediately after. The two are separate publications
+	// and cannot be made one transaction — mcp-go owns its registry read — so the
+	// guarantee is directional rather than atomic.
+	//
+	// What the window actually exposes, measured in mcp_direct_skew_test.go
+	// rather than assumed:
+	//
+	//   - An ADDED name is in the registry first. A SCOPED session is filtered
+	//     through the catalog and sees nothing; an UNSCOPED one short-circuits
+	//     both filters and is served the raw registry, so it sees the name while
+	//     describe still answers not_found. Listed-but-undescribable — the safe
+	//     direction, for a session entitled to the whole surface anyway.
+	//   - A REMOVED name leaves the registry first, so the previous catalog can
+	//     still describe it for the width of the window. Stale, not a
+	//     disclosure: the same session could have described it one request
+	//     earlier, and gets the definition it was already served.
+	//
+	// Both close at the publish. The three accepted residuals (T002/T003) are
+	// the schema- and annotations-only changes, which are invisible in the
+	// listing by construction.
 	p.directServer.SetTools(serverTools...)
+	if p.directRebuildPause != nil {
+		p.directRebuildPause()
+	}
+	p.publishDirectCatalog(cat)
 
 	p.logger.Info("refreshed direct mode tools",
-		zap.Int("tool_count", len(directTools)))
+		zap.Int("tool_count", len(directTools)),
+		zap.Uint64("catalog_generation", cat.Generation()))
 }
 
 // RefreshCodeExecModeTools rebuilds the code execution mode server's tool catalog description.

@@ -354,10 +354,10 @@ func TestE2E_SensitiveData_RESTAPIFilterSensitiveData(t *testing.T) {
 				"detection_count": 1,
 				"detections": []interface{}{
 					map[string]interface{}{
-						"type":            "aws_access_key",
-						"category":        "cloud_credentials",
-						"severity":        "critical",
-						"location":        "arguments",
+						"type":              "aws_access_key",
+						"category":          "cloud_credentials",
+						"severity":          "critical",
+						"location":          "arguments",
 						"is_likely_example": true,
 					},
 				},
@@ -529,10 +529,10 @@ func TestE2E_SensitiveData_DetectionMetadata(t *testing.T) {
 				"detection_count": 3,
 				"detections": []interface{}{
 					map[string]interface{}{
-						"type":            "aws_access_key",
-						"category":        "cloud_credentials",
-						"severity":        "critical",
-						"location":        "arguments",
+						"type":              "aws_access_key",
+						"category":          "cloud_credentials",
+						"severity":          "critical",
+						"location":          "arguments",
 						"is_likely_example": true,
 					},
 					map[string]interface{}{

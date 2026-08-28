@@ -54,17 +54,18 @@ import (
 )
 
 var (
-	configFile        string
-	dataDir           string
-	listen            string
-	trayEndpoint      string
-	enableSocket      bool
-	logLevel          string
-	debugSearch       bool
-	toolResponseLimit int
-	toolResponseMode  string
-	logToFile         bool
-	logDir            string
+	configFile             string
+	dataDir                string
+	listen                 string
+	trayEndpoint           string
+	enableSocket           bool
+	logLevel               string
+	debugSearch            bool
+	toolResponseLimit      int
+	toolResponseMode       string
+	directToolResponseMode string
+	logToFile              bool
+	logDir                 string
 
 	// Security flags
 	requireMCPAuth           bool
@@ -139,6 +140,7 @@ func main() {
 	serverCmd.Flags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	serverCmd.Flags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
 	serverCmd.Flags().StringVar(&toolResponseMode, "tool-response-mode", "", "retrieve_tools serialization mode: full (default) or compact (Spec 085)")
+	serverCmd.Flags().StringVar(&directToolResponseMode, "direct-tool-response-mode", "", "direct-surface serialization mode: full (default) or deferred (Spec 102)")
 	serverCmd.Flags().BoolVar(&requireMCPAuth, "require-mcp-auth", false, "Require authentication on /mcp endpoint (agent tokens or API key)")
 	serverCmd.Flags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
 	serverCmd.Flags().BoolVar(&disableManagement, "disable-management", false, "Disable management features")
@@ -767,6 +769,7 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 		cfg.ToolResponseLimit = toolResponseLimit
 	}
 	applyToolResponseModeFlag(cfg, cmd.Flags().Changed("tool-response-mode"), toolResponseMode)
+	applyDirectToolResponseModeFlag(cfg, cmd.Flags().Changed("direct-tool-response-mode"), directToolResponseMode)
 
 	// Validate the configuration
 	if err := cfg.Validate(); err != nil {
@@ -784,6 +787,18 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 func applyToolResponseModeFlag(cfg *config.Config, changed bool, mode string) {
 	if changed {
 		cfg.ToolResponseMode = mode
+	}
+}
+
+// applyDirectToolResponseModeFlag applies the --direct-tool-response-mode serve
+// flag onto the loaded config (Spec 102 FR-001). Same contract as its
+// retrieve_tools sibling above: only an explicitly set flag overrides the
+// file/env value, so an unset flag never clobbers
+// MCPPROXY_DIRECT_TOOL_RESPONSE_MODE or the config file, and cfg.Validate()
+// rejects invalid values with a direct_tool_response_mode error.
+func applyDirectToolResponseModeFlag(cfg *config.Config, changed bool, mode string) {
+	if changed {
+		cfg.DirectToolResponseMode = mode
 	}
 }
 

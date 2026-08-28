@@ -64,6 +64,27 @@ func (p *MCPProxyServer) effectiveToolResponseMode(detail string) string {
 	return config.ToolResponseModeFull
 }
 
+// effectiveDirectToolResponseMode resolves the DIRECT enumeration surface's
+// serialization mode for one rebuild (Spec 102 FR-001). A separate axis from
+// effectiveToolResponseMode above — that one governs retrieve_tools, this one
+// governs /mcp/all (and /mcp plus the legacy aliases under routing_mode
+// "direct") — and there is no per-call override to weigh, because the direct
+// surface exposes no `detail` argument.
+//
+// Like its sibling it reads the LIVE snapshot via currentConfig(), never the
+// construction-time p.config: the mode the catalog was built with is what
+// FR-014's hot-reload guard later compares against, so a renderer reading a
+// stale config would make that comparison meaningless. The empty value is the
+// documented default (config.go's DirectToolResponseModeFull) — nothing in the
+// non-test tree ever assigns it — so "" must resolve to full rather than fall
+// through to an unknown-mode branch.
+func (p *MCPProxyServer) effectiveDirectToolResponseMode() string {
+	if cfg := p.currentConfig(); cfg != nil && cfg.DirectToolResponseMode != "" {
+		return cfg.DirectToolResponseMode
+	}
+	return config.DirectToolResponseModeFull
+}
+
 // profileScopeForSlug builds a ProfileScope for the named profile from the live
 // config, or returns nil when the slug does not match a configured profile.
 func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope {

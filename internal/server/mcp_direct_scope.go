@@ -8,6 +8,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // requiredPermissionForDirectTool derives the agent-token permission a direct
@@ -17,30 +18,6 @@ import (
 // enforcement.
 func requiredPermissionForDirectTool(annotations *config.ToolAnnotations) string {
 	return contracts.ToolVariantToOperationType[contracts.DeriveCallWith(annotations)]
-}
-
-func (p *MCPProxyServer) setDirectToolPermissions(perms map[string]string) {
-	p.directToolPermsMu.Lock()
-	defer p.directToolPermsMu.Unlock()
-
-	if len(perms) == 0 {
-		p.directToolPerms = nil
-		return
-	}
-
-	copied := make(map[string]string, len(perms))
-	for name, perm := range perms {
-		copied[name] = perm
-	}
-	p.directToolPerms = copied
-}
-
-func (p *MCPProxyServer) lookupDirectToolPermission(directName string) (string, bool) {
-	p.directToolPermsMu.RLock()
-	defer p.directToolPermsMu.RUnlock()
-
-	perm, ok := p.directToolPerms[directName]
-	return perm, ok
 }
 
 // filterDirectModeToolsForAuth filters tools/list for scoped agent tokens and
@@ -72,31 +49,50 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
-		serverName, _, ok := ParseDirectToolName(tool.Name)
-		if !ok {
+		// Resolve through the catalog, NOT by re-parsing the display name.
+		// ParseDirectToolName splits on the first "__", which mis-splits a server
+		// name that itself contains "__" — so this filter could scope-check one
+		// origin while dispatch executed another. The catalog resolves by the same
+		// mapping the handler was registered from (D10/FR-011).
+		entry, decision := p.resolveDirectTool(tool.Name)
+
+		switch decision {
+		case directResolveBuiltin:
+			// A tool this proxy serves itself. It has no owning upstream server,
+			// so neither profile scope nor token server-scope applies.
 			filtered = append(filtered, tool)
 			continue
-		}
-
-		if !profileScope.Allows(serverName) {
+		case directResolveDenied:
+			// A catalog exists and does not admit this name: an unknown tool, or
+			// one withheld for a display-name collision. Dropping it is the point
+			// — re-parsing would pick an origin the catalog refused to choose.
 			continue
-		}
-
-		if !isScopedAgent {
+		case directResolveNoCatalog:
+			// Nothing published yet — a proxy still coming up. Fall back to the
+			// pre-catalog behaviour rather than deny, or startup would serve an
+			// empty listing to everyone.
+			//
+			// The parse cannot fail here: resolveDirectTool already classified a
+			// separator-less name as a built-in, so anything reaching this branch
+			// has a "__" in it.
+			serverName, _, _ := ParseDirectToolName(tool.Name)
+			if !profileScope.Allows(serverName) {
+				continue
+			}
+			if isScopedAgent {
+				// With no catalog there is no permission tier to check, and the
+				// retired directToolPermissions map behaved identically — a
+				// missing tier DROPPED the tool. Failing closed on an unknown
+				// tier is the safe direction, and this window is one rebuild
+				// long.
+				continue
+			}
 			filtered = append(filtered, tool)
 			continue
+		case directResolveFound:
 		}
 
-		if !authCtx.CanAccessServer(serverName) {
-			continue
-		}
-
-		requiredPerm, ok := p.lookupDirectToolPermission(tool.Name)
-		if !ok {
-			continue
-		}
-
-		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
+		if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
 			continue
 		}
 
@@ -104,6 +100,44 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 	}
 
 	return filtered
+}
+
+// directEntryInScope is the scope+tier half of the direct listing gate, factored
+// out of the loop above so describe_tool can apply the SAME test rather than a
+// second copy of it (Spec 102 FR-011/SC-007).
+//
+// Sharing it is the point: listing-parity is the whole contract of describe on
+// this surface — no id may be describable-but-unlisted, and none listed-but-
+// undescribable — and a mirrored predicate is exactly how that drifts. The
+// remaining half (agent callability) is directEntryCallable below.
+func directEntryInScope(
+	authCtx *auth.AuthContext,
+	profileScope *profile.ProfileScope,
+	isScopedAgent bool,
+	entry *directCatalogEntry,
+) bool {
+	if entry == nil {
+		return false
+	}
+	if !profileScope.Allows(entry.ServerName) {
+		return false
+	}
+	if !isScopedAgent {
+		return true
+	}
+	if !authCtx.CanAccessServer(entry.ServerName) {
+		return false
+	}
+	// The tier is the catalog entry's, derived from UPSTREAM annotations
+	// exactly as dispatch derives it. Deriving it from the registered
+	// mcp.Tool would read mcp-go's NewTool defaults — destructiveHint=true on
+	// essentially every tool — and hide the catalog from read- and
+	// write-scoped tokens while dispatch happily allowed the same calls
+	// (D13 rule 3).
+	if entry.RequiredPermission != "" && !authCtx.HasPermission(entry.RequiredPermission) {
+		return false
+	}
+	return true
 }
 
 // builtinPromptNames is the set of prompt display names mcpproxy serves itself

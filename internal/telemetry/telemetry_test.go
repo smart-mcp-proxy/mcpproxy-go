@@ -16,22 +16,28 @@ import (
 
 // mockRuntimeStats implements RuntimeStats for testing.
 type mockRuntimeStats struct {
-	serverCount           int
-	connectedCount        int
-	toolCount             int
-	routingMode           string
-	quarantine            bool
-	dockerAvailable       bool
-	dockerIsolatedServers int
-	dockerCLISource       string
+	serverCount            int
+	connectedCount         int
+	toolCount              int
+	routingMode            string
+	quarantine             bool
+	dockerAvailable        bool
+	dockerIsolatedServers  int
+	dockerCLISource        string
+	toolResponseMode       string
+	directToolResponseMode string
 }
 
 func (m *mockRuntimeStats) GetServerCount() int          { return m.serverCount }
 func (m *mockRuntimeStats) GetConnectedServerCount() int { return m.connectedCount }
 func (m *mockRuntimeStats) GetToolCount() int            { return m.toolCount }
 func (m *mockRuntimeStats) GetRoutingMode() string       { return m.routingMode }
-func (m *mockRuntimeStats) IsQuarantineEnabled() bool    { return m.quarantine }
-func (m *mockRuntimeStats) IsDockerAvailable() bool      { return m.dockerAvailable }
+func (m *mockRuntimeStats) GetToolResponseMode() string  { return m.toolResponseMode }
+func (m *mockRuntimeStats) GetDirectToolResponseMode() string {
+	return m.directToolResponseMode
+}
+func (m *mockRuntimeStats) IsQuarantineEnabled() bool { return m.quarantine }
+func (m *mockRuntimeStats) IsDockerAvailable() bool   { return m.dockerAvailable }
 func (m *mockRuntimeStats) GetDockerIsolatedServerCount() int {
 	return m.dockerIsolatedServers
 }
@@ -306,16 +312,16 @@ func TestEnsureAnonymousID(t *testing.T) {
 // once the Spec 080 funnel/churn fields ship. This is a tripwire against
 // accidental downgrades.
 func TestSchemaVersionV7(t *testing.T) {
-	if SchemaVersion != 9 {
-		t.Fatalf("SchemaVersion = %d, want 9", SchemaVersion)
+	if SchemaVersion != 10 {
+		t.Fatalf("SchemaVersion = %d, want 10", SchemaVersion)
 	}
 
 	cfg := &config.Config{}
 	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
 	svc.SetRuntimeStats(&mockRuntimeStats{})
 	payload := svc.BuildPayload()
-	if payload.SchemaVersion != 9 {
-		t.Errorf("payload.SchemaVersion = %d, want 9", payload.SchemaVersion)
+	if payload.SchemaVersion != 10 {
+		t.Errorf("payload.SchemaVersion = %d, want 10", payload.SchemaVersion)
 	}
 }
 
@@ -475,8 +481,10 @@ func TestAnonymousIDStable_V2ToV3(t *testing.T) {
 	if p1.AnonymousID != p2.AnonymousID {
 		t.Errorf("anonymous_id drifted between builds: %q vs %q", p1.AnonymousID, p2.AnonymousID)
 	}
-	// SchemaVersion is 9 after the v9 TPA funnel counters + trust_mode_distribution.
-	if p1.SchemaVersion != 9 {
-		t.Errorf("schema_version = %d, want 9 (v9 TPA funnel additions)", p1.SchemaVersion)
+	// A floor, not an equality: this test is about the anonymous id staying
+	// stable across builds, and pinning an exact schema version makes every
+	// future bump edit an assertion that has nothing to do with what it checks.
+	if p1.SchemaVersion < 9 {
+		t.Errorf("schema_version = %d, want >= 9 (v9 TPA funnel additions)", p1.SchemaVersion)
 	}
 }

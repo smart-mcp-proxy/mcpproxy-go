@@ -351,6 +351,19 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	return ready, nil
 }
 
+// NotFound builds the canonical not_found result for an id, WITHOUT consulting
+// any reader.
+//
+// It exists for surfaces that decide visibility before evaluation rather than
+// during it (spec 102's direct describe_tool, whose permission-tier and
+// display-name-collision gates are not preflight concepts). Such a surface must
+// answer a gated id with exactly the bytes an absent id produces — otherwise
+// the gate itself becomes the disclosure FR-013 exists to prevent — so it
+// shares this constructor rather than hand-assembling a lookalike.
+func NotFound(id string) Result {
+	return unavailable(id, ReasonNotFound, detailNotFound)
+}
+
 // unavailable builds a failure result from the taxonomy defaults.
 func unavailable(id string, reason Reason, detail string) Result {
 	return Result{

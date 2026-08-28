@@ -179,6 +179,20 @@ func TestFilterDirectToolsForAgentCallability_AgentOnly(t *testing.T) {
 		{Name: FormatDirectToolName("github", "config_disabled")},
 	}
 
+	// Spec 102: the filter resolves through the published catalog, and since
+	// T025 the constructor publishes an EMPTY one at init. Handing the filter
+	// tools that are absent from the catalog is no longer a realistic state —
+	// in production a tool reaching a filter came from the registry, which
+	// SetTools populates alongside the catalog — and an empty catalog correctly
+	// denies every name (D13 rule 2). Publish the catalog these tools belong to,
+	// so the test exercises CALLABILITY rather than catalog membership.
+	publishPermsCatalog(proxy, map[string]string{
+		FormatDirectToolName("github", "allowed"):         auth.PermRead,
+		FormatDirectToolName("github", "disabled"):        auth.PermRead,
+		FormatDirectToolName("github", "pending"):         auth.PermRead,
+		FormatDirectToolName("github", "config_disabled"): auth.PermRead,
+	})
+
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
 		AgentName:      "agent",

@@ -817,7 +817,6 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedAddedTools); err != nil {
 			return fmt.Errorf("failed to index added tools: %w", err)
 		}
-		r.warmSignatureCache(allowedAddedTools)
 	}
 
 	// 4. Re-index modified tools (excluding blocked)
@@ -839,8 +838,25 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedModifiedTools); err != nil {
 			return fmt.Errorf("failed to re-index modified tools: %w", err)
 		}
-		r.warmSignatureCache(allowedModifiedTools)
 	}
+
+	// 5. Warm the signature cache for every tool this server still serves —
+	// deliberately the WHOLE allowed set, not just what steps 3 and 4 touched.
+	//
+	// The narrow form (warming only added/modified tools) left the cache
+	// permanently empty on any restart against an existing index: the
+	// differential update finds nothing to do, so neither branch ran and nothing
+	// was ever warmed. Spec 085 did not notice, because its compact
+	// retrieve_tools reads through the COMPILING accessor and merely paid a
+	// first-call compile. Spec 102's deferred direct listing reads through Peek,
+	// which never compiles — so every entry silently lost its compact signature
+	// after a restart while the listing still looked well-formed. Found by live
+	// verification, not by a unit test; see
+	// TestApplyDifferentialToolUpdate_WarmsUnchangedToolsOnRestart.
+	//
+	// Idempotent and cheap: Warm returns on the first cache hit, so the steady
+	// state is one map lookup per tool per discovery.
+	r.warmSignatureCache(filterBlockedTools(newTools, approvalResult.BlockedTools))
 
 	// If the shared index changed for this server, refresh the per-profile indexes
 	// that include it (Profiles v2, Spec 057). Profiles without this server are
@@ -852,6 +868,32 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		// Evict signature-cache entries orphaned by removed/redefined tools —
 		// warming above only ever ADDS entries.
 		r.reconcileSignatureCache()
+
+		// Tell the routing-mode surfaces that a tool DEFINITION moved, not just
+		// that the server list did. Two live-verified bugs share this gap:
+		//
+		//   1. On a first-ever start the direct surface is rebuilt when the
+		//      server connects, which is BEFORE indexing warms the signature
+		//      cache — so every deferred entry rendered with a Peek miss and
+		//      shipped with no compact signature at all, permanently. An agent
+		//      then had the schema taken away and got nothing in exchange. It
+		//      healed only on the next unrelated servers.changed, and a restart
+		//      hid it entirely because the cache was already warm.
+		//   2. After a rug-pull the catalog kept the OLD schema forever, so
+		//      pre-dispatch validation rejected correct arguments and
+		//      describe_tool handed back the same stale schema — turning the
+		//      self-healing path into the unbounded loop it exists to prevent.
+		//
+		// Emitting here closes both: the direct rebuild re-renders from the
+		// freshly indexed definitions with a warm cache. It is guarded by
+		// `changed`, so an idle discovery sweep that found nothing new still
+		// emits nothing.
+		r.emitServersChanged("tools_changed", map[string]any{
+			"server":   serverName,
+			"added":    len(addedTools),
+			"modified": len(modifiedTools),
+			"removed":  len(removedTools),
+		})
 	}
 
 	return nil
@@ -1291,6 +1333,26 @@ func (r *Runtime) SaveConfiguration() error {
 		zap.Int("old_server_count", oldServerCount),
 		zap.Int("new_server_count", len(latestServers)),
 		zap.String("config_path", snapshot.Path))
+
+	// Telemetry keeps its OWN pointer to the live config (Service.config), and
+	// several heartbeat sections are computed from it rather than from the
+	// runtime: server_protocol_counts, trust_mode_distribution and the whole
+	// feature_flags block. That pointer moves only on NotifyConfigChanged, which
+	// until now was called from ApplyConfig and ReloadConfiguration but NOT from
+	// here — the path every server add/remove takes, whether it arrives via the
+	// REST API or the upstream_servers tool.
+	//
+	// The effect was silent and systematic: a fleet built up through the API
+	// reported {stdio:0, http:0, …} and an all-zero trust distribution until
+	// some UNRELATED edit to the config file happened to trigger a reload. The
+	// counts were not filtered or sampled — they were stale, and stale in the
+	// direction that makes adoption look like non-adoption.
+	//
+	// Fire-and-forget and cheap (a guarded pointer swap), matching the two
+	// existing call sites.
+	if r.telemetryService != nil {
+		r.telemetryService.NotifyConfigChanged(r.Config())
+	}
 
 	// Emit config.saved event to notify subscribers (Web UI, tray, etc.)
 	r.emitConfigSaved(snapshot.Path)

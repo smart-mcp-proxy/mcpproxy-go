@@ -59,10 +59,28 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	evaluator := newDirectCallabilityEvaluator(p)
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
-		serverName, toolName, ok := ParseDirectToolName(tool.Name)
-		if !ok {
+		// Same catalog resolution as filterDirectModeToolsForAuth (D10). The two
+		// filters run over the same listing, so if they resolved names
+		// differently — one by catalog, one by first-"__" parse — a server whose
+		// name contains "__" could be scope-checked as one origin and
+		// callability-checked as another.
+		entry, decision := p.resolveDirectTool(tool.Name)
+
+		var serverName, toolName string
+		switch decision {
+		case directResolveBuiltin:
+			// Built-ins are this proxy's own tools; there is no upstream
+			// approval record to evaluate.
 			filtered = append(filtered, tool)
 			continue
+		case directResolveDenied:
+			continue
+		case directResolveNoCatalog:
+			// The parse cannot fail: a separator-less name was already classified
+			// as a built-in above.
+			serverName, toolName, _ = ParseDirectToolName(tool.Name)
+		case directResolveFound:
+			serverName, toolName = entry.ServerName, entry.ToolName
 		}
 
 		if evaluator.evaluate(serverName, toolName).callable {
@@ -71,6 +89,24 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	}
 
 	return filtered
+}
+
+// directEntryCallable is the agent-callability half of the direct listing gate,
+// for callers that already hold a resolved catalog entry (Spec 102 US2).
+//
+// Non-agent sessions are unfiltered here, exactly as the loop above leaves them:
+// the direct listing deliberately RETAINS tool-level pending/changed/disabled
+// states for an operator, and describe_tool must therefore keep describing them
+// — a listed tool is never undescribable (SC-007). Only agent tokens, which
+// cannot see those tools in their own listing, are gated.
+func (p *MCPProxyServer) directEntryCallable(authCtx *auth.AuthContext, entry *directCatalogEntry) bool {
+	if entry == nil {
+		return false
+	}
+	if authCtx == nil || authCtx.Type != auth.AuthTypeAgent {
+		return true
+	}
+	return newDirectCallabilityEvaluator(p).evaluate(entry.ServerName, entry.ToolName).callable
 }
 
 // directToolCallabilityBlock returns a policy response when a direct-mode tool
