@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"github.com/mark3labs/mcp-go/client/transport"
 )
 
 // Classify maps a raw error to a stable Code. It prefers typed-error inspection
@@ -354,11 +356,19 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 	}
 
 	// A 4xx on the streamable-HTTP `initialize` POST is the legacy-SSE
-	// signature, not an auth or routing failure — the upstream layer says so in
-	// as many words. Matched BEFORE the generic status-text fallback below,
-	// which would otherwise claim it as a bare MCPX_HTTP_404/403 and send the
-	// user hunting for a credential problem that does not exist.
-	if strings.Contains(lmsg, "likely a legacy sse server") ||
+	// signature, not an auth or routing failure. Matched BEFORE the generic
+	// status-text fallback below, which would otherwise claim it as a bare
+	// MCPX_HTTP_404/403 and send the user hunting for a credential problem that
+	// does not exist.
+	//
+	// The typed check first: this error is mcp-go's exported sentinel, NOT one
+	// of our own strings, so a library bump can reword it at any time. The
+	// substring fallback stays because the upstream layer commonly stringifies
+	// the error before it reaches us, which breaks the errors.Is chain.
+	// TestLegacySSESentinelStillMatches pins the vendored wording so that bump
+	// fails a test instead of silently regressing this code to MCPX_HTTP_404.
+	if errors.Is(err, transport.ErrLegacySSEServer) ||
+		strings.Contains(lmsg, "likely a legacy sse server") ||
 		(strings.Contains(lmsg, "4xx for initialize") && strings.Contains(lmsg, "post")) {
 		return HTTPLegacySSE
 	}

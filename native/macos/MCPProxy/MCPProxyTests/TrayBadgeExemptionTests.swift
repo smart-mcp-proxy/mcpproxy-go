@@ -132,6 +132,65 @@ final class TrayBadgeExemptionTests: XCTestCase {
                        "nothing is badged, so nothing may be counted")
     }
 
+    /// The composition the whole fix set rests on, and the one shape that was
+    /// untested: new servers are quarantined by default
+    /// (`config_load_admission_gate.go` sets `Quarantined = true` on add), so
+    /// the PR's own live fixture — an `npx`-with-no-args server — arrives
+    /// quarantined AND misconfigured. The new MCPX_CONFIG_INVALID_COMMAND
+    /// therefore does NOT tint the badge in the commonest case.
+    ///
+    /// That is deliberate, not an oversight: quarantine review is the first
+    /// thing the user must do, and it is surfaced calmly. But it is worth
+    /// pinning, because "fix a config error" and "approve this server" are
+    /// exactly the two states someone might later assume compose differently.
+    @MainActor
+    func testANewlyAddedBrokenServerAsksForReviewNotAlarm() {
+        let broken = Self.decode("""
+        {
+            "id": "demo", "name": "demo", "protocol": "stdio",
+            "enabled": true, "connected": false, "quarantined": true, "tool_count": 0,
+            "error_code": "MCPX_CONFIG_INVALID_COMMAND",
+            "diagnostic": {"code": "MCPX_CONFIG_INVALID_COMMAND", "severity": "error", "summary": "no args"},
+            "health": {"level": "healthy", "admin_state": "quarantined",
+                       "summary": "Quarantined for review", "action": "approve"}
+        }
+        """)
+        let state = AppState()
+        state.servers = [broken]
+
+        XCTAssertNil(state.worstDiagnosticSeverity,
+                     "a server awaiting review must not raise a red badge, even when broken")
+        XCTAssertEqual(state.serversNeedingAttention.count, 1,
+                       "but it must still be listed — the user has to act on it")
+        XCTAssertEqual(broken.health?.action, "approve",
+                       "and the action offered is review, not restart")
+    }
+
+    /// Once reviewed and released from quarantine, the SAME broken server must
+    /// raise the badge — otherwise the exemption would hide the fault forever.
+    @MainActor
+    func testTheSameServerAlarmsOnceItLeavesQuarantine() {
+        let state = AppState()
+        state.servers = [Self.brokenServer(name: "demo")]
+        XCTAssertEqual(state.worstDiagnosticSeverity, "error")
+        XCTAssertEqual(state.diagnosticCount(severity: "error"), 1)
+    }
+
+    /// The three filters that must agree. `serversWithDiagnostic` was left on
+    /// the narrower OAuth-only predicate when `isBadgeExempt` was introduced.
+    @MainActor
+    func testAllThreeDiagnosticFiltersAgreeOnExemptions() {
+        let state = AppState()
+        state.servers = [
+            Self.quarantinedServer(name: "q"),
+            Self.loginRequiredServer(name: "l"),
+        ]
+        XCTAssertNil(state.worstDiagnosticSeverity)
+        XCTAssertEqual(state.diagnosticCount(severity: "error"), 0)
+        XCTAssertTrue(state.serversWithDiagnostic.isEmpty,
+                      "serversWithDiagnostic must use the same exemption as the badge")
+    }
+
     /// `quarantined: true` alone is enough, even if the health block is absent
     /// or stale — the two signals are checked independently on purpose.
     @MainActor

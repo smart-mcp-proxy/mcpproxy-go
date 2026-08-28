@@ -309,13 +309,20 @@ final class AppState: ObservableObject {
     /// warn/error severity. These drive the "Fix issues" menu group and the
     /// tray badge tint.
     ///
-    /// MCP-1819/T3: OAuth login-required servers are excluded. Pre-T1 the
-    /// backend classifies that state as an error-severity
-    /// MCPX_UNKNOWN_UNCLASSIFIED diagnostic, which would otherwise read as a
-    /// "file a bug" hard error. A server that just needs sign-in is surfaced
-    /// calmly via `serversNeedingAttention` (the "Sign in" affordance) instead.
+    /// Servers in an intentional non-connected state are excluded, via the same
+    /// `isBadgeExempt` predicate the badge uses — it was left on the narrower
+    /// OAuth-only check when that predicate was introduced, which quietly broke
+    /// the "these three filter identically" invariant at birth (verification
+    /// sweep, gap 1). Nothing consumes this today, which is exactly why the
+    /// drift would have gone unnoticed until something did.
+    ///
+    /// MCP-1819/T3, the original reason: the backend classifies OAuth
+    /// login-required as an error-severity MCPX_UNKNOWN_UNCLASSIFIED diagnostic,
+    /// which would otherwise read as a "file a bug" hard error. Such a server is
+    /// surfaced calmly via `serversNeedingAttention` instead — as is a
+    /// quarantined one, via "Review quarantine…".
     var serversWithDiagnostic: [ServerStatus] {
-        servers.filter { $0.hasAttentionDiagnostic && !$0.isOAuthLoginRequired }
+        servers.filter { $0.hasAttentionDiagnostic && !$0.isBadgeExempt }
     }
 
     /// How many servers carry the severity the tray icon is currently badging.

@@ -364,8 +364,13 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     /// menu header drew a calm yellow dot under a red menu-bar dot, and the
     /// user could not clear it without approving or disabling the server.
     ///
-    /// Both signals are checked: `quarantined` is the server's own flag and
-    /// `admin_state` is the cross-surface contract CLI/REST/Web-UI/tray share.
+    /// The `admin_state` half is belt-and-braces, not a second independent
+    /// signal: the backend derives it FROM `quarantined`
+    /// (`internal/health/calculator.go` returns `AdminState: quarantined`
+    /// whenever the input is quarantined), so today it cannot be true while
+    /// `quarantined` is false. It is kept because `admin_state` is the
+    /// cross-surface contract CLI/REST/Web-UI/tray share, and this stays correct
+    /// if those two ever decouple.
     var isQuarantineReview: Bool {
         quarantined || health?.adminState == "quarantined"
     }

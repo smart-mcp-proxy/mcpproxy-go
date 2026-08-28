@@ -17,20 +17,29 @@ import AppKit
 ///
 /// Why the view fills the WHOLE button rather than being a 6x6 view positioned
 /// at the corner: the dot is anchored to the centred 18pt ICON, not to the
-/// button, and the button's width changes (it is `variableLength`, and the core
-/// -state glyph comes and goes from `attributedTitle`). A small right-pinned
-/// subview breaks that anchor twice over —
+/// button, and the button's width changes (it is `variableLength`, and the
+/// core-state glyph comes and goes from `attributedTitle`). A small subview
+/// pinned into the button's corner breaks three ways —
 ///
-///  * `[.minXMargin, .maxYMargin]` pins to the BUTTON's bottom-right, so when
-///    the button shrinks by N the dot moves left by N while the centred icon's
-///    right edge moves left by only N/2; and
+///  * **`NSStatusBarButton` is FLIPPED.** `NSButton.isFlipped` is `true` (unlike
+///    a plain `NSView`), so inside the button y grows DOWNWARD: a frame at
+///    `y = 2` is 2pt from the TOP, and `.maxYMargin` pins to the TOP. The first
+///    attempt at this badge did exactly that and shipped the dot in the icon's
+///    top-right corner while every test passed, because no test rendered it
+///    inside a real status button. This is the trap; it is the reason the whole
+///    design now lives in `draw(_:)` of an UNFLIPPED view.
+///  * `[.minXMargin, …]` pins horizontally to the BUTTON's edge, so when the
+///    button shrinks by N the dot moves left by N while the centred icon's
+///    right edge moves left by only N/2.
 ///  * `NSStatusItem` resizes asynchronously, so `button.bounds` read straight
 ///    after clearing `attributedTitle` is still the old, wider value — the dot
 ///    is laid out against an icon centre that no longer exists.
 ///
 /// Filling the bounds and computing the dot inside `draw(_:)` from the CURRENT
-/// bounds removes both failure modes: any resize just redraws in the right
-/// place. (Cross-model review, gpt-5.6-sol.)
+/// bounds removes all three: the geometry is re-derived every draw, in this
+/// view's own bottom-left space, independent of the button's.
+/// (Cross-model review, gpt-5.6-sol; flipped-coordinate trap found by the
+/// verification sweep.)
 final class TrayBadgeDotView: NSView {
 
     /// The dot's fill. Setting it redraws; setting it to the same value is a
@@ -41,6 +50,13 @@ final class TrayBadgeDotView: NSView {
             needsDisplay = true
         }
     }
+
+    /// Load-bearing, and stated explicitly rather than inherited: every
+    /// coordinate in `draw(_:)` and in `TrayStatusIcon.badgeDotFrame` assumes a
+    /// bottom-left origin, while this view's SUPERVIEW (`NSStatusBarButton`) is
+    /// flipped. Overriding it to `true` would silently move the badge to the
+    /// icon's top-right — which is precisely the bug this design replaced.
+    override var isFlipped: Bool { false }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)

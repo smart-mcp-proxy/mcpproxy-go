@@ -99,8 +99,13 @@ enum TrayStatusIcon {
     static let badgeDotDiameter: CGFloat = 6
     static let statusIconSide: CGFloat = 18
 
-    /// Where the corner dot sits inside the status item button, in the button's
-    /// own (bottom-left origin) coordinates.
+    /// Where the corner dot sits, in BOTTOM-LEFT-ORIGIN coordinates.
+    ///
+    /// Read that twice before reusing this: it is the coordinate space of
+    /// `TrayBadgeDotView` (a plain, unflipped `NSView`), NOT of the status item
+    /// button that view sits in. `NSStatusBarButton.isFlipped` is `true`, so
+    /// applying this rect directly to a subview OF THE BUTTON puts the dot in
+    /// the icon's TOP-right corner. That bug shipped once already.
     ///
     /// Pure maths so the placement is testable without a live menu bar — this
     /// machine cannot screenshot the status item without a Screen Recording
