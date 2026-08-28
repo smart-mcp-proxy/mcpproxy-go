@@ -949,3 +949,30 @@ func TestDetectConfigChanges_DirectToolResponseMode(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "direct_tool_response_mode")
 	})
 }
+
+// Cross-model review: "" and "full" are the same mode, so normalizing one to
+// the other is NOT a change. Reporting it makes the apply result claim a field
+// moved when nothing did — the rebuild guard downstream would suppress the
+// churn, but the caller is still told wrong.
+func TestDetectConfigChanges_DirectToolResponseModeEmptyEqualsFull(t *testing.T) {
+	mk := func(mode string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			DirectToolResponseMode: mode,
+		}
+	}
+
+	for _, tc := range []struct{ from, to string }{
+		{"", config.DirectToolResponseModeFull},
+		{config.DirectToolResponseModeFull, ""},
+	} {
+		result := DetectConfigChanges(mk(tc.from), mk(tc.to))
+		require.True(t, result.Success)
+		assert.NotContainsf(t, result.ChangedFields, "direct_tool_response_mode",
+			"%q -> %q is the same mode spelled two ways", tc.from, tc.to)
+	}
+
+	// Still detected when it really moves.
+	real := DetectConfigChanges(mk(""), mk(config.DirectToolResponseModeDeferred))
+	assert.Contains(t, real.ChangedFields, "direct_tool_response_mode")
+}

@@ -89,6 +89,14 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 	// discovery is failing to still record the new mode, or the guarded reload
 	// would see no drift afterwards and the operator's change would be lost
 	// until something unrelated happened to rebuild.
+	//
+	// The consequence, accepted rather than hidden: after such a failure the
+	// stamp says "deferred" although nothing was ever RENDERED deferred, so a
+	// later config reload sees no drift and will not retry. Recovery does not
+	// depend on the reload path — the empty listing is itself the problem, and
+	// the servers.changed that fixes discovery rebuilds unconditionally, in
+	// whatever mode is then configured. Making the guard retry instead would
+	// mean rebuilding on every reload for as long as discovery stayed down.
 	mode := p.effectiveDirectToolResponseMode()
 
 	// DiscoverTools already filters to connected, enabled, non-quarantined
@@ -1046,12 +1054,26 @@ func (p *MCPProxyServer) directSerializationDrifted() bool {
 // at all — a "no changes for you" reload that looks, to a client, exactly like
 // the tool set having changed.
 func (p *MCPProxyServer) RefreshDirectModeToolsOnSerializationChange() {
-	if p.directServer == nil || !p.directSerializationDrifted() {
+	if p.directServer == nil {
+		return
+	}
+
+	// The drift check and the rebuild it authorizes must be ONE critical
+	// section. Checking outside the lock lets two concurrent reloads both
+	// observe drift, then serialize inside RefreshDirectModeTools and publish
+	// two generations — the second no longer justified by any flip, and pushing
+	// a second notifications/tools/list_changed to every client. That is the
+	// churn the guard exists to prevent, reintroduced by the guard's own
+	// racy read.
+	p.directRefreshMu.Lock()
+	defer p.directRefreshMu.Unlock()
+
+	if !p.directSerializationDrifted() {
 		return
 	}
 	p.logger.Info("direct serialization mode changed; rebuilding the direct tool surface",
 		zap.String("mode", p.effectiveDirectToolResponseMode()))
-	p.RefreshDirectModeTools()
+	p.refreshDirectModeToolsLocked()
 }
 
 // RefreshDirectModeTools rebuilds the direct mode server's tool set.
@@ -1072,6 +1094,13 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 	p.directRefreshMu.Lock()
 	defer p.directRefreshMu.Unlock()
 
+	p.refreshDirectModeToolsLocked()
+}
+
+// refreshDirectModeToolsLocked is the rebuild body. The caller MUST hold
+// directRefreshMu — split out so the reload guard can hold the lock across its
+// drift check and the rebuild that check authorizes.
+func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
 	directTools, cat := p.buildDirectModeTools()
 
 	serverTools := make([]mcpserver.ServerTool, len(directTools))

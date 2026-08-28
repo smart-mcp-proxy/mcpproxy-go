@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -39,9 +40,17 @@ type skewFixture struct {
 }
 
 func newSkewFixture(t *testing.T, tools []*config.ToolMetadata) *skewFixture {
+	return newSkewFixtureInMode(t, tools, config.DirectToolResponseModeFull)
+}
+
+// newSkewFixtureInMode is the deferred-capable constructor. The residual cases
+// MUST use deferred: in full mode a schema change is visible in the listing, so
+// "silently stale" would be proven by a listing that is not silent at all.
+func newSkewFixtureInMode(t *testing.T, tools []*config.ToolMetadata, mode string) *skewFixture {
 	t.Helper()
 	p := createTestMCPProxyServer(t)
 	p.config.RoutingMode = config.RoutingModeDirect
+	p.config.DirectToolResponseMode = mode
 
 	servers := map[string]struct{}{}
 	for _, tool := range tools {
@@ -84,6 +93,26 @@ func (f *skewFixture) rebuildPaused(t *testing.T, tools []*config.ToolMetadata, 
 	p.directServer.SetTools(rendered...)
 	during()
 	p.publishDirectCatalog(cat)
+}
+
+// wireEntry is the marshalled registry entry for one display name — the exact
+// bytes a client receives.
+func (f *skewFixture) wireEntry(t *testing.T, display string) string {
+	t.Helper()
+	st, ok := f.proxy.directServer.ListTools()[display]
+	require.Truef(t, ok, "%q is not registered", display)
+	raw, err := json.Marshal(st.Tool)
+	require.NoError(t, err)
+	return string(raw)
+}
+
+// registeredHandler returns the handler mcp-go would actually dispatch to,
+// rather than one the test built for itself.
+func (f *skewFixture) registeredHandler(t *testing.T, display string) mcpserver.ToolHandlerFunc {
+	t.Helper()
+	st, ok := f.proxy.directServer.ListTools()[display]
+	require.Truef(t, ok, "%q is not registered", display)
+	return st.Handler
 }
 
 // listed is what this session's tools/list actually serves right now: the live
@@ -242,48 +271,68 @@ func TestSkew_DescriptionChangeIsSelfConsistentOnBothSides(t *testing.T) {
 	assert.Equal(t, "Read a file, now with feeling", entry.Description)
 }
 
-// An ORIGIN FLIP — the same display name changing which upstream owns it —
-// must never let a session be scope-checked against one origin while dispatch
-// goes to the other.
+// An ORIGIN FLIP: the SAME display name, owned by a different upstream in the
+// next generation. Only the "__" ambiguity makes this expressible —
+// "a__b__c" is (server "a", tool "b__c") or (server "a__b", tool "c") — and it
+// is the sharpest form of the skew question, because during the window the
+// filters scope-check against the OLD origin while the registry already holds
+// the NEW origin's handler.
+//
+// An earlier version of this test flipped alpha__run to beta__run, which are
+// different display names and therefore not an origin flip at all; it asserted
+// nothing. (Found by cross-model review.)
 func TestSkew_OriginFlipNeverSplitsScopeFromDispatch(t *testing.T) {
-	base := []*config.ToolMetadata{
-		skewTool("alpha", "run", "Alpha run", `{"type":"object"}`, &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}),
+	const display = "a__b__c"
+
+	oldOrigin := []*config.ToolMetadata{
+		skewTool("a", "b__c", "Owned by a", `{"type":"object"}`, &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}),
 	}
-	f := newSkewFixture(t, base)
-	require.NoError(t, f.proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "beta", Enabled: true}))
+	newOrigin := []*config.ToolMetadata{
+		skewTool("a__b", "c", "Owned by a__b", `{"type":"object"}`, &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}),
+	}
+	require.Equal(t, display, FormatDirectToolName("a", "b__c"))
+	require.Equal(t, display, FormatDirectToolName("a__b", "c"),
+		"both origins must flatten to ONE display name, or this is not an origin flip")
+
+	f := newSkewFixture(t, oldOrigin)
+	require.NoError(t, f.proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a__b", Enabled: true}))
 	require.NoError(t, f.proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
-		ServerName: "beta", ToolName: "run", Status: storage.ToolApprovalStatusApproved,
+		ServerName: "a__b", ToolName: "c", Status: storage.ToolApprovalStatusApproved,
 	}))
 
-	// A token that may see alpha but NOT beta.
-	ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type: auth.AuthTypeAgent, AgentName: "alpha-only",
-		AllowedServers: []string{"alpha"},
+	// A token that may reach the OLD origin but not the new one.
+	oldOnly := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "a-only",
+		AllowedServers: []string{"a"},
 		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 	})
 
-	flipped := []*config.ToolMetadata{
-		skewTool("beta", "run", "Beta run", `{"type":"object"}`, &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}),
-	}
+	f.rebuildPaused(t, newOrigin, func() {
+		// The stale catalog still says this name belongs to "a", so the filters
+		// admit it for this token…
+		entry, ok := f.proxy.resolveDirectDescribeID(oldOnly, display)
+		require.True(t, ok, "the stale catalog still resolves the name")
+		require.Equal(t, "a", entry.ServerName, "…to the OLD origin")
+		require.Contains(t, f.listed(oldOnly), display, "so it is still listed")
 
-	f.rebuildPaused(t, flipped, func() {
-		// Whatever this session can see, it must resolve to an origin it is
-		// allowed to reach — the scope check and the registration must name the
-		// same server.
-		for name := range f.listed(ctx) {
-			entry, ok := f.proxy.resolveDirectDescribeID(ctx, name)
-			if !ok {
-				continue
-			}
-			assert.Truef(t, entry.ServerName == "alpha",
-				"listed %q resolved to origin %q, outside this token's scope", name, entry.ServerName)
-		}
+		// …but the registry already holds the NEW origin's handler, and that
+		// handler re-derives authorization from the entry IT captured. The
+		// split is closed at the only place it matters: the call is refused,
+		// against the origin that would actually be dispatched to.
+		result, err := f.registeredHandler(t, display)(oldOnly, mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: display},
+		})
+		require.NoError(t, err)
+		require.True(t, result.IsError,
+			"a token scoped to the old origin must not reach the new one through a stale listing")
+		assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "does not have access to server 'a__b'",
+			"the refusal must name the origin actually dispatched to, not the one the listing implied")
 	})
 
-	// After the flip the token sees nothing: beta__run is a different display
-	// name, and it is out of scope anyway.
-	assert.NotContains(t, f.listed(ctx), "beta__run")
-	assert.False(t, f.describable(ctx, "beta__run"))
+	// After the publish the listing agrees with the registry again: the name
+	// now belongs to an origin this token cannot see, so it is gone.
+	assert.NotContains(t, f.listed(oldOnly), display)
+	assert.False(t, f.describable(oldOnly, display))
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +386,7 @@ func TestSkew_InputSchemaOnlyChangeIsSilentlyStale(t *testing.T) {
 	}
 	require.NotEqual(t, before[0].Hash, after[0].Hash, "the edit must move the hash")
 
-	f := newSkewFixture(t, before)
+	f := newSkewFixtureInMode(t, before, config.DirectToolResponseModeDeferred)
 	ctx := context.Background()
 
 	// Both signatures must render identically, or the description would change
@@ -349,12 +398,22 @@ func TestSkew_InputSchemaOnlyChangeIsSilentlyStale(t *testing.T) {
 	require.Equal(t, sigBefore.Sig, sigAfter.Sig,
 		"the fixture edit must be signature-identical, or the staleness would be visible")
 
+	wireBefore := f.wireEntry(t, "fs__read")
+
 	f.rebuildPaused(t, after, func() {
 		entry, ok := f.proxy.resolveDirectDescribeID(ctx, "fs__read")
 		require.True(t, ok)
 		assert.Equal(t, nested("string"), entry.ParamsJSON,
-			"documenting residual 1: the schema is one generation stale, and nothing in the listing says so")
+			"documenting residual 1: the schema is one generation stale")
 	})
+
+	// …and NOTHING in the listing said so. In deferred mode the entry carries
+	// the placeholder and a signature that collapsed the edited nested property
+	// to "~", so the wire bytes are unchanged across a semantic schema change.
+	// That silence is the residual; in full mode the schema would have moved
+	// visibly and there would be nothing to document.
+	assert.Equal(t, wireBefore, f.wireEntry(t, "fs__read"),
+		"the listing must be byte-identical across the change, or the staleness is not silent")
 
 	entry, _ := f.proxy.resolveDirectDescribeID(ctx, "fs__read")
 	assert.Equal(t, nested("integer"), entry.ParamsJSON, "the window closes at the publish")
@@ -366,12 +425,14 @@ func TestSkew_InputSchemaOnlyChangeIsSilentlyStale(t *testing.T) {
 func TestSkew_OutputSchemaOnlyChangeIsSilentlyStale(t *testing.T) {
 	base := skewBase()
 	base[0].OutputSchemaJSON = `{"type":"object","properties":{"text":{"type":"string"}}}`
-	f := newSkewFixture(t, base)
+	f := newSkewFixtureInMode(t, base, config.DirectToolResponseModeDeferred)
 	ctx := context.Background()
 
 	after := skewBase()
 	after[0].OutputSchemaJSON = `{"type":"object","properties":{"bytes":{"type":"integer"}}}`
 	after[0].Hash = base[0].Hash + "-out"
+
+	wireBefore := f.wireEntry(t, "fs__read")
 
 	f.rebuildPaused(t, after, func() {
 		entry, ok := f.proxy.resolveDirectDescribeID(ctx, "fs__read")
@@ -379,6 +440,11 @@ func TestSkew_OutputSchemaOnlyChangeIsSilentlyStale(t *testing.T) {
 		assert.Contains(t, entry.OutputSchemaJSON, "text",
 			"documenting residual 2: the output schema is one generation stale")
 	})
+
+	// Silent by construction: deferred entries strip outputSchema entirely
+	// (FR-006/R2), so the listing cannot show the change even in principle.
+	assert.Equal(t, wireBefore, f.wireEntry(t, "fs__read"))
+	assert.NotContains(t, wireBefore, "outputSchema")
 
 	entry, _ := f.proxy.resolveDirectDescribeID(ctx, "fs__read")
 	assert.Contains(t, entry.OutputSchemaJSON, "bytes")
@@ -409,11 +475,10 @@ func TestSkew_AnnotationsOnlyChangeIsStaleButNeverAdmitsTheCall(t *testing.T) {
 		assert.Contains(t, f.listed(readOnly), "fs__purge",
 			"documenting residual 3: the read-scoped token still sees the tool, one generation stale")
 
-		// …but the call is refused, because dispatch re-derives the tier from
-		// the annotations its own registration captured.
-		newEntry := directCatalogFor(f.proxy, after).byDisplayName["fs__purge"]
-		require.NotNil(t, newEntry)
-		result, err := f.proxy.makeDirectModeHandler(newEntry)(readOnly, mcp.CallToolRequest{
+		// …but the call is refused. Dispatched through the handler mcp-go
+		// actually holds — building one here would prove only that a handler
+		// constructed by the test refuses, not that the REGISTERED one does.
+		result, err := f.registeredHandler(t, "fs__purge")(readOnly, mcp.CallToolRequest{
 			Params: mcp.CallToolParams{Name: "fs__purge"},
 		})
 		require.NoError(t, err)

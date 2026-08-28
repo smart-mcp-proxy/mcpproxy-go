@@ -41,6 +41,15 @@ func changedHTTPTimeoutFields(oldCfg, newCfg *config.Config) []string {
 
 // DetectConfigChanges compares old and new configurations to determine what changed
 // and whether a restart is required
+// normalizeDirectToolResponseMode resolves the empty value to the mode it
+// means, so the two spellings of "full" compare equal.
+func normalizeDirectToolResponseMode(mode string) string {
+	if mode == "" {
+		return config.DirectToolResponseModeFull
+	}
+	return mode
+}
+
 func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	result := &ConfigApplyResult{
 		Success:            true,
@@ -188,7 +197,13 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// This clause is what makes that branch reachable at all — without it the
 	// apply computes empty ChangedFields and is swallowed as "no changes
 	// detected".
-	if oldCfg.DirectToolResponseMode != newCfg.DirectToolResponseMode {
+	// Compared NORMALIZED: "" and "full" are the same mode (config.go documents
+	// the empty value as the default), so an operator deleting the key — or a
+	// PATCH round-trip dropping it — is not a change. Comparing raw strings
+	// reports a field that did not move, which the rebuild guard downstream
+	// would suppress but the apply RESULT would still misreport to the caller.
+	if normalizeDirectToolResponseMode(oldCfg.DirectToolResponseMode) !=
+		normalizeDirectToolResponseMode(newCfg.DirectToolResponseMode) {
 		result.ChangedFields = append(result.ChangedFields, "direct_tool_response_mode")
 	}
 

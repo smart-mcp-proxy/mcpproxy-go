@@ -267,6 +267,14 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 > proves its compensating property: a read-scoped token still sees the stale
 > listing but its **call** is refused, because dispatch re-derives the tier from
 > the annotations its own registration captured and never reads the catalog.
+>
+> **One more accepted consequence** (cross-model review): a flip made while
+> `DiscoverTools` is failing publishes an EMPTY catalog stamped with the new
+> mode, as T069 requires — so the guard afterwards sees no drift and a later
+> reload will not retry. That is deliberate: the empty listing is itself the
+> visible problem, and the `servers.changed` that fixes discovery rebuilds
+> unconditionally in whatever mode is then configured. Making the guard retry
+> instead would rebuild on every reload for as long as discovery stayed down.
 
 ---
 
