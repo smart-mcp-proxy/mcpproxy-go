@@ -868,6 +868,32 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		// Evict signature-cache entries orphaned by removed/redefined tools —
 		// warming above only ever ADDS entries.
 		r.reconcileSignatureCache()
+
+		// Tell the routing-mode surfaces that a tool DEFINITION moved, not just
+		// that the server list did. Two live-verified bugs share this gap:
+		//
+		//   1. On a first-ever start the direct surface is rebuilt when the
+		//      server connects, which is BEFORE indexing warms the signature
+		//      cache — so every deferred entry rendered with a Peek miss and
+		//      shipped with no compact signature at all, permanently. An agent
+		//      then had the schema taken away and got nothing in exchange. It
+		//      healed only on the next unrelated servers.changed, and a restart
+		//      hid it entirely because the cache was already warm.
+		//   2. After a rug-pull the catalog kept the OLD schema forever, so
+		//      pre-dispatch validation rejected correct arguments and
+		//      describe_tool handed back the same stale schema — turning the
+		//      self-healing path into the unbounded loop it exists to prevent.
+		//
+		// Emitting here closes both: the direct rebuild re-renders from the
+		// freshly indexed definitions with a warm cache. It is guarded by
+		// `changed`, so an idle discovery sweep that found nothing new still
+		// emits nothing.
+		r.emitServersChanged("tools_changed", map[string]any{
+			"server":   serverName,
+			"added":    len(addedTools),
+			"modified": len(modifiedTools),
+			"removed":  len(removedTools),
+		})
 	}
 
 	return nil

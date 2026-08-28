@@ -386,11 +386,29 @@ func (p *MCPProxyServer) resolveDirectTool(displayName string) (*directCatalogEn
 		return nil, directResolveBuiltin
 	}
 
-	// A name with no "__" separator cannot be an upstream projection: every
-	// upstream tool is named through FormatDirectToolName, which always inserts
-	// one. So it is something this proxy registered itself — describe_tool,
-	// retrieve_tools on a shared surface — and denying it would delete built-ins
-	// off their own surface.
+	cat := p.loadDirectCatalog()
+
+	// THE CATALOG DECIDES FIRST. If this snapshot admits the name, it is an
+	// upstream projection — whatever the name looks like — and it must go
+	// through the scope, tier and callability gates like any other.
+	//
+	// This ordering is load-bearing, and getting it wrong was a real disclosure
+	// bug. The structural test below assumes every upstream display name parses,
+	// because FormatDirectToolName always inserts "__". It does not: an upstream
+	// tool whose NAME IS EMPTY renders as "server__", which ParseDirectToolName
+	// rejects (the tool half is empty). That name was therefore classified as a
+	// proxy built-in, and both direct filters pass built-ins through
+	// unconditionally — so an agent token scoped to other servers could see the
+	// name, description and annotations of a tool on a server outside its scope.
+	// Found by adversarial QA, not by any unit test, because no fixture had ever
+	// contained a nameless tool.
+	if entry, ok := cat.Lookup(displayName); ok {
+		return entry, directResolveFound
+	}
+
+	// A name with no "__" separator that the catalog does NOT admit is something
+	// this proxy registered itself — describe_tool, retrieve_tools on a shared
+	// surface — and denying it would delete built-ins off their own surface.
 	//
 	// This is the structural half of D13 rule 2's "built-ins by explicit name
 	// set". The set above covers the residual case a structural test cannot: a
@@ -399,13 +417,8 @@ func (p *MCPProxyServer) resolveDirectTool(displayName string) (*directCatalogEn
 		return nil, directResolveBuiltin
 	}
 
-	cat := p.loadDirectCatalog()
 	if cat == nil {
 		return nil, directResolveNoCatalog
-	}
-
-	if entry, ok := cat.Lookup(displayName); ok {
-		return entry, directResolveFound
 	}
 	return nil, directResolveDenied
 }

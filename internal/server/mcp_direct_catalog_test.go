@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
@@ -160,4 +163,69 @@ func TestBuildDirectCatalog_DuplicateOriginIsNotACollision(t *testing.T) {
 	assert.Empty(t, cat.Withheld(), "a duplicate is not a collision and must not be reported as one")
 	assert.Equal(t, []string{"github__read_file"}, cat.DisplayNames(),
 		"the tool must appear exactly once in the listing")
+}
+
+// A tool with an EMPTY name renders as "server__", which ParseDirectToolName
+// rejects because the tool half is empty. Before the catalog got the first say
+// in resolveDirectTool, that name was classified as a proxy BUILT-IN — and both
+// direct filters pass built-ins through unconditionally, so an agent token
+// scoped to other servers could see the name, description and annotations of a
+// tool on a server it has no access to.
+//
+// Found by adversarial QA against a running proxy. No unit fixture had ever
+// contained a nameless tool, so nothing here could have caught it.
+func TestResolveDirectTool_EmptyToolNameIsNotABuiltin(t *testing.T) {
+	tools := []*config.ToolMetadata{
+		{ServerName: "hostile", Name: "", Description: "Nameless", ParamsJSON: `{"type":"object"}`, Hash: "h-empty"},
+		{ServerName: "we", Name: "solo", Description: "Fine", ParamsJSON: `{"type":"object"}`, Hash: "h-solo"},
+	}
+	display := FormatDirectToolName("hostile", "")
+	require.Equal(t, "hostile__", display)
+	_, _, parses := ParseDirectToolName(display)
+	require.False(t, parses, "the fixture must be a name that does NOT parse, or it proves nothing")
+
+	p := &MCPProxyServer{}
+	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+
+	entry, decision := p.resolveDirectTool(display)
+	assert.Equal(t, directResolveFound, decision,
+		"a name the catalog admits is an upstream projection, whatever it looks like")
+	require.NotNil(t, entry)
+	assert.Equal(t, "hostile", entry.ServerName,
+		"and it must resolve to its real origin, so the scope gate sees the right server")
+
+	// Real built-ins are still built-ins.
+	_, builtinDecision := p.resolveDirectTool("describe_tool")
+	assert.Equal(t, directResolveBuiltin, builtinDecision)
+}
+
+// The disclosure itself: a scoped token must not see the nameless tool of a
+// server outside its scope.
+func TestFilterDirectModeToolsForAuth_EmptyToolNameIsScopeChecked(t *testing.T) {
+	tools := []*config.ToolMetadata{
+		{ServerName: "hostile", Name: "", Description: "Nameless", ParamsJSON: `{"type":"object"}`, Hash: "h-empty"},
+		{ServerName: "we", Name: "solo", Description: "Fine", ParamsJSON: `{"type":"object"}`, Hash: "h-solo",
+			Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}},
+	}
+	p := &MCPProxyServer{}
+	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+
+	ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "scoped",
+		AllowedServers: []string{"we"},
+		Permissions:    []string{auth.PermRead},
+	})
+
+	filtered := p.filterDirectModeToolsForAuth(ctx, []mcp.Tool{
+		{Name: "hostile__"}, {Name: "we__solo"}, {Name: "describe_tool"},
+	})
+
+	names := make([]string, 0, len(filtered))
+	for _, tool := range filtered {
+		names = append(names, tool.Name)
+	}
+	assert.NotContains(t, names, "hostile__",
+		"a tool on an out-of-scope server must not be disclosed, even with an empty name")
+	assert.Contains(t, names, "we__solo")
+	assert.Contains(t, names, "describe_tool", "real built-ins stay visible")
 }
