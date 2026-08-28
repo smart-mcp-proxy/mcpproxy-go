@@ -1110,6 +1110,30 @@ Controls only the *serialization* of `retrieve_tools` responses (Spec 085) — n
 - **Hot-reload**: changes apply on the next call via the config file reload or `POST /api/v1/config/apply` — no restart.
 - Env: `MCPPROXY_TOOL_RESPONSE_MODE` · Flag: `--tool-response-mode`.
 
+---
+
+## Direct Tool Response Mode
+
+Controls only the *serialization* of the **direct enumeration surface** (Spec 102) — `/mcp/all`, plus `/mcp` and its legacy aliases `/v1/tool_code` and `/v1/tool-code` when `routing_mode` is `direct`. It never changes which tools are listed, only how each one is rendered.
+
+```json
+{
+  "direct_tool_response_mode": "full"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `direct_tool_response_mode` | string | `"full"` | `full` lists every upstream tool with its complete `inputSchema` (pre-Spec-102 behavior, byte-identical); an empty value means `full`. `deferred` keeps each tool's name and annotations but advertises `inputSchema` as exactly `{"type": "object"}`, drops `outputSchema`, and appends a compact signature line to the description. |
+
+- **Deferred entries**: description first, then the signature on its own line — e.g. `[github] Create a new issue.` / `create_issue(owner*:str, repo*:str, title*:str, labels:[str], milestone~:obj)`. As in compact mode, `*` marks a required parameter and `~` marks a lossy collapse.
+- **describe_tool**: registered on the direct surface too, so agents recover a full schema on demand (batch of 1–5 ids). It accepts both id spellings the surface can hand an agent: `server:tool` and the direct surface's own `server__tool`.
+- **Wrong guesses cost one retry**: a call whose arguments do not fit the stored schema is rejected pre-dispatch with an `invalid_params` error that embeds the full stored schema plus a hint, so the agent can correct itself without a separate lookup.
+- **Separate axis from `tool_response_mode`**: that key governs `retrieve_tools` responses, this one governs the direct enumeration surface, and setting one never moves the other. `tool_response_mode: "compact"` together with `direct_tool_response_mode: "deferred"` is a legal, intentional combination — each still governs only its own surface.
+- **Not a `routing_mode` value**: `routing_mode: "schema_deferred"` is rejected by config validation with a message naming the supported composition (`routing_mode: "direct"` with `direct_tool_response_mode: "deferred"`).
+- **Hot-reload**: flipping the mode rebuilds the direct surface and emits `notifications/tools/list_changed` to connected direct-surface sessions — no restart.
+- Env: `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` · Flag: `--direct-tool-response-mode`.
+
 ## Server Instructions
 
 Text returned in the MCP `initialize` response to guide AI agents on how to use the proxy (e.g., use `retrieve_tools` to discover existing tools rather than `search_servers`).
@@ -1507,6 +1531,7 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
 | `MCPPROXY_DATA` | `data_dir` | Override data directory |
 | `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |
+| `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` | `direct_tool_response_mode` | Direct enumeration surface serialization: `full` (default) or `deferred` |
 | `MCPPROXY_MAX_CONCURRENT_REQUESTS` | `max_concurrent_requests` | Global aggregate cap on concurrent upstream tool calls (`0` disables it). See [Concurrency Limits](#concurrency-limits--request-queueing) |
 | `MCPPROXY_QUEUE_SIZE` | `queue_size` | Global aggregate wait-queue length (`0` = shed at the cap) |
 | `MCPPROXY_QUEUE_TIMEOUT` | `queue_timeout` | Global aggregate queue wait budget, e.g. `30s` |

@@ -72,6 +72,7 @@ const sidebars = {
       label: 'Features',
       items: [
         'features/routing-modes',
+        'features/schema-deferred-direct-mode',
         'features/search-discovery',
         'features/tools-preflight',
         'features/profiles',

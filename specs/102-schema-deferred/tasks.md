@@ -280,15 +280,36 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T073 Add the standalone direct built-in gate to `internal/server/toolslist_snapshot_test.go` with `testdata/toolslist_goldens/direct_mode_builtins.json`: zero upstream tools (listing = `describe_tool` only), **both** serialization modes, membership + byte-exact serialization, plus the direct server's instructions string captured with an empty `instructions` config so the bytes are deterministic. It MUST be standalone, not an entry in `toolsListGoldenSurfaces` — `_DeltaIsEnumerated` reads a frozen `pre099/<surface>.json` per listed surface, and direct mode has no pre-feature baseline.
-- [ ] T074 In the same gate, assert over `p.directServer.ListTools()` **and** a real `tools/list` driven through the direct server on a session with no agent token, treating any difference between the two sets as a failure. `ListTools()` is the registration map; `handleListTools` serves `filteredTools(ctx)`, and `directServer` is the one routing-mode server carrying `WithToolFilter`s — so registered and served can diverge on exactly this server. Sort by tool name before serializing: `ListTools()` returns a map and Go randomizes iteration order.
-- [ ] T075 [P] Add the deferred-direct arm to `bench/arms/` plus its `bench/arms/testdata/*_golden.txt` render golden, following the registry contract in `specs/083-discovery-profiler/contracts/arm-interface.md` and `bench/arms/arm.go`. The existing arms all encode `retrieve_tools` result sets; none renders a direct `tools/list`.
-- [ ] T076 Run the SC-001/SC-002 token gates over the frozen 45-tool corpus with the spec-083 profiler's pinned tokenizer: assert ≥70% payload reduction and ≥80% one-shot-callable (non-lossy) share, and record the measured numbers in the PR description.
+- [x] T073 Add the standalone direct built-in gate to `internal/server/toolslist_snapshot_test.go` with `testdata/toolslist_goldens/direct_mode_builtins.json`: zero upstream tools (listing = `describe_tool` only), **both** serialization modes, membership + byte-exact serialization, plus the direct server's instructions string captured with an empty `instructions` config so the bytes are deterministic. It MUST be standalone, not an entry in `toolsListGoldenSurfaces` — `_DeltaIsEnumerated` reads a frozen `pre099/<surface>.json` per listed surface, and direct mode has no pre-feature baseline.
+- [x] T074 In the same gate, assert over `p.directServer.ListTools()` **and** a real `tools/list` driven through the direct server on a session with no agent token, treating any difference between the two sets as a failure. `ListTools()` is the registration map; `handleListTools` serves `filteredTools(ctx)`, and `directServer` is the one routing-mode server carrying `WithToolFilter`s — so registered and served can diverge on exactly this server. Sort by tool name before serializing: `ListTools()` returns a map and Go randomizes iteration order.
+- [x] T075 [P] Add the deferred-direct arm to `bench/arms/` plus its `bench/arms/testdata/*_golden.txt` render golden, following the registry contract in `specs/083-discovery-profiler/contracts/arm-interface.md` and `bench/arms/arm.go`. The existing arms all encode `retrieve_tools` result sets; none renders a direct `tools/list`.
+- [x] T076 Run the SC-001/SC-002 token gates over the frozen 45-tool corpus with the spec-083 profiler's pinned tokenizer: assert ≥70% payload reduction and ≥80% one-shot-callable (non-lossy) share, and record the measured numbers in the PR description.
+
+  **Measured, through BOTH paths, and they agree.** The T075 arm run through the profiler
+  itself (`go run ./bench/cmd/bench -corpus-v2 … -arms baseline_json,compact_sig,direct_deferred`):
+
+  | arm | tokens | savings vs baseline |
+  |---|---|---|
+  | `baseline_json` | 4386 | — |
+  | `compact_sig` | 2081 | 52.6% |
+  | **`direct_deferred`** | **3090** | **29.5%** |
+
+  The in-process gate (`TestDeferredDirect_TokenReduction_Corpus45`, which measures the real
+  `renderDirectTools` output rather than an arm's re-encoding) says **29.7%**. The two differ
+  only by the annotations block the arm does not model, and it is a constant in both columns.
+  SC-002 measures **86.7%** (39/45 non-lossy), comfortably over its 80% floor.
+
+  So SC-001's ≥70% is **not met and not reachable**, confirmed independently of the
+  implementation by the spec's own sanctioned pipeline. The ≥70% assertion this task asks for
+  is therefore NOT added — writing a test that cannot pass is not a gate. See the escalation
+  under the Phase 3 checkpoint for why the ceiling is arithmetic (38.9% even if the schema AND
+  the signature were both deleted). **This is the one item in the spec that needs a maintainer
+  decision rather than more implementation.**
 - [ ] T077 [P] Add E2E coverage in `internal/server/e2e_test.go`: live flip with a connected client (`notifications/tools/list_changed` observed, next listing reflects the mode, tool set identical — SC-006); guessed-wrong → one self-healing retry succeeds (SC-003); and the legacy aliases `/v1/tool_code` and `/v1/tool-code` covered by the **same** mode and notification assertions as `/mcp` (FR-003) — they are easy to miss and are explicitly in the direct-serving set.
 - [x] T078 Run `make swagger` after the config struct change and commit the regenerated `oas/` artifacts. **Not deferrable to Polish, as an earlier draft had it**: the pre-push hook runs `swagger-verify` and rejects the push the moment the config struct changes, so this lands with T005 in Phase 1. Left listed here as the record of where it actually happened.
-- [ ] T079 [P] Document `direct_tool_response_mode`, its env alias and its serve flag in `docs/configuration.md`.
-- [ ] T080 [P] Write the feature doc under `docs/features/`: the deferral convention (`*`/`~` signature grammar), `describe_tool` on the direct surface, and the client-compat notes — schema-driven form UIs render empty forms; stale cached listings are safe in both directions; the `initialize` instructions delta.
-- [ ] T081 [P] Update `CLAUDE.md`: the MCP-protocol built-ins line (`describe_tool` availability on the direct surface) and a Recent Changes entry.
+- [x] T079 [P] Document `direct_tool_response_mode`, its env alias and its serve flag in `docs/configuration.md`.
+- [x] T080 [P] Write the feature doc under `docs/features/`: the deferral convention (`*`/`~` signature grammar), `describe_tool` on the direct surface, and the client-compat notes — schema-driven form UIs render empty forms; stale cached listings are safe in both directions; the `initialize` instructions delta.
+- [x] T081 [P] Update `CLAUDE.md`: the MCP-protocol built-ins line (`describe_tool` availability on the direct surface) and a Recent Changes entry.
 - [ ] T082 Run the full gate set before opening the PR: `go test -race ./internal/...` (using the CI skip regex for `internal/server` locally), `go build -tags server -o /dev/null ./cmd/mcpproxy`, and `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...` — the v2 linter CI uses, which is stricter than `scripts/run-linter.sh`.
 - [ ] T083 Verify the five frozen gates land as predicted: gates 1 and 3 pass **unregenerated**; gate 2 shows exactly the two enumerated regens; gate 4 passes with the extended `describePlainDelta`; gate 5 is re-measured, not assumed. A diff anywhere else is a regression to fix, not a baseline to update.
 
