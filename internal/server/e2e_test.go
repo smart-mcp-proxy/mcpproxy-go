@@ -3824,6 +3824,19 @@ func TestE2E_DirectDeferredLiveFlipWithConnectedClient(t *testing.T) {
 	assert.NotContains(t, beforeEntry.Description, "\n", "a full-mode description carries no signature line")
 
 	// ---- The flip ----
+	// Drain everything the fixture setup emitted. Adding and indexing an upstream
+	// itself triggers rebuilds, so the channel already holds
+	// tools/list_changed frames that have nothing to do with the flip — and the
+	// assertion below would happily consume one of those and pass without the
+	// flip ever notifying anyone.
+	for draining := true; draining; {
+		select {
+		case <-notifications:
+		default:
+			draining = false
+		}
+	}
+
 	applyResult := applyDirectToolResponseMode(t, env, config.DirectToolResponseModeDeferred)
 	assert.Contains(t, applyResult.ChangedFields, "direct_tool_response_mode",
 		"DetectConfigChanges must report the flip — otherwise the apply is swallowed as 'no changes' and nothing rebuilds")
@@ -3936,7 +3949,13 @@ func TestE2E_DirectDeferredSelfHealingInvalidParams(t *testing.T) {
 
 	retryArgs := map[string]interface{}{"color": "red"}
 	for _, prop := range required {
-		retryArgs[prop.(string)] = "from-schema"
+		// Checked rather than a bare assertion: a non-string here means the
+		// embedded schema is malformed, which is a finding worth reporting as a
+		// failed assertion — not a panic that takes the whole test binary with it
+		// and buries the reason.
+		name, ok := prop.(string)
+		require.Truef(t, ok, "input_schema.required must contain strings, got %T", prop)
+		retryArgs[name] = "from-schema"
 	}
 	retryRequest := mcp.CallToolRequest{}
 	retryRequest.Params.Name = createWidget

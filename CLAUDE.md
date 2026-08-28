@@ -24,7 +24,7 @@ Only halt and ask a human IF:
 
 MCPProxy is a Go desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP): intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
-**Stack**: Go 1.24 (backend) · TypeScript 5.9 / Vue 3.5 (frontend) · Swift 5.9 (macOS tray). Storage: BBolt (`config.db`) + Bleve (search index). Avoid new dependencies without clear need.
+**Stack**: Go 1.25 (backend) · TypeScript 5.9 / Vue 3.5 (frontend) · Swift 5.9 (macOS tray). Storage: BBolt (`config.db`) + Bleve (search index). Avoid new dependencies without clear need.
 
 ## Editions (Personal & Server)
 
@@ -112,7 +112,7 @@ Env vars: `MCPPROXY_LISTEN`, `MCPPROXY_API_KEY`, `MCPPROXY_DEBUG`, `MCPPROXY_TEL
 
 ## MCP Protocol
 
-**Built-in tools**: `retrieve_tools` (BM25 search across upstream tools; Spec 049 opt-in `include_disabled`; Spec 085 `detail` override + compact signatures under `tool_response_mode: compact`) · `describe_tool` (Spec 085: batch ≤5 ids → full schemas; Spec 102: also on the direct surface, `server:tool` or `server__tool` ids) · `call_tool_read|write|destructive` (Spec 018 intent variants; operation type inferred from the variant; Spec 085 pre-dispatch arg validation with self-healing `invalid_params` errors) · `code_execution` (sandboxed JS, off by default) · `upstream_servers` (CRUD, Spec 049) · `quarantine_security` (Spec 032). **Tool format**: `<serverName>:<toolName>` (e.g. `github:create_issue`).
+**Built-in tools**: `retrieve_tools` (BM25 search across upstream tools; Spec 049 opt-in `include_disabled`; Spec 085 `detail` override + compact signatures under `tool_response_mode: compact`) · `describe_tool` (Spec 085: batch ≤5 ids → full schemas; Spec 102: also on the direct surface, `server:tool` or `server__tool` ids) · `call_tool_read|write|destructive` (Spec 018 intent variants; operation type inferred from the variant; Spec 085 pre-dispatch arg validation with self-healing `invalid_params` errors) · `code_execution` (sandboxed JS, off by default) · `upstream_servers` (CRUD, Spec 049) · `quarantine_security` (Spec 032). **Tool format**: `<serverName>:<toolName>` (e.g. `github:create_issue`); the direct surface lists as `<serverName>__<toolName>` and accepts both.
 
 **REST API** base `/api/v1`, auth via `X-API-Key` header or `?apikey=`. MCP endpoints (`/mcp`) stay unprotected for client compatibility; the REST API always requires a key (auto-generated if absent). All responses carry `X-Request-Id` (correlate with `mcpproxy activity list --request-id <id>`). Live updates via SSE at `/events`. Full endpoint list: `oas/swagger.yaml` + [docs/api/rest-api.md](docs/api/rest-api.md).
 

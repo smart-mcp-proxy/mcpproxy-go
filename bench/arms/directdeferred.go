@@ -51,9 +51,23 @@ const (
 //
 // Two production fields are deliberately absent, because the frozen corpus
 // carries no data for them and inventing it would price a fiction:
-// `annotations` (bench.Tool has no annotation hints; the field is also absent
-// from baseline_json, so its omission cancels in the comparison) and the
-// upstream `outputSchema` deferral would strip anyway.
+// `annotations` (bench.Tool has no annotation hints) and the upstream
+// `outputSchema` deferral would strip anyway.
+//
+// The annotations omission is NOT neutral, and an earlier version of this
+// comment wrongly claimed it "cancels in the comparison". It cancels from the
+// byte DIFFERENCE, since the field is identical in both arms — but savings is a
+// ratio, not a difference:
+//
+//	savings = removed / full
+//
+// so adding an unchanged block to both columns grows the denominator and LOWERS
+// the percentage. Omitting it therefore biases this arm's savings UPWARD
+// relative to the real wire. Measured: this arm reports 29.5% where the
+// in-process gate over the real marshalled mcp.Tool — annotations, `_meta` and
+// all — reports 29.7% on the same corpus, so the two modelling gaps happen to
+// nearly offset. Treat this arm as a comparative instrument for ranking
+// encodings, not as an absolute wire model.
 type DirectDeferredArm struct{}
 
 // NewDirectDeferred returns the direct_deferred arm.

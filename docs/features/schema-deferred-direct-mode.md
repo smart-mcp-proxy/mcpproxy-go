@@ -11,8 +11,13 @@ keywords: [direct mode, tools/list, schema, describe_tool, tokens, signatures, d
 
 Direct mode (`/mcp/all`) lists every tool of every connected upstream server. That
 is its whole point — nothing is hidden behind a search step — and also its whole
-cost: each entry ships its complete `inputSchema` and `outputSchema`, which is
-roughly 77% of the payload and around 30K tokens for a 100-tool fleet.
+cost: each entry ships its complete `inputSchema` and `outputSchema`.
+
+How much that costs depends heavily on the fleet. On the two reference corpora
+this project measures against, the upstream input schema is **43%** of a
+45-tool listing (6116 tokens total) and a similar share of a 527-tool one
+(99918 tokens, ~190 tokens per tool). A schema-heavy fleet will be higher; a
+fleet of small, flat tools will be lower.
 
 Schema-deferred serialization keeps the full listing and drops the schemas. Every
 tool still appears, under the same `serverName__toolName` name, with the same
@@ -31,8 +36,15 @@ already going to list.
 Turn it on when the `tools/list` payload itself is the problem:
 
 - **Large fleets.** Past roughly 50 tools, the full direct listing starts eating a
-  meaningful share of the context window before the agent has done anything. On a
-  100-tool fleet deferral takes the listing from ~30K tokens to ~3.5–5K.
+  meaningful share of the context window before the agent has done anything.
+
+  **Measured savings, so you can judge whether it is worth it:** **29.7%** on the
+  frozen 45-tool reference corpus and **34.8%** on a 527-tool snapshot. Deferral
+  removes the input schema and adds a signature, so the ceiling is set by how
+  much of *your* payload the schemas actually are — descriptions, names and the
+  annotations block are untouched and, on these corpora, dominate what is left.
+  Do not plan around an order-of-magnitude reduction; measure your own fleet with
+  `go run ./bench/cmd/bench` if the number matters to you.
 - **Agent clients, not human UIs.** The consumer is a model that reads text and
   guesses arguments. See [Client compatibility](#client-compatibility) — a
   schema-driven form UI is exactly the case that should stay on `full`.
@@ -214,8 +226,15 @@ could not already see.
 
 ## The self-healing retry
 
-Deferral means agents sometimes guess wrong. The cost of a wrong guess is bounded
-at exactly one retry.
+Deferral means agents sometimes guess wrong. What this bounds is the cost of
+*learning* the schema: the proxy hands it back on the first bad call, so the
+agent never has to discover it by trial and error against the upstream.
+
+It does **not** guarantee the next attempt succeeds. The proxy returns the
+schema; whether the agent then builds valid arguments, and whether the upstream
+call itself succeeds, are outside its control. What is guaranteed is narrower and
+still worth having: a wrong guess never reaches the upstream, and the response
+carries everything needed to correct it without a separate lookup.
 
 Direct-mode calls are validated against the tool's **stored upstream schema**
 before anything is dispatched. A call with missing or invalid arguments is
@@ -253,9 +272,11 @@ enabling it.
 
 ### Schema-driven form UIs render an empty form
 
-A client that builds an input form from the advertised `inputSchema` — MCP
-Inspector and inspector-style UIs — will render a deferred tool as a form with
-**no fields**, because the advertised schema declares no properties. The
+A client that builds an input form from the advertised `inputSchema` will render a
+deferred tool as a form with **no fields**, because the advertised schema
+declares no properties. This follows from the wire shape rather than from any
+particular client's behaviour: `{"type":"object"}` declares no properties, so
+there is nothing for a schema-driven UI to draw. The
 information is not lost (it is one `describe_tool` call away), but the UI has no
 way to know that.
 

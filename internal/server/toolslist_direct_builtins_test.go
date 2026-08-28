@@ -99,12 +99,26 @@ func servedDirectTools(t *testing.T, p *MCPProxyServer) map[string]json.RawMessa
 	return out
 }
 
-func directBuiltinsGoldenPath(mode string) string {
-	return filepath.Join("testdata", toolsListGoldenDir, directBuiltinsGolden+"_"+mode+".json")
+// ONE golden, not one per mode. Built-ins are rendered by their own builder and
+// never by renderDirectTools, so the two modes produce identical bytes — a fact
+// the test below asserts outright rather than obscuring behind two files that
+// would have to be kept in sync while always being equal.
+func directBuiltinsGoldenPath() string {
+	return filepath.Join("testdata", toolsListGoldenDir, directBuiltinsGolden+".json")
 }
 
 // TestToolsListSnapshot_DirectModeBuiltins is the gate.
+//
+// The golden is captured from the SERVED payload, not the registration map:
+// those are different questions on this surface (directServer is the one
+// routing-mode server carrying WithToolFilters), and it is the served bytes a
+// client actually receives. Registered-vs-served is then asserted BYTE-exactly —
+// an earlier version used assert.JSONEq here, which ignores key ordering and
+// formatting and so could not have caught a serialization difference between the
+// two, which is precisely what it was there to catch.
 func TestToolsListSnapshot_DirectModeBuiltins(t *testing.T) {
+	perMode := map[string]string{}
+
 	for _, mode := range []string{config.DirectToolResponseModeFull, config.DirectToolResponseModeDeferred} {
 		t.Run(mode, func(t *testing.T) {
 			p := newDirectBuiltinsProxy(t, mode)
@@ -112,40 +126,51 @@ func TestToolsListSnapshot_DirectModeBuiltins(t *testing.T) {
 			registered := registeredDirectTools(t, p)
 			served := servedDirectTools(t, p)
 
-			// T074: registered and served must be the same set. A filter that
-			// dropped a built-in would show up here and nowhere else.
+			// T074: the registration map and a real tools/list must agree, as a
+			// SET and byte for byte. A filter that dropped or reshaped a built-in
+			// shows up here and nowhere else.
 			assert.Equal(t, sortedToolNames(registered), sortedToolNames(served),
-				"the registration map and a real tools/list must agree on this surface")
+				"the registration map and a real tools/list must serve the same set")
 			for name, raw := range registered {
-				assert.JSONEqf(t, string(raw), string(served[name]),
+				assert.Equalf(t, string(raw), string(served[name]),
 					"registered and served bytes differ for %q", name)
 			}
 
 			// Zero upstreams: the listing IS the built-in set.
-			assert.Equal(t, []string{"describe_tool"}, sortedToolNames(registered),
+			assert.Equal(t, []string{"describe_tool"}, sortedToolNames(served),
 				"with no upstream servers the direct listing is exactly the built-ins")
 
 			payload := map[string]interface{}{
-				"tools":        registered,
+				"tools":        served,
 				"instructions": resolveDirectInstructions(""),
 			}
 			raw, err := json.MarshalIndent(payload, "", "  ")
 			require.NoError(t, err)
-			got := append(raw, '\n')
+			got := string(append(raw, '\n'))
+			perMode[mode] = got
 
-			path := directBuiltinsGoldenPath(mode)
+			path := directBuiltinsGoldenPath()
 			if dir := os.Getenv(toolsListGoldenWriteEnv); dir != "" {
 				require.NoError(t, os.MkdirAll(dir, 0o755))
 				out := filepath.Join(dir, filepath.Base(path))
-				require.NoError(t, os.WriteFile(out, got, 0o600))
+				require.NoError(t, os.WriteFile(out, []byte(got), 0o600))
 				t.Skipf("golden written to %s; comparison skipped", out)
 			}
 
 			want, err := os.ReadFile(path)
 			require.NoErrorf(t, err, "missing golden %s", path)
-			assert.Equal(t, string(normalizeGoldenEOL(want)), string(normalizeGoldenEOL(got)),
+			assert.Equal(t, string(normalizeGoldenEOL(want)), string(normalizeGoldenEOL([]byte(got))),
 				"the direct built-in surface changed; regenerate deliberately, never to fix a red run")
 		})
+	}
+
+	// The reason one golden is enough, asserted rather than assumed. If deferral
+	// ever DID reshape a built-in, this fails and the single-golden design has to
+	// be revisited — the two subtests above would otherwise silently pin the same
+	// bytes twice and neither would notice.
+	if len(perMode) == 2 {
+		assert.Equal(t, perMode[config.DirectToolResponseModeFull], perMode[config.DirectToolResponseModeDeferred],
+			"built-ins are not upstream projections; serialization must not touch them")
 	}
 }
 
@@ -155,17 +180,4 @@ func TestToolsListSnapshot_DirectModeBuiltinsInstructionsAreServed(t *testing.T)
 	p := newDirectBuiltinsProxy(t, config.DirectToolResponseModeDeferred)
 	assert.Equal(t, resolveDirectInstructions(""), directInitializeInstructions(t, p),
 		"the golden's instructions must be the bytes initialize serves")
-}
-
-// A sanity check on the gate itself: the two modes must differ somewhere, or
-// one golden would be silently pinning both.
-func TestToolsListSnapshot_DirectModeBuiltinsAreModeIndependent(t *testing.T) {
-	full := registeredDirectTools(t, newDirectBuiltinsProxy(t, config.DirectToolResponseModeFull))
-	deferred := registeredDirectTools(t, newDirectBuiltinsProxy(t, config.DirectToolResponseModeDeferred))
-
-	// Built-ins are rendered by their own builder, never by renderDirectTools,
-	// so they are identical across modes. That is the property this asserts —
-	// deferral must not reshape a tool mcpproxy serves itself.
-	assert.Equal(t, full, deferred,
-		"built-ins are not upstream projections; serialization must not touch them")
 }
