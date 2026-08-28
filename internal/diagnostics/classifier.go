@@ -157,6 +157,13 @@ func classifyConfig(err error, _ ClassifierHints) Code {
 		strings.Contains(msg, "secret reference") && (strings.Contains(msg, "not found") || strings.Contains(msg, "unresolved")),
 		strings.Contains(msg, "unresolved secret"):
 		return ConfigMissingSecret
+	// A package-runner command with nothing to run. This is mcpproxy's OWN
+	// pre-spawn validation message (internal/upstream/core/connection_stdio.go),
+	// so leaving it unclassified put a "Please file a bug report" CTA on a
+	// config typo the user can fix in one line.
+	case strings.Contains(msg, "has no args"),
+		strings.Contains(msg, "no args") && strings.Contains(msg, "required"):
+		return ConfigInvalidCommand
 	}
 	return ""
 }
@@ -344,6 +351,16 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 	}
 	if hints.Transport == "http" && strings.Contains(lmsg, "context deadline exceeded") {
 		return HTTPTimeout
+	}
+
+	// A 4xx on the streamable-HTTP `initialize` POST is the legacy-SSE
+	// signature, not an auth or routing failure — the upstream layer says so in
+	// as many words. Matched BEFORE the generic status-text fallback below,
+	// which would otherwise claim it as a bare MCPX_HTTP_404/403 and send the
+	// user hunting for a credential problem that does not exist.
+	if strings.Contains(lmsg, "likely a legacy sse server") ||
+		(strings.Contains(lmsg, "4xx for initialize") && strings.Contains(lmsg, "post")) {
+		return HTTPLegacySSE
 	}
 
 	// HTTP status text fallback. The upstream layer wraps non-2xx responses

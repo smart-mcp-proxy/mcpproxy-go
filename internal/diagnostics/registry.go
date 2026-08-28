@@ -258,6 +258,15 @@ func seedHTTP() {
 		},
 		DocsURL: docsURL(HTTPTimeout),
 	})
+	register(CatalogEntry{
+		Code:        HTTPLegacySSE,
+		Severity:    SeverityError,
+		UserMessage: "This endpoint rejected the streamable-HTTP handshake; it looks like a legacy SSE server.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Choosing the right transport", URL: docsURL(HTTPLegacySSE)},
+		},
+		DocsURL: docsURL(HTTPLegacySSE),
+	})
 }
 
 // --- DOCKER --------------------------------------------------------------
@@ -355,6 +364,16 @@ func seedCONFIG() {
 			{Type: FixStepLink, Label: "Config reference", URL: docsURL(ConfigParseError)},
 		},
 		DocsURL: docsURL(ConfigParseError),
+	})
+	register(CatalogEntry{
+		Code:        ConfigInvalidCommand,
+		Severity:    SeverityError,
+		UserMessage: "This server's command has nothing to run — a package runner like npx or uvx needs the package name in \"args\".",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Show this server's config", Command: "mcpproxy upstream get <server> -o json"},
+			{Type: FixStepLink, Label: "Server configuration reference", URL: docsURL(ConfigInvalidCommand)},
+		},
+		DocsURL: docsURL(ConfigInvalidCommand),
 	})
 	register(CatalogEntry{
 		Code:        ConfigMissingSecret,

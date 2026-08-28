@@ -1170,7 +1170,12 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 		tools, err := client.ListTools(ctx)
 		if err != nil {
-			m.logger.Error("Failed to list tools from client",
+			// Warn, not Error: markSwept below is deliberately skipped so the
+			// next sweep retries this server. A failure the code already plans
+			// to retry is not an error — and on a healthy install with several
+			// stdio servers this fired ~1x/min each, forever, which is what
+			// made main.log rotate every couple of hours.
+			m.logger.Warn("Failed to list tools from client",
 				zap.String("id", snapshot.id),
 				zap.String("server", snapshot.name),
 				zap.Error(err))

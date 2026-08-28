@@ -320,25 +320,27 @@ final class AppState: ObservableObject {
 
     /// How many servers carry the severity the tray icon is currently badging.
     ///
-    /// Must agree with `worstDiagnosticSeverity` exactly, or the status item
-    /// says "4 server errors" over a badge that counted three: that property
-    /// looks only at ENABLED servers, while `serversWithDiagnostic` includes
-    /// the disabled ones and both severities.
+    /// Must agree with `worstDiagnosticSeverity` exactly — including its
+    /// `isBadgeExempt` filter — or the status item says "4 server errors" over
+    /// a badge that counted three: that property looks only at ENABLED servers,
+    /// while `serversWithDiagnostic` includes the disabled ones and both
+    /// severities.
     func diagnosticCount(severity: String) -> Int {
         servers.filter {
-            $0.enabled && !$0.isOAuthLoginRequired && $0.diagnostic?.severity == severity
+            $0.enabled && !$0.isBadgeExempt && $0.diagnostic?.severity == severity
         }.count
     }
 
     /// Highest-severity diagnostic across enabled servers. Returns nil when
     /// no diagnostics are attached. Used by TrayIcon to colour the badge.
     ///
-    /// MCP-1819/T3: OAuth login-required servers are skipped so a server that
-    /// merely needs sign-in does not tint the tray icon badge red/orange — the
-    /// calm "Needs Attention / Sign in" path owns that state instead.
+    /// Servers in an INTENTIONAL non-connected state are skipped (see
+    /// `ServerStatus.isBadgeExempt`) so neither a pending sign-in nor a
+    /// quarantine review tints the tray icon badge red/orange — the calm
+    /// "Needs Attention" path owns those states instead.
     var worstDiagnosticSeverity: String? {
         var sawWarn = false
-        for srv in servers where srv.enabled && !srv.isOAuthLoginRequired {
+        for srv in servers where srv.enabled && !srv.isBadgeExempt {
             guard let d = srv.diagnostic else { continue }
             if d.severity == "error" { return "error" }
             if d.severity == "warn" { sawWarn = true }
