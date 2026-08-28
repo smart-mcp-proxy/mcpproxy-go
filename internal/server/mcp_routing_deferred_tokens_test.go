@@ -134,7 +134,7 @@ func renderCorpusTokens(t *testing.T, mode string, tools []*config.ToolMetadata)
 	require.NoError(t, err, "cl100k_base must be loadable (the profiler pins the same encoder)")
 
 	total := 0
-	rendered := p.renderDirectTools(buildDirectCatalog(tools, nil))
+	rendered := p.renderDirectTools(directCatalogFor(p, tools))
 	require.Len(t, rendered, len(tools), "every corpus tool must be listed in both modes")
 	for _, st := range rendered {
 		raw, err := json.Marshal(st.Tool)

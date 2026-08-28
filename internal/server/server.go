@@ -586,6 +586,15 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// until a restart. Same shape as RefreshPrompts above: cheap,
 				// idempotent, static construction on this one listener goroutine.
 				s.mcpProxy.RefreshCodeExecutionAvailability()
+				// Spec 102 FR-014: direct_tool_response_mode is hot-reloadable,
+				// but unlike the settings above the direct listing is
+				// REGISTERED state — reading the live config on the next call
+				// changes nothing, so the surface has to be rebuilt. Guarded on
+				// a real change: SetTools re-registers everything and emits
+				// notifications/tools/list_changed to every initialized
+				// session, so an unguarded call would make any unrelated config
+				// edit look, to a client, exactly like the tool set changing.
+				s.mcpProxy.RefreshDirectModeToolsOnSerializationChange()
 			}
 		case runtime.EventTypeUpstreamPromptsChanged:
 			// F13: an upstream added/removed a prompt at runtime (debounced

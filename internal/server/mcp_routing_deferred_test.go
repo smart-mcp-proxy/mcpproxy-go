@@ -42,6 +42,19 @@ func newDeferredRenderProxy(mode string) *MCPProxyServer {
 	}
 }
 
+// directCatalogFor builds a catalog STAMPED with the proxy's configured direct
+// serialization, exactly as buildDirectModeTools does in production.
+//
+// The stamp lives on the snapshot, not in config, so a rebuild and the FR-014
+// reload guard cannot disagree about what was published. A test that called
+// buildDirectCatalog directly would leave it empty — which means "full" — and
+// silently render the wrong mode.
+func directCatalogFor(p *MCPProxyServer, tools []*config.ToolMetadata) *directCatalog {
+	cat := buildDirectCatalog(tools, nil)
+	cat.mode = p.effectiveDirectToolResponseMode()
+	return cat
+}
+
 // warmFixtureSignatures warms the shared cache for every fixture tool, the way
 // the indexing path does at startup (FR-005). Rendering never compiles.
 func warmFixtureSignatures(p *MCPProxyServer, tools []*config.ToolMetadata) {
@@ -75,7 +88,7 @@ func renderFixture(t *testing.T, mode string) map[string]json.RawMessage {
 	p := newDeferredRenderProxy(mode)
 	tools := fixtureTools()
 	warmFixtureSignatures(p, tools)
-	return renderedByName(t, p.renderDirectTools(buildDirectCatalog(tools, nil)))
+	return renderedByName(t, p.renderDirectTools(directCatalogFor(p, tools)))
 }
 
 // T028: the deferred wire shape.
@@ -158,7 +171,7 @@ func TestDeferredDirectEntry_AnnotationsByteIdenticalToFullMode(t *testing.T) {
 			render := func(mode string) json.RawMessage {
 				p := newDeferredRenderProxy(mode)
 				warmFixtureSignatures(p, tools)
-				out := renderedByName(t, p.renderDirectTools(buildDirectCatalog(tools, nil)))
+				out := renderedByName(t, p.renderDirectTools(directCatalogFor(p, tools)))
 				raw, ok := out[FormatDirectToolName("srv", name)]
 				require.True(t, ok)
 				return raw
@@ -189,7 +202,7 @@ func TestDeferredDirectEntry_MarshalsWithoutSchemaConflict(t *testing.T) {
 	tools := fixtureTools()
 	warmFixtureSignatures(p, tools)
 
-	for _, st := range p.renderDirectTools(buildDirectCatalog(tools, nil)) {
+	for _, st := range p.renderDirectTools(directCatalogFor(p, tools)) {
 		_, err := json.Marshal(st.Tool)
 		require.NoErrorf(t, err, "deferred tool %q must marshal without a schema conflict", st.Tool.Name)
 	}
@@ -203,7 +216,7 @@ func TestDeferredDirectEntry_SignatureCacheMiss_ListedWithoutSuffix(t *testing.T
 	// Deliberately NOT warmed.
 
 	before := p.sigCache.CompileCount()
-	entries := renderedByName(t, p.renderDirectTools(buildDirectCatalog(tools, nil)))
+	entries := renderedByName(t, p.renderDirectTools(directCatalogFor(p, tools)))
 
 	require.Len(t, entries, 2, "a cache miss must not drop the entry")
 
@@ -229,7 +242,7 @@ func TestDeferredDirectEntry_NilSignatureCache_DoesNotPanic(t *testing.T) {
 		logger: zap.NewNop(),
 		config: &config.Config{DirectToolResponseMode: config.DirectToolResponseModeDeferred},
 	}
-	entries := renderedByName(t, p.renderDirectTools(buildDirectCatalog(fixtureTools(), nil)))
+	entries := renderedByName(t, p.renderDirectTools(directCatalogFor(p, fixtureTools())))
 	require.Len(t, entries, 2)
 	assert.Equal(t, `{"type":"object"}`, string(fieldOf(t, entries["github__read_file"], "inputSchema")))
 }
@@ -243,7 +256,7 @@ func TestDirectModes_SetIdentity(t *testing.T) {
 	renderOrdered := func(mode string) ([]string, []mcpserver.ServerTool) {
 		p := newDeferredRenderProxy(mode)
 		warmFixtureSignatures(p, tools)
-		rendered := p.renderDirectTools(buildDirectCatalog(tools, nil))
+		rendered := p.renderDirectTools(directCatalogFor(p, tools))
 		names := make([]string, 0, len(rendered))
 		for _, st := range rendered {
 			names = append(names, st.Tool.Name)
@@ -311,7 +324,7 @@ func TestDirectModes_SetIdentity(t *testing.T) {
 			}))
 		}
 		warmFixtureSignatures(p, tools)
-		catalog := buildDirectCatalog(tools, nil)
+		catalog := directCatalogFor(p, tools)
 		rendered := p.renderDirectTools(catalog)
 		p.publishDirectCatalog(catalog)
 

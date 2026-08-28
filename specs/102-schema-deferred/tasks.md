@@ -226,16 +226,47 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 
 **Independent test**: with a client connected, flip the config value; assert a `notifications/tools/list_changed` is emitted, the next `tools/list` reflects the new serialization, and the tool set is identical across the flip.
 
-- [ ] T065 [P] [US4] Add the `direct_tool_response_mode` clause to `DetectConfigChanges` in `internal/runtime/config_hotreload.go`, beside the existing `tool_response_mode` clause.
-- [ ] T066 [US4] Write failing test in `internal/runtime/config_hotreload_test.go` that a change to the new field is detected and an unrelated edit is not.
-- [ ] T067 [US4] Write failing test for the rebuild guard in `internal/server/server_test.go`: a serialization flip triggers a rebuild **and** a notification; an unrelated config edit triggers **no** `SetTools` and **no** notification (the FR-014 no-churn rule, which a nil catalog would otherwise defeat).
-- [ ] T068 [US4] Add the guarded direct rebuild to the `config.reloaded` branch of `listenForRoutingModeRefresh` in `internal/server/server.go`: compare the mode the current catalog was built with against the live effective mode read via `p.currentConfig()` — **never** construction-time `p.config` — and rebuild only on a real change.
-- [ ] T069 [US4] Write failing test (alongside T067, same file, before T068) in `internal/server/server_test.go` that a flip while `DiscoverTools` is failing still rebuilds and is not lost: an empty catalog is published with the new mode recorded (R8).
-- [ ] T070 [US4] **Requires Phase 5 complete.** Write the eight publication-skew interleaving tests in `internal/server/mcp_direct_skew_test.go` (D13), with a rebuild paused between `SetTools` and the catalog publish and a concurrent scoped `tools/list` + `describe_tool`, in three groups: (1) closed by design — added name, removed name, description-visible change, origin flip; (2) closed by withholding — a within-generation display-name collision; (3) the three documented residuals — input-schema-only, output-schema-only, annotations-only (read → destructive). The input-schema case **must** be semantically different but signature-identical (a nested-property edit the 085 grammar collapses to `~`) with the new hash warmed before the rebuild renders, or `Peek` misses and the description changes visibly instead; a canonicalization-equal edit will not do, since `hash` re-marshals the parsed schema.
-- [ ] T071 [US4] Write the two **no-rebuild** cache tests in `internal/server/mcp_direct_skew_test.go`: a signature-cache miss→warm and a hit→eviction between registration and a later filter/describe call must both leave the tool listed and describable — proof that the discriminator reads the **stored** `renderedDescription` rather than re-rendering.
-- [ ] T072 [US4] **Requires Phase 5 complete** — its self-healing assertions are Phase 5 behaviour. Assert across the whole skew set in `internal/server/mcp_direct_skew_test.go`: no describable-but-unlisted id; no entry scope-checked against one origin while its handler dispatches to another; no read-scoped token having a destructive tool's **call** admitted; `generation` increments exactly once per paused rebuild and not at all on a guarded no-op reload; and no stale definition leading to a call that *succeeds* against the wrong schema.
+- [x] T065 [P] [US4] Add the `direct_tool_response_mode` clause to `DetectConfigChanges` in `internal/runtime/config_hotreload.go`, beside the existing `tool_response_mode` clause.
+- [x] T066 [US4] Write failing test in `internal/runtime/config_hotreload_test.go` that a change to the new field is detected and an unrelated edit is not.
+- [x] T067 [US4] Write failing test for the rebuild guard in `internal/server/server_test.go`: a serialization flip triggers a rebuild **and** a notification; an unrelated config edit triggers **no** `SetTools` and **no** notification (the FR-014 no-churn rule, which a nil catalog would otherwise defeat).
+- [x] T068 [US4] Add the guarded direct rebuild to the `config.reloaded` branch of `listenForRoutingModeRefresh` in `internal/server/server.go`: compare the mode the current catalog was built with against the live effective mode read via `p.currentConfig()` — **never** construction-time `p.config` — and rebuild only on a real change.
+- [x] T069 [US4] Write failing test (alongside T067, same file, before T068) in `internal/server/server_test.go` that a flip while `DiscoverTools` is failing still rebuilds and is not lost: an empty catalog is published with the new mode recorded (R8).
+- [x] T070 [US4] **Requires Phase 5 complete.** Write the eight publication-skew interleaving tests in `internal/server/mcp_direct_skew_test.go` (D13), with a rebuild paused between `SetTools` and the catalog publish and a concurrent scoped `tools/list` + `describe_tool`, in three groups: (1) closed by design — added name, removed name, description-visible change, origin flip; (2) closed by withholding — a within-generation display-name collision; (3) the three documented residuals — input-schema-only, output-schema-only, annotations-only (read → destructive). The input-schema case **must** be semantically different but signature-identical (a nested-property edit the 085 grammar collapses to `~`) with the new hash warmed before the rebuild renders, or `Peek` misses and the description changes visibly instead; a canonicalization-equal edit will not do, since `hash` re-marshals the parsed schema.
+- [x] T071 [US4] Write the two **no-rebuild** cache tests in `internal/server/mcp_direct_skew_test.go`: a signature-cache miss→warm and a hit→eviction between registration and a later filter/describe call must both leave the tool listed and describable — proof that the discriminator reads the **stored** `renderedDescription` rather than re-rendering.
+- [x] T072 [US4] **Requires Phase 5 complete** — its self-healing assertions are Phase 5 behaviour. Assert across the whole skew set in `internal/server/mcp_direct_skew_test.go`: no describable-but-unlisted id; no entry scope-checked against one origin while its handler dispatches to another; no read-scoped token having a destructive tool's **call** admitted; `generation` increments exactly once per paused rebuild and not at all on a guarded no-op reload; and no stale definition leading to a call that *succeeds* against the wrong schema.
 
 **Checkpoint**: the feature is operable on a running proxy and the concurrency story is proven rather than asserted.
+
+> ### What the skew window actually exposes (T070, measured not assumed)
+>
+> D13's "the filters deny it, which is safe" is true of **scoped** sessions
+> specifically. `filterDirectModeToolsForAuth` short-circuits for a session with
+> no agent token and no active profile (`if !isScopedAgent && profileScope ==
+> nil { return tools }`), so an unscoped session is served the raw registry and
+> never consults the catalog at all. Two consequences, both recorded as tests
+> rather than asserted away:
+>
+> - **Added name**: a scoped session sees nothing (denied on both sides); an
+>   unscoped one sees it listed while describe still answers `not_found`.
+>   Listed-but-undescribable — the safe direction, for a session entitled to the
+>   whole surface anyway.
+> - **Removed name**: it leaves the registry first, so the previous catalog can
+>   still describe it for the width of the window. Stale, not a disclosure — the
+>   same session could have described it one request earlier and gets the
+>   definition it was already served.
+>
+> Both close at the publish. Neither is a new residual in the T002/T003 sense
+> (those are the invisible schema- and annotations-only changes); they are the
+> visible, self-correcting edges of the ordering, and the tests name them so a
+> future reader does not have to rediscover that the "atomic" language in FR-017
+> was narrowed at T001.
+>
+> Group 3's three residuals are reproduced as specified, including the
+> signature-identical nested-schema edit (a canonicalization-equal edit will not
+> do — `hash` re-marshals the parsed schema), and the annotations-only case
+> proves its compensating property: a read-scoped token still sees the stale
+> listing but its **call** is refused, because dispatch re-derives the tier from
+> the annotations its own registration captured and never reads the catalog.
 
 ---
 

@@ -176,6 +176,22 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "tool_response_mode")
 	}
 
+	// Direct-surface serialization (Spec 102 FR-014 — hot-reloadable,
+	// serialization only). A SEPARATE clause from the one above, not a shared
+	// one: the two axes govern different surfaces, so folding them together
+	// would make an operator's edit to retrieve_tools rebuild the direct
+	// listing and notify every connected client for nothing.
+	//
+	// Unlike the retrieve axis, reporting the change is NOT all the propagation
+	// needed: the direct listing is registered state, not rendered per request,
+	// so listenForRoutingModeRefresh's config.reloaded branch has to rebuild it.
+	// This clause is what makes that branch reachable at all — without it the
+	// apply computes empty ChangedFields and is swallowed as "no changes
+	// detected".
+	if oldCfg.DirectToolResponseMode != newCfg.DirectToolResponseMode {
+		result.ChangedFields = append(result.ChangedFields, "direct_tool_response_mode")
+	}
+
 	// Upstream prompt aggregation (PR #973 — hot-reloadable, opt-in). Without
 	// this clause a lone aggregate_upstream_prompts toggle computes empty
 	// ChangedFields and is swallowed as "no changes detected", so ApplyConfig

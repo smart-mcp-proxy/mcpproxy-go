@@ -887,3 +887,65 @@ func TestDetectConfigChanges_ServersRealChangeStillDetected(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "mcpServers")
 	})
 }
+
+// TestDetectConfigChanges_DirectToolResponseMode (Spec 102 T066/FR-014): an
+// apply that changes ONLY direct_tool_response_mode must be detected.
+//
+// Without a clause the apply computes empty ChangedFields, is swallowed as "no
+// changes detected", and never emits config.reloaded — so the guarded rebuild
+// downstream is never reached and the operator's flip silently does nothing
+// until the next servers.changed. The two axes are independent: moving one must
+// not report the other.
+func TestDetectConfigChanges_DirectToolResponseMode(t *testing.T) {
+	mk := func(direct, retrieve string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			DirectToolResponseMode: direct,
+			ToolResponseMode:       retrieve,
+		}
+	}
+
+	t.Run("only direct_tool_response_mode differs -> detected, hot-reloadable", func(t *testing.T) {
+		result := DetectConfigChanges(mk("", ""), mk(config.DirectToolResponseModeDeferred, ""))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "direct_tool_response_mode")
+		assert.False(t, result.RequiresRestart, "serialization mode is hot-reloadable")
+	})
+
+	t.Run("flip back deferred -> full detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(config.DirectToolResponseModeDeferred, ""),
+			mk(config.DirectToolResponseModeFull, ""))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "direct_tool_response_mode")
+	})
+
+	t.Run("unchanged mode not reported", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(config.DirectToolResponseModeFull, ""),
+			mk(config.DirectToolResponseModeFull, ""))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "direct_tool_response_mode")
+	})
+
+	t.Run("the two axes are independent", func(t *testing.T) {
+		// Moving the retrieve axis must not report the direct one…
+		retrieveOnly := DetectConfigChanges(mk("", ""), mk("", config.ToolResponseModeCompact))
+		assert.Contains(t, retrieveOnly.ChangedFields, "tool_response_mode")
+		assert.NotContains(t, retrieveOnly.ChangedFields, "direct_tool_response_mode")
+
+		// …and vice versa. A shared clause would make an operator's edit to one
+		// surface rebuild the other.
+		directOnly := DetectConfigChanges(mk("", ""), mk(config.DirectToolResponseModeDeferred, ""))
+		assert.Contains(t, directOnly.ChangedFields, "direct_tool_response_mode")
+		assert.NotContains(t, directOnly.ChangedFields, "tool_response_mode")
+	})
+
+	t.Run("an unrelated edit reports neither", func(t *testing.T) {
+		before := mk(config.DirectToolResponseModeDeferred, config.ToolResponseModeCompact)
+		after := mk(config.DirectToolResponseModeDeferred, config.ToolResponseModeCompact)
+		after.DebugSearch = !before.DebugSearch
+		result := DetectConfigChanges(before, after)
+		assert.NotContains(t, result.ChangedFields, "direct_tool_response_mode")
+	})
+}

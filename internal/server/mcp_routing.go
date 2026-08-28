@@ -84,6 +84,13 @@ func FormatDirectPromptName(serverName, promptName string) string {
 func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *directCatalog) {
 	ctx := context.Background()
 
+	// Resolved ONCE for this rebuild and stamped on whichever catalog we end up
+	// publishing, including the failure paths: T069 requires a flip made while
+	// discovery is failing to still record the new mode, or the guarded reload
+	// would see no drift afterwards and the operator's change would be lost
+	// until something unrelated happened to rebuild.
+	mode := p.effectiveDirectToolResponseMode()
+
 	// DiscoverTools already filters to connected, enabled, non-quarantined
 	// servers — server-LEVEL filtering only. Tool-level state (pending/changed
 	// approval) is applied later by the callability filter.
@@ -92,7 +99,7 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 	// failure rather than panicking: built-ins still register, the catalog is
 	// still published, and the next servers.changed fills in the upstreams.
 	if p.upstreamManager == nil {
-		return p.withDirectBuiltins(nil), buildDirectCatalog(nil, p.logger)
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
 	}
 
 	tools, err := p.upstreamManager.DiscoverTools(ctx)
@@ -103,10 +110,11 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 		// discovery filters "no catalog yet, do not deny" at exactly the moment
 		// upstream discovery is failing, flipping them from deny-on-miss to
 		// allow-everything.
-		return p.withDirectBuiltins(nil), buildDirectCatalog(nil, p.logger)
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
 	}
 
 	cat := buildDirectCatalog(tools, p.logger)
+	cat.mode = mode
 	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat
 }
 
@@ -142,11 +150,13 @@ func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.Serve
 	names := cat.DisplayNames()
 	serverTools := make([]mcpserver.ServerTool, 0, len(names))
 
-	// Resolved ONCE, above the loop. Every entry of a published generation must
-	// share one serialization: reading the mode per entry would let a reload
-	// landing mid-loop publish a listing that straddles both, which no consumer
-	// (or test) can describe.
-	deferred := p.effectiveDirectToolResponseMode() == config.DirectToolResponseModeDeferred
+	// Read from the SNAPSHOT, not from config. Every entry of a published
+	// generation must share one serialization — resolving per entry would let a
+	// reload landing mid-loop publish a listing that straddles both, which no
+	// consumer (or test) can describe — and the same stamp is what the FR-014
+	// reload guard later compares against, so the render and the guard cannot
+	// disagree about what was published.
+	deferred := cat.Mode() == config.DirectToolResponseModeDeferred
 
 	// Counted and logged because a signature miss is INVISIBLE in the payload —
 	// a deferred entry without a suffix looks exactly like a tool whose schema
@@ -196,6 +206,16 @@ func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.Serve
 		zap.Int("signature_misses", signatureMisses))
 
 	return serverTools
+}
+
+// emptyDirectCatalog is the non-nil empty snapshot the failure paths publish,
+// carrying the mode this rebuild resolved. Non-nil matters (D13 rule 2): a nil
+// catalog tells the discovery filters "not built yet, do not deny" at exactly
+// the moment discovery is failing.
+func emptyDirectCatalog(mode string, logger *zap.Logger) *directCatalog {
+	cat := buildDirectCatalog(nil, logger)
+	cat.mode = mode
+	return cat
 }
 
 // renderFullDirectTool is the pre-Spec-102 rendering, moved verbatim out of the
@@ -994,6 +1014,46 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		zap.String("default_mode", p.config.RoutingMode))
 }
 
+// directSerializationDrifted reports whether the live effective direct
+// serialization differs from the one the PUBLISHED catalog was rendered with
+// (Spec 102 FR-014 / T068).
+//
+// The comparison is against the snapshot, not against a remembered config
+// value, because only the snapshot knows what connected clients were actually
+// served. Reading the live side through currentConfig() — never
+// construction-time p.config — is what makes a hot reload visible here at all.
+//
+// A nil catalog is deliberately NOT drift. Nothing is published, so there is no
+// "what we served" to compare against, and answering true would rebuild the
+// whole surface on every unrelated config reload — the churn FR-014 forbids. In
+// production the window does not exist: the constructor publishes a catalog
+// before serving its first request (D15/T025), and a nil one would still be
+// filled by the next servers.changed.
+func (p *MCPProxyServer) directSerializationDrifted() bool {
+	cat := p.loadDirectCatalog()
+	if cat == nil {
+		return false
+	}
+	return cat.Mode() != p.effectiveDirectToolResponseMode()
+}
+
+// RefreshDirectModeToolsOnSerializationChange rebuilds the direct surface iff
+// the operator's serialization choice has actually moved.
+//
+// Exported for the config.reloaded listener, which must not simply call
+// RefreshDirectModeTools: that would re-register every tool and push a
+// notifications/tools/list_changed to every connected client on any config edit
+// at all — a "no changes for you" reload that looks, to a client, exactly like
+// the tool set having changed.
+func (p *MCPProxyServer) RefreshDirectModeToolsOnSerializationChange() {
+	if p.directServer == nil || !p.directSerializationDrifted() {
+		return
+	}
+	p.logger.Info("direct serialization mode changed; rebuilding the direct tool surface",
+		zap.String("mode", p.effectiveDirectToolResponseMode()))
+	p.RefreshDirectModeTools()
+}
+
 // RefreshDirectModeTools rebuilds the direct mode server's tool set.
 // Should be called when upstream servers change (connect/disconnect/tool updates).
 func (p *MCPProxyServer) RefreshDirectModeTools() {
@@ -1020,9 +1080,24 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 	// ORDER IS LOAD-BEARING (D13 rule 1). SetTools lands the registry first, the
 	// catalog is published immediately after. The two are separate publications
 	// and cannot be made one transaction — mcp-go owns its registry read — so the
-	// guarantee is directional: a request may see a registry entry whose catalog
-	// entry has not landed yet (the filters deny it, which is safe), but never a
-	// catalog entry for a name the registry is not serving.
+	// guarantee is directional rather than atomic.
+	//
+	// What the window actually exposes, measured in mcp_direct_skew_test.go
+	// rather than assumed:
+	//
+	//   - An ADDED name is in the registry first. A SCOPED session is filtered
+	//     through the catalog and sees nothing; an UNSCOPED one short-circuits
+	//     both filters and is served the raw registry, so it sees the name while
+	//     describe still answers not_found. Listed-but-undescribable — the safe
+	//     direction, for a session entitled to the whole surface anyway.
+	//   - A REMOVED name leaves the registry first, so the previous catalog can
+	//     still describe it for the width of the window. Stale, not a
+	//     disclosure: the same session could have described it one request
+	//     earlier, and gets the definition it was already served.
+	//
+	// Both close at the publish. The three accepted residuals (T002/T003) are
+	// the schema- and annotations-only changes, which are invisible in the
+	// listing by construction.
 	p.directServer.SetTools(serverTools...)
 	p.publishDirectCatalog(cat)
 

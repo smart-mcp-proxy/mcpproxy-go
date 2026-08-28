@@ -44,6 +44,14 @@ type directCatalog struct {
 	// see ambiguousCanonical.
 	byCanonical map[string]*directCatalogEntry
 
+	// mode is the direct serialization this generation was RENDERED with
+	// ("full" or "deferred"). It lives on the snapshot rather than being
+	// re-read from config at compare time because that is the only place the
+	// question "what is currently published?" has an honest answer: config says
+	// what the operator wants, the catalog says what connected clients were
+	// actually served (Spec 102 FR-014 / T068).
+	mode string
+
 	// ambiguousCanonical holds canonical ids that two admitted DISPLAY names
 	// flatten onto: server "a" + tool "b:c" and server "a:b" + tool "c" are
 	// distinct, unambiguous display names ("a__b:c", "a:b__c") whose canonical
@@ -316,6 +324,14 @@ func (c *directCatalog) Withheld() []directCatalogCollision {
 	out := make([]directCatalogCollision, len(c.withheld))
 	copy(out, c.withheld)
 	return out
+}
+
+// Mode is the direct serialization this snapshot was rendered with.
+func (c *directCatalog) Mode() string {
+	if c == nil {
+		return ""
+	}
+	return c.mode
 }
 
 // Generation is the publish counter for this snapshot.

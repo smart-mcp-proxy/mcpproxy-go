@@ -109,7 +109,7 @@ func validationTool() *config.ToolMetadata {
 // renderDirectTools, nowhere else.
 func renderedDirectHandler(t *testing.T, p *MCPProxyServer, tool *config.ToolMetadata) (mcpserver.ToolHandlerFunc, string) {
 	t.Helper()
-	cat := buildDirectCatalog([]*config.ToolMetadata{tool}, nil)
+	cat := directCatalogFor(p, []*config.ToolMetadata{tool})
 	p.sigCache.Warm(tool.Hash, tool.ParamsJSON, tool.Description)
 	p.publishDirectCatalog(cat)
 
