@@ -1207,6 +1207,14 @@ type UpdateInfo struct {
 	InstallChannel   string     `json:"install_channel,omitempty"`   // Detected install channel (homebrew, dmg, deb, rpm, docker, go-install, windows-installer, tarball, unknown) — Spec 079 FR-008
 	UpdateCommand    string     `json:"update_command,omitempty"`    // One-line update command for the channel; only set when an update is available and the channel has one — Spec 079 FR-009
 	NudgesSuppressed bool       `json:"nudges_suppressed,omitempty"` // UI surfaces must stay quiet (CI / non-interactive context); machine-readable fields still report the facts — Spec 079 FR-019
+
+	// Spec 079 FR-002 — how far behind the running build is. All four are
+	// additive (FR-021) and absent when the delta could not be resolved, in
+	// which case every surface renders its pre-delta wording.
+	BehindSummary           string `json:"behind_summary,omitempty"`            // Pre-rendered clause every surface prints verbatim, e.g. "8 releases / ~14 weeks behind" — render this, do not re-derive it
+	ReleasesBehind          *int   `json:"releases_behind,omitempty"`           // Releases on the offered channel between the running and offered versions
+	ReleasesBehindSaturated bool   `json:"releases_behind_saturated,omitempty"` // ReleasesBehind is a lower bound: the running build predates the scanned release window
+	WeeksBehind             *int   `json:"weeks_behind,omitempty"`              // Whole weeks between the two releases' publish dates; 0 is a real value, absent means unknown
 }
 
 // InfoEndpoints represents the available API endpoints

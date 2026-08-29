@@ -1075,7 +1075,10 @@ Get application info, version, and update availability.
       "checked_at": "2025-01-15T10:30:00Z",
       "is_prerelease": false,
       "install_channel": "homebrew",
-      "update_command": "brew upgrade mcpproxy"
+      "update_command": "brew upgrade mcpproxy",
+      "behind_summary": "8 releases / ~14 weeks behind",
+      "releases_behind": 8,
+      "weeks_behind": 14
     }
   }
 }
@@ -1105,6 +1108,14 @@ Get application info, version, and update availability.
 | `update.check_error` | string | Error message if update check failed |
 | `update.install_channel` | string | Detected install channel: `homebrew`, `dmg`, `deb`, `rpm`, `docker`, `go-install`, `windows-installer`, `tarball`, or `unknown`. Always present once detected, even when no update is available. See [Version Updates](/features/version-updates) for how detection works. |
 | `update.update_command` | string | Exact one-line update command for the detected channel. Only present when an update is available **and** the channel has a safe command (`homebrew`, `deb`, `rpm`, `go-install`); omitted for `dmg`/`windows-installer`/`tarball`/`docker`/`unknown` so a possibly-wrong command is never suggested. |
+| `update.behind_summary` | string | Human-readable delta clause, e.g. `8 releases / ~14 weeks behind` (Spec 079 FR-002). **Render this verbatim** rather than rebuilding it from the numbers below — it is authored once in the core so the CLI, Web UI banner and both trays cannot word it differently. Only present when an update is available and the delta could be resolved. |
+| `update.releases_behind` | integer | Releases on the offered channel between the running version and the offered one. Absent when unknown. |
+| `update.releases_behind_saturated` | boolean | `releases_behind` is a **lower bound**: the running build predates the scanned release window, so older releases were never counted. Clients render `N+`. Omitted when false. |
+| `update.weeks_behind` | integer | Whole weeks between the two releases' publish dates. `0` is a real value (a same-week release); *absent* means unknown, so do not conflate them. |
+
+:::note Delta fields degrade silently
+The four `behind_*` / `*_behind` fields are best-effort enrichment: resolving them needs the release list and publish dates, which is a second GitHub request. When that request fails, is rate-limited, or the running build has no release record, the fields are simply **absent** and every surface renders exactly the message it rendered before the delta existed. A missing delta never sets `check_error` and never suppresses the nudge.
+:::
 
 :::tip Update Checking
 MCPProxy automatically checks for updates every 4 hours. The update information is exposed via this endpoint and used by the tray application and web UI to show update notifications. Use `?refresh=true` to force an immediate re-check. Checking is controlled by the `update_check` config block (`enabled`, `channel`) — see [Version Updates](/features/version-updates); when disabled, `?refresh=true` performs no check and the `update` object is omitted.

@@ -1869,6 +1869,12 @@ type coreUpdateInfo struct {
 	// NudgesSuppressed: the core runs in a CI / non-interactive context and
 	// UI nudges must stay quiet (Spec 079 FR-019).
 	NudgesSuppressed bool `json:"nudges_suppressed"`
+	// BehindSummary is the core-rendered "N releases / M weeks behind" clause
+	// (Spec 079 FR-002). Rendered verbatim, never re-derived here — that is
+	// what keeps this tray, the Web UI banner and the CLI wording identical.
+	// Empty against a core that predates it, or when the delta could not be
+	// resolved; the menu item then reads exactly as it did before.
+	BehindSummary string `json:"behind_summary"`
 }
 
 // fetchCoreUpdateInfo queries the core's /api/v1/info endpoint. It returns the
@@ -1983,11 +1989,20 @@ func (a *App) checkUpdateFromAPI() {
 	// facts in its state but shows no nudge and logs at debug only.
 	if update.Available && !update.NudgesSuppressed {
 		if !wasAvailable {
-			a.logger.Info("Update available",
-				zap.String("current", a.version),
-				zap.String("latest", update.LatestVersion))
+			// Sugared logger: loose key/value args, and the FR-002 delta only
+			// when the core resolved one.
+			if update.BehindSummary != "" {
+				a.logger.Infow("Update available",
+					"current", a.version,
+					"latest", update.LatestVersion,
+					"behind", update.BehindSummary)
+			} else {
+				a.logger.Infow("Update available",
+					"current", a.version,
+					"latest", update.LatestVersion)
+			}
 		}
-		a.showUpdateMenuItem(update.LatestVersion, update.IsPrerelease)
+		a.showUpdateMenuItem(update.LatestVersion, update.IsPrerelease, update.BehindSummary)
 	} else {
 		if update.Available && update.NudgesSuppressed {
 			a.logger.Debug("Update available but nudges suppressed (CI/non-interactive)",
@@ -1998,7 +2013,7 @@ func (a *App) checkUpdateFromAPI() {
 }
 
 // showUpdateMenuItem shows the update menu item with the new version
-func (a *App) showUpdateMenuItem(version string, isPrerelease bool) {
+func (a *App) showUpdateMenuItem(version string, isPrerelease bool, behindSummary string) {
 	if a.updateMenuItem == nil {
 		return
 	}
@@ -2013,8 +2028,19 @@ func (a *App) showUpdateMenuItem(version string, isPrerelease bool) {
 		title = fmt.Sprintf("Update available: %s (use brew upgrade)", version)
 	}
 
+	// Spec 079 FR-002: how far behind the running build is. It goes in the
+	// tooltip rather than the title because the title is already carrying the
+	// version and the channel's update hint, and a menu-bar item that grows to
+	// "New version available (v0.62.0) — 8 releases / ~14 weeks behind" stops
+	// being scannable. Printed verbatim from the core so this tray cannot word
+	// the delta differently from status, doctor and the Web UI banner.
+	tooltip := "Click to open the download page"
+	if behindSummary != "" {
+		tooltip = "You are " + behindSummary + ". Click to open the download page."
+	}
+
 	a.updateMenuItem.SetTitle(title)
-	a.updateMenuItem.SetTooltip("Click to open the download page")
+	a.updateMenuItem.SetTooltip(tooltip)
 	a.updateMenuItem.Show()
 }
 

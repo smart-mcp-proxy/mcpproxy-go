@@ -1578,6 +1578,10 @@ actor CoreProcessManager {
             appState.webUIBaseURL = webUIBase
             if let update = info.update, update.available, let latest = update.latestVersion {
                 appState.updateAvailable = latest.hasPrefix("v") ? String(latest.dropFirst()) : latest
+                // Spec 079 FR-002. Cleared as well as set: a core that stops
+                // reporting a delta (checker restarted, went offline) must not
+                // leave a stale age on screen next to a fresh version.
+                appState.updateBehindSummary = update.behindSummary
             }
         }
 

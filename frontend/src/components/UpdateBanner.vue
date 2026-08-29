@@ -11,7 +11,14 @@
     <div class="flex-1">
       <span>
         Update available: <span class="font-semibold">{{ latestVersion }}</span>
-        <template v-if="currentVersion"> — you are running {{ currentVersion }}</template>.
+        <template v-if="currentVersion"> — you are running {{ currentVersion }}</template
+        ><!-- Spec 079 FR-002: the "N releases / M weeks behind" delta. The
+             clause is rendered by the daemon (updatecheck.FormatBehindSummary)
+             and printed verbatim, so this banner cannot word it differently
+             from status/doctor/the tray — do not rebuild it from the numeric
+             fields. Absent when the delta could not be resolved or the daemon
+             predates it, and the sentence then reads exactly as before. -->
+        <template v-if="behindSummary">, <span data-test="update-banner-behind">{{ behindSummary }}</span></template>.
       </span>
       <a
         v-if="releaseUrl"
@@ -96,6 +103,8 @@ function readDismissedVersion(): string {
 const dismissedVersion = ref(readDismissedVersion())
 
 const latestVersion = computed(() => systemStore.latestVersion)
+// Spec 079 FR-002 — see the template comment; rendered, never re-derived.
+const behindSummary = computed(() => systemStore.updateBehindSummary)
 const currentVersion = computed(() => systemStore.version)
 const releaseUrl = computed(() => systemStore.info?.update?.release_url ?? '')
 // Spec 079 US2: channel-aware one-line update command (empty when the

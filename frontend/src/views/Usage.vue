@@ -15,7 +15,14 @@
         </button>
       </div>
 
-      <select v-model="status" class="select select-sm select-bordered" data-test="usage-status-filter" @change="reload">
+      <!--
+        F30 (#1046): both selects carry their purpose only in their option
+        text, so a screen reader announces "combo box" with no idea what it
+        filters. They went unnoticed by the original audit because Usage had
+        no route of its own then; #1044 made it the landing page and brought
+        them onto "/", where the committed a11y sweep now reaches them.
+      -->
+      <select v-model="status" aria-label="Filter calls by status" class="select select-sm select-bordered" data-test="usage-status-filter" @change="reload">
         <option value="">All statuses</option>
         <option value="success">Success</option>
         <option value="error">Errors</option>
@@ -23,14 +30,22 @@
         <option value="rejected">Rejected</option>
       </select>
 
-      <select v-model="sort" class="select select-sm select-bordered" data-test="usage-sort" @change="reload">
+      <select v-model="sort" aria-label="Sort tools by" class="select select-sm select-bordered" data-test="usage-sort" @change="reload">
         <option value="resp_bytes">Sort: response size</option>
         <option value="calls">Sort: calls</option>
         <option value="error_rate">Sort: error rate</option>
         <option value="p95">Sort: p95 latency</option>
       </select>
 
-      <span v-if="data" class="text-xs opacity-50 ml-auto" data-test="usage-freshness">
+      <!--
+        F9: `opacity-*` multiplies alpha on base-content and lands under AA
+        (this one measured 3.16:1 on corporate). #1054 replaced the
+        `text-base-content/NN` ramp and `.stat-*` with the AA-checked
+        `--tone-muted`, but the raw opacity utility was never covered — and
+        nothing caught it until #1044 moved this view onto "/", where the
+        committed contrast sweep walks. Same visual intent, measured colour.
+      -->
+      <span v-if="data" class="text-xs text-base-content/60 ml-auto" data-test="usage-freshness">
         Updated {{ freshnessLabel }}
       </span>
     </div>
@@ -61,7 +76,7 @@
         </div>
         <div class="stat-desc">
           {{ data.tokens_saved_percentage.toFixed(1) }}% smaller tool context via BM25 discovery ·
-          <span class="opacity-70">tracks your catalog, not your call volume</span>
+          <span class="text-base-content/60">tracks your catalog, not your call volume</span>
         </div>
       </div>
       <!--
@@ -120,7 +135,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
         </svg>
         <h3 class="font-semibold text-lg mt-2">No usage data yet</h3>
-        <p class="text-sm opacity-60 max-w-md">
+        <p class="text-sm text-base-content/60 max-w-md">
           Once your agents start calling tools through the proxy, you'll see call volume,
           token sinks, error rates and a timeline here. Try widening the window or clearing filters.
         </p>
@@ -154,7 +169,7 @@
       </div>
 
       <!-- "other" fold note when the per-tool list was truncated -->
-      <div v-if="data.other" class="lg:col-span-2 text-xs opacity-50 text-center" data-test="usage-other-note">
+      <div v-if="data.other" class="lg:col-span-2 text-xs text-base-content/60 text-center" data-test="usage-other-note">
         + {{ data.other.tools_folded }} more tool{{ data.other.tools_folded === 1 ? '' : 's' }}
         ({{ formatNumber(data.other.calls) }} calls) folded into “other”.
       </div>

@@ -139,6 +139,10 @@ export const useSystemStore = defineStore('system', () => {
   // command (empty when the channel has no safe command, FR-009).
   const installChannel = computed(() => info.value?.update?.install_channel ?? '')
   const updateCommand = computed(() => info.value?.update?.update_command ?? '')
+  // Spec 079 FR-002: the daemon-rendered "N releases / M weeks behind" clause.
+  // Empty against a daemon that predates it, or when the delta could not be
+  // resolved — surfaces then render their pre-delta wording.
+  const updateBehindSummary = computed(() => info.value?.update?.behind_summary ?? '')
 
   // Routing mode
   const routingMode = computed(() => routing.value?.routing_mode ?? status.value?.routing_mode ?? 'retrieve_tools')
@@ -617,6 +621,7 @@ export const useSystemStore = defineStore('system', () => {
     latestVersion,
     installChannel,
     updateCommand,
+    updateBehindSummary,
     routingMode,
     sidebarCollapsed,
 

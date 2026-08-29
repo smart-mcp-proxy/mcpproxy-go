@@ -2797,6 +2797,12 @@ components:
         available:
           description: Whether an update is available
           type: boolean
+        behind_summary:
+          description: |-
+            Spec 079 FR-002 — how far behind the running build is. All four are
+            additive (FR-021) and absent when the delta could not be resolved, in
+            which case every surface renders its pre-delta wording.
+          type: string
         check_error:
           description: Error message if update check failed
           type: string
@@ -2820,10 +2826,22 @@ components:
         release_url:
           description: URL to the release page
           type: string
+        releases_behind:
+          description: Releases on the offered channel between the running and offered
+            versions
+          type: integer
+        releases_behind_saturated:
+          description: 'ReleasesBehind is a lower bound: the running build predates
+            the scanned release window'
+          type: boolean
         update_command:
           description: One-line update command for the channel; only set when an update
             is available and the channel has one — Spec 079 FR-009
           type: string
+        weeks_behind:
+          description: Whole weeks between the two releases' publish dates; 0 is a
+            real value, absent means unknown
+          type: integer
       type: object
     contracts.UpdatePolicy:
       description: |-

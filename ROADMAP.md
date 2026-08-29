@@ -65,18 +65,16 @@ graph LR
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,scanner_simplification,schema_deferred done;
-  class analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
-  class tpa_db in_review;
-  class ux_audit,action_log_transparency,remote_access_tunnel,token_bench,tool_graph,discovery_eval_harness todo;
+  class ux_audit,analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
+  class action_log_transparency,tpa_db,remote_access_tunnel,token_bench,tool_graph,discovery_eval_harness todo;
 ```
 
 **Independent epics** (14) — no cross-epic prerequisites; each stands alone:
 
+- 🔵 **Upgrade awareness & guided update** — In progress · P0
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
-- 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P3
 - 🟡 **Windows native tray app** — In review · P2
 - ⚪ **Planning/docs truth automation** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
@@ -84,8 +82,8 @@ graph LR
 - ⚫ **Paid-tier MVP (billing / seats / license)** — Todo · P3 · parked
 - ⚫ **SDK v1 migration** — Todo · P3 · parked
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
+- ⚪ **MCP protocol upgrade to 2026-07-28 revision** — Todo · P3
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
-- 🟢 **Upgrade awareness & guided update** — Done · P0
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
@@ -93,6 +91,84 @@ graph LR
 ## Epic details
 
 Each epic's child tasks, their internal dependency graph, and tracker/PR links — **collapsed by default**, expand the ones you care about. Full metadata (priority, spec progress) is in the [Epics](#epics) table below.
+
+<details>
+<summary>🔵 Web UI + macOS app UX audit — In progress · P0</summary>
+
+> End-to-end UX pass across Web UI and the macOS tray app; the umbrella for the polish push. (No spec yet — 064 is the unrelated agent-fleet glass-cockpit spec.) 2026-08-29 truth-sync: both sweeps and every finding they raised SHIPPED in August (this file had them at todo). Audits: docs/qa/ux-audit-webui-2026-08.md (36 findings) and docs/qa/ux-audit-macos-tray-2026-08.md (16 findings); both carry a Resolution section mapping finding -> PR. What is left is regression-proofing, not findings.
+
+```mermaid
+graph LR
+  ux_audit_webui_sweep["Web UI heuristic + Playwright UX sweep"]
+  ux_audit_macos_sweep["macOS tray app UX sweep (settings parity, flo…"]
+  ux_audit_webui_fixes["Close the 36 Web UI findings"]
+  ux_audit_macos_fixes["Close the 16 macOS tray findings"]
+  ux_audit_recheck_defects["Five new defects found while re-checking the…"]
+  ux_audit_sweep_regressions["Fold the audit's regression assertions into t…"]
+  ux_audit_sweep_found_defects["Three defects the completed sweep found on ma…"]
+  ux_audit_tray_live_verify["Verify the 16 tray fixes on a running tray"]
+
+  ux_audit_webui_sweep --> ux_audit_webui_fixes
+  ux_audit_macos_sweep --> ux_audit_macos_fixes
+  ux_audit_webui_fixes --> ux_audit_recheck_defects
+  ux_audit_webui_fixes --> ux_audit_sweep_regressions
+  ux_audit_sweep_regressions --> ux_audit_sweep_found_defects
+  ux_audit_macos_fixes --> ux_audit_tray_live_verify
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class ux_audit_webui_sweep,ux_audit_macos_sweep,ux_audit_webui_fixes,ux_audit_macos_fixes,ux_audit_recheck_defects,ux_audit_sweep_regressions,ux_audit_sweep_found_defects done;
+  class ux_audit_tray_live_verify todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Web UI heuristic + Playwright UX sweep | 🟢 Done | #1046 |
+| macOS tray app UX sweep (settings parity, flows) | 🟢 Done | #1043 |
+| Close the 36 Web UI findings | 🟢 Done | #1044 #1048 #1049 #1050 #1051 #1052 #1053 #1054 |
+| Close the 16 macOS tray findings | 🟢 Done | #1055 #1056 |
+| Five new defects found while re-checking the Web UI audit on v0.61.0 | 🟢 Done | #1062 #1072 #1077 |
+| Fold the audit's regression assertions into the committed sweep (e2e/web-ui-sweep) | 🟢 Done | — |
+| Three defects the completed sweep found on main | 🟢 Done | — |
+| Verify the 16 tray fixes on a running tray | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>🔵 Upgrade awareness &amp; guided update — In progress · P0</summary>
+
+> Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI. 2026-08-29 truth-sync: this epic was marked done, but FR-002's release/age delta was never built — the four shipped tasks are US-slices and the FR belonged to none of them. Spec 079 has only spec.md (no plan.md/tasks.md), so no checkbox surface could catch it; the deferral survived only as TODO(spec-079/FR-002) code comments, which is how an outside contributor found it (#1081).
+
+Spec: [079-upgrade-nudge](./specs/079-upgrade-nudge/)
+
+```mermaid
+graph LR
+  upgrade_nudge_status_log["US1 slice: update availability in mcpproxy st…"]
+  upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + up…"]
+  upgrade_nudge_channel["US2: channel-aware guided update command (bre…"]
+  upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no…"]
+  upgrade_nudge_delta["FR-002 remainder: human-readable 'N releases…"]
+
+  upgrade_nudge_status_log --> upgrade_nudge_surfacing
+  upgrade_nudge_surfacing --> upgrade_nudge_channel
+  upgrade_nudge_surfacing --> upgrade_nudge_quiet
+  upgrade_nudge_channel --> upgrade_nudge_delta
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class upgrade_nudge_status_log,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet done;
+  class upgrade_nudge_delta todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| US1 slice: update availability in mcpproxy status + deduped startup log | 🟢 Done | #798 |
+| US1 remainder: dismissible Web UI banner + update_check config block | 🟢 Done | #805 |
+| US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker) | 🟢 Done | #818 |
+| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | 🟢 Done | #911 |
+| FR-002 remainder: human-readable "N releases / M weeks behind" delta on status, doctor, startup log, Web UI and the tray | ⚪ Todo | — |
+
+</details>
 
 <details>
 <summary>🔵 Release qualification gate (auto-QA matrix blocks the tag) — In progress · P0</summary>
@@ -142,15 +218,13 @@ graph LR
   analytics_token_drain_graphs --> analytics_default_landing
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
-  class analytics_token_drain_graphs done;
-  class analytics_default_landing in_review;
+  class analytics_token_drain_graphs,analytics_default_landing done;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | Per-server / per-tool token-drain graphs | 🟢 Done | — |
-| Make dashboard the default landing page | 🟡 In review | — |
+| Make dashboard the default landing page | 🟢 Done | #1044 |
 
 </details>
 
@@ -223,43 +297,6 @@ graph LR
 </details>
 
 <details>
-<summary>🔵 MCP protocol upgrade to 2026-07-28 revision — In progress · P3</summary>
-
-> UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision in review as #1033: final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
-
-Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) · PR: #1033
-
-</details>
-
-<details>
-<summary>🟡 tpa-db: versioned TPA signature database for the offline scanner — In review · P1</summary>
-
-> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db is in review as #1028 (merge-on-convergence armed); no implementation has started, so every child task stays todo.
-
-Spec: [101-tpa-db](./specs/101-tpa-db/) · PR: #1028
-
-```mermaid
-graph LR
-  tpa_db_format["Signature DB format + loader (versioned, sign…"]
-  tpa_db_corpus["Seed corpus: catalog known public TPA campaig…"]
-  tpa_db_refresh["Out-of-band refresh (offline-friendly: manual…"]
-
-  tpa_db_format --> tpa_db_corpus
-  tpa_db_format --> tpa_db_refresh
-
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tpa_db_format,tpa_db_corpus,tpa_db_refresh todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
-| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
-| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
-
-</details>
-
-<details>
 <summary>🟡 Windows native tray app — In review · P2 · MCP-43</summary>
 
 > No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first.
@@ -281,28 +318,6 @@ graph LR
 | --- | --- | --- |
 | Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work) | ⚪ Todo | — |
 | WebView2 native window + profile submenu | 🟡 In review | `MCP-43` |
-
-</details>
-
-<details>
-<summary>⚪ Web UI + macOS app UX audit — Todo · P0</summary>
-
-> End-to-end UX pass across Web UI and the macOS tray app; the umbrella for the polish push. (No spec yet — 064 is the unrelated agent-fleet glass-cockpit spec.)
-
-```mermaid
-graph LR
-  ux_audit_webui_sweep["Web UI heuristic + Playwright UX sweep"]
-  ux_audit_macos_sweep["macOS tray app UX sweep (settings parity, flo…"]
-
-
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class ux_audit_webui_sweep,ux_audit_macos_sweep todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| Web UI heuristic + Playwright UX sweep | ⚪ Todo | — |
-| macOS tray app UX sweep (settings parity, flows) | ⚪ Todo | — |
 
 </details>
 
@@ -335,6 +350,34 @@ graph LR
 | Activity in the tray menu (recent tool calls + security events, jump to full log) | ⚪ Todo | — |
 | tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
 | Tie activity retention/size into the glance view | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ tpa-db: versioned TPA signature database for the offline scanner — Todo · P1</summary>
+
+> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); no implementation has started, so the epic and every child task stay todo (the pr: link is the spec, not the build).
+
+Spec: [101-tpa-db](./specs/101-tpa-db/)
+
+```mermaid
+graph LR
+  tpa_db_format["Signature DB format + loader (versioned, sign…"]
+  tpa_db_corpus["Seed corpus: catalog known public TPA campaig…"]
+  tpa_db_refresh["Out-of-band refresh (offline-friendly: manual…"]
+
+  tpa_db_format --> tpa_db_corpus
+  tpa_db_format --> tpa_db_refresh
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class tpa_db_format,tpa_db_corpus,tpa_db_refresh todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
+| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
+| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
 
 </details>
 
@@ -462,6 +505,15 @@ graph LR
 </details>
 
 <details>
+<summary>⚪ MCP protocol upgrade to 2026-07-28 revision — Todo · P3</summary>
+
+> UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that — implementation has not started, hence todo): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
+
+Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
+
+</details>
+
+<details>
 <summary>⚪ Security gateway Tracks C/D (per-arg least-privilege + signature provenance) — Todo · P3</summary>
 
 > Track A→Spec 056, Track B→Spec 059 (both shipped). UNBUILT: Track C per-ARGUMENT allow-listing (per-tool scope exists in mcp_direct_scope.go); Track D provenance + human-readable signature diff (SHA-256 pinning exists via Spec 032). Build ON 032/028, don't re-implement; honor the rug-pull re-quarantine interaction rule vs 032 auto-approve.
@@ -511,37 +563,6 @@ Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 <summary>⚫ SSO (server edition) — Todo · parked · P3</summary>
 
 > PARKED. Single sign-on for the multi-user server edition.
-
-</details>
-
-<details>
-<summary>🟢 Upgrade awareness &amp; guided update — Done · P0</summary>
-
-> Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI.
-
-Spec: [079-upgrade-nudge](./specs/079-upgrade-nudge/)
-
-```mermaid
-graph LR
-  upgrade_nudge_status_log["US1 slice: update availability in mcpproxy st…"]
-  upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + up…"]
-  upgrade_nudge_channel["US2: channel-aware guided update command (bre…"]
-  upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no…"]
-
-  upgrade_nudge_status_log --> upgrade_nudge_surfacing
-  upgrade_nudge_surfacing --> upgrade_nudge_channel
-  upgrade_nudge_surfacing --> upgrade_nudge_quiet
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  class upgrade_nudge_status_log,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet done;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| US1 slice: update availability in mcpproxy status + deduped startup log | 🟢 Done | #798 |
-| US1 remainder: dismissible Web UI banner + update_check config block | 🟢 Done | #805 |
-| US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker) | 🟢 Done | #818 |
-| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | 🟢 Done | #911 |
 
 </details>
 
@@ -705,7 +726,7 @@ graph LR
 <details>
 <summary>🟢 Deferred-schema serialization for the direct tools/list surface (spec 102) — Done · P1</summary>
 
-> Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema (~88% smaller listing), with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction). COMPLETE: all 89 tasks shipped in #1063; the settings UI for both serialization axes followed in #1082. MEASURED SAVINGS FELL WELL SHORT OF THE ~88% PROJECTION ABOVE: 29.7% on the frozen reference corpus and 34.8% on a 527-tool snapshot, against SC-001's >=70% target, with 38.9% the arithmetic ceiling even if both the schema and the signature were deleted. The projection assumed schemas dominate the payload; names, descriptions and annotations turn out to carry most of it. SC-001 was RESTATED per corpus shape (maintainer decision 2026-08-29): now >=25% on the 45-tool corpus and >=30% at fleet scale, both asserted, with the original 70% kept as an upper tripwire.
+> Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema, with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction). COMPLETE: all 89 tasks shipped in #1063; the settings UI for both serialization axes followed in #1082; #1083/#1084 fixed in #1086. MEASURED SAVINGS FELL WELL SHORT OF THE ~88% ORIGINALLY PROJECTED: 29.7% on the frozen 45-tool reference corpus and 34.8% on a 527-tool snapshot, with 38.9% the arithmetic ceiling even if both the schema and the signature were deleted. The projection assumed schemas dominate the payload; names, descriptions and annotations turn out to carry most of it. SC-001 was RESTATED per corpus shape (maintainer decision 2026-08-29): now >=25% on the 45-tool corpus and >=30% at fleet scale, both asserted in internal/server/mcp_routing_deferred_tokens_test.go, with the original 70% kept as an upper tripwire. Unblocks token-bench — and that measured shortfall is the first thing token-bench has to explain.
 
 Spec: [102-schema-deferred](./specs/102-schema-deferred/) · PR: #1063
 
@@ -738,19 +759,20 @@ graph LR
 
 | Epic | Status | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- |
+| Web UI + macOS app UX audit | In progress | P0 | — |  |  |
+| Upgrade awareness & guided update | In progress | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
-| MCP protocol upgrade to 2026-07-28 revision | In progress | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | #1033 |
-| tpa-db: versioned TPA signature database for the offline scanner | In review | P1 | — | [101-tpa-db](./specs/101-tpa-db/) | #1028 |
 | Windows native tray app `MCP-43` | In review | P2 | — |  |  |
-| Web UI + macOS app UX audit | Todo | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | P1 | — |  |  |
+| tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Token-efficiency benchmark: measured savings, published results | Todo | P1 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
 | Planning/docs truth automation | Todo | P2 | — |  |  |
+| MCP protocol upgrade to 2026-07-28 revision | Todo | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Server marketplace `MCP-37` | Todo (parked) | P3 | — |  |  |
@@ -758,7 +780,6 @@ graph LR
 | Paid-tier MVP (billing / seats / license) `MCP-40` | Todo (parked) | P3 | — |  |  |
 | SDK v1 migration | Todo (parked) | P3 | — |  |  |
 | SSO (server edition) | Todo (parked) | P3 | — |  |  |
-| Upgrade awareness & guided update | Done | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |

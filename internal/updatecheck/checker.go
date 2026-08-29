@@ -89,6 +89,22 @@ type Checker struct {
 
 	// For testing: allows injection of a custom check function
 	checkFunc func() (*GitHubRelease, error)
+
+	// deltaFunc resolves the Spec 079 FR-002 delta for an offered release.
+	// It mirrors the checkFunc seam so tests can drive the delta without a
+	// network. Best-effort by contract: an error here is a no-op, never a
+	// check failure (see runCheck).
+	deltaFunc func(latest *GitHubRelease) (*ReleaseDelta, error)
+
+	// deltaCacheKey / deltaCache / deltaCacheAt memoise the last delta, so a
+	// repeat check with an unchanged (channel, current, latest) triple needs no
+	// network at all. Invalidated three ways: by the key, by SetConfig (a
+	// stable -> rc switch changes the correct count without changing either
+	// version), and by deltaCacheTTL — release history is very nearly, but not
+	// actually, immutable.
+	deltaCacheKey string
+	deltaCache    *ReleaseDelta
+	deltaCacheAt  time.Time
 }
 
 // isQuietEnvironment reports whether UI nudges should be suppressed (Spec 079
@@ -133,6 +149,8 @@ func New(logger *zap.Logger, version string) *Checker {
 		return c.githubClient.GetRelease(c.IncludePrereleases())
 	}
 
+	c.deltaFunc = c.fetchReleaseDelta
+
 	return c
 }
 
@@ -164,6 +182,11 @@ func (c *Checker) SetConfig(enabled, includePrereleases bool) {
 		// channel switch never briefly serves stale (possibly wrong-channel)
 		// info before the prompt re-check completes (FR-013).
 		c.versionInfo = &VersionInfo{CurrentVersion: c.version, InstallChannel: c.installChannel, NudgesSuppressed: c.nudgesSuppressed}
+		// Same reasoning for the FR-002 delta: a stable -> rc switch changes
+		// the correct release count without changing either version. The cache
+		// key already carries the channel, so this is belt-and-braces against
+		// a future change to that key.
+		c.deltaCacheKey, c.deltaCache, c.deltaCacheAt = "", nil, time.Time{}
 		// A pre-change failure must not impose its backoff window (FR-018) on
 		// the new configuration — the prompt re-enable/channel-switch check
 		// below must actually run.
@@ -414,7 +437,7 @@ func (c *Checker) runCheck(force bool) {
 		}
 		c.mu.Unlock()
 		c.logger.Debug("Update check failed", zap.Error(err))
-		c.updateVersionInfo(nil, err.Error(), gen)
+		c.updateVersionInfo(nil, nil, err.Error(), gen)
 		return
 	}
 
@@ -424,14 +447,121 @@ func (c *Checker) runCheck(force bool) {
 		c.nextCheckAt = time.Time{}
 	}
 	c.mu.Unlock()
-	c.updateVersionInfo(release, "", gen)
+
+	// Spec 079 FR-002: enrich the result with the release/age delta. This is
+	// deliberately best-effort and runs OUTSIDE the lock. Three rules make it
+	// safe to fail:
+	//
+	//   1. it never writes CheckError — status and doctor read a non-empty
+	//      CheckError as "the check failed" and suppress the nudge entirely,
+	//      so a delta miss there would delete the very message it enriches;
+	//   2. it never touches consecutiveFailures/nextCheckAt — a delta miss
+	//      must not push the real check into FR-018 backoff;
+	//   3. it returns nil, and every surface falls back to today's wording.
+	delta := c.resolveDelta(release)
+
+	c.updateVersionInfo(release, delta, "", gen)
+}
+
+// resolveDelta computes the FR-002 delta for an offered release, or nil when
+// there is nothing honest to report. Never returns an error: by FR-006 a
+// missing delta may not degrade any surface, so every failure path is a
+// silent nil.
+func (c *Checker) resolveDelta(release *GitHubRelease) *ReleaseDelta {
+	c.mu.RLock()
+	deltaFunc := c.deltaFunc
+	c.mu.RUnlock()
+	if release == nil || deltaFunc == nil {
+		return nil
+	}
+	// FR-017: an unversioned/development build gets no delta (and never
+	// reaches here anyway — Start/CheckNow gate on isValidSemver).
+	// FR-016: no delta unless something strictly newer is actually offered.
+	if !c.isValidSemver() || !c.compareVersions(c.version, release.TagName) {
+		return nil
+	}
+
+	key := c.deltaKey(release.TagName)
+	now := c.nowFn()
+	c.mu.RLock()
+	cached := c.deltaCache
+	hit := c.deltaCacheKey == key && cached != nil && now.Before(c.deltaCacheAt.Add(deltaCacheTTL))
+	c.mu.RUnlock()
+	if hit {
+		return cached
+	}
+
+	delta, err := deltaFunc(release)
+	if err != nil || delta == nil {
+		if err != nil {
+			c.logger.Debug("Update delta unavailable; reporting availability without it",
+				zap.Error(err))
+		}
+		return nil
+	}
+
+	c.mu.Lock()
+	c.deltaCacheKey, c.deltaCache, c.deltaCacheAt = key, delta, c.nowFn()
+	c.mu.Unlock()
+	return delta
+}
+
+// deltaKey identifies a delta result. The channel belongs in it because a
+// stable -> rc hot-reload changes the correct count while both versions stay
+// the same.
+func (c *Checker) deltaKey(latest string) string {
+	channel := "stable"
+	if c.IncludePrereleases() {
+		channel = "rc"
+	}
+	return channel + "|" + c.version + "|" + latest
+}
+
+// fetchReleaseDelta is the production deltaFunc: one page of the releases list
+// (ETag-cached), plus a by-tag lookup only when the running version predates
+// that page and its publish date is therefore unknown.
+func (c *Checker) fetchReleaseDelta(latest *GitHubRelease) (*ReleaseDelta, error) {
+	// A real deadline shared by BOTH requests. Gating only between stages was
+	// not enough: stage 1 could spend almost the whole budget and stage 2 would
+	// then still get the client's full per-request timeout on top, so the added
+	// wall clock could reach ~18s on a request a user is waiting on.
+	ctx, cancel := context.WithTimeout(context.Background(), deltaBudget)
+	defer cancel()
+
+	page, err := c.githubClient.ListReleases(ctx, releasesPerPage*deltaScanPages)
+	if err != nil {
+		return nil, err
+	}
+
+	includePrereleases := c.IncludePrereleases()
+
+	// Only pay for the second request when the page cannot date the running
+	// build itself. It shares the budget above, so a slow first request leaves
+	// it less time rather than adding its own.
+	var currentRelease *GitHubRelease
+	if findRelease(page, ensureVPrefix(c.version)) == nil {
+		if rel, tagErr := c.githubClient.GetReleaseByTagContext(ctx, ensureVPrefix(c.version)); tagErr == nil {
+			currentRelease = rel
+		} else {
+			// Expected for a pseudo-version or a yanked tag, and also how a
+			// spent budget surfaces. Either way it costs only the age.
+			c.logger.Debug("Running version has no release record; reporting the count without an age",
+				zap.String("version", c.version), zap.Error(tagErr))
+		}
+	}
+
+	delta, ok := ComputeReleaseDelta(c.version, latest.TagName, page, currentRelease, includePrereleases)
+	if !ok {
+		return nil, nil
+	}
+	return &delta, nil
 }
 
 // updateVersionInfo updates the cached version information. gen is the config
 // generation the check started under; results from a check that raced a
 // SetConfig change (disable, channel switch) are dropped so nothing stale is
 // published or announced after the change (FR-013/FR-015).
-func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, gen uint64) {
+func (c *Checker) updateVersionInfo(release *GitHubRelease, delta *ReleaseDelta, checkError string, gen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -483,6 +613,23 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, g
 		NudgesSuppressed: c.nudgesSuppressed,
 	}
 
+	// Spec 079 FR-002. Absent delta = absent fields; every surface then
+	// renders exactly what it rendered before this feature existed.
+	behindSummary := ""
+	if updateAvailable && delta != nil {
+		behindSummary = FormatBehindSummary(*delta)
+		if behindSummary != "" {
+			releases := delta.ReleasesBehind
+			c.versionInfo.ReleasesBehind = &releases
+			c.versionInfo.ReleasesBehindSaturated = delta.Saturated
+			if delta.WeeksKnown {
+				weeks := delta.WeeksBehind
+				c.versionInfo.WeeksBehind = &weeks
+			}
+			c.versionInfo.BehindSummary = behindSummary
+		}
+	}
+
 	switch {
 	// FR-019: in CI / non-interactive contexts the per-run availability
 	// announcement is a log nag — keep the facts machine-readable only.
@@ -493,15 +640,18 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, g
 	case updateAvailable && latestVersion != c.announcedVersion:
 		// Announce each newly detected version exactly once per process;
 		// subsequent ticks for the same version log at Debug only.
-		// TODO(spec-079/FR-002): include the "N releases / M weeks behind"
-		// delta here once the checker fetches the release list + publish
-		// dates (a later 079 slice extending VersionInfo, additive per
-		// FR-021).
+		// FR-002: the delta rides along when known, and is simply absent when
+		// the enrichment could not be resolved.
 		c.announcedVersion = latestVersion
-		c.logger.Info("Update available",
+		fields := []zap.Field{
 			zap.String("current", c.version),
 			zap.String("latest", latestVersion),
-			zap.String("url", release.HTMLURL))
+			zap.String("url", release.HTMLURL),
+		}
+		if behindSummary != "" {
+			fields = append(fields, zap.String("behind", behindSummary))
+		}
+		c.logger.Info("Update available", fields...)
 	case updateAvailable:
 		c.logger.Debug("Update still available",
 			zap.String("current", c.version),
@@ -548,6 +698,15 @@ func ensureVPrefix(version string) string {
 // Primarily for testing.
 func (c *Checker) SetCheckInterval(interval time.Duration) {
 	c.checkInterval = interval
+}
+
+// SetDeltaFunc sets a custom FR-002 delta resolver.
+// Primarily for testing.
+func (c *Checker) SetDeltaFunc(fn func(latest *GitHubRelease) (*ReleaseDelta, error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deltaCacheKey, c.deltaCache = "", nil
+	c.deltaFunc = fn
 }
 
 // SetCheckFunc sets a custom check function.
