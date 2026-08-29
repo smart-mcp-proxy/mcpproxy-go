@@ -23,6 +23,24 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Features
 
+- **mcp:** schema-deferred direct mode — a new `direct_tool_response_mode` key (`full` | `deferred`,
+  **default `full`, so this is opt-in and changes nothing until you turn it on**). In `deferred`,
+  the direct enumeration surface (`/mcp/all`, and `/mcp` under `routing_mode: "direct"`) lists every
+  tool with its name, description, annotations and a compact Spec-085 signature, advertising
+  `inputSchema` as exactly `{"type":"object"}` and dropping `outputSchema`; agents recover a full
+  schema on demand via `describe_tool`, and a call whose arguments do not fit is rejected
+  **before** it reaches the upstream, with the schema attached so the agent can self-correct.
+  Hot-reloadable — flipping it rebuilds the listing and notifies connected clients, no restart.
+  **Measured token saving is ~30%** (29.7% on the 45-tool reference corpus, 34.8% on a 527-tool
+  snapshot) — materially less than the ~88% originally projected, because names, descriptions and
+  annotations, not schemas, dominate the payload. (spec 102, [#971](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/971))
+- **settings:** both serialization modes are now reachable from the UI — Settings → General →
+  "Detail in tool-search results" (`tool_response_mode`) and "Detail in Direct-mode listings"
+  (`direct_tool_response_mode`), in the Web UI and the macOS tray. They previously had four ways to
+  set them (config file, env var, serve flag, REST) and no UI at all, so a tray-only user could not
+  reach `direct_tool_response_mode`. Neither carries a restart badge — both hot-reload, unlike
+  `routing_mode` above them.
+
 - **mcp:** `describe_tool` check mode — an optional `check: true` returns one availability
   verdict per id (up to 50) from the spec-098 preflight evaluator instead of schemas, so an
   agent can gate a multi-step plan without leaving the MCP session. Optional `filters`
@@ -30,6 +48,24 @@ Releases follow [Semantic Versioning](https://semver.org/).
   record, and the returned `request_id` finds it. (spec 099, [#969](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/969))
 
 ### Bug Fixes
+
+- **mcp/describe_tool:** on the direct surface, the returned definition named the tool
+  `<server>:<tool>` and recommended a `call_with` intent variant — neither of which that surface
+  can be asked for, so an agent following the response verbatim got "tool not found". It now
+  echoes the registered `<server>__<tool>` name and omits `call_with` (the permission signal
+  remains in `annotations`, which it was derived from). Both id spellings still work as input.
+  ([#1083](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1083))
+- **api:** a config value the validator rejects now returns **400** with the offending field in a
+  structured `validation_errors` payload, instead of 500. 500 is reserved for genuine failures to
+  persist a valid config. ([#1084](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1084))
+- **api:** `/api/v1/status` embedded a status snapshot whose `upstream_stats` and `tools_indexed`
+  were never refreshed — reporting `"Connecting"` and `0` for the life of a process whose servers
+  were long ready, while the sibling top-level field was correct. Both now come from one live
+  source, on the REST poll and on the SSE stream.
+  ([#1084](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1084))
+- **logging:** ~97 log calls in the REST API passed key/value pairs to a sugared logger method that
+  concatenates them, producing runs like `patcherrorconfiguration...` instead of structured fields.
+  ([#1084](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1084))
 
 - **homebrew:** One-line install in docs + guard tap job against pre-release tags (#486) ([#486](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/486)) ([`1098701`](https://github.com/smart-mcp-proxy/mcpproxy-go/commit/109870116fe17aa1ce7ecfd603962c1d3de21ba0))
 

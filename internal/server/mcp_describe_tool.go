@@ -115,11 +115,16 @@ func buildDescribeToolTool() mcp.Tool {
 // The two surfaces answer from different authorities and with different id
 // grammars; everything downstream — the shared builder, the score deletion, the
 // additive output_schema — is common.
+//
+// The fourth return is the DIRECT surface's registered display name
+// ("<server>__<tool>"), empty on the indexed surface. It is what the direct
+// surface can actually be asked to call, so the assembly seam swaps it over the
+// canonical "<server>:<tool>" the shared builder emits (#1083).
 func (p *MCPProxyServer) resolveDescribeDefinition(
 	ctx context.Context,
 	surface describeSurface,
 	id string,
-) (*config.ToolMetadata, toolEntryOpts, map[string]interface{}) {
+) (*config.ToolMetadata, toolEntryOpts, string, map[string]interface{}) {
 	if surface == describeSurfaceDirect {
 		entry, ok := p.resolveDirectDescribeID(ctx, id)
 		if !ok {
@@ -129,18 +134,18 @@ func (p *MCPProxyServer) resolveDescribeDefinition(
 			if corrected, ok := p.suggestDirectToolID(ctx, id); ok {
 				remediation = fmt.Sprintf("Tool not found. Tool ids are case-sensitive — did you mean '%s'?", corrected)
 			}
-			return nil, toolEntryOpts{}, describeToolIDError(id, describeErrNotFound, remediation)
+			return nil, toolEntryOpts{}, "", describeToolIDError(id, describeErrNotFound, remediation)
 		}
 		// The catalog entry carries the UPSTREAM annotations. Letting the
 		// builder fall back to its StateView lookup would silently downgrade a
 		// listed-but-pending destructive tool to call_with "read", because the
 		// StateView does not carry it (D10).
-		return entry.toolMetadata(), toolEntryOpts{annotationsOverride: entry.Annotations}, nil
+		return entry.toolMetadata(), toolEntryOpts{annotationsOverride: entry.Annotations}, entry.DisplayName, nil
 	}
 
 	serverName, toolName, ok := splitServerTool(id)
 	if !ok {
-		return nil, toolEntryOpts{}, describeToolIDError(id, describeErrNotFound, describeMalformedIDRemediation)
+		return nil, toolEntryOpts{}, "", describeToolIDError(id, describeErrNotFound, describeMalformedIDRemediation)
 	}
 
 	visible, reason := p.toolVisibleToSession(ctx, serverName, toolName)
@@ -151,15 +156,38 @@ func (p *MCPProxyServer) resolveDescribeDefinition(
 				remediation = fmt.Sprintf("Tool not found. Tool ids are case-sensitive — did you mean '%s'?", canonical)
 			}
 		}
-		return nil, toolEntryOpts{}, describeToolIDError(id, code, remediation)
+		return nil, toolEntryOpts{}, "", describeToolIDError(id, code, remediation)
 	}
 
 	meta := p.lookupIndexedTool(serverName, toolName)
 	if meta == nil {
 		// Disappeared between the visibility check and the lookup.
-		return nil, toolEntryOpts{}, describeToolIDError(id, describeErrNotFound, describeNotFoundRemediation)
+		return nil, toolEntryOpts{}, "", describeToolIDError(id, describeErrNotFound, describeNotFoundRemediation)
 	}
-	return meta, toolEntryOpts{}, nil
+	return meta, toolEntryOpts{}, "", nil
+}
+
+// applyDirectSurfaceIdentity rewrites a definition so every identifier in it is
+// one the DIRECT surface can actually be asked for (#1083).
+//
+// The shared builder emits the canonical "<server>:<tool>" name and a `call_with`
+// naming one of the call_tool_read/write/destructive intent variants. Both are
+// right on the indexed surface and wrong on this one: the direct surface
+// registers "<server>__<tool>" and exposes no intent variants at all, so an
+// agent that followed either field verbatim got "tool not found" for both.
+// Deferred mode makes that a live path rather than a curiosity — recovering a
+// schema through describe_tool is exactly what it tells agents to do.
+//
+// `call_with` is dropped rather than retargeted: it answers "which variant do I
+// dispatch through", a question this surface does not have. The permission
+// signal it carried is not lost — `annotations` travels on the same definition
+// and is the source `call_with` was derived from.
+func applyDirectSurfaceIdentity(entry map[string]interface{}, displayName string) {
+	if displayName == "" {
+		return
+	}
+	entry["name"] = displayName
+	delete(entry, "call_with")
 }
 
 // applyDescribeOutputSchema attaches the tool's declared output schema to a
@@ -312,7 +340,7 @@ func (p *MCPProxyServer) handleDescribeToolOnSurface(ctx context.Context, reques
 	definitions := make([]map[string]interface{}, 0, len(ids))
 	idErrors := make([]map[string]interface{}, 0)
 	for _, id := range ids {
-		meta, opts, idErr := p.resolveDescribeDefinition(ctx, surface, id)
+		meta, opts, directDisplayName, idErr := p.resolveDescribeDefinition(ctx, surface, id)
 		if idErr != nil {
 			idErrors = append(idErrors, idErr)
 			continue
@@ -329,6 +357,12 @@ func (p *MCPProxyServer) handleDescribeToolOnSurface(ctx context.Context, reques
 		// in the shared builder would change full-mode retrieve_tools bytes for
 		// every tool that declares one (R2), which FR-010 forbids.
 		applyDescribeOutputSchema(entry, meta.OutputSchemaJSON)
+
+		// #1083: on the direct surface the shared builder's canonical name and
+		// intent-variant `call_with` are both uncallable. Applied at the same
+		// assembly seam as output_schema, for the same reason — doing it inside
+		// the shared builder would change indexed-surface bytes.
+		applyDirectSurfaceIdentity(entry, directDisplayName)
 
 		definitions = append(definitions, entry)
 	}

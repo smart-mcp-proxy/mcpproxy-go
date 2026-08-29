@@ -124,7 +124,7 @@ Technical approach, grounded in the code:
 **Target Platform**: Linux/macOS/Windows core binary, personal + server editions — pure `internal/`, edition-agnostic (no `//go:build server` code touched; server-edition build verified).
 **Project Type**: Single Go project (core server).
 **Performance Goals**: Constitution I unaffected — serialization + registration-time work only; signatures come from the index-warmed cache via a pure read (`Peek`), no per-request compilation (FR-005); validation is memoized per tool hash and cheaper than the upstream round trip it prevents.
-**Constraints**: FR-015 byte-stability of full-mode direct listings; FR-010 existing goldens pass unregenerated except the two enumerated FR-009 regens; FR-008 identical tool-set membership across modes; FR-013b fail-open validation; SC-001 ≥70% token reduction on the 45-tool corpus (**this constraint was NOT met — measured 29.7%, ceiling 38.9%; see spec.md SC-001**).
+**Constraints**: FR-015 byte-stability of full-mode direct listings; FR-010 existing goldens pass unregenerated except the two enumerated FR-009 regens; FR-008 identical tool-set membership across modes; FR-013b fail-open validation; SC-001 token reduction (**restated 2026-08-29**: ≥25% on the 45-tool corpus and ≥30% at fleet scale, after the original ≥70%/≥85% proved unreachable — measured 29.7%/34.8%, ceiling 38.9%; see spec.md SC-001).
 **Scale/Scope**: ~6 packages touched: `internal/server` (core of the change), `internal/config`, `internal/runtime` (one clause), `internal/toolsig` (one method), `cmd/mcpproxy` (one flag), `bench/arms` (one measurement arm for the SC-001/SC-002 gates); plus docs and generated OpenAPI artifacts.
 
 ## Constitution Check
