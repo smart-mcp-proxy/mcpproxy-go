@@ -78,6 +78,13 @@ MCPPROXY_DIRECT_TOOL_RESPONSE_MODE=deferred mcpproxy serve
 mcpproxy serve --direct-tool-response-mode=deferred
 ```
 
+Or from the UI — **Settings → General → "Detail in Direct-mode listings"**, in
+both the Web UI and the macOS tray. The routing-mode field ("How agents find
+tools") heads the same section, two rows above. Note the asymmetry: changing the
+serialization mode applies hot, but changing `routing_mode` needs a restart (the
+badge on that field says so), because `/mcp` binds its routing mode once at
+startup.
+
 **This is a separate axis from `tool_response_mode`.** That key (and its
 `--tool-response-mode` flag and `MCPPROXY_TOOL_RESPONSE_MODE` alias) still governs
 `retrieve_tools` serialization only, and its meaning is unchanged. The two
@@ -343,6 +350,6 @@ editing the `instructions` config key needs a restart — unlike
 
 - [Routing Modes](routing-modes.md) — what the direct surface is and when to choose it
 - [Required-Tools Preflight](tools-preflight.md) — `describe_tool` check mode and the reason taxonomy
-- [Search & Discovery](search-discovery.md) — the `retrieve_tools` surface and its own `tool_response_mode` axis
+- [Search & Discovery](search-discovery.md) — the `retrieve_tools` surface and its own [`tool_response_mode` axis](search-discovery.md#tool-response-mode)
 - [Agent Tokens](agent-tokens.md) — scoping which tools a session lists at all
 - [Configuration Reference](../configuration/config-file.md)

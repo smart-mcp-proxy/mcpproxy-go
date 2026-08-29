@@ -50,6 +50,16 @@ func normalizeDirectToolResponseMode(mode string) string {
 	return mode
 }
 
+// normalizeToolResponseMode is the retrieve-surface twin of the above. Both
+// axes document "" as meaning "full", so both comparisons have to normalize —
+// see the DirectToolResponseMode clause for why a raw comparison misreports.
+func normalizeToolResponseMode(mode string) string {
+	if mode == "" {
+		return config.ToolResponseModeFull
+	}
+	return mode
+}
+
 func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	result := &ConfigApplyResult{
 		Success:            true,
@@ -208,7 +218,16 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// computes empty ChangedFields and is swallowed as "no changes detected".
 	// The retrieve path reads the live snapshot (p.currentConfig()), so
 	// reporting the change is all the propagation needed.
-	if oldCfg.ToolResponseMode != newCfg.ToolResponseMode {
+	//
+	// Compared NORMALIZED, for the same reason as the direct axis below: "" and
+	// "full" are the same mode, so an operator deleting the key — or a PATCH
+	// round-trip dropping it — is not a change, and reporting one makes the
+	// apply RESULT tell the caller a field moved when nothing did. The direct
+	// clause gained this in Spec 102 review; this one was left comparing raw
+	// strings, and the Settings UI now offers "full" as an explicit choice,
+	// which makes an explicit-vs-absent round trip reachable from the form.
+	if normalizeToolResponseMode(oldCfg.ToolResponseMode) !=
+		normalizeToolResponseMode(newCfg.ToolResponseMode) {
 		result.ChangedFields = append(result.ChangedFields, "tool_response_mode")
 	}
 

@@ -12,8 +12,9 @@ friendly, prioritized form sections instead of raw JSON:
 - **Security & Access** — API key (masked, show/regenerate), require MCP auth,
   quarantine, global Docker isolation, code execution, read-only mode,
   sensitive-data detection, reveal secret headers, listen address.
-- **General** — routing mode, tool limits, response limit, call timeout, log
-  level, telemetry, prompts.
+- **General** — routing mode, the two response-detail modes (`tool_response_mode`
+  for Retrieve, `direct_tool_response_mode` for Direct), tool limits, response
+  limit, call timeout, log level, telemetry, prompts.
 - **Advanced** — collapsible accordions per subsystem (code execution, Docker
   isolation, sensitive-data detection, output validation, output sanitisation,
   activity retention, logging, TLS, …).
@@ -28,8 +29,10 @@ pipeline. Because the merge starts from the live config and overlays just your
 changes, unrelated values and masked secrets (API key, secret headers) are never
 overwritten.
 
-Fields that need a restart (`listen`, `data_dir`, `api_key`, `tls.*`) show a
-**restart** badge; sensitive changes (reveal secret headers, disabling
+Fields that need a restart (`listen`, `api_key`, `routing_mode`, `tls.*`,
+`code_execution_pool_size`, and `server_edition.enabled` on the server edition)
+show a **restart** badge — the two response-detail modes deliberately carry no
+badge, because they hot-reload; sensitive changes (reveal secret headers, disabling
 quarantine/management, binding to a non-loopback address) require an explicit
 confirmation before they apply.
 

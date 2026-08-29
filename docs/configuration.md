@@ -1166,7 +1166,7 @@ Controls only the *serialization* of `retrieve_tools` responses (Spec 085) — n
 - **Per-call override**: the `detail` parameter on `retrieve_tools` (`compact` | `full`) overrides the configured mode for that call only.
 - **describe_tool**: in compact mode, agents fetch full definitions on demand with `describe_tool` (batch of 1–5 `server:tool` ids; same visibility rules as search).
 - **Hot-reload**: changes apply on the next call via the config file reload or `POST /api/v1/config/apply` — no restart.
-- Env: `MCPPROXY_TOOL_RESPONSE_MODE` · Flag: `--tool-response-mode`.
+- Env: `MCPPROXY_TOOL_RESPONSE_MODE` · Flag: `--tool-response-mode` · UI: Settings → General → "Detail in tool-search results" (Web UI and macOS tray).
 
 ---
 
@@ -1190,7 +1190,7 @@ Controls only the *serialization* of the **direct enumeration surface** (Spec 10
 - **Separate axis from `tool_response_mode`**: that key governs `retrieve_tools` responses, this one governs the direct enumeration surface, and setting one never moves the other. `tool_response_mode: "compact"` together with `direct_tool_response_mode: "deferred"` is a legal, intentional combination — each still governs only its own surface.
 - **Not a `routing_mode` value**: `routing_mode: "schema_deferred"` is rejected by config validation with a message naming the supported composition (`routing_mode: "direct"` with `direct_tool_response_mode: "deferred"`).
 - **Hot-reload**: flipping the mode rebuilds the direct surface and emits `notifications/tools/list_changed` to connected direct-surface sessions — no restart.
-- Env: `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` · Flag: `--direct-tool-response-mode`.
+- Env: `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` · Flag: `--direct-tool-response-mode` · UI: Settings → General → "Detail in Direct-mode listings" (Web UI and macOS tray).
 
 ## Server Instructions
 

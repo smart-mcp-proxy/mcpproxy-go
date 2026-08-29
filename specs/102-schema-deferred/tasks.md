@@ -280,7 +280,7 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 
 ## Phase 7: Polish & cross-cutting
 
-- [x] T073 Add the standalone direct built-in gate to `internal/server/toolslist_snapshot_test.go` with `testdata/toolslist_goldens/direct_mode_builtins.json`: zero upstream tools (listing = `describe_tool` only), **both** serialization modes, membership + byte-exact serialization, plus the direct server's instructions string captured with an empty `instructions` config so the bytes are deterministic. It MUST be standalone, not an entry in `toolsListGoldenSurfaces` — `_DeltaIsEnumerated` reads a frozen `pre099/<surface>.json` per listed surface, and direct mode has no pre-feature baseline.
+- [x] T073 Add the standalone direct built-in gate to `internal/server/toolslist_snapshot_test.go` (**landed in a new file, `internal/server/toolslist_direct_builtins_test.go`, because the task itself requires the gate to be standalone rather than an entry in `toolsListGoldenSurfaces` — a separate file expresses that better than an orphan test in the shared snapshot file**) with `testdata/toolslist_goldens/direct_mode_builtins.json`: zero upstream tools (listing = `describe_tool` only), **both** serialization modes, membership + byte-exact serialization, plus the direct server's instructions string captured with an empty `instructions` config so the bytes are deterministic. It MUST be standalone, not an entry in `toolsListGoldenSurfaces` — `_DeltaIsEnumerated` reads a frozen `pre099/<surface>.json` per listed surface, and direct mode has no pre-feature baseline.
 - [x] T074 In the same gate, assert over `p.directServer.ListTools()` **and** a real `tools/list` driven through the direct server on a session with no agent token, treating any difference between the two sets as a failure. `ListTools()` is the registration map; `handleListTools` serves `filteredTools(ctx)`, and `directServer` is the one routing-mode server carrying `WithToolFilter`s — so registered and served can diverge on exactly this server. Sort by tool name before serializing: `ListTools()` returns a map and Go randomizes iteration order.
 - [x] T075 [P] Add the deferred-direct arm to `bench/arms/` plus its `bench/arms/testdata/*_golden.txt` render golden, following the registry contract in `specs/083-discovery-profiler/contracts/arm-interface.md` and `bench/arms/arm.go`. The existing arms all encode `retrieve_tools` result sets; none renders a direct `tools/list`.
 - [x] T076 Run the SC-001/SC-002 token gates over the frozen 45-tool corpus with the spec-083 profiler's pinned tokenizer: assert ≥70% payload reduction and ≥80% one-shot-callable (non-lossy) share, and record the measured numbers in the PR description.
@@ -321,9 +321,12 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 - [x] T083 Verify the five frozen gates land as predicted: gates 1 and 3 pass **unregenerated**; gate 2 shows exactly the two enumerated regens; gate 4 passes with the extended `describePlainDelta`; gate 5 is re-measured, not assumed. A diff anywhere else is a regression to fix, not a baseline to update.
 
   **Verified, not assumed.** All five pass. Golden churn across the entire branch is exactly:
-  the two enumerated regens (`default_server.json`, `retrieve_tools_mode.json`) plus four NEW
-  files (`direct_full_prefeature.golden.json`, the two `direct_mode_builtins_*.json`, and the
-  bench arm golden). `code_execution_mode.json` and both `pre099/` baselines are untouched —
+  the two enumerated regens (`default_server.json`, `retrieve_tools_mode.json`) plus three NEW
+  files (`direct_full_prefeature.golden.json`, `toolslist_goldens/direct_mode_builtins.json`, and
+  the bench arm golden `bench/arms/testdata/directdeferred_golden.txt`). *(Corrected 2026-08-29:
+  this note originally said "four NEW files … the two `direct_mode_builtins_*.json`".
+  `git show 9aef8d6f1 --diff-filter=A` lists three; there is a single builtins golden, which
+  covers both serialization modes in one file rather than one file per mode.)* `code_execution_mode.json` and both `pre099/` baselines are untouched —
   which is what confines the change to the two surfaces that register describe_tool.
 
   `go test -race ./internal/...` is green except `TestResolveDockerStatusResolvableAndWorking`,
