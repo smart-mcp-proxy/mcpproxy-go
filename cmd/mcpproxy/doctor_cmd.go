@@ -311,7 +311,14 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 					releaseURL := getStringField(updateInfo, "release_url")
 
 					if updateAvailable && latestVersion != "" {
-						fmt.Printf("Version: %s (update available: %s)\n", version, latestVersion)
+						// Spec 079 FR-002: the same daemon-rendered delta
+						// clause status prints, so the two surfaces cannot
+						// word it differently. Absent from an older daemon.
+						behind := ""
+						if b := getStringField(updateInfo, "behind_summary"); b != "" {
+							behind = ", " + b
+						}
+						fmt.Printf("Version: %s (update available: %s%s)\n", version, latestVersion, behind)
 						if releaseURL != "" {
 							fmt.Printf("Download: %s\n", releaseURL)
 						}

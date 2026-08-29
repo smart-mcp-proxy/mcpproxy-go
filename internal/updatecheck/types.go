@@ -52,6 +52,37 @@ type VersionInfo struct {
 	// nudge is noise. Machine-readable consumers still get the full facts
 	// (Spec 079 FR-019, additive per FR-021).
 	NudgesSuppressed bool `json:"nudges_suppressed,omitempty"`
+
+	// ReleasesBehind / ReleasesBehindSaturated / WeeksBehind / BehindSummary
+	// carry the Spec 079 FR-002 delta. All four are additive and omitted when
+	// unknown (FR-021): the delta is best-effort enrichment of the check, so a
+	// failed or skipped delta scan leaves them absent and every surface falls
+	// back to exactly the message it rendered before.
+	//
+	// Only ever populated when UpdateAvailable is true, which is what makes a
+	// negative delta structurally impossible (FR-016).
+
+	// ReleasesBehind counts releases on the offered channel between the
+	// running version and the offered one. A pointer because "unknown" and a
+	// value must stay distinguishable.
+	ReleasesBehind *int `json:"releases_behind,omitempty"`
+
+	// ReleasesBehindSaturated marks ReleasesBehind as a lower bound: the
+	// running build predates the scanned release window. Surfaces render
+	// "N+ releases".
+	ReleasesBehindSaturated bool `json:"releases_behind_saturated,omitempty"`
+
+	// WeeksBehind is whole weeks between the two releases' publish dates.
+	// A pointer because 0 is legitimate — a same-week release is one release
+	// and zero weeks behind — and must not be confused with "unknown".
+	WeeksBehind *int `json:"weeks_behind,omitempty"`
+
+	// BehindSummary is the pre-rendered clause every surface prints verbatim,
+	// e.g. "8 releases / ~14 weeks behind". Rendered once in Go
+	// (FormatBehindSummary) precisely so the CLI, the Web UI banner and the
+	// tray cannot word it differently; the raw numbers above sit alongside it
+	// so machine consumers never parse prose.
+	BehindSummary string `json:"behind_summary,omitempty"`
 }
 
 // GitHubRelease represents a release from the GitHub Releases API.
@@ -127,6 +158,12 @@ type InfoResponseUpdate struct {
 	// NudgesSuppressed tells UI surfaces to stay quiet in CI /
 	// non-interactive contexts (Spec 079 FR-019)
 	NudgesSuppressed bool `json:"nudges_suppressed,omitempty"`
+
+	// Spec 079 FR-002 delta — see the matching fields on VersionInfo.
+	ReleasesBehind          *int   `json:"releases_behind,omitempty"`
+	ReleasesBehindSaturated bool   `json:"releases_behind_saturated,omitempty"`
+	WeeksBehind             *int   `json:"weeks_behind,omitempty"`
+	BehindSummary           string `json:"behind_summary,omitempty"`
 }
 
 // ToAPIResponse converts VersionInfo to the API response format.
@@ -144,5 +181,10 @@ func (v *VersionInfo) ToAPIResponse() *InfoResponseUpdate {
 		InstallChannel:   v.InstallChannel,
 		UpdateCommand:    v.UpdateCommand,
 		NudgesSuppressed: v.NudgesSuppressed,
+
+		ReleasesBehind:          v.ReleasesBehind,
+		ReleasesBehindSaturated: v.ReleasesBehindSaturated,
+		WeeksBehind:             v.WeeksBehind,
+		BehindSummary:           v.BehindSummary,
 	}
 }

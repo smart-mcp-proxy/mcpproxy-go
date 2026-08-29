@@ -865,6 +865,14 @@ struct UpdateInfo: Codable, Equatable {
     let isPrerelease: Bool?
     let checkError: String?
 
+    /// Spec 079 FR-002 — the core-rendered "N releases / M weeks behind"
+    /// clause. Optional because a core older than this feature omits it, and
+    /// because the core withholds it whenever the delta could not be resolved
+    /// (offline, rate-limited, a build with no release record). Render it
+    /// verbatim; never re-derive the wording here, or this tray drifts from
+    /// `mcpproxy status`, `doctor` and the Web UI banner.
+    let behindSummary: String?
+
     enum CodingKeys: String, CodingKey {
         case available
         case latestVersion = "latest_version"
@@ -872,6 +880,7 @@ struct UpdateInfo: Codable, Equatable {
         case checkedAt = "checked_at"
         case isPrerelease = "is_prerelease"
         case checkError = "check_error"
+        case behindSummary = "behind_summary"
     }
 }
 

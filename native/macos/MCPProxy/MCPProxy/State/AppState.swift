@@ -222,6 +222,12 @@ final class AppState: ObservableObject {
 
     @Published var version: String = ""
     @Published var updateAvailable: String? = nil
+
+    /// Spec 079 FR-002 — the core-rendered "N releases / M weeks behind"
+    /// clause that accompanies `updateAvailable`. Nil when the core could not
+    /// resolve a delta, or predates the field. Rendered verbatim so this tray
+    /// words it exactly as `mcpproxy status`, `doctor` and the Web UI do.
+    @Published var updateBehindSummary: String? = nil
     @Published var autoStartEnabled: Bool = false
 
     /// Spec 092 FR-015 — the effective update policy the attached core reports

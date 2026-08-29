@@ -504,7 +504,17 @@
                 <th class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
                 <th class="hidden lg:table-cell min-w-[11rem]">Intent</th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('status')">
+                <!--
+                  F14 follow-up: at <640px the table is `table-fixed`, so every
+                  visible column takes an equal share — too narrow for the
+                  status badge, which is `whitespace-nowrap` and so overflowed
+                  its own cell. The committed sweep never caught it because a
+                  `success` row renders an `sr-only` label (zero width), and a
+                  success row is ~90% of traffic: the assertion only became
+                  real once a run put an error row first. Floor the column at
+                  the widest pill, like the Intent column above.
+                -->
+                <th class="cursor-pointer hover:bg-base-200 min-w-[5.5rem]" @click="sortBy('status')">
                   Status {{ getSortIndicator('status') }}
                 </th>
                 <th class="hidden md:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('duration_ms')">
@@ -722,10 +732,20 @@
                   in the column (F5, #1046). Screen readers still hear it.
                 -->
                 <td class="whitespace-nowrap">
+                  <!--
+                    max-w-full + truncate, because the label is not a closed
+                    set: an unmapped status falls through to a ghost pill
+                    carrying the RAW value (`quarantined` measured 100px in a
+                    93px cell at 390px, where the table is `table-fixed`).
+                    Sizing the column to today's longest known label would only
+                    hold until the next status is added, so let the pill clip
+                    itself and keep the full value in the title.
+                  -->
                   <span
                     v-if="statusPresentation(row.activity.status).pill"
                     data-test="activity-status"
-                    :class="statusPresentation(row.activity.status).className"
+                    :title="statusPresentation(row.activity.status).label"
+                    :class="[statusPresentation(row.activity.status).className, 'max-w-full truncate']"
                   >
                     {{ statusPresentation(row.activity.status).label }}
                   </span>

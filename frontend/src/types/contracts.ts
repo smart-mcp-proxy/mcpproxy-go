@@ -479,6 +479,17 @@ export interface UpdateInfo {
   // Spec 079 US3 (FR-019): the core runs in a CI / non-interactive context —
   // UI surfaces must stay quiet while the facts remain machine-readable.
   nudges_suppressed?: boolean;
+  // Spec 079 FR-002 (additive per FR-021): how far behind the running build
+  // is. behind_summary is rendered by the daemon
+  // (updatecheck.FormatBehindSummary) and printed verbatim by every surface,
+  // so the CLI, this banner and the tray cannot word it differently — do not
+  // re-derive it from the numbers below. All four are absent when the delta
+  // could not be resolved, or against a daemon too old to send them; the
+  // banner then renders exactly what it rendered before.
+  behind_summary?: string;
+  releases_behind?: number;
+  releases_behind_saturated?: boolean;
+  weeks_behind?: number;
 }
 
 export interface InfoResponse {

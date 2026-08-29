@@ -148,7 +148,8 @@ mcpproxy status -o json
 
 When the daemon is running, `status` surfaces the result of the background update check (the same `update` object as `GET /api/v1/info` and `mcpproxy doctor`):
 
-- **Update available**: `Version: v1.2.0 (update available: v1.3.0 — <release URL>)`
+- **Update available**: `Version: v1.2.0 (update available: v1.3.0, 8 releases / ~14 weeks behind — <release URL>)`
+  - The `N releases / M weeks behind` clause (Spec 079 FR-002) appears only when the daemon resolved a delta. Resolving it needs a second GitHub request for the release list and publish dates, so it is absent when that request fails or is rate-limited, when the running build has no release record, and against a daemon older than the feature — the line then reads exactly as it did before, without the clause. A build too old for the scanned window reports a lower bound (`59+ releases`).
 - **Up to date**: `Version: v1.3.0 (latest)`
 - **Check failed or not yet completed** (offline, rate-limited): the version is shown without any annotation. In JSON output the `update.check_error` field retains the failure reason for diagnostics.
 - **Update checking disabled** (`update_check.enabled: false` in the config, or `MCPPROXY_DISABLE_AUTO_UPDATE=true`): the daemon performs no check and omits the `update` object entirely, so the version is shown without any annotation.
