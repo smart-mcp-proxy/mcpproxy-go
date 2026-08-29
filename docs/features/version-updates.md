@@ -58,7 +58,7 @@ $ mcpproxy doctor
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔍 MCPProxy Health Check
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Version: v1.2.3 (update available: v1.3.0)
+Version: v1.2.3 (update available: v1.3.0, 8 releases / ~14 weeks behind)
 Download: https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0
 
 ✅ All systems operational! No issues detected.
@@ -176,6 +176,9 @@ Response includes an `update` field when version information is available:
     "update": {
       "available": true,
       "latest_version": "v1.3.0",
+      "behind_summary": "8 releases / ~14 weeks behind",
+      "releases_behind": 8,
+      "weeks_behind": 14,
       "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
       "checked_at": "2025-01-15T10:30:00Z",
       "is_prerelease": false,

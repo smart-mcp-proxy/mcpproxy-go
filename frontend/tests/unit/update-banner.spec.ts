@@ -16,6 +16,7 @@ function mountBanner(update?: {
   latest_version?: string
   release_url?: string
   nudges_suppressed?: boolean
+  behind_summary?: string
 }) {
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -126,5 +127,46 @@ describe('UpdateBanner (Spec 079 FR-005)', () => {
       getSpy.mockRestore()
       setSpy.mockRestore()
     }
+  })
+})
+
+// Spec 079 FR-002 — the "N releases / M weeks behind" delta.
+//
+// The banner must PRINT the daemon's clause, not rebuild one from the numeric
+// fields: that is the whole mechanism keeping this banner, `mcpproxy status`,
+// `doctor` and both trays wording the delta identically. And it must degrade
+// to its pre-delta sentence against a daemon that sends no clause, which is
+// every daemon older than this feature.
+describe('UpdateBanner — release/age delta (FR-002)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  it('prints the daemon-rendered delta clause verbatim', () => {
+    const { wrapper } = mountBanner({
+      available: true,
+      latest_version: 'v0.46.0',
+      behind_summary: '8 releases / ~14 weeks behind',
+    })
+    const behind = wrapper.find('[data-test="update-banner-behind"]')
+    expect(behind.exists()).toBe(true)
+    expect(behind.text()).toBe('8 releases / ~14 weeks behind')
+  })
+
+  it('omits the delta entirely when the daemon sends none', () => {
+    const { wrapper } = mountBanner({ available: true, latest_version: 'v0.46.0' })
+    expect(wrapper.find('[data-test="update-banner-behind"]').exists()).toBe(false)
+    // The pre-delta sentence still reads correctly, with no stray comma.
+    expect(wrapper.text()).toContain('Update available: v0.46.0')
+  })
+
+  it('does not resurrect the banner for a version the user dismissed', () => {
+    localStorage.setItem(STORAGE_KEY, 'v0.46.0')
+    const { wrapper } = mountBanner({
+      available: true,
+      latest_version: 'v0.46.0',
+      behind_summary: '8 releases / ~14 weeks behind',
+    })
+    expect(wrapper.find('[data-test="update-banner"]').exists()).toBe(false)
   })
 })

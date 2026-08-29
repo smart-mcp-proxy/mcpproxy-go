@@ -1360,6 +1360,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         checkUpdates.isEnabled = updateService.canCheckForUpdates
         menu.addItem(checkUpdates)
 
+        // Spec 079 FR-002: the core-rendered "N releases / M weeks behind"
+        // clause, prefixed onto whichever update tooltip is built below.
+        //
+        // The delta goes in the TOOLTIP, not the title: Spec 092 FR-010 fixes
+        // the exact title shape, and a menu-bar row that grows to "Update
+        // v0.62.0 — ready to restart? — 8 releases / ~14 weeks behind" stops
+        // being scannable. The string is printed verbatim from the core so
+        // this tray cannot word the delta differently from status, doctor,
+        // the Go tray and the Web UI banner.
+        func behindPrefix() -> String {
+            guard let behind = appState.updateBehindSummary, !behind.isEmpty else { return "" }
+            return "You are \(behind). "
+        }
+
         // Spec 092 FR-017: exactly one source of truth owns the update item.
         // The core's cached result (`appState.updateAvailable`) is merged into
         // the service's legacy version first, so the resolver sees ONE legacy
@@ -1375,7 +1389,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     action: #selector(installFeedUpdate), keyEquivalent: ""
                 )
                 item.target = self
-                item.toolTip = "Downloads and verifies the update, stops the core, "
+                item.toolTip = behindPrefix() + "Downloads and verifies the update, stops the core, "
                     + "replaces MCPProxy and relaunches it."
                 menu.addItem(item)
 
@@ -1385,7 +1399,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     action: #selector(openDownloadPage), keyEquivalent: ""
                 )
                 item.target = self
-                item.toolTip = "Opens the download page. This version cannot be installed "
+                item.toolTip = behindPrefix() + "Opens the download page. This version cannot be installed "
                     + "from here."
                 menu.addItem(item)
 

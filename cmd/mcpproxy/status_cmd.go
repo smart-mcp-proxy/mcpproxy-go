@@ -51,6 +51,17 @@ type StatusUpdateInfo struct {
 	CheckError     string `json:"check_error,omitempty"`
 	InstallChannel string `json:"install_channel,omitempty"` // Spec 079 FR-008
 	UpdateCommand  string `json:"update_command,omitempty"`  // Spec 079 FR-009
+
+	// BehindSummary is the daemon-rendered "N releases / M weeks behind"
+	// clause (Spec 079 FR-002). Empty against a daemon too old to send it, or
+	// when the delta could not be resolved — status then prints the same line
+	// it printed before the delta existed.
+	BehindSummary string `json:"behind_summary,omitempty"`
+	// The raw figures behind that clause, for `status -o json` consumers that
+	// would otherwise have to parse prose.
+	ReleasesBehind          *int `json:"releases_behind,omitempty"`
+	ReleasesBehindSaturated bool `json:"releases_behind_saturated,omitempty"`
+	WeeksBehind             *int `json:"weeks_behind,omitempty"`
 }
 
 // ServerEditionStatusInfo holds server-edition-specific status information.
@@ -340,6 +351,23 @@ func extractStatusUpdate(infoData map[string]interface{}) *StatusUpdateInfo {
 	if v, ok := updateData["update_command"].(string); ok {
 		u.UpdateCommand = v
 	}
+	// Spec 079 FR-002. Absent from an older daemon, which is exactly the
+	// daemon most likely to be running here — treat absence as "no delta",
+	// never as an error.
+	if v, ok := updateData["behind_summary"].(string); ok {
+		u.BehindSummary = v
+	}
+	if v, ok := updateData["releases_behind"].(float64); ok {
+		n := int(v)
+		u.ReleasesBehind = &n
+	}
+	if v, ok := updateData["releases_behind_saturated"].(bool); ok {
+		u.ReleasesBehindSaturated = v
+	}
+	if v, ok := updateData["weeks_behind"].(float64); ok {
+		n := int(v)
+		u.WeeksBehind = &n
+	}
 	return u
 }
 
@@ -347,15 +375,20 @@ func extractStatusUpdate(infoData map[string]interface{}) *StatusUpdateInfo {
 // line, mirroring doctor's presentation. A failed or not-yet-completed check
 // renders nothing (quiet on failure; the error stays in JSON for diagnostics).
 //
-// TODO(spec-079/FR-002): extend the annotation with the human-readable
-// "N releases / M weeks behind" delta once internal/updatecheck computes it
-// (requires the release list + publish dates, not just the latest release;
-// additive per FR-021). This function is the single rendering point.
+// Spec 079 FR-002/FR-003: the "N releases / M weeks behind" delta is appended
+// here when the daemon reports one. The clause itself is authored by the
+// daemon (updatecheck.FormatBehindSummary) rather than assembled here, so
+// status, doctor, the startup log, the Web UI banner and the tray cannot word
+// it differently. An older daemon omits it and this renders the legacy form.
 func statusVersionSuffix(u *StatusUpdateInfo) string {
 	if u == nil || u.CheckError != "" {
 		return ""
 	}
 	if u.Available && u.LatestVersion != "" {
+		behind := ""
+		if u.BehindSummary != "" {
+			behind = ", " + u.BehindSummary
+		}
 		// Spec 079 US2 (FR-009): append the channel's exact one-line update
 		// command, or the channel-appropriate guidance when no command is
 		// safe. Older daemons omit install_channel — render the legacy form.
@@ -371,9 +404,9 @@ func statusVersionSuffix(u *StatusUpdateInfo) string {
 			}
 		}
 		if u.ReleaseURL != "" {
-			return fmt.Sprintf(" (update available: %s — %s%s)", u.LatestVersion, u.ReleaseURL, action)
+			return fmt.Sprintf(" (update available: %s%s — %s%s)", u.LatestVersion, behind, u.ReleaseURL, action)
 		}
-		return fmt.Sprintf(" (update available: %s%s)", u.LatestVersion, action)
+		return fmt.Sprintf(" (update available: %s%s%s)", u.LatestVersion, behind, action)
 	}
 	if u.LatestVersion != "" {
 		// A successful check confirmed we are current.
