@@ -93,20 +93,13 @@ final class SettingsSerializationModeFieldsTests: XCTestCase {
     }
 
     /// The normalized copy genuinely diverges from the raw response — which is
-    /// exactly why ConfigStore.load() must normalize `working` AND `original`.
-    /// Normalizing only one would make an untouched field read as dirty.
+    /// what makes the "normalize both snapshots" rule load-bearing rather than
+    /// decorative.
     func testDivergesFromTheRawResponse() {
         let raw: [String: Any] = ["listen": "127.0.0.1:8080"]
         let normalized = SettingsCatalog.normalizeDefaults(raw)
-        XCTAssertNil(raw["tool_response_mode"])
+        XCTAssertNil(raw["tool_response_mode"], "the core omits the key entirely")
         XCTAssertEqual(normalized["tool_response_mode"] as? String, "full")
-        // Both copies normalized => every catalogue key compares equal.
-        let other = SettingsCatalog.normalizeDefaults(raw)
-        for field in SettingsCatalog.allFields {
-            XCTAssertTrue(valuesEqual(configGet(normalized, field.key),
-                                      configGet(other, field.key)),
-                          "\(field.key) differs between two normalized copies")
-        }
     }
 
     func testLeavesFieldsWithoutADefaultUntouched() {
@@ -125,5 +118,66 @@ final class SettingsSerializationModeFieldsTests: XCTestCase {
             .map(\.key)
             .sorted()
         XCTAssertEqual(withDefaults, ["direct_tool_response_mode", "tool_response_mode"])
+    }
+
+    // MARK: ConfigStore hydration
+    //
+    // Cross-model review caught that the assertion here used to compare two
+    // direct calls to normalizeDefaults — which passes even if ConfigStore
+    // normalizes only ONE snapshot, the exact bug it was meant to catch. These
+    // drive the real store instead, through the `hydrate(from:)` seam load()
+    // uses.
+
+    @MainActor
+    private func hydratedStore(_ cfg: [String: Any]) -> ConfigStore {
+        let store = ConfigStore(appState: AppState())
+        store.hydrate(from: cfg)
+        return store
+    }
+
+    /// The invariant that matters: after hydrating from a config that omits
+    /// both modes, neither field is dirty. Normalizing only `working` (and not
+    /// `original`) makes both read as unsaved changes the moment Settings opens.
+    @MainActor
+    func testHydrationLeavesTheOmittedModesUndirty() {
+        let store = hydratedStore(["listen": "127.0.0.1:8080"])
+        XCTAssertEqual(store.value("tool_response_mode") as? String, "full")
+        XCTAssertEqual(store.value("direct_tool_response_mode") as? String, "full")
+        XCTAssertFalse(store.isDirty("tool_response_mode"))
+        XCTAssertFalse(store.isDirty("direct_tool_response_mode"))
+        XCTAssertTrue(store.dirtyKeys(in: SettingsCatalog.allFields).isEmpty,
+                      "a freshly hydrated form must have no unsaved changes")
+    }
+
+    /// The Raw tab reads `raw`, not the normalized snapshot, so it must not
+    /// show a key the config file does not contain.
+    @MainActor
+    func testRawTabShowsServerTruthNotTheInventedDefault() {
+        let store = hydratedStore(["listen": "127.0.0.1:8080"])
+        XCTAssertFalse(store.prettyJSON.contains("tool_response_mode"),
+                       "Raw tab must not invent a key the core never sent")
+        XCTAssertTrue(store.prettyJSON.contains("listen"))
+    }
+
+    /// An explicitly-set mode survives hydration untouched and stays undirty.
+    @MainActor
+    func testHydrationPreservesAnExplicitMode() {
+        let store = hydratedStore([
+            "listen": "127.0.0.1:8080",
+            "direct_tool_response_mode": "deferred",
+        ])
+        XCTAssertEqual(store.value("direct_tool_response_mode") as? String, "deferred")
+        XCTAssertFalse(store.isDirty("direct_tool_response_mode"))
+        XCTAssertTrue(store.prettyJSON.contains("direct_tool_response_mode"))
+    }
+
+    /// A genuine edit is still detected — the guards above must not be passing
+    /// simply because dirty-tracking is broken.
+    @MainActor
+    func testAGenuineEditIsStillDirty() {
+        let store = hydratedStore(["listen": "127.0.0.1:8080"])
+        store.setValue("direct_tool_response_mode", "deferred")
+        XCTAssertTrue(store.isDirty("direct_tool_response_mode"))
+        XCTAssertFalse(store.isDirty("tool_response_mode"))
     }
 }

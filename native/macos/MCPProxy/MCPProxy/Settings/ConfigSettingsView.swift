@@ -44,17 +44,7 @@ final class ConfigStore: ObservableObject {
         loading = true
         loadError = nil
         do {
-            let cfg = try await api.getConfig()
-            raw = cfg
-            // Fill the resolved default for `omitempty` keys the core omits
-            // (the serialization modes: absent means "full") so their Picker
-            // shows the real default instead of blank. Both copies get it —
-            // otherwise the untouched field would read as an unsaved change.
-            let normalized = SettingsCatalog.normalizeDefaults(cfg)
-            working = normalized
-            original = normalized
-            loaded = true
-            revision += 1
+            hydrate(from: try await api.getConfig())
         } catch {
             loadError = (error as? APIClientError)?.errorDescription ?? error.localizedDescription
         }
@@ -64,6 +54,24 @@ final class ConfigStore: ObservableObject {
             defaultInstructions = text
         }
         loading = false
+    }
+
+    /// Populate the store from a raw `GET /api/v1/config` response.
+    ///
+    /// Split out of `load()` so the hydration invariant is testable without an
+    /// API client. That invariant: `working` and `original` BOTH get the
+    /// resolved defaults for `omitempty` keys the core omits (the serialization
+    /// modes — absent means "full") so their Picker shows the real default
+    /// instead of blank, while `raw` keeps the untouched response because the
+    /// Raw tab must show server truth. Normalizing only one of the two would
+    /// make an untouched field read as an unsaved change.
+    func hydrate(from cfg: [String: Any]) {
+        raw = cfg
+        let normalized = SettingsCatalog.normalizeDefaults(cfg)
+        working = normalized
+        original = normalized
+        loaded = true
+        revision += 1
     }
 
     /// The core's current (saved) configuration, pretty-printed for the

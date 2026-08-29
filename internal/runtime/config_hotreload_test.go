@@ -977,6 +977,42 @@ func TestDetectConfigChanges_DirectToolResponseModeEmptyEqualsFull(t *testing.T)
 	assert.Contains(t, real.ChangedFields, "direct_tool_response_mode")
 }
 
+// The retrieve axis has the same ""-means-"full" contract as the direct axis
+// above, so it needs the same normalized comparison. It shipped comparing raw
+// strings; exposing "full" as an explicit choice in the Settings form made an
+// explicit-vs-absent round trip reachable from the UI.
+func TestDetectConfigChanges_ToolResponseModeEmptyEqualsFull(t *testing.T) {
+	mk := func(mode string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			ToolResponseMode: mode,
+		}
+	}
+
+	for _, tc := range []struct{ from, to string }{
+		{"", config.ToolResponseModeFull},
+		{config.ToolResponseModeFull, ""},
+	} {
+		result := DetectConfigChanges(mk(tc.from), mk(tc.to))
+		require.True(t, result.Success)
+		assert.NotContainsf(t, result.ChangedFields, "tool_response_mode",
+			"%q -> %q is the same mode spelled two ways", tc.from, tc.to)
+	}
+
+	// Still detected when it really moves, in both directions.
+	assert.Contains(t,
+		DetectConfigChanges(mk(""), mk(config.ToolResponseModeCompact)).ChangedFields,
+		"tool_response_mode")
+	assert.Contains(t,
+		DetectConfigChanges(mk(config.ToolResponseModeCompact), mk(config.ToolResponseModeFull)).ChangedFields,
+		"tool_response_mode")
+
+	// Normalizing one axis must not leak into the other.
+	assert.NotContains(t,
+		DetectConfigChanges(mk(""), mk(config.ToolResponseModeCompact)).ChangedFields,
+		"direct_tool_response_mode")
+}
+
 // TestDetectConfigChanges_RoutingModeRequiresRestart: /mcp is bound to ONE
 // mcp-go server instance at startup and registered on an http.ServeMux, which
 // cannot re-register a pattern — so a routing_mode change genuinely cannot take
