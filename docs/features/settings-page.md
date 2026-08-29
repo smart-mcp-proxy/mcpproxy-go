@@ -29,8 +29,10 @@ pipeline. Because the merge starts from the live config and overlays just your
 changes, unrelated values and masked secrets (API key, secret headers) are never
 overwritten.
 
-Fields that need a restart (`listen`, `data_dir`, `api_key`, `tls.*`) show a
-**restart** badge; sensitive changes (reveal secret headers, disabling
+Fields that need a restart (`listen`, `api_key`, `routing_mode`, `tls.*`,
+`code_execution_pool_size`, and `server_edition.enabled` on the server edition)
+show a **restart** badge — the two response-detail modes deliberately carry no
+badge, because they hot-reload; sensitive changes (reveal secret headers, disabling
 quarantine/management, binding to a non-loopback address) require an explicit
 confirmation before they apply.
 

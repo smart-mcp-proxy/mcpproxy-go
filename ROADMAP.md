@@ -67,8 +67,8 @@ graph LR
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sandbox_isolation,scanner_v2,scanner_simplification done;
-  class analytics_dashboard,schema_deferred,telemetry_identity,telemetry_v7_churn in_progress;
+  class sandbox_isolation,scanner_v2,scanner_simplification,schema_deferred done;
+  class analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
   class tpa_db in_review;
   class ux_audit,action_log_transparency,remote_access_tunnel,token_bench,tool_graph,discovery_eval_harness todo;
 ```
@@ -151,15 +151,6 @@ graph LR
 | --- | --- | --- |
 | Per-server / per-tool token-drain graphs | 🟢 Done | — |
 | Make dashboard the default landing page | 🟡 In review | — |
-
-</details>
-
-<details>
-<summary>🔵 Deferred-schema serialization for the direct tools/list surface (spec 102) — In progress · P1</summary>
-
-> Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema (~88% smaller listing), with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction); plan in progress.
-
-Spec: [102-schema-deferred](./specs/102-schema-deferred/)
 
 </details>
 
@@ -712,6 +703,15 @@ graph LR
 </details>
 
 <details>
+<summary>🟢 Deferred-schema serialization for the direct tools/list surface (spec 102) — Done · P1</summary>
+
+> Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema (~88% smaller listing), with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction). COMPLETE: all 89 tasks shipped in #1063; the settings UI for both serialization axes followed in #1082. MEASURED SAVINGS FELL WELL SHORT OF THE ~88% PROJECTION ABOVE: 29.7% on the frozen reference corpus and 34.8% on a 527-tool snapshot, against SC-001's >=70% target, with 38.9% the arithmetic ceiling even if both the schema and the signature were deleted. The projection assumed schemas dominate the payload; names, descriptions and annotations turn out to carry most of it. SC-001 is knowingly unmet and awaits a maintainer decision (restate per corpus shape, or re-target at a schema-heavy corpus) — see specs/102-schema-deferred/tasks.md T035a.
+
+Spec: [102-schema-deferred](./specs/102-schema-deferred/) · PR: #1063
+
+</details>
+
+<details>
 <summary>🟢 Tray↔core decoupling: socket/REST API only, no config-file reads — Done · P2</summary>
 
 > Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot.
@@ -740,7 +740,6 @@ graph LR
 | --- | --- | --- | --- | --- | --- |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
-| Deferred-schema serialization for the direct tools/list surface (spec 102) | In progress | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | #1033 |
@@ -765,6 +764,7 @@ graph LR
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
+| Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 
 ## Shipped (archived)

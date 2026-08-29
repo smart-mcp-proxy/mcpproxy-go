@@ -519,6 +519,38 @@ export function allCatalogFields(): SettingField[] {
  * "full". Applied to BOTH the working copy and the last-saved snapshot so a
  * field nobody touched never counts as an unsaved change.
  */
+/**
+ * Back-compat for the teams -> server_edition rename (MCP-1086): if a config
+ * only carries the legacy `teams` key, mirror it onto `server_edition` so the
+ * form (which binds to `server_edition.*`) hydrates. Mutates and returns cfg.
+ */
+export function aliasServerEdition(cfg: any): any {
+  if (cfg && cfg.server_edition == null && cfg.teams != null) {
+    cfg.server_edition = cfg.teams
+  }
+  return cfg
+}
+
+/**
+ * Build the Settings form state from a raw `GET /api/v1/config` response.
+ *
+ * Extracted from Settings.vue so the hydration invariant is testable directly
+ * rather than by matching source text. That invariant:
+ *
+ *  - `working` and `original` BOTH get the resolved defaults, so a field nobody
+ *    touched never counts as an unsaved change.
+ *  - `raw` is the untouched response. The Raw JSON tab must show server truth,
+ *    and both helpers above MUTATE their argument, so the clones matter.
+ */
+export function hydrateConfigState(cfg: any): { working: any; original: any; raw: any } {
+  const clone = (v: any) => (v == null ? v : JSON.parse(JSON.stringify(v)))
+  return {
+    working: normalizeFieldDefaults(aliasServerEdition(clone(cfg))),
+    original: normalizeFieldDefaults(aliasServerEdition(clone(cfg))),
+    raw: clone(cfg),
+  }
+}
+
 export function normalizeFieldDefaults(cfg: any): any {
   if (cfg == null || typeof cfg !== 'object') return cfg
   for (const f of allCatalogFields()) {

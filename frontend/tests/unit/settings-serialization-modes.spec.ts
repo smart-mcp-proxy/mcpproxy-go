@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   GENERAL_FIELDS,
+  hydrateConfigState,
   allCatalogFields,
   normalizeFieldDefaults,
   restartRequiredLabels,
@@ -90,23 +91,14 @@ describe('normalizeFieldDefaults', () => {
     expect(cfg.direct_tool_response_mode).toBe('deferred')
   })
 
-  // Settings.vue must normalize `working` AND `original` from the same
-  // response. Normalizing only the working copy is a live footgun: the value
-  // genuinely diverges from the raw response, so the untouched field would
-  // compare unequal and the section would open claiming an unsaved change.
-  // (Asserting the divergence is what gives the "normalize both" rule teeth —
-  // comparing two identically-normalized objects would pass unconditionally.)
-  it('diverges from the raw response, so both copies must be normalized', () => {
+  // The normalized copy genuinely diverges from the raw response — which is
+  // what makes the "normalize both snapshots" rule load-bearing. (Comparing two
+  // identically-normalized objects would pass unconditionally; that vacuous
+  // form is what cross-model review caught in the tray twin of this test.)
+  it('diverges from the raw response', () => {
     const response = { listen: '127.0.0.1:8080' }
-    const working = normalizeFieldDefaults({ ...response })
-
-    expect(getPath(working, 'tool_response_mode')).toBe('full')
     expect(getPath(response, 'tool_response_mode')).toBeUndefined()
-
-    const original = normalizeFieldDefaults({ ...response })
-    for (const f of allCatalogFields()) {
-      expect(getPath(working, f.key)).toEqual(getPath(original, f.key))
-    }
+    expect(getPath(normalizeFieldDefaults({ ...response }), 'tool_response_mode')).toBe('full')
   })
 
   it('leaves fields that declare no default untouched', () => {
@@ -122,26 +114,65 @@ describe('normalizeFieldDefaults', () => {
   })
 })
 
-// The catalogue is inert until Settings.vue applies it. There is no mount
-// harness for that view, so pin the wiring at the source level — the same
-// approach settings-deep-scan-field.spec.ts uses. Without this, dropping the
-// normalize call would leave every test above green while the Settings page
-// showed two empty dropdowns.
-describe('Settings.vue wiring', () => {
-  const source = readFileSync(
-    resolve(__dirname, '../../src/views/Settings.vue'),
-    'utf-8',
-  )
+// hydrateConfigState is what Settings.vue's loadConfig() actually calls, so
+// these assert the invariant itself rather than matching source text — a
+// source-text match cannot tell whether `cfg` is still the untouched response
+// by the time the Raw tab serializes it.
+describe('hydrateConfigState', () => {
+  const response = () => ({ listen: '127.0.0.1:8080' })
 
-  it('normalizes both the working copy and the last-saved snapshot', () => {
-    expect(source).toMatch(/state\.working = normalizeFieldDefaults\(/)
-    expect(source).toMatch(/state\.original = normalizeFieldDefaults\(/)
+  it('normalizes both snapshots, so nothing reads as dirty on open', () => {
+    const { working, original } = hydrateConfigState(response())
+    expect(getPath(working, 'tool_response_mode')).toBe('full')
+    expect(getPath(original, 'tool_response_mode')).toBe('full')
+    for (const f of allCatalogFields()) {
+      expect(getPath(working, f.key)).toEqual(getPath(original, f.key))
+    }
   })
 
-  it('leaves the Raw JSON tab on the untouched server response', () => {
-    // configJson must serialize `cfg`, not a normalized clone — the Raw tab
-    // shows what the core actually holds, and normalization invents keys the
-    // config file does not contain.
-    expect(source).toMatch(/configJson\.value = JSON\.stringify\(cfg,/)
+  it('keeps raw as the untouched server response for the Raw JSON tab', () => {
+    const { raw } = hydrateConfigState(response())
+    expect(JSON.stringify(raw)).not.toContain('tool_response_mode')
+    expect(JSON.stringify(raw)).not.toContain('direct_tool_response_mode')
+    expect(getPath(raw, 'listen')).toBe('127.0.0.1:8080')
+  })
+
+  it('does not mutate its argument', () => {
+    const cfg = response()
+    hydrateConfigState(cfg)
+    expect(getPath(cfg, 'tool_response_mode')).toBeUndefined()
+  })
+
+  it('still aliases a legacy teams-keyed config onto server_edition', () => {
+    const { working } = hydrateConfigState({ teams: { enabled: true } })
+    expect(getPath(working, 'server_edition.enabled')).toBe(true)
+  })
+
+  it('preserves an explicitly-set mode', () => {
+    const { working, raw } = hydrateConfigState({ direct_tool_response_mode: 'deferred' })
+    expect(getPath(working, 'direct_tool_response_mode')).toBe('deferred')
+    expect(getPath(raw, 'direct_tool_response_mode')).toBe('deferred')
+  })
+})
+
+// Regression: cross-model review found that a resolved default WAS writable.
+// SettingsSection keeps a component-local `dirty` ref and dirtyKeys is the
+// UNION of it and the working/original comparison. Reload replaces both
+// snapshots but used to leave that ref populated, so: pick Compact -> Reload ->
+// Save PATCHed `tool_response_mode: "full"` into a config that never had the
+// key. Settings.vue now keys every section on a form epoch bumped per
+// hydration, so the section remounts with an empty ref.
+describe('Settings.vue rehydration (stale-dirty regression)', () => {
+  const source = readFileSync(resolve(__dirname, '../../src/views/Settings.vue'), 'utf-8')
+
+  it('bumps a form epoch on every hydration', () => {
+    expect(source).toMatch(/formEpoch\.value\+\+/)
+  })
+
+  it('keys every SettingsSection on that epoch so the dirty ref cannot survive', () => {
+    const sections = source.match(/<SettingsSection\b/g) || []
+    const keyed = source.match(/<SettingsSection :key="`[^`]*\$\{formEpoch\}`"/g) || []
+    expect(sections.length).toBeGreaterThan(0)
+    expect(keyed.length).toBe(sections.length)
   })
 })
