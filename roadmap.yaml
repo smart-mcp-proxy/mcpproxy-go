@@ -204,9 +204,14 @@ epics:
         depends_on: [ux-audit-webui-fixes]
       - id: ux-audit-sweep-regressions
         title: "Fold the audit's regression assertions into the committed sweep (e2e/web-ui-sweep)"
-        status: todo
-        note: "The audit's own closing ask. visual-a11y-sweep.spec.ts already carries F9 contrast, F29 theme, F14 responsive and F30 accessible-name/aria-live/keyboard; the modal Escape+focus check (F6) and the cross-view total-consistency check (F1) are still missing. F6 must be asserted with an IN-PAGE dispatch — a synthetic key press never reaches the document keydown listener and silently tests the automation layer instead of the app (that false negative already burned one re-check). Feeds release-qa-gate T2, which runs this sweep on tags."
+        status: done
+        note: "The audit's own closing ask. F9 contrast, F29 theme, F14 responsive and F30 accessible-name/aria-live/keyboard were already committed; added the F6 modal Escape+focus check and the F1 cross-view total-consistency check. F6 is asserted with an IN-PAGE dispatch — a synthetic key press never reaches the document keydown listener and silently tests the automation layer instead of the app. F1 encodes the real invariant, not naive equality: Usage folds `blocked` into errors while Activity splits them, and /activity/usage is served from a short read cache so the two converge rather than agree instantly. Running the completed sweep found three defects already on main — see ux-audit-sweep-found-defects. Feeds release-qa-gate T2, which runs this sweep on tags."
         depends_on: [ux-audit-webui-fixes]
+      - id: ux-audit-sweep-found-defects
+        title: "Three defects the completed sweep found on main"
+        status: done
+        note: "None are regressions of the 36, and each was invisible before: (1) the LANDING PAGE failed AA in both themes and two of its controls had no accessible name — Usage.vue uses the raw `opacity-*` utility, which #1054's --tone-muted work never covered, and the audit walked / before #1044 made Usage the landing page; (2) the Activity status pill clips at 390px for any status outside the known four (`tool_auto_approved` measured 145px in a 93px table-fixed cell) — the existing F14 phone check was vacuous because it measures rows.first() and a success row renders an sr-only zero-width label. Method note: both surfaced because a new assertion changed what an EXISTING assertion saw (the sweep shares one instance, so one check's traffic is the next one's data). Sweep went 25-pass/3-fail on clean HEAD to 30-pass/0-fail."
+        depends_on: [ux-audit-sweep-regressions]
       - id: ux-audit-tray-live-verify
         title: "Verify the 16 tray fixes on a running tray"
         status: todo

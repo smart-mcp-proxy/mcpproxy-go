@@ -522,3 +522,71 @@ test('header search button is enabled with an empty box', async ({ page }) => {
   await page.waitForTimeout(250)
   expect(page.url()).not.toContain('/search')
 })
+
+// ---------------------------------------------------------------------------
+// F6 — the Add Server modal must take focus, trap Tab, close on Escape and
+// hand focus back to its trigger.
+//
+// These five `<dialog :open>` modals are opened by the `open` ATTRIBUTE rather
+// than showModal(), so the browser supplies none of the modal affordances;
+// every one of them comes from `useModalA11y`. Its own comment delegates the
+// real-browser half of its coverage to "the Playwright sweep" — this is that
+// test. Without it, deleting the document keydown listener or the nextTick
+// focusInitial() passes the whole sweep.
+//
+// Escape is dispatched IN-PAGE, never with page.keyboard.press(). Re-checking
+// F6 during the audit produced a FALSE NEGATIVE for exactly that reason: a key
+// sent through the automation layer never reached the document listener under
+// test, so the assertion measured the harness instead of the app.
+//
+// Assert on the `[open]` ATTRIBUTE, not on DOM presence — the modal box is not
+// behind a v-if, so it stays in the DOM when closed. Checking "is it in the
+// DOM" is how the original audit mis-measured this.
+// ---------------------------------------------------------------------------
+test('the Add Server modal takes focus, traps Tab and closes on Escape', async ({ page }) => {
+  // /activity mounts exactly one AddServerModal (TopHeader's). `/` and
+  // /servers mount a second copy of the same component, which makes the
+  // data-test locator strict-mode ambiguous there.
+  await goto(page, '/activity')
+
+  await page.locator('[data-test="header-add-server"]').click()
+  await expect(page.locator('dialog[data-test="add-server-modal"][open]')).toHaveCount(1)
+
+  const focus = await page.evaluate(() => {
+    const box = document.querySelector('[data-test="add-server-modal-box"]')
+    const active = document.activeElement as HTMLElement | null
+    return {
+      inside: !!box && !!active && box.contains(active),
+      onCloseButton: !!active && active.hasAttribute('data-modal-close-button'),
+    }
+  })
+  expect(focus.inside, 'focus never entered the Add Server dialog').toBe(true)
+  expect(focus.onCloseButton, 'focus landed on the header ✕ instead of the form').toBe(false)
+
+  // Tab from the last focusable wraps to the first instead of walking out into
+  // the page behind the modal.
+  const wrapped = await page.evaluate(() => {
+    const box = document.querySelector('[data-test="add-server-modal-box"]')
+    if (!box) return null
+    const focusables = Array.from(
+      box.querySelectorAll<HTMLElement>(
+        'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => el.checkVisibility({ checkVisibilityCSS: true }))
+    if (focusables.length < 2) return null
+    focusables[focusables.length - 1].focus()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    return document.activeElement === focusables[0]
+  })
+  expect(wrapped, 'Tab escaped the dialog instead of wrapping to the first control').toBe(true)
+
+  await page.evaluate(() =>
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+  )
+  await expect(page.locator('dialog[data-test="add-server-modal"][open]')).toHaveCount(0)
+
+  // Focus restoration is deferred a tick, so poll rather than read once.
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-test') ?? null))
+    .toBe('header-add-server')
+})

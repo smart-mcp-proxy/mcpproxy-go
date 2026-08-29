@@ -105,18 +105,20 @@ graph LR
   ux_audit_macos_fixes["Close the 16 macOS tray findings"]
   ux_audit_recheck_defects["Five new defects found while re-checking the…"]
   ux_audit_sweep_regressions["Fold the audit's regression assertions into t…"]
+  ux_audit_sweep_found_defects["Three defects the completed sweep found on ma…"]
   ux_audit_tray_live_verify["Verify the 16 tray fixes on a running tray"]
 
   ux_audit_webui_sweep --> ux_audit_webui_fixes
   ux_audit_macos_sweep --> ux_audit_macos_fixes
   ux_audit_webui_fixes --> ux_audit_recheck_defects
   ux_audit_webui_fixes --> ux_audit_sweep_regressions
+  ux_audit_sweep_regressions --> ux_audit_sweep_found_defects
   ux_audit_macos_fixes --> ux_audit_tray_live_verify
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class ux_audit_webui_sweep,ux_audit_macos_sweep,ux_audit_webui_fixes,ux_audit_macos_fixes,ux_audit_recheck_defects done;
-  class ux_audit_sweep_regressions,ux_audit_tray_live_verify todo;
+  class ux_audit_webui_sweep,ux_audit_macos_sweep,ux_audit_webui_fixes,ux_audit_macos_fixes,ux_audit_recheck_defects,ux_audit_sweep_regressions,ux_audit_sweep_found_defects done;
+  class ux_audit_tray_live_verify todo;
 ```
 
 | Task | Status | Refs |
@@ -126,7 +128,8 @@ graph LR
 | Close the 36 Web UI findings | 🟢 Done | #1044 #1048 #1049 #1050 #1051 #1052 #1053 #1054 |
 | Close the 16 macOS tray findings | 🟢 Done | #1055 #1056 |
 | Five new defects found while re-checking the Web UI audit on v0.61.0 | 🟢 Done | #1062 #1072 #1077 |
-| Fold the audit's regression assertions into the committed sweep (e2e/web-ui-sweep) | ⚪ Todo | — |
+| Fold the audit's regression assertions into the committed sweep (e2e/web-ui-sweep) | 🟢 Done | — |
+| Three defects the completed sweep found on main | 🟢 Done | — |
 | Verify the 16 tray fixes on a running tray | ⚪ Todo | — |
 
 </details>
