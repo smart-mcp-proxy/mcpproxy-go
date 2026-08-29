@@ -1498,8 +1498,14 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	validationErrors := newCfg.ValidateDetailed()
 	if len(validationErrors) > 0 {
 		r.mu.Unlock() // Unlock before returning
+		// Carry the structured errors back on the RESULT, not only inside the
+		// error string (#1084). A caller cannot tell "the operator sent a bad
+		// value" from "the server failed to persist" by string-matching, so the
+		// REST handlers used to report every apply failure as 500 — including
+		// a plainly invalid enum value, which is a 400.
 		return &ConfigApplyResult{
-			Success: false,
+			Success:          false,
+			ValidationErrors: validationErrors,
 		}, fmt.Errorf("configuration validation failed: %v", validationErrors[0].Error())
 	}
 

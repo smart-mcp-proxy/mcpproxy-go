@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 
@@ -22,60 +23,51 @@ import (
 // stays T075/T076. The encoder is cl100k_base — the same one the spec-083
 // profiler pins, and the same one TestDescribeTool_DefinitionTokenBudget uses.
 //
-// ── SC-001 IS NOT REACHABLE ON THIS CORPUS, AND THAT IS A SPEC-NUMBERS DEFECT ──
+// ── SC-001 WAS RESTATED PER CORPUS SHAPE (maintainer decision, 2026-08-29) ──
 //
-// SC-001 declares "≥70% smaller in tokens than full mode" on the frozen 45-tool
-// reference corpus. Measured here (cl100k_base, real renderer):
+// As originally written SC-001 asked for ≥70% reduction on the frozen 45-tool
+// corpus and ≥85% on a ~100-tool fleet. T035a measured:
 //
-//	full     = 6116 tokens  (inputSchema 2604, annotations 1125,
-//	                         description 1784, name 286, outputSchema 0)
-//	deferred = 4301 tokens
-//	reduction = 29.7%
+//	corpus_v2.tools.json          45 tools   6116 → 4301   29.7%   (asked ≥70%)
+//	livemcptool_snapshot          527 tools  99918 → 65138 34.8%   (asked ≥85%)
 //
-// The shortfall is arithmetic, not an implementation defect. Deferral can only
-// remove the upstream inputSchema — 2604 of 6116 tokens, 42.6% of the payload.
-// Everything else is either required by FR-004 (the untouched description,
-// unchanged annotations, the name) or is the appended signature FR-004 mandates.
-// So even a hypothetical listing that deleted BOTH the schema and the signature
-// would reach only 38.9%: the ceiling on this corpus is below SC-001's floor.
+// The ceiling on corpus_v2 is 38.9% — what deleting BOTH the schema and the
+// signature would yield — so no implementation of this design could reach 70%
+// on this corpus shape. The original number assumed schemas dominate the
+// payload (spec-083 profiling put them at ~77%); at these shapes names,
+// descriptions and annotations dominate, and FR-004 forbids touching those.
 //
-// SC-001's threshold was calibrated on issue #971's fleet shape (~300 tokens per
-// tool, ~30K per 100 tools), where the schema is assumed to be the dominant
-// term. corpus_v2 is schema-light and description-heavy (~136 tokens/tool), and
-// mcp-go's unconditional annotations block alone is a fixed ~25 tokens per entry
-// that no serialization change can touch.
+// SC-001 now asks ≥25% on corpus_v2 and ≥30% on the 527-tool snapshot — roughly
+// 15% relative below each measured value, as regression headroom rather than a
+// second projection. Both bounds are asserted here, so this file IS the SC-001
+// gate rather than a stand-in for one.
 //
-// SC-001's second clause does not hold either. Measured the same way over the
-// 527-tool livemcptool snapshot (specs/083-discovery-profiler/datasets/
-// livemcptool_snapshot/tools.json, ~190 tokens/tool — the closest thing this
-// repo has to the "~100-tool fleet"): full = 99918, deferred = 65138,
-// reduction = 34.8%, against SC-001's projected ≥85%. So the criterion is not
-// merely mis-fitted to the reference corpus; the ≥70%/≥85% numbers assume the
-// upstream schema is a far larger share of a tools/list payload than it is in
-// either dataset available here.
-//
-// Truncating descriptions to close the gap is not available: FR-004 requires the
-// existing description untouched.
-//
-// The gate asserted below is therefore a REGRESSION FLOOR on the implementation,
-// not a restatement of SC-001. Resolving SC-001 itself — restating its threshold
-// per corpus shape, or re-targeting the criterion at a schema-heavy corpus — is
-// escalated to T076, where the criterion is formally re-measured and recorded.
+// The 70% tripwire is retained: clearing it would mean the corpus premise
+// behind the restatement has changed, and the criterion must be re-derived
+// rather than left in place.
+
 const (
 	// deferredCorpusPath is the frozen 45-tool reference corpus WITH schemas.
 	// corpus_v1 (spec 065) carries no schemas and cannot measure deferral.
 	deferredCorpusPath = "../../specs/083-discovery-profiler/datasets/corpus_v2.tools.json"
 
-	// deferredCorpusReductionFloor is the regression floor for the measured
-	// payload reduction (measured: 29.7%). Set just under it so an
-	// implementation regression — a schema leaking back into a deferred entry, a
-	// signature ballooning — fails, while corpus-neutral churn does not.
+	// deferredLargeCorpusPath is the 527-tool LiveMCPBench snapshot — the
+	// second half of the revised SC-001, and the only in-repo corpus large
+	// enough to stand in for a real fleet.
+	deferredLargeCorpusPath = "../../specs/083-discovery-profiler/datasets/livemcptool_snapshot/tools.json"
+
+	// deferredCorpusReductionFloor is revised SC-001's reference-corpus bound
+	// (measured 29.7%, ceiling 38.9%).
 	deferredCorpusReductionFloor = 0.25
 
-	// deferredCorpusSC001Target is SC-001's declared threshold, kept here as the
-	// documented record of what the spec asks for versus what this corpus can
-	// deliver. Deliberately NOT asserted — see the defect note above.
-	deferredCorpusSC001Target = 0.70
+	// deferredLargeCorpusReductionFloor is revised SC-001's fleet-scale bound
+	// (measured 34.8%).
+	deferredLargeCorpusReductionFloor = 0.30
+
+	// deferredCorpusSC001Tripwire is the ORIGINAL threshold, retained as an
+	// upper guard. Clearing it means the corpus premise behind the restatement
+	// no longer holds and SC-001 must be re-derived — not silently enjoyed.
+	deferredCorpusSC001Tripwire = 0.70
 
 	// deferredCorpusNonLossyFloor is SC-002 as written: ≥80% of corpus tools are
 	// callable one-shot from the deferred listing, i.e. their signature is not
@@ -144,6 +136,47 @@ func renderCorpusTokens(t *testing.T, mode string, tools []*config.ToolMetadata)
 	return total
 }
 
+// loadDeferredLargeCorpus reads the 527-tool LiveMCPBench snapshot. Its rows
+// use `inputSchema` where corpus_v2 uses `schema`, and carry no tool_id, so it
+// needs its own decoder rather than a shared one.
+func loadDeferredLargeCorpus(t *testing.T) []*config.ToolMetadata {
+	t.Helper()
+
+	raw, err := os.ReadFile(deferredLargeCorpusPath)
+	require.NoError(t, err, "the LiveMCPBench snapshot must be present")
+
+	var corpus struct {
+		ToolCount int `json:"tool_count"`
+		Tools     []struct {
+			Server      string          `json:"server"`
+			Tool        string          `json:"tool"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &corpus))
+	require.Len(t, corpus.Tools, 527, "SC-001's fleet-scale bound is stated against the 527-tool snapshot")
+
+	out := make([]*config.ToolMetadata, 0, len(corpus.Tools))
+	for i, tool := range corpus.Tools {
+		params := string(tool.InputSchema)
+		if params == "" || params == "null" {
+			params = `{"type":"object"}`
+		}
+		out = append(out, &config.ToolMetadata{
+			ServerName:  tool.Server,
+			Name:        tool.Tool,
+			Description: tool.Description,
+			ParamsJSON:  params,
+			// Distinct per row: the signature cache is keyed by hash, so a
+			// shared one would collapse 527 tools onto a single signature and
+			// silently understate the deferred payload.
+			Hash: fmt.Sprintf("large-corpus-%d", i),
+		})
+	}
+	return out
+}
+
 func TestDeferredDirect_TokenReduction_Corpus45(t *testing.T) {
 	tools := loadDeferredCorpus(t)
 
@@ -153,19 +186,40 @@ func TestDeferredDirect_TokenReduction_Corpus45(t *testing.T) {
 	require.Positive(t, full)
 	reduction := 1 - float64(deferred)/float64(full)
 
-	t.Logf("SC-001 measurement (corpus_v2, 45 tools, cl100k_base): full=%d deferred=%d reduction=%.1f%% (spec target %.0f%%)",
-		full, deferred, reduction*100, deferredCorpusSC001Target*100)
+	t.Logf("SC-001 (corpus_v2, 45 tools, cl100k_base): full=%d deferred=%d reduction=%.1f%% (revised bound %.0f%%)",
+		full, deferred, reduction*100, deferredCorpusReductionFloor*100)
 
 	assert.GreaterOrEqualf(t, reduction, deferredCorpusReductionFloor,
-		"deferred rendering regressed: %.1f%% reduction is below the %.0f%% floor",
+		"revised SC-001: %.1f%% reduction is below the %.0f%% reference-corpus bound",
 		reduction*100, deferredCorpusReductionFloor*100)
 
-	// A guard on the guard: if a future change ever DOES clear SC-001 on this
-	// corpus, the defect note above has gone stale and must be revisited rather
-	// than silently left in place.
-	assert.Lessf(t, reduction, deferredCorpusSC001Target,
-		"reduction now clears SC-001's %.0f%% on this corpus — update the spec-defect note and promote this to a real gate",
-		deferredCorpusSC001Target*100)
+	assert.Lessf(t, reduction, deferredCorpusSC001Tripwire,
+		"reduction now clears the original %.0f%% on this corpus — the shape premise behind the SC-001 restatement no longer holds; re-derive the criterion instead of leaving it",
+		deferredCorpusSC001Tripwire*100)
+}
+
+// The fleet-scale half of revised SC-001. corpus_v2 is 45 tools; a real
+// deployment is hundreds, and the reduction is a function of corpus shape, so
+// asserting only the small corpus would leave half the criterion unenforced.
+func TestDeferredDirect_TokenReduction_LargeCorpus(t *testing.T) {
+	tools := loadDeferredLargeCorpus(t)
+
+	full := renderCorpusTokens(t, config.DirectToolResponseModeFull, tools)
+	deferred := renderCorpusTokens(t, config.DirectToolResponseModeDeferred, tools)
+
+	require.Positive(t, full)
+	reduction := 1 - float64(deferred)/float64(full)
+
+	t.Logf("SC-001 (livemcptool snapshot, %d tools, cl100k_base): full=%d deferred=%d reduction=%.1f%% (revised bound %.0f%%)",
+		len(tools), full, deferred, reduction*100, deferredLargeCorpusReductionFloor*100)
+
+	assert.GreaterOrEqualf(t, reduction, deferredLargeCorpusReductionFloor,
+		"revised SC-001: %.1f%% reduction is below the %.0f%% fleet-scale bound",
+		reduction*100, deferredLargeCorpusReductionFloor*100)
+
+	assert.Lessf(t, reduction, deferredCorpusSC001Tripwire,
+		"reduction now clears the original %.0f%% at fleet scale — re-derive SC-001 rather than leaving the restatement in place",
+		deferredCorpusSC001Tripwire*100)
 }
 
 func TestDeferredDirect_NonLossyShare_Corpus45(t *testing.T) {

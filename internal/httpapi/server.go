@@ -453,7 +453,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			// These connections are authenticated via OS-level permissions (UID/SID matching)
 			source := transport.GetConnectionSource(r.Context())
 			if source == transport.ConnectionSourceTray {
-				s.logger.Debug("Tray connection - skipping API key validation",
+				s.logger.Debugw("Tray connection - skipping API key validation",
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr),
 					zap.String("source", string(source)))
@@ -481,7 +481,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			// SECURITY: API key is REQUIRED for all TCP connections to REST API
 			// Empty API key is not allowed - this prevents accidental exposure
 			if cfg.APIKey == "" {
-				s.logger.Warn("TCP connection rejected - API key not configured",
+				s.logger.Warnw("TCP connection rejected - API key not configured",
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, r, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
@@ -491,7 +491,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			// Extract token from request
 			token := ExtractToken(r)
 			if token == "" {
-				s.logger.Warn("TCP connection with missing API key",
+				s.logger.Warnw("TCP connection with missing API key",
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
@@ -506,7 +506,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 
 			// Check if the token matches the global API key (admin)
 			if token == cfg.APIKey {
-				s.logger.Debug("TCP connection with valid API key",
+				s.logger.Debugw("TCP connection with valid API key",
 					zap.String("path", r.URL.Path),
 					zap.String("remote_addr", r.RemoteAddr))
 				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
@@ -515,7 +515,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			}
 
 			// Token doesn't match anything
-			s.logger.Warn("TCP connection with invalid API key",
+			s.logger.Warnw("TCP connection with invalid API key",
 				zap.String("path", r.URL.Path),
 				zap.String("remote_addr", r.RemoteAddr))
 			s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
@@ -526,7 +526,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
 func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, token string) {
 	if s.tokenStore == nil || s.dataDir == "" {
-		s.logger.Warn("Agent token presented but token store not configured",
+		s.logger.Warnw("Agent token presented but token store not configured",
 			zap.String("path", r.URL.Path),
 			zap.String("remote_addr", r.RemoteAddr))
 		s.writeError(w, r, http.StatusUnauthorized, "Agent tokens are not configured on this server")
@@ -535,14 +535,14 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 
 	hmacKey, err := auth.GetOrCreateHMACKey(s.dataDir)
 	if err != nil {
-		s.logger.Error("Failed to get HMAC key for agent token validation", zap.Error(err))
+		s.logger.Errorw("Failed to get HMAC key for agent token validation", zap.Error(err))
 		s.writeError(w, r, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
 	agentToken, err := s.tokenStore.ValidateAgentToken(token, hmacKey)
 	if err != nil {
-		s.logger.Warn("Agent token validation failed",
+		s.logger.Warnw("Agent token validation failed",
 			zap.String("path", r.URL.Path),
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
@@ -553,7 +553,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	// Update last-used timestamp in background
 	go func() {
 		if updateErr := s.tokenStore.UpdateAgentTokenLastUsed(agentToken.Name); updateErr != nil {
-			s.logger.Warn("Failed to update agent token last-used timestamp",
+			s.logger.Warnw("Failed to update agent token last-used timestamp",
 				zap.String("name", agentToken.Name),
 				zap.Error(updateErr))
 		}
@@ -567,7 +567,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	authCtx := agentToken.AuthContext()
 	ctx := auth.WithAuthContext(r.Context(), authCtx)
 
-	s.logger.Debug("Agent token authenticated",
+	s.logger.Debugw("Agent token authenticated",
 		zap.String("agent_name", agentToken.Name),
 		zap.String("token_prefix", agentToken.TokenPrefix),
 		zap.String("path", r.URL.Path),
@@ -995,7 +995,7 @@ func (s *Server) setupRoutes() {
 	// Note: Swagger UI is mounted directly on the main mux (not via HTTP API server)
 	// See internal/server/server.go for swagger handler registration
 
-	s.logger.Debug("HTTP API routes setup completed",
+	s.logger.Debugw("HTTP API routes setup completed",
 		"api_routes", "/api/v1/*",
 		"sse_route", "/events",
 		"health_routes", "/healthz,/readyz,/livez,/ready")
@@ -1078,7 +1078,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		s.logger.Error("Failed to encode JSON response", "error", err)
+		s.logger.Errorw("Failed to encode JSON response", "error", err)
 	}
 }
 
@@ -1131,12 +1131,16 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 		autostartDataDir = cfg.DataDir
 	}
 
+	// One traversal, used for both the top-level field and the nested snapshot,
+	// so the two cannot disagree and the O(servers) walk happens once (#1084).
+	liveUpstreamStats := s.controller.GetUpstreamStats()
+
 	response := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
 		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
-		"upstream_stats": s.controller.GetUpstreamStats(),
-		"status":         s.controller.GetStatus(),
+		"upstream_stats": liveUpstreamStats,
+		"status":         withLiveUpstreamStats(s.controller.GetStatus(), liveUpstreamStats),
 		"routing_mode":   routingMode,
 		"timestamp":      time.Now().Unix(),
 		// Unix seconds at which this core process started, so a UI can render a
@@ -1404,7 +1408,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		}).ListServers(r.Context())
 
 		if err != nil {
-			s.logger.Error("Failed to list servers via management service", "error", err)
+			s.logger.Errorw("Failed to list servers via management service", "error", err)
 			s.writeError(w, r, http.StatusInternalServerError, "Failed to get servers")
 			return
 		}
@@ -1452,7 +1456,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// Fallback to legacy path if management service not available
 	genericServers, err := s.controller.GetAllServers()
 	if err != nil {
-		s.logger.Error("Failed to get servers", "error", err)
+		s.logger.Errorw("Failed to get servers", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get servers")
 		return
 	}
@@ -1861,12 +1865,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusConflict, err.Error())
 			return
 		}
-		logger.Error("Failed to add server", "server", req.Name, "error", err)
+		logger.Errorw("Failed to add server", "server", req.Name, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to add server: %v", err))
 		return
 	}
 
-	logger.Info("Server added successfully", "server", req.Name, "quarantined", quarantined)
+	logger.Infow("Server added successfully", "server", req.Name, "quarantined", quarantined)
 	s.writeSuccess(w, contracts.ServerActionResponse{
 		Server:  req.Name,
 		Action:  "add",
@@ -1904,12 +1908,12 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusNotFound, err.Error())
 			return
 		}
-		logger.Error("Failed to remove server", "server", serverID, "error", err)
+		logger.Errorw("Failed to remove server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to remove server: %v", err))
 		return
 	}
 
-	logger.Info("Server removed successfully", "server", serverID)
+	logger.Infow("Server removed successfully", "server", serverID)
 	s.writeSuccess(w, contracts.ServerActionResponse{
 		Server:  serverID,
 		Action:  "remove",
@@ -2147,12 +2151,12 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusNotFound, err.Error())
 			return
 		}
-		logger.Error("Failed to update server", "server", serverName, "error", err)
+		logger.Errorw("Failed to update server", "server", serverName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to update server: %v", err))
 		return
 	}
 
-	logger.Info("Server updated successfully", "server", serverName)
+	logger.Infow("Server updated successfully", "server", serverName)
 	s.writeSuccess(w, map[string]interface{}{
 		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
 		"restart_required": true,
@@ -2269,7 +2273,7 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 	// state so it's traceable.
 	ref := secret.Ref{Type: secretTypeKeyring, Name: req.SecretName}
 	if err := resolver.Store(ctx, ref, value); err != nil {
-		s.logger.Error("config-to-secret: keyring store failed",
+		s.logger.Errorw("config-to-secret: keyring store failed",
 			"server", serverName, "scope", req.Scope, "key", req.Key, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("failed to store secret: %v", err))
 		return
@@ -2301,7 +2305,7 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 	updates.ReconnectOnUse = sc.ReconnectOnUse
 
 	if err := s.controller.UpdateServer(ctx, serverName, updates); err != nil {
-		s.logger.Error("config-to-secret: keyring write succeeded but config update failed; secret is stored but not referenced",
+		s.logger.Errorw("config-to-secret: keyring write succeeded but config update failed; secret is stored but not referenced",
 			"server", serverName, "scope", req.Scope, "key", req.Key, "secret_name", req.SecretName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("secret stored as %q but config update failed: %v", req.SecretName, err))
 		return
@@ -2309,7 +2313,7 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 
 	// Wake any servers that depend on the new secret. Best-effort.
 	if err := s.controller.NotifySecretsChanged(ctx, "store", req.SecretName); err != nil {
-		s.logger.Warn("config-to-secret: failed to notify runtime of secret change",
+		s.logger.Warnw("config-to-secret: failed to notify runtime of secret change",
 			"name", req.SecretName, "error", err)
 	}
 
@@ -2347,7 +2351,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 		}).EnableServer(r.Context(), serverID, true)
 
 		if err != nil {
-			s.logger.Error("Failed to enable server via management service", "server", serverID, "error", err)
+			s.logger.Errorw("Failed to enable server via management service", "server", serverID, "error", err)
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
 			return
 		}
@@ -2365,15 +2369,15 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	// Fallback to legacy async path
 	async, err := s.toggleServerAsync(serverID, true)
 	if err != nil {
-		s.logger.Error("Failed to enable server", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to enable server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
 		return
 	}
 
 	if async {
-		s.logger.Debug("Server enable dispatched asynchronously", "server", serverID)
+		s.logger.Debugw("Server enable dispatched asynchronously", "server", serverID)
 	} else {
-		s.logger.Debug("Server enable completed synchronously", "server", serverID)
+		s.logger.Debugw("Server enable completed synchronously", "server", serverID)
 	}
 
 	response := contracts.ServerActionResponse{
@@ -2414,7 +2418,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 		}).EnableServer(r.Context(), serverID, false)
 
 		if err != nil {
-			s.logger.Error("Failed to disable server via management service", "server", serverID, "error", err)
+			s.logger.Errorw("Failed to disable server via management service", "server", serverID, "error", err)
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
 			return
 		}
@@ -2432,15 +2436,15 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	// Fallback to legacy async path
 	async, err := s.toggleServerAsync(serverID, false)
 	if err != nil {
-		s.logger.Error("Failed to disable server", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to disable server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
 		return
 	}
 
 	if async {
-		s.logger.Debug("Server disable dispatched asynchronously", "server", serverID)
+		s.logger.Debugw("Server disable dispatched asynchronously", "server", serverID)
 	} else {
-		s.logger.Debug("Server disable completed synchronously", "server", serverID)
+		s.logger.Debugw("Server disable completed synchronously", "server", serverID)
 	}
 
 	response := contracts.ServerActionResponse{
@@ -2469,7 +2473,7 @@ func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Requ
 	reason := r.URL.Query().Get("reason")
 
 	if err := s.controller.ForceReconnectAllServers(reason); err != nil {
-		s.logger.Error("Failed to trigger force reconnect for servers",
+		s.logger.Errorw("Failed to trigger force reconnect for servers",
 			"reason", reason,
 			"error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to reconnect servers: %v", err))
@@ -2509,7 +2513,7 @@ func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 
 	result, err := mgmtSvc.RestartAll(r.Context())
 	if err != nil {
-		s.logger.Error("RestartAll operation failed", "error", err)
+		s.logger.Errorw("RestartAll operation failed", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to restart all servers: %v", err))
 		return
 	}
@@ -2541,7 +2545,7 @@ func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 
 	result, err := mgmtSvc.EnableAll(r.Context())
 	if err != nil {
-		s.logger.Error("EnableAll operation failed", "error", err)
+		s.logger.Errorw("EnableAll operation failed", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable all servers: %v", err))
 		return
 	}
@@ -2573,7 +2577,7 @@ func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 
 	result, err := mgmtSvc.DisableAll(r.Context())
 	if err != nil {
-		s.logger.Error("DisableAll operation failed", "error", err)
+		s.logger.Errorw("DisableAll operation failed", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable all servers: %v", err))
 		return
 	}
@@ -2618,7 +2622,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 
 			if isOAuthError {
 				// OAuth required is not a failure - restart succeeded but OAuth is needed
-				s.logger.Info("Server restart completed, OAuth login required",
+				s.logger.Infow("Server restart completed, OAuth login required",
 					"server", serverID,
 					"error", errStr)
 
@@ -2633,7 +2637,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Non-OAuth error - treat as failure
-			s.logger.Error("Failed to restart server via management service", "server", serverID, "error", err)
+			s.logger.Errorw("Failed to restart server via management service", "server", serverID, "error", err)
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
 			return
 		}
@@ -2667,7 +2671,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 
 			if isOAuthError {
 				// OAuth required is not a failure - restart succeeded but OAuth is needed
-				s.logger.Info("Server restart completed, OAuth login required",
+				s.logger.Infow("Server restart completed, OAuth login required",
 					"server", serverID,
 					"error", errStr)
 
@@ -2682,17 +2686,17 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Non-OAuth error - treat as failure
-			s.logger.Error("Failed to restart server", "server", serverID, "error", err)
+			s.logger.Errorw("Failed to restart server", "server", serverID, "error", err)
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to restart server: %v", err))
 			return
 		}
-		s.logger.Debug("Server restart completed synchronously", "server", serverID)
+		s.logger.Debugw("Server restart completed synchronously", "server", serverID)
 	case <-time.After(35 * time.Second):
 		// Longer timeout for restart (30s connect timeout + 5s buffer)
-		s.logger.Debug("Server restart executing asynchronously", "server", serverID)
+		s.logger.Debugw("Server restart executing asynchronously", "server", serverID)
 		go func() {
 			if err := <-done; err != nil {
-				s.logger.Error("Asynchronous server restart failed", "server", serverID, "error", err)
+				s.logger.Errorw("Asynchronous server restart failed", "server", serverID, "error", err)
 			}
 		}()
 	}
@@ -2733,10 +2737,10 @@ func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.logger.Info("Manual tool discovery triggered via API", "server", serverID)
+	s.logger.Infow("Manual tool discovery triggered via API", "server", serverID)
 
 	if err := s.controller.DiscoverServerTools(r.Context(), serverID); err != nil {
-		s.logger.Error("Failed to discover tools for server", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to discover tools for server", "server", serverID, "error", err)
 
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
@@ -2780,10 +2784,10 @@ func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("Manual tool refresh triggered via API", "server", serverID)
+	s.logger.Infow("Manual tool refresh triggered via API", "server", serverID)
 
 	if err := s.controller.DiscoverServerTools(r.Context(), serverID); err != nil {
-		s.logger.Error("Failed to refresh tools for server", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to refresh tools for server", "server", serverID, "error", err)
 
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
@@ -2815,7 +2819,7 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 	case <-time.After(asyncToggleTimeout):
 		go func() {
 			if err := <-errCh; err != nil {
-				s.logger.Error("Asynchronous server toggle failed", "server", serverID, "enabled", enabled, "error", err)
+				s.logger.Errorw("Asynchronous server toggle failed", "server", serverID, "enabled", enabled, "error", err)
 			}
 		}()
 		return true, nil
@@ -2855,7 +2859,7 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 
 	result, err := mgmtSvc.TriggerOAuthLoginQuick(r.Context(), serverID)
 	if err != nil {
-		s.logger.Error("Failed to trigger OAuth login", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to trigger OAuth login", "server", serverID, "error", err)
 
 		// Spec 020: Check for structured OAuth errors and return them directly
 		var oauthFlowErr *contracts.OAuthFlowError
@@ -2865,7 +2869,7 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			if encErr := json.NewEncoder(w).Encode(oauthFlowErr); encErr != nil {
-				s.logger.Error("Failed to encode OAuth flow error response", "error", encErr)
+				s.logger.Errorw("Failed to encode OAuth flow error response", "error", encErr)
 			}
 			return
 		}
@@ -2875,7 +2879,7 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			if encErr := json.NewEncoder(w).Encode(oauthValidationErr); encErr != nil {
-				s.logger.Error("Failed to encode OAuth validation error response", "error", encErr)
+				s.logger.Errorw("Failed to encode OAuth validation error response", "error", encErr)
 			}
 			return
 		}
@@ -2959,7 +2963,7 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := mgmtSvc.TriggerOAuthLogout(r.Context(), serverID); err != nil {
-		s.logger.Error("Failed to trigger OAuth logout", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to trigger OAuth logout", "server", serverID, "error", err)
 
 		// Map errors to HTTP status codes
 		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
@@ -3005,7 +3009,7 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.controller.QuarantineServer(serverID, true); err != nil {
-		s.logger.Error("Failed to quarantine server", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to quarantine server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to quarantine server: %v", err))
 		return
 	}
@@ -3041,7 +3045,7 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.controller.QuarantineServer(serverID, false); err != nil {
-		s.logger.Error("Failed to unquarantine server", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to unquarantine server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to unquarantine server: %v", err))
 		return
 	}
@@ -3087,7 +3091,7 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 
 	tools, err := mgmtSvc.GetServerTools(r.Context(), serverID)
 	if err != nil {
-		s.logger.Error("Failed to get server tools", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to get server tools", "server", serverID, "error", err)
 
 		// Map errors to HTTP status codes (T018)
 		if strings.Contains(err.Error(), "not found") {
@@ -3164,7 +3168,7 @@ func (s *Server) enrichServerTools(serverID string, tools []map[string]interface
 		}
 	}
 	if firstErr != nil {
-		s.logger.Debug("Tool approval enrichment partial", "server", serverID, "enriched", enrichedCount, "total", len(typedTools), "error", firstErr)
+		s.logger.Debugw("Tool approval enrichment partial", "server", serverID, "enriched", enrichedCount, "total", len(typedTools), "error", firstErr)
 	}
 	return typedTools
 }
@@ -3194,7 +3198,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 	// here must not fail the whole page — usage columns just stay zero.
 	usage, usageErr := s.controller.AggregateToolUsage(time.Now().Add(-globalToolsUsageWindow))
 	if usageErr != nil {
-		s.logger.Warn("Global tools: usage aggregation failed, continuing without usage", "error", usageErr)
+		s.logger.Warnw("Global tools: usage aggregation failed, continuing without usage", "error", usageErr)
 		usage = map[string]storage.ToolUsageStat{}
 	}
 
@@ -3246,7 +3250,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			// we could gather, flag the rest as partial.
 			resp.Partial = true
 			resp.FailedServers = append(resp.FailedServers, name)
-			s.logger.Debug("Global tools: server tools fetch failed", "server", name, "error", terr)
+			s.logger.Debugw("Global tools: server tools fetch failed", "server", name, "error", terr)
 			continue
 		}
 
@@ -3313,7 +3317,7 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 
 	logEntries, err := s.controller.GetServerLogs(serverID, tail)
 	if err != nil {
-		s.logger.Error("Failed to get server logs", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to get server logs", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get logs: %v", err))
 		return
 	}
@@ -3357,7 +3361,7 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.controller.SearchTools(query, limit)
 	if err != nil {
-		s.logger.Error("Failed to search tools", "query", query, "error", err)
+		s.logger.Errorw("Failed to search tools", "query", query, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
 		return
 	}
@@ -3440,7 +3444,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		defer s.controller.UnsubscribeEvents(eventsCh)
 	}
 
-	s.logger.Debug("SSE connection established",
+	s.logger.Debugw("SSE connection established",
 		"status_channel_nil", statusCh == nil,
 		"events_channel_nil", eventsCh == nil)
 
@@ -3449,18 +3453,19 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	defer heartbeat.Stop()
 
 	// Send initial status
+	initialLiveStats := s.controller.GetUpstreamStats()
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
 		"listen_addr":    s.controller.GetListenAddress(),
-		"upstream_stats": s.controller.GetUpstreamStats(),
-		"status":         s.controller.GetStatus(),
+		"upstream_stats": initialLiveStats,
+		"status":         withLiveUpstreamStats(s.controller.GetStatus(), initialLiveStats),
 		"timestamp":      time.Now().Unix(),
 		"started_at":     processStart.Unix(),
 	}
 
-	s.logger.Debug("Sending initial SSE status event", "data", initialStatus)
+	s.logger.Debugw("Sending initial SSE status event", "data", initialStatus)
 	if err := s.writeSSEEvent(w, flusher, canFlush, "status", initialStatus); err != nil {
-		s.logger.Error("Failed to write initial SSE event", "error", err)
+		s.logger.Errorw("Failed to write initial SSE event", "error", err)
 		return
 	}
 	s.logger.Debug("Initial SSE status event sent successfully")
@@ -3476,7 +3481,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				"timestamp": time.Now().Unix(),
 			}
 			if err := s.writeSSEEvent(w, flusher, canFlush, "ping", pingData); err != nil {
-				s.logger.Error("Failed to write SSE heartbeat", "error", err)
+				s.logger.Errorw("Failed to write SSE heartbeat", "error", err)
 				return
 			}
 		case status, ok := <-statusCh:
@@ -3484,17 +3489,21 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			// The channel snapshot is a point-in-time capture that never
+			// passes through GetStatus(), so without this the stream's nested
+			// stats stay stale for the life of the connection (#1084).
+			eventLiveStats := s.controller.GetUpstreamStats()
 			response := map[string]interface{}{
 				"running":        s.controller.IsRunning(),
 				"listen_addr":    s.controller.GetListenAddress(),
-				"upstream_stats": s.controller.GetUpstreamStats(),
-				"status":         status,
+				"upstream_stats": eventLiveStats,
+				"status":         withLiveUpstreamStats(status, eventLiveStats),
 				"timestamp":      time.Now().Unix(),
 				"started_at":     processStart.Unix(),
 			}
 
 			if err := s.writeSSEEvent(w, flusher, canFlush, "status", response); err != nil {
-				s.logger.Error("Failed to write SSE event", "error", err)
+				s.logger.Errorw("Failed to write SSE event", "error", err)
 				return
 			}
 		case evt, ok := <-eventsCh:
@@ -3509,7 +3518,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if err := s.writeSSEEvent(w, flusher, canFlush, string(evt.Type), eventPayload); err != nil {
-				s.logger.Error("Failed to write runtime SSE event", "error", err)
+				s.logger.Errorw("Failed to write runtime SSE event", "error", err)
 				return
 			}
 		}
@@ -3607,7 +3616,7 @@ func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {
 	// Get all secret references from available providers
 	refs, err := resolver.ListAll(ctx)
 	if err != nil {
-		s.logger.Error("Failed to list secret references", "error", err)
+		s.logger.Errorw("Failed to list secret references", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to list secret references")
 		return
 	}
@@ -3686,7 +3695,7 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 	// Extract config-referenced secrets and environment variables
 	configSecrets, err := resolver.ExtractConfigSecrets(ctx, cfg)
 	if err != nil {
-		s.logger.Error("Failed to extract config secrets", "error", err)
+		s.logger.Errorw("Failed to extract config secrets", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to extract config secrets")
 		return
 	}
@@ -3762,7 +3771,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 
 	err := resolver.Store(ctx, ref, request.Value)
 	if err != nil {
-		s.logger.Error("Failed to store secret", "name", request.Name, "error", err)
+		s.logger.Errorw("Failed to store secret", "name", request.Name, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to store secret: %v", err))
 		return
 	}
@@ -3770,7 +3779,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	// Notify runtime that secrets changed (this will restart affected servers)
 	if runtime := s.controller; runtime != nil {
 		if err := runtime.NotifySecretsChanged(ctx, "store", request.Name); err != nil {
-			s.logger.Warn("Failed to notify runtime of secret change",
+			s.logger.Warnw("Failed to notify runtime of secret change",
 				"name", request.Name,
 				"error", err)
 		}
@@ -3839,7 +3848,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 
 	err := resolver.Delete(ctx, ref)
 	if err != nil {
-		s.logger.Error("Failed to delete secret", "name", name, "error", err)
+		s.logger.Errorw("Failed to delete secret", "name", name, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to delete secret: %v", err))
 		return
 	}
@@ -3847,7 +3856,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	// Notify runtime that secrets changed (this will restart affected servers)
 	if runtime := s.controller; runtime != nil {
 		if err := runtime.NotifySecretsChanged(ctx, "delete", name); err != nil {
-			s.logger.Warn("Failed to notify runtime of secret deletion",
+			s.logger.Warnw("Failed to notify runtime of secret deletion",
 				"name", name,
 				"error", err)
 		}
@@ -3886,7 +3895,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 		}).Doctor(r.Context())
 
 		if err != nil {
-			s.logger.Error("Failed to get diagnostics via management service", "error", err)
+			s.logger.Errorw("Failed to get diagnostics via management service", "error", err)
 			s.writeError(w, r, http.StatusInternalServerError, "Failed to get diagnostics")
 			return
 		}
@@ -3901,7 +3910,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Fallback to legacy path if management service not available
 	genericServers, err := s.controller.GetAllServers()
 	if err != nil {
-		s.logger.Error("Failed to get servers for diagnostics", "error", err)
+		s.logger.Errorw("Failed to get servers for diagnostics", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get servers")
 		return
 	}
@@ -4019,7 +4028,7 @@ func (s *Server) handleGetTokenStats(w http.ResponseWriter, r *http.Request) {
 
 	tokenStats, err := s.controller.GetTokenSavings()
 	if err != nil {
-		s.logger.Error("Failed to calculate token savings", "error", err)
+		s.logger.Errorw("Failed to calculate token savings", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to calculate token savings: %v", err))
 		return
 	}
@@ -4157,7 +4166,7 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		s.logger.Error("Failed to get tool calls", "error", err, "session_id", sessionID)
+		s.logger.Errorw("Failed to get tool calls", "error", err, "session_id", sessionID)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get tool calls")
 		return
 	}
@@ -4201,7 +4210,7 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 	// Get tool call by ID
 	toolCall, err := s.controller.GetToolCallByID(id)
 	if err != nil {
-		s.logger.Error("Failed to get tool call detail", "id", id, "error", err)
+		s.logger.Errorw("Failed to get tool call detail", "id", id, "error", err)
 		s.writeError(w, r, http.StatusNotFound, "Tool call not found")
 		return
 	}
@@ -4255,7 +4264,7 @@ func (s *Server) handleGetServerToolCalls(w http.ResponseWriter, r *http.Request
 	// Get server tool calls
 	toolCalls, err := s.controller.GetServerToolCalls(serverID, limit)
 	if err != nil {
-		s.logger.Error("Failed to get server tool calls", "server", serverID, "error", err)
+		s.logger.Errorw("Failed to get server tool calls", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get server tool calls")
 		return
 	}
@@ -4365,7 +4374,7 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusTooManyRequests, limitErr.UserMessage())
 			return
 		}
-		s.logger.Error("Failed to replay tool call", "id", id, "error", err)
+		s.logger.Errorw("Failed to replay tool call", "id", id, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to replay tool call: %v", err))
 		return
 	}
@@ -4406,7 +4415,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := s.controller.GetConfig()
 	if err != nil {
-		s.logger.Error("Failed to get configuration", "error", err)
+		s.logger.Errorw("Failed to get configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
 		return
 	}
@@ -4454,7 +4463,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	// Perform validation
 	validationErrors, err := s.controller.ValidateConfig(&cfg)
 	if err != nil {
-		s.logger.Error("Failed to validate configuration", "error", err)
+		s.logger.Errorw("Failed to validate configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Validation failed: %v", err))
 		return
 	}
@@ -4500,8 +4509,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	// Apply configuration
 	result, err := s.controller.ApplyConfig(&cfg, cfgPath)
 	if err != nil {
-		s.logger.Error("Failed to apply configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
+		s.writeApplyConfigError(w, r, "Failed to apply configuration", result, err)
 		return
 	}
 
@@ -4552,7 +4560,7 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 	// that logic here.
 	cfg, err := s.controller.GetConfig()
 	if err != nil {
-		s.logger.Error("Failed to get configuration for docker-isolation patch", "error", err)
+		s.logger.Errorw("Failed to get configuration for docker-isolation patch", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
 	}
@@ -4569,8 +4577,7 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 	cfgPath := s.controller.GetConfigPath()
 	result, err := s.controller.ApplyConfig(cfg, cfgPath)
 	if err != nil {
-		s.logger.Error("Failed to apply docker-isolation toggle", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
+		s.writeApplyConfigError(w, r, "Failed to apply docker-isolation toggle", result, err)
 		return
 	}
 
@@ -4621,7 +4628,7 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	// untouched fields, including masked secrets, are preserved verbatim.
 	cfg, err := s.controller.GetConfig()
 	if err != nil {
-		s.logger.Error("Failed to get configuration for patch", "error", err)
+		s.logger.Errorw("Failed to get configuration for patch", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
 	}
@@ -4634,13 +4641,13 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	// deep-merge the patch onto without enumerating every field.
 	baseBytes, err := json.Marshal(cfg)
 	if err != nil {
-		s.logger.Error("Failed to marshal live configuration", "error", err)
+		s.logger.Errorw("Failed to marshal live configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
 	}
 	var baseMap map[string]interface{}
 	if err := json.Unmarshal(baseBytes, &baseMap); err != nil {
-		s.logger.Error("Failed to unmarshal live configuration", "error", err)
+		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
 	}
@@ -4649,7 +4656,7 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 
 	mergedBytes, err := json.Marshal(baseMap)
 	if err != nil {
-		s.logger.Error("Failed to marshal merged configuration", "error", err)
+		s.logger.Errorw("Failed to marshal merged configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to build configuration")
 		return
 	}
@@ -4661,8 +4668,7 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.controller.ApplyConfig(&merged, s.controller.GetConfigPath())
 	if err != nil {
-		s.logger.Error("Failed to apply configuration patch", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
+		s.writeApplyConfigError(w, r, "Failed to apply configuration patch", result, err)
 		return
 	}
 
@@ -4675,6 +4681,75 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
 	}
 	s.writeSuccess(w, response)
+}
+
+// writeApplyConfigError reports an ApplyConfig failure with the right status
+// class (#1084).
+//
+// ApplyConfig fails for two very different reasons: the operator sent a value
+// the config rejects, or the server could not persist/commit a valid one. Both
+// used to come back as 500, so `{"direct_tool_response_mode":"bogus"}` — a
+// plain enum typo — was reported as a server fault, which is also what tells a
+// client whether retrying could ever help. The structured ValidationErrors on
+// the result are what distinguish them; when they are present this is a 400 and
+// the payload carries them so the caller can point at the offending field.
+//
+// Returns the status it wrote, for the callers that log.
+func (s *Server) writeApplyConfigError(w http.ResponseWriter, r *http.Request, msg string, result *internalRuntime.ConfigApplyResult, err error) {
+	if result != nil && len(result.ValidationErrors) > 0 {
+		// A rejected value is the operator's, not the server's: log it at warn
+		// and answer 400. The structured errors ride in `data` so a client can
+		// point at the offending field instead of scraping the message.
+		s.logger.Warnw(msg, "error", err)
+		requestID := reqcontext.GetRequestID(r.Context())
+		s.writeJSON(w, http.StatusBadRequest, contracts.APIResponse{
+			Success:   false,
+			Error:     fmt.Sprintf("%s: %v", msg, err),
+			RequestID: requestID,
+			Data: map[string]interface{}{
+				"validation_errors": contracts.ConvertValidationErrors(result.ValidationErrors),
+			},
+		})
+		return
+	}
+	s.logger.Errorw(msg, "error", err)
+	s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("%s: %v", msg, err))
+}
+
+// withLiveUpstreamStats returns a copy of a status snapshot whose nested
+// upstream_stats / tools_indexed carry the LIVE values passed in (#1084).
+//
+// The snapshot comes from the last PUBLISHED status event, and nothing
+// refreshes its embedded stats once connection settles: they sat at
+// "Connecting"/0 for the whole life of a process whose servers were long Ready,
+// while the sibling top-level upstream_stats — computed live from the
+// supervisor's StateView — was correct. Two fields describing one thing
+// disagreed and only one ever converged.
+//
+// Applied here rather than inside Server.GetStatus() for two reasons: every
+// emission site (the REST poll and both SSE paths) already computes the live
+// stats once for its top-level field, so this reuses that value instead of
+// repeating an O(servers) traversal per response; and the SSE stream forwards a
+// snapshot straight off the channel, which never passes through GetStatus() at
+// all.
+//
+// Copies rather than mutates: the SSE value is a map owned by the publisher,
+// and refreshing it in place would edit something another goroutine may hold.
+// Keys are preserved rather than dropped — clients read data.status.*.
+func withLiveUpstreamStats(status interface{}, live map[string]interface{}) interface{} {
+	snapshot, ok := status.(map[string]interface{})
+	if !ok || live == nil {
+		return status
+	}
+	refreshed := make(map[string]interface{}, len(snapshot))
+	for k, v := range snapshot {
+		refreshed[k] = v
+	}
+	refreshed["upstream_stats"] = live
+	if totalTools, ok := live["total_tools"].(int); ok {
+		refreshed["tools_indexed"] = totalTools
+	}
+	return refreshed
 }
 
 // deepMergeJSON recursively merges patch into base. When both base[k] and
@@ -4752,7 +4827,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusTooManyRequests, limitErr.UserMessage())
 			return
 		}
-		s.logger.Error("Failed to call tool", "tool", request.ToolName, "error", err)
+		s.logger.Errorw("Failed to call tool", "tool", request.ToolName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to call tool: %v", err))
 		return
 	}
@@ -4775,7 +4850,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 	registries, err := s.controller.ListRegistries()
 	if err != nil {
-		s.logger.Error("Failed to list registries", "error", err)
+		s.logger.Errorw("Failed to list registries", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list registries: %v", err))
 		return
 	}
@@ -4785,7 +4860,7 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 	for i, reg := range registries {
 		regMap, ok := reg.(map[string]interface{})
 		if !ok {
-			s.logger.Warn("Invalid registry type", "registry", reg)
+			s.logger.Warnw("Invalid registry type", "registry", reg)
 			continue
 		}
 
@@ -4875,7 +4950,7 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 			})
 			return
 		}
-		s.logger.Error("Failed to search registry servers", "registry", registryID, "error", err)
+		s.logger.Errorw("Failed to search registry servers", "registry", registryID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to search servers: %v", err))
 		return
 	}
@@ -4885,7 +4960,7 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 	for i, srv := range servers {
 		srvMap, ok := srv.(map[string]interface{})
 		if !ok {
-			s.logger.Warn("Invalid server type", "server", srv)
+			s.logger.Warnw("Invalid server type", "server", srv)
 			continue
 		}
 
@@ -5003,7 +5078,7 @@ func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := registryAddErrorStatus(rerr.Code)
 		if status >= http.StatusInternalServerError {
-			logger.Error("Add from registry failed", "registry", registryID, "server", serverID, "error", err)
+			logger.Errorw("Add from registry failed", "registry", registryID, "server", serverID, "error", err)
 		}
 		s.writeRegistryAddError(w, r, status, rerr)
 		return
@@ -5053,7 +5128,7 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		status := registryAddErrorStatus(rerr.Code)
 		if status >= http.StatusInternalServerError {
-			logger.Error("Add registry source failed", "url", req.URL, "error", err)
+			logger.Errorw("Add registry source failed", "url", req.URL, "error", err)
 		}
 		s.writeRegistryAddError(w, r, status, rerr)
 		return
@@ -5098,7 +5173,7 @@ func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		status := registryAddErrorStatus(rerr.Code)
 		if status >= http.StatusInternalServerError {
-			logger.Error("Remove registry source failed", "id", registryID, "error", err)
+			logger.Errorw("Remove registry source failed", "id", registryID, "error", err)
 		}
 		s.writeRegistryAddError(w, r, status, rerr)
 		return
@@ -5151,7 +5226,7 @@ func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		status := registryAddErrorStatus(rerr.Code)
 		if status >= http.StatusInternalServerError {
-			logger.Error("Edit registry source failed", "id", registryID, "error", err)
+			logger.Errorw("Edit registry source failed", "id", registryID, "error", err)
 		}
 		s.writeRegistryAddError(w, r, status, rerr)
 		return
@@ -5189,7 +5264,7 @@ func (s *Server) handleRefreshRegistryCache(w http.ResponseWriter, r *http.Reque
 
 	cleared, err := s.controller.RefreshRegistryCache(registryID)
 	if err != nil {
-		s.logger.Error("Failed to refresh registry cache", "registry", registryID, "error", err)
+		s.logger.Errorw("Failed to refresh registry cache", "registry", registryID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to refresh registry cache: %v", err))
 		return
 	}
@@ -5308,7 +5383,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	// Get recent sessions from controller
 	sessions, total, err := s.controller.GetRecentSessions(limit, status)
 	if err != nil {
-		s.logger.Error("Failed to get sessions", "error", err)
+		s.logger.Errorw("Failed to get sessions", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get sessions")
 		return
 	}
@@ -5360,7 +5435,7 @@ func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) 
 	// Get session by ID
 	session, err := s.controller.GetSessionByID(id)
 	if err != nil {
-		s.logger.Error("Failed to get session detail", "id", id, "error", err)
+		s.logger.Errorw("Failed to get session detail", "id", id, "error", err)
 		s.writeError(w, r, http.StatusNotFound, "Session not found")
 		return
 	}

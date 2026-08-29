@@ -164,7 +164,96 @@ func TestDescribeDirect_BothIDFormsResolveIdentically(t *testing.T) {
 	resp := callDescribeDirect(t, p, ctx, []interface{}{"we__ird__do_thing"})
 	require.Len(t, resp.Definitions, 1)
 	assert.Equal(t, "we__ird", resp.Definitions[0]["server"])
-	assert.Equal(t, "we__ird:do_thing", resp.Definitions[0]["name"])
+	// #1083: the name echoed back is the DIRECT surface's registered display
+	// name, not the canonical id. This assertion previously pinned
+	// "we__ird:do_thing" — the canonical form, which this surface cannot be
+	// asked to call.
+	assert.Equal(t, "we__ird__do_thing", resp.Definitions[0]["name"])
+}
+
+// #1083: every identifier a direct-surface definition hands back must be one
+// this surface can actually be asked for.
+//
+// Deferred mode tells agents to recover schemas through describe_tool, so this
+// is the live discovery path, not a curiosity. Before the fix the response
+// named the tool "<server>:<tool>" (the surface registers "<server>__<tool>")
+// and recommended `call_with: "call_tool_read"` (this surface exposes no intent
+// variants at all) — both produced "tool not found" when followed verbatim.
+func TestDescribeDirect_ReturnedIdentifiersAreCallableOnThisSurface(t *testing.T) {
+	p := newDirectDescribeProxy(t)
+	ctx := context.Background()
+
+	registered := map[string]bool{}
+	for _, name := range p.loadDirectCatalog().DisplayNames() {
+		registered[name] = true
+	}
+	require.NotEmpty(t, registered, "fixture must register direct tools")
+
+	for _, id := range []string{"github__read_file", "github__delete_repo", "we__ird__do_thing"} {
+		t.Run(id, func(t *testing.T) {
+			resp := callDescribeDirect(t, p, ctx, []interface{}{id})
+			require.Len(t, resp.Definitions, 1)
+			def := resp.Definitions[0]
+
+			name, _ := def["name"].(string)
+			assert.True(t, registered[name],
+				"describe_tool returned name %q, which is not a tool this surface registers (registered: %v)",
+				name, registered)
+
+			// `call_with` names call_tool_read/write/destructive — dispatch
+			// variants the direct surface does not expose. Dropped rather than
+			// retargeted; `annotations` still carries the permission signal it
+			// was derived from.
+			_, hasCallWith := def["call_with"]
+			assert.False(t, hasCallWith,
+				"call_with names an intent variant the direct surface does not expose")
+			assert.Contains(t, def, "annotations",
+				"dropping call_with must not lose the permission signal")
+		})
+	}
+
+	// Asking by the canonical form still WORKS as input — only the echoed
+	// identifier changes.
+	viaCanonical := callDescribeDirect(t, p, ctx, []interface{}{"github:read_file"})
+	require.Len(t, viaCanonical.Definitions, 1)
+	assert.Equal(t, "github__read_file", viaCanonical.Definitions[0]["name"],
+		"both input forms must echo back the callable name")
+}
+
+// The indexed surface is untouched: there `<server>:<tool>` IS the callable id
+// and `call_with` names a real dispatch variant, so both must survive. The
+// resolver signals "not the direct surface" with an empty display name, and the
+// seam is a no-op on it.
+func TestDescribeIndexed_KeepsCanonicalNameAndCallWith(t *testing.T) {
+	entry := map[string]interface{}{
+		"name":      "github:delete_repo",
+		"call_with": string(contracts.ToolVariantDestructive),
+	}
+	applyDirectSurfaceIdentity(entry, "")
+
+	assert.Equal(t, "github:delete_repo", entry["name"],
+		"the indexed surface's canonical name must survive untouched")
+	assert.Equal(t, string(contracts.ToolVariantDestructive), entry["call_with"],
+		"call_with names a real dispatch variant on the indexed surface")
+}
+
+// ...and the indexed branch of the resolver is what supplies that empty name,
+// so the no-op above is actually the path taken rather than a hypothetical.
+func TestResolveDescribeDefinition_IndexedSurfaceReportsNoDisplayName(t *testing.T) {
+	p := newDirectDescribeProxy(t)
+
+	// Unresolvable on the indexed surface (the fixture is not indexed) — the
+	// display name must still be empty, never a direct-surface leak.
+	_, _, displayName, idErr := p.resolveDescribeDefinition(
+		context.Background(), describeSurfaceIndexed, "github:read_file")
+	require.NotNil(t, idErr, "the fixture is deliberately not indexed")
+	assert.Empty(t, displayName, "the indexed surface must never report a direct display name")
+
+	// The direct surface does report one.
+	_, _, directName, directErr := p.resolveDescribeDefinition(
+		context.Background(), describeSurfaceDirect, "github:read_file")
+	require.Nil(t, directErr)
+	assert.Equal(t, "github__read_file", directName)
 }
 
 // T043: the permission-tier gate. A read-scoped token cannot LIST a destructive
@@ -182,7 +271,7 @@ func TestDescribeDirect_PermissionTierGate(t *testing.T) {
 	resp := callDescribeDirect(t, p, readOnly, []interface{}{"github__delete_repo", "github__read_file"})
 
 	require.Len(t, resp.Definitions, 1, "only the read-tier tool may describe")
-	assert.Equal(t, "github:read_file", resp.Definitions[0]["name"])
+	assert.Equal(t, "github__read_file", resp.Definitions[0]["name"])
 
 	byID := describeErrorsByID(resp)
 	require.Contains(t, byID, "github__delete_repo")
@@ -227,7 +316,7 @@ func TestDescribeDirect_PendingToolStillDescribesFromSnapshot(t *testing.T) {
 
 	require.Empty(t, resp.Errors, "a listed tool is never undescribable (SC-007)")
 	require.Len(t, resp.Definitions, 1)
-	assert.Equal(t, "github:read_file", resp.Definitions[0]["name"])
+	assert.Equal(t, "github__read_file", resp.Definitions[0]["name"])
 	assert.Equal(t, "Read a file", resp.Definitions[0]["description"],
 		"the definition comes from the catalog snapshot, not the index")
 }
@@ -276,13 +365,15 @@ func TestDescribeDirect_OutputSchemaPresentOnlyWhenDeclared(t *testing.T) {
 		byName[def["name"].(string)] = def
 	}
 
-	withSchema := byName["github:create_issue"]
+	// Keyed by the DISPLAY name each definition echoes back (#1083).
+	withSchema := byName["github__create_issue"]
 	require.Contains(t, withSchema, "output_schema", "a declaring tool must carry output_schema")
 	raw, err := json.Marshal(withSchema["output_schema"])
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"type":"object","properties":{"number":{"type":"integer"}}}`, string(raw))
 
-	assert.NotContains(t, byName["github:read_file"], "output_schema",
+	require.Contains(t, byName, "github__read_file", "the non-declaring tool must still be in the batch")
+	assert.NotContains(t, byName["github__read_file"], "output_schema",
 		"a tool with no output schema must not carry an empty one")
 }
 
@@ -325,14 +416,25 @@ func TestDescribeDirect_PendingDestructiveKeepsItsRealAnnotations(t *testing.T) 
 	require.Len(t, resp.Definitions, 1)
 
 	def := resp.Definitions[0]
-	// contracts.DeriveCallWith answers the VARIANT name, which is what an agent
-	// calls; the task text's "destructive" is the tier it names.
-	assert.Equal(t, string(contracts.ToolVariantDestructive), def["call_with"],
-		"the safety hint must come from the catalog snapshot, not from an absent StateView entry")
+
+	// #1083 dropped `call_with` from this surface — it named an intent variant
+	// the direct surface does not expose. The D10 property it guarded is
+	// unchanged and still asserted here, at its actual source: the annotations
+	// must come from the CATALOG SNAPSHOT, not from the absent StateView entry
+	// that would silently downgrade a pending destructive tool to read.
+	_, hasCallWith := def["call_with"]
+	assert.False(t, hasCallWith, "call_with is not emitted on the direct surface")
 
 	annotations, ok := def["annotations"].(map[string]interface{})
 	require.True(t, ok, "the definition must carry the upstream annotations")
-	assert.Equal(t, true, annotations["destructiveHint"])
+	assert.Equal(t, true, annotations["destructiveHint"],
+		"the safety signal must come from the catalog snapshot, not from an absent StateView entry")
+
+	// And the derived tier is still recoverable from what IS emitted:
+	// DeriveCallWith is a pure function of these annotations, so dropping the
+	// derived field loses no information a consumer cannot recompute.
+	assert.Equal(t, string(contracts.ToolVariantDestructive),
+		contracts.DeriveCallWith(&config.ToolAnnotations{DestructiveHint: boolPtr(true)}))
 }
 
 // The override must not leak onto the retrieve path: full-mode entries keep
@@ -476,7 +578,7 @@ func TestDescribeDirect_ServerRemovedBetweenListAndDescribe(t *testing.T) {
 		[]interface{}{"we__ird__do_thing", "github__read_file"})
 
 	require.Len(t, resp.Definitions, 1, "the surviving id must still answer — the batch does not fail")
-	assert.Equal(t, "github:read_file", resp.Definitions[0]["name"])
+	assert.Equal(t, "github__read_file", resp.Definitions[0]["name"], "#1083: the echoed name is the callable one")
 
 	byID := describeErrorsByID(resp)
 	require.Contains(t, byID, "we__ird__do_thing")
@@ -511,14 +613,21 @@ func TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap(t *testing.T) {
 		byName[def["name"].(string)] = def
 	}
 
+	// Definitions are now keyed by the DISPLAY name each one echoes (#1083),
+	// and the two display names stay distinct — so this still discriminates
+	// between the two tools, which is the whole point of the test. (Before
+	// #1083 the keys were the two CANONICAL ids, "x:y:z" and "x__y:z".)
+	require.Len(t, byName, 2, "the two tools must remain separable by echoed name")
+
 	// "x__y:z" resolves as a DISPLAY name only — to server "x".
-	require.Contains(t, byName, "x:y:z")
-	assert.Equal(t, "x", byName["x:y:z"]["server"])
+	require.Contains(t, byName, "x__y:z")
+	assert.Equal(t, "x", byName["x__y:z"]["server"])
 
 	// The other tool is reachable by its own display name, and its canonical
-	// form is withheld because it cannot name one of the two.
-	require.Contains(t, byName, "x__y:z")
-	assert.Equal(t, "x__y", byName["x__y:z"]["server"])
+	// form — which is the string "x__y:z", i.e. the FIRST tool's display name —
+	// is withheld because it cannot unambiguously name one of the two.
+	require.Contains(t, byName, "x__y__z")
+	assert.Equal(t, "x__y", byName["x__y__z"]["server"])
 
 	cat := p.loadDirectCatalog()
 	_, resolvesCanonically := cat.LookupCanonical("x__y:z")

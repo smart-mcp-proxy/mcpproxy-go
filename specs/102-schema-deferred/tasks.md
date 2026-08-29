@@ -104,7 +104,19 @@ So T004 gates Phase 1; T001–T003 gate their own dependents and are otherwise c
 
 **Checkpoint**: US1 is independently demonstrable — flip the config, fetch `tools/list`, observe the token drop with the full tool set intact.
 
-> ### ⚠️ Escalation from T035a — SC-001's thresholds are not reachable
+> ### ✅ RESOLVED 2026-08-29 — SC-001 restated per corpus shape (was: escalation from T035a)
+>
+> **Maintainer decision:** adapt the threshold. SC-001 now asks **≥25%** on the frozen
+> 45-tool corpus and **≥30%** on the 527-tool snapshot — roughly 15% relative below each
+> measured value, as regression headroom rather than a second projection. Both bounds are
+> now ASSERTED in `internal/server/mcp_routing_deferred_tokens_test.go`
+> (`TestDeferredDirect_TokenReduction_Corpus45` / `_LargeCorpus`), so that file is the
+> SC-001 gate rather than a stand-in. The original 70% is retained as an upper tripwire:
+> clearing it means the corpus premise changed and the criterion must be re-derived.
+>
+> The original escalation is kept below, because it is the evidence the decision rests on.
+>
+> ### ⚠️ Escalation from T035a — SC-001's original thresholds were not reachable
 >
 > T035a ran the gates and SC-002 passes (39/45 = 86.7% one-shot callable, floor
 > 80%). **SC-001 does not, and cannot on either dataset in this repo.** Measured

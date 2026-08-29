@@ -2,7 +2,7 @@
 
 **Feature Branch**: `102-schema-deferred`
 **Created**: 2026-08-24
-**Status**: Draft — SHIPPED 2026-08-29 (all 89 tasks, PR #1063; settings UI in #1082). **SC-001 is measured and UNMET** (29.7% / 34.8% vs a >=70% target, 38.9% ceiling) and awaits a maintainer decision; see the SC-001 note under Measurable Outcomes.
+**Status**: Draft — SHIPPED 2026-08-29 (all 89 tasks, PR #1063; settings UI in #1082). SC-001 was measured as unmet against its original ≥70%/≥85% thresholds and has been **restated per corpus shape** (maintainer decision, 2026-08-29) — see Measurable Outcomes.
 **Input**: User description: "schema_deferred routing (issue #971): direct-mode tools/list keeps ALL tool names + descriptions but defers inputSchema; agents fetch full schemas on demand via describe_tool. Built as a thin composition over the Spec 085 compact-router machinery (compact signatures, describe_tool, pre-dispatch validation + self-healing errors) per the maintainer's accepted direction (issue #971 comment, 2026-08-13)."
 
 **Related**: #971 (accepted-direction, 2026-08-13). Spec 085 (compact router — the reused machinery: signature cache, `describe_tool`, pre-dispatch validation, self-healing invalid-params errors). Specs 098/099 (preflight evaluator + `describe_tool` `check` mode — the full describe_tool contract travels wherever the tool is exposed). Industry precedent: Atlassian mcp-compressor "Low Compression" (94 tools: 17,600 → 3,900 tokens), Alibaba Qoder two-phase discovery, MCP client best-practices Catalog → Inspect → Execute.
@@ -19,11 +19,11 @@ Per the maintainer's accepted direction, this is **not a new routing mode**: `ro
 
 ### User Story 1 - Deferred enumeration: see everything, pay for schemas only when needed (Priority: P1)
 
-An agent connects to the direct surface of a proxy with deferred serialization enabled. `tools/list` returns every visible upstream tool — same `serverName__toolName` names, same annotations — but each entry carries the description plus its precompiled compact signature (`*` = required, `~` = lossy) instead of a full `inputSchema`; the declared input schema is a minimal permissive object. For a 100-tool fleet the listing was projected to drop from ~30K to roughly 3.5–5K tokens; **the shipped measurement contradicts that projection** — a 527-tool snapshot went 99,918 → 65,138 tokens (~34.8%), because names, descriptions and annotations, not schemas, carry most of the payload (see the SC-001 note). For flat (non-lossy) tools the agent can still call directly from the signature with zero extra round trips, which held.
+An agent connects to the direct surface of a proxy with deferred serialization enabled. `tools/list` returns every visible upstream tool — same `serverName__toolName` names, same annotations — but each entry carries the description plus its precompiled compact signature (`*` = required, `~` = lossy) instead of a full `inputSchema`; the declared input schema is a minimal permissive object. For a 100-tool fleet the listing was originally projected to drop from ~30K to roughly 3.5–5K tokens; **the shipped measurement contradicts that projection** — a 527-tool snapshot went 99,918 → 65,138 tokens (34.8%), because names, descriptions and annotations, not schemas, carry most of the payload. SC-001 has been restated accordingly (see Measurable Outcomes). For flat (non-lossy) tools the agent can still call directly from the signature with zero extra round trips, which held.
 
 **Why this priority**: This is the headline gap #971 names — full visibility at deferred-schema cost — and the entire token win of the feature.
 
-**Independent Test**: Enable deferral on a fixture proxy with multiple upstream servers; fetch `tools/list` on the direct surface and assert: every tool present, no entry carries upstream schema properties, every entry's description ends with its compact signature, and total payload tokens are reduced versus full mode on the frozen 45-tool reference corpus. (The ≥70% figure this test originally named was not met — measured 29.7%; the shipped gate in `bench/arms` asserts a 25% floor plus an upper guard, per T076.)
+**Independent Test**: Enable deferral on a fixture proxy with multiple upstream servers; fetch `tools/list` on the direct surface and assert: every tool present, no entry carries upstream schema properties, every entry's description ends with its compact signature, and total payload tokens are reduced by **≥25%** versus full mode on the frozen 45-tool reference corpus (revised SC-001; measured 29.7%).
 
 **Acceptance Scenarios**:
 
@@ -180,22 +180,35 @@ An operator flips deferred serialization on (or off) in config with the proxy ru
 
 ### Measurable Outcomes
 
-- **SC-001** (**NOT MET — measured, escalated, awaiting maintainer decision**): As written, this
-  required a ≥70% token reduction on the frozen 45-tool reference corpus and ≥85% on a ~100-tool
-  fleet.
+- **SC-001** (**REVISED 2026-08-29 — maintainer decision; original thresholds were unreachable**):
+  Deferred direct-surface `tools/list` payload is **≥25% smaller in tokens** than full mode on the
+  frozen 45-tool reference corpus, and **≥30% smaller** on the 527-tool LiveMCPBench snapshot, both
+  measured by the spec-083 profiler pipeline with its pinned `cl100k_base` encoder. Both corpora are
+  in-repo and both bounds are asserted (`internal/server/mcp_routing_deferred_tokens_test.go`).
 
-  > **Measured outcome (2026-08-29, T035a).** 29.7% on the reference corpus and 34.8% on a 527-tool
-  > snapshot (99,918 → 65,138 tokens). The **arithmetic ceiling is 38.9%** — that is what deleting
-  > *both* the schema and the signature would yield — so no implementation of this design can reach
-  > 70% on this corpus shape. The target rested on Spec 083 profiling attributing ~77% of the payload
-  > to schemas; at the corpus shapes actually measured, names, descriptions and annotations dominate.
+  > **Why the number changed.** As originally written SC-001 asked for ≥70% on the reference corpus
+  > and ≥85% on a ~100-tool fleet. Measured (T035a):
   >
-  > This is recorded rather than quietly restated: the feature works and delivers a real ~30% saving,
-  > but the criterion as written is unreachable. **Two options for the maintainer:** restate the
-  > threshold per corpus shape, or re-target SC-001 at a schema-heavy corpus where the original
-  > premise holds. Until then the shipped gate (`bench/arms`, T076) asserts a 25% floor plus an upper
-  > guard that fails loudly if anything ever does clear 70%. See tasks.md T035a and the Phase 3
-  > checkpoint for the full measurement table.
+  > | corpus | tools | full | deferred | reduction | originally asked |
+  > |---|---|---|---|---|---|
+  > | `corpus_v2.tools.json` (frozen reference) | 45 | 6116 | 4301 | **29.7%** | ≥70% |
+  > | `livemcptool_snapshot/tools.json` | 527 | 99918 | 65138 | **34.8%** | ≥85% |
+  >
+  > The **arithmetic ceiling on the reference corpus is 38.9%** — what deleting *both* the schema and
+  > the signature would yield — so no implementation of this design could have reached 70% on this
+  > corpus shape. The original target rested on Spec 083 profiling attributing ~77% of the payload to
+  > schemas; at the shapes actually measured, names, descriptions and annotations dominate, and FR-004
+  > forbids touching those.
+  >
+  > **The revised thresholds sit ~15% relative below each measured value** (29.7 → 25, 34.8 → 30),
+  > which is regression headroom for corpus-neutral churn rather than a second projection. They are
+  > deliberately stated per corpus, because the reduction is a function of corpus shape, not of the
+  > implementation.
+  >
+  > A **70% tripwire is retained and asserted**: if either corpus ever clears the original figure, the
+  > premise behind this restatement has changed and the criterion must be re-derived rather than
+  > silently left in place. A schema-heavy corpus would legitimately behave that way.
+
 - **SC-002**: ≥80% of corpus tools (the non-lossy share; Spec 085 lossy-rate gate <20%) are callable one-shot from the deferred listing — zero `describe_tool` round trips — verified against the corpus signature set.
 - **SC-003**: An agent whose guessed arguments fail validation completes the call in exactly one retry using only the error-embedded schema (no additional discovery calls), demonstrated in E2E.
 - **SC-004**: With deferral off, automated comparison shows direct-surface responses byte-identical to pre-feature behavior modulo the single enumerated surface delta (FR-010); the existing tool-surface goldens pass **unregenerated** (the delta lands on a surface they do not cover), and the new direct-surface built-in gate pins that delta.
