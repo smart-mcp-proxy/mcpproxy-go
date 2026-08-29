@@ -28,6 +28,10 @@ final class ConfigStore: ObservableObject {
     @Published var defaultInstructions: String?
 
     private var original: [String: Any] = [:]
+    /// The API response exactly as the core sent it. `working`/`original` are
+    /// normalized (absent `omitempty` defaults filled in) so blank Pickers show
+    /// their real default, but the Raw tab must keep showing server truth.
+    private var raw: [String: Any] = [:]
     private let appState: AppState
 
     init(appState: AppState) { self.appState = appState }
@@ -40,11 +44,7 @@ final class ConfigStore: ObservableObject {
         loading = true
         loadError = nil
         do {
-            let cfg = try await api.getConfig()
-            working = cfg
-            original = cfg
-            loaded = true
-            revision += 1
+            hydrate(from: try await api.getConfig())
         } catch {
             loadError = (error as? APIClientError)?.errorDescription ?? error.localizedDescription
         }
@@ -56,12 +56,30 @@ final class ConfigStore: ObservableObject {
         loading = false
     }
 
+    /// Populate the store from a raw `GET /api/v1/config` response.
+    ///
+    /// Split out of `load()` so the hydration invariant is testable without an
+    /// API client. That invariant: `working` and `original` BOTH get the
+    /// resolved defaults for `omitempty` keys the core omits (the serialization
+    /// modes — absent means "full") so their Picker shows the real default
+    /// instead of blank, while `raw` keeps the untouched response because the
+    /// Raw tab must show server truth. Normalizing only one of the two would
+    /// make an untouched field read as an unsaved change.
+    func hydrate(from cfg: [String: Any]) {
+        raw = cfg
+        let normalized = SettingsCatalog.normalizeDefaults(cfg)
+        working = normalized
+        original = normalized
+        loaded = true
+        revision += 1
+    }
+
     /// The core's current (saved) configuration, pretty-printed for the
     /// read-only Raw tab. Reflects server truth — not unsaved form edits.
     var prettyJSON: String {
-        guard JSONSerialization.isValidJSONObject(original),
+        guard JSONSerialization.isValidJSONObject(raw),
               let data = try? JSONSerialization.data(
-                withJSONObject: original, options: [.prettyPrinted, .sortedKeys]),
+                withJSONObject: raw, options: [.prettyPrinted, .sortedKeys]),
               let str = String(data: data, encoding: .utf8)
         else { return "{}" }
         return str
@@ -105,8 +123,13 @@ final class ConfigStore: ObservableObject {
             }.joined(separator: "; ")
             throw APIClientError.httpError(statusCode: 422, message: msg.isEmpty ? "Validation failed" : msg)
         }
-        // Commit saved keys into the snapshot so they're no longer dirty.
-        for k in keys { configSet(&original, k, configGet(working, k)) }
+        // Commit saved keys into the snapshot so they're no longer dirty. The
+        // Raw tab tracks the same commit, so it keeps reflecting what the core
+        // now holds rather than the config as it was at load time.
+        for k in keys {
+            configSet(&original, k, configGet(working, k))
+            configSet(&raw, k, configGet(working, k))
+        }
         revision += 1
         let requiresRestart = (result["requires_restart"] as? Bool) ?? false
         return (requiresRestart, result["restart_reason"] as? String)

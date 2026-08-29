@@ -32,7 +32,7 @@
     <div v-if="loaded && search.trim()" class="card bg-base-100 shadow-md" data-test="settings-search-results">
       <div class="card-body">
         <h2 class="card-title text-lg">🔍 Search results <span class="text-sm font-normal text-base-content/60">({{ filteredFields.length }})</span></h2>
-        <SettingsSection section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" />
+        <SettingsSection :key="`sec-${formEpoch}`" section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" />
       </div>
     </div>
 
@@ -82,7 +82,7 @@
               {{ p.label }}: {{ p.on ? 'on' : 'off' }}
             </span>
           </div>
-          <SettingsSection section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
         </div>
       </div>
 
@@ -90,7 +90,7 @@
       <div v-show="activeTab === 'general'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg">⚙️ General</h2>
-          <SettingsSection section-id="general" :fields="generalFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="general" :fields="generalFields" :working="state.working" :original="state.original" />
         </div>
       </div>
 
@@ -110,7 +110,7 @@
                 :data-test="`settings-accordion-docs-${acc.id}`"
               >Learn more ↗</a>
             </p>
-            <SettingsSection :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" />
+            <SettingsSection :key="`acc-${acc.id}-${formEpoch}`" :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" />
           </div>
         </details>
         <div class="text-xs text-base-content/50 px-1">
@@ -123,7 +123,7 @@
       <div v-if="hasServerEdition" v-show="activeTab === 'teams'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg" data-test="settings-server-edition-title">{{ serverEditionTitle }}</h2>
-          <SettingsSection section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" />
         </div>
       </div>
 
@@ -194,6 +194,7 @@ import {
   docsUrl,
   isBlankInstructions,
   restartRequiredLabels,
+  hydrateConfigState,
   type SettingField,
   type SettingsAccordion,
 } from '@/views/settings/fields'
@@ -248,6 +249,13 @@ const loadError = ref('')
 const activeTab = ref<string>('security')
 const showConnect = ref(false)
 const state = reactive<{ working: any; original: any }>({ working: {}, original: {} })
+// Bumped on every (re)hydration so each SettingsSection remounts with a fresh
+// component-local `dirty` ref. Without this, a field the user edited and then
+// abandoned via Reload stays in that ref, and because dirtyKeys is the UNION of
+// it and the working/original comparison, Save would PATCH a key whose value
+// never actually moved — writing a resolved default into a config that omitted
+// the key entirely.
+const formEpoch = ref(0)
 // Server-edition (multi-user) config lives under `server_edition` (MCP-1086).
 // Gate on the canonical key, falling back to the legacy `teams` key so a config
 // written before the rename still surfaces the Server Edition tab.
@@ -319,20 +327,6 @@ const editorOptions = {
   lineNumbers: 'on' as const,
 }
 
-function clone<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v))
-}
-
-// Back-compat for the teams -> server_edition rename (MCP-1086): if a config
-// only carries the legacy `teams` key, mirror it onto `server_edition` so the
-// form (which binds to `server_edition.*`) hydrates. Mutates and returns cfg.
-function aliasServerEdition(cfg: any): any {
-  if (cfg && cfg.server_edition == null && cfg.teams != null) {
-    cfg.server_edition = cfg.teams
-  }
-  return cfg
-}
-
 async function loadConfig() {
   loading.value = true
   loadError.value = ''
@@ -344,9 +338,18 @@ async function loadConfig() {
       // backend loader already normalizes a legacy `teams` key to
       // `server_edition`, but alias it here too so a config still carrying the
       // old key hydrates the form (edits always save under `server_edition`).
-      state.working = aliasServerEdition(clone(cfg))
-      state.original = aliasServerEdition(clone(cfg))
-      configJson.value = JSON.stringify(cfg, null, 2)
+      // normalizeFieldDefaults fills the resolved default for `omitempty`
+      // keys the API omits (the serialization modes: absent means "full"), so
+      // their <select> shows the real default instead of an empty box. Applied
+      // to both copies — otherwise the untouched field would read as dirty.
+      const hydrated = hydrateConfigState(cfg)
+      state.working = hydrated.working
+      state.original = hydrated.original
+      formEpoch.value++
+      // hydrated.raw, not cfg: the Raw tab must show the untouched response,
+      // and this makes that dependency explicit rather than relying on the
+      // hydration helper's internal cloning.
+      configJson.value = JSON.stringify(hydrated.raw, null, 2)
       configStatus.value = { valid: true }
       loaded.value = true
       maybePrefillInstructions()

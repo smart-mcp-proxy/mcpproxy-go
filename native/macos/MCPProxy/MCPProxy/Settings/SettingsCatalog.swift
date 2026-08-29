@@ -20,6 +20,10 @@ struct ConfigField: Identifiable {
     var help: String? = nil
     let control: ConfigControl
     var options: [ConfigOption] = []
+    // Value an absent/blank key actually resolves to on the Go side. Only
+    // needed for `omitempty` fields whose zero value is meaningful (the
+    // serialization modes: "" means "full"). See normalizeDefaults below.
+    var defaultValue: String? = nil
     var min: Double? = nil
     var max: Double? = nil
     // Increment for a `.number` stepper. Mirrors `step` in fields.ts — without
@@ -163,6 +167,37 @@ enum SettingsCatalog {
             // operator BEFORE they save.
             restart: true,
             docs: "/features/routing-modes"
+        ),
+        // Spec 085 / Spec 102 — the two SERIALIZATION axes. Neither is a
+        // routing mode: `routing_mode` picks the tool SURFACE, these two pick
+        // how each entry on that surface is rendered. Both hot-reload (the Go
+        // change detector sets requires_restart for neither), so no restart
+        // badge. Until this landed they were reachable only via the config
+        // file, an env var, a serve flag or the REST API — a tray-only user
+        // could not set them at all.
+        ConfigField(
+            key: "tool_response_mode",
+            label: "Detail in tool-search results",
+            help: "Applies to Retrieve mode. Full = every result carries its complete input schema. Compact = a one-line signature plus a first-sentence description, and the agent fetches a full schema on demand with describe_tool. Saves tokens; never changes which tools are found.",
+            control: .select,
+            options: [
+                ConfigOption(value: "full", label: "Full \u{2014} complete schemas (default)"),
+                ConfigOption(value: "compact", label: "Compact \u{2014} signatures, schema on demand"),
+            ],
+            defaultValue: "full",
+            docs: "/features/search-discovery#tool-response-mode"
+        ),
+        ConfigField(
+            key: "direct_tool_response_mode",
+            label: "Detail in Direct-mode listings",
+            help: "Applies to Direct mode, and to /mcp/all in any mode. Full = every tool is listed with its complete input schema. Deferred = name, description and a compact signature only, with schemas fetched on demand via describe_tool; a call whose arguments do not fit is rejected before it reaches the server, with the schema attached so the agent can correct itself.",
+            control: .select,
+            options: [
+                ConfigOption(value: "full", label: "Full \u{2014} complete schemas (default)"),
+                ConfigOption(value: "deferred", label: "Deferred \u{2014} signatures, schema on demand"),
+            ],
+            defaultValue: "full",
+            docs: "/features/schema-deferred-direct-mode"
         ),
         ConfigField(
             key: "tools_limit",
@@ -350,6 +385,34 @@ enum SettingsCatalog {
             ]
         ),
     ]
+
+    /// Every field in the catalogue, across all sections.
+    static var allFields: [ConfigField] {
+        security + general + advanced.flatMap(\.fields)
+    }
+
+    /// Fill in the resolved default for every field that declares a
+    /// `defaultValue` and is currently blank in `cfg`.
+    ///
+    /// The serialization-mode keys are `omitempty` on the Go side, where an
+    /// absent value means "full" — so the config the API returns simply omits
+    /// them until someone sets one. A SwiftUI Picker whose selection matches
+    /// no tag renders blank, which would make the default read as "unset"
+    /// rather than as "full". Apply to BOTH the working copy and the
+    /// last-saved snapshot so an untouched field never counts as dirty; keep
+    /// the untouched response for the Raw tab, which must show server truth.
+    static func normalizeDefaults(_ cfg: [String: Any]) -> [String: Any] {
+        var out = cfg
+        for field in allFields {
+            guard let fallback = field.defaultValue else { continue }
+            let current = configGet(out, field.key)
+            let blank = current == nil
+                || current is NSNull
+                || (current as? String)?.isEmpty == true
+            if blank { configSet(&out, field.key, fallback) }
+        }
+        return out
+    }
 }
 
 // MARK: - Path helpers (operate on a JSON-decoded config dictionary)

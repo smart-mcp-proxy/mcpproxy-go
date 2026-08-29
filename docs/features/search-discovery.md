@@ -94,6 +94,38 @@ curl -H "X-API-Key: your-key" \
 |--------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum results per query |
 
+### Response detail — `tool_response_mode` {#tool-response-mode}
+
+Controls only how each `retrieve_tools` result is *serialized*. It never changes
+the query, the ranking, or which tools are found.
+
+```json
+{
+  "tool_response_mode": "compact"
+}
+```
+
+| Option | Type | Default | Values | Description |
+|--------|------|---------|--------|-------------|
+| `tool_response_mode` | string | `"full"` | `full`, `compact` | `full` returns each result with its complete `inputSchema` (pre-Spec-085 behaviour, byte-identical). `compact` returns a one-line signature instead: per entry `id`, `score`, `sig`, a first-sentence `desc` and a `lossy` flag, plus one top-level `hint`. An empty value means `full`. |
+
+- **Compact signatures**: `*` marks a required parameter (never elided), `~`
+  marks a lossy collapse (nested objects, long enums), and short enums/defaults
+  are inlined — e.g. `(origin*:str, ttl:int=3600)`.
+- **Recovering a full schema**: in compact mode agents call `describe_tool` with
+  a batch of 1–5 `server:tool` ids. Same visibility rules as search.
+- **Per-call override**: the `detail` parameter on `retrieve_tools`
+  (`compact` | `full`) overrides the configured mode for that one call.
+- **Where to set it**: Settings → General → "Detail in tool-search results", in
+  both the Web UI and the macOS tray. Also `MCPPROXY_TOOL_RESPONSE_MODE`, the
+  `--tool-response-mode` serve flag, or the config key directly.
+- **Hot-reload**: applies on the next call — no restart.
+
+This axis governs the `retrieve_tools` surface only. The **direct** enumeration
+surface has its own, separate axis, `direct_tool_response_mode` — see
+[Schema-Deferred Direct Mode](schema-deferred-direct-mode.md). Setting one never
+moves the other, and combining them is legal.
+
 ### Index Location
 
 The search index is stored at:
