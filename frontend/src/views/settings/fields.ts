@@ -50,6 +50,10 @@ export interface SettingField {
   valueKind?: ValueKind // extra format validation for text/secret fields
   optional?: boolean // when true, an empty value is valid (skips kind validation)
   resetDefault?: string // when set, render an inline "Reset to default" button that emits this value
+  // Value an absent/blank key actually resolves to on the Go side. Only needed
+  // for `omitempty` fields whose zero value is meaningful (the serialization
+  // modes: "" means "full"). See normalizeFieldDefaults below for why.
+  defaultValue?: string
 }
 
 export interface SettingsAccordion {
@@ -251,6 +255,36 @@ export const GENERAL_FIELDS: SettingField[] = [
     // operator got a green "Configuration applied" toast while /mcp kept
     // serving the old surface.
     restart: true,
+  },
+  // Spec 085 / Spec 102 — the two SERIALIZATION axes. Neither is a routing
+  // mode: `routing_mode` picks the tool SURFACE, these two pick how each entry
+  // on that surface is rendered. Both hot-reload (the Go change detector sets
+  // requires_restart for neither), so no restart badge. Until this landed they
+  // were reachable only via the config file, an env var, a serve flag or the
+  // REST API — a tray-only user could not set them at all.
+  {
+    key: 'tool_response_mode',
+    docs: '/features/search-discovery#tool-response-mode',
+    label: 'Detail in tool-search results',
+    help: 'Applies to Retrieve mode. Full = every result carries its complete input schema. Compact = a one-line signature plus a first-sentence description, and the agent fetches a full schema on demand with describe_tool. Saves tokens; never changes which tools are found.',
+    control: 'select',
+    defaultValue: 'full',
+    options: [
+      { value: 'full', label: 'Full — complete schemas (default)' },
+      { value: 'compact', label: 'Compact — signatures, schema on demand' },
+    ],
+  },
+  {
+    key: 'direct_tool_response_mode',
+    docs: '/features/schema-deferred-direct-mode',
+    label: 'Detail in Direct-mode listings',
+    help: 'Applies to Direct mode, and to /mcp/all in any mode. Full = every tool is listed with its complete input schema. Deferred = name, description and a compact signature only, with schemas fetched on demand via describe_tool; a call whose arguments do not fit is rejected before it reaches the server, with the schema attached so the agent can correct itself.',
+    control: 'select',
+    defaultValue: 'full',
+    options: [
+      { value: 'full', label: 'Full — complete schemas (default)' },
+      { value: 'deferred', label: 'Deferred — signatures, schema on demand' },
+    ],
   },
   { key: 'tools_limit', label: 'Search results limit', help: 'How many tools a single tool-search returns to the agent.', control: 'number', min: 1, max: 1000 },
   { key: 'tool_response_limit', label: 'Max tool response size (characters)', help: 'Responses larger than this are truncated and cached so the agent can page through them. 0 = never truncate.', control: 'number', min: 0 },
@@ -457,17 +491,42 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
  * follows.
  */
 export function restartRequiredLabels(): string[] {
-  const fields = [
+  const labels: string[] = []
+  for (const f of allCatalogFields()) {
+    if (f.restart && !labels.includes(f.label)) labels.push(f.label)
+  }
+  return labels
+}
+
+/** Every field in the catalogue, across all sections and accordions. */
+export function allCatalogFields(): SettingField[] {
+  return [
     ...GENERAL_FIELDS,
     ...SECURITY_FIELDS,
     ...SERVER_EDITION_FIELDS,
     ...ADVANCED_ACCORDIONS.flatMap((a) => a.fields),
   ]
-  const labels: string[] = []
-  for (const f of fields) {
-    if (f.restart && !labels.includes(f.label)) labels.push(f.label)
+}
+
+/**
+ * Fill in the resolved default for every catalogue field that declares a
+ * `defaultValue` and is currently blank in `cfg`. Mutates and returns cfg.
+ *
+ * The serialization-mode keys are `omitempty` on the Go side, where an absent
+ * value means "full" — so the config the API returns simply omits them until
+ * someone sets one. A native <select> whose value matches no <option> renders
+ * an empty box, which would make the default read as "unset" rather than as
+ * "full". Applied to BOTH the working copy and the last-saved snapshot so a
+ * field nobody touched never counts as an unsaved change.
+ */
+export function normalizeFieldDefaults(cfg: any): any {
+  if (cfg == null || typeof cfg !== 'object') return cfg
+  for (const f of allCatalogFields()) {
+    if (f.defaultValue == null) continue
+    const cur = getPath(cfg, f.key)
+    if (cur == null || cur === '') setPath(cfg, f.key, f.defaultValue)
   }
-  return labels
+  return cfg
 }
 
 export function getPath(obj: any, path: string): any {

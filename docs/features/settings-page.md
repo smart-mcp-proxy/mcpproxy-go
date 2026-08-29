@@ -12,8 +12,9 @@ friendly, prioritized form sections instead of raw JSON:
 - **Security & Access** — API key (masked, show/regenerate), require MCP auth,
   quarantine, global Docker isolation, code execution, read-only mode,
   sensitive-data detection, reveal secret headers, listen address.
-- **General** — routing mode, tool limits, response limit, call timeout, log
-  level, telemetry, prompts.
+- **General** — routing mode, the two response-detail modes (`tool_response_mode`
+  for Retrieve, `direct_tool_response_mode` for Direct), tool limits, response
+  limit, call timeout, log level, telemetry, prompts.
 - **Advanced** — collapsible accordions per subsystem (code execution, Docker
   isolation, sensitive-data detection, output validation, output sanitisation,
   activity retention, logging, TLS, …).

@@ -194,6 +194,7 @@ import {
   docsUrl,
   isBlankInstructions,
   restartRequiredLabels,
+  normalizeFieldDefaults,
   type SettingField,
   type SettingsAccordion,
 } from '@/views/settings/fields'
@@ -344,8 +345,12 @@ async function loadConfig() {
       // backend loader already normalizes a legacy `teams` key to
       // `server_edition`, but alias it here too so a config still carrying the
       // old key hydrates the form (edits always save under `server_edition`).
-      state.working = aliasServerEdition(clone(cfg))
-      state.original = aliasServerEdition(clone(cfg))
+      // normalizeFieldDefaults fills the resolved default for `omitempty`
+      // keys the API omits (the serialization modes: absent means "full"), so
+      // their <select> shows the real default instead of an empty box. Applied
+      // to both copies — otherwise the untouched field would read as dirty.
+      state.working = normalizeFieldDefaults(aliasServerEdition(clone(cfg)))
+      state.original = normalizeFieldDefaults(aliasServerEdition(clone(cfg)))
       configJson.value = JSON.stringify(cfg, null, 2)
       configStatus.value = { valid: true }
       loaded.value = true
