@@ -1852,11 +1852,17 @@ jobs:
           cd tap
           mkdir -p Formula
 
+          # NOTE: deliberately NO `version` stanza. Every url below embeds the
+          # version, so Homebrew scans it from the URL, and since ~2026-08-05
+          # `brew audit --formula --online` FAILS an explicit stanza with
+          # "Stable: `version X` is redundant with version scanned from URL".
+          # That kept the tap's audit workflow red on every release from v0.53.0
+          # to v0.62.0. `version` is still available to the test block below —
+          # it is derived, not absent. Do not re-add it.
           cat > Formula/mcpproxy.rb << 'FORMULA_EOF'
           class Mcpproxy < Formula
             desc "Smart MCP Proxy - Intelligent tool discovery and proxying for MCP servers"
             homepage "https://github.com/smart-mcp-proxy/mcpproxy-go"
-            version "${VERSION}"
             license "MIT"
 
             on_macos do
