@@ -189,4 +189,89 @@ func TestServedRoutingMode_SurvivesADiskReload(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, config.RoutingModeDirect, desired.RoutingMode,
 		"the file IS the desired config, so the edit shows up as pending")
+
+	// The running config must not adopt it either — otherwise the next apply
+	// pins to a value that was never live, and every surface reading the config
+	// names a mode nobody is being served.
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	assert.Equal(t, config.RoutingModeRetrieveTools, live.RoutingMode)
+	// …and the configsvc snapshot, which live subscribers read, must agree with
+	// it rather than carrying the raw file.
+	assert.Equal(t, config.RoutingModeRetrieveTools, rt.ConfigSnapshot().Config.RoutingMode)
+}
+
+// desiredCfg is the merge base for every read-modify-write of the config
+// (PATCH /api/v1/config, the raw editor, the tray). It therefore has to track
+// EVERY commit path, not just ApplyConfig — UpdateConfig and SaveConfiguration
+// replace or mutate the live config too, and a desired copy frozen at boot
+// would make the next PATCH re-persist a document that has lost whatever those
+// paths added. Registries are the sharpest case: they live only in the config
+// file, so nothing splices them back from config.db.
+func TestGetDesiredConfig_TracksNonApplyCommitPaths(t *testing.T) {
+	rt, cfgPath := newPendingRestartRuntime(t)
+
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	updated := *live
+	updated.Registries = append(append([]config.RegistryEntry{}, live.Registries...),
+		config.RegistryEntry{ID: "custom", Name: "Custom", URL: "https://example.test"})
+	rt.UpdateConfig(&updated, cfgPath)
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	var found bool
+	for _, reg := range desired.Registries {
+		if reg.ID == "custom" {
+			found = true
+		}
+	}
+	assert.True(t, found, "a config committed outside ApplyConfig must reach the desired config")
+
+	// …and the PATCH round trip that merges onto it must not erase it.
+	desired.ToolsLimit = 33
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+
+	onDisk, err := config.LoadFromFile(cfgPath)
+	require.NoError(t, err)
+	found = false
+	for _, reg := range onDisk.Registries {
+		if reg.ID == "custom" {
+			found = true
+		}
+	}
+	assert.True(t, found, "the next apply must not re-persist a document without it")
+}
+
+// The other direction: a commit path that is NOT ApplyConfig must not adopt or
+// erase a restart-gated value that is waiting for a restart. Enabling a server
+// while a routing switch is pending rewrites the whole file.
+func TestSaveConfiguration_KeepsThePendingRestartGatedValue(t *testing.T) {
+	rt, cfgPath := newPendingRestartRuntime(t)
+
+	pending := config.DefaultConfig()
+	pending.Listen = "127.0.0.1:8080"
+	pending.DataDir = filepath.Dir(cfgPath)
+	pending.RoutingMode = config.RoutingModeDirect
+	res, err := rt.ApplyConfig(pending, cfgPath)
+	require.NoError(t, err)
+	require.True(t, res.RequiresRestart)
+
+	// Any non-ApplyConfig commit — here the one every enable/disable/quarantine
+	// toggle runs through.
+	require.NoError(t, rt.SaveConfiguration())
+
+	onDisk, err := config.LoadFromFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, config.RoutingModeDirect, onDisk.RoutingMode,
+		"a server toggle must not revert a switch the API still reports as pending")
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	assert.Equal(t, config.RoutingModeDirect, desired.RoutingMode)
+
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	assert.Equal(t, config.RoutingModeRetrieveTools, live.RoutingMode, "still not adopted in memory")
 }

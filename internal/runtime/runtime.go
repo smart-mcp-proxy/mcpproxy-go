@@ -455,6 +455,68 @@ func (r *Runtime) ConfigPath() string {
 	return r.cfgPath
 }
 
+// setDesiredLocked records a newly committed configuration as the desired one,
+// keeping whatever restart-gated value is still waiting for a restart.
+//
+// Every commit path has to call this, not just ApplyConfig: UpdateConfig and
+// SaveConfiguration replace or mutate the live config and write it to disk too,
+// and desiredCfg is the merge base for every read-modify-write of the
+// configuration (PATCH /api/v1/config, the raw editor, the tray). A desired copy
+// frozen at the last ApplyConfig would make the next PATCH re-persist a document
+// that has lost whatever those paths added — registries are the sharpest case,
+// since they live only in the config file and nothing splices them back from
+// config.db.
+//
+// Caller must hold r.mu.
+func (r *Runtime) setDesiredLocked(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if r.desiredCfg == nil {
+		r.desiredCfg = cfg
+		return
+	}
+	// pinRestartGated(live, desired) == desired with live's restart-gated
+	// fields, which is exactly "take every hot field just committed, keep what
+	// is pending".
+	r.desiredCfg = pinRestartGated(r.desiredCfg, cfg)
+}
+
+// setDesired is setDesiredLocked's locking wrapper.
+func (r *Runtime) setDesired(cfg *config.Config) {
+	r.mu.Lock()
+	r.setDesiredLocked(cfg)
+	r.mu.Unlock()
+}
+
+// pendingAwareDiskConfig returns running with the restart-gated fields that are
+// pending on disk restored, or nil when nothing is pending and the caller can
+// write `running` as-is.
+//
+// SaveConfiguration rewrites the whole file from the running configuration, so
+// without this a server enable/disable silently reverts a routing-mode switch
+// the API is still reporting as pending.
+func (r *Runtime) pendingAwareDiskConfig(running *config.Config) *config.Config {
+	if running == nil {
+		return nil
+	}
+	r.mu.RLock()
+	desired := r.desiredCfg
+	r.mu.RUnlock()
+	if desired == nil {
+		return nil
+	}
+	// pinRestartGated(live, desired) == desired with live's restart-gated
+	// fields; here the roles are reversed — take `running` and restore the
+	// PENDING restart-gated values from the desired config.
+	withPending := pinRestartGated(desired, running)
+	if DetectConfigChanges(running, withPending).RequiresRestart {
+		return withPending
+	}
+	// Nothing restart-gated differs; let the normal save path run.
+	return nil
+}
+
 // UpdateConfig replaces the runtime configuration in-place.
 // This now updates both the legacy field and the ConfigService.
 func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
@@ -482,6 +544,7 @@ func (r *Runtime) updateConfigLocked(cfg *config.Config, cfgPath string) {
 	// Update legacy fields for backward compatibility
 	r.mu.Lock()
 	r.cfg = cfg
+	r.setDesiredLocked(cfg)
 	if cfgPath != "" {
 		r.cfgPath = cfgPath
 	}
@@ -1635,15 +1698,17 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// smuggling the still-pending value into memory.
 	hotCfg := pinRestartGated(r.cfg, newCfg)
 
+	// What this process can actually adopt, always computed against the running
+	// config — never against the desired one `result` was diffed from, which can
+	// hold a value that was never live. Restart-gated fields are equal by
+	// construction here, so it can never come back RequiresRestart and can never
+	// hit one of the detector's early returns.
+	hotResult := DetectConfigChanges(r.cfg, hotCfg)
 	if result.RequiresRestart {
 		r.logger.Warn("Configuration changes require restart",
 			zap.String("reason", result.RestartReason),
 			zap.Strings("changed_fields", result.ChangedFields))
 
-		// Computed against a config whose restart-gated fields equal the live
-		// ones by construction, so it can never come back RequiresRestart and
-		// can never hit one of the detector's early returns.
-		hotResult := DetectConfigChanges(r.cfg, hotCfg)
 		if !hotResult.Success || len(hotResult.ChangedFields) == 0 {
 			// Nothing else in this write can apply now.
 			r.mu.Unlock() // Unlock before returning
@@ -1652,10 +1717,17 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 
 		r.logger.Info("Applying the hot-reloadable half of a restart-required change",
 			zap.Strings("hot_fields", hotResult.ChangedFields))
-		result.ChangedFields = mergeChangedFields(result.ChangedFields, hotResult.ChangedFields)
 		// The hot half IS live when this returns; the restart flag and reason
 		// stay set for the half that is not.
 		result.AppliedImmediately = true
+	}
+	// Merge on every path, not only the restart one. The caller-facing diff is
+	// taken against the desired config, so when a pending value is being
+	// reverted (cancelling a switch) it lists only that field — and the
+	// downstream side effects below key off ChangedFields, so the hot half of
+	// the same write would skip its server reload and update-check re-gate.
+	if hotResult.Success {
+		result.ChangedFields = mergeChangedFields(result.ChangedFields, hotResult.ChangedFields)
 	}
 	newCfg = hotCfg
 

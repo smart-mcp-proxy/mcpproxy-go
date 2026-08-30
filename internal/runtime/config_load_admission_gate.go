@@ -295,6 +295,7 @@ func (r *Runtime) gateInitialConfig() {
 		}
 		r.mu.Lock()
 		r.cfg = gated
+		r.setDesiredLocked(gated)
 		r.mu.Unlock()
 	}
 }
@@ -352,6 +353,7 @@ func (r *Runtime) publishAdmissionGatedConfig(previous, gated *config.Config) {
 	r.mu.Lock()
 	if r.cfg == previous {
 		r.cfg = gated
+		r.setDesiredLocked(gated)
 	}
 	r.mu.Unlock()
 }

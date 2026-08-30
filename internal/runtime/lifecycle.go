@@ -1300,6 +1300,14 @@ func (r *Runtime) SaveConfiguration() error {
 		zap.String("config_path", snapshot.Path),
 		zap.Bool("using_config_service", r.configSvc != nil))
 
+	// This path rewrites the WHOLE file from the running configuration, so a
+	// restart-gated value that is saved but not yet adopted — a routing-mode
+	// switch the operator is still being told is pending — would be reverted on
+	// disk by the next server enable/disable. Overlay the pending values onto
+	// what goes to disk, while the in-memory stores keep describing what is
+	// actually running.
+	diskCopy := r.pendingAwareDiskConfig(configCopy)
+
 	// Use ConfigService to save (doesn't hold locks, handles file I/O)
 	oldServerCount := 0
 	if r.configSvc != nil {
@@ -1314,13 +1322,29 @@ func (r *Runtime) SaveConfiguration() error {
 		// must not leave configSvc and r.cfg divergent (PR #857 review).
 		oldServerCount = r.syncServersToLegacyConfig(latestServers)
 		// Then persist to disk
-		if err := r.configSvc.SaveToFile(); err != nil {
+		if diskCopy != nil {
+			// Written directly rather than through SaveToFile, whose source is
+			// the configSvc snapshot (the running config). Marked as our own
+			// write first, or the watcher reads the pending value back as an
+			// external edit and hot-applies what we deliberately deferred.
+			r.noteConfigSelfWrite(diskCopy)
+			if err := config.SaveConfig(diskCopy, snapshot.Path); err != nil {
+				r.forgetConfigSelfWrite(diskCopy)
+				r.logger.Error("Failed to save config to file (pending-aware path)", zap.Error(err))
+				return err
+			}
+			r.setDesired(diskCopy)
+		} else if err := r.configSvc.SaveToFile(); err != nil {
 			r.logger.Error("Failed to save config to file via config service", zap.Error(err))
 			return err
 		}
 		r.logger.Debug("Config saved to disk via config service")
 	} else {
 		// Fallback to legacy save (no configSvc store to keep in sync)
+		if diskCopy != nil {
+			configCopy = diskCopy
+			r.noteConfigSelfWrite(diskCopy)
+		}
 		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
 			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))
 			return err
@@ -1369,6 +1393,12 @@ func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig
 	defer r.mu.Unlock()
 	oldServerCount := len(r.cfg.Servers)
 	r.cfg.Servers = latestServers
+	// The desired config is a separate struct once anything is pending, so the
+	// server list has to be written to both — otherwise the next PATCH merges
+	// onto a base whose servers are whatever they were at the last apply.
+	if r.desiredCfg != nil && r.desiredCfg != r.cfg {
+		r.desiredCfg.Servers = latestServers
+	}
 	return oldServerCount
 }
 
@@ -1422,8 +1452,30 @@ func (r *Runtime) ReloadConfiguration() error {
 	// (configSvc.ReloadFromFile doesn't touch the legacy fields; the legacy
 	// fallback branch above already synced them via UpdateConfig.)
 	if r.configSvc != nil {
+		// A hand-edited restart-gated field cannot be adopted any more than an
+		// API-applied one can: /mcp stays bound to the mode it registered at
+		// startup, the listener stays bound, the DB stays open. Pinning them
+		// here is what keeps "the running config" meaning that on BOTH commit
+		// paths — without it every surface that reports the routing mode named
+		// a surface nobody was being served, and pinRestartGated on the apply
+		// path would pin to a value that was never live.
+		r.mu.RLock()
+		pinned := pinRestartGated(r.cfg, newSnapshot.Config)
+		r.mu.RUnlock()
+
+		// Republish so the configsvc snapshot and r.cfg cannot disagree:
+		// ReloadFromFile has already published the RAW file, which live
+		// subscribers would read as the running configuration. Skipped when
+		// nothing is pending — the common case, where pinned is equivalent to
+		// what ReloadFromFile just published.
+		if DetectConfigChanges(newSnapshot.Config, pinned).RequiresRestart {
+			if uerr := r.configSvc.Update(pinned, configsvc.UpdateTypeModify, "reload_pin_restart_gated"); uerr != nil {
+				r.logger.Error("Failed to republish the pinned configuration after reload", zap.Error(uerr))
+			}
+		}
+
 		r.mu.Lock()
-		r.cfg = newSnapshot.Config
+		r.cfg = pinned
 		// The file IS the desired configuration, so a disk reload resets it —
 		// including over an API change that was still waiting for a restart:
 		// whoever edited the file wins, and nothing may keep merging onto a
