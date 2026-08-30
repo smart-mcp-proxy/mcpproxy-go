@@ -438,6 +438,12 @@ export interface RoutingInfo {
   pending_routing_mode?: string
   /** True when pending_routing_mode is set — a restart is needed to apply it. */
   restart_required?: boolean
+  /**
+   * Whether the code_execution tool is enabled. The code-execution surface has
+   * no other tool-calling path, so this gates whether that routing mode can
+   * work at all. Absent on daemons that predate the field.
+   */
+  code_execution_enabled?: boolean
 }
 
 // Dashboard stats

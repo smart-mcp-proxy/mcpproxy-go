@@ -21,6 +21,7 @@ type mockRoutingController struct {
 	// config — both hot-reloadable, unlike routingMode.
 	toolResponseMode       string
 	directToolResponseMode string
+	codeExecutionEnabled   bool
 	// desiredRoutingMode is the routing_mode as PERSISTED: a restart-gated
 	// change lands on disk while the running process keeps serving the old one
 	// (ApplyConfig's restart contract). Empty means "same as live".
@@ -62,6 +63,7 @@ func (m *mockRoutingController) GetConfig() (*config.Config, error) {
 		RoutingMode:            m.routingMode,
 		ToolResponseMode:       m.toolResponseMode,
 		DirectToolResponseMode: m.directToolResponseMode,
+		EnableCodeExecution:    m.codeExecutionEnabled,
 	}, nil
 }
 
@@ -357,5 +359,22 @@ func TestHandleGetRouting_PendingRoutingMode(t *testing.T) {
 		})
 		assert.Empty(t, data["pending_routing_mode"])
 		assert.Equal(t, false, data["restart_required"])
+	})
+}
+
+// TestHandleGetRouting_CodeExecutionEnabled: the code-execution surface has no
+// tool-calling path other than the code_execution tool, which is a refusing
+// stub while the feature is off. The Web UI switcher has to be able to warn
+// BEFORE the operator commits to a restart, so the flag rides along with the
+// mode it gates.
+func TestHandleGetRouting_CodeExecutionEnabled(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		data := getRouting(t, &mockRoutingController{apiKey: "test-key"})
+		assert.Equal(t, false, data["code_execution_enabled"])
+	})
+
+	t.Run("reported when enabled", func(t *testing.T) {
+		data := getRouting(t, &mockRoutingController{apiKey: "test-key", codeExecutionEnabled: true})
+		assert.Equal(t, true, data["code_execution_enabled"])
 	})
 }

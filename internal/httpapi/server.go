@@ -1226,6 +1226,12 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 	// hot-reloadable, unlike routing_mode below.
 	toolResponseMode := config.ToolResponseModeFull
 	directToolResponseMode := config.DirectToolResponseModeFull
+	// Code execution is off by default and its surface has NO other tool-calling
+	// path (buildCodeExecModeTools omits call_tool_*), so picking that routing
+	// mode with the flag off produces a surface that can discover tools and call
+	// none of them. The switcher has to be able to warn before the operator
+	// commits to a restart.
+	codeExecutionEnabled := false
 	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
 		if cfg.ToolResponseMode != "" {
 			toolResponseMode = cfg.ToolResponseMode
@@ -1233,6 +1239,7 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 		if cfg.DirectToolResponseMode != "" {
 			directToolResponseMode = cfg.DirectToolResponseMode
 		}
+		codeExecutionEnabled = cfg.EnableCodeExecution
 	}
 
 	// routing_mode above is what /mcp is ACTUALLY serving: a routing-mode change
@@ -1257,6 +1264,7 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 			config.RoutingModeDirect,
 			config.RoutingModeCodeExecution,
 		},
+		"code_execution_enabled":    codeExecutionEnabled,
 		"tool_response_mode":        toolResponseMode,
 		"direct_tool_response_mode": directToolResponseMode,
 		"pending_routing_mode":      pendingRoutingMode,
