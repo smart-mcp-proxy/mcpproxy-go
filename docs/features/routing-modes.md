@@ -207,9 +207,20 @@ curl -H "X-API-Key: your-key" http://127.0.0.1:8080/api/v1/routing
     "code_execution": "/mcp/code",
     "retrieve_tools": "/mcp/call"
   },
-  "available_modes": ["retrieve_tools", "direct", "code_execution"]
+  "available_modes": ["retrieve_tools", "direct", "code_execution"],
+  "tool_response_mode": "full",
+  "direct_tool_response_mode": "full",
+  "pending_routing_mode": "",
+  "restart_required": false
 }
 ```
+
+`routing_mode` is the mode `/mcp` is **actually serving**. When a routing-mode
+change has been saved but not yet applied, `pending_routing_mode` names the mode
+the next start will adopt and `restart_required` is `true` — see
+[Changing Routing Mode](#changing-routing-mode). `tool_response_mode` and
+`direct_tool_response_mode` report the two serialization axes, resolved (an unset
+value reads as `"full"`).
 
 ```bash
 # Status endpoint also includes routing_mode
@@ -217,6 +228,23 @@ curl -H "X-API-Key: your-key" http://127.0.0.1:8080/api/v1/status
 ```
 
 ## Changing Routing Mode
+
+### From the Web UI
+
+The **Mode** control in the header is a switcher. Its **Surface** tab lists the
+three routing modes with what each costs an agent and which dedicated endpoint
+always serves it; its **Schema detail** tab holds the two serialization axes
+(`tool_response_mode` and `direct_tool_response_mode`), which apply immediately.
+
+Picking a routing mode saves it and marks it **pending**: the header keeps naming
+the mode `/mcp` is still serving, and the panel says which mode the next start
+will adopt — plus the dedicated endpoint that already serves it, if you would
+rather point your client there than restart. **Cancel — keep &lt;mode&gt;** reverts a
+pending choice.
+
+The same three fields also live in **Settings → General**.
+
+### From the config file
 
 1. Edit `~/.mcpproxy/mcp_config.json`:
    ```json
@@ -232,6 +260,11 @@ curl -H "X-API-Key: your-key" http://127.0.0.1:8080/api/v1/status
    ```
 
 The routing mode is applied at startup and determines which MCP server instance handles the default `/mcp` endpoint. Dedicated endpoints (`/mcp/all`, `/mcp/code`, `/mcp/call`) are always available regardless of the configured mode.
+
+While the change is pending, the rest of the configuration keeps working
+normally: settings that hot-reload — including both serialization axes — apply
+immediately and leave the pending routing mode intact on disk. `mcpproxy status`
+and `/api/v1/routing` keep reporting the mode `/mcp` is really serving.
 
 ## Tool Refresh
 

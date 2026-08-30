@@ -417,6 +417,7 @@ export interface StatusUpdate {
 
 // Routing mode types
 export interface RoutingInfo {
+  /** The mode /mcp is ACTUALLY serving (in-memory config), not the configured intent. */
   routing_mode: string
   description: string
   endpoints: {
@@ -426,6 +427,17 @@ export interface RoutingInfo {
     retrieve_tools: string
   }
   available_modes: string[]
+  /** Spec 085 serialization of retrieve_tools results — resolved, never empty. */
+  tool_response_mode?: string
+  /** Spec 102 serialization of direct-surface listings — resolved, never empty. */
+  direct_tool_response_mode?: string
+  /**
+   * Routing mode persisted on disk when it differs from the served one, i.e.
+   * the mode a restart would adopt. Empty when there is nothing pending.
+   */
+  pending_routing_mode?: string
+  /** True when pending_routing_mode is set — a restart is needed to apply it. */
+  restart_required?: boolean
 }
 
 // Dashboard stats

@@ -1424,6 +1424,11 @@ func (r *Runtime) ReloadConfiguration() error {
 	if r.configSvc != nil {
 		r.mu.Lock()
 		r.cfg = newSnapshot.Config
+		// The file IS the desired configuration, so a disk reload resets it —
+		// including over an API change that was still waiting for a restart:
+		// whoever edited the file wins, and nothing may keep merging onto a
+		// base the file no longer agrees with.
+		r.desiredCfg = newSnapshot.Config
 		if newSnapshot.Path != "" {
 			r.cfgPath = newSnapshot.Path
 		}

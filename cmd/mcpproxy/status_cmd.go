@@ -213,6 +213,15 @@ func collectStatusFromDaemon(cfg *config.Config, client *cliclient.Client, socke
 		info.ListenAddr = cfg.Listen
 	}
 
+	// Take the routing mode from the RUNNING daemon, not from the config file.
+	// /mcp binds its mode at startup, so a mode saved but not yet adopted (or
+	// hand-edited into the file) is not what the daemon is serving — and
+	// `mcpproxy status` is one of the documented ways to check which surface an
+	// agent will get. Older daemons omit the field; the config value stands in.
+	if mode, ok := statusData["routing_mode"].(string); ok && mode != "" {
+		info.RoutingMode = mode
+	}
+
 	// Extract upstream stats
 	if stats, ok := statusData["upstream_stats"].(map[string]interface{}); ok {
 		info.Servers = extractServerCounts(stats)

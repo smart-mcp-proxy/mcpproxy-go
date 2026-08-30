@@ -50,6 +50,20 @@ func normalizeDirectToolResponseMode(mode string) string {
 	return mode
 }
 
+// normalizeRoutingMode resolves the empty value to the mode it means. Same
+// reason as its two serialization neighbours below: the routing_mode clause
+// compared raw strings, so an apply body that simply OMITS routing_mode (a
+// hand-written config, a CLI apply, any client that does not round-trip every
+// key) was reported as a restart-required change to the mode already being
+// served — and the empty value was persisted, after which /api/v1/routing
+// normalizes it back and reports nothing pending.
+func normalizeRoutingMode(mode string) string {
+	if mode == "" {
+		return config.RoutingModeRetrieveTools
+	}
+	return mode
+}
+
 // normalizeToolResponseMode is the retrieve-surface twin of the above. Both
 // axes document "" as meaning "full", so both comparisons have to normalize —
 // see the DirectToolResponseMode clause for why a raw comparison misreports.
@@ -103,7 +117,7 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	//
 	// The dedicated routes (/mcp/all, /mcp/code, /mcp/call) are unaffected: each
 	// is permanently bound to its own mode by design (Spec 031).
-	if oldCfg.RoutingMode != newCfg.RoutingMode {
+	if normalizeRoutingMode(oldCfg.RoutingMode) != normalizeRoutingMode(newCfg.RoutingMode) {
 		result.ChangedFields = append(result.ChangedFields, "routing_mode")
 		result.RequiresRestart = true
 		result.AppliedImmediately = false

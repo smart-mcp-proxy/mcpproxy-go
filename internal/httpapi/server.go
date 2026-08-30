@@ -1130,6 +1130,10 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 		}
 		autostartDataDir = cfg.DataDir
 	}
+	// Same source of truth as /api/v1/routing: what /mcp actually bound, not
+	// what the config now says. Two surfaces reporting "the routing mode" must
+	// not be able to disagree.
+	routingMode = s.servedRoutingMode(routingMode)
 
 	// One traversal, used for both the top-level field and the nested snapshot,
 	// so the two cannot disagree and the O(servers) walk happens once (#1084).
@@ -1188,7 +1192,10 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 
 // handleGetRouting godoc
 // @Summary Get routing mode information
-// @Description Get the current routing mode and available MCP endpoints
+// @Description Get the current routing mode and available MCP endpoints.
+// @Description routing_mode is what /mcp is actually serving; pending_routing_mode carries a
+// @Description restart-pending value persisted on disk (empty when there is none).
+// @Description tool_response_mode and direct_tool_response_mode report the two serialization axes, resolved.
 // @Tags status
 // @Produce json
 // @Security ApiKeyAuth
@@ -1200,6 +1207,7 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.RoutingMode != "" {
 		routingMode = cfg.RoutingMode
 	}
+	routingMode = s.servedRoutingMode(routingMode)
 
 	// Build mode description
 	var description string
@@ -1211,6 +1219,29 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 	default:
 		description = "BM25 search via retrieve_tools + call_tool variants (default)"
 	}
+
+	// Serialization axes (Spec 085 / Spec 102). Reported RESOLVED, never raw:
+	// the Web UI header switcher renders one selected option per axis, and an
+	// unset value must show as "Full" rather than as nothing selected. Both are
+	// hot-reloadable, unlike routing_mode below.
+	toolResponseMode := config.ToolResponseModeFull
+	directToolResponseMode := config.DirectToolResponseModeFull
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		if cfg.ToolResponseMode != "" {
+			toolResponseMode = cfg.ToolResponseMode
+		}
+		if cfg.DirectToolResponseMode != "" {
+			directToolResponseMode = cfg.DirectToolResponseMode
+		}
+	}
+
+	// routing_mode above is what /mcp is ACTUALLY serving: a routing-mode change
+	// is written to disk but deliberately not adopted in memory (ApplyConfig's
+	// restart-required contract), because /mcp binds its mode to an http.ServeMux
+	// pattern at startup. Reporting only the served value leaves the operator
+	// with a switcher that appears to do nothing; reporting only the configured
+	// one is the drift DetectConfigChanges was fixed to stop. So report both.
+	pendingRoutingMode, restartRequired := s.pendingRoutingMode(routingMode)
 
 	response := map[string]interface{}{
 		"routing_mode": routingMode,
@@ -1226,9 +1257,72 @@ func (s *Server) handleGetRouting(w http.ResponseWriter, _ *http.Request) {
 			config.RoutingModeDirect,
 			config.RoutingModeCodeExecution,
 		},
+		"tool_response_mode":        toolResponseMode,
+		"direct_tool_response_mode": directToolResponseMode,
+		"pending_routing_mode":      pendingRoutingMode,
+		"restart_required":          restartRequired,
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// servedRoutingMode returns the routing mode /mcp ACTUALLY bound at startup,
+// falling back to the configured value passed in.
+//
+// The config can move underneath a running process — a restart-pending API
+// change, or a hand-edited file the watcher hot-reloads — while /mcp stays
+// bound to the mcp-go server instance it registered on the ServeMux. Reporting
+// the config there names a surface /mcp is not serving, and the Web UI renders
+// it as "serving now". The fallback covers a controller that records nothing
+// (stdio transport, tests).
+func (s *Server) servedRoutingMode(configured string) string {
+	if served, ok := s.controller.(interface{ ServedRoutingMode() string }); ok {
+		if mode := served.ServedRoutingMode(); mode != "" {
+			return mode
+		}
+	}
+	return configured
+}
+
+// pendingRoutingMode reports the routing mode the next start would adopt, when
+// that differs from the one this process is serving.
+//
+// Sourced from the runtime's DESIRED config (what is on disk) rather than by
+// reading the file here: the runtime already tracks it, so a Web-UI poll costs
+// no disk I/O and cannot race a config commit half-way through a rename. Any
+// controller that does not expose it reports nothing pending — a status
+// endpoint must never invent a restart prompt it cannot substantiate.
+func (s *Server) pendingRoutingMode(servedMode string) (pending string, restartRequired bool) {
+	desiredCtrl, ok := s.controller.(interface {
+		GetDesiredConfig() (*config.Config, error)
+	})
+	if !ok {
+		return "", false
+	}
+	desired, err := desiredCtrl.GetDesiredConfig()
+	if err != nil || desired == nil {
+		return "", false
+	}
+	desiredMode := config.ResolveRoutingMode(desired.RoutingMode)
+	if desiredMode == config.ResolveRoutingMode(servedMode) {
+		return "", false
+	}
+	return desiredMode, true
+}
+
+// desiredConfigForPatch returns the merge base for a read-modify-write of the
+// configuration: the desired (on-disk) config when the controller exposes it,
+// otherwise the running one.
+func (s *Server) desiredConfigForPatch() (*config.Config, error) {
+	if desiredCtrl, ok := s.controller.(interface {
+		GetDesiredConfig() (*config.Config, error)
+	}); ok {
+		cfg, err := desiredCtrl.GetDesiredConfig()
+		if err == nil && cfg != nil {
+			return cfg, nil
+		}
+	}
+	return s.controller.GetConfig()
 }
 
 // handleGetInfo godoc
@@ -4413,7 +4507,14 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := s.controller.GetConfig()
+	// The DESIRED config — what the file holds and what the next start will
+	// use. This endpoint backs the raw-JSON editor and every client that
+	// round-trips the config through PUT/POST, so serving the running one would
+	// hand back a document missing whatever is waiting for a restart, which the
+	// client then saves. A restart-gated field that differs from the running
+	// value is reported by /api/v1/routing (pending_routing_mode) and badged in
+	// Settings, not hidden here.
+	cfg, err := s.desiredConfigForPatch()
 	if err != nil {
 		s.logger.Errorw("Failed to get configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
@@ -4558,7 +4659,9 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 	// the existing apply pipeline so we benefit from validation, change
 	// detection, disk persistence, and hot-reload without duplicating any of
 	// that logic here.
-	cfg, err := s.controller.GetConfig()
+	// Desired, not running: same reason as handlePatchConfig — a read-modify-
+	// write of the running config discards any restart-pending field.
+	cfg, err := s.desiredConfigForPatch()
 	if err != nil {
 		s.logger.Errorw("Failed to get configuration for docker-isolation patch", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
@@ -4623,10 +4726,17 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the REAL in-memory config (secrets intact — redaction only happens
-	// on the GET response path). We deep-merge only the client-sent keys so
-	// untouched fields, including masked secrets, are preserved verbatim.
-	cfg, err := s.controller.GetConfig()
+	// Read the REAL config (secrets intact — redaction only happens on the GET
+	// response path). We deep-merge only the client-sent keys so untouched
+	// fields, including masked secrets, are preserved verbatim.
+	//
+	// The merge base is the DESIRED config — what is on disk — not the running
+	// one. They differ only while a restart-gated field (routing_mode, listen,
+	// api_key, …) has been saved but not yet adopted, and merging onto the
+	// running config there silently reverted it: an operator who switched to
+	// Direct and then changed any other setting lost the routing switch with no
+	// warning, on disk, with a success toast.
+	cfg, err := s.desiredConfigForPatch()
 	if err != nil {
 		s.logger.Errorw("Failed to get configuration for patch", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")

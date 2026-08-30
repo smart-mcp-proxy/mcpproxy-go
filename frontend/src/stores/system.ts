@@ -144,8 +144,18 @@ export const useSystemStore = defineStore('system', () => {
   // resolved — surfaces then render their pre-delta wording.
   const updateBehindSummary = computed(() => info.value?.update?.behind_summary ?? '')
 
-  // Routing mode
+  // Routing mode. This is the mode /mcp is ACTUALLY serving: a routing_mode
+  // change is written to disk but not adopted in memory until the core
+  // restarts, so the badge keeps naming reality and `pendingRoutingMode`
+  // carries the intent (see the ModeSwitcher).
   const routingMode = computed(() => routing.value?.routing_mode ?? status.value?.routing_mode ?? 'retrieve_tools')
+  const pendingRoutingMode = computed(() => routing.value?.pending_routing_mode ?? '')
+  const routingRestartRequired = computed(() => Boolean(routing.value?.restart_required))
+  // The two serialization axes (Spec 085 / Spec 102). The backend resolves them,
+  // so an unset value still arrives as "full" — the ?? here only covers a daemon
+  // that predates the fields.
+  const toolResponseMode = computed(() => routing.value?.tool_response_mode ?? 'full')
+  const directToolResponseMode = computed(() => routing.value?.direct_tool_response_mode ?? 'full')
 
   // Actions
   function connectEventSource() {
@@ -581,6 +591,39 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
+  /**
+   * Persist one routing/serialization field and refresh the routing snapshot.
+   *
+   * PATCH (not a full apply) so nothing else in the config is round-tripped:
+   * the header switcher must never be able to rewrite a value the operator did
+   * not touch. Returns the apply result so the caller can distinguish "applied
+   * now" from "saved, needs a restart" — routing_mode is the only one of the
+   * three that takes the second path.
+   */
+  async function applyModeField(field: string, value: string) {
+    try {
+      const response = await api.patchConfig({ [field]: value })
+      if (!response.success || !response.data) {
+        const msg = response.error || 'Failed to apply the change'
+        addToast({ type: 'error', title: 'Could not change mode', message: msg })
+        return { ok: false as const, requiresRestart: false, error: msg }
+      }
+      // Refresh from the server rather than assuming: on the restart path the
+      // served mode deliberately does NOT change, and only /api/v1/routing
+      // knows what is now pending.
+      await fetchRouting()
+      return {
+        ok: true as const,
+        requiresRestart: Boolean(response.data.requires_restart),
+        restartReason: response.data.restart_reason || '',
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      addToast({ type: 'error', title: 'Could not change mode', message: msg })
+      return { ok: false as const, requiresRestart: false, error: msg }
+    }
+  }
+
   async function fetchRouting() {
     try {
       const response = await api.getRouting()
@@ -623,6 +666,10 @@ export const useSystemStore = defineStore('system', () => {
     updateCommand,
     updateBehindSummary,
     routingMode,
+    pendingRoutingMode,
+    routingRestartRequired,
+    toolResponseMode,
+    directToolResponseMode,
     sidebarCollapsed,
 
     // Actions
@@ -636,6 +683,7 @@ export const useSystemStore = defineStore('system', () => {
     clearToasts,
     fetchInfo,
     fetchRouting,
+    applyModeField,
     checkForUpdates,
     setAuthRequired,
     markAuthRecovered,

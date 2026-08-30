@@ -1065,3 +1065,38 @@ func TestDetectConfigChanges_RoutingModeRequiresRestart(t *testing.T) {
 		assert.True(t, result.AppliedImmediately)
 	})
 }
+
+// TestDetectConfigChanges_RoutingModeNormalization: routing_mode documents ""
+// as meaning retrieve_tools, exactly like its two serialization neighbours,
+// which both normalize before comparing. The routing_mode clause compared raw
+// strings, so an apply whose body simply OMITS routing_mode (a hand-written
+// config, a CLI apply, any client that does not round-trip every key) was
+// reported as a restart-required routing change to a mode that is the one
+// already being served — and the empty value was then persisted, at which point
+// /api/v1/routing normalizes it back and reports nothing pending. Two surfaces
+// contradicting each other over a change that never happened.
+func TestDetectConfigChanges_RoutingModeNormalization(t *testing.T) {
+	t.Run("empty vs explicit default is not a change", func(t *testing.T) {
+		old := &config.Config{RoutingMode: config.RoutingModeRetrieveTools}
+		next := &config.Config{RoutingMode: ""}
+		result := DetectConfigChanges(old, next)
+		assert.False(t, result.RequiresRestart, "omitting routing_mode must not force a restart")
+		assert.NotContains(t, result.ChangedFields, "routing_mode")
+	})
+
+	t.Run("explicit default vs empty is not a change either", func(t *testing.T) {
+		old := &config.Config{RoutingMode: ""}
+		next := &config.Config{RoutingMode: config.RoutingModeRetrieveTools}
+		result := DetectConfigChanges(old, next)
+		assert.False(t, result.RequiresRestart)
+		assert.NotContains(t, result.ChangedFields, "routing_mode")
+	})
+
+	t.Run("a real mode change still requires a restart", func(t *testing.T) {
+		old := &config.Config{RoutingMode: ""}
+		next := &config.Config{RoutingMode: config.RoutingModeDirect}
+		result := DetectConfigChanges(old, next)
+		assert.True(t, result.RequiresRestart)
+		assert.Contains(t, result.ChangedFields, "routing_mode")
+	})
+}

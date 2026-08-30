@@ -541,10 +541,26 @@ Get the current routing mode and available MCP endpoints.
       "code_execution": "/mcp/code",
       "retrieve_tools": "/mcp/call"
     },
-    "available_modes": ["retrieve_tools", "direct", "code_execution"]
+    "available_modes": ["retrieve_tools", "direct", "code_execution"],
+    "tool_response_mode": "full",
+    "direct_tool_response_mode": "full",
+    "pending_routing_mode": "",
+    "restart_required": false
   }
 }
 ```
+
+| Field | Meaning |
+|-------|---------|
+| `routing_mode` | The mode `/mcp` is **actually serving** — recorded when the server bound it at startup, not read back from the config. A config change (API or hand-edited file) cannot rebind `/mcp`. |
+| `pending_routing_mode` | The mode the next start will adopt, when it differs from the served one. Empty when nothing is pending. |
+| `restart_required` | True exactly when `pending_routing_mode` is set. |
+| `tool_response_mode` | Spec 085 serialization of `retrieve_tools` results, resolved (`full` when unset). Hot-reloadable. |
+| `direct_tool_response_mode` | Spec 102 serialization of direct-surface listings, resolved (`full` when unset). Hot-reloadable. |
+
+A restart-gated change is persisted immediately and reported as pending; later
+changes to other settings apply hot and leave it pending. Re-applying the mode
+that is already being served clears it.
 
 See [Routing Modes](../features/routing-modes.md) for details on each mode.
 

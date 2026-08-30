@@ -300,3 +300,56 @@ func TestDeepMergeJSON(t *testing.T) {
 	// New key added.
 	assert.Equal(t, "x", base["new_key"])
 }
+
+// desiredBaseController serves a live config whose routing_mode the process is
+// still serving, and a desired config carrying a restart-pending one — the exact
+// state ApplyConfig leaves behind after a routing-mode change.
+type desiredBaseController struct {
+	mockPatchConfigController
+	desired *config.Config
+}
+
+func (m *desiredBaseController) GetDesiredConfig() (*config.Config, error) {
+	clone := *m.desired
+	return &clone, nil
+}
+
+// TestHandlePatchConfig_MergesOntoDesiredConfig: a PATCH edits the configuration
+// that will be in force, not the one currently running. Merging onto the live
+// config silently reverted any restart-pending field the client did not send —
+// switch the header mode switcher to Direct, then toggle deferred schemas, and
+// the routing switch vanished from disk with a success toast.
+func TestHandlePatchConfig_MergesOntoDesiredConfig(t *testing.T) {
+	live := &config.Config{
+		APIKey:      "secret-key",
+		RoutingMode: config.RoutingModeRetrieveTools, // what /mcp is serving
+	}
+	desired := &config.Config{
+		APIKey:      "secret-key",
+		RoutingMode: config.RoutingModeDirect, // saved, waiting for a restart
+	}
+	ctrl := &desiredBaseController{
+		mockPatchConfigController: mockPatchConfigController{apiKey: "secret-key", live: live},
+		desired:                   desired,
+	}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	body, err := json.Marshal(map[string]interface{}{
+		"direct_tool_response_mode": config.DirectToolResponseModeDeferred,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "secret-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	require.NotNil(t, ctrl.captured)
+	assert.Equal(t, config.DirectToolResponseModeDeferred, ctrl.captured.DirectToolResponseMode,
+		"the patched field must reach the apply pipeline")
+	assert.Equal(t, config.RoutingModeDirect, ctrl.captured.RoutingMode,
+		"a restart-pending routing mode the client never mentioned must survive the patch")
+	assert.Equal(t, "secret-key", ctrl.captured.APIKey, "secrets still preserved verbatim")
+}

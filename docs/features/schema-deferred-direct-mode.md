@@ -78,8 +78,9 @@ MCPPROXY_DIRECT_TOOL_RESPONSE_MODE=deferred mcpproxy serve
 mcpproxy serve --direct-tool-response-mode=deferred
 ```
 
-Or from the UI — **Settings → General → "Detail in Direct-mode listings"**, in
-both the Web UI and the macOS tray. The routing-mode field ("How agents find
+Or from the UI — the **Mode** switcher in the Web UI header, under **Schema
+detail → Direct listings**, or **Settings → General → "Detail in Direct-mode
+listings"**, in both the Web UI and the macOS tray. The routing-mode field ("How agents find
 tools") heads the same section, two rows above. Note the asymmetry: changing the
 serialization mode applies hot, but changing `routing_mode` needs a restart (the
 badge on that field says so), because `/mcp` binds its routing mode once at
