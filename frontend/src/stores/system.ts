@@ -156,6 +156,12 @@ export const useSystemStore = defineStore('system', () => {
   // that predates the fields.
   const toolResponseMode = computed(() => routing.value?.tool_response_mode ?? 'full')
   const directToolResponseMode = computed(() => routing.value?.direct_tool_response_mode ?? 'full')
+  // Spec 097/code-exec gate. The code-execution SURFACE has no tool-calling
+  // path other than the code_execution tool, which refuses while this is off,
+  // so the mode switcher warns before an operator restarts into it. Defaults to
+  // true against a daemon that predates the field: a missing field must not
+  // render a warning we cannot substantiate.
+  const codeExecutionEnabled = computed(() => routing.value?.code_execution_enabled ?? true)
 
   // Actions
   function connectEventSource() {
@@ -670,6 +676,7 @@ export const useSystemStore = defineStore('system', () => {
     routingRestartRequired,
     toolResponseMode,
     directToolResponseMode,
+    codeExecutionEnabled,
     sidebarCollapsed,
 
     // Actions

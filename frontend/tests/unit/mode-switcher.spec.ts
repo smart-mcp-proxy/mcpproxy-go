@@ -24,6 +24,7 @@ type RoutingOverrides = Partial<{
   direct_tool_response_mode: string
   pending_routing_mode: string
   restart_required: boolean
+  code_execution_enabled: boolean
 }>
 
 // Mirrors the /api/v1/routing payload, including the resolution the handler
@@ -45,6 +46,7 @@ function routingPayload(o: RoutingOverrides = {}) {
     direct_tool_response_mode: 'full',
     pending_routing_mode: '',
     restart_required: false,
+    code_execution_enabled: true,
     ...o,
   }
 }
@@ -91,9 +93,13 @@ describe('ModeSwitcher', () => {
     expect(wrapper.find('[data-test="mode-restart-badge-direct"]').text()).toBe('needs restart')
     expect(wrapper.find('[data-test="mode-restart-badge-code_execution"]').exists()).toBe(true)
 
-    const direct = wrapper.find('[data-test="mode-option-direct"]').text()
-    expect(direct).toContain('/mcp/all')
-    expect(direct.length).toBeGreaterThan(120) // description + trade-off, not a bare word
+    // Visible: one short line plus the endpoint chip. The full explanation and
+    // its trade-off are the hover hint — the panel must not scroll, so the long
+    // form cannot be inline. This asserts it is still REACHABLE, not dropped.
+    const direct = wrapper.find('[data-test="mode-option-direct"]')
+    expect(direct.text()).toContain('/mcp/all')
+    expect(direct.text().length).toBeLessThan(110)
+    expect(direct.attributes('title')).toContain('190 tokens per tool')
 
     // The way to get Direct WITHOUT a restart has to be on screen, or the only
     // visible path to it is a restart the operator may not want.
@@ -177,18 +183,20 @@ describe('ModeSwitcher', () => {
 
   it('quantifies the deferred trade-off instead of naming it', async () => {
     const wrapper = await mountOpen()
-    const deferred = wrapper
-      .find('[data-test="serialization-option-direct-tool-response-deferred"]')
-      .text()
-    // Measured numbers from Spec 102 (SC-001 as restated), and the cost.
-    expect(deferred).toMatch(/29\.7%|34\.8%/)
-    expect(deferred).toContain('describe_tool')
+    const deferred = wrapper.find(
+      '[data-test="serialization-option-direct-tool-response-deferred"]'
+    )
+    // The visible line quantifies it roughly; the hover hint carries the
+    // measured numbers from Spec 102 (SC-001 as restated) and the cost.
+    expect(deferred.text()).toContain('%')
+    expect(deferred.attributes('title')).toMatch(/29\.7%|34\.8%/)
+    expect(deferred.attributes('title')).toContain('describe_tool')
   })
 
   it('names the endpoints each axis governs, which depends on the routing mode', async () => {
     const retrieve = await mountOpen()
     expect(retrieve.find('[data-test="serialization-surface-tool-response"]').text()).toContain(
-      '/mcp and /mcp/call'
+      '/mcp · /mcp/call'
     )
     // Direct listings still govern /mcp/all while /mcp serves Retrieve — the
     // axis is never inert, so it is never greyed out.
@@ -199,18 +207,30 @@ describe('ModeSwitcher', () => {
     const direct = await mountOpen({ routing_mode: 'direct' })
     expect(
       direct.find('[data-test="serialization-surface-direct-tool-response"]').text()
-    ).toContain('/mcp and /mcp/all')
+    ).toContain('/mcp · /mcp/all')
   })
 
   it('surfaces a non-default serialization on the collapsed badge', async () => {
+    // The panel's word for it, not the raw config value: an operator who opens
+    // the panel after reading "compact" would find no such word in it.
     const compact = await mountOpen({ tool_response_mode: 'compact' })
-    expect(compact.find('[data-test="mode-switcher-serialization-badge"]').text()).toBe('compact')
+    expect(compact.find('[data-test="mode-switcher-serialization-badge"]').text()).toBe('Signatures')
 
     const deferred = await mountOpen({
       routing_mode: 'direct',
       direct_tool_response_mode: 'deferred',
     })
-    expect(deferred.find('[data-test="mode-switcher-serialization-badge"]').text()).toBe('deferred')
+    expect(deferred.find('[data-test="mode-switcher-serialization-badge"]').text()).toBe(
+      'Signatures'
+    )
+
+    // Code execution PINS /mcp to full schemas, so a badge there would advertise
+    // a serialization that surface does not use.
+    const codeExec = await mountOpen({
+      routing_mode: 'code_execution',
+      tool_response_mode: 'compact',
+    })
+    expect(codeExec.find('[data-test="mode-switcher-serialization-badge"]').exists()).toBe(false)
 
     // …and stays quiet when both axes are at their default.
     const plain = await mountOpen()
@@ -245,9 +265,9 @@ describe('ModeSwitcher', () => {
     expect(codeExec.find('[data-test="serialization-surface-tool-response"]').text()).toBe(
       '/mcp/call'
     )
-    expect(codeExec.find('[data-test="serialization-note-tool-response"]').text()).toContain(
-      'describe_tool'
-    )
+    const note = codeExec.find('[data-test="serialization-note-tool-response"]')
+    expect(note.text()).toContain('full schemas')
+    expect(note.attributes('title')).toContain('describe_tool')
 
     // …and says nothing of the sort in the mode where it does govern /mcp.
     const retrieve = await mountOpen()
@@ -264,6 +284,104 @@ describe('ModeSwitcher', () => {
     })
     expect(wrapper.find('[data-test="mode-switcher-pending-notice"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="mode-switcher-pending-badge"]').exists()).toBe(false)
+  })
+
+  // The panel must fit without scrolling: a dropdown with an inner scrollbar
+  // hides the half of the decision that is below the fold, which is exactly
+  // what the two tabs exist to prevent. Height is measured in the browser
+  // sweep; here we pin the two things that make it grow — an overflow class on
+  // the container, and long inline copy where a hover hint belongs.
+  // The panel must FIT without scrolling at a normal viewport — the two tabs
+  // exist so neither half of the decision hides below a fold. It keeps a
+  // viewport-relative cap and overflow anyway: dropping them entirely made the
+  // bottom of the panel permanently unreachable at 200% zoom or on a short
+  // window, because the panel is absolutely positioned inside a sticky header
+  // that the page cannot scroll. The cap is sized so it never engages at normal
+  // heights; what keeps it from engaging is the copy budget asserted below.
+  it('fits without scrolling, and keeps its long copy in hover hints', async () => {
+    const wrapper = await mountOpen()
+    const menu = wrapper.find('[data-test="mode-switcher-menu"]')
+    const classes = menu.classes().join(' ')
+    expect(classes).toMatch(/overflow-y-auto/)
+    expect(classes).toMatch(/max-h-\[calc\(100vh/)
+
+    for (const mode of ['retrieve_tools', 'direct', 'code_execution']) {
+      const row = wrapper.find(`[data-test="mode-option-${mode}"]`)
+      expect(row.text().length).toBeLessThan(110)
+      // …and the long form is still one hover away.
+      expect((row.attributes('title') || '').length).toBeGreaterThan(60)
+    }
+    for (const id of ['tool-response-compact', 'direct-tool-response-deferred']) {
+      const row = wrapper.find(`[data-test="serialization-option-${id}"]`)
+      expect(row.text().length).toBeLessThan(80)
+      expect((row.attributes('title') || '').length).toBeGreaterThan(60)
+    }
+  })
+
+  it('links out to the docs from both tabs', async () => {
+    const wrapper = await mountOpen()
+    expect(wrapper.find('[data-test="mode-switcher-surface-doc"]').attributes('href')).toContain(
+      'docs.mcpproxy.app'
+    )
+    expect(wrapper.find('[data-test="mode-switcher-detail-doc"]').attributes('href')).toContain(
+      'docs.mcpproxy.app'
+    )
+  })
+
+  // The code-execution surface has NO tool-calling path but the code_execution
+  // tool, which refuses while the feature is off. A prerequisite that only
+  // appears on hover is one the operator meets after restarting into a surface
+  // that finds tools and can call none of them.
+  it('warns inline when Code Exec cannot work yet', async () => {
+    const off = await mountOpen({ code_execution_enabled: false })
+    const prereq = off.find('[data-test="mode-option-code_execution-prereq"]')
+    expect(prereq.exists()).toBe(true)
+    expect(prereq.text()).toContain('Settings')
+    // …and only for the mode it gates.
+    expect(off.find('[data-test="mode-option-direct-prereq"]').exists()).toBe(false)
+
+    const on = await mountOpen({ code_execution_enabled: true })
+    expect(on.find('[data-test="mode-option-code_execution-prereq"]').exists()).toBe(false)
+  })
+
+  it('does not promise a pending surface that cannot serve yet', async () => {
+    const wrapper = await mountOpen({
+      pending_routing_mode: 'code_execution',
+      restart_required: true,
+      code_execution_enabled: false,
+    })
+    const notice = wrapper.find('[data-test="mode-switcher-pending-notice"]').text()
+    expect(notice).toContain('Settings')
+    expect(notice).not.toContain('serves it now')
+  })
+
+  // Selection was conveyed by a background tint and an unlabelled tick — neither
+  // of which reaches assistive tech.
+  it('exposes its selection to assistive tech, on both axes', async () => {
+    const wrapper = await mountOpen({ tool_response_mode: 'compact' })
+
+    const active = wrapper.find('[data-test="mode-option-retrieve_tools"]')
+    expect(active.attributes('role')).toBe('radio')
+    expect(active.attributes('aria-checked')).toBe('true')
+    expect(wrapper.find('[data-test="mode-option-direct"]').attributes('aria-checked')).toBe('false')
+
+    const chosen = wrapper.find('[data-test="serialization-option-tool-response-compact"]')
+    expect(chosen.attributes('aria-checked')).toBe('true')
+    expect(
+      wrapper.find('[data-test="serialization-option-tool-response-full"]').attributes('aria-checked')
+    ).toBe('false')
+  })
+
+  it('sends each serialization axis to its own docs page', async () => {
+    const wrapper = await mountOpen()
+    const retrieveDoc = wrapper.find('[data-test="serialization-doc-tool-response"]').attributes('href')
+    const directDoc = wrapper
+      .find('[data-test="serialization-doc-direct-tool-response"]')
+      .attributes('href')
+    // Two different specs, two different pages — one link for both sent half the
+    // readers to the wrong feature.
+    expect(retrieveDoc).not.toBe(directDoc)
+    expect(directDoc).toContain('schema-deferred')
   })
 
   it('reports a failed write instead of showing a mode it did not set', async () => {
