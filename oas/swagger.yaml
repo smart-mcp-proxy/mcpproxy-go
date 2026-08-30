@@ -5326,7 +5326,11 @@ paths:
       - registries
   /api/v1/routing:
     get:
-      description: Get the current routing mode and available MCP endpoints
+      description: |-
+        Get the current routing mode and available MCP endpoints.
+        routing_mode is what /mcp is actually serving; pending_routing_mode carries a
+        restart-pending value persisted on disk (empty when there is none).
+        tool_response_mode and direct_tool_response_mode report the two serialization axes, resolved.
       responses:
         "200":
           content:

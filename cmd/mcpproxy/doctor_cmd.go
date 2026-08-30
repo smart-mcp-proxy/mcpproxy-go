@@ -617,7 +617,11 @@ func displaySecurityFeaturesStatus() {
 	if routingMode == "" {
 		routingMode = config.RoutingModeRetrieveTools
 	}
-	fmt.Printf("  Routing Mode: %s\n", routingMode)
+	// Labelled "configured" on purpose: this function reads the config FILE, and
+	// /mcp binds its routing mode at startup — a mode saved but not yet adopted
+	// (or hand-edited into the file) is not what a running daemon is serving.
+	// `mcpproxy status` asks the daemon and reports the served one.
+	fmt.Printf("  Routing Mode (configured): %s\n", routingMode)
 	switch routingMode {
 	case config.RoutingModeDirect:
 		fmt.Println("    All upstream tools exposed directly via /mcp endpoint")
@@ -627,6 +631,7 @@ func displaySecurityFeaturesStatus() {
 		fmt.Println("    BM25 search via retrieve_tools + call_tool variants")
 	}
 	fmt.Printf("    Endpoints: /mcp/all (direct), /mcp/code (code_execution), /mcp/call (retrieve_tools)\n")
+	fmt.Println("    A running daemon keeps serving the mode it started with — `mcpproxy status` reports that one")
 	fmt.Println()
 
 	// Sensitive Data Detection status

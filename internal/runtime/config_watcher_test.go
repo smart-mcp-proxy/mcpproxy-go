@@ -168,7 +168,7 @@ func TestConfigWatcher_RestartRequiredApplyNotEchoed(t *testing.T) {
 	updates := rt.ConfigService().Subscribe(ctx)
 	defer rt.ConfigService().Unsubscribe(updates)
 
-	limitBefore := rt.ConfigSnapshot().Config.ToolResponseLimit
+	listenBefore := rt.ConfigSnapshot().Config.Listen
 
 	edited := editedConfig(initialCfg, 56789)
 	edited.Listen = "127.0.0.1:1" // restart-required field
@@ -176,8 +176,15 @@ func TestConfigWatcher_RestartRequiredApplyNotEchoed(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.RequiresRestart, "listen change must require restart")
 
+	// The RESTART-GATED half is what stays deferred. The hot half of the same
+	// write (tool_response_limit here) applies immediately, through the apply
+	// path — that is the contract, not a watcher echo — so this test asserts on
+	// `listen`, the field that must never move without a restart.
+	assert.Equal(t, 56789, rt.ConfigSnapshot().Config.ToolResponseLimit,
+		"the hot half of a restart-required apply applies immediately")
+
 	// Give the watcher debounce ample time to fire, then assert the deferred
-	// config was NOT hot-applied behind the API's back.
+	// field was NOT hot-applied behind the API's back.
 	timeout := time.After(1500 * time.Millisecond)
 	for {
 		select {
@@ -185,7 +192,7 @@ func TestConfigWatcher_RestartRequiredApplyNotEchoed(t *testing.T) {
 			assert.NotEqual(t, configsvc.UpdateTypeReload, u.Type,
 				"watcher must not echo a restart-required self-save back as a disk reload (source=%s)", u.Source)
 		case <-timeout:
-			assert.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit,
+			assert.Equal(t, listenBefore, rt.ConfigSnapshot().Config.Listen,
 				"restart-required apply must stay deferred; watcher must not hot-apply it")
 			return
 		}
@@ -232,23 +239,27 @@ func TestConfigWatcher_ExternalRevertToLastSelfWriteReloads(t *testing.T) {
 func TestConfigWatcher_RevertThenRewriteOfSelfWrittenBytesReloads(t *testing.T) {
 	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
 
-	limitBefore := rt.ConfigSnapshot().Config.ToolResponseLimit
+	listenBefore := rt.ConfigSnapshot().Config.Listen
 
-	// Restart-required apply: disk=A, memory=O, marker=A.
+	// Restart-required apply: disk=A, memory keeps O's restart-gated fields,
+	// marker=A. (A's hot fields DO apply now — the deferral is per-field.)
 	cfgA := editedConfig(initialCfg, 88888)
 	cfgA.Listen = "127.0.0.1:1"
 	result, err := rt.ApplyConfig(cfgA, cfgPath)
 	require.NoError(t, err)
 	require.True(t, result.RequiresRestart)
 
-	// Let the self-write event be (correctly) suppressed.
+	// Let the self-write event be (correctly) suppressed: the restart-gated
+	// field must not arrive by the back door.
 	time.Sleep(1200 * time.Millisecond)
-	require.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit)
+	require.Equal(t, listenBefore, rt.ConfigSnapshot().Config.Listen)
 
-	// External revert to O: disk==memory, suppressed — but the file has now
-	// moved past our last save, so the marker must be dropped here.
+	// External revert to O: the file has now moved past our last save, so the
+	// marker must be dropped here.
 	require.NoError(t, config.SaveConfig(initialCfg, cfgPath))
-	time.Sleep(1200 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == initialCfg.ToolResponseLimit
+	}, 5*time.Second, 25*time.Millisecond, "external revert must hot-reload")
 
 	// External re-write of A: genuine edit, must hot-reload its hot parts.
 	require.NoError(t, config.SaveConfig(cfgA, cfgPath))
@@ -435,9 +446,12 @@ func TestConfigWatcher_ReloadRebuildsTruncator(t *testing.T) {
 func TestConfigWatcher_BackToBackSelfWritesBothSuppressed(t *testing.T) {
 	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
 
-	limitBefore := rt.ConfigSnapshot().Config.ToolResponseLimit
+	listenBefore := rt.ConfigSnapshot().Config.Listen
 
-	// Restart-required self-save A: disk=A, memory stays O, marker records A.
+	// Restart-required self-save A: disk=A, memory keeps O's `listen`, marker
+	// records A. Asserted on `listen` rather than tool_response_limit: the hot
+	// half of a restart-required apply is applied by the apply itself now, so
+	// only the restart-gated field can witness a watcher echo.
 	cfgA := editedConfig(initialCfg, 71111)
 	cfgA.Listen = "127.0.0.1:1"
 	resA, err := rt.ApplyConfig(cfgA, cfgPath)
@@ -454,12 +468,12 @@ func TestConfigWatcher_BackToBackSelfWritesBothSuppressed(t *testing.T) {
 
 	// A's debounce fires while disk still holds A. It must stay suppressed.
 	time.Sleep(1200 * time.Millisecond)
-	require.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit,
+	require.Equal(t, listenBefore, rt.ConfigSnapshot().Config.Listen,
 		"watcher must not hot-apply restart-required save A when a second self-write pre-armed in between")
 
 	// B's write lands on disk; that event must be suppressed too.
 	require.NoError(t, config.SaveConfig(cfgB, cfgPath))
 	time.Sleep(1200 * time.Millisecond)
-	require.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit,
+	require.Equal(t, listenBefore, rt.ConfigSnapshot().Config.Listen,
 		"watcher must not hot-apply restart-required save B either")
 }

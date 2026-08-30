@@ -35,6 +35,20 @@ const (
 	DirectToolResponseModeDeferred = "deferred" // Signature-suffixed descriptions, permissive schema
 )
 
+// ResolveRoutingMode resolves a configured routing mode to the one actually
+// served, mirroring MCPProxyServer.GetMCPServerForMode: unset — and anything
+// unrecognised — falls back to retrieve_tools. Callers that report "the routing
+// mode" to an operator must resolve first, or a config holding "" reads as a
+// mode nobody can act on.
+func ResolveRoutingMode(mode string) string {
+	switch mode {
+	case RoutingModeDirect, RoutingModeCodeExecution, RoutingModeRetrieveTools:
+		return mode
+	default:
+		return RoutingModeRetrieveTools
+	}
+}
+
 // Duration is a wrapper around time.Duration that can be marshaled to/from JSON.
 // When serialized to JSON, it is represented as a string (e.g., "30s", "5m").
 // @swaggertype string

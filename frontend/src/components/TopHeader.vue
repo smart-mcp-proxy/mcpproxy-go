@@ -85,17 +85,11 @@
           <span class="text-xs text-base-content/60">Tools</span>
         </div>
 
-        <!-- Routing Mode. The label alone is jargon (audit F31), so the badge
-             carries what the mode actually does to a connecting agent. -->
-        <div
-          class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm cursor-help"
-          :title="routingMode.description"
-          :aria-label="`Routing mode: ${routingMode.description}`"
-          data-test="routing-mode-badge"
-        >
-          <span class="text-xs text-base-content/60">Mode:</span>
-          <span class="font-medium">{{ routingModeLabel }}</span>
-        </div>
+        <!-- Routing + serialization mode switcher. Was a read-only badge whose
+             `cursor-help` promised an explanation the browser only produced
+             after a long hover (audit F31 follow-up); now it explains and
+             switches, like the profile switcher beside it. -->
+        <ModeSwitcher />
 
         <!-- MCP Endpoints Dropdown -->
         <div v-if="systemStore.listenAddr" class="relative">
@@ -165,7 +159,7 @@ import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
 import AddServerModal from './AddServerModal.vue'
 import ProfileSwitcher from './ProfileSwitcher.vue'
-import { routingModeMeta } from '@/utils/routingMode'
+import ModeSwitcher from './ModeSwitcher.vue'
 
 const router = useRouter()
 const systemStore = useSystemStore()
@@ -173,9 +167,6 @@ const serversStore = useServersStore()
 const authStore = useAuthStore()
 
 const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')
-
-const routingMode = computed(() => routingModeMeta(systemStore.routingMode))
-const routingModeLabel = computed(() => routingMode.value.label)
 
 const searchQuery = ref('')
 const showAddServerModal = ref(false)

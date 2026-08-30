@@ -914,6 +914,14 @@ func (s *Server) Start(ctx context.Context) error {
 		if cfg != nil {
 			routingMode = cfg.RoutingMode
 		}
+		// Record what /mcp is ACTUALLY bound to, resolved the same way
+		// GetMCPServerForMode resolves it (an unrecognised value falls back to
+		// retrieve_tools). Every surface that reports "the routing mode" reads
+		// this, not the config: the config can move underneath a running
+		// process — a restart-pending API change, or a hand-edited file the
+		// watcher hot-reloads — and reporting it would name a surface /mcp is
+		// not serving.
+		s.runtime.SetServedRoutingMode(config.ResolveRoutingMode(routingMode))
 		// mcp-go's built-in DNS-rebinding protection is disabled in favor of
 		// hostValidationMiddleware, which applies the same check but honors the
 		// trusted_hosts allowlist for reverse-proxy deployments (GH #898).
@@ -3083,6 +3091,18 @@ func (s *Server) GetLogDir() string {
 // GetConfig returns the current configuration
 func (s *Server) GetConfig() (*config.Config, error) {
 	return s.runtime.GetConfig()
+}
+
+// GetDesiredConfig returns the configuration as persisted on disk — what the
+// next start will use. Read-modify-write callers must merge onto this one; see
+// Runtime.GetDesiredConfig.
+func (s *Server) GetDesiredConfig() (*config.Config, error) {
+	return s.runtime.GetDesiredConfig()
+}
+
+// ServedRoutingMode returns the routing mode /mcp actually bound at startup.
+func (s *Server) ServedRoutingMode() string {
+	return s.runtime.ServedRoutingMode()
 }
 
 // DefaultInstructions returns the built-in default MCP instructions text,
