@@ -163,11 +163,12 @@ report beside them — and that two runs are identical modulo `generated_at`.
       (not an `OfflineSection` — replay crosses the matrix, it is not one more corpus)
 - [ ] T029 [US1] Exclude or pin `generated_at` for replay reports in `bench/replay.go` so
       SC-002's determinism check is meaningful
-- [ ] T030 [US1] Label every replay figure as a COUNTERFACTUAL over recorded traffic, not
+- [ ] T030 [US1] Write a FAILING assertion in `bench/replay_test.go`: no replay figure may be
+      emitted without the counterfactual marker (FR-004)
+- [ ] T031 [US1] Label every replay figure as a COUNTERFACTUAL over recorded traffic, not
       observed agent behaviour, in `bench/replay.go` — FR-004 forbids presenting it as observed,
-      and the Replay Boundary is the spec's most load-bearing constraint
-- [ ] T031 [US1] Assert that labelling in `bench/replay_test.go`: no replay figure may be emitted
-      without the counterfactual marker
+      and the Replay Boundary is the spec's most load-bearing constraint. Turns the assertion
+      above green
 - [ ] T032 [US1] Render the `replay` block in the dashboard template in `bench/report.go`,
       showing the exclusion report, the counterfactual label, and that figures are scored against
       **today's** fleet, not the fleet as recorded
