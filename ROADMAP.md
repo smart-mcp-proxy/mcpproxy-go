@@ -73,6 +73,7 @@ graph LR
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🔵 **Planning/docs truth automation** — In progress · P2
+- 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
 - ⚪ **Windows native tray app** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -85,7 +86,6 @@ graph LR
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
-- 🟢 **Discovery-quality eval harness (Spec 065 second half)** — Done · P3
 
 ## Epic details
 
@@ -296,6 +296,28 @@ graph LR
 | Weekly cloud routine: LLM judges only the residue the evidence-check cannot decide, opens/updates one propose-only PR | 🟢 Done | #824 #870 #999 #842 |
 | Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check | ⚪ Todo | — |
 | Run top quickstart.md scenario per spec as contract test in test-api-e2e.sh | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>🔵 Discovery-quality eval harness (Spec 065 second half) — In progress · P3</summary>
+
+> IN PROGRESS — 2026-08-31 audit, corrected on cross-model review: both halves of the HARNESS shipped INDEPENDENTLY (not via token-bench-harness), but spec 065 is NOT fully met, so this is not done. FR-009 and SC-005 require CI to FAIL on a discovery regression beyond tolerance; the retrieval-D1 job is continue-on-error on pull requests, so on the PR path it does not fail — eval.yml itself records the promotion to PR-blocking as still open (MCP-742). A second, weaker tension to adjudicate rather than assume: CN-002 asks that scoring never run against a live drifting corpus, and D1 does boot a live mcpproxy serving 7 reference servers — but #931 pinned all seven upstreams to freeze-era versions and the job gates on the exact corpus ID set, so the corpus is reproducible in practice. Decide whether that satisfies CN-002 or whether a committed snapshot is required. Remaining work is therefore the gating promotion, not the harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note continue-on-error is scoped to github.event_name == 'pull_request', so the job is REPORT-ONLY on PRs (npx/uvx fetch flake) and BLOCKING on both the nightly schedule and manual workflow_dispatch runs. Promoting it to PR-blocking after a green soak is still open (MCP-742). NB the workflow's own inline comment says 'blocking on the nightly schedule' and omits workflow_dispatch. A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness.
+
+Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
+
+```mermaid
+graph LR
+  discovery_eval_pr_blocking["Promote retrieval-D1 from report-only to PR-b…<br/>MCP-742"]
+
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class discovery_eval_pr_blocking todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Promote retrieval-D1 from report-only to PR-blocking (spec 065 FR-009/SC-005), and adjudicate the CN-002 frozen-corpus question | ⚪ Todo | `MCP-742` |
 
 </details>
 
@@ -739,15 +761,6 @@ graph LR
 
 </details>
 
-<details>
-<summary>🟢 Discovery-quality eval harness (Spec 065 second half) — Done · P3</summary>
-
-> DONE — 2026-08-31 audit: both halves shipped INDEPENDENTLY, not via token-bench-harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note continue-on-error is scoped to github.event_name == 'pull_request', so the job is REPORT-ONLY on PRs (npx/uvx fetch flake) and BLOCKING on both the nightly schedule and manual workflow_dispatch runs. Promoting it to PR-blocking after a green soak is still open (MCP-742). NB the workflow's own inline comment says 'blocking on the nightly schedule' and omits workflow_dispatch. A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness.
-
-Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
-
-</details>
-
 ## Epics
 
 | Epic | Status | Priority | Progress | Spec | PR |
@@ -758,6 +771,7 @@ Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
+| Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Token-efficiency benchmark: measured savings, published results | Todo | P1 | — |  |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
@@ -779,7 +793,6 @@ Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
-| Discovery-quality eval harness (Spec 065 second half) | Done | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 
 ## Shipped (archived)
 
