@@ -65,8 +65,8 @@ graph LR
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred done;
-  class ux_audit,action_log_transparency,telemetry_identity,telemetry_v7_churn in_progress;
-  class tpa_db,remote_access_tunnel,token_bench,tool_graph todo;
+  class ux_audit,action_log_transparency,token_bench,telemetry_identity,telemetry_v7_churn in_progress;
+  class tpa_db,remote_access_tunnel,tool_graph todo;
 ```
 
 **Independent epics** (15) — no cross-epic prerequisites; each stands alone:
@@ -195,6 +195,38 @@ graph LR
 | Activity in the tray menu (recent tool calls + security events, jump to full log) | ⚪ Todo | — |
 | tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
 | Tie activity retention/size into the glance view | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>🔵 Token-efficiency benchmark: measured savings, published results — In progress · P1</summary>
+
+> Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix. Spec 103 landed 2026-08-31 (#1137 spec+plan, #1139 tasks) after 13 cross-model review rounds; three of its findings changed the design rather than the wording: a recording carries no prompt/conversation/completion oracle so replay CANNOT show agent behaviour (US1 deterministic cost vs US2 live loop are now separate stories); replay needs a FLEET INPUT because the export has no fleet snapshot; and bodies-off yields menu costs plus one cross-mode delta, never an absolute workload cost. The matrix is 5 distinct behaviours, not a 3x2x2 product.
+
+Spec: [103-token-bench](./specs/103-token-bench/) · PR: #1141
+
+```mermaid
+graph LR
+  token_bench_harness["Replay harness: activity-log sessions re-run…"]
+  token_bench_public["Run public suites locally (τ-bench / BFCL / M…"]
+  token_bench_blog["Publish results + methodology on mcpproxy.app…"]
+  token_bench_telemetry["Heartbeat v10: per-tool_response_mode token c…"]
+
+  token_bench_harness --> token_bench_public
+  token_bench_public --> token_bench_blog
+
+  classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class token_bench_harness in_progress;
+  class token_bench_public,token_bench_blog,token_bench_telemetry todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries | 🔵 In progress | #1141 |
+| Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results | ⚪ Todo | — |
+| Publish results + methodology on mcpproxy.app/blog | ⚪ Todo | — |
+| Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation | ⚪ Todo | — |
 
 </details>
 
@@ -346,36 +378,6 @@ graph LR
 | Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
 | Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
 | Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
-
-</details>
-
-<details>
-<summary>⚪ Token-efficiency benchmark: measured savings, published results — Todo · P1</summary>
-
-> Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix. Spec 103 landed 2026-08-31 (#1137 spec+plan, #1139 tasks) after 13 cross-model review rounds; three of its findings changed the design rather than the wording: a recording carries no prompt/conversation/completion oracle so replay CANNOT show agent behaviour (US1 deterministic cost vs US2 live loop are now separate stories); replay needs a FLEET INPUT because the export has no fleet snapshot; and bodies-off yields menu costs plus one cross-mode delta, never an absolute workload cost. The matrix is 5 distinct behaviours, not a 3x2x2 product.
-
-Spec: [103-token-bench](./specs/103-token-bench/)
-
-```mermaid
-graph LR
-  token_bench_harness["Replay harness: activity-log sessions re-run…"]
-  token_bench_public["Run public suites locally (τ-bench / BFCL / M…"]
-  token_bench_blog["Publish results + methodology on mcpproxy.app…"]
-  token_bench_telemetry["Heartbeat v10: per-tool_response_mode token c…"]
-
-  token_bench_harness --> token_bench_public
-  token_bench_public --> token_bench_blog
-
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class token_bench_harness,token_bench_public,token_bench_blog,token_bench_telemetry todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries | ⚪ Todo | — |
-| Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results | ⚪ Todo | — |
-| Publish results + methodology on mcpproxy.app/blog | ⚪ Todo | — |
-| Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation | ⚪ Todo | — |
 
 </details>
 
@@ -770,12 +772,12 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
+| Token-efficiency benchmark: measured savings, published results | In progress | P1 | 33/64 (52%) | [103-token-bench](./specs/103-token-bench/) | #1141 |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
-| Token-efficiency benchmark: measured savings, published results | Todo | P1 | 0/64 (0%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
