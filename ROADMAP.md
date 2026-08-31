@@ -358,7 +358,7 @@ graph LR
 <details>
 <summary>⚪ Windows native tray app — Todo · P2 · MCP-43</summary>
 
-> No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first. 2026-08-31 audit: reset from in_review to todo — no Windows-tray PR is open or merged, and native/windows/ holds only a README placeholder with no WebView2 code anywhere in the tree, so 'in review' had no PR to point at.
+> No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first. 2026-08-31 audit: reset from in_review to todo. Scoped precisely: Windows tray support DID ship in 2025 via the cross-platform Go/systray build (#74, merged 2025-10-23, cmd/mcpproxy-tray/ + internal/tray under GOOS=windows) — what this epic tracks is the NATIVE WebView2 replacement, and for that no PR is open or merged and native/windows/ holds only a README placeholder with no WebView2 code anywhere in the tree. So 'in review' had no PR to point at.
 
 ```mermaid
 graph LR
@@ -626,7 +626,7 @@ graph LR
 <details>
 <summary>🟢 Analytics dashboard as default page — Done · P1</summary>
 
-> Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done. 2026-08-31 audit: the default-landing half shipped too - frontend/src/router/index.ts routes path '/' to the Dashboard component, guarded by frontend/tests/unit/dashboard-default-landing.spec.ts. Spec 069's one remaining task is a local Playwright verification sweep that leaves no committed artifact, so it can never tick from code; the epic is complete.
+> Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done. 2026-08-31 audit: the default-landing half shipped too - frontend/src/router/index.ts routes path '/' to the Dashboard component, guarded by frontend/tests/unit/dashboard-default-landing.spec.ts. Spec 069's one remaining task (T023) is a local Playwright verification sweep that leaves no committed artifact: a human can run it and tick the box, but no code evidence can ever confirm it, so it cannot gate the epic. The epic is complete.
 
 Spec: [069-observability-usage-graphs](./specs/069-observability-usage-graphs/)
 
