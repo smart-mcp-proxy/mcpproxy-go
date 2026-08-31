@@ -36,11 +36,16 @@ mode cell, what this workload would have cost, with the exclusion accounting bes
 
 ### 3. Know which figures you just got
 
-- **Tool-surface cost per mode: `measured`.** No recorded content was needed.
-- **Response cost: `estimated` or absent.** Tokenizing needs the text; a byte length only
-  supports an estimate. Re-run with bodies on if you need it measured.
-- **Discovery-response cost: unavailable.** Internal `retrieve_tools` activity emission
-  carries no byte counts, so it is not recoverable from the activity log at all.
+- **`direct_full`, `direct_deferred`, `code_exec`: `measured`.** What their mode changes is
+  the static tool-surface payload, computed from the fleet's tool definitions — no recorded
+  content needed.
+- **`retrieve_full`, `retrieve_compact`: NOT measurable here.** What their mode changes IS the
+  `retrieve_tools` response body, so these two cells require a bodies-on run.
+- **Response cost generally: `estimated` or absent.** Tokenizing needs the text; a byte length
+  supports only an estimate.
+- **The fleet is today's fleet.** The export carries no fleet snapshot, so this scores a
+  recorded workload against the currently configured servers — internally valid across modes,
+  but not a historical reconstruction.
 
 ### 4. Read the exclusion report before the headline
 
@@ -53,7 +58,10 @@ pretending otherwise.
 ```bash
 go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out /tmp/run-a
 go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out /tmp/run-b
-diff /tmp/run-a/report.json /tmp/run-b/report.json && echo "byte-identical (SC-002)"
+# generated_at is a wall-clock stamp and differs between runs by design.
+diff <(jq 'del(.generated_at)' /tmp/run-a/report.json) \
+     <(jq 'del(.generated_at)' /tmp/run-b/report.json) \
+  && echo "byte-identical modulo generated_at (SC-002)"
 ```
 
 ### Offline note
@@ -62,6 +70,7 @@ The tokenizer downloads its vocabulary on first use unless a cache directory is 
 
 ```bash
 export TIKTOKEN_CACHE_DIR="$HOME/.cache/tiktoken"
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out /tmp/warm   # warms it, needs network once
 ```
 
 Setting the variable only names a cache; it does not fill one. A first run still fetches the

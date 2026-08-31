@@ -41,8 +41,9 @@ existing field's meaning or shape, and spec 103 changes none. Precedent: `Latenc
 
 **Finding that becomes work**: SC-011 ("no generated report is committed") is enforced only by
 `bench/.gitignore` and convention. There is no CI job or test that fails on a committed
-report. The cheap gate is a CI step asserting `git status --porcelain bench/results` is empty,
-mirroring `scripts/verify-oas.sh`.
+report. The gate must assert that nothing under the results directory is **tracked** —
+`test -z "$(git ls-files bench/results)"`. A `git status --porcelain` check does NOT work:
+porcelain omits ignored files and would stay silent about an already-committed report.
 
 ---
 
@@ -69,13 +70,21 @@ storage record, documented as *measured pre-truncation*, but are absent from the
 contract entirely. Adding them (two DTO fields, two lines in the export projection) lets a
 truncated record carry an explicitly-estimated response cost instead of being dropped.
 
-**Correction applied after review**: an earlier draft claimed these give an *accurate* cost
-basis without bodies. They do not — they are byte lengths, and tokenizing requires the text.
-What actually survives bodies-off is the **tool-surface** cost, which is derived from the
-fleet's tool definitions and the call sequence rather than from any recorded content, and
-which is the term the modes change. Response cost with bodies off is `estimated` at best.
-Separately, internal `retrieve_tools` emission carries no byte counts, so discovery-response
-cost is unrecoverable from the activity log by any route.
+**Correction applied after review, then corrected again**: an early draft claimed these give
+an *accurate* cost basis without bodies. They do not — they are byte lengths, and tokenizing
+needs the text. A second draft over-corrected, claiming tool-surface cost carries the headline
+for all five cells. The precise position:
+
+- **Three cells (both direct cells and code-execution) are measurable bodies-off**, because
+  what their mode changes is the static tool-surface payload, computed from the fleet's tool
+  definitions rather than from any recording.
+- **The two `retrieve_tools` cells need bodies-on**, because what their mode changes IS the
+  `retrieve_tools` response body.
+- **`retrieve_tools` response cost is recoverable with bodies on** — the handler writes the
+  FULL response to the activity log (`internal/server/mcp.go:2061-2064`). It is unavailable
+  only in the bodies-off configuration, not unrecoverable in general.
+- **The export carries no fleet snapshot**, so a replay scores a recorded workload against
+  today's fleet. Internally valid across modes; not a historical reconstruction.
 
 **Alternatives considered**: reading BBolt directly (rejected — bypasses the contract, couples
 the harness to storage internals, and defeats the privacy gating entirely); building a new
@@ -181,7 +190,13 @@ constraint is that same rule on a new axis, so it is enforceable with machinery 
 exists — the extension is a new section and a source label, not new aggregation logic.
 
 Provider `usage` maps 1:1 onto FR-014's required split (input / output / cache-read) with no
-derivation, so reading response fields is strictly simpler than proxying. An LLM proxy is kept
+derivation, so reading response fields is strictly simpler than proxying.
+
+**Gap to close at task time**: the suite's own per-task output records input / output / total /
+reasoning — it has **no cache-read field**. So FR-014's cache-read axis cannot come from the
+suite's report; it must be captured in the driver from the provider response, or explicitly
+declared out of reach for suite-driven runs. The single MCP-factory patch alone does not
+establish FR-014 coverage. An LLM proxy is kept
 only as the fallback for a closed-box suite whose loop cannot be edited — which MCPMark, being
 patchable at one seam, is not.
 
@@ -204,9 +219,10 @@ entirely greenfield — no `cache_read` concept exists anywhere.
 ### Two hazards this creates
 
 - **`ReportV2.Tokenizer` is a report-level singleton** naming one estimator. Once provider
-  usage enters the same envelope, that field silently claims the whole report was
-  tiktoken-counted. It must be **scoped** to the deterministic sections, and the live block
-  must carry its own accounting-source field (provider + pinned model).
+  usage enters the same envelope a reader could take that field to describe it too. Resolve
+  **additively**: leave the existing field's meaning intact and give each new block its own
+  accounting-source field (provider + pinned model). Narrowing the existing field would itself
+  be a meaning change and would require a version bump.
 - **`RetryRateForArm` returns 0.0 for unknown arms**, indistinguishable from a measured 0.0.
   With FR-013 replacing assumed rates only where measurements exist, one table could mix a
   measured rate and a defaulted one under a single section-level `estimated` badge. Session
@@ -220,7 +236,9 @@ entirely greenfield — no `cache_read` concept exists anywhere.
    `TIKTOKEN_CACHE_DIR` / `DATA_GYM_CACHE_DIR` is set. Nothing in the repo or in
    `bench.yml` sets it, so the documented "offline estimator" property holds only after a warm
    cache. **An outside reproducer on a restricted network fails at step one** — which defeats
-   SC-004. Fix: set the cache dir in CI and document it in the reproduction procedure.
+   SC-004. Fix: setting the variable is necessary but NOT sufficient — it names a cache without
+   filling one. CI must also **populate or restore** the cache (a cache-restore step, or a
+   vendored copy), and the reproduction procedure must tell an outsider to warm it once.
 2. **The tokenizer caveat is unsourced and internally contradicted.** The repo states up to
    ~60% underestimation versus Claude; Anthropic's own guidance says ~15–20% on typical text
    (more on code). The two differ threefold and neither is sourced in-repo. Publishing

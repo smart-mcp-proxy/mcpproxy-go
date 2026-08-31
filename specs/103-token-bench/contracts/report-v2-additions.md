@@ -83,4 +83,9 @@ measured rate and a defaulted one under a single `estimated` badge.
   `test -z "$(git ls-files bench/results)"`.
 - **`SC-004` is not currently achievable offline.** The tokenizer fetches its vocabulary over
   the network unless a cache directory env var is set, and nothing in the repo or CI sets it.
-  Set it in CI and document it in the reproduction procedure.
+  Setting the variable is necessary but **not sufficient** — it names a cache without filling
+  one. CI must also populate or restore that cache, and the reproduction procedure must tell
+  an outsider to warm it once with network access.
+- **`SC-002` (byte-identical reruns) collides with the report's wall-clock `generated_at`
+  stamp.** Replay must pin or exclude that field, or every determinism check fails on it
+  alone.

@@ -55,12 +55,18 @@ One recorded tool call inside a session.
 
 **Validation rules**
 
-- **Tool-surface cost does not depend on recorded content at all** — it is computed from the
-  fleet's tool definitions under each mode plus the call sequence. It is fully `measured` with
-  bodies off. This is the term the modes actually change, and it is US1's headline.
-- **Response cost DOES require the text.** With bodies off it may only be reported as an
-  explicit `estimated` figure derived from byte length, never as `measured`; with bodies on it
-  becomes `measured`. The two MUST NOT be presented interchangeably.
+- **Tool-surface cost does not depend on recorded content** — it is computed from the fleet's
+  tool definitions under each mode. It is fully `measured` with bodies off, and it is what the
+  direct and code-execution cells' modes change.
+- **The two `retrieve_tools` cells are NOT measurable with bodies off**, because what their
+  mode changes is the `retrieve_tools` response body itself. They require an explicit
+  bodies-on run and MUST be reported as unavailable otherwise, never as zero.
+- **Response cost generally requires the text.** With bodies off it may only be an explicit
+  `estimated` figure derived from byte length; with bodies on it becomes `measured`. The two
+  MUST NOT be presented interchangeably.
+- **The export carries no fleet snapshot**, so every replay figure is against the currently
+  configured fleet. Reports MUST state this: it is internally valid across modes but is not a
+  historical reconstruction.
 - A call whose `parent_id` resolves MUST be attributed to its parent's session, so
   code-execution sub-calls are neither double-counted nor orphaned.
 

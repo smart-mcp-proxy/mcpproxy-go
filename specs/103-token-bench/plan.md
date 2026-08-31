@@ -9,8 +9,9 @@ Add two measurement capabilities to the existing `bench/` harness, and one small
 contract fix that makes the first of them honest.
 
 1. **US1 — deterministic replay** (`-replay`): load exported activity JSONL, group it into
-   units of work, and recompute what that real workload would have cost under every valid
-   mode. No model, byte-reproducible.
+   units of work, and recompute what that real workload would have cost under each mode cell.
+   No model. Reproducible **modulo the report's `generated_at` stamp**, which must be excluded
+   or pinned before any byte-identical comparison (see Risks).
 2. **US2 — live agent loop**: run MCPMark against mcpproxy under each mode, capturing
    provider-reported token usage and per-task pass verdicts, to produce tokens per
    *completed* task, first-attempt success and retry rates.
@@ -80,13 +81,13 @@ Three findings drive this and each becomes a design rule:
    exported record can be sensitive but not yet flagged.
    → **Rule**: exclude-by-flag is a best-effort reducer and MUST NOT be described as a
    guarantee, in code comments or in the published methodology.
-3. **Bodies are not needed for the headline — but not for the reason first assumed.**
-   Tool-surface cost, the term the modes actually change, is computed from the fleet's tool
-   definitions and the call sequence, so it needs no recorded content at all.
-   The recorded byte sizes are byte *lengths*, not token counts, so they support only an
-   explicitly-estimated response cost; measured response cost requires bodies.
-   → **Rule**: the default configuration produces the measured headline without ever loading a
-   body, and any response-cost figure taken with bodies off is badged `estimated`.
+3. **Bodies-off covers three of the five cells, not all five.** For the two direct cells and
+   the code-execution cell, what the mode changes is the static tool-surface payload, computed
+   from the fleet's tool definitions with no recorded content. For the two `retrieve_tools`
+   cells, what the mode changes IS the response body, so those need bodies-on. The recorded
+   byte sizes are byte *lengths*, not token counts, and support only an estimate.
+   → **Rule**: bodies-off is the default and yields measured figures for three cells; the two
+   `retrieve_tools` cells are reported as requiring an explicit bodies-on run.
 
 ## Phase 0: Research
 
@@ -103,8 +104,9 @@ Five topics were resolved; the load-bearing outcomes:
    storage record, measured pre-truncation, but are absent from the export contract. Adding
    them lets a truncated record carry an explicitly-estimated response cost instead of being
    dropped. They are byte lengths, **not** token counts, so they do not make response cost
-   measurable — and internal `retrieve_tools` emission carries no byte counts at all, so
-   discovery-response cost is unrecoverable from the activity log by any route.
+   measurable. Internal `retrieve_tools` emission carries no byte counts either — but its FULL
+   response IS written to the activity log, so its cost is recoverable with bodies on and
+   unavailable only in the bodies-off configuration.
 4. **MCPMark is adopted**, SHA-pinned, with one `elif` in its single MCP factory. Its per-task
    `meta.json` feeds FR-010/011/012/018 directly.
 5. **Token accounting stays split**: tiktoken for everything deterministic; provider `usage`
@@ -114,13 +116,20 @@ Five topics were resolved; the load-bearing outcomes:
 ### Risks carried into Phase 1
 
 - **`ReportV2.Tokenizer` is a report-level singleton.** The moment provider-usage figures
-  enter the same envelope, that field silently claims the whole report was tiktoken-counted.
-  It must be scoped to the deterministic sections, not merely supplemented.
+  enter the same envelope, a reader could take that field to describe them too. Resolve it
+  **additively** — leave the existing field's meaning intact and give every new block its own
+  `accounting_source` — rather than by narrowing the existing field, which would itself require
+  a version bump. See contracts/report-v2-additions.md.
 - **Provenance is section-level, not per-figure.** FR-013 requires measured and estimated
   figures to coexist inside one block, so new row types need their own provenance field.
 - **tiktoken fetches its vocabulary over the network** unless `TIKTOKEN_CACHE_DIR` is set;
-  nothing in the repo or CI sets it. SC-004 (an outsider reproduces the deterministic figures)
-  is not currently achievable on a restricted network.
+  nothing in the repo or CI sets it. Setting the variable only *names* a cache — a first run
+  still downloads — so an offline reproduction additionally needs the cache **populated**
+  (warmed once with network, or restored/vendored in CI). Without that, SC-004 is not
+  achievable on a restricted network.
+- **The report carries a wall-clock `generated_at` stamp.** SC-002 asks for byte-identical
+  replay reports; two runs will differ on that field alone unless replay pins or excludes it.
+  Decide which before writing the determinism test.
 - **`RetryRateForArm` returns 0.0 for unknown arms**, indistinguishable from a measured 0.0.
   Mixing a measured rate with a defaulted one under a single section badge is a live hazard
   for FR-013.
@@ -179,11 +188,12 @@ because they need `Tokenizer`, `ProxyToolsForMode` and the `EncodingArm` interfa
 `bench` cannot import `bench/arms` (a real cycle — arms import `bench`); they cross that
 boundary with the same structural interface `RunArms` already uses.
 
-**Dependency rule for `bench/replaycorpus/`**: the existing `bench/corpusio/` imports `bench`,
-so if `replaycorpus` mirrors that arrangement then `bench/replay.go` **cannot** import it
-without creating a second cycle. Either define the replay domain types wholly inside
-`replaycorpus` with no import of `bench`, or keep replay orchestration in `cmd/bench`. This
-must be settled before any file is created.
+**Dependency rule for `bench/replaycorpus/` — decided, not deferred**: the existing
+`bench/corpusio/` imports `bench`, so a `replaycorpus` that mirrored it could not be imported
+by `bench/replay.go` without a second cycle. **Decision: `bench/replaycorpus` imports nothing
+from `bench`.** It defines its own replay domain types, and `bench/replay.go` imports it. The
+alternative (orchestrating from `cmd/bench`) is rejected because it would put measurement
+logic outside the package that holds every other measurement.
 
 **`modematrix.go` composes, it does not reimplement.** The pieces it needs already exist —
 mode constants and proxy catalogs (`bench/tokens.go`), full rendering
