@@ -910,4 +910,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
 | [101-tpa-db](./specs/101-tpa-db/) | — | — |
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
-| [103-token-bench](./specs/103-token-bench/) | `drafted` | 0/59 (0%) |
+| [103-token-bench](./specs/103-token-bench/) | `drafted` | 0/64 (0%) |
