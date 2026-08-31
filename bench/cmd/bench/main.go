@@ -28,6 +28,18 @@
 // full-menu count (joined to live tools by id — GET /api/v1/tools can serve
 // stub schemas), and -expected-tools surfaces corpus drift (FR-021).
 //
+// Replay mode (Spec 103 US1) recomputes cost over a REAL recorded workload:
+// an activity export plus a MANDATORY fleet input, deterministic, no model
+// spend:
+//
+//	go run ./bench/cmd/bench -replay /path/outside/the/repo/activity.jsonl \
+//	  -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json -out bench/results
+//
+// The fleet input is not optional. A menu is a property of the tool
+// definitions and the activity export carries no fleet snapshot, so a
+// recording on its own computes nothing — `-replay` without `-corpus-v2` or
+// `-livemcptool` is an error, not a degraded run.
+//
 // A LAP lint artifact (`uvx --from lap-score==0.8.0 lap lint --json`) merges
 // into either report via -lap-json. Reports land in bench/results/
 // (gitignored — reports are never committed, per the Spec 065 CN-003 rule).
@@ -47,6 +59,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/bench"
 	"github.com/smart-mcp-proxy/mcpproxy-go/bench/arms"
 	"github.com/smart-mcp-proxy/mcpproxy-go/bench/corpusio"
+	"github.com/smart-mcp-proxy/mcpproxy-go/bench/replaycorpus"
 )
 
 // toonResultsArmName is the pseudo-arm selectable via -arms: fixture-driven
@@ -73,7 +86,24 @@ func main() {
 	lapJSON := flag.String("lap-json", "", "path to a LAP lint artifact (lap.json) to merge as the independent verdict")
 	resultFixtures := flag.String("result-fixtures", "specs/083-discovery-profiler/datasets/result_fixtures_v1.json", "tool-result fixture set for the toon_results arm")
 	expectedTools := flag.Int("expected-tools", 0, "live mode: expected upstream tool count (from the frozen corpus); a differing live catalog is surfaced as a corpus-drift warning (FR-021)")
+
+	// Spec 103 US1 replay flags (T028). The fleet input is supplied through
+	// the EXISTING corpus flags (-corpus-v2 / -livemcptool) rather than a new
+	// one: a replay fleet is a tool corpus, and a second way to name one would
+	// be a second loader to keep honest.
+	replayPath := flag.String("replay", "", "path to an activity JSONL export (mcpproxy activity export --format json) to recompute cost over; REQUIRES a fleet input (-corpus-v2 or -livemcptool) — a recording alone computes nothing. The file must live OUTSIDE this repository and is never committed")
+	replayBodies := flag.Bool("replay-bodies-on-unmasked", false, "replay: read recorded request/response bodies. OFF by default. The activity export path does NOT mask, so this reads raw unmasked user traffic; bodies are tokenized inside the loader and only counts leave it")
 	flag.Parse()
+
+	// -live and -replay are different measurements over different inputs, and
+	// -live is checked first. Accepting both would silently run live mode and
+	// discard -replay with no output and no warning — a benchmark that quietly
+	// measures something other than what was asked for is worse than one that
+	// refuses, so refuse.
+	if *live && *replayPath != "" {
+		fmt.Fprintln(os.Stderr, "error: -live and -replay are mutually exclusive; -live measures a running proxy, -replay recomputes cost over a recording. Pick one.")
+		os.Exit(2)
+	}
 
 	if *live {
 		// In live mode -corpus-v2 is the schema SOURCE for the naive
@@ -87,6 +117,21 @@ func main() {
 			corpusV2Path:  *corpusV2Path,
 			expectedTools: *expectedTools,
 			flipGates:     *flipGates,
+		})
+		return
+	}
+	// Replay is checked BEFORE the profiler branch: it consumes -corpus-v2 as
+	// its fleet input, so the profiler check would otherwise swallow the run.
+	// It is a top-level branch rather than an OfflineSection because replay
+	// crosses the mode matrix — it is not one more corpus.
+	if *replayPath != "" {
+		runReplay(replayCLIOptions{
+			recording:       *replayPath,
+			bodiesOn:        *replayBodies,
+			encoding:        *encoding,
+			outDir:          *outDir,
+			corpusV2Path:    *corpusV2Path,
+			livemcptoolPath: *livemcptoolPath,
 		})
 		return
 	}
@@ -418,6 +463,138 @@ func printArmRows(r *bench.ReportV2) {
 		}
 		fmt.Fprintf(os.Stdout, "  %-14s %-28s %8d tokens  %6.1f%% savings  (%d skipped tools)%s\n",
 			row.Arm, row.CorpusID, row.TotalTokens, row.SavingsVsBaselinePct, row.SkippedTools, quality)
+	}
+}
+
+// replayCLIOptions carries the Spec 103 replay flag values.
+type replayCLIOptions struct {
+	recording       string
+	bodiesOn        bool
+	encoding        string
+	outDir          string
+	corpusV2Path    string
+	livemcptoolPath string
+}
+
+// runReplay is the Spec 103 US1 entry point: recompute per-cell menu cost and
+// the direct-cell cross-mode delta over a real recorded workload.
+//
+// The fleet input is loaded here, but the RULE that one is required lives in
+// bench.RunReplay, which returns ErrReplayFleetRequired for a nil fleet. That
+// keeps one statement of the rule rather than two that can drift: the CLI
+// merely reports it.
+func runReplay(opts replayCLIOptions) {
+	tk, err := bench.NewTokenizer(opts.encoding)
+	if err != nil {
+		log.Fatalf("bench: %v", err)
+	}
+
+	fleet, fleetID := loadReplayFleet(opts.corpusV2Path, opts.livemcptoolPath)
+
+	// Resolve exactly the arms the matrix needs to price a menu. A missing arm
+	// is fatal rather than a skipped row: an absent cell reads as "not
+	// applicable" when the truth would be "we could not measure it".
+	armsByName := make(map[string]bench.EncodingArm)
+	for _, name := range bench.ReplayArmNames() {
+		arm, rerr := arms.Resolve(name)
+		if rerr != nil {
+			log.Fatalf("bench: replay needs the %q arm to price a mode cell's menu: %v", name, rerr)
+		}
+		armsByName[name] = arm
+	}
+
+	bodies := replaycorpus.BodiesOff
+	if opts.bodiesOn {
+		bodies = replaycorpus.BodiesOnUnmasked
+	}
+
+	block, err := bench.RunReplay(tk, bench.ReplayOptions{
+		RecordingPath: opts.recording,
+		Fleet:         fleet,
+		FleetID:       fleetID,
+		Bodies:        bodies,
+		Encoding:      opts.encoding,
+		Arms:          armsByName,
+		Warnf:         func(format string, args ...any) { fmt.Fprintf(os.Stderr, "bench: "+format+"\n", args...) },
+	})
+	if err != nil {
+		log.Fatalf("bench: %v", err)
+	}
+
+	report := bench.ReplayReport(tk, block)
+	if err := report.ValidateAdditiveBlocks(); err != nil {
+		log.Fatalf("bench: %v", err)
+	}
+	printReplay(block)
+
+	jsonPath, htmlPath, err := report.WriteReports(opts.outDir)
+	if err != nil {
+		log.Fatalf("bench: %v", err)
+	}
+	fmt.Fprintf(os.Stdout, "wrote %s and %s\n", jsonPath, htmlPath)
+	fmt.Fprintf(os.Stderr, "bench: the replay input is raw recorded traffic — delete %s when this run is finished\n", opts.recording)
+}
+
+// loadReplayFleet resolves the fleet input from the existing corpus flags.
+//
+// Neither flag returns a nil fleet on purpose: the refusal belongs to
+// bench.RunReplay, whose error explains WHY a recording alone computes
+// nothing. Supplying both is refused here, because silently preferring one
+// would make the reported fleet shape a coin toss.
+func loadReplayFleet(corpusV2Path, livemcptoolPath string) (*bench.Corpus, string) {
+	if corpusV2Path != "" && livemcptoolPath != "" {
+		log.Fatalf("bench: replay takes ONE fleet input; -corpus-v2 and -livemcptool were both given, and every figure is quoted for exactly one fleet shape")
+	}
+	switch {
+	case corpusV2Path != "":
+		corpus, err := bench.LoadCorpusV2(corpusV2Path)
+		if err != nil {
+			log.Fatalf("bench: %v", err)
+		}
+		return corpus, corpus.Version
+	case livemcptoolPath != "":
+		snapshotPath := livemcptoolPath
+		if st, err := os.Stat(snapshotPath); err == nil && st.IsDir() {
+			snapshotPath = filepath.Join(snapshotPath, "tools.json")
+		}
+		corpus, _, _, err := corpusio.LoadLiveMCPTool(snapshotPath)
+		if err != nil {
+			log.Fatalf("bench: %v", err)
+		}
+		return corpus, corpus.Version
+	default:
+		return nil, ""
+	}
+}
+
+// printReplay summarizes the block on stdout, EXCLUSIONS FIRST.
+//
+// The order is the point (FR-003, SC-008): a reader meets what did not count
+// before they meet the headline, so a number computed over a third of the
+// supplied sessions cannot be read as a number over all of them. The
+// counterfactual label leads, for the same reason.
+func printReplay(b *bench.ReplayBlock) {
+	fmt.Fprintf(os.Stdout, "mcpproxy replay (%s over the %s fleet, %d tools)\n",
+		b.AccountingSource.Identity, b.FleetShape.ID, b.FleetShape.ToolCount)
+	fmt.Fprintf(os.Stdout, "  %s\n", b.Counterfactual)
+	fmt.Fprintf(os.Stdout, "  sessions: %d supplied, %d used, bodies %s\n",
+		b.SessionsSupplied, b.SessionsUsed, map[bool]string{true: "ON (raw, unmasked)", false: "off"}[b.BodiesIncluded])
+	if len(b.Exclusions) == 0 {
+		fmt.Fprintf(os.Stdout, "  exclusions: none\n")
+	}
+	for _, ex := range b.Exclusions {
+		fmt.Fprintf(os.Stdout, "  excluded/flagged %-14s %d\n", ex.Reason, ex.Sessions)
+	}
+	for _, cell := range b.Cells {
+		fmt.Fprintf(os.Stdout, "  %-18s menu %7d tokens  %d recorded calls  [%s]\n",
+			cell.CellID, cell.MenuTokens, cell.Calls, cell.Provenance)
+		if cell.AbsoluteWorkloadWithheld {
+			fmt.Fprintf(os.Stdout, "    absolute complete-workload cost WITHHELD: %s\n", cell.WithheldReason)
+		}
+	}
+	if d := b.DirectDelta; d != nil {
+		fmt.Fprintf(os.Stdout, "  delta %s -> %s: %d tokens (%.1f%%) [%s]\n",
+			d.FromCellID, d.ToCellID, d.DeltaTokens, d.DeltaPct, d.Provenance)
 	}
 }
 

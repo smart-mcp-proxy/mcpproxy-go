@@ -329,6 +329,39 @@ type ReplayExclusion struct {
 // workload. Bodies-off it carries a MEASURED menu cost and, at best, an
 // ESTIMATED response cost derived from pre-truncation byte LENGTHS — which is
 // exactly the mix that per-row provenance exists to express.
+// ReplayLoaderReason is one reason code and its count, as the loader recorded
+// it. The reason strings are the loader's own vocabulary rather than the
+// report's closed enum: they name causes the report-level enum has no term for
+// (a truncated internal response that would overstate, a byte-gap record), and
+// flattening them into the closed set would destroy the very distinction that
+// makes them actionable.
+type ReplayLoaderReason struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+
+// ReplayLoaderAccounting is the loader-level companion to ReplayBlock.Exclusions.
+//
+// The three buckets are deliberately separate rather than one total. A dropped
+// record never entered a unit of work; a withheld cost was suppressed on a
+// record that DID contribute; a flagged record contributed and was counted but
+// carries a usability caveat. "12 exclusions" spanning all three is
+// uninterpretable, and an uninterpretable count satisfies the letter of
+// "everything is counted" while destroying its purpose.
+type ReplayLoaderAccounting struct {
+	RecordsDropped int                  `json:"records_dropped"`
+	Dropped        []ReplayLoaderReason `json:"dropped,omitempty"`
+	CostsWithheld  int                  `json:"costs_withheld"`
+	Withheld       []ReplayLoaderReason `json:"withheld,omitempty"`
+	RecordsFlagged int                  `json:"records_flagged"`
+	Flagged        []ReplayLoaderReason `json:"flagged,omitempty"`
+	// OrphanedSubCalls counts sub-calls whose parent fell outside the exported
+	// window. They ARE counted in the workload, at top level; what was lost is
+	// their attribution to a parent. Reported because a total that hides it
+	// cannot be audited.
+	OrphanedSubCalls int `json:"orphaned_sub_calls,omitempty"`
+}
+
 type ReplayCellCost struct {
 	CellID string `json:"cell_id"`
 	// Provenance is measured/computed/estimated for THIS row.
@@ -383,7 +416,14 @@ type ReplayBlock struct {
 	SessionsSupplied int               `json:"sessions_supplied"`
 	SessionsUsed     int               `json:"sessions_used"`
 	Exclusions       []ReplayExclusion `json:"exclusions,omitempty"`
-	Cells            []ReplayCellCost  `json:"cells,omitempty"`
+	// LoaderAccounting is the loader's own exclusion detail: what was dropped
+	// before joining a unit of work, what had its cost withheld INSIDE an
+	// admitted unit, what was admitted but flagged, and how many sub-calls
+	// lost their parent. The session rows above cannot express any of that,
+	// and a withheld cost that collapses a response total with no row saying
+	// why is precisely the silent accounting SC-008 forbids.
+	LoaderAccounting *ReplayLoaderAccounting `json:"loader_accounting,omitempty"`
+	Cells            []ReplayCellCost        `json:"cells,omitempty"`
 	// DirectDelta is absent when only one direct cell was measured.
 	DirectDelta *ReplayDirectDelta `json:"direct_delta,omitempty"`
 	// SensitiveFlagBestEffort restates, in the report itself, that the
