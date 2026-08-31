@@ -352,7 +352,9 @@ graph LR
 <details>
 <summary>⚪ Token-efficiency benchmark: measured savings, published results — Todo · P1</summary>
 
-> Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix.
+> Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix. Spec 103 landed 2026-08-31 (#1137 spec+plan, #1139 tasks) after 13 cross-model review rounds; three of its findings changed the design rather than the wording: a recording carries no prompt/conversation/completion oracle so replay CANNOT show agent behaviour (US1 deterministic cost vs US2 live loop are now separate stories); replay needs a FLEET INPUT because the export has no fleet snapshot; and bodies-off yields menu costs plus one cross-mode delta, never an absolute workload cost. The matrix is 5 distinct behaviours, not a 3x2x2 product.
+
+Spec: [103-token-bench](./specs/103-token-bench/)
 
 ```mermaid
 graph LR
@@ -773,7 +775,7 @@ graph LR
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
-| Token-efficiency benchmark: measured savings, published results | Todo | P1 | — |  |  |
+| Token-efficiency benchmark: measured savings, published results | Todo | P1 | 0/64 (0%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |

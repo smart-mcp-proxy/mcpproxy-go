@@ -18,7 +18,7 @@ Only halt and ask a human IF:
 1. You need destructive data operations or to delete core proxy logic that cannot be mocked.
 2. A required environment variable is missing from `.env` and cannot be mocked for the task's scope.
 3. You are stuck in an error loop for the same `go test` failing after 5 consecutive attempts.
-4. **Cross-model (Codex) review round cap — per PR:** when a PR is gated by a cross-model Codex review, run at most **5 fix→re-review rounds on that PR**. If Codex has not returned a clean verdict after the 5th round, STOP and ask the human how to proceed (do not auto-run round 6). The counter is per-PR and resets for each new PR. (Verify each Codex finding is genuine before fixing — Codex can false-positive; a round only counts when you push a fix and re-review.)
+4. **Cross-model review round cap — per PR:** when a PR is gated by a cross-model review, run at most **10 fix→re-review rounds on that PR**. If the reviewer has not returned a clean verdict after the 10th round, STOP and ask the human how to proceed (do not auto-run round 11). The counter is per-PR and resets for each new PR. (Verify each finding is genuine before fixing — reviewers do false-positive; a round only counts when you push a fix and re-review.) **The reviewer is the `opencode` CLI (`--model github-copilot/gpt-5.6-sol`), not Codex** — maintainer directive 2026-08-14. The cap was raised from 5 to 10 on 2026-08-31 because round 5 on #1136 caught a real defect the first four missed.
 
 ## Project Overview
 
