@@ -229,8 +229,9 @@ Artifacts produced: [data-model.md](./data-model.md), [contracts/](./contracts/)
 [quickstart.md](./quickstart.md).
 
 **Post-design constitution re-check: PASS.** The design touches the request path in exactly one
-place — passing an already-computed boolean into an existing activity emit — and otherwise adds
-no production code. It introduces no new abstraction beyond one loader package that mirrors an
+place — passing an already-computed boolean into an existing activity emit — and touches no
+other request-path code. Its remaining production footprint is the additive export DTO fields
+and their projection, both off the request path. It introduces no new abstraction beyond one loader package that mirrors an
 existing sibling, and no module dependency. Principle IV is satisfied by the bodies-off default
 rather than by a masking layer, which is the simpler of the two available designs.
 
