@@ -223,6 +223,15 @@ func TestUsabilityFlagsAreComputedOnceAtLoad(t *testing.T) {
 	// re-classify (data-model.md, "computed once at load").
 	c := loadString(t, record(t, map[string]any{"response_truncated": true, "response_bytes": 5}), testOptions(t.TempDir()))
 	before := c.Sessions[0].Usability
+
+	// Assert the EXPECTED initial state before testing stability. Without this
+	// the test is vacuous: delete load-time classification entirely and
+	// before == after == Flags{}, so "nothing changed" still passes and the
+	// test reports green on a loader that classifies nothing at all.
+	if !before.Truncated {
+		t.Fatalf("load-time classification must already have set Truncated, got %+v", before)
+	}
+
 	_ = c.Sessions[0].AllCalls()
 	if c.Sessions[0].Usability != before {
 		t.Error("usability flags changed after a downstream read")
