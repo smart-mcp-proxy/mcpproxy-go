@@ -42,11 +42,21 @@ so they must fall to exclusion accounting rather than silently contributing zero
 - **Code-execution sub-calls record both byte counts as zero**
   (`internal/server/mcp_code_execution.go:811-818`). A truncated sub-call therefore cannot use
   the byte-length estimate either, and must be counted as excluded.
-- **A truncated `retrieve_tools` record does not tell you what the agent PAID.** The activity
-  log stores the FULL pre-truncation response, while the agent consumed the truncated text. So
-  even bodies-on recovers the wrong quantity for such calls: they must be excluded, or the
-  truncation re-applied before counting. Silently tokenizing the stored full text would
-  OVERSTATE the agent's cost.
+- **A truncated `retrieve_tools` record does not tell you what the agent PAID, and today you
+  cannot even identify one.** The activity log stores the FULL pre-truncation response while
+  the agent consumed truncated text, so tokenizing the stored text OVERSTATES the agent's cost.
+  Worse, the truncation is not recorded: `wasTruncated` is computed in the handler
+  (`internal/server/mcp.go:2019-2035`) and only logged — `emitActivityInternalToolCall`
+  (`:810`) has no truncation parameter, so the flag never reaches the activity record.
+
+  **This makes a SECOND backend change necessary** for the exclusion rule to be implementable:
+  propagate the truncation flag onto internal tool-call activity. Without it the loader cannot
+  distinguish a truncated `retrieve_tools` record from a complete one and would silently
+  overstate.
+
+  **Fallback if that change is not wanted**: exclude ALL internal `retrieve_tools` records from
+  response-cost accounting and report the exclusion count. Blunt, but honest — and it must be
+  an explicit decision, not a silent default.
 
 ## Privacy contract
 

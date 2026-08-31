@@ -104,13 +104,17 @@ Five topics were resolved; the load-bearing outcomes:
 2. **The matrix is 5 distinct behaviours**; the other 7 combinations of the 3-axis product
    are configurable but redundant and collapse onto them. The routing-mode axis is selected by
    endpoint URL with no restart; the serialization axes still need config.
-3. **One backend change is worth making**: `request_bytes` / `response_bytes` exist on the
-   storage record, measured pre-truncation, but are absent from the export contract. Adding
-   them lets a truncated record carry an explicitly-estimated response cost instead of being
-   dropped. They are byte lengths, **not** token counts, so they do not make response cost
-   measurable. Internal `retrieve_tools` emission carries no byte counts either — but its FULL
-   response IS written to the activity log, so its cost is recoverable with bodies on and
-   unavailable only in the bodies-off configuration.
+3. **Two backend changes are needed, both small.**
+   (a) `request_bytes` / `response_bytes` exist on the storage record, measured pre-truncation,
+   but are absent from the export contract. Adding them lets a truncated record carry an
+   explicitly-estimated response cost instead of being dropped. They are byte lengths, **not**
+   token counts, so they do not make response cost measurable.
+   (b) **Truncation is not recorded for internal tool calls.** `wasTruncated` is computed in the
+   `retrieve_tools` handler and only logged; `emitActivityInternalToolCall` has no truncation
+   parameter, so the flag never reaches the activity record. Without propagating it the
+   exclusion rule for truncated `retrieve_tools` records is unimplementable and the loader would
+   silently overstate agent cost. The fallback — excluding every internal `retrieve_tools`
+   record from response-cost accounting — must be an explicit decision, not a silent default.
 4. **MCPMark is adopted**, SHA-pinned, with one `elif` in its single MCP factory. Its per-task
    `meta.json` feeds FR-010/011/012/018 directly.
 5. **Token accounting stays split**: tiktoken for everything deterministic; provider `usage`
@@ -178,6 +182,8 @@ bench/
 
 internal/contracts/activity.go    # EXTEND — add request_bytes / response_bytes
 internal/httpapi/activity.go      # EXTEND — copy them in the export projection
+internal/server/mcp.go            # EXTEND — propagate wasTruncated to internal tool-call
+                                  #          activity (or accept blanket exclusion)
 
 specs/083-discovery-profiler/contracts/report-v2.schema.json   # EXTEND — declare new blocks
 .github/workflows/bench.yml       # EXTEND — TIKTOKEN_CACHE_DIR set AND cache populated
