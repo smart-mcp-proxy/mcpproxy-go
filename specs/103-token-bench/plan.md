@@ -62,7 +62,7 @@ and must run offline; no recorded session content may reach a report or a third 
 
 | Principle | Assessment |
 |---|---|
-| **I. Performance at Scale** | N/A to production paths. The harness adds no code to a request path. The one production-touching change (Phase 0 item 3 below) adds two integers to an export DTO. |
+| **I. Performance at Scale** | Two production-touching changes, both trivial. (a) Two integers added to an export DTO — off the request path. (b) Propagating an already-computed `wasTruncated` boolean into the internal tool-call activity emit, which IS on the `retrieve_tools` request path: it passes a value the handler already has, adds no computation and no I/O. If even that is unwanted, the blanket-exclusion fallback removes it entirely at the cost of coverage. |
 | **II. Actor-Based Concurrency** | No new concurrency in production code. The harness is a batch tool. |
 | **III. Configuration-Driven** | PASS: the matrix is crossed by endpoint URL plus existing config fields, adding no benchmark-only configuration to the product. |
 | **IV. Security by Default** | **The binding gate for this feature.** Replay inputs are raw user traffic; the export path deliberately does not mask. Design must default to bodies-off and must never transmit recorded content off-box. See Security Design below. |
@@ -213,19 +213,26 @@ mode constants and proxy catalogs (`bench/tokens.go`), full rendering
 rendering (`bench/arms/directdeferred.go`) and MCP transport (`bench/mcpcaller.go`). It must
 reach them through passed structural interfaces, never by re-deriving a serialization.
 
-The only production-code change is two additive DTO fields plus their projection — deliberately
-minimal, and justified because without them a truncated record must be dropped rather than
-estimated.
+The production-code changes are two, both deliberately minimal: the additive DTO fields plus
+their export projection, and propagation of the already-computed truncation flag onto internal
+tool-call activity. The first is justified because without it a truncated record must be
+dropped rather than estimated; the second because without it a truncated `retrieve_tools`
+record cannot be identified at all, and the loader would silently overstate agent cost.
+
+If the second is rejected, the blanket-exclusion fallback stands in — at the cost of excluding
+every internal `retrieve_tools` record from response-cost accounting. That trade must be made
+explicitly and reported, not defaulted into.
 
 ## Phase 1: Design & Contracts
 
 Artifacts produced: [data-model.md](./data-model.md), [contracts/](./contracts/),
 [quickstart.md](./quickstart.md).
 
-**Post-design constitution re-check: PASS.** The design adds no production request-path code,
-introduces no new abstraction beyond one loader package that mirrors an existing sibling, and
-adds no module dependency. Principle IV is satisfied by the bodies-off default rather than by
-a masking layer, which is the simpler of the two available designs.
+**Post-design constitution re-check: PASS.** The design touches the request path in exactly one
+place — passing an already-computed boolean into an existing activity emit — and otherwise adds
+no production code. It introduces no new abstraction beyond one loader package that mirrors an
+existing sibling, and no module dependency. Principle IV is satisfied by the bodies-off default
+rather than by a masking layer, which is the simpler of the two available designs.
 
 ## Open decisions for the operator (not blockers)
 
