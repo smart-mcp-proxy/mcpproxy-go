@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 )
 
 // Issue #1146: the activity records for the two MUTATING built-in tools
@@ -52,7 +54,16 @@ const (
 // raw MCP request. Returns nil for an empty request so callers keep emitting
 // `null` arguments exactly as before.
 func activityArgsFromRequest(request mcp.CallToolRequest) map[string]interface{} {
-	raw := request.GetArguments()
+	// Drop MCPProxy's own `_auth_*` plumbing BEFORE anything else. Neither of
+	// the two handlers this file serves calls injectAuthMetadata, so a key
+	// under that prefix here can only have been sent by the CALLER — and
+	// internal/runtime copies `_auth_user_id` / `_auth_user_email` straight
+	// onto ActivityRecord.UserID/UserEmail. Capturing the whole request would
+	// therefore hand an agent a forged identity stamp on the audit row for a
+	// privileged mutation. The old {operation,name} allowlist dropped these by
+	// accident; dropping them on purpose is what keeps "record everything"
+	// safe.
+	raw := security.StripInternalArgs(request.GetArguments())
 	if len(raw) == 0 {
 		return nil
 	}
@@ -75,11 +86,63 @@ func activityArgsFromRequest(request mcp.CallToolRequest) map[string]interface{}
 	return args
 }
 
+// activityAttributedOps are the operations of the two management built-ins that
+// are handed the request — the only ones that can have acted on the caller's
+// `name`. An operation absent from this set (an inventory read, an unknown
+// string, a request that never named an operation at all) dispatched nothing
+// against `name`, so its activity row stays unattributed rather than letting an
+// agent stamp activity onto a server it never touched.
+//
+// The set is an ALLOWLIST so an unknown operation defaults to safe, and
+// TestActivityAttributedOps_MatchTheOperationSwitches pins it to the two switch
+// statements in BOTH directions: a new mutating operation that forgets to
+// register here fails the test (the issue-#1146 "-" Server column would be
+// back), and so does an inventory operation that wrongly appears.
+var activityAttributedOps = map[string]bool{
+	// upstream_servers
+	operationAdd:        true,
+	operationRemove:     true,
+	"update":            true,
+	"patch":             true,
+	"tail_log":          true,
+	"enable":            true,
+	"disable":           true,
+	"restart":           true,
+	"refresh":           true,
+	"add_from_registry": true,
+
+	// quarantine_security
+	"inspect_quarantined": true,
+	"quarantine_server":   true,
+	"quarantine":          true,
+	"inspect_tools":       true,
+	"scan_server":         true,
+	"get_scan_report":     true,
+	"approve_tool":        true,
+	"approve_all_tools":   true,
+	"block_tool":          true,
+	"block_all_tools":     true,
+	"enable_tool":         true,
+	"disable_tool":        true,
+	"inspect_prompts":     true,
+	"approve_prompt":      true,
+	"approve_all_prompts": true,
+}
+
 // activityTargetServer resolves the server a mutation targets, so the activity
 // row renders a Server column and `activity list --server <name>` matches it.
 // runtime.EmitActivityInternalToolCall omits target_server when empty, which is
 // why every site used to render "-" (issue #1146).
-func activityTargetServer(request mcp.CallToolRequest) string {
+//
+// `name` is agent-supplied and never validated here, so it is only trusted for
+// an operation that actually acts on it: an unresolved operation and the
+// inventory reads stay unattributed. Without that gate an agent could attribute
+// its management chatter — and, through /api/v1/activity/summary, per-server
+// totals — to any server it liked by calling `list` with a `name`.
+func activityTargetServer(request mcp.CallToolRequest, operation string) string {
+	if !activityAttributedOps[operation] {
+		return ""
+	}
 	return request.GetString("name", "")
 }
 
@@ -180,6 +243,9 @@ func redactActivityValue(key string, v interface{}) interface{} {
 		}
 		return out
 	case []interface{}:
+		if isActivityArgvKey(key) {
+			return redactActivityArgv(typed)
+		}
 		out := make([]interface{}, len(typed))
 		for i, val := range typed {
 			out[i] = redactActivityValue(key, val)
@@ -210,6 +276,99 @@ func redactActivityString(key, s string) string {
 	default:
 		return capActivityValue(oauth.RedactEnvValues(map[string]string{key: s})[key])
 	}
+}
+
+// isActivityArgvKey reports whether a slice is a command-line argument vector.
+// Covers the `args` config field (config.MergeServerConfig's diff) and the
+// `args_json` tool parameter (the suffix is trimmed before the walk).
+func isActivityArgvKey(key string) bool {
+	return strings.EqualFold(key, "args")
+}
+
+// redactActivityArgv masks a command-line argument vector.
+//
+// Issue #1146, review round: argv was the one leak the key-driven walker could
+// not see. An argv token has no enclosing key — the slice branch recursed with
+// the PARENT key ("args"), so every element reached redactActivityString("args",
+// elem) and fell through unmasked. Passing a credential as an argv token
+// (`uvx mcp-foo --api-key sk-live-…`) is one of the commonest MCP server config
+// shapes, so the record persisted in BBolt, the SSE payload and
+// `mcpproxy activity list` all carried it in the clear.
+//
+// Two rules, because argv secrets announce themselves in two ways:
+//
+//   - The FLAG names the credential — `--api-key VALUE` and `--api-key=VALUE`.
+//     Delegated to redactActivityString with the de-dashed flag as the key, so
+//     the same single source of truth the env map uses decides, and the flag
+//     itself stays readable (it is the audit signal: WHICH credential moved).
+//   - The VALUE is recognisably a credential on its own — an AWS key, a GitHub
+//     token, a PEM block, a high-entropy blob — wherever it sits. That is what
+//     internal/security's detector is for, so it is reused rather than
+//     re-invented as another regex here.
+//
+// Everything else round-trips verbatim: package names, subcommands, paths and
+// ports are what make the record useful.
+func redactActivityArgv(argv []interface{}) []interface{} {
+	out := make([]interface{}, len(argv))
+	maskNext := false
+
+	for i, item := range argv {
+		s, ok := item.(string)
+		if !ok {
+			// A non-string element carries no flag semantics; walk it with no
+			// enclosing key and reset the pairing.
+			out[i] = redactActivityValue("", item)
+			maskNext = false
+			continue
+		}
+
+		if maskNext {
+			out[i] = capActivityValue(oauth.MaskValue(s))
+			maskNext = false
+			continue
+		}
+
+		if flag, value, inline := strings.Cut(s, "="); inline && isArgvFlag(flag) {
+			out[i] = capActivityValue(flag + "=" + redactActivityString(argvFlagKey(flag), value))
+			continue
+		}
+
+		out[i] = capActivityValue(maskDetectedSecrets(s))
+		maskNext = isArgvFlag(s) && oauth.IsSensitiveKeyName(argvFlagKey(s))
+	}
+
+	return out
+}
+
+// isArgvFlag reports whether a token is an option rather than a positional
+// argument. A bare "-" or "--" is a convention, not a flag.
+func isArgvFlag(token string) bool {
+	return strings.HasPrefix(token, "-") && strings.Trim(token, "-") != ""
+}
+
+// argvFlagKey turns `--api-key` into the key name the env/header redactors
+// match on.
+func argvFlagKey(flag string) string {
+	return strings.TrimLeft(flag, "-")
+}
+
+// activitySecretMasker is the value-shaped secret masker used for argv tokens,
+// which have no key to be judged by.
+//
+// It is built from the DEFAULT detection config rather than the running one on
+// purpose: masking here is a property of the audit STORE, and an operator who
+// turned sensitive-data detection off for the call path must not thereby cause
+// credentials to be written to that store in the clear. (Detector.MaskText
+// ignores the `enabled` flag for the same reason.)
+var activitySecretMasker = sync.OnceValue(func() *security.Detector {
+	return security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
+})
+
+// maskDetectedSecrets masks any credential the detector recognises inside one
+// argv token, leaving text it does not recognise untouched.
+func maskDetectedSecrets(s string) string {
+	masked, _ := activitySecretMasker().MaskText(s)
+	return masked
 }
 
 // isActivityHeadersKey reports whether a map should be masked with HTTP-header

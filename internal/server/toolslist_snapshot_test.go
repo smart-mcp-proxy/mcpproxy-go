@@ -185,10 +185,15 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //   - describe_tool        — spec 099 (FR-014), retrieve_tools surfaces only.
 //   - quarantine_security  — scan_server / get_scan_report operations, on every
 //     surface that registers the tool (all three).
+//   - upstream_servers     — issue #1146: update/patch now mask secret-bearing
+//     values in the `changes` diff they return, which an agent reading the diff
+//     back can observe, so the description says so. DESCRIPTION ONLY — no
+//     parameter moves, which assertUpstreamServersDelta in
+//     mcp_menu_surface_test.go pins field by field.
 var toolsListAllowedDelta = map[string][]string{
-	"default_server":      {"describe_tool", "quarantine_security"},
-	"retrieve_tools_mode": {"describe_tool", "quarantine_security"},
-	"code_execution_mode": {"quarantine_security"},
+	"default_server":      {"describe_tool", "quarantine_security", "upstream_servers"},
+	"retrieve_tools_mode": {"describe_tool", "quarantine_security", "upstream_servers"},
+	"code_execution_mode": {"quarantine_security", "upstream_servers"},
 }
 
 // TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens

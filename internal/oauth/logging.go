@@ -191,6 +191,16 @@ var sensitiveEnvMarkers = []string{
 	"DSN", "CONNECTION_STRING", "CONN_STR",
 }
 
+// IsSensitiveKeyName reports whether a NAME looks like it holds a secret, using
+// the same case-insensitive marker match RedactEnvValues applies to env-var
+// keys. Exported for callers that have to decide masking from a name they hold
+// separately from the value — e.g. a command-line flag naming the argv token
+// that follows it (issue #1146), where there is no map to hand to
+// RedactEnvValues.
+func IsSensitiveKeyName(name string) bool {
+	return isSensitiveEnvKey(name)
+}
+
 // isSensitiveEnvKey reports whether an env var name looks like it holds a
 // secret, based on a case-insensitive substring match against
 // sensitiveEnvMarkers.

@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -217,7 +218,8 @@ func TestActivityTargetServer_ResolvedFromNameParam(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			req := mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: tc.args}}
-			assert.Equal(t, tc.want, activityTargetServer(req))
+			operation, _ := tc.args["operation"].(string)
+			assert.Equal(t, tc.want, activityTargetServer(req, operation))
 		})
 	}
 }
@@ -387,4 +389,325 @@ func TestPatchResponse_DoesNotEchoSecrets(t *testing.T) {
 	modified, ok := changes["modified"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Contains(t, modified, "env", "the operator must still see WHICH field changed")
+}
+
+// (5) MINOR/contract — masking the `changes` diff is agent-observable: an agent
+// that reads modified[*].from/.to back to confirm what it wrote must still get
+// the TRUTH for anything that is not a secret. Only secret-bearing values may
+// mask. (That the description now says so is pinned by
+// assertUpstreamServersDelta in mcp_menu_surface_test.go.)
+func TestPatchResponse_NonSecretValuesRoundTripTruthfully(t *testing.T) {
+	proxy, _ := newStoredScriptProxy(t)
+
+	seed := &config.ServerConfig{
+		Name:     "plain",
+		URL:      "https://old.test/mcp",
+		Protocol: "streamable-http",
+		Enabled:  false,
+	}
+	_, err := proxy.storage.AddUpstream(seed)
+	require.NoError(t, err)
+
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "upstream_servers",
+		Arguments: map[string]interface{}{
+			"operation": "patch",
+			"name":      "plain",
+			"url":       "https://new.test/mcp",
+			"enabled":   true,
+		},
+	}}
+
+	result, _, err := proxy.handlePatchUpstream(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(resultText(t, result)), &payload))
+	changes, ok := payload["changes"].(map[string]interface{})
+	require.Truef(t, ok, "the diff must be reported, got %v", payload)
+	modified, ok := changes["modified"].(map[string]interface{})
+	require.True(t, ok)
+
+	urlChange, ok := modified["url"].(map[string]interface{})
+	require.Truef(t, ok, "url must appear in the diff, got %v", modified)
+	assert.Equal(t, "https://old.test/mcp", urlChange["from"],
+		"a non-secret value must round-trip exactly — an agent verifies what it wrote from this")
+	assert.Equal(t, "https://new.test/mcp", urlChange["to"])
+
+	if enabledChange, ok := modified["enabled"].(map[string]interface{}); ok {
+		assert.Equal(t, false, enabledChange["from"])
+		assert.Equal(t, true, enabledChange["to"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cross-model review of #1146 (round 1). Findings 1-4, each pinned here.
+// ---------------------------------------------------------------------------
+
+const (
+	testArgvSecret       = "sk-live-1234567890abcdef"
+	testArgvInlineSecret = "ghp_inlineAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
+
+// (1) MAJOR — a credential passed as an argv TOKEN has no key to be judged by,
+// so the env-var rule could not see it and recorded it verbatim. Passing a
+// secret as `--api-key <value>` is one of the commonest MCP server config
+// shapes, so this was a live leak on the exact path #1146 set out to seal.
+func TestActivityArgs_ArgvSecretsAreMasked(t *testing.T) {
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "upstream_servers",
+		Arguments: map[string]interface{}{
+			"operation": "add",
+			"name":      "x",
+			"command":   "uvx",
+			"args_json": `["mcp-foo","--api-key","` + testArgvSecret + `","--token=` + testArgvInlineSecret + `"]`,
+		},
+	}}
+
+	argv, ok := activityArgsFromRequest(req)["args_json"].([]interface{})
+	require.Truef(t, ok, "args_json must stay a list, got %T", activityArgsFromRequest(req)["args_json"])
+	require.Len(t, argv, 4)
+
+	assert.Equal(t, "mcp-foo", argv[0], "a package name is not a secret and must stay readable")
+	assert.Equal(t, "--api-key", argv[1], "the flag NAMES the credential — keep it, that is the audit signal")
+	assert.NotContains(t, argv[2], testArgvSecret, "the argv credential was recorded in the clear")
+	assert.Contains(t, argv[2], "••••", "the credential must be present but masked, not dropped")
+	assert.NotContains(t, argv[3], testArgvInlineSecret, "the inline --flag=secret form leaked")
+	assert.Contains(t, argv[3], "--token=", "the inline flag name must survive the mask")
+}
+
+// (1') …and the same token reaching the record through the resolved config
+// diff (`args` is a FieldChange whose From/To are []string).
+func TestRedactedConfigDiff_ArgvSecretsAreMasked(t *testing.T) {
+	diff := config.NewConfigDiff()
+	diff.Modified["args"] = config.FieldChange{
+		Path: "args",
+		From: []string{"mcp-foo"},
+		To:   []string{"mcp-foo", "--api-key", testArgvSecret},
+	}
+
+	encoded, err := json.Marshal(redactedConfigDiff(diff))
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), testArgvSecret,
+		"the config diff recorded an argv credential in the clear")
+	assert.Contains(t, string(encoded), "--api-key",
+		"the flag name must survive so the operator knows WHICH credential moved")
+}
+
+// (1”) Over-masking would make the record useless. Ordinary argv tokens —
+// package names, subcommands, paths, ports — must round-trip verbatim.
+func TestActivityArgs_OrdinaryArgvStaysReadable(t *testing.T) {
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "upstream_servers",
+		Arguments: map[string]interface{}{
+			"operation": "add",
+			"name":      "x",
+			"args_json": `["-y","@modelcontextprotocol/server-github","--port","8080","--transport=stdio","/srv/data"]`,
+		},
+	}}
+	argv, ok := activityArgsFromRequest(req)["args_json"].([]interface{})
+	require.True(t, ok)
+	assert.Equal(t,
+		[]interface{}{"-y", "@modelcontextprotocol/server-github", "--port", "8080", "--transport=stdio", "/srv/data"},
+		argv)
+}
+
+// (4) MINOR/security — `_auth_*` are keys MCPProxy injects into a call for its
+// own use, and internal/runtime copies `_auth_user_id` / `_auth_user_email`
+// straight onto ActivityRecord.UserID/UserEmail. Neither of these two handlers
+// calls injectAuthMetadata, so anything under that prefix here can ONLY have
+// come from the caller: capturing the whole request handed an agent a
+// caller-controlled identity stamp on the audit row for a privileged mutation.
+// The old {operation,name} allowlist dropped them by accident; drop them on
+// purpose.
+func TestActivityArgs_DropsCallerSuppliedAuthMetadata(t *testing.T) {
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "upstream_servers",
+		Arguments: map[string]interface{}{
+			"operation":        "remove",
+			"name":             "github",
+			"_auth_user_id":    "01HIMPERSONATED",
+			"_auth_user_email": "victim@example.test",
+			"_auth_auth_type":  "oauth",
+		},
+	}}
+	args := activityArgsFromRequest(req)
+	require.NotNil(t, args)
+
+	for key := range args {
+		assert.NotContainsf(t, key, "_auth_",
+			"caller-supplied %q became a forged identity stamp on the audit row", key)
+	}
+	assert.Equal(t, "remove", args["operation"], "the real parameters must still be recorded")
+	assert.Equal(t, "github", args["name"])
+}
+
+// (2) MINOR — `name` is agent-supplied and unvalidated. The inventory
+// operations do not take the request at all, so attributing their activity row
+// to whatever `name` the caller passed lets an agent stamp a row onto a server
+// it never touched (and, through /api/v1/activity/summary, onto that server's
+// traffic totals).
+func TestActivityTargetServer_UnattributedForInventoryOperations(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		want      string
+	}{
+		{"upstream list ignores name", "list", ""},
+		{"quarantine list ignores name", "list_quarantined", ""},
+		{"unparsed operation", "", ""},
+		{"unknown operation", "definitely-not-an-operation", ""},
+		{"patch acts on name", "patch", "github"},
+		{"remove acts on name", "remove", "github"},
+		{"approve_tool acts on name", "approve_tool", "github"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+				Arguments: map[string]interface{}{"operation": tc.operation, "name": "github"},
+			}}
+			assert.Equal(t, tc.want, activityTargetServer(req, tc.operation))
+		})
+	}
+}
+
+// (2') Rot guard, both directions: activityAttributedOps must be EXACTLY the
+// operations whose switch arm is handed the request. A new mutating operation
+// that forgets to register is unattributed — the issue-#1146 "-" Server column,
+// back again; an inventory operation that wrongly appears is the misattribution
+// this finding was about.
+func TestActivityAttributedOps_MatchTheOperationSwitches(t *testing.T) {
+	consts := parseServerStringConsts(t)
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(".", "mcp.go"), nil, 0)
+	require.NoError(t, err)
+
+	guarded := map[string]bool{"handleUpstreamServers": true, "handleQuarantineSecurity": true}
+	withRequest := map[string]bool{}
+	withoutRequest := map[string]bool{}
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !guarded[fn.Name.Name] {
+			continue
+		}
+		ast.Inspect(fn, func(node ast.Node) bool {
+			clause, isClause := node.(*ast.CaseClause)
+			if !isClause || len(clause.List) == 0 || !caseBodyCallsHandler(clause) {
+				return true
+			}
+			target := withoutRequest
+			if caseBodyPassesRequest(clause) {
+				target = withRequest
+			}
+			for _, expr := range clause.List {
+				if op, resolved := resolveCaseString(expr, consts); resolved {
+					target[op] = true
+				}
+			}
+			return true
+		})
+	}
+
+	require.NotEmpty(t, withRequest, "the AST walk found no operation arms — the guard would be vacuous")
+	require.NotEmpty(t, withoutRequest, "the AST walk found no inventory arms — the guard would be vacuous")
+
+	assert.Equal(t, sortedKeys(withRequest), sortedKeys(activityAttributedOps),
+		"activityAttributedOps must list exactly the operations whose handler receives the request")
+
+	for op := range withoutRequest {
+		assert.Falsef(t, activityAttributedOps[op],
+			"operation %q never receives the request, so the caller's `name` was not acted on", op)
+	}
+}
+
+// parseServerStringConsts collects the package's `const x = "literal"` values
+// so a case clause written as an identifier (operationList) can be resolved.
+func parseServerStringConsts(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		require.NoErrorf(t, err, "parsing %s", name)
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+					continue
+				}
+				lit, ok := vs.Values[0].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				unquoted, err := strconv.Unquote(lit.Value)
+				if err == nil {
+					out[vs.Names[0].Name] = unquoted
+				}
+			}
+		}
+	}
+	require.NotEmpty(t, out)
+	return out
+}
+
+func resolveCaseString(expr ast.Expr, consts map[string]string) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return "", false
+		}
+		unquoted, err := strconv.Unquote(e.Value)
+		return unquoted, err == nil
+	case *ast.Ident:
+		v, ok := consts[e.Name]
+		return v, ok
+	}
+	return "", false
+}
+
+// caseBodyCallsHandler reports whether the clause dispatches to a p.handleX
+// method — i.e. it is one of the operation switch's arms rather than an
+// unrelated switch (status strings, etc.).
+func caseBodyCallsHandler(clause *ast.CaseClause) bool {
+	found := false
+	for _, stmt := range clause.Body {
+		ast.Inspect(stmt, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && strings.HasPrefix(sel.Sel.Name, "handle") {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
+}
+
+func caseBodyPassesRequest(clause *ast.CaseClause) bool {
+	found := false
+	for _, stmt := range clause.Body {
+		ast.Inspect(stmt, func(node ast.Node) bool {
+			ident, ok := node.(*ast.Ident)
+			if ok && ident.Name == "request" {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
 }

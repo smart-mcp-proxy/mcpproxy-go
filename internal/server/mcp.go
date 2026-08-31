@@ -1124,7 +1124,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 	var tools []mcpserver.ServerTool
 	{
 		upstreamServersTool := mcp.NewTool("upstream_servers",
-			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)"),
+			mcp.WithDescription("Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)\n\nREDACTION (update/patch): the returned 'changes' diff keeps every field PATH exact, but MASKS values under secret-bearing keys (env vars, headers, oauth secrets, credential-shaped argv tokens) in both this response and the activity log. Non-secret values round-trip unchanged; do not read a masked value back as what was stored."),
 			mcp.WithTitleAnnotation("Upstream Servers"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithReadOnlyHintAnnotation(false),
@@ -3260,17 +3260,20 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	}
 	requestID := mintCorrelationID("upstream_servers")
 
-	// Issue #1146: the resolved server name must reach every emit site, or the
-	// Activity Log Server column renders "-" and --server filtering misses the
-	// mutation entirely. Hoisted above the first emit so even a malformed
-	// request is attributable.
-	targetServer := activityTargetServer(request)
-
 	operation, err := request.RequireString("operation")
 	if err != nil {
-		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgsFromRequest(request), nil, nil, "")
+		// No operation resolved, so nothing acted on the caller's `name`:
+		// activityTargetServer leaves the row unattributed rather than letting
+		// a malformed request stamp itself onto a server.
+		p.emitActivityInternalToolCall("upstream_servers", activityTargetServer(request, ""), "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgsFromRequest(request), nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
 	}
+
+	// Issue #1146: the resolved server name must reach every emit site, or the
+	// Activity Log Server column renders "-" and --server filtering misses the
+	// mutation entirely. Resolved from the operation as well as the parameter,
+	// so only operations that actually act on `name` are attributed to it.
+	targetServer := activityTargetServer(request, operation)
 
 	// Build arguments map for activity logging (Spec 024). Issue #1146: record
 	// the FULL redacted argument set, not just {operation, name} — see
@@ -3403,15 +3406,15 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	}
 	requestID := mintCorrelationID("quarantine_security")
 
-	// Issue #1146: see handleUpstreamServers — the resolved server name must
-	// reach every emit site, including the pre-gate denials.
-	targetServer := activityTargetServer(request)
-
 	operation, err := request.RequireString("operation")
 	if err != nil {
-		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgsFromRequest(request), nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", activityTargetServer(request, ""), "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgsFromRequest(request), nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
 	}
+
+	// Issue #1146: see handleUpstreamServers — the resolved server name must
+	// reach every emit site, including the pre-gate denials.
+	targetServer := activityTargetServer(request, operation)
 
 	// Build arguments map for activity logging (Spec 024). Issue #1146: the full
 	// redacted argument set — this also picks up prompt_name, which the old
