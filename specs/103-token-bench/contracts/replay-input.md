@@ -42,44 +42,55 @@ so they must fall to exclusion accounting rather than silently contributing zero
 - **Code-execution sub-calls record both byte counts as zero**
   (`internal/server/mcp_code_execution.go:811-818`). A truncated sub-call therefore cannot use
   the byte-length estimate either, and must be counted as excluded.
+- **A truncated `retrieve_tools` record does not tell you what the agent PAID.** The activity
+  log stores the FULL pre-truncation response, while the agent consumed the truncated text. So
+  even bodies-on recovers the wrong quantity for such calls: they must be excluded, or the
+  truncation re-applied before counting. Silently tokenizing the stored full text would
+  OVERSTATE the agent's cost.
 
 ## Privacy contract
 
-1. **Default is bodies-off. Measurability is per cell, and splits into two different questions:
-   the MENU cost (what the agent pays to see the tools) and the COMPLETE WORKLOAD cost (menu
-   plus every response the workload consumed).**
+1. **Replay requires a FLEET INPUT as well as the recording.** A menu cost is a property of the
+   tool definitions the agent was shown, and the export carries no fleet snapshot. Built-in
+   proxy tools alone are not the menu — under `direct` the menu is the whole upstream fleet.
+   So `-replay <jsonl>` on its own can compute nothing; it must be paired with either a frozen
+   fleet corpus (the existing committed corpora already serve this) or a live proxy to read
+   the current fleet from. **A recording-only invocation is an error, not a degraded run.**
 
-   | Mode cell | Menu cost, bodies-off | Complete workload cost, bodies-off | Why |
+2. **Default is bodies-off. What that yields, per cell:**
+
+   | Mode cell | Menu cost | Absolute complete-workload cost | Cross-mode delta |
    |---|---|---|---|
-   | `direct_full` | measured | measured | the mode changes only the static tools/list payload |
-   | `direct_deferred` | measured | measured | same |
-   | `code_exec` | measured | **NO** | this surface also registers `retrieve_tools` (`internal/server/mcp_routing.go:670-676`), whose responses are bodies |
-   | `retrieve_full` | measured | **NO** | the mode changes the `retrieve_tools` response body itself |
-   | `retrieve_compact` | measured | **NO** | same |
+   | `direct_full` | measured (needs fleet input) | **NO** — response text absent | **measured** vs `direct_deferred` |
+   | `direct_deferred` | measured (needs fleet input) | **NO** — response text absent | **measured** vs `direct_full` |
+   | `code_exec` | measured (needs fleet input) | **NO** | not comparable bodies-off |
+   | `retrieve_full` | measured (needs fleet input) | **NO** | **NO** — the mode changes the response body |
+   | `retrieve_compact` | measured (needs fleet input) | **NO** | **NO** — same |
 
-   So bodies-off gives a measured MENU cost for all five cells, and a measured COMPLETE
-   WORKLOAD cost for only the two direct cells. Three cells require an explicit bodies-on run
-   for their complete figure and MUST be reported as unavailable otherwise, never as zero.
+   **No cell has a measured ABSOLUTE complete-workload cost bodies-off**, because complete
+   workload includes every consumed response and that text is absent. What bodies-off does give
+   is (a) menu cost per cell, and (b) the cross-mode DELTA between the two direct cells, whose
+   identical call responses cancel out of the comparison. That delta is the honest bodies-off
+   headline; an absolute figure is not available.
 
-   **What the recording contributes** is the *recorded call shape* — call sequence, tool mix
-   and call counts — evaluated against today's fleet. It does NOT contribute fleet size: the
-   export carries no fleet snapshot, and the tool definitions come from the live fleet.
+   **What the recording contributes** is the *recorded call shape* — call sequence, tool mix and
+   call counts — evaluated against the supplied fleet input. It does not contribute fleet size.
 
    **Consequence to state in every replay report**: a replay scores a recorded workload against
-   **today's** fleet, not the fleet as it stood when the session was recorded. Internally valid
+   the SUPPLIED fleet, not the fleet as it stood when the session was recorded. Internally valid
    across modes; not a historical reconstruction.
 
-2. **Bodies-on is a separate, explicit opt-in** and prints a warning. The export path does
+3. **Bodies-on is a separate, explicit opt-in** and prints a warning. The export path does
    **not** mask: masking is wired into the list and detail handlers only, so a bodies-on
    export is raw and unmasked by design — it is the compliance surface.
-3. **`has_sensitive_data` is not a guarantee.** There is no persisted sensitivity field: the
+4. **`has_sensitive_data` is not a guarantee.** There is no persisted sensitivity field: the
    flag is derived at export from detection metadata added asynchronously after initial
    persistence, so a freshly exported record may be sensitive but not yet flagged.
    Exclude-by-flag is a best-effort reducer and must be documented as such wherever relied on.
-4. **Nothing crosses the loader boundary but counts.** Sessions and calls surrender sizes,
+5. **Nothing crosses the loader boundary but counts.** Sessions and calls surrender sizes,
    statuses and derived measurements. No content reaches a report, a dashboard, or any
    third-party service including model providers.
-5. **Inputs live outside the repository**, are never committed, and the documented procedure
+6. **Inputs live outside the repository**, are never committed, and the documented procedure
    tells an operator how to delete them.
 
 ## Loader output

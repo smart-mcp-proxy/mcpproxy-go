@@ -34,6 +34,10 @@ One unit of real recorded work, reassembled from exported activity JSONL.
   wherever the flag is relied upon (Principle IV).
 - A session MUST NOT carry its call contents into any report structure. Only counts, sizes and
   derived measurements propagate (FR-006).
+- **Therefore tokenization of response bodies happens INSIDE the loader**, not downstream: a
+  bodies-on run tokenizes within `replaycorpus` and emits token counts, so no text ever
+  crosses the boundary. A design that hands bodies to the scoring layer to tokenize would
+  violate the invariant above — the two cannot both hold.
 
 **State transitions**: `loaded → grouped → classified → {scored | excluded}`. Exclusion is
 terminal and always counted.
@@ -58,10 +62,13 @@ One recorded tool call inside a session.
 - **Tool-surface cost does not depend on recorded content** — it is computed from the fleet's
   tool definitions under each mode. It is fully `measured` with bodies off, and it is what the
   direct and code-execution cells' modes change.
-- **Three cells cannot yield a complete workload figure with bodies off**: both
-  `retrieve_tools` cells (their mode changes the response body itself) and `code_exec` (its
-  surface also serves `retrieve_tools`). Menu cost is still measured for all five. The three
-  MUST be reported as unavailable for the complete figure, never as zero.
+- **NO cell yields an absolute complete-workload cost with bodies off**, because complete
+  workload includes every consumed response and that text is absent. Bodies-off yields menu
+  cost per cell (given a fleet input) and the cross-mode DELTA between the two direct cells,
+  whose identical call responses cancel. Absolute figures MUST be reported as unavailable,
+  never as zero.
+- **Menu cost requires a FLEET INPUT** — a frozen fleet corpus or a live proxy. The export
+  carries no fleet snapshot, so a recording-only run computes nothing.
 - **Response cost generally requires the text.** With bodies off it may only be an explicit
   `estimated` figure derived from byte length; with bodies on it becomes `measured`. The two
   MUST NOT be presented interchangeably.

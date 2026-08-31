@@ -75,14 +75,18 @@ an *accurate* cost basis without bodies. They do not — they are byte lengths, 
 needs the text. A second draft over-corrected, claiming tool-surface cost carries the headline
 for all five cells. The precise position:
 
-- **Separate MENU cost from COMPLETE WORKLOAD cost.** Bodies-off yields a measured menu cost
-  for all five cells, but a measured complete-workload cost for only the two direct cells,
-  whose mode changes nothing but the static tools/list payload.
-- **`code_exec` is PARTIAL, not measurable**: its menu is static, but the surface also
-  registers `retrieve_tools` (`internal/server/mcp_routing.go:670-676`) whose responses are
-  bodies, so its complete workload cost needs bodies-on.
-- **The two `retrieve_tools` cells need bodies-on**, because what their mode changes IS the
-  `retrieve_tools` response body.
+- **A fleet input is mandatory.** A menu is a property of the tool definitions, and the export
+  carries no fleet snapshot, so replay must be paired with a frozen fleet corpus or a live
+  proxy. A recording-only invocation computes nothing.
+- **No cell yields an absolute complete-workload cost bodies-off.** Complete workload includes
+  every consumed response, and that text is absent. Bodies-off gives menu cost per cell plus
+  the cross-mode DELTA between the two direct cells, whose identical call responses cancel.
+- **`code_exec` and both `retrieve_tools` cells have no bodies-off delta either**: the
+  code-execution surface also registers `retrieve_tools`
+  (`internal/server/mcp_routing.go:670-676`), and the `retrieve_tools` cells' mode changes the
+  response body itself.
+- **Tokenization of bodies must happen inside the loader**, so no text crosses the boundary
+  that the privacy invariant draws.
 - **`retrieve_tools` response cost is recoverable with bodies on** — the handler writes the
   FULL response to the activity log (`internal/server/mcp.go:2061-2064`). It is unavailable
   only in the bodies-off configuration, not unrecoverable in general.
@@ -192,8 +196,11 @@ in its own doc comment and errors rather than fabricating a verdict. Spec 103's 
 constraint is that same rule on a new axis, so it is enforceable with machinery that already
 exists — the extension is a new section and a source label, not new aggregation logic.
 
-Provider `usage` maps 1:1 onto FR-014's required split (input / output / cache-read) with no
-derivation, so reading response fields is strictly simpler than proxying.
+For the provider this project would pin, `usage` maps 1:1 onto FR-014's required split
+(input / output / cache-read) with no derivation, so reading response fields is simpler than
+proxying. **This is provider-specific and unverified until the provider is pinned** — the
+mapping must be re-checked against whichever provider is chosen, and it does NOT hold for the
+suite's own per-task output (see the gap below).
 
 **Gap to close at task time**: the suite's own per-task output records input / output / total /
 reasoning — it has **no cache-read field**. So FR-014's cache-read axis cannot come from the

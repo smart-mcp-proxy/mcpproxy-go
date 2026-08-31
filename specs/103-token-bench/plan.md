@@ -8,10 +8,12 @@
 Add two measurement capabilities to the existing `bench/` harness, and one small backend
 contract fix that makes the first of them honest.
 
-1. **US1 — deterministic replay** (`-replay`): load exported activity JSONL, group it into
-   units of work, and recompute what that real workload would have cost under each mode cell.
-   No model. Reproducible **modulo the report's `generated_at` stamp**, which must be excluded
-   or pinned before any byte-identical comparison (see Risks).
+1. **US1 — deterministic replay** (`-replay` PLUS a fleet input): load exported activity JSONL,
+   group it into units of work, and recompute menu cost per mode cell and the direct-cell delta
+   for that real workload shape. **A fleet input is mandatory** — a frozen fleet corpus or a
+   live proxy — because a menu is a property of the tool definitions and the export carries no
+   fleet snapshot. No model. Reproducible **modulo the report's `generated_at` stamp**, which
+   must be excluded or pinned before any byte-identical comparison (see Risks).
 2. **US2 — live agent loop**: run MCPMark against mcpproxy under each mode, capturing
    provider-reported token usage and per-task pass verdicts, to produce tokens per
    *completed* task, first-attempt success and retry rates.
@@ -81,14 +83,15 @@ Three findings drive this and each becomes a design rule:
    exported record can be sensitive but not yet flagged.
    → **Rule**: exclude-by-flag is a best-effort reducer and MUST NOT be described as a
    guarantee, in code comments or in the published methodology.
-3. **Bodies-off measurability is per cell, and splits menu cost from complete workload cost.**
-   Bodies-off gives a measured MENU cost for all five cells, but a measured COMPLETE WORKLOAD
-   cost for only the two direct cells. `code_exec` is partial — its menu is static, but the
-   surface also registers `retrieve_tools`, whose responses are bodies — and both
-   `retrieve_tools` cells need bodies-on because the mode changes the response body itself.
+3. **Bodies-off yields menu costs and one cross-mode delta — never an absolute workload cost.**
+   Complete workload includes every consumed response, and that text is absent bodies-off, so
+   NO cell has a measured absolute figure. What it does give is menu cost per cell, plus the
+   delta between the two direct cells, whose identical call responses cancel in the comparison.
    The recorded byte sizes are byte *lengths*, not token counts, and support only an estimate.
-   → **Rule**: bodies-off is the default; the three cells that cannot yield a complete figure
-   from it are reported as unavailable, never as zero.
+   → **Rule**: bodies-off is the default and reports menu costs plus the direct-cell delta;
+   absolute workload figures are reported unavailable, never as zero.
+   → **Rule**: response tokenization happens inside the loader, so no body text ever reaches
+   the scoring layer (otherwise the no-content-leaves-the-loader invariant cannot hold).
 
 ## Phase 0: Research
 

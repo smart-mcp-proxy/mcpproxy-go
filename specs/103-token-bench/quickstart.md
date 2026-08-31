@@ -28,7 +28,13 @@ design; take one only if you specifically need measured *response* cost, and del
 ### 2. Recompute cost across the matrix
 
 ```bash
-go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out bench/results
+# A fleet input is MANDATORY — a menu is a property of the tool definitions, and the
+# activity export carries no fleet snapshot. Use a frozen corpus:
+go run ./bench/cmd/bench \
+  -replay ~/replay-corpus.jsonl \
+  -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
+  -out bench/results
+# ...or point at a live proxy to read today's fleet instead.
 ```
 
 Produces the `replay` block in `bench/results/report.json` plus the dashboard section: per
@@ -36,13 +42,16 @@ mode cell, what this workload would have cost, with the exclusion accounting bes
 
 ### 3. Know which figures you just got
 
-- **Menu cost: `measured` for all five cells.** Computed from the fleet's tool definitions —
-  no recorded content needed.
-- **Complete workload cost: `measured` for `direct_full` and `direct_deferred` only.**
-- **`code_exec`: partial.** Its menu is static, but the surface also serves `retrieve_tools`,
-  whose responses are bodies — so its complete figure needs a bodies-on run.
-- **`retrieve_full`, `retrieve_compact`: need bodies-on.** What their mode changes IS the
-  `retrieve_tools` response body.
+- **Menu cost: `measured` for all five cells** — from the FLEET INPUT you supplied, not from
+  the recording.
+- **Absolute complete-workload cost: unavailable for every cell.** It includes every consumed
+  response, and that text is absent bodies-off.
+- **Cross-mode delta: `measured` for `direct_full` vs `direct_deferred` only** — their call
+  responses are identical, so they cancel in the comparison. This is the honest bodies-off
+  headline.
+- **`retrieve_full` / `retrieve_compact` deltas: unavailable bodies-off**, because the mode
+  changes the `retrieve_tools` response body itself. Same for `code_exec`, whose surface also
+  serves `retrieve_tools`.
 - **Response cost generally: `estimated` or absent.** Tokenizing needs the text; a byte length
   supports only an estimate.
 - **The fleet is today's fleet.** The export carries no fleet snapshot, so this scores a
@@ -58,8 +67,9 @@ pretending otherwise.
 ### 5. Verify determinism
 
 ```bash
-go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out /tmp/run-a
-go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out /tmp/run-b
+CORPUS=specs/083-discovery-profiler/datasets/corpus_v2.tools.json
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -corpus-v2 $CORPUS -out /tmp/run-a
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -corpus-v2 $CORPUS -out /tmp/run-b
 # generated_at is a wall-clock stamp and differs between runs by design.
 diff <(jq 'del(.generated_at)' /tmp/run-a/report.json) \
      <(jq 'del(.generated_at)' /tmp/run-b/report.json) \
@@ -72,7 +82,9 @@ The tokenizer downloads its vocabulary on first use unless a cache directory is 
 
 ```bash
 export TIKTOKEN_CACHE_DIR="$HOME/.cache/tiktoken"
-go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out /tmp/warm   # warms it, needs network once
+# warms it; needs network once
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl \
+  -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json -out /tmp/warm
 ```
 
 Setting the variable only names a cache; it does not fill one. A first run still fetches the
