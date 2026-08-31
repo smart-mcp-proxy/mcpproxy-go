@@ -156,7 +156,15 @@ export interface SecurityScanReportSummary {
 
 // Server types
 export interface ServerIsolationConfig {
+  // EFFECTIVE isolation state, after global + per-server + structural
+  // resolution. NOT the raw per-server override — read enabled_override for
+  // that. Always present on stdio servers.
   enabled: boolean
+  // RAW per-server override. Absent = inherit the global setting, which is a
+  // distinct state from an explicit false.
+  enabled_override?: boolean
+  // RAW per-server mode override. Absent = inherit.
+  mode_override?: string
   image?: string
   network_mode?: string
   extra_args?: string[]
@@ -169,6 +177,17 @@ export interface ServerIsolationConfig {
 // IsolationDefaults reports the resolved baseline Docker isolation
 // values the backend will apply when no per-server override is set.
 // Used as placeholders so "empty = inherit" is discoverable in the UI.
+// IsolationEffective reports the resolved isolation state of a server and the
+// rule that produced it, so the UI can explain "inherits global: docker"
+// instead of rendering an ambiguous toggle. Read-only; never sent on PATCH.
+export interface ServerIsolationEffective {
+  mode: string // 'docker' | 'sandbox' | 'none'
+  isolated: boolean
+  global_mode?: string
+  inherited: boolean
+  source?: string // treat unknown values as 'global'
+}
+
 export interface ServerIsolationDefaults {
   runtime_type?: string
   image?: string
@@ -220,6 +239,7 @@ export interface Server {
   reconnect_count?: number
   isolation?: ServerIsolationConfig // Per-server Docker isolation override
   isolation_defaults?: ServerIsolationDefaults // Resolved baseline values (read-only)
+  isolation_effective?: ServerIsolationEffective // Resolved isolation state + why (read-only)
   oauth?: {
     client_id: string
     auth_url: string

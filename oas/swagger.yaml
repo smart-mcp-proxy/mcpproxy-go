@@ -1863,6 +1863,23 @@ components:
         cpu_limit:
           type: string
         enabled:
+          description: |-
+            Enabled is the EFFECTIVE isolation state for this server, after the
+            global setting, the per-server override and the structural gates have all
+            been applied. It is NOT the raw per-server override — read
+            EnabledOverride for that (GH #1142).
+
+            It stays a non-pointer bool that is always present on the wire: the macOS
+            tray decodes it as a non-optional Swift Bool, so omitting or nulling the
+            key would fail Codable for the whole server payload. Older clients that
+            read this field now simply get a true answer.
+          type: boolean
+        enabled_override:
+          description: |-
+            EnabledOverride is the RAW per-server `isolation.enabled` override, as
+            persisted. Absent means "inherit the global setting" — which is a
+            distinct state from an explicit false, and the distinction the reporting
+            bug used to destroy.
           type: boolean
         extra_args:
           items:
@@ -1872,6 +1889,11 @@ components:
         image:
           type: string
         memory_limit:
+          type: string
+        mode_override:
+          description: |-
+            ModeOverride is the RAW per-server `isolation.mode` override
+            ("docker" | "sandbox" | "none"). Absent means "inherit".
           type: string
         network_mode:
           type: string
@@ -1898,6 +1920,34 @@ components:
         runtime_type:
           type: string
         working_dir:
+          type: string
+      type: object
+    contracts.IsolationEffective:
+      description: |-
+        IsolationEffective exposes the resolved isolation state (and the rule
+        that decided it) so clients can distinguish "inherits global" from an
+        explicit per-server choice. Read-only; never consumed on PATCH.
+      properties:
+        global_mode:
+          description: GlobalMode is what "inherit" resolves to right now.
+          type: string
+        inherited:
+          description: |-
+            Inherited is true when the server sets neither `isolation.enabled` nor
+            `isolation.mode`, so its state tracks the global setting.
+          type: boolean
+        isolated:
+          description: Isolated is Mode != "none".
+          type: boolean
+        mode:
+          description: 'Mode is the effective isolation mode: "docker" | "sandbox"
+            | "none".'
+          type: string
+        source:
+          description: |-
+            Source names the deciding rule: "global", "server-mode",
+            "server-opt-out", "server-opt-in-ignored", "not-stdio" or
+            "already-docker". Treat an unrecognized value as "global".
           type: string
       type: object
     contracts.LogEntry:
@@ -2496,6 +2546,8 @@ components:
           $ref: '#/components/schemas/contracts.IsolationConfig'
         isolation_defaults:
           $ref: '#/components/schemas/contracts.IsolationDefaults'
+        isolation_effective:
+          $ref: '#/components/schemas/contracts.IsolationEffective'
         last_error:
           type: string
         last_reconnect_at:
@@ -3272,12 +3324,21 @@ components:
       type: object
     httpapi.IsolationRequest:
       description: |-
-        Isolation carries per-server Docker isolation overrides (image,
-        network_mode, extra_args, working_dir, enabled). A nil pointer
-        means "do not touch isolation config"; an empty-but-present
-        object on PATCH intentionally clears the overrides.
+        Isolation carries per-server Docker isolation overrides (enabled,
+        mode_override, image, network_mode, extra_args, working_dir). A nil
+        pointer means "do not touch isolation config". A present object is
+        applied field-by-field ON TOP of the persisted overrides, so omitting a
+        field leaves it alone; clear an individual override by sending it
+        explicitly (`"enabled": null`, `"image": ""`).
       properties:
         enabled:
+          description: |-
+            Enabled is the tri-state per-server override. It has THREE meaningful
+            wire states, and collapsing them is what silently un-isolated servers
+            (GH #1142):
+              - absent          → leave the persisted override untouched
+              - null            → clear the override, back to inheriting the global
+              - true / false    → set an explicit opt-in / opt-out
           type: boolean
         extra_args:
           items:
@@ -3285,6 +3346,11 @@ components:
           type: array
           uniqueItems: false
         image:
+          type: string
+        mode_override:
+          description: |-
+            ModeOverride sets `isolation.mode` ("docker" | "sandbox" | "none").
+            nil leaves the persisted value alone; an empty string clears it.
           type: string
         network_mode:
           type: string

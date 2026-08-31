@@ -1107,6 +1107,16 @@
               <div class="card-body py-4">
                 <h3 class="card-title text-base">Docker Isolation Overrides</h3>
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <!-- Effective state first: "isolation.enabled" alone cannot
+                       say whether a server inherits the global setting or was
+                       explicitly opted out (GH #1142). -->
+                  <template v-if="isolationState">
+                    <dt class="text-base-content/60">Isolation</dt>
+                    <dd>
+                      <span :class="['badge badge-sm', isolationState.isolated ? 'badge-success' : 'badge-ghost']">{{ isolationState.label }}</span>
+                      <span class="text-base-content/60 text-xs ml-2">{{ isolationState.detail }}</span>
+                    </dd>
+                  </template>
                   <dt class="text-base-content/60">Image</dt>
                   <dd>
                     <code v-if="server.isolation?.image" class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.isolation.image }}</code>
@@ -1562,6 +1572,7 @@ import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
+import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
 import { TRUST_MODES, type TrustMode } from '@/utils/trustMode'
 import { parseHoldEvidence } from '@/utils/holdEvidence'
@@ -3366,8 +3377,13 @@ async function commitConvert() {
 // Isolation Overrides section — either a per-server override or a resolved
 // default the user might want to inspect. Stdio servers without docker
 // isolation enabled have neither and the section is hidden entirely.
+// Resolved isolation state ("Isolated (docker) — inherits the global setting"),
+// so the panel explains WHY rather than showing a bare flag (GH #1142).
+const isolationState = computed(() => describeIsolation(server.value))
+
 const hasIsolationData = computed(() => {
   if (!server.value) return false
+  if (server.value.isolation_effective) return true
   const iso = server.value.isolation
   const def = server.value.isolation_defaults
   if (iso && (iso.image || iso.network_mode || (iso.extra_args && iso.extra_args.length) || iso.working_dir || iso.memory_limit || iso.cpu_limit)) {

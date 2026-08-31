@@ -172,6 +172,7 @@ export interface Server {
   updated: string; // ISO date string
   isolation?: IsolationConfig;
   isolation_defaults?: IsolationDefaults; // Resolved baseline values (read-only, used as placeholders)
+  isolation_effective?: IsolationEffective; // Resolved isolation state + why (read-only)
   oauth_status?: 'authenticated' | 'expired' | 'error' | 'none'; // OAuth authentication status
   token_expires_at?: string; // ISO date string when OAuth token expires
   user_logged_out?: boolean; // True if user explicitly logged out (prevents auto-reconnection)
@@ -224,7 +225,15 @@ export interface OAuthConfig {
 }
 
 export interface IsolationConfig {
+  // EFFECTIVE isolation state, after global + per-server + structural
+  // resolution. NOT the raw per-server override — read enabled_override for
+  // that. Always present on stdio servers.
   enabled: boolean;
+  // RAW per-server override. Absent = inherit the global setting, which is a
+  // distinct state from an explicit false.
+  enabled_override?: boolean;
+  // RAW per-server mode override. Absent = inherit.
+  mode_override?: string;
   image?: string;
   network_mode?: string;
   extra_args?: string[];
@@ -232,6 +241,17 @@ export interface IsolationConfig {
   cpu_limit?: string;
   working_dir?: string;
   timeout?: string;
+}
+
+// IsolationEffective reports the resolved isolation state of a server and the
+// rule that produced it, so the UI can explain "inherits global: docker"
+// instead of rendering an ambiguous toggle. Read-only; never sent on PATCH.
+export interface IsolationEffective {
+  mode: string; // 'docker' | 'sandbox' | 'none'
+  isolated: boolean;
+  global_mode?: string;
+  inherited: boolean; // no per-server enabled/mode override is set
+  source?: string; // 'global' | 'server-mode' | 'server-opt-out' | 'server-opt-in-ignored' | 'not-stdio' | 'already-docker'; treat unknown as 'global'
 }
 
 // IsolationDefaults reports the resolved baseline Docker isolation

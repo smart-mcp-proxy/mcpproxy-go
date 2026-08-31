@@ -3845,10 +3845,16 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		if server.Command != "" {
 			isolationManager := p.getIsolationManager()
 			if isolationManager != nil {
-				shouldIsolate := isolationManager.ShouldIsolate(server)
-				dockerInfo["applies_to_server"] = shouldIsolate
+				resolved := isolationManager.ResolveIsolation(server)
+				// applies_to_server is the EFFECTIVE answer to "is this server
+				// isolated": a sandbox-isolated server used to report false here
+				// because the check was ShouldIsolate (docker-only) (GH #1142).
+				dockerInfo["applies_to_server"] = resolved.Isolated
+				dockerInfo["isolation_mode"] = string(resolved.Mode)
+				dockerInfo["isolation_inherited"] = resolved.Inherited
+				dockerInfo["isolation_source"] = resolved.Source
 
-				if shouldIsolate {
+				if resolved.Mode == config.IsolationModeDocker {
 					runtimeType := isolationManager.DetectRuntimeType(server.Command)
 					dockerInfo["runtime_detected"] = runtimeType
 
@@ -3858,15 +3864,26 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				}
 			}
 
-			// Add server-specific isolation config
+			// Add server-specific isolation config. This block is deliberately
+			// the RAW per-server override — it is named server_isolation — so
+			// `enabled` is omitted entirely when the server inherits the global
+			// setting rather than being flattened to false. The effective state
+			// lives in applies_to_server / isolation_mode above.
 			if server.Isolation != nil {
-				dockerInfo["server_isolation"] = map[string]interface{}{
-					"enabled":      server.Isolation.IsEnabled(),
+				serverIso := map[string]interface{}{
 					"image":        server.Isolation.Image,
 					"network_mode": server.Isolation.NetworkMode,
 					"working_dir":  server.Isolation.WorkingDir,
 					"extra_args":   server.Isolation.ExtraArgs,
 				}
+				if server.Isolation.Enabled != nil {
+					serverIso["enabled"] = *server.Isolation.Enabled
+					serverIso["enabled_override"] = *server.Isolation.Enabled
+				}
+				if server.Isolation.Mode != nil {
+					serverIso["mode_override"] = string(*server.Isolation.Mode)
+				}
+				dockerInfo["server_isolation"] = serverIso
 			}
 
 			// Add global limits
@@ -4111,6 +4128,10 @@ func (p *MCPProxyServer) getIsolationManager() IsolationChecker {
 
 // IsolationChecker interface for checking isolation settings
 type IsolationChecker interface {
+	// ResolveIsolation is the single source of truth for "is this server
+	// isolated" — it accounts for the global mode, the tri-state per-server
+	// override and the structural gates (GH #1142).
+	ResolveIsolation(serverConfig *config.ServerConfig) config.ResolvedIsolation
 	ShouldIsolate(serverConfig *config.ServerConfig) bool
 	DetectRuntimeType(command string) string
 	GetDockerImage(serverConfig *config.ServerConfig, runtimeType string) (string, error)

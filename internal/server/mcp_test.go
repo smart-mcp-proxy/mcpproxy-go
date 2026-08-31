@@ -1651,7 +1651,8 @@ func TestPatchPreservesIsolationConfig(t *testing.T) {
 
 	// CRITICAL: Verify Isolation config is preserved completely
 	require.NotNil(t, merged.Isolation, "Isolation config must be preserved")
-	assert.True(t, merged.Isolation.IsEnabled(), "Isolation.Enabled must be preserved")
+	require.NotNil(t, merged.Isolation.Enabled, "Isolation.Enabled override must survive as a set pointer, not collapse to nil")
+	assert.True(t, *merged.Isolation.Enabled, "Isolation.Enabled must be preserved")
 	assert.Equal(t, "python:3.11", merged.Isolation.Image, "Isolation.Image must be preserved")
 	assert.Equal(t, "bridge", merged.Isolation.NetworkMode, "Isolation.NetworkMode must be preserved")
 	assert.Equal(t, []string{"-v", "/host:/container"}, merged.Isolation.ExtraArgs, "Isolation.ExtraArgs must be preserved")
@@ -1826,7 +1827,8 @@ func TestPatchPreservesAllFieldsOnSimpleToggle(t *testing.T) {
 
 	// Deep verify nested configs
 	require.NotNil(t, merged.Isolation)
-	assert.Equal(t, baseConfig.Isolation.IsEnabled(), merged.Isolation.IsEnabled())
+	assert.Equal(t, baseConfig.Isolation.Enabled, merged.Isolation.Enabled,
+		"the tri-state enabled override must round-trip exactly (nil stays nil)")
 	assert.Equal(t, baseConfig.Isolation.Image, merged.Isolation.Image)
 	assert.Equal(t, baseConfig.Isolation.NetworkMode, merged.Isolation.NetworkMode)
 	assert.Equal(t, baseConfig.Isolation.ExtraArgs, merged.Isolation.ExtraArgs)
@@ -1882,7 +1884,8 @@ func TestPatchDeepMergeIsolation(t *testing.T) {
 	assert.Equal(t, "/app", merged.Isolation.WorkingDir, "WorkingDir must be preserved")
 
 	// With *bool: patch.Isolation.Enabled is nil (not set), so base value is preserved
-	assert.True(t, merged.Isolation.IsEnabled(), "Enabled must be preserved when patch doesn't set it")
+	require.NotNil(t, merged.Isolation.Enabled, "Enabled must stay a set override when the patch doesn't touch it")
+	assert.True(t, *merged.Isolation.Enabled, "Enabled must be preserved when patch doesn't set it")
 
 	// Verify the diff contains isolation changes
 	assert.NotNil(t, diff)
@@ -1940,4 +1943,35 @@ func TestRawByteSize_MeasuredBeforeTruncation(t *testing.T) {
 	// measurement happened before truncation, not after.
 	assert.Greater(t, responseBytes, rawByteSize(forwarded),
 		"captured ResponseBytes must exceed the post-truncation payload size")
+}
+
+// TestPatchPreservesIsolationMode is the MCP-side regression for GH #1142:
+// copyIsolationConfig/MergeIsolationConfig ignored IsolationConfig.Mode, so the
+// `upstream_servers patch` path silently erased a server's per-server isolation
+// mode (the primary MCP-34.2 override) on any unrelated isolation edit.
+func TestPatchPreservesIsolationMode(t *testing.T) {
+	sandbox := config.IsolationModeSandbox
+	baseConfig := &config.ServerConfig{
+		Name:     "test-mode-preserve",
+		Protocol: "stdio",
+		Command:  "uvx",
+		Enabled:  true,
+		Isolation: &config.IsolationConfig{
+			Mode:  &sandbox,
+			Image: "python:3.11",
+		},
+	}
+
+	patch := &config.ServerConfig{
+		Isolation: &config.IsolationConfig{Image: "python:3.12"},
+	}
+
+	merged, _, err := config.MergeServerConfig(baseConfig, patch, config.DefaultMergeOptions())
+	require.NoError(t, err)
+	require.NotNil(t, merged.Isolation)
+	assert.Equal(t, "python:3.12", merged.Isolation.Image)
+	require.NotNil(t, merged.Isolation.Mode, "isolation.mode must survive an unrelated isolation patch")
+	assert.Equal(t, sandbox, *merged.Isolation.Mode)
+	assert.NotSame(t, baseConfig.Isolation.Mode, merged.Isolation.Mode,
+		"the merged Mode pointer must not alias the base config")
 }
