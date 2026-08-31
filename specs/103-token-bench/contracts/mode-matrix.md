@@ -1,6 +1,7 @@
 # Contract: the mode matrix
 
-**5 valid cells + 1 baseline. 7 structurally impossible combinations, each a skip-with-reason
+**5 distinct behaviours + 1 baseline. The 3-axis product's other 7 combinations are
+configurable but redundant, each a skip-with-reason
 row.** This file is the source of truth for FR-015, FR-016 and FR-017.
 
 ## Valid cells
@@ -17,27 +18,58 @@ row.** This file is the source of truth for FR-015, FR-016 and FR-017.
 `baseline` is not an mcpproxy mode. It is the same agent doing the same tasks with every
 upstream tool inline, and it is what every percentage is measured against.
 
-## Skipped combinations (FR-017)
+## The other 7 combinations of the 3-axis product (FR-017)
 
-| Combination | Reason code | Why |
+The naive product is 3 routing modes x 2 discovery serializations x 2 direct serializations =
+**12 combinations, which collapse onto 5 distinct behaviours.**
+
+They are **not impossible to configure** — they are *configurable and behaviourally redundant*,
+because on each surface one or both serialization axes have no consumer. Calling them
+"impossible" would be wrong; rendering them as zeros would be worse. Each is a
+**skip-with-reason row naming the cell it collapses onto.**
+
+| Configured combination | Collapses onto | Reason code |
 |---|---|---|
-| `code_execution` × `compact` | `forced` | The code-execution surface overwrites the response mode with `full` and blanks the detail parameter; `detail` is not in that surface's schema. |
-| `code_execution` × `compact` × direct axis | `forced` | Same cause, second axis. |
-| `direct` × `full` (discovery axis) | `inapplicable` | `tool_response_mode` has exactly one consumer, inside the retrieve_tools handler. The direct surface has no `retrieve_tools` tool. |
-| `direct` × `compact` (discovery axis) | `inapplicable` | Same cause. |
-| `retrieve_tools` × `deferred` | `inapplicable` | `direct_tool_response_mode` is read only when building the direct listing. |
-| `code_execution` × `deferred` | `inapplicable` | Same cause. |
-| `code_execution` with `enable_code_execution: false` | `degenerate` | The surface can discover tools and call none of them. |
+| `retrieve_tools` x full x **deferred** | `retrieve_full` | `axis-ignored` |
+| `retrieve_tools` x compact x **deferred** | `retrieve_compact` | `axis-ignored` |
+| `direct` x **compact** x full | `direct_full` | `axis-ignored` |
+| `direct` x **compact** x deferred | `direct_deferred` | `axis-ignored` |
+| `code_execution` x **compact** x full | `code_exec` | `forced-full` |
+| `code_execution` x full x **deferred** | `code_exec` | `axis-ignored` |
+| `code_execution` x **compact** x **deferred** | `code_exec` | `forced-full` + `axis-ignored` |
+
+### Why each axis is ignored where it is
+
+- **`tool_response_mode` has exactly one consumer**: `effectiveToolResponseMode`, called from
+  the `retrieve_tools` handler (`internal/server/mcp.go:1585`). Neither the direct nor the
+  code-execution surface reads it — the direct surface has no `retrieve_tools` tool at all.
+- **`direct_tool_response_mode` has exactly one consumer**: `effectiveDirectToolResponseMode`,
+  read when building the direct listing (`internal/server/mcp_routing.go:100`). Only the
+  direct surface consults it.
+- **`code_execution` forces full**: that surface overwrites the response mode with `full` and
+  blanks the detail parameter; `detail` is not in its schema. That is a genuine *override*,
+  distinct from an ignored axis, hence its own reason code.
+
+### Separately: a degenerate configuration
+
+`code_execution` with `enable_code_execution: false` is not part of the product above. It is a
+configuration in which the surface can discover tools and call none of them. Skip it with
+reason `degenerate`.
 
 ## Rules
 
-1. **A cell is selected by endpoint URL, not by a config change.** All three routing-mode
-   servers are built at startup and all three endpoints stay mounted regardless of config.
-   The whole matrix therefore crosses on ONE long-lived proxy instance.
-2. **Only the two serialization axes need config**, and each affects only its own surface.
-3. **An inapplicable axis is recorded as not-applicable**, never as a default value — a
+1. **The routing-mode axis is selected by endpoint URL — no config change, no restart.** All
+   three routing-mode servers are built at startup and all three endpoints stay mounted
+   regardless of config (`internal/server/server.go:2514-2536`).
+2. **The two serialization axes DO require config**, and each affects only its own surface.
+   A cell is therefore (URL, serialization-config) — **not URL alone**. Whether those two
+   fields hot-reload, or whether each value needs a fresh instance, is OPEN and must be
+   settled before tasks are written: it decides whether the matrix crosses on one long-lived
+   proxy or on several.
+3. **An ignored axis is recorded as not-applicable**, never as a default value — a
    default would imply a measurement that was never taken.
-4. **A skipped cell carries a reason code and never renders as a zero.** Reuse the existing
+4. **A skipped row carries a reason code AND the cell it collapses onto, and never renders
+   as a zero.** Reuse the existing
    skipped-row shape (`Skipped` / `SkipReason` plus the skipped-result constructor) rather
    than inventing a second one.
 5. **Capability toggles** (batching, stored scripts, validate-before-dispatch) are binary

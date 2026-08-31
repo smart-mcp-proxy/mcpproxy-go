@@ -63,23 +63,24 @@ One recorded tool call inside a session.
 
 ## ModeCell
 
-One point in the matrix. **There are exactly 5 valid cells plus a baseline**; see
+One point in the matrix. **There are exactly 5 distinct behaviours plus a baseline**; see
 [contracts/mode-matrix.md](./contracts/mode-matrix.md).
 
 | Field | Meaning |
 |---|---|
 | `id` | Stable cell identifier used as a report key. |
-| `endpoint` | Which mounted MCP endpoint this cell is served from — this is how a cell is selected, not a config change. |
+| `endpoint` | Which mounted MCP endpoint serves this cell. Selects the routing-mode axis with no config change; the serialization axes still need config. |
 | `discovery_serialization` | full / compact / not-applicable. |
 | `direct_serialization` | full / deferred / not-applicable. |
 | `capabilities` | Binary conditions applicable to this cell (batching, stored scripts, validate-before-dispatch). |
-| `skipped`, `skip_reason` | Populated for the 7 structurally impossible combinations. |
+| `skipped`, `skip_reason`, `collapses_onto` | Populated for the 7 redundant combinations of the 3-axis product; each names the valid cell it collapses onto. |
 
 **Validation rules**
 
-- An inapplicable axis MUST be recorded as not-applicable, never as a default value — a
-  default would imply a measurement that was never taken (FR-017).
-- A skipped cell MUST carry a reason and MUST NOT be rendered as a zero.
+- An ignored axis MUST be recorded as not-applicable, never as a default value — a default
+  would imply a measurement that was never taken (FR-017).
+- A skipped row MUST carry a reason code AND the cell it collapses onto, and MUST NOT be
+  rendered as a zero. These combinations are configurable and redundant, NOT impossible.
 - Cell identity MUST be stable across runs so results are comparable over time (FR-028).
 
 ---

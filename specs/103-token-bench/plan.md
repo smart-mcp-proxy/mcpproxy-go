@@ -18,13 +18,15 @@ contract fix that makes the first of them honest.
 The research pass changed three things materially versus the spec's assumptions, all in the
 direction of less work:
 
-- **The mode matrix is 5 cells, not 12.** The three axes are not a free product; two of them
-  each govern exactly one surface. Seven combinations are structurally impossible and get
-  skip-with-reason rows.
-- **The matrix crosses on ONE long-lived proxy instance.** All three routing-mode servers are
-  built at startup and permanently mounted, so a cell is selected by URL, not by a config
-  change plus restart. Only the two serialization axes need config, and only for their own
-  surface.
+- **The mode matrix is 5 distinct behaviours, not 12.** The three axes are not a free product:
+  each serialization axis has exactly one consumer, so the other 7 combinations are
+  configurable but **behaviourally redundant** — each collapses onto one of the 5. They are
+  reported as skip-with-reason rows naming the cell they collapse onto, never as zeros and
+  never as "impossible".
+- **The routing-mode axis costs nothing to cross.** All three routing-mode servers are built
+  at startup and permanently mounted, so that axis is selected by endpoint URL with no config
+  change and no restart. The two serialization axes still require config; whether they
+  hot-reload is an open question that changes the runner's shape (see below).
 - **MCPMark needs one `elif` to point at mcpproxy**, and already emits per-task token usage,
   pass verdicts, turn counts and pass^k. The spec's fallback plan (build an in-repo task set)
   is not needed.
@@ -58,7 +60,7 @@ and must run offline; no recorded session content may reach a report or a third 
 |---|---|
 | **I. Performance at Scale** | N/A to production paths. The harness adds no code to a request path. The one production-touching change (Phase 0 item 3 below) adds two integers to an export DTO. |
 | **II. Actor-Based Concurrency** | No new concurrency in production code. The harness is a batch tool. |
-| **III. Configuration-Driven** | PASS, and strengthened: the matrix is crossed by URL + existing config fields, adding no benchmark-only configuration to the product. |
+| **III. Configuration-Driven** | PASS: the matrix is crossed by endpoint URL plus existing config fields, adding no benchmark-only configuration to the product. |
 | **IV. Security by Default** | **The binding gate for this feature.** Replay inputs are raw user traffic; the export path deliberately does not mask. Design must default to bodies-off and must never transmit recorded content off-box. See Security Design below. |
 | **V. TDD** | PASS. Every unit below is specified test-first; the deterministic half is fully unit-testable with no proxy, following the `flipgate.go` precedent of parameterising the driver over a function type. |
 | **VI. Documentation Hygiene** | PASS. `bench/README.md` is the feature's user-facing doc and must gain the replay and live-loop sections; `CLAUDE.md` needs no change (no new commands at the top level, no architecture change). |
@@ -89,8 +91,9 @@ Five topics were resolved; the load-bearing outcomes:
 1. **Extension seams** — three exist. Spec 103 uses the "new measurement mode" seam twice
    (flag on `cmd/bench` + driver in package `bench` + report block), following the spec-085
    flip-gate precedent. **No new arm is needed**, and no new binary.
-2. **The valid matrix is 5 cells**, with 7 documented skip reasons; cells are selected by
-   endpoint URL on one running proxy.
+2. **The matrix is 5 distinct behaviours**; the other 7 combinations of the 3-axis product
+   are configurable but redundant and collapse onto them. The routing-mode axis is selected by
+   endpoint URL with no restart; the serialization axes still need config.
 3. **One backend change is required**: `request_bytes` / `response_bytes` exist on the storage
    record, explicitly measured pre-truncation, but are absent from the export contract. Adding
    them turns FR-002 from "exclude truncated records" into "annotate them accurately", which
@@ -187,6 +190,9 @@ a masking layer, which is the simpler of the two available designs.
 
 These need a human, and none blocks starting US1:
 
+0. **Can the two serialization fields be hot-reloaded, or does each value need a fresh
+   instance?** This decides whether the matrix crosses on one long-lived proxy or on several,
+   and it is the one open item that changes the runner's shape. Verify before `/speckit.tasks`.
 1. **Pinned model and spend ceiling** for the live loop. US1 delivers alone without it.
 2. **Whether cache-read tokens count toward "tokens per completed task."** FR-014 requires
    tracking them separately; FR-018 does not say which composite the headline uses. This is a
