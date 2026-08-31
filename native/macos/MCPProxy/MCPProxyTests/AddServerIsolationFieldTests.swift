@@ -56,6 +56,33 @@ final class AddServerIsolationFieldTests: XCTestCase {
         )
     }
 
+    // (c-1b) The toggle OFF must emit NO isolation key at all (GH #1142).
+    // Emitting `["enabled": false]` unconditionally wrote a permanent explicit
+    // opt-out onto every stdio server added from the tray, so the server would
+    // ignore global Docker isolation forever — a silent security downgrade the
+    // user never asked for. "Off" here means "inherit the global setting",
+    // matching AddServerModal.vue, which only writes isolation_json when the
+    // box is ticked.
+    func testStdioToggleOffOmitsIsolation() {
+        let config = ManualServerForm.makeServerConfig(
+            name: "local-fs",
+            selectedProtocol: "stdio",
+            enabled: true,
+            dockerIsolation: false,
+            quarantined: false,
+            url: "",
+            command: "npx",
+            argsText: "@modelcontextprotocol/server-filesystem",
+            workingDir: "",
+            envText: ""
+        )
+        XCTAssertEqual(config["command"] as? String, "npx")
+        XCTAssertNil(
+            config["isolation"],
+            "an unticked isolation box means \"inherit the global setting\" — it must not persist an explicit opt-out"
+        )
+    }
+
     // (c-2) A brand-new HTTP server config never carries an enabled isolation,
     // even when the (stale) toggle value is still true — i.e. switching an
     // in-progress form from stdio→http must not leak isolation into the config.
