@@ -512,7 +512,14 @@ func isStubSchema(raw json.RawMessage) bool {
 		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return false
+		// A schema that will not decode as an object carries no properties to
+		// price, so it is a stub for costing purposes. Returning false here —
+		// as an earlier version did — let a schema of `true`, `[]` or `0` pass
+		// as REAL and be priced at about one token, which is the
+		// semantically-empty-but-syntactically-different bypass around every
+		// guard downstream. Not reachable from mcpproxy today, which emits
+		// object schemas, but the guard should not depend on that.
+		return true
 	}
 	return len(s.Properties) == 0
 }

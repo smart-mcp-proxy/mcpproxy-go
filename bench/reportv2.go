@@ -316,6 +316,16 @@ type FleetShape struct {
 	ToolCount            int     `json:"tool_count"`
 	MeanDefinitionTokens float64 `json:"mean_definition_tokens,omitempty"`
 	P95DefinitionTokens  int     `json:"p95_definition_tokens,omitempty"`
+	// SchemalessTools counts tools in this fleet that carried no priceable
+	// input schema.
+	//
+	// A fleet is refused outright only when NO tool has a real schema. A
+	// PARTIAL regression — 3 of 45, or 20 of 45 — passes that guard and prices
+	// the stubbed ones at nothing, quietly shrinking the baseline and
+	// inflating the headline. Without this count the report carries no trace
+	// of it, so the reader cannot tell a clean fleet from a partly stubbed
+	// one, and a drift from 3 to 20 between runs is invisible.
+	SchemalessTools int `json:"schemaless_tools,omitempty"`
 }
 
 // ReplayExclusion counts the supplied sessions dropped for one reason (FR-003,

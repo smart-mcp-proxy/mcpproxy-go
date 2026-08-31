@@ -126,14 +126,24 @@ type ReplayOptions struct {
 	// replay input is raw recorded traffic and must never be committed.
 	RecordingPath string
 
-	// Fleet is the MANDATORY fleet input: the tool definitions the menu cost
-	// is computed from. Either a frozen corpus (the committed corpora already
-	// serve this) or a snapshot of a live proxy's catalog.
+	// Fleet is the frozen half of the MANDATORY fleet input: the tool
+	// definitions the menu cost is computed from, as a committed corpus.
+	// Exactly one of Fleet and LiveFleet must be supplied.
 	Fleet *Corpus
 
 	// FleetID names the fleet shape every figure is quoted for (IC-004).
 	// Empty falls back to the corpus version.
 	FleetID string
+
+	// LiveFleet is the live half of the fleet input: a running proxy's own
+	// catalog, read over MCP tools/list (mcptools.go). It is an ALTERNATIVE to
+	// Fleet, never a supplement — see ResolveFleet for why supplying both is
+	// an error rather than a preference.
+	//
+	// It is a structural FleetSource for the same reason Arms are structural
+	// EncodingArms: bench cannot import the packages that build the concrete
+	// producers, and a test must be able to satisfy the seam with a literal.
+	LiveFleet FleetSource
 
 	// Bodies is the loader's privacy posture. The ZERO VALUE is bodies-off,
 	// which is the safe default and the one this file's contract is written
@@ -170,6 +180,87 @@ func ReplayArmNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ResolveFleet picks the ONE fleet a replay is priced over, from the two ways
+// of supplying one: a frozen corpus, or a live proxy's own catalog read over
+// MCP tools/list (mcptools.go).
+//
+// Two rules, and they are the same rule seen from both sides.
+//
+// NEITHER given is ErrReplayFleetRequired. A menu is a property of the tool
+// definitions and the activity export carries no fleet snapshot, so a
+// recording on its own computes nothing at all. Adding a live source does NOT
+// soften this: it adds a second way to supply a fleet, not permission to omit
+// one.
+//
+// BOTH given is ErrReplayFleetAmbiguous. This one is easy to get wrong in the
+// accommodating direction — prefer the live proxy, say, and warn. But every
+// figure in the report is quoted for exactly one fleet shape, named by a single
+// fleet_id, and a reader has no way to tell which input that id came from. A
+// silent preference therefore does not produce a slightly-less-precise report;
+// it produces a report whose provenance line is false. Refuse instead.
+//
+// The live fetch happens HERE rather than at the call site so that a live
+// fleet's failure lands on the same code path as every other fleet failure. A
+// caller that fell back to a frozen corpus on a failed fetch would answer a
+// different question than the one that was asked, using the same headline.
+func ResolveFleet(frozen *Corpus, frozenID string, live FleetSource) (*Corpus, string, error) {
+	hasFrozen := frozen != nil && len(frozen.Tools) > 0
+	switch {
+	case hasFrozen && live != nil:
+		return nil, "", fmt.Errorf("%w: a frozen corpus and a live proxy catalog were both supplied, and every figure is quoted for "+
+			"exactly one fleet shape — silently preferring one would make the report's fleet_id a claim about definitions it was not priced over",
+			ErrReplayFleetAmbiguous)
+
+	case live != nil:
+		fleet, err := live.Fleet()
+		if err != nil {
+			return nil, "", fmt.Errorf("replay: read the live fleet: %w", err)
+		}
+		if fleet == nil || len(fleet.Tools) == 0 {
+			return nil, "", fmt.Errorf("%w: the live fleet source returned no tools", ErrReplayFleetRequired)
+		}
+		// Guard HERE, not only inside FetchToolsList. The guard's job is to
+		// stop a stubbed live fleet from being priced, and a check that lives
+		// in one implementation of FleetSource only protects that one
+		// implementation — any other live source reaches the tokenizer
+		// unchecked. ResolveFleet is where every live fleet passes exactly
+		// once, so it is where the property actually holds.
+		if err := guardToolSchemas("live fleet "+live.FleetID(), fleet.Tools); err != nil {
+			return nil, "", err
+		}
+		id := live.FleetID()
+		if id == "" {
+			id = fleet.Version
+		}
+		return fleet, id, nil
+
+	case hasFrozen:
+		// DELIBERATELY UNGUARDED, and not an oversight — a review flagged the
+		// asymmetry with the live path as a defect and it is not one.
+		//
+		// A schema-less frozen corpus is a SUPPORTED input. corpus_v1 (spec
+		// 065) is 45 tools with zero schemas by design, and it is the default
+		// -corpus value; CountToolWithSchema is documented to count a
+		// schema-less tool identically to CountTool precisely so the two mix
+		// in one report. Applying the live guard here would reject the
+		// project's own default corpus.
+		//
+		// The asymmetry tracks a real difference in what the two sources can
+		// silently be. A live surface can be misconfigured out from under the
+		// operator — direct_tool_response_mode:"deferred" turns every upstream
+		// schema into a placeholder and under-counts the direct menu by ~39%
+		// with nothing on screen to say so. A committed corpus is a reviewed
+		// artifact whose shape was chosen; if it carries no schemas, that is a
+		// property someone can see in the diff.
+		return frozen, frozenID, nil
+
+	default:
+		return nil, "", fmt.Errorf("%w: a menu is a property of the tool definitions and the activity export carries no fleet snapshot, "+
+			"so a recording on its own computes nothing — pass a frozen corpus or a live-proxy catalog "+
+			"(this is an error, not a degraded run)", ErrReplayFleetRequired)
+	}
 }
 
 // FleetResolver builds the loader's replayability predicate from a fleet
@@ -240,18 +331,20 @@ func splitToolIdentity(serverName, toolName string) (server, tool string) {
 // RunReplay loads a recording, prices every mode cell's menu against the
 // supplied fleet, and returns the report block.
 //
-// The fleet check comes FIRST, before the recording is even opened: refusing
+// The fleet is resolved FIRST, before the recording is even opened: refusing
 // early is what makes the refusal a rule about the invocation rather than an
-// accident of whichever file happened to be readable.
+// accident of whichever file happened to be readable. Resolution also covers
+// the live source (ResolveFleet), so a live fleet's stub guard fires before any
+// raw recorded traffic is read off disk.
 func RunReplay(tk *Tokenizer, opts ReplayOptions) (*ReplayBlock, error) {
 	if tk == nil {
 		return nil, errors.New("replay: a tokenizer is required")
 	}
-	if opts.Fleet == nil || len(opts.Fleet.Tools) == 0 {
-		return nil, fmt.Errorf("%w: a menu is a property of the tool definitions and the activity export carries no fleet snapshot, "+
-			"so a recording on its own computes nothing — pass a frozen corpus or a live-proxy catalog "+
-			"(this is an error, not a degraded run)", ErrReplayFleetRequired)
+	fleet, fleetID, err := ResolveFleet(opts.Fleet, opts.FleetID, opts.LiveFleet)
+	if err != nil {
+		return nil, err
 	}
+	opts.Fleet, opts.FleetID = fleet, fleetID
 	if opts.RecordingPath == "" {
 		return nil, errors.New("replay: a recording path is required (mcpproxy activity export --format json)")
 	}
@@ -616,6 +709,15 @@ func replayFleetShape(tk *Tokenizer, opts ReplayOptions) (FleetShape, error) {
 		id = opts.Fleet.Version
 	}
 	shape := FleetShape{ID: id, ToolCount: len(opts.Fleet.Tools)}
+	// Count the partially-stubbed remainder so a fleet that PASSED the guard
+	// still shows how much of it could not be priced. The guard only refuses
+	// an all-stub population; a 3-of-45 regression flows straight through and
+	// would otherwise leave no trace in the report.
+	for _, tl := range opts.Fleet.Tools {
+		if len(tl.Schema) == 0 || isStubSchema(tl.Schema) {
+			shape.SchemalessTools++
+		}
+	}
 
 	arm := opts.Arms[baselineArmName]
 	if arm == nil {
