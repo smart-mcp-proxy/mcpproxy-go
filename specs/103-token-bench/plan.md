@@ -81,13 +81,14 @@ Three findings drive this and each becomes a design rule:
    exported record can be sensitive but not yet flagged.
    → **Rule**: exclude-by-flag is a best-effort reducer and MUST NOT be described as a
    guarantee, in code comments or in the published methodology.
-3. **Bodies-off covers three of the five cells, not all five.** For the two direct cells and
-   the code-execution cell, what the mode changes is the static tool-surface payload, computed
-   from the fleet's tool definitions with no recorded content. For the two `retrieve_tools`
-   cells, what the mode changes IS the response body, so those need bodies-on. The recorded
-   byte sizes are byte *lengths*, not token counts, and support only an estimate.
-   → **Rule**: bodies-off is the default and yields measured figures for three cells; the two
-   `retrieve_tools` cells are reported as requiring an explicit bodies-on run.
+3. **Bodies-off measurability is per cell, and splits menu cost from complete workload cost.**
+   Bodies-off gives a measured MENU cost for all five cells, but a measured COMPLETE WORKLOAD
+   cost for only the two direct cells. `code_exec` is partial — its menu is static, but the
+   surface also registers `retrieve_tools`, whose responses are bodies — and both
+   `retrieve_tools` cells need bodies-on because the mode changes the response body itself.
+   The recorded byte sizes are byte *lengths*, not token counts, and support only an estimate.
+   → **Rule**: bodies-off is the default; the three cells that cannot yield a complete figure
+   from it are reported as unavailable, never as zero.
 
 ## Phase 0: Research
 
@@ -168,7 +169,7 @@ bench/
 ├── modematrix.go                 # NEW — the 5 valid cells, skip reasons, cell→URL mapping
 ├── agentloop.go                  # NEW — live-loop driver + MCPMark meta.json ingestion
 ├── reportv2.go                   # EXTEND — additive optional blocks; per-row provenance
-├── live_report.go                # EXTEND — scope Tokenizer to deterministic sections
+├── live_report.go                # EXTEND — per-block accounting_source (do NOT narrow Tokenizer)
 ├── session.go                    # EXTEND — measured rates supersede armRetryRates
 └── cmd/bench/main.go             # EXTEND — -replay and -agent-loop branches
 
@@ -176,7 +177,9 @@ internal/contracts/activity.go    # EXTEND — add request_bytes / response_byte
 internal/httpapi/activity.go      # EXTEND — copy them in the export projection
 
 specs/083-discovery-profiler/contracts/report-v2.schema.json   # EXTEND — declare new blocks
-.github/workflows/bench.yml       # EXTEND — TIKTOKEN_CACHE_DIR; assert no committed reports
+.github/workflows/bench.yml       # EXTEND — TIKTOKEN_CACHE_DIR set AND cache populated
+<a PR-triggered required workflow>     # SC-011 gate — bench.yml runs only on v* tags and
+                                  # workflow_dispatch, so a gate there cannot block a PR
 ```
 
 **Structure Decision**: The feature lives almost entirely inside the existing `bench/` tree,

@@ -58,9 +58,10 @@ One recorded tool call inside a session.
 - **Tool-surface cost does not depend on recorded content** — it is computed from the fleet's
   tool definitions under each mode. It is fully `measured` with bodies off, and it is what the
   direct and code-execution cells' modes change.
-- **The two `retrieve_tools` cells are NOT measurable with bodies off**, because what their
-  mode changes is the `retrieve_tools` response body itself. They require an explicit
-  bodies-on run and MUST be reported as unavailable otherwise, never as zero.
+- **Three cells cannot yield a complete workload figure with bodies off**: both
+  `retrieve_tools` cells (their mode changes the response body itself) and `code_exec` (its
+  surface also serves `retrieve_tools`). Menu cost is still measured for all five. The three
+  MUST be reported as unavailable for the complete figure, never as zero.
 - **Response cost generally requires the text.** With bodies off it may only be an explicit
   `estimated` figure derived from byte length; with bodies on it becomes `measured`. The two
   MUST NOT be presented interchangeably.

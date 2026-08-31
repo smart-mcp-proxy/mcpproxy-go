@@ -36,11 +36,13 @@ mode cell, what this workload would have cost, with the exclusion accounting bes
 
 ### 3. Know which figures you just got
 
-- **`direct_full`, `direct_deferred`, `code_exec`: `measured`.** What their mode changes is
-  the static tool-surface payload, computed from the fleet's tool definitions — no recorded
-  content needed.
-- **`retrieve_full`, `retrieve_compact`: NOT measurable here.** What their mode changes IS the
-  `retrieve_tools` response body, so these two cells require a bodies-on run.
+- **Menu cost: `measured` for all five cells.** Computed from the fleet's tool definitions —
+  no recorded content needed.
+- **Complete workload cost: `measured` for `direct_full` and `direct_deferred` only.**
+- **`code_exec`: partial.** Its menu is static, but the surface also serves `retrieve_tools`,
+  whose responses are bodies — so its complete figure needs a bodies-on run.
+- **`retrieve_full`, `retrieve_compact`: need bodies-on.** What their mode changes IS the
+  `retrieve_tools` response body.
 - **Response cost generally: `estimated` or absent.** Tokenizing needs the text; a byte length
   supports only an estimate.
 - **The fleet is today's fleet.** The export carries no fleet snapshot, so this scores a

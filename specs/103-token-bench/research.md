@@ -75,9 +75,12 @@ an *accurate* cost basis without bodies. They do not — they are byte lengths, 
 needs the text. A second draft over-corrected, claiming tool-surface cost carries the headline
 for all five cells. The precise position:
 
-- **Three cells (both direct cells and code-execution) are measurable bodies-off**, because
-  what their mode changes is the static tool-surface payload, computed from the fleet's tool
-  definitions rather than from any recording.
+- **Separate MENU cost from COMPLETE WORKLOAD cost.** Bodies-off yields a measured menu cost
+  for all five cells, but a measured complete-workload cost for only the two direct cells,
+  whose mode changes nothing but the static tools/list payload.
+- **`code_exec` is PARTIAL, not measurable**: its menu is static, but the surface also
+  registers `retrieve_tools` (`internal/server/mcp_routing.go:670-676`) whose responses are
+  bodies, so its complete workload cost needs bodies-on.
 - **The two `retrieve_tools` cells need bodies-on**, because what their mode changes IS the
   `retrieve_tools` response body.
 - **`retrieve_tools` response cost is recoverable with bodies on** — the handler writes the

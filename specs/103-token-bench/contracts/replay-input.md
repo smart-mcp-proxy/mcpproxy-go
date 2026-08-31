@@ -32,33 +32,42 @@ carry an explicitly-estimated response cost instead of being dropped.
 **They do NOT make response cost measurable.** Tokenizing requires the text; a byte length
 yields an estimate at best. See the cost split below.
 
-**Known gap, precisely scoped**: internal `retrieve_tools` activity emission carries no byte
-counts, so with bodies OFF its response cost cannot even be estimated. It is *not* unrecoverable
-in general — the handler writes the FULL response to the activity log
-(`internal/server/mcp.go:2061-2064`), so a bodies-on export does carry it. Report it as
-unavailable in the bodies-off configuration, not as unavailable outright.
+**Known gaps in byte coverage** — records where even the byte-length estimate is unavailable,
+so they must fall to exclusion accounting rather than silently contributing zero:
+
+- **Internal `retrieve_tools` emission carries no byte counts.** With bodies off its response
+  cost cannot even be estimated. It is *not* unrecoverable in general — the handler writes the
+  FULL response to the activity log (`internal/server/mcp.go:2061-2064`), so a bodies-on export
+  carries it.
+- **Code-execution sub-calls record both byte counts as zero**
+  (`internal/server/mcp_code_execution.go:811-818`). A truncated sub-call therefore cannot use
+  the byte-length estimate either, and must be counted as excluded.
 
 ## Privacy contract
 
-1. **Default is bodies-off. Be precise about what that can and cannot measure.**
+1. **Default is bodies-off. Measurability is per cell, and splits into two different questions:
+   the MENU cost (what the agent pays to see the tools) and the COMPLETE WORKLOAD cost (menu
+   plus every response the workload consumed).**
 
-   | Mode cell | What the mode changes | Measurable bodies-off? |
-   |---|---|---|
-   | `direct_full`, `direct_deferred` | the static tool-surface payload | **Yes** — computed from the fleet's tool definitions, no recorded content needed |
-   | `retrieve_full`, `retrieve_compact` | the per-call `retrieve_tools` **response** | **No** — that response is the cost, and it is a body |
-   | `code_exec` | the static surface | **Yes**, same as direct |
+   | Mode cell | Menu cost, bodies-off | Complete workload cost, bodies-off | Why |
+   |---|---|---|---|
+   | `direct_full` | measured | measured | the mode changes only the static tools/list payload |
+   | `direct_deferred` | measured | measured | same |
+   | `code_exec` | measured | **NO** | this surface also registers `retrieve_tools` (`internal/server/mcp_routing.go:670-676`), whose responses are bodies |
+   | `retrieve_full` | measured | **NO** | the mode changes the `retrieve_tools` response body itself |
+   | `retrieve_compact` | measured | **NO** | same |
 
-   So bodies-off covers three of five cells fully. The two `retrieve_tools` cells need bodies,
-   because the thing their mode changes IS a response body.
+   So bodies-off gives a measured MENU cost for all five cells, and a measured COMPLETE
+   WORKLOAD cost for only the two direct cells. Three cells require an explicit bodies-on run
+   for their complete figure and MUST be reported as unavailable otherwise, never as zero.
 
-   **What the recording contributes** is the *workload shape* — call sequence, tool mix, call
-   counts, real fleet size — which is what makes the numbers about real usage rather than a
-   frozen corpus. The tool definitions themselves come from the live fleet, not the recording.
+   **What the recording contributes** is the *recorded call shape* — call sequence, tool mix
+   and call counts — evaluated against today's fleet. It does NOT contribute fleet size: the
+   export carries no fleet snapshot, and the tool definitions come from the live fleet.
 
-   **Consequence to state in every replay report**: the export carries no fleet snapshot, so a
-   replay scores the recorded workload against **today's** fleet, not the fleet as it stood
-   when the session was recorded. If the fleet has changed, the comparison is still internally
-   valid across modes but is not a historical reconstruction.
+   **Consequence to state in every replay report**: a replay scores a recorded workload against
+   **today's** fleet, not the fleet as it stood when the session was recorded. Internally valid
+   across modes; not a historical reconstruction.
 
 2. **Bodies-on is a separate, explicit opt-in** and prints a warning. The export path does
    **not** mask: masking is wired into the list and detail handlers only, so a bodies-on

@@ -81,6 +81,9 @@ measured rate and a defaulted one under a single `estimated` badge.
   ignored files, and it would also stay silent about a report that is already tracked. The
   correct assertion is that no file under the results directory is tracked at all:
   `test -z "$(git ls-files bench/results)"`.
+  **Placement matters as much as the assertion**: `bench.yml` triggers only on `v*` tags and
+  `workflow_dispatch`, so a gate there cannot block a pull request. Put it in a PR-triggered
+  required workflow, or state plainly that SC-011 remains post-merge detection only.
 - **`SC-004` is not currently achievable offline.** The tokenizer fetches its vocabulary over
   the network unless a cache directory env var is set, and nothing in the repo or CI sets it.
   Setting the variable is necessary but **not sufficient** — it names a cache without filling
