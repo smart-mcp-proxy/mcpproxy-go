@@ -596,6 +596,23 @@ func (r *Runtime) EmitActivitySystemStop(reason, signal string, uptimeSeconds in
 // arguments contains the input parameters, response contains the output
 // intent is the intent declaration metadata
 func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
+	r.EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, false)
+}
+
+// EmitActivityInternalToolCallTruncated is EmitActivityInternalToolCall for a
+// built-in whose RECORDED response is larger than the one the agent received.
+//
+// The non-internal path has carried this since Spec 024 (see the
+// "response_truncated" key in EmitActivityToolCallCompleted); the internal path
+// did not, and that asymmetry is a correctness problem rather than a cosmetic
+// one. retrieve_tools deliberately writes its FULL pre-truncation response to
+// the activity log while the agent consumed only the cut text, so a record that
+// does not say it was truncated is indistinguishable from a complete one.
+// Anything recomputing cost from the log then tokenizes text the agent never
+// paid for and OVERSTATES what mcpproxy cost — the one direction of error the
+// Spec 103 token benchmark exists to prevent, and one that cannot be detected
+// after the fact.
+func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseTruncated bool) {
 	payload := map[string]any{
 		"internal_tool_name": internalToolName,
 		"session_id":         sessionID,
@@ -625,6 +642,10 @@ func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, t
 	if contentTrust != "" {
 		payload["content_trust"] = contentTrust
 	}
+	// Always set, never omitempty-style conditional: absent and false must not be
+	// the same wire state here, because a consumer reading "no key" as "not
+	// truncated" is exactly the silent understatement this flag prevents.
+	payload["response_truncated"] = responseTruncated
 	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
 }
 

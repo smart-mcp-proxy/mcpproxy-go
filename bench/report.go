@@ -188,6 +188,60 @@ const dashboardV2HTML = `<!doctype html>
 {{end}}{{end}}
 <p class="small">Provenance badges: <span class="badge badge-measured">measured</span> observed over the real protocol/corpus &middot; <span class="badge badge-computed">computed</span> arithmetic over measured inputs &middot; <span class="badge badge-estimated">estimated</span> model with documented assumptions.</p>
 
+{{if .Replay}}
+<h2>Replay &mdash; a recorded workload, recomputed{{with prov .Provenance "replay"}}<span class="badge badge-{{.}}">{{.}}</span>{{end}}</h2>
+<div class="caveat">&#9888;&#65039; <b>{{.Replay.Counterfactual}}</b></div>
+<p class="small">accounting source <code>{{.Replay.AccountingSource.Kind}}</code> &middot; <code>{{.Replay.AccountingSource.Identity}}</code> &middot; recorded bodies {{if .Replay.BodiesIncluded}}<span class="warn">ON &mdash; raw and unmasked (the activity export path does not mask)</span>{{else}}off (default posture){{end}} &middot; fleet shape <code>{{.Replay.FleetShape.ID}}</code>, {{.Replay.FleetShape.ToolCount}} tools{{if .Replay.FleetShape.MeanDefinitionTokens}}, mean {{f1 .Replay.FleetShape.MeanDefinitionTokens}} tokens per definition, p95 {{.Replay.FleetShape.P95DefinitionTokens}}{{end}}</p>
+
+<h3>What did not count</h3>
+<p><span class="stat"><b>{{.Replay.SessionsSupplied}}</b>sessions supplied</span><span class="stat"><b>{{.Replay.SessionsUsed}}</b>sessions used</span></p>
+{{if .Replay.Exclusions}}
+<table>
+  <thead><tr><th>Reason</th><th>Count</th><th>Effect</th></tr></thead>
+  <tbody>
+  {{range .Replay.Exclusions}}
+    <tr>
+      <td><code>{{.Reason}}</code></td>
+      <td>{{.Sessions}}</td>
+      <td class="l">{{if eq .Reason "sensitive"}}sessions DROPPED &mdash; not priced at all{{else if eq .Reason "unreplayable"}}sessions DROPPED &mdash; a recorded tool is absent from the supplied fleet{{else if eq .Reason "bodies_missing"}}sessions flagged &mdash; still counted for call shape, but no response figure is derivable from them{{else if eq .Reason "truncated"}}sessions flagged &mdash; a stored response was cut, so its text describes more than the agent consumed{{else}}RECORDS dropped before reaching any unit of work (non-call activity, no tool name, or no work session){{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+<p class="small">Read this table BEFORE the numbers below. The two DROPPED rows account exactly for sessions supplied minus sessions used; the flagged rows describe sessions that still contributed. The <code>unattributed</code> row counts RECORDS rather than sessions &mdash; those records never became a session, so no session count exists for them.</p>
+{{else}}
+<p class="small">No sessions were dropped and no records fell outside a unit of work.</p>
+{{end}}
+{{if .Replay.SensitiveFlagBestEffort}}
+<p class="small">The sensitive-data flag is a best-effort REDUCER, never a guarantee: it is derived from detection metadata written asynchronously AFTER a record is persisted, so a freshly exported record may be sensitive and not yet flagged.</p>
+{{end}}
+
+<h3>Per-cell cost</h3>
+<table>
+  <thead><tr><th>Mode cell</th><th>Menu tokens</th><th>Recorded calls</th><th>Response tokens</th><th>Absolute complete-workload cost</th><th>Provenance</th></tr></thead>
+  <tbody>
+  {{range .Replay.Cells}}
+    <tr>
+      <td><code>{{.CellID}}</code></td>
+      <td>{{.MenuTokens}}</td>
+      <td>{{.Calls}}</td>
+      <td>{{if .ResponseTokens}}{{.ResponseTokens}}{{else}}&mdash;{{end}}</td>
+      <td class="l">{{if .AbsoluteWorkloadWithheld}}<span class="warn">withheld</span> &mdash; {{.WithheldReason}}{{else}}available{{end}}</td>
+      <td><span class="badge badge-{{.Provenance}}">{{.Provenance}}</span></td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{if .Replay.DirectDelta}}
+<h3>Cross-mode delta{{with .Replay.DirectDelta}}<span class="badge badge-{{.Provenance}}">{{.Provenance}}</span>{{end}}</h3>
+{{with .Replay.DirectDelta}}
+<p><span class="stat"><b>{{.DeltaTokens}}</b>tokens</span><span class="stat"><b>{{f1 .DeltaPct}}%</b>of the <code>{{.FromCellID}}</code> menu</span></p>
+<p class="small">This is the honest bodies-off headline: <code>{{.FromCellID}}</code> and <code>{{.ToCellID}}</code> serve IDENTICAL call responses, so the response term cancels out of the difference and the delta survives without the response text. No such delta exists for the retrieve cells &mdash; their serialization changes the response body, which is exactly the text a bodies-off replay does not carry.</p>
+{{end}}
+{{end}}
+<p class="small">Every figure above scores the recorded call shape against the SUPPLIED fleet &mdash; today's fleet, not the fleet as it stood when the sessions were recorded. It is internally valid across mode cells and is not a historical reconstruction. <code>generated_at</code> is pinned rather than stamped so two runs over the same inputs are byte-identical.</p>
+{{end}}
+
 {{if .Corpora}}
 <h2>Corpora{{with prov .Provenance "corpora"}}<span class="badge badge-{{.}}">{{.}}</span>{{end}}</h2>
 <table>

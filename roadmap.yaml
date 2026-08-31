@@ -389,15 +389,17 @@ epics:
 
   - id: token-bench
     title: "Token-efficiency benchmark: measured savings, published results"
-    status: todo
+    status: in_progress
     priority: P1
     spec: specs/103-token-bench
+    pr: "#1141"
     depends_on: [schema-deferred]
     note: "Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix. Spec 103 landed 2026-08-31 (#1137 spec+plan, #1139 tasks) after 13 cross-model review rounds; three of its findings changed the design rather than the wording: a recording carries no prompt/conversation/completion oracle so replay CANNOT show agent behaviour (US1 deterministic cost vs US2 live loop are now separate stories); replay needs a FLEET INPUT because the export has no fleet snapshot; and bodies-off yields menu costs plus one cross-mode delta, never an absolute workload cost. The matrix is 5 distinct behaviours, not a 3x2x2 product."
     tasks:
       - id: token-bench-harness
         title: "Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries"
-        status: todo
+        status: in_progress
+        pr: "#1141"
         depends_on: []
         note: "BUILDS ON the existing bench/ harness - do NOT rebuild token counting, encoding arms, break-even or recall. Already shipped there (PRs #747/#748 MCP-42, #851 spec 083): six encoding arms including direct_deferred (spec 102), cl100k_base counting, live response cost, break-even, RecallAtK/NDCGAtK, the v2 report + dashboard, `make bench-discovery` and CI wiring in bench.yml/eval.yml. 2026-08-31 audit correction: the old note claimed this task absorbs discovery-eval-harness because it would measure retrieval recall - recall is ALREADY measured (eval.yml retrieval-d1 + bench/armindex.go), so that is not this task's contribution. GENUINELY OPEN and unique here: (a) activity-log session REPLAY (nothing in bench/ reads the activity log; internal/contracts/activity.go already carries WorkSessionID, ToolName and Response - watch ResponseTruncated, which would undercount tokens); (b) MEASURED first-call success and retry rate — today they are assumed, not observed: bench/session.go defines per-arm literature-derived defaults (armRetryRates, research D8) and bench/report.go only renders and labels them as estimates; (c) tokens-per-SUCCESSFUL-task, which needs a task-completion signal the static harness has no concept of."
       - id: token-bench-public

@@ -50,6 +50,20 @@ type ActivityRecord struct {
 	ParentID          string                 `json:"parent_id,omitempty"`                      // Correlation id of the parent call (the code_execution whose sandbox issued this sub-call)
 	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`  // Additional context-specific data
 
+	// Byte sizes measured pre-truncation, mirroring storage.ActivityRecord
+	// (Spec 069 A1). They are the only cost signal a bodies-off export carries:
+	// with payloads suppressed there is no text left to measure, so a consumer
+	// accounting for a record it cannot read has nothing else to go on. They are
+	// byte LENGTHS, not token counts — the basis for an explicit estimate, never
+	// a measured figure (spec 103, contracts/replay-input.md).
+	//
+	// Zero means UNKNOWN, not free: legacy records predate the measurement and
+	// code-execution sub-calls record both as zero. Hence omitempty — an absent
+	// key tells a consumer to fall to exclusion accounting, whereas a present
+	// zero would read as a costless call and silently understate the workload.
+	RequestBytes  int `json:"request_bytes,omitempty"`  // JSON-serialized request arguments size in bytes
+	ResponseBytes int `json:"response_bytes,omitempty"` // Raw upstream response size in bytes before truncation
+
 	// Sensitive data detection fields (Spec 026)
 	HasSensitiveData bool     `json:"has_sensitive_data"`        // Whether sensitive data was detected
 	DetectionTypes   []string `json:"detection_types,omitempty"` // List of detection types found

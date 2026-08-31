@@ -325,6 +325,160 @@ flip-gate metrics under `flip_gates` in `live_report.json` (FR-018):
 go run ./bench/cmd/bench -live -flip-gates -proxy http://127.0.0.1:8092 -api-key eval-corpus-snapshot
 ```
 
+## Real-workload replay + agent loop (Spec 103)
+
+Everything above scores a **frozen corpus**. Spec 103 adds the two entry points
+that score a **real workload**: a deterministic *replay* of recorded activity
+(no model spend, US1) and a live *agent loop* under a pinned model (US2). The
+replay entry point lands with US1; the agent loop is gated on an operator
+decision (pinned model + spend ceiling) and is tracked under "not yet built"
+below until that is made.
+
+Both cross the **five-cell mode matrix** — `retrieve_full`, `retrieve_compact`,
+`direct_full`, `direct_deferred`, `code_exec`. The three axes (routing mode ×
+response mode × schema detail) have twelve combinations, but only five are
+distinct behaviours; the other seven are configurable, redundant, and reported
+as skip rows naming the cell they collapse onto.
+
+### Replay — recompute a recorded workload (deterministic, no model spend)
+
+**1. Export a real workload**, from a machine that has been using mcpproxy for
+real work:
+
+```bash
+mcpproxy activity export --format json > ~/replay-corpus.jsonl
+```
+
+CSV is not a valid input: it drops `work_session_id`, the byte fields and the
+call arguments, so it can neither group units of work nor account tokens.
+
+**2. Recompute across the matrix. A fleet input is MANDATORY** — a menu cost is
+a property of the tool definitions the agent was shown, and the activity export
+carries no fleet snapshot. The recording contributes the *call shape* (sequence,
+tool mix, call counts); it does not contribute fleet size. A recording-only
+invocation is a **hard error, not a degraded run**.
+
+```bash
+# Frozen fleet (reproducible):
+go run ./bench/cmd/bench \
+  -replay ~/replay-corpus.jsonl \
+  -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
+  -out bench/results
+
+# ...or read today's fleet from a live proxy instead:
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl \
+  -proxy http://127.0.0.1:8092 -api-key "$KEY" -out bench/results
+```
+
+Either way the workload is scored against the **supplied** fleet, not the fleet
+as it stood when the session was recorded. That is internally valid across cells
+and is *not* a historical reconstruction — the report says so on every figure.
+
+**3. Bodies-off is the DEFAULT, and it decides which figures exist.** The export
+path does not mask (masking is wired into the list and detail handlers only), so
+a bodies-on export is raw and unmasked by design. Bodies-on is therefore a
+separate, explicit opt-in that prints a warning, and content is tokenized inside
+the loader — only counts cross the boundary, never text.
+
+| | bodies-off (default) | bodies-on (opt-in) |
+|---|---|---|
+| Menu cost, all five cells | **measured** (from the fleet input) | measured |
+| Absolute complete-workload cost | **unavailable for every cell** — reported unavailable, never as zero | measurable where bodies survive |
+| `direct_full` vs `direct_deferred` delta | **measured** — their call responses are identical and cancel | measured |
+| `retrieve_full` / `retrieve_compact` / `code_exec` deltas | unavailable — the mode changes the response body itself | measured |
+| Response cost generally | `estimated` at best (`request_bytes`/`response_bytes` are **byte lengths**, not token counts) | measured |
+
+**4. Read the exclusion report before the headline.** Truncated,
+bodies-missing, sensitive and unreplayable records are each detected and
+**counted**; a truncated record never contributes silently. A corpus that is 80%
+truncated yields a real number over a small slice, and the report says so.
+Two caveats worth internalizing: `has_sensitive_data` is derived from detection
+metadata added *asynchronously* after persistence, so exclude-by-flag is a
+best-effort reducer and never a guarantee; and the activity log stores the FULL
+pre-truncation `retrieve_tools` response while the agent consumed truncated
+text, so a truncated record tokenized as-is **overstates** cost.
+
+**5. Verify determinism** (SC-002) — two runs are byte-identical once the
+wall-clock stamp is removed:
+
+```bash
+CORPUS=specs/083-discovery-profiler/datasets/corpus_v2.tools.json
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -corpus-v2 $CORPUS -out /tmp/run-a
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -corpus-v2 $CORPUS -out /tmp/run-b
+diff <(jq 'del(.generated_at)' /tmp/run-a/report.json) \
+     <(jq 'del(.generated_at)' /tmp/run-b/report.json) \
+  && echo "byte-identical modulo generated_at (SC-002)"
+```
+
+**6. Delete the input when you are finished.**
+
+```bash
+rm -f ~/replay-corpus.jsonl
+```
+
+A replay input is raw user traffic. Keep it **outside the repository**, never
+commit it, and delete it when the run is done — it is gitignored nowhere
+precisely because it should never be inside the repo in the first place.
+
+### Agent loop — tokens per *completed* task (costs model spend)
+
+The replay half is a **counterfactual** over recorded traffic: what the same
+call shape would have cost per cell. It is not observed agent behaviour, and no
+replay figure may be published without that label. The agent loop is the half
+that observes behaviour, and it is the only part that costs spend.
+
+- **One instance, whole matrix.** All three routing-mode servers are mounted at
+  startup, so a cell is selected by **endpoint URL**; only the two serialization
+  axes need config, and both hot-reload. Enable code execution if `code_exec` is
+  in scope — without it that cell is degenerate and is skipped with a reason.
+- **Stand up the full fleet**, even when running one service's tasks. A single
+  server's toolset is too small a fleet for proxy modes to differ from baseline,
+  and the full fleet is also the honest **baseline arm**: same agent, same
+  tasks, all tools loaded directly.
+- **k ≥ 4 runs per cell.** A single agentic run is noise; every
+  model-dependent figure is an average over at least four runs with its spread,
+  or it is not a headline.
+- **Four figures per cell**: tokens per completed task, completion rate,
+  first-attempt success and retry rate. The retry classification rule
+  (corrective vs infrastructure) must be applied **identically to the baseline
+  arm and the proxy arms**, or the comparison is biased toward whichever arm
+  carries richer error signal.
+- **Accounting sources are never summed.** Deterministic figures come from the
+  local tiktoken estimator; live figures come from provider-reported usage. A
+  cross-source aggregate is withheld with a stated reason instead — and a mode
+  that costs less while completing less is marked a **regression**, whatever its
+  token figure says.
+
+### Offline prerequisite (both halves)
+
+`tiktoken` downloads its vocabulary on first use unless the cache directory is
+both named **and populated**:
+
+```bash
+export TIKTOKEN_CACHE_DIR="$HOME/.cache/tiktoken"
+go run ./bench/cmd/bench -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
+  -out /tmp/warm   # warms the cache; needs network exactly once
+```
+
+Setting the variable only *names* a cache; it does not fill one. A genuinely
+offline reproduction needs the cache pre-populated — warm it once with network
+access, or restore a known-good copy (which is what `.github/workflows/bench.yml`
+does via its `actions/cache` step).
+
+### Before publishing a replay or agent-loop number
+
+1. Recompute the achievable ceiling **for each fleet shape**; never carry a
+   previous fleet's ceiling forward.
+2. Quote the fleet shape beside every percentage.
+3. Confirm no report is tracked:
+   ```bash
+   test -z "$(git ls-files bench/results)" && echo "clean (SC-011)"
+   ```
+   Use `git ls-files`, **not** `git status --porcelain` — porcelain does not
+   list ignored files and would stay silent about an already-tracked report.
+   `.github/workflows/bench-results-untracked.yml` runs this same assertion on
+   every pull request.
+
 ## What is scoped but not yet built (follow-ups)
 
 These require decisions and/or other roles, so they are tracked as child issues
