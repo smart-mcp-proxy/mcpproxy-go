@@ -1,7 +1,8 @@
 # Quickstart: token-bench (spec 103)
 
-Two independent halves. **Start with the deterministic one** — it needs no model spend, no
-credentials and no network, and it delivers value alone.
+Two independent halves. **Start with the deterministic one** — it needs no model spend and no
+credentials, and it delivers value alone. It runs offline *once the tokenizer vocabulary is
+cached*; see "Offline note" below, which is a real prerequisite rather than a footnote.
 
 ---
 
@@ -15,8 +16,10 @@ From a machine that has been using mcpproxy for real work:
 mcpproxy activity export --format json > ~/replay-corpus.jsonl
 ```
 
-**Bodies stay off.** The headline is computable from pre-truncation byte sizes, and the export
-path does not mask — a bodies-on export is raw and unmasked by design.
+**Bodies stay off.** The headline — per-mode tool-surface cost — is computed from the fleet's
+tool definitions and the call sequence, not from recorded content, so it is fully measured
+with bodies off. The export path does not mask, so a bodies-on export is raw and unmasked by
+design; take one only if you specifically need measured *response* cost, and delete it after.
 
 > The file is real user traffic. Keep it outside the repository, never commit it, and delete
 > it when finished. It is deliberately gitignored nowhere, because it should never be inside
@@ -31,13 +34,21 @@ go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out bench/results
 Produces the `replay` block in `bench/results/report.json` plus the dashboard section: per
 mode cell, what this workload would have cost, with the exclusion accounting beside it.
 
-### 3. Read the exclusion report first, not the headline
+### 3. Know which figures you just got
+
+- **Tool-surface cost per mode: `measured`.** No recorded content was needed.
+- **Response cost: `estimated` or absent.** Tokenizing needs the text; a byte length only
+  supports an estimate. Re-run with bodies on if you need it measured.
+- **Discovery-response cost: unavailable.** Internal `retrieve_tools` activity emission
+  carries no byte counts, so it is not recoverable from the activity log at all.
+
+### 4. Read the exclusion report before the headline
 
 The exclusion counts tell you whether the headline is trustworthy. A corpus that is 80%
 truncated produces a real number over a small slice, and the report says so rather than
 pretending otherwise.
 
-### 4. Verify determinism
+### 5. Verify determinism
 
 ```bash
 go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out /tmp/run-a
@@ -53,8 +64,10 @@ The tokenizer downloads its vocabulary on first use unless a cache directory is 
 export TIKTOKEN_CACHE_DIR="$HOME/.cache/tiktoken"
 ```
 
-Set this before claiming an offline run. Without it, a reproducer on a restricted network
-fails at step one — which is what SC-004 requires to work.
+Setting the variable only names a cache; it does not fill one. A first run still fetches the
+vocabulary, so a genuinely offline reproduction needs the cache pre-populated (warm it once
+with network access, or vendor/restore a known-good cache in CI). Without that, a reproducer
+on a restricted network fails at step one — which is exactly what SC-004 requires to work.
 
 ---
 
@@ -121,8 +134,9 @@ These feed tokens-per-completed-task, completion rate, first-attempt success and
 2. Measure the tokenizer's divergence from the pinned model using the token-counting endpoint
    (no inference spend) rather than quoting either of the two contradictory figures currently
    in circulation.
-3. Confirm no report was committed:
+3. Confirm no report is tracked:
    ```bash
-   git status --porcelain bench/results
+   test -z "$(git ls-files bench/results)" && echo "clean (SC-011)"
    ```
-   Empty output, or the run is not publishable.
+   Use `git ls-files`, not `git status --porcelain` — porcelain does not list ignored files and
+   would stay silent about an already-tracked report.

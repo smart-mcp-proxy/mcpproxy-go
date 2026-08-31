@@ -40,12 +40,15 @@ because on each surface one or both serialization axes have no consumer. Calling
 
 ### Why each axis is ignored where it is
 
-- **`tool_response_mode` has exactly one consumer**: `effectiveToolResponseMode`, called from
-  the `retrieve_tools` handler (`internal/server/mcp.go:1585`). Neither the direct nor the
-  code-execution surface reads it — the direct surface has no `retrieve_tools` tool at all.
-- **`direct_tool_response_mode` has exactly one consumer**: `effectiveDirectToolResponseMode`,
-  read when building the direct listing (`internal/server/mcp_routing.go:100`). Only the
-  direct surface consults it.
+- **`tool_response_mode` governs exactly one surface**: resolved by
+  `effectiveToolResponseMode`, whose single production call is in the `retrieve_tools` handler
+  (`internal/server/mcp.go:1584-1585`). Neither the direct nor the code-execution surface reads
+  it — the direct surface has no `retrieve_tools` tool at all.
+- **`direct_tool_response_mode` governs exactly one surface**: resolved by
+  `effectiveDirectToolResponseMode`. Note it has THREE production call sites, not one —
+  building the listing (`mcp_routing.go:100`), detecting serialization drift (`:1040-1045`)
+  and logging a reload (`:1071-1076`) — but all three concern the direct surface only, so the
+  collapse holds. The claim is one *surface*, not one *call site*.
 - **`code_execution` forces full**: that surface overwrites the response mode with `full` and
   blanks the detail parameter; `detail` is not in its schema. That is a genuine *override*,
   distinct from an ignored axis, hence its own reason code.
@@ -62,10 +65,12 @@ reason `degenerate`.
    three routing-mode servers are built at startup and all three endpoints stay mounted
    regardless of config (`internal/server/server.go:2514-2536`).
 2. **The two serialization axes DO require config**, and each affects only its own surface.
-   A cell is therefore (URL, serialization-config) — **not URL alone**. Whether those two
-   fields hot-reload, or whether each value needs a fresh instance, is OPEN and must be
-   settled before tasks are written: it decides whether the matrix crosses on one long-lived
-   proxy or on several.
+   A cell is therefore (URL, serialization-config) — **not URL alone**.
+   **Both hot-reload, so the matrix still crosses on ONE long-lived instance**, with a config
+   apply between serialization cells: `tool_response_mode` is read from the live snapshot on
+   every call (`internal/server/profile_resolver.go:49-64`, documented as taking effect "on
+   the very next call, without reconstructing the server"), and `direct_tool_response_mode` is
+   rebuilt on the `config.reloaded` event (`internal/server/server.go:569-597`).
 3. **An ignored axis is recorded as not-applicable**, never as a default value — a
    default would imply a measurement that was never taken.
 4. **A skipped row carries a reason code AND the cell it collapses onto, and never renders

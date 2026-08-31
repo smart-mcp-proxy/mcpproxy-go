@@ -25,8 +25,9 @@ direction of less work:
   never as "impossible".
 - **The routing-mode axis costs nothing to cross.** All three routing-mode servers are built
   at startup and permanently mounted, so that axis is selected by endpoint URL with no config
-  change and no restart. The two serialization axes still require config; whether they
-  hot-reload is an open question that changes the runner's shape (see below).
+  change and no restart. The two serialization axes still require config, but **both
+  hot-reload**, so the whole matrix still crosses on one long-lived instance with a config
+  apply between serialization cells.
 - **MCPMark needs one `elif` to point at mcpproxy**, and already emits per-task token usage,
   pass verdicts, turn counts and pass^k. The spec's fallback plan (build an in-repo task set)
   is not needed.
@@ -79,9 +80,13 @@ Three findings drive this and each becomes a design rule:
    exported record can be sensitive but not yet flagged.
    → **Rule**: exclude-by-flag is a best-effort reducer and MUST NOT be described as a
    guarantee, in code comments or in the published methodology.
-3. **Bodies are not needed for the headline.** Byte sizes recorded pre-truncation give an
-   accurate response-cost figure without reading content (see Phase 0 item 3).
-   → **Rule**: the default configuration produces the headline without ever loading a body.
+3. **Bodies are not needed for the headline — but not for the reason first assumed.**
+   Tool-surface cost, the term the modes actually change, is computed from the fleet's tool
+   definitions and the call sequence, so it needs no recorded content at all.
+   The recorded byte sizes are byte *lengths*, not token counts, so they support only an
+   explicitly-estimated response cost; measured response cost requires bodies.
+   → **Rule**: the default configuration produces the measured headline without ever loading a
+   body, and any response-cost figure taken with bodies off is badged `estimated`.
 
 ## Phase 0: Research
 
@@ -94,10 +99,12 @@ Five topics were resolved; the load-bearing outcomes:
 2. **The matrix is 5 distinct behaviours**; the other 7 combinations of the 3-axis product
    are configurable but redundant and collapse onto them. The routing-mode axis is selected by
    endpoint URL with no restart; the serialization axes still need config.
-3. **One backend change is required**: `request_bytes` / `response_bytes` exist on the storage
-   record, explicitly measured pre-truncation, but are absent from the export contract. Adding
-   them turns FR-002 from "exclude truncated records" into "annotate them accurately", which
-   materially improves the headline's coverage.
+3. **One backend change is worth making**: `request_bytes` / `response_bytes` exist on the
+   storage record, measured pre-truncation, but are absent from the export contract. Adding
+   them lets a truncated record carry an explicitly-estimated response cost instead of being
+   dropped. They are byte lengths, **not** token counts, so they do not make response cost
+   measurable — and internal `retrieve_tools` emission carries no byte counts at all, so
+   discovery-response cost is unrecoverable from the activity log by any route.
 4. **MCPMark is adopted**, SHA-pinned, with one `elif` in its single MCP factory. Its per-task
    `meta.json` feeds FR-010/011/012/018 directly.
 5. **Token accounting stays split**: tiktoken for everything deterministic; provider `usage`
@@ -169,12 +176,24 @@ rather than an addition to it, because `corpusio` is scoped by its own doc comme
 tool-retrieval corpora and produces `Corpus`/`GoldenSet` values — a session trace is neither.
 `replay.go`, `modematrix.go` and `agentloop.go` sit in package `bench` (not a subpackage)
 because they need `Tokenizer`, `ProxyToolsForMode` and the `EncodingArm` interface, and
-`bench` cannot import `bench/arms` (a documented cycle); they cross that boundary with the
-same structural interface `RunArms` already uses.
+`bench` cannot import `bench/arms` (a real cycle — arms import `bench`); they cross that
+boundary with the same structural interface `RunArms` already uses.
+
+**Dependency rule for `bench/replaycorpus/`**: the existing `bench/corpusio/` imports `bench`,
+so if `replaycorpus` mirrors that arrangement then `bench/replay.go` **cannot** import it
+without creating a second cycle. Either define the replay domain types wholly inside
+`replaycorpus` with no import of `bench`, or keep replay orchestration in `cmd/bench`. This
+must be settled before any file is created.
+
+**`modematrix.go` composes, it does not reimplement.** The pieces it needs already exist —
+mode constants and proxy catalogs (`bench/tokens.go`), full rendering
+(`bench/arms/baseline.go`), compact measurement (`bench/flipgate.go`), deferred-direct
+rendering (`bench/arms/directdeferred.go`) and MCP transport (`bench/mcpcaller.go`). It must
+reach them through passed structural interfaces, never by re-deriving a serialization.
 
 The only production-code change is two additive DTO fields plus their projection — deliberately
-minimal, and justified because without them FR-002 degrades from accurate annotation to
-wholesale exclusion.
+minimal, and justified because without them a truncated record must be dropped rather than
+estimated.
 
 ## Phase 1: Design & Contracts
 
@@ -190,9 +209,6 @@ a masking layer, which is the simpler of the two available designs.
 
 These need a human, and none blocks starting US1:
 
-0. **Can the two serialization fields be hot-reloaded, or does each value need a fresh
-   instance?** This decides whether the matrix crosses on one long-lived proxy or on several,
-   and it is the one open item that changes the runner's shape. Verify before `/speckit.tasks`.
 1. **Pinned model and spend ceiling** for the live loop. US1 delivers alone without it.
 2. **Whether cache-read tokens count toward "tokens per completed task."** FR-014 requires
    tracking them separately; FR-018 does not say which composite the headline uses. This is a

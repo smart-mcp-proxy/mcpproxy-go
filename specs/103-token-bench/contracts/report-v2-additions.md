@@ -39,8 +39,17 @@ The report envelope carries **one** tokenizer identity for the whole document. O
 provider-reported usage enters the same envelope, that field silently claims the entire report
 was tokenizer-counted.
 
-It must be **scoped to the deterministic sections**, with the live block naming its own
-accounting source. Supplementing is not enough — the existing field becomes false otherwise.
+**Do not redefine the existing field.** This contract states that a version bump is required
+whenever an existing field's meaning changes, and narrowing the document-level tokenizer to
+"the deterministic sections only" would be exactly such a change — the two rules contradict.
+
+Resolve it additively instead: leave the existing field's meaning intact (it names the
+deterministic estimator, which remains true of every section that has one), and give each new
+block its own explicit `accounting_source` naming either that estimator or the provider plus
+pinned model. A reader then never has to infer scope from a document-level field.
+
+If a future change really must narrow the existing field, bump the version — that is what the
+rule is for.
 
 ### 2. Add per-row provenance
 
@@ -67,8 +76,11 @@ measured rate and a defaulted one under a single `estimated` badge.
 ## Enforcement gaps to close
 
 - **`SC-011` has no gate today.** "Reports are never committed" is gitignore plus convention;
-  no CI job or test fails on a committed report. Add a CI step asserting the results directory
-  is clean, mirroring the existing OAS verification script.
+  no CI job or test fails on a committed report.
+  **`git status --porcelain bench/results` is NOT a valid gate** — porcelain does not list
+  ignored files, and it would also stay silent about a report that is already tracked. The
+  correct assertion is that no file under the results directory is tracked at all:
+  `test -z "$(git ls-files bench/results)"`.
 - **`SC-004` is not currently achievable offline.** The tokenizer fetches its vocabulary over
   the network unless a cache directory env var is set, and nothing in the repo or CI sets it.
   Set it in CI and document it in the reproduction procedure.

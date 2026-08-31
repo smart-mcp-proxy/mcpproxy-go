@@ -64,11 +64,18 @@ bodies-off.** Add `request_bytes` / `response_bytes` to the export contract.
   exported record can be sensitive but not yet flagged. Exclude-by-flag is therefore a
   best-effort reducer and must never be documented as a guarantee.
 
-**The one required backend change**: `request_bytes` and `response_bytes` exist on the storage
-record and are explicitly documented as *measured pre-truncation* — but they are absent from
-the export contract entirely. Adding them (two fields on the DTO, two lines in the export
-projection) turns FR-002 from "exclude every truncated record" into "annotate it accurately",
-which materially raises how much real traffic the headline can use.
+**The one worthwhile backend change**: `request_bytes` and `response_bytes` exist on the
+storage record, documented as *measured pre-truncation*, but are absent from the export
+contract entirely. Adding them (two DTO fields, two lines in the export projection) lets a
+truncated record carry an explicitly-estimated response cost instead of being dropped.
+
+**Correction applied after review**: an earlier draft claimed these give an *accurate* cost
+basis without bodies. They do not — they are byte lengths, and tokenizing requires the text.
+What actually survives bodies-off is the **tool-surface** cost, which is derived from the
+fleet's tool definitions and the call sequence rather than from any recorded content, and
+which is the term the modes change. Response cost with bodies off is `estimated` at best.
+Separately, internal `retrieve_tools` emission carries no byte counts, so discovery-response
+cost is unrecoverable from the activity log by any route.
 
 **Alternatives considered**: reading BBolt directly (rejected — bypasses the contract, couples
 the harness to storage internals, and defeats the privacy gating entirely); building a new
@@ -106,8 +113,12 @@ Plus the existing `baseline` arm as the FR-020 denominator.
 
 **Crossing the matrix is cheap.** All three routing-mode servers are built at startup and all
 three endpoints are permanently mounted regardless of config — the source comments this
-explicitly. A cell is therefore selected **by URL on one long-lived proxy instance**; only the
-two serialization axes need config, and each affects only its own surface.
+explicitly — so the routing-mode axis is selected **by URL**, with no restart. The two
+serialization axes do need config, but **both hot-reload**: `tool_response_mode` is read from
+the live snapshot on every call (documented as taking effect "on the very next call, without
+reconstructing the server") and `direct_tool_response_mode` is rebuilt on the `config.reloaded`
+event. So the whole matrix crosses on ONE long-lived instance, with a config apply between
+serialization cells.
 
 **Reuse the existing skip shape** rather than inventing one: `ArmResult.Skipped` /
 `SkipReason` and the `SkippedArmResult` constructor already implement "a skipped row with a

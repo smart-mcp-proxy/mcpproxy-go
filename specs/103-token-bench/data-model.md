@@ -28,9 +28,10 @@ One unit of real recorded work, reassembled from exported activity JSONL.
 - A session with `truncated` calls MUST NOT contribute a silent token total. It either
   contributes an annotated figure derived from pre-truncation byte sizes, or is excluded and
   counted in the exclusion report (FR-002, FR-003, SC-008).
-- `sensitive` is a **best-effort** reducer. The flag is written asynchronously after the
-  record is persisted, so its absence does not prove a record is clean. This limitation MUST
-  be stated wherever the flag is relied upon (Principle IV).
+- `sensitive` is a **best-effort** reducer. There is no persisted sensitivity field; the flag
+  is derived at export from detection metadata that is added asynchronously after initial
+  persistence, so its absence does not prove a record is clean. This limitation MUST be stated
+  wherever the flag is relied upon (Principle IV).
 - A session MUST NOT carry its call contents into any report structure. Only counts, sizes and
   derived measurements propagate (FR-006).
 
@@ -46,16 +47,20 @@ One recorded tool call inside a session.
 | Field | Meaning |
 |---|---|
 | `tool_name`, `server_name` | Identity, used to resolve the call against a mode's tool surface. |
-| `request_bytes`, `response_bytes` | **Measured pre-truncation.** The reason the backend contract change matters: these permit an accurate response-cost figure without reading a body. |
+| `request_bytes`, `response_bytes` | **Byte lengths, measured pre-truncation — NOT token counts.** They support an explicitly-estimated response cost when bodies are absent; they cannot produce a measured one, because tokenizing requires the text. |
 | `response_truncated` | Whether the stored content was cut. |
 | `status` | success / error / blocked / rejected. |
 | `parent_id` | Links a code-execution sub-call to the call that issued it. |
-| `has_sensitive_data` | Best-effort flag (see above). |
+| `has_sensitive_data` | Derived at export from detection metadata, which is added asynchronously after initial persistence. Best-effort (see above). |
 
 **Validation rules**
 
-- When bodies are absent (the default), token cost MUST be derived from the byte sizes, and
-  the resulting figure labelled as byte-derived rather than content-derived.
+- **Tool-surface cost does not depend on recorded content at all** — it is computed from the
+  fleet's tool definitions under each mode plus the call sequence. It is fully `measured` with
+  bodies off. This is the term the modes actually change, and it is US1's headline.
+- **Response cost DOES require the text.** With bodies off it may only be reported as an
+  explicit `estimated` figure derived from byte length, never as `measured`; with bodies on it
+  becomes `measured`. The two MUST NOT be presented interchangeably.
 - A call whose `parent_id` resolves MUST be attributed to its parent's session, so
   code-execution sub-calls are neither double-counted nor orphaned.
 
