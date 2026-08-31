@@ -29,6 +29,18 @@ const (
 	// than being folded into an arbitrary one.
 	ReasonUnattributed ExclusionReason = "unattributed"
 
+	// ReasonOrphanedSubCall marks a sub-call whose parent fell outside the
+	// exported window AND which carries no work_session_id of its own, so
+	// there is no unit of work left to attribute it to.
+	//
+	// It is separated from ReasonUnattributed on purpose. Both are records
+	// with no session, but they tell the operator different things: an
+	// unattributed record never had a session, whereas this one had a parent
+	// that the EXPORT WINDOW cut off. The second is fixable — re-export with a
+	// wider window and the record comes back — and folding it into the first
+	// would hide the one exclusion reason the operator can actually act on.
+	ReasonOrphanedSubCall ExclusionReason = "orphaned_sub_call"
+
 	// ReasonTruncated marks a record whose stored response was cut at capture.
 	// It is a FLAG, not a drop: the record still contributes its call shape and
 	// an annotated byte-length estimate. It is counted so that no truncated
@@ -114,9 +126,18 @@ type ExclusionReport struct {
 
 	// OrphanedSubCalls counts sub-calls whose parent_id resolved to no
 	// request_id in the export — typically because the parent code_execution
-	// fell outside the exported window. They are KEPT at top level rather than
-	// dropped (dropping them would understate the workload) and counted here so
-	// the attribution loss is visible.
+	// fell outside the exported window.
+	//
+	// Two outcomes, and this counter spans BOTH so the attribution loss is
+	// visible either way:
+	//   - the sub-call carries its own work_session_id: it is KEPT at top
+	//     level, because dropping it would understate the workload;
+	//   - it does not: there is no unit of work left to attribute it to, so it
+	//     is dropped under ReasonOrphanedSubCall — which is a DIFFERENT and
+	//     more actionable reason than ReasonUnattributed, since a wider export
+	//     window would recover it.
+	// Sandbox sub-calls commonly fall in the second case: they inherit their
+	// session from the parent, so losing the parent loses the session too.
 	OrphanedSubCalls int `json:"orphaned_sub_calls,omitempty"`
 }
 

@@ -246,3 +246,64 @@ func TestPackageImportsNothingFromBench(t *testing.T) {
 		}
 	}
 }
+
+// An orphaned sub-call with no session of its own must be dropped under its
+// OWN reason, not folded into "unattributed".
+//
+// Both are records with no unit of work, but only one is actionable: an
+// unattributed record never had a session, whereas an orphan had a parent that
+// the EXPORT WINDOW cut off — and a wider re-export brings it back. Merging
+// them hides the one exclusion an operator can do something about.
+//
+// This case is the common one for sandbox sub-calls, which inherit their
+// session from the parent: losing the parent loses the session too.
+func TestGroup_OrphanedSubCallWithoutSessionGetsItsOwnReason(t *testing.T) {
+	// A sub-call whose parent_id resolves to nothing in this export, and which
+	// carries no work_session_id of its own.
+	line := `{"id":"c1","type":"tool_call","timestamp":"2026-03-01T12:00:01Z",` +
+		`"parent_id":"parent-outside-window","server_name":"s","tool_name":"t","status":"success"}`
+
+	corpus, err := Load(strings.NewReader(line+"\n"), Options{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if corpus.Exclusions.OrphanedSubCalls != 1 {
+		t.Errorf("the orphan must be counted so the attribution loss stays visible, got %d",
+			corpus.Exclusions.OrphanedSubCalls)
+	}
+	if got := corpus.Exclusions.Dropped[ReasonOrphanedSubCall]; got != 1 {
+		t.Errorf("a dropped orphan must carry ReasonOrphanedSubCall, got %d", got)
+	}
+	if got := corpus.Exclusions.Dropped[ReasonUnattributed]; got != 0 {
+		t.Errorf("an orphan must NOT be reported as merely unattributed — that hides the "+
+			"actionable cause (a too-narrow export window); got %d", got)
+	}
+}
+
+// An orphan that CAN stand alone is kept, not dropped: dropping it would
+// understate the workload. Only the attribution is lost, and the counter says so.
+func TestGroup_OrphanedSubCallWithSessionIsKept(t *testing.T) {
+	line := `{"id":"c1","type":"tool_call","timestamp":"2026-03-01T12:00:01Z",` +
+		`"parent_id":"parent-outside-window","work_session_id":"ws-1",` +
+		`"server_name":"s","tool_name":"t","status":"success"}`
+
+	corpus, err := Load(strings.NewReader(line+"\n"), Options{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if corpus.Exclusions.OrphanedSubCalls != 1 {
+		t.Errorf("the orphan must still be counted, got %d", corpus.Exclusions.OrphanedSubCalls)
+	}
+	if len(corpus.Sessions) != 1 {
+		t.Fatalf("an orphan with its own session must be KEPT — dropping it understates the "+
+			"workload; got %d sessions", len(corpus.Sessions))
+	}
+	if n := corpus.TotalCalls(); n != 1 {
+		t.Errorf("the kept orphan must contribute to the workload, got %d calls", n)
+	}
+	if corpus.Exclusions.TotalDropped() != 0 {
+		t.Errorf("nothing should be dropped here, got %d", corpus.Exclusions.TotalDropped())
+	}
+}

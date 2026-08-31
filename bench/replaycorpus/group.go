@@ -72,13 +72,19 @@ func group(calls []*ReplayCall, sessions map[string]string, rep *ExclusionReport
 
 	topLevel := make([]*ReplayCall, 0, len(calls))
 	owner := make(map[*ReplayCall]string, len(calls))
+	orphaned := make(map[*ReplayCall]bool)
 	for _, call := range calls {
 		if call.ParentID != "" {
 			if parent, ok := byRequestID[call.ParentID]; ok && parent != call {
 				parent.SubCalls = append(parent.SubCalls, call)
 				continue
 			}
+			// The parent fell outside the exported window. Keep the call at
+			// top level if it can stand alone; remember that it is an orphan
+			// either way, so a drop below is attributed to the export window
+			// rather than to the record simply having no session.
 			rep.OrphanedSubCalls++
+			orphaned[call] = true
 		}
 		topLevel = append(topLevel, call)
 		owner[call] = sessions[call.ID]
@@ -91,7 +97,17 @@ func group(calls []*ReplayCall, sessions map[string]string, rep *ExclusionReport
 		if workSessionID == "" {
 			// No work session, and no parent to inherit one from: the record
 			// belongs to no unit of work. Reported, not folded in.
-			rep.drop(ReasonUnattributed)
+			//
+			// An orphan lands here whenever the export window cut its parent,
+			// which is the common case for sandbox sub-calls: they inherit
+			// their session from the parent, so losing one loses the other.
+			// It gets its own reason because it is the actionable one — a
+			// wider re-export brings the record back.
+			if orphaned[call] {
+				rep.drop(ReasonOrphanedSubCall)
+			} else {
+				rep.drop(ReasonUnattributed)
+			}
 			continue
 		}
 		session, ok := grouped[workSessionID]
