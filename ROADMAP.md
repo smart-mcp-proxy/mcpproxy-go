@@ -817,7 +817,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 
 | # | Status | Progress |
 | --- | --- | --- |
-| [001-code-execution](./specs/001-code-execution/) | `in-flight` | 74/127 (58%) |
+| [001-code-execution](./specs/001-code-execution/) | `in-flight` | 78/127 (61%) |
 | [001-fix-skipped-auth-tests](./specs/001-fix-skipped-auth-tests/) | — | — |
 | [001-oas-endpoint-documentation](./specs/001-oas-endpoint-documentation/) | `in-flight` | 36/69 (52%) |
 | [001-oauth-scope-discovery](./specs/001-oauth-scope-discovery/) | — | — |
@@ -830,7 +830,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 93/103 (90%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
 | [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 47/87 (54%) |
-| [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 24/36 (67%) |
+| [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 25/36 (69%) |
 | [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 38/39 (97%) |
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
 | [012-unified-health-status](./specs/012-unified-health-status/) | `shipped` | 44/44 (100%) |
@@ -839,7 +839,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [014-cli-output-formatting](./specs/014-cli-output-formatting/) | `in-flight` | 62/66 (94%) |
 | [015-server-management-cli](./specs/015-server-management-cli/) | `shipped` | 50/50 (100%) |
 | [016-activity-log-backend](./specs/016-activity-log-backend/) | `in-flight` | 44/50 (88%) |
-| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 50/60 (83%) |
+| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 51/60 (85%) |
 | [018-intent-declaration](./specs/018-intent-declaration/) | `shipped` | 69/69 (100%) |
 | [019-activity-webui](./specs/019-activity-webui/) | `shipped` | 72/73 (99%) |
 | [020-oauth-login-feedback](./specs/020-oauth-login-feedback/) | — | — |
