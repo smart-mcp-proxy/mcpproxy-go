@@ -143,14 +143,14 @@ epics:
         pr: "#780"
         depends_on: [scanner-v2-eval-gate]
 
-  # ── IN REVIEW ───────────────────────────────────────────────────────────
+  # ── BLOCKED ON DISCOVERY (was IN REVIEW; nothing is in review as of 2026-08-31) ──
   - id: windows-tray
     title: Windows native tray app
-    status: in_review
+    status: todo
     priority: P2
     mcp: MCP-43
     depends_on: []
-    note: "No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first."
+    note: "No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first. 2026-08-31 audit: reset from in_review to todo. Scoped precisely: Windows tray support DID ship in 2025 via the cross-platform Go/systray build (#74, merged 2025-10-23, cmd/mcpproxy-tray/ + internal/tray under GOOS=windows) — what this epic tracks is the NATIVE WebView2 replacement, and for that no PR is open or merged and native/windows/ holds only a README placeholder with no WebView2 code anywhere in the tree. So 'in review' had no PR to point at."
     tasks:
       - id: windows-tray-funnel-qa
         title: "Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work)"
@@ -159,7 +159,7 @@ epics:
         depends_on: []
       - id: windows-tray-window
         title: WebView2 native window + profile submenu
-        status: in_review
+        status: todo
         mcp: MCP-43
         depends_on: [windows-tray-funnel-qa]
 
@@ -220,7 +220,7 @@ epics:
 
   - id: action-log-transparency
     title: Action log / transparency — info at a glance
-    status: todo
+    status: in_progress
     priority: P1
     depends_on: [ux-audit]
     note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Vision pillar 'feel control → transparency' — the activity log is a headline feature, polish it and bring it to the tray menu. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
@@ -256,11 +256,11 @@ epics:
 
   - id: analytics-dashboard
     title: Analytics dashboard as default page
-    status: in_progress
+    status: done
     priority: P1
     spec: specs/069-observability-usage-graphs
     depends_on: [ux-audit]
-    note: "Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done; only the default-landing half remains."
+    note: "Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done. 2026-08-31 audit: the default-landing half shipped too - frontend/src/router/index.ts routes path '/' to the Dashboard component, guarded by frontend/tests/unit/dashboard-default-landing.spec.ts. Spec 069's one remaining task (T023) is a local Playwright verification sweep that leaves no committed artifact: a human can run it and tick the box, but no code evidence can ever confirm it, so it cannot gate the epic. The epic is complete."
     tasks:
       - id: analytics-token-drain-graphs
         title: Per-server / per-tool token-drain graphs
@@ -398,11 +398,12 @@ epics:
         title: "Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries"
         status: todo
         depends_on: []
-        note: "Absorbs discovery-eval-harness (spec 065 second half) — the same harness measures retrieval recall."
+        note: "BUILDS ON the existing bench/ harness - do NOT rebuild token counting, encoding arms, break-even or recall. Already shipped there (PRs #747/#748 MCP-42, #851 spec 083): six encoding arms including direct_deferred (spec 102), cl100k_base counting, live response cost, break-even, RecallAtK/NDCGAtK, the v2 report + dashboard, `make bench-discovery` and CI wiring in bench.yml/eval.yml. 2026-08-31 audit correction: the old note claimed this task absorbs discovery-eval-harness because it would measure retrieval recall - recall is ALREADY measured (eval.yml retrieval-d1 + bench/armindex.go), so that is not this task's contribution. GENUINELY OPEN and unique here: (a) activity-log session REPLAY (nothing in bench/ reads the activity log; internal/contracts/activity.go already carries WorkSessionID, ToolName and Response - watch ResponseTruncated, which would undercount tokens); (b) MEASURED first-call success and retry rate — today they are assumed, not observed: bench/session.go defines per-arm literature-derived defaults (armRetryRates, research D8) and bench/report.go only renders and labels them as estimates; (c) tokens-per-SUCCESSFUL-task, which needs a task-completion signal the static harness has no concept of."
       - id: token-bench-public
         title: "Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results"
         status: todo
         depends_on: [token-bench-harness]
+        note: "PARTIALLY SHIPPED via spec 083 - public CORPUS/LINTER groundwork is integrated and reproducible, but NO public agent-loop task suite is, and that is what this task ultimately owes. Do not call any of the following MCP-specific: ToolRet is a general tool-retrieval corpus whose docs are heterogeneous JSON/text and explicitly not MCP input schemas (bench/corpusio/toolret.go). What exists: ToolRet (runtime fetch, never committed; seeded subset via -subset/-seed; run by the toolret-subset job in bench.yml), the 527-tool Apache-2.0 LiveMCPBench snapshot, and the pinned external lap-score linter as an independent verdict. Scope precisely: the LiveMCPBench snapshot is load-bearing for spec 102 SC-001 at fleet scale and is runnable via -livemcptool, but bench.yml does NOT run it (the regular job passes only -corpus-v2), and its loader carries no retrieval golden set — so it measures token/scale, not recall. REMAINING: the agent-loop suites, which need a pinned-LLM budget decision. Re-confirm the shortlist against the completed research pass before building - the τ-bench/BFCL naming here predates it."
       - id: token-bench-blog
         title: "Publish results + methodology on mcpproxy.app/blog"
         status: todo
@@ -439,11 +440,11 @@ epics:
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
     title: Upgrade awareness & guided update
-    status: in_progress
+    status: done
     priority: P0
     spec: specs/079-upgrade-nudge
     depends_on: []
-    note: "Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI. 2026-08-29 truth-sync: this epic was marked done, but FR-002's release/age delta was never built — the four shipped tasks are US-slices and the FR belonged to none of them. Spec 079 has only spec.md (no plan.md/tasks.md), so no checkbox surface could catch it; the deferral survived only as TODO(spec-079/FR-002) code comments, which is how an outside contributor found it (#1081)."
+    note: "Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI. 2026-08-29 truth-sync: this epic was marked done, but FR-002's release/age delta was never built — the four shipped tasks are US-slices and the FR belonged to none of them. Spec 079 has only spec.md (no plan.md/tasks.md), so no checkbox surface could catch it; the deferral survived only as TODO(spec-079/FR-002) code comments, which is how an outside contributor found it (#1081). RESOLVED 2026-08-29 in #1085; all five tasks are now done and the epic is complete."
     tasks:
       - id: upgrade-nudge-status-log
         title: "US1 slice: update availability in mcpproxy status + deduped startup log"
@@ -468,8 +469,9 @@ epics:
         depends_on: [upgrade-nudge-surfacing]
       - id: upgrade-nudge-delta
         title: "FR-002 remainder: human-readable \"N releases / M weeks behind\" delta on status, doctor, startup log, Web UI and the tray"
-        status: todo
-        note: "Deferred by #798 and never picked up; TODO(spec-079/FR-002) markers at internal/updatecheck/checker.go and cmd/mcpproxy/status_cmd.go. Spec 079 acceptance scenarios 1-3 and FR-003 are unmet — every surface renders latest-version-only. The blocker is data, not rendering: the checker calls only /releases/latest, so it has the latest release's publish date but not the running version's, and no tag sequence to count. Additive VersionInfo fields per FR-021; must stay silent for development builds (FR-017) and never render a negative delta (FR-016). Reported by an outside contributor in #1081."
+        status: done
+        pr: "#1085"
+        note: "SHIPPED in #1085 (2026-08-29), closing #1081. The data blocker is resolved: internal/updatecheck/delta.go (ComputeReleaseDelta/FormatBehindSummary) counts the delta by semver over one ETag-conditional /releases page, with a by-tag lookup for builds older than that page; github.go gained ListReleases + GetReleaseByTagContext. The clause is formatted once in Go and rendered verbatim on all six surfaces: status_cmd.go, doctor_cmd.go, the deduped startup log (checker.go), UpdateBanner.vue, the Go tray and the Swift tray. Fields additive per FR-021 (behind_summary, releases_behind, releases_behind_saturated, weeks_behind); FR-016/FR-017 guarded in resolveDelta; a delta miss never sets CheckError nor touches the FR-018 backoff. The TODO(spec-079/FR-002) markers are gone (2026-08-31 audit: grep -rn \"spec-079\" --include=*.go internal cmd -> no hits)."
         issue: "#1081"
         depends_on: [upgrade-nudge-channel]
 
@@ -623,7 +625,7 @@ epics:
 
   - id: planning-hygiene
     title: Planning/docs truth automation
-    status: todo
+    status: in_progress
     priority: P2
     depends_on: []
     note: "Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests."
@@ -645,9 +647,10 @@ epics:
         depends_on: []
       - id: hygiene-spec-gardener
         title: "Weekly cloud routine: LLM judges only the residue the evidence-check cannot decide, opens/updates one propose-only PR"
-        status: in_progress
+        status: done
         priority: P2
-        note: "Claude cloud routine 'spec-roadmap gardener' (trig_014GkHno4XSTobu8ViJV7Sno), Mondays 05:07 UTC. Branch claude/spec-gardener (the `claude/` prefix is what the cloud git-proxy allows to push without unrestricted-branch-push). Guardrails: never pushes main; never auto-applies un-ticks (they go in the PR body for a human); evidence required per tick; adversarial refutation pass; 40-tick cap per run. Blocked in practice until check-spec-evidence.py lands on main — the routine no-ops until then."
+        pr: ["#824", "#870", "#999", "#842"]
+        note: "SHIPPED and operating: three gardener runs merged (#824 2026-07-13, #870 2026-07-29, #999 2026-08-17). Auto-approval is NOT retroactive and did not carry all three — only #999 has a github-actions APPROVED review; #824 carries none and in fact merged ~24 min BEFORE the auto-approve workflow itself (#842, .github/workflows/spec-gardener-auto-approve.yml, merged 2026-07-13 04:40), and #870 records no approving review either. The blocker recorded below is cleared - scripts/check-spec-evidence.py is on main. Claude cloud routine 'spec-roadmap gardener' (trig_014GkHno4XSTobu8ViJV7Sno), Mondays 05:07 UTC. Branch claude/spec-gardener (the `claude/` prefix is what the cloud git-proxy allows to push without unrestricted-branch-push). Guardrails: never pushes main; never auto-applies un-ticks (they go in the PR body for a human); evidence required per tick; adversarial refutation pass; 40-tick cap per run."
         depends_on: [hygiene-spec-evidence-check]
       - id: hygiene-docs-facts
         title: "Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check"
@@ -722,8 +725,15 @@ epics:
     note: "Track A→Spec 056, Track B→Spec 059 (both shipped). UNBUILT: Track C per-ARGUMENT allow-listing (per-tool scope exists in mcp_direct_scope.go); Track D provenance + human-readable signature diff (SHA-256 pinning exists via Spec 032). Build ON 032/028, don't re-implement; honor the rug-pull re-quarantine interaction rule vs 032 auto-approve."
   - id: discovery-eval-harness
     title: Discovery-quality eval harness (Spec 065 second half)
-    status: todo
+    status: in_progress
     priority: P3
     spec: specs/065-evaluation-foundation
-    depends_on: [token-bench-harness]
-    note: "SUPERSEDED — folded into token-bench-harness: the token-efficiency replay harness re-runs real sessions under every mode combo and measures retrieval recall on the same corpus, so a separate discovery-quality harness would duplicate it. Kept here as a pointer (the id is a stable depends_on target); do not build standalone. Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness."
+    depends_on: []
+    tasks:
+      - id: discovery-eval-pr-blocking
+        title: "Promote retrieval-D1 from report-only to PR-blocking (spec 065 FR-009/SC-005), and adjudicate the CN-002 frozen-corpus question"
+        status: todo
+        mcp: MCP-742
+        depends_on: []
+        note: "The only thing standing between this epic and done. eval.yml sets continue-on-error for pull_request on the retrieval-D1 job because D1 depends on npx/uvx package fetches (a known flake source); the workflow's own comment plans the promotion after a green soak. Until then CI does not fail on a discovery regression on the PR path, which is exactly what FR-009 and SC-005 require."
+    note: "IN PROGRESS — 2026-08-31 audit, corrected on cross-model review: both halves of the HARNESS shipped INDEPENDENTLY (not via token-bench-harness), but spec 065 is NOT fully met, so this is not done. FR-009 and SC-005 require CI to FAIL on a discovery regression beyond tolerance; the retrieval-D1 job is continue-on-error on pull requests, so on the PR path it does not fail — eval.yml itself records the promotion to PR-blocking as still open (MCP-742). A second, weaker tension to adjudicate rather than assume: CN-002 asks that scoring never run against a live drifting corpus, and D1 does boot a live mcpproxy serving 7 reference servers — but #931 pinned all seven upstreams to freeze-era versions and the job gates on the exact corpus ID set, so the corpus is reproducible in practice. Decide whether that satisfies CN-002 or whether a committed snapshot is required. Remaining work is therefore the gating promotion, not the harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note continue-on-error is scoped to github.event_name == 'pull_request', so the job is REPORT-ONLY on PRs (npx/uvx fetch flake) and BLOCKING on both the nightly schedule and manual workflow_dispatch runs. Promoting it to PR-blocking after a green soak is still open (MCP-742). NB the workflow's own inline comment says 'blocking on the nightly schedule' and omits workflow_dispatch. A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness."

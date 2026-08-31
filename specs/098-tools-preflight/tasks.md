@@ -6,7 +6,7 @@
 
 ## Phase 1: Setup
 
-- [ ] T001 Create `internal/preflight` package skeleton (`reasons.go`, `evaluator.go`, doc comment stating zero-I/O invariant and the error-not-fabricated-reason rule) per plan.md structure
+- [x] T001 Create `internal/preflight` package skeleton (`reasons.go`, `evaluator.go`, doc comment stating zero-I/O invariant and the error-not-fabricated-reason rule) per plan.md structure
 - [x] T002 [P] Capture tools/list golden snapshots for all three routing modes **from merge-base (origin/main)** into `internal/server/testdata/toolslist_goldens/` + snapshot test `internal/server/toolslist_snapshot_test.go` comparing the feature branch byte-for-byte (FR-015; goldens must predate any dispatch refactor)
 
 ## Phase 2: Foundational (blocking all stories)
@@ -60,7 +60,7 @@
 - [x] T028 [P] `docs/api/rest-api.md`: endpoint reference (envelope, tiers, 400/503 rules, wait semantics) (FR-017)
 - [x] T029 [P] `docs/cli-management-commands.md`: `tools preflight` reference with exit-code table and cron/CI recipe (FR-017)
 - [x] T030 [P] NEW `docs/features/tools-preflight.md`: concept, taxonomy + precedence tables, disclosure tiers, transparency/activity story, cron + GitHub Actions + n8n recipes, composition with code_execution/stored scripts (REST-from-harness pattern), Phase-2+ roadmap (FR-017)
-- [ ] T031 [P] Usage-examples expansion: README/docs agent-workflow examples — token-saving discovery flow, typical agent actions through mcpproxy, preflight-gated automation example (FR-017)
+- [x] T031 [P] Usage-examples expansion: README/docs agent-workflow examples — token-saving discovery flow, typical agent actions through mcpproxy, preflight-gated automation example (FR-017)
 - [ ] T032 Full gates: `go test -race ./...` (incl. cmd/ CLI tests), server-edition build+test+lint (T021 set), `./scripts/test-api-e2e.sh`, golangci-lint v2 `.github/.golangci.yml`, swagger + generate-types diff-clean
 - [ ] T033 Cross-model review of the full diff (opencode gpt-5.6-sol), fix→re-review ≤5 rounds; then quickstart walkthrough end-to-end on the isolated instance
 
