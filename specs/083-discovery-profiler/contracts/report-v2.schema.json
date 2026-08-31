@@ -206,12 +206,221 @@
       "type": "object",
       "properties": { "seed": { "type": "integer" }, "size": { "type": "integer" } }
     },
+    "replay": {
+      "type": "object",
+      "description": "Spec 103 US1: deterministic cost recomputation over a real recorded workload. Additive and optional — its presence does not change report_version, and it names its OWN accounting source rather than inheriting the document-level tokenizer.",
+      "required": ["accounting_source", "counterfactual", "bodies_included", "fleet_shape", "sessions_supplied", "sessions_used"],
+      "properties": {
+        "accounting_source": { "$ref": "#/$defs/accounting_source" },
+        "counterfactual": {
+          "type": "string",
+          "minLength": 10,
+          "$comment": "FR-004: replay is a counterfactual over recorded traffic scored against the SUPPLIED fleet, never observed agent behaviour. Required so a figure cannot be emitted without its label."
+        },
+        "bodies_included": { "type": "boolean" },
+        "sensitive_flag_best_effort": { "type": "boolean" },
+        "fleet_shape": { "$ref": "#/$defs/fleet_shape" },
+        "sessions_supplied": { "type": "integer" },
+        "sessions_used": { "type": "integer" },
+        "exclusions": {
+          "type": "array",
+          "$comment": "FR-003 / SC-008: supplied minus used is explained here, one count per reason. Silence is never success.",
+          "items": {
+            "type": "object",
+            "required": ["reason", "sessions"],
+            "properties": {
+              "reason": { "enum": ["truncated", "bodies_missing", "sensitive", "unreplayable", "unattributed"] },
+              "sessions": { "type": "integer" }
+            }
+          }
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cell_id", "provenance", "calls", "menu_tokens"],
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "absolute_workload_withheld": { "const": true } },
+                  "required": ["absolute_workload_withheld"]
+                },
+                "then": {
+                  "required": ["withheld_reason"],
+                  "$comment": "An unavailable absolute workload figure is reported as withheld WITH a reason, never as zero."
+                }
+              }
+            ],
+            "properties": {
+              "cell_id": { "type": "string" },
+              "provenance": { "$ref": "#/$defs/provenance" },
+              "calls": { "type": "integer" },
+              "menu_tokens": { "type": "integer" },
+              "response_tokens": { "type": "integer" },
+              "absolute_workload_withheld": { "type": "boolean" },
+              "withheld_reason": { "type": "string" }
+            }
+          }
+        },
+        "direct_delta": {
+          "type": "object",
+          "description": "The cross-mode delta between the two direct cells, whose identical call responses cancel out of the comparison — the honest bodies-off headline.",
+          "required": ["from_cell_id", "to_cell_id", "provenance", "delta_tokens", "delta_pct"],
+          "properties": {
+            "from_cell_id": { "type": "string" },
+            "to_cell_id": { "type": "string" },
+            "provenance": { "$ref": "#/$defs/provenance" },
+            "delta_tokens": { "type": "integer" },
+            "delta_pct": { "type": "number" }
+          }
+        }
+      }
+    },
+    "agent_loop": {
+      "type": "object",
+      "description": "Spec 103 US2: live agent-loop measurements. Its accounting_source is provider-reported usage plus a pinned model, and its figures are NEVER summed with tokenizer-sourced ones.",
+      "required": ["accounting_source", "fleet_shape"],
+      "properties": {
+        "accounting_source": { "$ref": "#/$defs/accounting_source" },
+        "suite": { "type": "string" },
+        "suite_version": { "type": "string" },
+        "fleet_shape": { "$ref": "#/$defs/fleet_shape" },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "cell_id", "provenance", "runs", "spread_pct",
+              "tokens_per_completed_task", "completion_rate_pct", "first_attempt_success_pct",
+              "retries_corrective", "retries_infrastructure",
+              "input_tokens", "output_tokens", "cache_read_tokens", "headline"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "headline": { "const": true } },
+                  "required": ["headline"]
+                },
+                "then": {
+                  "properties": { "runs": { "minimum": 4 } },
+                  "$comment": "FR-021: a model-dependent figure needs at least four runs plus a spread before it may be a headline."
+                }
+              }
+            ],
+            "properties": {
+              "cell_id": { "type": "string" },
+              "provenance": { "$ref": "#/$defs/provenance" },
+              "runs": { "type": "integer" },
+              "spread_pct": { "type": "number" },
+              "partial_runs": { "type": "integer" },
+              "tokens_per_completed_task": { "type": "number" },
+              "completion_rate_pct": { "type": "number" },
+              "first_attempt_success_pct": { "type": "number" },
+              "retries_corrective": { "type": "integer" },
+              "retries_infrastructure": { "type": "integer" },
+              "input_tokens": { "type": "integer" },
+              "output_tokens": { "type": "integer" },
+              "cache_read_tokens": { "type": "integer" },
+              "headline": { "type": "boolean" },
+              "regression": { "type": "boolean" },
+              "withheld": { "type": "boolean" },
+              "withheld_reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "payload_decomposition": {
+      "type": "object",
+      "description": "Spec 103 US4: tool-definition payload attribution per fleet shape, each with its own recomputed ceiling and an explicit verdict on spec 102.",
+      "required": ["accounting_source", "shapes"],
+      "properties": {
+        "accounting_source": { "$ref": "#/$defs/accounting_source" },
+        "shapes": {
+          "type": "array",
+          "minItems": 2,
+          "$comment": "FR-024: at least two fleet shapes. A single-shape decomposition is exactly the projection spec 102 got wrong.",
+          "items": {
+            "type": "object",
+            "required": [
+              "fleet_shape", "provenance",
+              "share_names_pct", "share_descriptions_pct", "share_annotations_pct", "share_schemas_pct",
+              "achievable_ceiling_pct", "spec102_verdict"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "spec102_verdict": { "const": "corrected" } },
+                  "required": ["spec102_verdict"]
+                },
+                "then": {
+                  "required": ["spec102_delta_pct"],
+                  "$comment": "FR-025: a correction states its delta."
+                }
+              }
+            ],
+            "properties": {
+              "fleet_shape": { "$ref": "#/$defs/fleet_shape" },
+              "provenance": { "$ref": "#/$defs/provenance" },
+              "share_names_pct": { "type": "number" },
+              "share_descriptions_pct": { "type": "number" },
+              "share_annotations_pct": { "type": "number" },
+              "share_schemas_pct": { "type": "number" },
+              "achievable_ceiling_pct": {
+                "type": "number",
+                "$comment": "Recomputed per fleet shape — never carried forward from a previously published figure."
+              },
+              "spec102_verdict": { "enum": ["confirmed", "corrected"] },
+              "spec102_delta_pct": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
     "provenance": {
       "type": "object",
-      "additionalProperties": { "enum": ["measured", "computed", "estimated"] }
+      "$comment": "SECTION-level provenance: one badge per section key. It cannot express FR-013, where measured and estimated figures coexist inside one block — that is what the per-row provenance fields on the spec 103 blocks are for.",
+      "additionalProperties": { "$ref": "#/$defs/provenance" }
     }
   },
   "$defs": {
+    "provenance": {
+      "enum": ["measured", "computed", "estimated"],
+      "description": "How a figure was arrived at: measured (observed over the real protocol), computed (arithmetic over measured inputs), or estimated (a model with documented assumptions). Declared once and referenced by both the section-level map and every per-row provenance field, so the two can never drift apart."
+    },
+    "accounting_source": {
+      "type": "object",
+      "description": "Where one block's numbers came from. Per BLOCK, because the document-level tokenizer field names the deterministic estimator for the whole report and cannot be narrowed without a report_version bump. Figures from different sources are never summed — a cross-source aggregate is withheld with a stated reason.",
+      "required": ["kind", "identity"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "provider-usage" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "required": ["model"],
+            "$comment": "Provider-reported usage is uninterpretable without the model pinned: an unpinned run is not comparable to any later one."
+          }
+        }
+      ],
+      "properties": {
+        "kind": { "enum": ["deterministic-tokenizer", "provider-usage"] },
+        "identity": { "type": "string", "minLength": 1, "examples": ["cl100k_base", "anthropic"] },
+        "model": { "type": "string" }
+      }
+    },
+    "fleet_shape": {
+      "type": "object",
+      "description": "The tool count and definition-size distribution a figure holds for (IC-004). Every published percentage carries one.",
+      "required": ["id", "tool_count"],
+      "properties": {
+        "id": { "type": "string" },
+        "tool_count": { "type": "integer" },
+        "mean_definition_tokens": { "type": "number" },
+        "p95_definition_tokens": { "type": "integer" }
+      }
+    },
     "latency_aggregate": {
       "type": "object",
       "description": "Nearest-rank percentile summary of client-measured latencies for one measured surface (FR-023).",

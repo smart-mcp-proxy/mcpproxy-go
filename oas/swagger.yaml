@@ -1289,12 +1289,29 @@ components:
           description: Correlation id of the parent call (the code_execution whose
             sandbox issued this sub-call)
           type: string
+        request_bytes:
+          description: |-
+            Byte sizes measured pre-truncation, mirroring storage.ActivityRecord
+            (Spec 069 A1). They are the only cost signal a bodies-off export carries:
+            with payloads suppressed there is no text left to measure, so a consumer
+            accounting for a record it cannot read has nothing else to go on. They are
+            byte LENGTHS, not token counts — the basis for an explicit estimate, never
+            a measured figure (spec 103, contracts/replay-input.md).
+
+            Zero means UNKNOWN, not free: legacy records predate the measurement and
+            code-execution sub-calls record both as zero. Hence omitempty — an absent
+            key tells a consumer to fall to exclusion accounting, whereas a present
+            zero would read as a costless call and silently understate the workload.
+          type: integer
         request_id:
           description: HTTP request ID for correlation
           type: string
         response:
           description: Tool response (potentially truncated)
           type: string
+        response_bytes:
+          description: Raw upstream response size in bytes before truncation
+          type: integer
         response_truncated:
           description: True if response was truncated
           type: boolean
