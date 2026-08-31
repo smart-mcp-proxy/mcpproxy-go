@@ -1,0 +1,335 @@
+# Tasks: Token-efficiency benchmark — measured savings, published results
+
+**Input**: Design documents from `/specs/103-token-bench/`
+**Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
+
+**Tests**: INCLUDED. The project constitution (Principle V) requires tests before implementation
+for all features, so test tasks are not optional here.
+
+**Organization**: Grouped by user story. US1 alone is a shippable MVP.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: parallelizable (different files, no dependency on an incomplete task)
+- **[Story]**: US1–US5, mapping to spec.md's user stories
+
+## Path Conventions
+
+Single Go project. The feature lives in the existing `bench/` tree, with two small production
+changes in `internal/`. Paths below are repo-relative and exact.
+
+---
+
+## Phase 1: Setup
+
+**Purpose**: Make the deterministic half reproducible before anything depends on it.
+
+- [ ] T001 Set `TIKTOKEN_CACHE_DIR` in `.github/workflows/bench.yml` AND add a cache
+      restore/save step so the vocabulary is present offline — setting the variable alone only
+      names a cache, it does not fill one (research.md "Cross-cutting: reproducibility hazards")
+- [ ] T002 [P] Add a PR-triggered required workflow step asserting no report is tracked:
+      `test -z "$(git ls-files bench/results)"`. It must NOT live in `.github/workflows/bench.yml`,
+      which triggers only on `v*` tags and `workflow_dispatch` and so cannot block a PR (SC-011)
+- [ ] T003 [P] Document the replay + agent-loop entry points in `bench/README.md`, including the
+      mandatory fleet input and the bodies-off/bodies-on distinction (Principle VI)
+
+---
+
+## Phase 2: Foundational (blocking prerequisites)
+
+**Purpose**: Contract and report groundwork every story depends on. **No user story can start
+until this phase completes.**
+
+**Production changes (both small, both required before US1 can be honest):**
+
+- [ ] T004 Add `RequestBytes` / `ResponseBytes` to the export DTO in
+      `internal/contracts/activity.go` and copy them in `storageToContractActivityForExport`
+      in `internal/httpapi/activity.go`. They exist on the storage record as pre-truncation
+      measurements but never reach the export (contracts/replay-input.md)
+- [ ] T005 Write a failing test asserting the export projection carries both byte fields, in
+      `internal/httpapi/activity_test.go` — before T004 (TDD, Principle V)
+- [ ] T006 Propagate the already-computed `wasTruncated` into the internal tool-call activity
+      emit: extend `emitActivityInternalToolCall` in `internal/server/mcp.go:810` and pass the
+      value the `retrieve_tools` handler already holds at `internal/server/mcp.go:2019-2035`.
+      **Without this a truncated `retrieve_tools` record cannot be identified and the loader
+      would silently overstate agent cost.** If this is rejected, record the blanket-exclusion
+      fallback decision in `bench/README.md` instead — it must be explicit, never a default
+- [ ] T007 Write a failing test asserting a truncated `retrieve_tools` call produces an activity
+      record flagged truncated, in `internal/server/mcp_activity_test.go` — before T006
+
+**Report envelope (additive, no `report_version` bump):**
+
+- [ ] T008 [P] Add a `provenance` field to every new row type and constrain it to
+      `measured|computed|estimated` in `bench/reportv2.go`. Section-level provenance cannot
+      express FR-013, which lets measured and estimated figures coexist in one block
+- [ ] T009 [P] Add a per-block `accounting_source` field in `bench/reportv2.go`. **Do NOT narrow
+      the existing document-level `Tokenizer` field** — that would be a meaning change requiring
+      a version bump (contracts/report-v2-additions.md)
+- [ ] T010 Declare the new optional blocks (`replay`, `agent_loop`, `payload_decomposition`) in
+      `specs/083-discovery-profiler/contracts/report-v2.schema.json`. The schema has no
+      `additionalProperties: false`, so an undeclared block would validate silently — declare
+      them anyway, the schema file is the reviewed contract
+- [ ] T011 Extend `bench/reportv2_test.go` to assert the new blocks validate against the schema
+
+**Mode matrix:**
+
+- [ ] T012 Write failing tests for the matrix in `bench/modematrix_test.go`: exactly 5 distinct
+      cells; the 7 redundant combinations each produce a skip row naming the cell it collapses
+      onto; `code_execution` + `enable_code_execution:false` yields reason `degenerate`
+- [ ] T013 Implement `bench/modematrix.go` per `contracts/mode-matrix.md`. **Compose existing
+      pieces through structural interfaces — do not re-derive any serialization.** Reuse mode
+      constants and proxy catalogs (`bench/tokens.go`), full rendering
+      (`bench/arms/baseline.go`), compact measurement (`bench/flipgate.go`), deferred-direct
+      rendering (`bench/arms/directdeferred.go`), MCP transport (`bench/mcpcaller.go`). Reuse
+      the existing skip shape (`ArmResult.Skipped`/`SkipReason`, `SkippedArmResult`)
+- [ ] T014 Map a cell to its endpoint URL. The routing-mode axis needs no config change — all
+      three routing-mode servers are mounted at startup (`internal/server/server.go:2514-2536`).
+      The two serialization axes need config but both hot-reload, so the matrix crosses on one
+      long-lived instance with a config apply between serialization cells
+
+**Checkpoint**: Contracts, report envelope and matrix ready — user stories can begin.
+
+---
+
+## Phase 3: User Story 1 — Recompute real workload cost (Priority: P1) 🎯 MVP
+
+**Goal**: Given exported activity plus a fleet input, report per-cell menu cost and the
+direct-cell cross-mode delta for a real workload shape. No model, deterministic.
+
+**Independent Test**: Supply an export and a frozen corpus; confirm per-cell menu cost and the
+`direct_full` vs `direct_deferred` delta appear, each badged `measured`, with an exclusion
+report beside them — and that two runs are identical modulo `generated_at`.
+
+### Tests for User Story 1 ⚠️ (write first, confirm they fail)
+
+- [ ] T015 [P] [US1] Loader tests in `bench/replaycorpus/load_test.go`: JSONL decoding; CSV
+      rejected; grouping by `work_session_id`; `parent_id` ↔ `request_id` join for
+      code-execution sub-calls
+- [ ] T016 [P] [US1] Usability-flag tests in `bench/replaycorpus/flags_test.go`: truncated,
+      bodies-missing, sensitive and unreplayable are each detected, and every exclusion is
+      counted — **assert a truncated record never contributes silently** (FR-002, SC-008)
+- [ ] T017 [P] [US1] Privacy tests in `bench/replaycorpus/privacy_test.go`: no body text
+      escapes the package; tokenization happens inside the loader and only counts cross the
+      boundary (FR-006, SC-009)
+- [ ] T018 [P] [US1] Test that a recording-only invocation (no fleet input) is a hard error,
+      not a degraded run, in `bench/replay_test.go`
+- [ ] T019 [P] [US1] Test that no cell reports an absolute complete-workload cost bodies-off,
+      and that only the `direct_full` vs `direct_deferred` delta is produced, in
+      `bench/replay_test.go`
+- [ ] T020 [P] [US1] Determinism test in `bench/replay_test.go`: two runs over the same inputs
+      are byte-identical after `generated_at` is excluded (SC-002)
+
+### Implementation for User Story 1
+
+- [ ] T021 [P] [US1] Create `bench/replaycorpus/load.go` — decode `contracts.ActivityRecord`
+      JSONL from `mcpproxy activity export --format json`. **This package MUST import nothing
+      from `bench`**, or `bench/replay.go` cannot import it without a cycle (`bench/corpusio`
+      imports `bench`, which is why mirroring it would fail)
+- [ ] T022 [P] [US1] Create `bench/replaycorpus/group.go` — group by `work_session_id`, join
+      code-execution sub-calls via `parent_id` ↔ `request_id` so they are neither
+      double-counted nor orphaned
+- [ ] T023 [US1] Create `bench/replaycorpus/flags.go` — compute usability flags once at load.
+      Handle the two byte-coverage gaps: internal `retrieve_tools` records carry no byte counts,
+      and code-execution sub-calls emit both as zero
+      (`internal/server/mcp_code_execution.go:811-818`); both fall to exclusion accounting
+- [ ] T024 [US1] In `bench/replaycorpus/tokenize.go`, tokenize inside the loader for bodies-on runs and emit counts only, so no text
+      crosses the boundary. Exclude (or re-apply truncation to) truncated `retrieve_tools`
+      records — the log stores the FULL pre-truncation response while the agent consumed
+      truncated text, so tokenizing it as-is would OVERSTATE cost
+- [ ] T025 [US1] Create `bench/replay.go` — per-cell menu cost from the fleet input, plus the
+      direct-cell delta. Reuse `arms.CanonicalToolText` / `CountToolWithSchema` for the tool
+      surface and the `bench/respcost.go` span-partition technique for responses, so components
+      sum exactly
+- [ ] T026 [US1] Add the `-replay` flag plus a mandatory fleet input to `bench/cmd/bench/main.go`
+      as a top-level branch beside the profiler check, emitting a `replay` block into `ReportV2`
+      (not an `OfflineSection` — replay crosses the matrix, it is not one more corpus)
+- [ ] T027 [US1] Exclude or pin `generated_at` for replay reports in `bench/replay.go` so SC-002's
+      determinism check is meaningful
+- [ ] T028 [US1] Render the `replay` block in the dashboard template in `bench/report.go`, showing the exclusion report and
+      stating that figures are scored against **today's** fleet, not the fleet as recorded
+
+**Checkpoint**: US1 is independently shippable and delivers real-workload numbers with no model spend.
+
+---
+
+## Phase 4: User Story 2 — Measure whether a mode helps the agent succeed (Priority: P1)
+
+**Goal**: Tokens per *completed* task, completion rate, first-attempt success and retry rates
+per cell, from a live agent loop under a pinned model.
+
+**Independent Test**: Run a fixed task set under at least two cells; confirm all four figures
+appear per cell, badged `measured`, averaged over k≥4 runs with spread.
+
+**⚠️ Blocked on an operator decision**: pinned model + spend ceiling. US1 does not depend on this.
+
+### Tests for User Story 2 ⚠️
+
+- [ ] T029 [P] [US2] Classification tests in `bench/agentloop_test.go` for the binding
+      Definitions: first-attempt success, corrective vs infrastructure retry, unit of work,
+      task completion. **The same rule must apply to the baseline arm and the proxy arms**, or
+      the comparison is biased toward whichever carries richer error signal
+- [ ] T030 [P] [US2] In `bench/agentloop_test.go`, test that `completion: no-signal` excludes a record
+      from completion-dependent figures rather than counting it as success or failure
+- [ ] T031 [P] [US2] In `bench/agentloop_test.go`, test that a model-dependent figure with `runs < 4` is
+      refused as a headline (FR-021)
+- [ ] T032 [P] [US2] In `bench/agentloop_test.go`, test that a mode with lower token cost but lower
+      completion is flagged a regression by the completion threshold and is NOT reported as a saving (SC-007) — drive it
+      with a deliberately degraded mode
+- [ ] T033 [P] [US2] Test that a cross-accounting-source aggregate is WITHHELD with a stated
+      reason, never computed, mirroring the existing `AuthoritativeHeadline`/`withholdHeadline`
+      pattern in `bench/live_report.go`
+
+### Implementation for User Story 2
+
+- [ ] T034 [US2] Create `bench/agentloop.go` — driver parameterised over a function type so the
+      arithmetic is unit-testable with no suite running, following the `bench/flipgate.go`
+      precedent
+- [ ] T035 [US2] Ingest the suite's per-task `meta.json` (`execution_result.success`,
+      `token_usage`, `turn_count`) and `messages.json` trajectories for retry classification
+- [ ] T036 [US2] Capture provider-reported `usage` in the driver for the input/output/cache-read
+      split. **The suite's own output has no cache-read field**, so that axis must come from the
+      driver or be explicitly declared out of reach (research.md)
+- [ ] T037 [US2] Emit the `agent_loop` block from `bench/agentloop.go` with its own `accounting_source`
+      (provider + pinned model), never summed with tokenizer-sourced figures
+- [ ] T038 [US2] Supersede the assumed per-arm retry defaults where a measurement exists, and
+      add a per-row provenance field to session-cost rows. `RetryRateForArm` returns `0.0` for
+      unknown arms (`bench/session.go:49-62`), indistinguishable from a measured `0.0` — the
+      per-row badge is what prevents a silent mix
+- [ ] T039 [US2] Patch the pinned suite's single MCP factory — `src/agents/mcpmark_agent.py`
+      `_create_mcp_server()` in the external MCPMark clone, NOT a file in this repo — with an
+      env-gated branch returning an HTTP MCP server at mcpproxy's URL with the API-key header.
+      Pin by commit SHA and record the SHA in `bench/README.md` (FR-028)
+- [ ] T040 [US2] In the benchmark's mcpproxy config (a scratch `mcp_config.json`, never committed), configure ALL suite services simultaneously while running one
+      service's tasks — a single server's toolset is too small a fleet to show the asymptote,
+      and the full fleet is also the honest FR-020 baseline
+- [ ] T041 [US2] Start with the credential-free core (filesystem + postgres, 51 local tasks); record the chosen scope in `bench/README.md`.
+      Any service performing real writes must be run so it cannot damage real data (FR-027)
+
+**Checkpoint**: US1 and US2 both work independently.
+
+---
+
+## Phase 5: User Story 4 — Explain the 29.7% shortfall (Priority: P2)
+
+**Goal**: Attribute tool-definition payload to names, descriptions, annotations and schemas
+across fleet shapes, and confirm or correct spec 102's conclusion.
+
+**Independent Test**: Produce a decomposition for at least two fleet shapes with a ceiling
+recomputed per corpus and an explicit `confirmed`/`corrected` verdict.
+
+### Tests for User Story 4 ⚠️
+
+- [ ] T042 [P] [US4] Test that the four shares sum to the whole payload, in
+      `bench/payloaddecomp_test.go`
+- [ ] T043 [P] [US4] In `bench/payloaddecomp_test.go`, test that the achievable ceiling is recomputed per
+      corpus and never carried forward as a constant — that carry-forward is precisely the error spec 102 made
+
+### Implementation for User Story 4
+
+- [ ] T044 [US4] Implement the decomposition in `bench/payloaddecomp.go` over at least two fleet
+      shapes (the 45-tool reference corpus and the 527-tool snapshot)
+- [ ] T045 [US4] Emit the `payload_decomposition` block from `bench/payloaddecomp.go` with an explicit `spec102_verdict`
+      (`confirmed` or `corrected`, with the delta)
+
+**Checkpoint**: The shortfall has an evidenced answer.
+
+---
+
+## Phase 6: User Story 3 — An outsider reproduces the numbers (Priority: P2)
+
+**Goal**: Every published figure is reproducible from a documented, pinned procedure.
+
+**Independent Test**: Someone with no prior context follows the procedure and reproduces the
+deterministic figures exactly, the model-dependent ones within the stated tolerance.
+
+- [ ] T046 [P] [US3] Measure the tokenizer's divergence from the pinned model with the provider's
+      token-counting endpoint (no inference spend) and record it in `bench/README.md` as
+      FR-022's numeric tolerance. **The repo currently states ~60% while the provider's guidance says ~15–20%** —
+      neither is sourced, and they differ threefold
+- [ ] T047 [US3] In `bench/reportv2.go`, mark figures derived from private recorded sessions as NOT
+      independently reproducible; they must never be the sole support for a published claim (FR-030)
+- [ ] T048 [US3] In `bench/replay.go` and `bench/agentloop.go`, retain raw per-run records under
+      `bench/results/` and reference them from the report so a headline traces to its inputs, without embedding session contents (FR-029)
+- [ ] T049 [US3] In `bench/reportv2.go`, mark partial or interrupted runs as partial and block them from
+      publication (FR-032)
+- [ ] T050 [US3] Write the reproduction procedure into `bench/README.md`, including warming the
+      tokenizer cache and supplying a fleet input
+
+**Checkpoint**: The numbers survive outside scrutiny.
+
+---
+
+## Phase 7: User Story 5 — Publish (Priority: P3)
+
+**Goal**: Results reach developers deciding whether to adopt.
+
+- [ ] T051 [US5] Draft the write-up for `mcpproxy.app/blog` (separate repository): measured
+      figures, the fleet shapes they hold for, known limitations, the reproduction procedure,
+      and **plainly where savings do not materialise** (FR-031, SC-012). Extend the existing
+      2026-03-19 "BM25 vs Embeddings vs Lua" post rather than duplicating it
+
+---
+
+## Phase 8: Polish & Cross-Cutting
+
+- [ ] T052 [P] Compare the Web-UI/status savings figure (`internal/server/tokens/savings.go`, surfaced via
+      `internal/runtime/runtime.go`) against the bench headline over one live fleet. They are independently implemented over the same data and have never been
+      compared; the spec's own Assumptions say a contradiction is a finding to investigate
+- [ ] T053 [P] Verify no generated report became tracked: `git ls-files bench/results` is empty
+- [ ] T054 Full gates: `go build ./cmd/mcpproxy` and `-tags server`;
+      `go test -race -count=1 ./internal/... ./bench/...`;
+      `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...`;
+      `./scripts/test-api-e2e.sh`; `make swagger` diff-clean
+- [ ] T055 Cross-model review of the full diff (opencode `gpt-5.6-sol`) staged into `.review-tmp/`,
+      ≤10 rounds per the standing cap; verify each finding against the tree before fixing
+
+---
+
+## Dependencies
+
+```text
+Phase 1 (Setup) ──► Phase 2 (Foundational) ──┬──► Phase 3 US1 (P1) ──► Phase 5 US4 (P2)
+                                             │                    └──► Phase 6 US3 (P2)
+                                             └──► Phase 4 US2 (P1) ──► Phase 6 US3 (P2)
+                                                                        │
+                                                                        └──► Phase 7 US5 (P3)
+                                                                                 │
+                                                                        Phase 8 Polish
+```
+
+- **US1 and US2 are independent of each other** and can proceed in parallel once Phase 2 lands.
+- **US4 depends on US1** only for the fleet-input plumbing.
+- **US3 depends on both P1 stories** having produced figures worth reproducing.
+- **US5 depends on US3** — publishing before reproducibility is what this feature exists to avoid.
+
+## Parallel opportunities
+
+- **Phase 1**: T002, T003 together.
+- **Phase 2**: T008 and T009 together (both `bench/reportv2.go`, so coordinate); T005/T007 are
+  independent test-first tasks.
+- **US1**: T015–T020 all in parallel (distinct test files); then T021 and T022 in parallel.
+- **US2**: T029–T033 all in parallel.
+- **US4**: T042 and T043 in parallel.
+- **Polish**: T052 and T053 in parallel.
+
+## Implementation strategy
+
+**MVP = Phase 1 + Phase 2 + Phase 3 (US1).** That yields real-workload menu costs and the
+direct-cell delta with **zero model spend**, and it is independently useful: it replaces the
+frozen-corpus numbers with numbers from real fleets.
+
+**Increment 2 = US2**, gated on the pinned-model decision. This is where the feature's actual
+claim — tokens per *completed* task — becomes measurable.
+
+**Increment 3 = US4, then US3, then US5.**
+
+## Warnings carried from the design
+
+1. **Never let a truncated record contribute silently.** It understates cost *in the project's
+   favour*, which is the failure this whole feature exists to prevent.
+2. **Never sum across accounting sources.** Withhold with a stated reason instead.
+3. **Never publish a percentage without its fleet shape.**
+4. **Never present a bodies-off figure as an absolute complete-workload cost.** Bodies-off
+   yields menu costs and one cross-mode delta.
+5. **A recording-only run is an error**, not a degraded run — without a fleet input there is no
+   menu to cost.
