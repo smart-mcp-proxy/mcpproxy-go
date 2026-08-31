@@ -68,3 +68,52 @@ default and recorded in Assumptions instead:
 candidate suites emit per-task token counts, and whether they can be pointed at a single
 proxy endpoint. FR-020 and FR-022 are unsatisfiable if neither holds, so plan stage must
 read the suites' code before committing to one.
+
+## Cross-model review round 1 (opencode gpt-5.6-sol, 2026-08-31)
+
+Seven findings, all verified against the tree and all applied. Two were **Critical and
+changed the spec's premise**:
+
+1. **Replay cannot answer what the spec asked it to.** The activity record carries tool
+   calls, arguments, responses, status and work-session grouping — but no prompt, no
+   conversation, no model state and no completion oracle (`internal/storage/activity_models.go`).
+   So replaying a recording under a different mode cannot reveal how the agent would have
+   *behaved*: which calls it would attempt, whether the first was right, whether it finished.
+   The original US1 asked for exactly that and was unsatisfiable.
+   **Fix**: added a binding **Replay Boundary** section and split the old US1 into US1
+   (deterministic counterfactual cost recomputation over real workload shape, no model) and
+   US2 (live agent loop under a pinned model, which owns every success/completion figure).
+   FR-004 now forbids inferring behaviour from a recording, and Out of Scope names it.
+
+2. **Reproducibility and privacy were in direct conflict, and the privacy side was absent.**
+   The body-inclusive export deliberately returns full unmasked values including detected
+   secrets — it is the compliance surface, not a browsing one (`internal/httpapi/activity.go`).
+   The spec said session contents must stay out of published artefacts but said nothing about
+   protecting them *during* replay, including transmission to model providers.
+   **Fix**: new FR-006..FR-009 (sensitive by default, never transmitted to third parties,
+   flagged records excluded or reduced, inputs live outside the repo with a documented
+   deletion step) plus SC-009. FR-030 now admits that figures from private sessions are not
+   independently reproducible and cannot be the sole support for a published claim.
+
+Also applied:
+
+3. **The headline metric did not actually penalise worse completion.** Tokens-per-completed-task
+   can *improve* while completion falls, if tokens fall faster — so the old SC-006 was not
+   generally true. **Fix**: FR-018 requires completion rate at equal prominence, FR-019 adds a
+   completion-regression threshold that overrides any token saving, and SC-007 now requires
+   demonstrating this with a deliberately degraded mode.
+4. **SC-001 demanded results for "every mode combination"** while FR-017 requires skipping
+   invalid ones. **Fix**: scoped to every *valid* combination exercised by the live task set.
+5. **Core terms were undefined** ("first attempt", "accepted", "retry", "unit of work",
+   "completion", token accounting source). **Fix**: a binding Definitions block, which also
+   separates corrective retries from infrastructure retries.
+6. **Three FRs restated existing capabilities.** **Fix**: moved to an Inherited Constraints
+   block (IC-001..IC-004) so they are satisfied, not rebuilt.
+7. **The capability axes were not a testable matrix.** **Fix**: FR-016 states them as binary
+   conditions over the routing modes where each is available, with the report enumerating
+   applicable rows.
+
+The reviewer independently confirmed the spec's current-state claims: nothing in the harness
+replays activity exports, retry rates are literature-derived defaults, first-call success is
+not measured, the three axes are not crossed, and the spec-102 figures (29.7% / 34.8% /
+38.9% ceiling vs a 70% projection) are accurate.

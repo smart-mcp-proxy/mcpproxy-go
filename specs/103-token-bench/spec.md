@@ -49,42 +49,87 @@ The provenance-badge convention is load-bearing for this feature: everything it 
 declare whether it is measured, computed or estimated, and the point of the work is to move
 specific numbers from `estimated` to `measured`.
 
+## Replay Boundary *(read before planning — this bounds US1)*
+
+A recorded session is a trace of what an agent **did** under the mode it was running. It
+carries the tool calls, their arguments, the responses, status, timing and the grouping that
+ties calls into one unit of user work. It does **not** carry the user's prompt, the
+conversation, the model's state, or any oracle for whether the user's goal was met.
+
+Therefore replay CAN answer: what this real workload, at this real fleet size, would have
+cost under a different serialization or routing mode. That is arithmetic over recorded
+traffic and is fully deterministic.
+
+Replay CANNOT answer: how the agent would have *behaved* differently — which calls it would
+have attempted, whether its first attempt would have been right, whether it would have
+finished. Those are new decisions by a model that is not present in the recording.
+
+Any requirement about success, retries or completion therefore belongs to a live agent loop
+(US2), not to replay (US1). A design that infers agent behaviour from a recording is wrong,
+and this boundary is the single most important thing for planning to respect.
+
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 — A maintainer measures what a task actually costs (Priority: P1)
+### User Story 1 — Recompute real workload cost under every mode (Priority: P1)
 
-A maintainer wants to know, for a given mode combination, how many tokens it takes to
-finish a real unit of work — not how many tokens the menu costs. They point the harness at
-a set of previously recorded real sessions, run every mode combination over them, and get a
-per-mode cost-per-completed-task figure alongside how often the agent got the call right
-the first time.
+A maintainer takes a set of previously recorded real sessions — the actual sequence of tool
+calls a real agent made, at real fleet size — and asks what that same workload would have
+cost under every other mode combination. The answer is arithmetic over recorded traffic: no
+model is invoked and no agent decision is predicted.
 
-**Why this priority**: This is the feature's core claim and the only part that cannot be
-approximated from what exists. Without it, every session-level number stays an estimate.
+**Why this priority**: It is the cheapest way to replace synthetic corpora with real workload
+shapes, it needs no model spend, and it is fully deterministic. It is also strictly bounded:
+see the Replay Boundary below for what it cannot answer.
 
-**Independent Test**: Record or supply a set of real sessions, run the harness across the
-mode matrix, and confirm the report contains a per-mode cost-per-completed-task and a
-first-call success rate, each marked `measured` rather than `estimated`.
+**Independent Test**: Supply exported real sessions, run the recomputation across the mode
+matrix, and confirm a per-mode cost for that workload, each figure marked `measured` or
+`computed` and never `estimated`.
 
 **Acceptance Scenarios**:
 
-1. **Given** a set of exported real sessions, **When** a maintainer runs the replay across
-   all mode combinations, **Then** the report shows, per mode, tokens per completed task,
-   first-call success rate and retry count, each carrying a `measured` provenance badge.
-2. **Given** a recorded session whose stored responses were truncated when captured,
-   **When** the replay processes it, **Then** that session is excluded from token totals or
-   explicitly annotated as under-counting, and the report states how many sessions were
-   affected — it is never silently included.
-3. **Given** two runs of the same replay over the same session set and the same modes,
-   **When** their reports are compared, **Then** the deterministic figures are identical and
-   any model-dependent figure is reported as a mean across runs with its spread.
-4. **Given** a mode that reduces tool-surface tokens but lowers task completion,
-   **When** the report is generated, **Then** its cost-per-completed-task rises, making the
-   regression visible rather than hidden behind a favourable surface number.
+1. **Given** a set of exported real sessions, **When** a maintainer runs the recomputation,
+   **Then** the report shows per-mode token cost for that workload, broken into tool-surface
+   cost and response cost, on real fleet sizes rather than a frozen corpus.
+2. **Given** a recorded session whose responses were truncated at capture, **When** it is
+   processed, **Then** it is excluded from token totals or explicitly annotated as
+   under-counting, and the report states how many sessions were affected — never silently
+   included.
+3. **Given** two runs over the same sessions and modes, **When** their reports are compared,
+   **Then** the figures are byte-identical, since no model is involved.
+4. **Given** any recomputed figure, **When** a reader inspects it, **Then** it is labelled as
+   a counterfactual over recorded traffic, not as observed agent behaviour.
 
 ---
 
-### User Story 2 — A skeptical reader reproduces the published numbers (Priority: P2)
+### User Story 2 — Measure whether a mode helps the agent succeed (Priority: P1)
+
+A maintainer wants the number that actually matters: tokens per *completed* task. This
+requires a live agent loop under a pinned model, because it depends on decisions the agent
+makes differently under each mode — which calls it attempts, how often the first attempt is
+right, and whether it finishes.
+
+**Why this priority**: This is the feature's core claim. Without it every savings figure
+remains a statement about menu size rather than about work done. It is separated from US1
+because it has a fundamentally different cost, determinism and data requirement.
+
+**Independent Test**: Run a fixed task set through a live agent under at least two mode
+combinations and confirm the report gives, per mode, tokens per completed task, task
+completion rate, first-attempt success rate and retry count, each `measured`.
+
+**Acceptance Scenarios**:
+
+1. **Given** a fixed task set, **When** it is run under each mode combination, **Then** the
+   report gives per mode: task completion rate, tokens per completed task, first-attempt
+   success rate and retry count, each `measured`.
+2. **Given** a mode that lowers token use but completes fewer tasks, **When** the report is
+   read, **Then** the completion drop is displayed with equal prominence to the token
+   saving, and the mode is not presented as a saving.
+3. **Given** any model-dependent figure, **When** it is published, **Then** it is an average
+   over at least four runs with its spread, never a single run.
+
+---
+
+### User Story 3 — A skeptical reader reproduces the published numbers (Priority: P2)
 
 Someone who does not trust the project reads a published claim, follows the documented
 procedure, and arrives at the same numbers within a stated tolerance — including the
@@ -92,7 +137,7 @@ comparison against not using MCPProxy at all.
 
 **Why this priority**: An unreproducible benchmark is marketing. This is what separates
 this work from the thin-methodology comparisons already circulating in this space. It
-depends on US1 producing numbers worth reproducing.
+depends on US1 and US2 producing numbers worth reproducing.
 
 **Independent Test**: A person with no prior context follows the published procedure on
 their own machine and reproduces the deterministic figures exactly and the model-dependent
@@ -114,7 +159,7 @@ figures within the stated tolerance.
 
 ---
 
-### User Story 3 — The 29.7% shortfall gets an answer (Priority: P2)
+### User Story 4 — The 29.7% shortfall gets an answer (Priority: P2)
 
 A maintainer wants to know whether the spec-102 conclusion — that names, descriptions and
 annotations dominate the payload, capping achievable savings well below the projection —
@@ -122,7 +167,7 @@ holds on real fleets, or was an artefact of two frozen corpora.
 
 **Why this priority**: This determines whether further serialization work is worth doing at
 all, and it is the first question anyone will ask about the published numbers. It reuses
-US1's machinery rather than adding its own.
+the existing tool-surface measurement machinery rather than adding its own.
 
 **Independent Test**: Produce a payload decomposition across corpora of different sizes and
 shapes and compare it against the spec-102 conclusion, yielding an explicit confirmation
@@ -139,7 +184,7 @@ or correction.
 
 ---
 
-### User Story 4 — Results reach the people deciding whether to adopt (Priority: P3)
+### User Story 5 — Results reach the people deciding whether to adopt (Priority: P3)
 
 A developer evaluating MCPProxy reads a public write-up with real numbers, an honest
 account of where savings do *not* materialise, and enough method to judge it.
@@ -184,9 +229,38 @@ they hold for, the known limitations, and the reproduction procedure.
 
 ## Requirements *(mandatory)*
 
+### Definitions *(binding — these terms are used with exactly these meanings)*
+
+- **Unit of work**: one task from a fixed task set (US2), or one recorded work-session
+  grouping (US1). Never an individual tool call.
+- **Attempt**: one tool call issued by the agent toward a given intent.
+- **First-attempt success**: the first attempt for an intent returned a non-error result AND
+  was not followed by a corrective retry for the same intent. A schema-valid call that the
+  agent immediately re-issues differently is NOT a success.
+- **Retry**: a subsequent attempt for the same intent after a failed or corrected one.
+  Transport-level and infrastructure retries are counted and reported SEPARATELY, because
+  they measure the network, not the mode.
+- **Task completion**: the task suite's own pass verdict. Where a suite has no verdict, the
+  unit of work is reported as having no completion signal and is excluded from
+  completion-dependent figures rather than assumed complete.
+- **Token accounting**: provider-reported usage where the run is model-backed; the existing
+  deterministic tokenizer where it is not. Which one produced a figure MUST be stated; the
+  two MUST NOT be summed into one number.
+- **Fleet shape**: the tool count plus the distribution of definition sizes for the tool set
+  a figure was measured on.
+
+### Inherited constraints *(already provided by the existing harness — satisfy, do not rebuild)*
+
+- **IC-001**: Every figure carries a `measured` / `computed` / `estimated` provenance badge.
+- **IC-002**: Static tool-surface cost is measured from the live tool builders for every
+  routing mode and MUST NOT be re-derived.
+- **IC-003**: Generated reports are never committed; only code, fixtures, thresholds and
+  methodology are versioned.
+- **IC-004**: Any quoted percentage carries the fleet shape it was measured on.
+
 ### Functional Requirements
 
-**Replay of real sessions**
+**Replay of real sessions (deterministic; see Replay Boundary)**
 
 - **FR-001**: The harness MUST accept previously recorded real agent sessions as input via
   the existing export path, without requiring a new capture mechanism.
@@ -195,118 +269,145 @@ they hold for, the known limitations, and the reproduction procedure.
   under-counting; it MUST NOT include them silently.
 - **FR-003**: The harness MUST report how many supplied sessions were unusable and why,
   distinguishing truncation, missing bodies, and unreplayable upstreams.
-- **FR-004**: The harness MUST treat recorded session content as sensitive: results and
-  published artefacts MUST NOT contain session contents.
+- **FR-004**: Replay output MUST be labelled as a counterfactual cost recomputation over
+  recorded traffic. It MUST NOT be presented as observed agent behaviour, and the harness
+  MUST NOT infer success, retry or completion figures from a recording.
+- **FR-005**: Replay MUST report cost split into tool-surface cost and response cost, so the
+  two can be reasoned about separately at real fleet shapes.
 
-**Measured success and retries**
+**Handling of recorded session data**
 
-- **FR-005**: The harness MUST measure first-call success rate — how often the agent's first
-  attempt at a tool call is accepted — per mode combination.
-- **FR-006**: The harness MUST measure retry counts per mode combination, replacing the
-  current assumed per-arm defaults for any mode where a measurement exists.
-- **FR-007**: Any figure still derived from an assumption MUST remain marked as an estimate
-  and MUST NOT be presented alongside measured figures without that distinction.
-- **FR-008**: The harness MUST report a task-completion signal per replayed unit of work, so
-  that cost can be expressed per *completed* task rather than per attempt.
+Recorded sessions are real user traffic. The export path that includes bodies deliberately
+returns full unmasked values — it is the compliance/incident-response surface — so replay
+inputs can contain secrets and personal data that the browsing surfaces mask.
+
+- **FR-006**: Replay inputs MUST be treated as sensitive by default. Neither they nor any
+  excerpt MUST appear in a report, dashboard or published artefact.
+- **FR-007**: The harness MUST NOT transmit recorded session content to any third-party
+  service, including model providers. Replay is local arithmetic; a design requiring such
+  transmission is outside this feature.
+- **FR-008**: Records flagged as containing sensitive data MUST be excluded, or reduced to
+  the non-sensitive measurements needed for token accounting, before use; the count of
+  affected records MUST be reported.
+- **FR-009**: Replay inputs MUST live outside the repository, MUST NOT be committed, and the
+  documented procedure MUST tell an operator how to delete them when finished.
+
+**Measured success, retries and completion (live agent loop)**
+
+- **FR-010**: The harness MUST measure first-attempt success rate per mode combination, as
+  defined above.
+- **FR-011**: The harness MUST measure retry counts per mode combination, reporting
+  corrective retries separately from infrastructure retries.
+- **FR-012**: The harness MUST record a task-completion verdict per unit of work, taken from
+  the task suite rather than inferred.
+- **FR-013**: Measured success and retry figures MUST replace the assumed per-arm defaults
+  for any mode where a measurement exists; any figure still derived from an assumption MUST
+  remain badged `estimated` and MUST NOT be presented without that distinction.
+- **FR-014**: Token accounting MUST separate input, output and cached-read consumption.
 
 **The mode matrix**
 
-- **FR-009**: The harness MUST cross all three configuration axes that govern what an agent
-  sees: the routing mode, the serialization mode of the discovery surface, and the
-  serialization mode of the direct surface.
-- **FR-010**: The matrix MUST additionally cover the batching, stored-script and
-  validate-before-dispatch capabilities, since each trades one kind of cost for another.
-- **FR-011**: Combinations that are not meaningful MUST be reported as skipped with a reason,
+- **FR-015**: The matrix MUST cross the three configuration axes that determine what an agent
+  sees: routing mode, discovery-surface serialization, and direct-surface serialization.
+- **FR-016**: Batching, stored scripts and validate-before-dispatch MUST each be covered as a
+  binary condition applied to the routing modes where they are available, and the report MUST
+  enumerate which rows each applies to.
+- **FR-017**: Combinations that are not meaningful MUST be reported as skipped with a reason,
   never as a zero or a missing row.
-- **FR-012**: The report MUST express headline cost as tokens per completed task, with the
-  static tool-surface cost retained as a separate, clearly-labelled figure.
-- **FR-013**: Token accounting MUST separate input, output and cached-read consumption.
+- **FR-018**: The report MUST express headline cost as tokens per completed task, with
+  completion rate displayed alongside it at equal prominence.
+- **FR-019**: A mode whose completion rate falls below the baseline's by more than a stated
+  threshold MUST be marked as a regression regardless of its token cost, and MUST NOT be
+  described as a saving.
 
 **Honest comparison**
 
-- **FR-014**: The baseline arm MUST be the same agent performing the same tasks with all
+- **FR-020**: The baseline arm MUST be the same agent performing the same tasks with all
   tools loaded directly. A comparison against a different or weaker configuration MUST NOT
   be published.
-- **FR-015**: Any model-dependent figure MUST be reported as an average over at least four
-  runs together with a measure of consistency across runs; a single run MUST NOT be
-  reported as a headline result.
-- **FR-016**: Every published percentage MUST carry the size and shape of the tool set it was
-  measured on.
-- **FR-017**: The report MUST include a cost-versus-outcome view so a reader can see which
+- **FR-021**: Any model-dependent figure MUST be reported as an average over at least four
+  runs together with a measure of consistency across runs; a single run MUST NOT be reported
+  as a headline result.
+- **FR-022**: The reproduction tolerance for model-dependent figures MUST be stated
+  numerically in the published methodology.
+- **FR-023**: The report MUST include a cost-versus-outcome view so a reader can see which
   modes are worth their savings rather than only which are cheapest.
 
 **Payload decomposition**
 
-- **FR-018**: The harness MUST attribute tool-definition payload share to names,
-  descriptions, annotations and schemas separately, across at least two corpus shapes.
-- **FR-019**: The result MUST explicitly confirm or correct the spec-102 conclusion about
+- **FR-024**: The harness MUST attribute tool-definition payload share to names,
+  descriptions, annotations and schemas separately, across at least two fleet shapes.
+- **FR-025**: The result MUST explicitly confirm or correct the spec-102 conclusion about
   what dominates the payload, and MUST recompute the achievable ceiling per corpus rather
   than carrying a fixed figure forward.
 
 **Public suites**
 
-- **FR-020**: The harness MUST support running at least one public task suite that exercises
-  a full agent loop, in addition to the retrieval and token corpora that already exist.
-- **FR-021**: Any suite performing real writes against third-party services MUST be run in a
+- **FR-026**: The harness MUST support at least one public task suite that exercises a full
+  agent loop and emits a per-task pass verdict.
+- **FR-027**: Any suite performing real writes against third-party services MUST be run in a
   way that cannot damage real user data.
-- **FR-022**: Suite versions and configuration MUST be pinned so a later run is comparable to
+- **FR-028**: Suite versions and configuration MUST be pinned so a later run is comparable to
   an earlier one.
 
 **Reproducibility and publication**
 
-- **FR-023**: Generated reports MUST NOT be committed to the repository; only code, fixtures,
-  thresholds and methodology are versioned.
-- **FR-024**: Raw per-run records MUST be retained and referenced by the report so a headline
-  figure can be traced to its inputs.
-- **FR-025**: Every input MUST be either included in the repository or obtainable by a
-  documented, pinned procedure.
-- **FR-026**: The published write-up MUST state measured figures, the corpus shapes they hold
+- **FR-029**: Raw per-run records MUST be retained and referenced by the report so a headline
+  figure can be traced to its inputs, without embedding session contents (FR-006).
+- **FR-030**: Every input MUST be either included in the repository or obtainable by a
+  documented, pinned procedure. Figures that depend on private recorded sessions MUST be
+  marked as not independently reproducible, and MUST NOT be the sole support for a published
+  claim.
+- **FR-031**: The published write-up MUST state measured figures, the fleet shapes they hold
   for, known limitations, and the reproduction procedure, and MUST state plainly where
   savings do not materialise.
-- **FR-027**: A partial or interrupted run MUST be identifiable as partial and MUST NOT be
+- **FR-032**: A partial or interrupted run MUST be identifiable as partial and MUST NOT be
   publishable as a complete comparison.
 
 ### Key Entities
 
-- **Replayed session**: A previously recorded unit of real agent work, with its sequence of
-  tool calls and enough context to re-run it. Carries usability flags (truncated, missing
-  bodies, unreplayable).
-- **Mode combination**: One point in the configuration matrix — a routing mode plus the
-  serialization settings and capability toggles that determine what the agent sees and how
-  it calls.
-- **Run record**: The raw outcome of executing one session under one mode combination:
-  token consumption split by kind, attempts, first-call outcome, completion, and any error.
-- **Measurement**: An aggregate over run records, always carrying its provenance
-  (`measured`, `computed`, or `estimated`) and, where model-dependent, its run count and
-  spread.
-- **Payload decomposition**: The attribution of tool-definition cost to names, descriptions,
-  annotations and schemas for a given corpus.
+- **Replayed session**: A previously recorded unit of real agent work — its tool calls,
+  arguments and responses — with usability flags (truncated, missing bodies, unreplayable,
+  sensitive).
+- **Mode combination**: One point in the matrix — routing mode plus serialization settings
+  and capability toggles determining what the agent sees and how it calls.
+- **Run record**: The raw outcome of one unit of work under one mode: token consumption by
+  kind, attempts, first-attempt outcome, retries by class, completion verdict, errors.
+- **Measurement**: An aggregate over run records, carrying provenance and, where
+  model-dependent, run count and spread.
+- **Payload decomposition**: Attribution of tool-definition cost to names, descriptions,
+  annotations and schemas for a given fleet shape.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-- **SC-001**: For every mode combination in the matrix, a maintainer can obtain a cost per
-  completed task and a first-call success rate, both marked as measured rather than
-  estimated.
-- **SC-002**: No session-level cost figure in the report is derived from an assumed retry
-  rate unless it is explicitly labelled as an estimate.
-- **SC-003**: A person outside the project, following only the published procedure,
+- **SC-001**: For every VALID mode combination exercised by the live task set, a maintainer
+  can obtain tokens per completed task, completion rate and first-attempt success rate, each
+  badged `measured`.
+- **SC-002**: For every valid mode combination, a maintainer can obtain the counterfactual
+  cost of a real recorded workload, reproducible byte-for-byte across runs.
+- **SC-003**: No session-level cost figure is derived from an assumed retry rate unless it is
+  explicitly badged `estimated`.
+- **SC-004**: A person outside the project, following only the published procedure,
   reproduces the deterministic figures exactly and the model-dependent figures within the
-  stated tolerance.
-- **SC-004**: Every published percentage states the tool-set size and shape it was measured
-  on; a percentage without that context does not appear.
-- **SC-005**: The spec-102 payload conclusion is explicitly confirmed or corrected, with the
-  achievable ceiling recomputed for each corpus measured.
-- **SC-006**: A deliberately degraded mode — one that costs fewer surface tokens but
-  completes fewer tasks — is visibly worse in the report's headline metric, demonstrating
-  that the benchmark detects a false saving rather than rewarding it.
-- **SC-007**: Recorded sessions with truncated content are never counted silently: the
-  report states how many were affected and how they were handled.
-- **SC-008**: At least one full agent-loop public task suite runs against MCPProxy and
+  stated numeric tolerance.
+- **SC-005**: Every published percentage states the fleet shape it was measured on; a
+  percentage without that context does not appear.
+- **SC-006**: The spec-102 payload conclusion is explicitly confirmed or corrected, with the
+  achievable ceiling recomputed for each fleet shape measured.
+- **SC-007**: A mode that lowers token cost while completing fewer tasks is flagged as a
+  regression by the completion threshold and is not reported as a saving — demonstrated by
+  running a deliberately degraded mode.
+- **SC-008**: Recorded sessions with truncated content are never counted silently: the report
+  states how many were affected and how they were handled.
+- **SC-009**: No recorded session content, and no excerpt of it, appears in any report,
+  dashboard or published artefact, and no such content is transmitted to a third-party
+  service.
+- **SC-010**: At least one full agent-loop public task suite runs against MCPProxy and
   produces comparable results across at least two mode combinations.
-- **SC-009**: No generated report is committed to the repository.
-- **SC-010**: A reader of the published write-up can state which mode suits their fleet size
+- **SC-011**: No generated report is committed to the repository.
+- **SC-012**: A reader of the published write-up can state which mode suits their fleet shape
   and can name at least one case where MCPProxy's savings do not materialise.
 
 ## Assumptions
@@ -315,15 +416,19 @@ they hold for, the known limitations, and the reproduction procedure.
   as available and correct; this feature adds to it rather than replacing it. If a
   measurement here contradicts an existing one, that is a finding to investigate, not a
   reason to fork the harness.
-- **Recorded sessions are the primary corpus.** Real recorded work is more representative
-  than synthetic tasks, so it drives the headline. Public suites provide external validity
-  and comparability, not the headline.
-- **A task-completion signal can be derived from recorded sessions.** Where it cannot be
-  derived reliably, the affected sessions are reported as lacking a completion signal
-  rather than being assumed complete.
+- **Recorded sessions supply real workload SHAPE, not agent behaviour.** They drive the
+  cost recomputation (US1) because real fleets beat synthetic corpora. They cannot drive the
+  success/completion headline, because a recording contains no prompt, conversation, model
+  state or completion oracle — see Replay Boundary. The live task set (US2) owns that.
+- **Task completion comes from the task suite's own verdict**, never inferred from a call
+  trace. Units of work with no verdict are reported as lacking a completion signal and
+  excluded from completion-dependent figures rather than assumed complete.
 - **Model-dependent measurement costs money and needs a decision.** Any full agent-loop run
-  requires a pinned model and a spending decision before it can be built; the deterministic
-  parts of this feature are designed to stand alone without it.
+  requires a pinned model and a spending decision before it can be built. US1 is designed to
+  deliver value alone without it, so the feature is not blocked on that decision.
+- **Private recorded sessions cannot be published**, so figures derived from them are not
+  independently reproducible by an outsider. Public suites and frozen corpora therefore carry
+  the reproducible claims; recorded-session figures corroborate them at real fleet shape.
 - **Reporting conventions carry over.** The provenance-badge discipline, the
   reports-are-never-committed rule, and the requirement to quote corpus size alongside any
   percentage all continue to apply.
@@ -342,11 +447,18 @@ they hold for, the known limitations, and the reproduction procedure.
 - Retrieval-quality evaluation, which already exists and is separately gated.
 - Suites that are not MCP-native, and any suite that cannot be pointed at a single proxy
   endpoint.
+- Inferring agent behaviour, success or completion from recorded traces. This is not merely
+  out of scope: it is forbidden by FR-004, because it would fabricate the feature's headline.
+- Any new activity capture mechanism. If the existing export proves insufficient for cost
+  recomputation, that is a finding to report, not scope to absorb here.
 
 ## Dependencies
 
 - The recorded-session export path must expose enough per-call detail — including response
-  content when explicitly requested — for token accounting.
+  content when explicitly requested — for token accounting. It is already known NOT to carry
+  prompts, conversation or completion verdicts, which is why US2 exists separately.
+- A task suite with per-task pass verdicts is required for every completion-dependent
+  figure; without one, US2 cannot be satisfied by any amount of recorded data.
 - The mode configuration axes must be settable per run so the matrix can be crossed.
 - A pinned model and a spending decision are prerequisites for the agent-loop portions
   (US2's public-suite half and any measured retry rate that requires live inference).
