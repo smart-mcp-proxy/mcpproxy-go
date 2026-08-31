@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -151,4 +152,64 @@ func TestFreshenLoadedDockerRecoveryState_NilSafe(t *testing.T) {
 		}
 	}()
 	freshenLoadedDockerRecoveryState(nil)
+}
+
+// TestShouldEnableDockerRecovery_PerServerTriState pins the behaviour of the
+// per-server isolation clause in shouldEnableDockerRecovery across the *bool
+// tri-state. It was written to guard the GH #1142 rename of
+// IsolationConfig.IsEnabled() → IsExplicitlyEnabled(): that clause has always
+// meant "an explicit per-server opt-in", so an inheriting (nil) override must
+// NOT switch Docker recovery on when global isolation is off.
+func TestShouldEnableDockerRecovery_PerServerTriState(t *testing.T) {
+	newManager := func(servers ...*config.ServerConfig) *Manager {
+		m := &Manager{logger: zap.NewNop()}
+		m.globalConfig.Store(&config.Config{
+			DockerIsolation: &config.DockerIsolationConfig{Enabled: false},
+			Servers:         servers,
+		})
+		return m
+	}
+
+	t.Run("global off and per-server nil stays off", func(t *testing.T) {
+		m := newManager(&config.ServerConfig{
+			Name:      "npx-server",
+			Command:   "npx",
+			Isolation: &config.IsolationConfig{Image: "node:22"},
+		})
+		if m.shouldEnableDockerRecovery() {
+			t.Error("an inheriting (nil) per-server override must not enable Docker recovery when global isolation is off")
+		}
+	})
+
+	t.Run("global off and per-server explicit false stays off", func(t *testing.T) {
+		m := newManager(&config.ServerConfig{
+			Name:      "npx-server",
+			Command:   "npx",
+			Isolation: &config.IsolationConfig{Enabled: config.BoolPtr(false)},
+		})
+		if m.shouldEnableDockerRecovery() {
+			t.Error("an explicit opt-out must not enable Docker recovery")
+		}
+	})
+
+	t.Run("per-server explicit true enables recovery", func(t *testing.T) {
+		m := newManager(&config.ServerConfig{
+			Name:      "npx-server",
+			Command:   "npx",
+			Isolation: &config.IsolationConfig{Enabled: config.BoolPtr(true)},
+		})
+		if !m.shouldEnableDockerRecovery() {
+			t.Error("an explicit per-server opt-in must enable Docker recovery")
+		}
+	})
+
+	t.Run("global isolation on enables recovery regardless", func(t *testing.T) {
+		m := &Manager{logger: zap.NewNop()}
+		m.globalConfig.Store(&config.Config{
+			DockerIsolation: &config.DockerIsolationConfig{Enabled: true},
+		})
+		if !m.shouldEnableDockerRecovery() {
+			t.Error("global isolation on must enable Docker recovery")
+		}
+	})
 }

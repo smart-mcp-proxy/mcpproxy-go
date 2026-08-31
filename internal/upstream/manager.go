@@ -275,7 +275,11 @@ func (m *Manager) shouldEnableDockerRecovery() bool {
 			continue
 		}
 
-		if srv.Isolation != nil && srv.Isolation.IsEnabled() {
+		// An EXPLICIT per-server opt-in only. A nil Enabled means "inherit
+		// the global setting", which the clause above already answered
+		// (GH #1142) — treating it as an opt-in here would start the Docker
+		// recovery monitor for every server on a host with isolation off.
+		if srv.Isolation.IsExplicitlyEnabled() {
 			return true
 		}
 

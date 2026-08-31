@@ -498,6 +498,15 @@ func MergeIsolationConfig(base, patch *IsolationConfig, removeIfNil bool) *Isola
 		result.Enabled = patch.Enabled
 	}
 
+	// Mode (*IsolationMode) has the same tri-state semantics as Enabled: nil
+	// means "not set in the patch", so only a non-nil value overrides. Missing
+	// this case silently dropped the per-server isolation mode on every
+	// unrelated patch (GH #1142).
+	if patch.Mode != nil {
+		mode := *patch.Mode
+		result.Mode = &mode
+	}
+
 	if patch.Image != "" {
 		result.Image = patch.Image
 	}
@@ -692,6 +701,14 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	return dst
 }
 
+// CopyIsolationConfig returns a deep copy of an isolation override set, or nil
+// for a nil input. Exported so the REST PATCH seam can start from the persisted
+// overrides and apply only the fields the request actually carried, instead of
+// dropping the ones it does not expose (GH #1142).
+func CopyIsolationConfig(src *IsolationConfig) *IsolationConfig {
+	return copyIsolationConfig(src)
+}
+
 func copyIsolationConfig(src *IsolationConfig) *IsolationConfig {
 	if src == nil {
 		return nil
@@ -710,6 +727,13 @@ func copyIsolationConfig(src *IsolationConfig) *IsolationConfig {
 	if src.Enabled != nil {
 		enabled := *src.Enabled
 		dst.Enabled = &enabled
+	}
+
+	// Same for *IsolationMode — copying the pointer would alias the source and
+	// let a later in-place edit leak across configs.
+	if src.Mode != nil {
+		mode := *src.Mode
+		dst.Mode = &mode
 	}
 
 	if src.ExtraArgs != nil {
