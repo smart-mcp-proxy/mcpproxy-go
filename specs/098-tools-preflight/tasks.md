@@ -47,7 +47,7 @@
 
 ## Phase 6: User Story 4 — Non-regression (P3)
 
-- [x] T024 [US4] Golden snapshot test from T002 green on the finished branch (byte-identical tools/list across all three modes) (FR-015)
+- [ ] T024 [US4] Golden snapshot test from T002 green on the finished branch (byte-identical tools/list across all three modes) (FR-015)
 - [ ] T025 [US4] E2E: run a `code_execution` script and a stored script (spec 097) against the isolated instance; assert unchanged behavior and that dispatch decisions for sabotaged tools agree with preflight verdicts on all four dispatch paths (no-skew live check)
 
 ## Phase 7: Sabotage E2E matrix (acceptance gate)

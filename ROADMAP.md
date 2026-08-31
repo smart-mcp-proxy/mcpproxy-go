@@ -743,7 +743,7 @@ graph LR
 <details>
 <summary>🟢 Discovery-quality eval harness (Spec 065 second half) — Done · P3</summary>
 
-> SUPERSEDED — folded into token-bench-harness: the token-efficiency replay harness re-runs real sessions under every mode combo and measures retrieval recall on the same corpus, so a separate discovery-quality harness would duplicate it. Kept here as a pointer (the id is a stable depends_on target); do not build standalone. 2026-08-31 audit: BOTH HALVES ARE SHIPPED, so this is done rather than pending. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo, and bench/ carries a second in-repo implementation (metrics.go RecallAtK/NDCGAtK, armindex.go's recall@5 parity gate through the production Bleve index). Kept as a stable depends_on target; still do not build a standalone harness.
+> DONE — 2026-08-31 audit: both halves shipped INDEPENDENTLY, not via token-bench-harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note it is REPORT-ONLY on pull requests (continue-on-error, npx/uvx fetch flake) and blocks only on the nightly schedule, so promoting it to PR-blocking after a green soak is still open (MCP-742). A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness.
 
 Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 
@@ -893,7 +893,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [095-update-failure-ux](./specs/095-update-failure-ux/) | `shipped` | 28/28 (100%) |
 | [096-batched-call-tools](./specs/096-batched-call-tools/) | `in-flight` | 15/16 (94%) |
 | [097-stored-scripts](./specs/097-stored-scripts/) | `in-flight` | 13/14 (93%) |
-| [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 29/33 (88%) |
+| [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 28/33 (85%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
 | [101-tpa-db](./specs/101-tpa-db/) | — | — |
