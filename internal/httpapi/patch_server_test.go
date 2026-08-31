@@ -1074,7 +1074,7 @@ func TestHandlePatchServer_ExplicitNullClearsIsolationOverride(t *testing.T) {
 	}
 	srv := NewServer(mockCtrl, logger, nil)
 
-	body := []byte(`{"isolation":{"enabled":null}}`)
+	body := []byte(`{"isolation":{"enabled_override":null}}`)
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/python-mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
@@ -1103,7 +1103,7 @@ func TestHandlePatchServer_ExplicitIsolationEnabledStillApplies(t *testing.T) {
 		}
 		srv := NewServer(mockCtrl, logger, nil)
 
-		body := []byte(`{"isolation":{"enabled":` + strconv.FormatBool(want) + `}}`)
+		body := []byte(`{"isolation":{"enabled_override":` + strconv.FormatBool(want) + `}}`)
 		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/python-mcp", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-API-Key", "test-key")

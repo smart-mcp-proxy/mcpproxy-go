@@ -51,8 +51,12 @@ final class AddServerIsolationFieldTests: XCTestCase {
         XCTAssertNil(config["url"], "a stdio server must not carry a url")
         let isolation = config["isolation"] as? [String: Any]
         XCTAssertEqual(
-            isolation?["enabled"] as? Bool, true,
+            isolation?["enabled_override"] as? Bool, true,
             "a stdio server records its isolation choice via the backend `isolation` object"
+        )
+        XCTAssertNil(
+            isolation?["enabled"] as Any?,
+            "`enabled` is the read-only EFFECTIVE state — the writable key is `enabled_override` (GH #1142)"
         )
     }
 

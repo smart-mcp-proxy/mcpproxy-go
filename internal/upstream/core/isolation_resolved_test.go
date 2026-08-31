@@ -17,6 +17,16 @@ type resolveCase struct {
 	wantInherit bool
 }
 
+// sandboxSource is the resolution source expected for a server whose mode is
+// "sandbox": the ordinary server-mode answer where the host can enforce
+// Landlock, and the honest degradation elsewhere.
+func sandboxSource() string {
+	if config.SandboxEnforceable() {
+		return config.IsolationSourceServerMode
+	}
+	return config.IsolationSourceSandboxUnavailable
+}
+
 func stdioServer() *config.ServerConfig {
 	return &config.ServerConfig{Name: "srv", Command: "npx", Args: []string{"some-mcp"}}
 }
@@ -88,12 +98,17 @@ func resolveCases() []resolveCase {
 			wantInherit: true,
 		},
 		{
+			// The mode override decides the MODE unconditionally, but whether
+			// that mode actually confines depends on the host: wrapWithSandbox
+			// runs the server unconfined off Linux and on kernels without
+			// Landlock, so Isolated must follow the host, not the config
+			// (GH #1142).
 			name:        "per-server mode override wins over global docker",
 			global:      &config.DockerIsolationConfig{Enabled: true},
 			server:      withIso(&config.IsolationConfig{Mode: &sandbox}),
 			wantMode:    config.IsolationModeSandbox,
-			wantIso:     true,
-			wantSource:  config.IsolationSourceServerMode,
+			wantIso:     config.SandboxEnforceable(),
+			wantSource:  sandboxSource(),
 			wantInherit: false,
 		},
 		{
@@ -101,8 +116,8 @@ func resolveCases() []resolveCase {
 			global:      &config.DockerIsolationConfig{Enabled: false},
 			server:      withIso(&config.IsolationConfig{Mode: &sandbox}),
 			wantMode:    config.IsolationModeSandbox,
-			wantIso:     true,
-			wantSource:  config.IsolationSourceServerMode,
+			wantIso:     config.SandboxEnforceable(),
+			wantSource:  sandboxSource(),
 			wantInherit: false,
 		},
 		{

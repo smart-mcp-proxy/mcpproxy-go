@@ -70,6 +70,12 @@ stdin/stdout pass straight through with no intervening multiplexer.
 | **Linux** (no Landlock) | Degraded → runs unconfined, logged |
 | **macOS / Windows** | Documented **no-op** → effective `none` (Landlock is Linux-only) |
 
+The API says so too: where the sandbox cannot be enforced, a server with
+`mode: sandbox` reports `isolation.enabled: false` and
+`isolation_effective.source: "sandbox-unavailable"` (its `mode` stays `sandbox`,
+because on Linux the wrapper still applies its rlimits). The read surface never
+claims confinement the spawn path will not deliver.
+
 See also: [Docker Isolation](/features/docker-isolation) for the Docker mode, and
 the [non-Docker sandbox spike](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/development/sandbox-spike-mcp-34.md) for the
 mechanism evaluation.

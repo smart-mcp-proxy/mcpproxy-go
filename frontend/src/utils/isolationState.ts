@@ -52,6 +52,14 @@ export function describeIsolation(server: Server | null | undefined): IsolationD
     case 'already-docker':
       detail = 'This server already runs Docker itself'
       break
+    case 'sandbox-unavailable':
+      // The mode is set, but the spawn path degrades to unconfined here (any
+      // non-Linux host, or a Linux kernel without Landlock).
+      detail = 'Sandbox mode is set, but this system cannot enforce it — the server runs unconfined'
+      break
+    case 'unsupported-mode':
+      detail = `Isolation mode "${eff.mode}" is not one this version implements — the server runs unconfined`
+      break
     default:
       // 'global' and anything unrecognized.
       detail = eff.inherited

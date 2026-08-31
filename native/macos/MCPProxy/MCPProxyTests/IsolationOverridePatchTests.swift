@@ -34,8 +34,12 @@ final class IsolationOverridePatchTests: XCTestCase {
         let iso = try XCTUnwrap(patch)
         XCTAssertEqual(iso["image"] as? String, "python:3.12")
         XCTAssertNil(
-            iso["enabled"] as Any?,
+            iso["enabled_override"] as Any?,
             "an untouched isolation toggle must never appear in the PATCH — that is what silently wrote an explicit opt-out"
+        )
+        XCTAssertNil(
+            iso["enabled"] as Any?,
+            "`enabled` is the read-only EFFECTIVE state; writing it back is the read-modify-write corruption path"
         )
     }
 
@@ -58,7 +62,8 @@ final class IsolationOverridePatchTests: XCTestCase {
             original: unchanged
         )
         let iso = try XCTUnwrap(patch)
-        XCTAssertEqual(iso["enabled"] as? Bool, false)
+        XCTAssertEqual(iso["enabled_override"] as? Bool, false)
+        XCTAssertNil(iso["enabled"] as Any?, "the write key is `enabled_override`")
     }
 
     func testForceOnEmitsExplicitTrue() throws {
@@ -69,7 +74,8 @@ final class IsolationOverridePatchTests: XCTestCase {
             original: unchanged
         )
         let iso = try XCTUnwrap(patch)
-        XCTAssertEqual(iso["enabled"] as? Bool, true)
+        XCTAssertEqual(iso["enabled_override"] as? Bool, true)
+        XCTAssertNil(iso["enabled"] as Any?, "the write key is `enabled_override`")
     }
 
     // Going back to "inherit" must send an explicit null, otherwise the
@@ -83,7 +89,7 @@ final class IsolationOverridePatchTests: XCTestCase {
         )
         let iso = try XCTUnwrap(patch)
         XCTAssertTrue(
-            iso["enabled"] is NSNull,
+            iso["enabled_override"] is NSNull,
             "clearing the override back to inherit must send JSON null, not omit the key"
         )
     }
@@ -103,6 +109,7 @@ final class IsolationOverridePatchTests: XCTestCase {
         )
         let iso = try XCTUnwrap(patch)
         XCTAssertEqual(iso["network_mode"] as? String, "none")
+        XCTAssertNil(iso["enabled_override"] as Any?)
         XCTAssertNil(iso["enabled"] as Any?)
     }
 

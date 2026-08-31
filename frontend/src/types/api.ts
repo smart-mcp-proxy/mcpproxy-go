@@ -181,11 +181,14 @@ export interface ServerIsolationConfig {
 // rule that produced it, so the UI can explain "inherits global: docker"
 // instead of rendering an ambiguous toggle. Read-only; never sent on PATCH.
 export interface ServerIsolationEffective {
-  mode: string // 'docker' | 'sandbox' | 'none'
-  isolated: boolean
+  mode: string // 'docker' | 'sandbox' | 'none' — what the spawn path branches on
+  isolated: boolean // actually CONFINED; not simply mode !== 'none' (see 'sandbox-unavailable')
   global_mode?: string
   inherited: boolean
-  source?: string // treat unknown values as 'global'
+  // 'global' | 'server-mode' | 'server-opt-out' | 'server-opt-in-ignored' |
+  // 'not-stdio' | 'already-docker' | 'sandbox-unavailable' | 'unsupported-mode'.
+  // Treat unknown values as 'global'.
+  source?: string
 }
 
 export interface ServerIsolationDefaults {

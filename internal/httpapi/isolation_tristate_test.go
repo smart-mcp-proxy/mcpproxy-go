@@ -79,7 +79,7 @@ func TestIsolationRequest_ResolvePreservesUnexposed(t *testing.T) {
 // TestIsolationRequest_ResolveClearsOverride pins the "back to inherit" path.
 func TestIsolationRequest_ResolveClearsOverride(t *testing.T) {
 	existing := &config.IsolationConfig{Enabled: config.BoolPtr(false), Image: "img"}
-	req := &IsolationRequest{Enabled: NullableBool{Set: true, Value: nil}}
+	req := &IsolationRequest{EnabledOverride: NullableBool{Set: true, Value: nil}}
 
 	out := req.resolve(existing)
 	require.NotNil(t, out)
@@ -89,7 +89,7 @@ func TestIsolationRequest_ResolveClearsOverride(t *testing.T) {
 
 // TestIsolationRequest_ResolveSetsExplicit covers the ordinary set path.
 func TestIsolationRequest_ResolveSetsExplicit(t *testing.T) {
-	req := &IsolationRequest{Enabled: NullableBool{Set: true, Value: config.BoolPtr(false)}}
+	req := &IsolationRequest{EnabledOverride: NullableBool{Set: true, Value: config.BoolPtr(false)}}
 	out := req.resolve(nil)
 	require.NotNil(t, out)
 	require.NotNil(t, out.Enabled)

@@ -1864,10 +1864,14 @@ components:
           type: string
         enabled:
           description: |-
-            Enabled is the EFFECTIVE isolation state for this server, after the
-            global setting, the per-server override and the structural gates have all
-            been applied. It is NOT the raw per-server override — read
-            EnabledOverride for that (GH #1142).
+            Enabled is the EFFECTIVE isolation state for this server: whether its
+            process is actually CONFINED, after the global setting, the per-server
+            override, the structural gates and the host's capabilities. It is NOT the
+            raw per-server override — read EnabledOverride for that (GH #1142).
+
+            READ-ONLY. The write surfaces reject an `enabled` key precisely because
+            it is derived: echoing it back would convert "inherits the global
+            setting" into a permanent explicit override. Write EnabledOverride.
 
             It stays a non-pointer bool that is always present on the wire: the macOS
             tray decodes it as a non-optional Swift Bool, so omitting or nulling the
@@ -1937,17 +1941,23 @@ components:
             `isolation.mode`, so its state tracks the global setting.
           type: boolean
         isolated:
-          description: Isolated is Mode != "none".
+          description: |-
+            Isolated reports whether the process is actually CONFINED. It is NOT
+            simply Mode != "none": "sandbox" on a host that cannot enforce Landlock
+            (any non-Linux OS, or a kernel without the LSM) runs the server
+            unconfined, and Source then says "sandbox-unavailable" (GH #1142).
           type: boolean
         mode:
-          description: 'Mode is the effective isolation mode: "docker" | "sandbox"
-            | "none".'
+          description: |-
+            Mode is the effective isolation mode: "docker" | "sandbox" | "none" —
+            exactly what the spawn path branches on.
           type: string
         source:
           description: |-
             Source names the deciding rule: "global", "server-mode",
-            "server-opt-out", "server-opt-in-ignored", "not-stdio" or
-            "already-docker". Treat an unrecognized value as "global".
+            "server-opt-out", "server-opt-in-ignored", "not-stdio",
+            "already-docker", "sandbox-unavailable" or "unsupported-mode".
+            Treat an unrecognized value as "global".
           type: string
       type: object
     contracts.LogEntry:
@@ -3333,8 +3343,14 @@ components:
       properties:
         enabled:
           description: |-
-            Enabled is the tri-state per-server override. It has THREE meaningful
-            wire states, and collapsing them is what silently un-isolated servers
+            Enabled exists ONLY to detect and reject an echoed-back read. It is the
+            effective state on the read surface and is never writable; see validate().
+          type: boolean
+        enabled_override:
+          description: |-
+            EnabledOverride is the tri-state per-server override — the RAW value, the
+            same one reads return as `enabled_override`. It has THREE meaningful wire
+            states, and collapsing them is what silently un-isolated servers
             (GH #1142):
               - absent          → leave the persisted override untouched
               - null            → clear the override, back to inheriting the global
@@ -3350,7 +3366,8 @@ components:
         mode_override:
           description: |-
             ModeOverride sets `isolation.mode` ("docker" | "sandbox" | "none").
-            nil leaves the persisted value alone; an empty string clears it.
+            nil leaves the persisted value alone; an empty string clears it. An
+            unrecognized value is rejected with a 400 rather than persisted.
           type: string
         network_mode:
           type: string
@@ -5537,8 +5554,12 @@ paths:
       tags:
       - servers
     post:
-      description: Add a new MCP upstream server to the configuration. New servers
-        are quarantined by default for security.
+      description: 'Add a new MCP upstream server to the configuration. New servers
+        are quarantined by default for security. Isolation: `isolation.enabled` is
+        READ-ONLY (it reports the effective state on reads) and is rejected with 400;
+        set the per-server override via `isolation.enabled_override` (true | false
+        | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override`
+        is rejected with 400.'
       requestBody:
         content:
           application/json:
@@ -5632,7 +5653,11 @@ paths:
       tags:
       - servers
     patch:
-      description: Update specific fields of an existing upstream MCP server configuration.
+      description: 'Update specific fields of an existing upstream MCP server configuration.
+        Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state
+        on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override`
+        (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override`
+        is rejected with 400.'
       parameters:
       - description: Server ID or name
         in: path

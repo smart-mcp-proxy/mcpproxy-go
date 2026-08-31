@@ -211,10 +211,14 @@ type OAuthConfig struct {
 // config.IsolationConfig so the web UI and native tray can both edit
 // these fields without reaching into config-file internals.
 type IsolationConfig struct {
-	// Enabled is the EFFECTIVE isolation state for this server, after the
-	// global setting, the per-server override and the structural gates have all
-	// been applied. It is NOT the raw per-server override — read
-	// EnabledOverride for that (GH #1142).
+	// Enabled is the EFFECTIVE isolation state for this server: whether its
+	// process is actually CONFINED, after the global setting, the per-server
+	// override, the structural gates and the host's capabilities. It is NOT the
+	// raw per-server override — read EnabledOverride for that (GH #1142).
+	//
+	// READ-ONLY. The write surfaces reject an `enabled` key precisely because
+	// it is derived: echoing it back would convert "inherits the global
+	// setting" into a permanent explicit override. Write EnabledOverride.
 	//
 	// It stays a non-pointer bool that is always present on the wire: the macOS
 	// tray decodes it as a non-optional Swift Bool, so omitting or nulling the
@@ -244,9 +248,13 @@ type IsolationConfig struct {
 //
 // Read-only output; clients must not echo it back on PATCH requests.
 type IsolationEffective struct {
-	// Mode is the effective isolation mode: "docker" | "sandbox" | "none".
+	// Mode is the effective isolation mode: "docker" | "sandbox" | "none" —
+	// exactly what the spawn path branches on.
 	Mode string `json:"mode"`
-	// Isolated is Mode != "none".
+	// Isolated reports whether the process is actually CONFINED. It is NOT
+	// simply Mode != "none": "sandbox" on a host that cannot enforce Landlock
+	// (any non-Linux OS, or a kernel without the LSM) runs the server
+	// unconfined, and Source then says "sandbox-unavailable" (GH #1142).
 	Isolated bool `json:"isolated"`
 	// GlobalMode is what "inherit" resolves to right now.
 	GlobalMode string `json:"global_mode,omitempty"`
@@ -254,8 +262,9 @@ type IsolationEffective struct {
 	// `isolation.mode`, so its state tracks the global setting.
 	Inherited bool `json:"inherited"`
 	// Source names the deciding rule: "global", "server-mode",
-	// "server-opt-out", "server-opt-in-ignored", "not-stdio" or
-	// "already-docker". Treat an unrecognized value as "global".
+	// "server-opt-out", "server-opt-in-ignored", "not-stdio",
+	// "already-docker", "sandbox-unavailable" or "unsupported-mode".
+	// Treat an unrecognized value as "global".
 	Source string `json:"source,omitempty"`
 }
 

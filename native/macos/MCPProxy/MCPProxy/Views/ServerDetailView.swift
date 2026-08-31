@@ -43,8 +43,8 @@ enum IsolationOverride: Equatable {
         }
     }
 
-    /// The value to send for `isolation.enabled`: a bool, or NSNull to clear
-    /// the override back to inherit (an omitted key means "leave alone").
+    /// The value to send for `isolation.enabled_override`: a bool, or NSNull to
+    /// clear the override back to inherit (an omitted key means "leave alone").
     var patchValue: Any {
         switch self {
         case .inherit: return NSNull()
@@ -918,12 +918,17 @@ struct ServerDetailView: View {
     /// nothing changed.
     ///
     /// Pure and static so the rule that matters can be unit-tested without a
-    /// running app: **`enabled` is emitted only when the override picker
-    /// actually moved.** The previous code force-added it to every isolation
-    /// patch, so editing an unrelated sub-field on a server that merely
-    /// INHERITED global isolation persisted an explicit opt-out and silently
-    /// un-containerised it (GH #1142). A move back to `.inherit` sends JSON
-    /// null, because an omitted key means "leave the persisted value alone".
+    /// running app: **`enabled_override` is emitted only when the override
+    /// picker actually moved.** The previous code force-added it to every
+    /// isolation patch, so editing an unrelated sub-field on a server that
+    /// merely INHERITED global isolation persisted an explicit opt-out and
+    /// silently un-containerised it (GH #1142). A move back to `.inherit` sends
+    /// JSON null, because an omitted key means "leave the persisted value alone".
+    ///
+    /// The key is `enabled_override`, never `enabled`: on a READ, `enabled` is
+    /// the EFFECTIVE state (global setting + override + structural gates), so
+    /// writing that key back is how a read-modify-write turns "inherits the
+    /// global setting" into a permanent override. The backend rejects it.
     static func buildIsolationPatch(
         override: IsolationOverride,
         originalOverride: IsolationOverride,
@@ -933,7 +938,7 @@ struct ServerDetailView: View {
         var iso: [String: Any] = [:]
 
         if override != originalOverride {
-            iso["enabled"] = override.patchValue
+            iso["enabled_override"] = override.patchValue
         }
         if edited.image != original.image {
             iso["image"] = edited.image
@@ -1195,8 +1200,8 @@ struct ServerDetailView: View {
         if editQuarantined != server.quarantined { updates["quarantined"] = editQuarantined }
 
         // Docker isolation (stdio only). Only genuinely-changed fields are
-        // sent; `enabled` appears ONLY when the user actually moved the
-        // override picker (GH #1142).
+        // sent; `enabled_override` appears ONLY when the user actually moved
+        // the override picker (GH #1142).
         if server.protocol == "stdio" {
             let existing = server.isolation
             let newExtra = editIsolationExtraArgs

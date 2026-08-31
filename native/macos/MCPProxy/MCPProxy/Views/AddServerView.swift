@@ -732,17 +732,22 @@ extension ManualServerForm {
                 config["args"] = args
             }
             // The backend server-create payload takes an `isolation` object
-            // ({"enabled": …}); the old top-level `docker_isolation` bool it
-            // never read, so the toggle silently did nothing.
+            // ({"enabled_override": …}); the old top-level `docker_isolation`
+            // bool it never read, so the toggle silently did nothing.
+            //
+            // The key is `enabled_override`, not `enabled`: `enabled` is the
+            // read-only EFFECTIVE state on the read surface and the backend
+            // rejects it on writes, so that reading a server and writing the
+            // object back cannot rewrite the override (GH #1142).
             //
             // Emit the object ONLY when the box is ticked. An unticked box
             // means "inherit the global setting", NOT "never isolate" — sending
-            // `["enabled": false]` unconditionally stamped a permanent explicit
-            // opt-out on every stdio server added here, so it would ignore
-            // global Docker isolation forever (GH #1142). Matches
-            // AddServerModal.vue, which only writes isolation_json when on.
+            // a `false` unconditionally stamped a permanent explicit opt-out on
+            // every stdio server added here, so it would ignore global Docker
+            // isolation forever. Matches AddServerModal.vue, which only writes
+            // isolation_json when on.
             if dockerIsolation {
-                config["isolation"] = ["enabled": true]
+                config["isolation"] = ["enabled_override": true]
             }
         } else {
             // URL transports carry no command and no isolation flag.

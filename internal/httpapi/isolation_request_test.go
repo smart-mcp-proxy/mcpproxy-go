@@ -35,11 +35,11 @@ func TestIsolationRequestResolveAllFields(t *testing.T) {
 	workingDir := "/vault"
 
 	r := &IsolationRequest{
-		Enabled:     NullableBool{Set: true, Value: &enabled},
-		Image:       &image,
-		NetworkMode: &networkMode,
-		ExtraArgs:   &extra,
-		WorkingDir:  &workingDir,
+		EnabledOverride: NullableBool{Set: true, Value: &enabled},
+		Image:           &image,
+		NetworkMode:     &networkMode,
+		ExtraArgs:       &extra,
+		WorkingDir:      &workingDir,
 	}
 	got := r.resolve(nil)
 	require.NotNil(t, got)
@@ -55,7 +55,7 @@ func TestIsolationRequestResolveDisabledExplicitly(t *testing.T) {
 	// A present enabled:false must produce a pointer to false, not nil
 	// (nil means "do not touch"; false means "set to false").
 	enabled := false
-	r := &IsolationRequest{Enabled: NullableBool{Set: true, Value: &enabled}}
+	r := &IsolationRequest{EnabledOverride: NullableBool{Set: true, Value: &enabled}}
 	got := r.resolve(nil)
 	require.NotNil(t, got)
 	require.NotNil(t, got.Enabled)

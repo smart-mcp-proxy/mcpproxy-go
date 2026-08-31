@@ -4637,6 +4637,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		if err := json.Unmarshal([]byte(isolationJSON), &isoConfig); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Invalid isolation_json format: %v", err)), nil
 		}
+		// GH #1142: an unknown mode must be refused here, not persisted and
+		// then rejected by the NEXT daemon start's config validation.
+		if err := config.ValidateIsolationModeOverride(isoConfig.Mode); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid isolation_json: %v", err)), nil
+		}
 		isolation = &isoConfig
 	}
 
@@ -5206,6 +5211,11 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			var isolation config.IsolationConfig
 			if err := json.Unmarshal([]byte(isolationJSON), &isolation); err != nil {
 				return nil, opts, fmt.Errorf("invalid isolation_json format: %v", err)
+			}
+			// GH #1142: refuse an unknown mode at the seam rather than writing
+			// a config file the next daemon start will reject.
+			if err := config.ValidateIsolationModeOverride(isolation.Mode); err != nil {
+				return nil, opts, fmt.Errorf("invalid isolation_json: %w", err)
 			}
 			patch.Isolation = &isolation
 		}

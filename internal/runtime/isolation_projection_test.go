@@ -104,9 +104,19 @@ func TestBuildIsolationMaps_ModeOverride(t *testing.T) {
 	iso, eff := buildIsolationMaps(global, sc)
 	require.NotNil(t, iso)
 	assert.Equal(t, "sandbox", iso["mode_override"])
-	assert.Equal(t, true, iso["enabled"], "a sandbox-isolated server is isolated")
-	assert.Equal(t, "sandbox", eff["mode"])
-	assert.Equal(t, config.IsolationSourceServerMode, eff["source"])
+	assert.Equal(t, "sandbox", eff["mode"], "the mode is what the spawn path branches on")
+
+	// Whether that mode actually CONFINES depends on the host: wrapWithSandbox
+	// runs the server unconfined off Linux and on kernels without Landlock, so
+	// the projection must not claim isolation the spawn path will not deliver
+	// (GH #1142).
+	if config.SandboxEnforceable() {
+		assert.Equal(t, true, iso["enabled"], "a sandbox-isolated server is isolated")
+		assert.Equal(t, config.IsolationSourceServerMode, eff["source"])
+	} else {
+		assert.Equal(t, false, iso["enabled"], "this host cannot enforce the sandbox")
+		assert.Equal(t, config.IsolationSourceSandboxUnavailable, eff["source"])
+	}
 }
 
 // TestBuildIsolationMaps_HTTPServerOmitted keeps HTTP servers free of a

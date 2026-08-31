@@ -123,6 +123,44 @@ describe('describeIsolation', () => {
     expect(d!.detail).toBe('Mode set for this server: sandbox')
   })
 
+  // GH #1142: `sandbox` on a host that cannot enforce Landlock runs the server
+  // UNCONFINED (wrapWithSandbox returns the command unchanged). The UI must not
+  // show a containerised-looking badge for a server that is not confined.
+  it('explains a sandbox mode the host cannot enforce', () => {
+    const d = describeIsolation(
+      stdio({
+        isolation: { enabled: false, mode_override: 'sandbox' },
+        isolation_effective: {
+          mode: 'sandbox',
+          isolated: false,
+          inherited: false,
+          global_mode: 'docker',
+          source: 'sandbox-unavailable',
+        },
+      })
+    )
+    expect(d!.isolated).toBe(false)
+    expect(d!.label).toBe('Not isolated')
+    expect(d!.detail).toContain('cannot enforce it')
+  })
+
+  it('explains a mode this version does not implement', () => {
+    const d = describeIsolation(
+      stdio({
+        isolation: { enabled: false, mode_override: 'bogus' },
+        isolation_effective: {
+          mode: 'bogus',
+          isolated: false,
+          inherited: false,
+          global_mode: 'docker',
+          source: 'unsupported-mode',
+        },
+      })
+    )
+    expect(d!.label).toBe('Not isolated')
+    expect(d!.detail).toContain('runs unconfined')
+  })
+
   // Forward-compat: an unrecognized source must degrade to the inherit story,
   // never to a wrong claim.
   it('treats an unknown source as inherited', () => {

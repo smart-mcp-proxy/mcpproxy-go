@@ -275,7 +275,8 @@ struct IsolationEffectiveStatus: Codable, Equatable {
     let globalMode: String?
     let inherited: Bool
     /// "global" | "server-mode" | "server-opt-out" | "server-opt-in-ignored" |
-    /// "not-stdio" | "already-docker". Treat anything else as "global".
+    /// "not-stdio" | "already-docker" | "sandbox-unavailable" |
+    /// "unsupported-mode". Treat anything else as "global".
     let source: String?
 
     enum CodingKeys: String, CodingKey {
@@ -297,6 +298,12 @@ struct IsolationEffectiveStatus: Codable, Equatable {
             return "No local process to isolate"
         case "already-docker":
             return "This server already runs Docker itself"
+        case "sandbox-unavailable":
+            // The mode is set, but the spawn path degrades to unconfined here:
+            // Landlock is Linux-only, so a Mac never enforces it.
+            return "Sandbox mode is set, but this system cannot enforce it — the server runs unconfined"
+        case "unsupported-mode":
+            return "Isolation mode \(mode) is not one this version implements — the server runs unconfined"
         default:
             return inherited ? "Inherits the global setting (\(global))" : "Turned on for this server"
         }
