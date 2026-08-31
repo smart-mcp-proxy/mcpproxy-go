@@ -215,3 +215,57 @@ func TestPayloadDecomposition_VerdictDeclinesToSettleSpec102(t *testing.T) {
 		t.Errorf("the verdict must name the payload gap it is declining to cross; got %q", v)
 	}
 }
+
+// T053 — the block must carry a populated accounting source, and must report
+// the annotation share as NULL rather than zero.
+//
+// Zero would claim a measurement that was never taken. The corpora carry no
+// annotations field at all, so "not measured" is the only truthful value, and
+// the difference between null and 0 is the difference between an honest gap and
+// a fabricated finding.
+func TestPayloadDecompositionBlock_AnnotationShareIsNullNotZero(t *testing.T) {
+	tk := runnerTokenizer(t)
+
+	a, err := DecomposePayload(tk, decompCorpus(), "a@1")
+	if err != nil {
+		t.Fatalf("DecomposePayload(a): %v", err)
+	}
+	b, err := DecomposePayload(tk, decompCorpus(), "b@1")
+	if err != nil {
+		t.Fatalf("DecomposePayload(b): %v", err)
+	}
+
+	block, err := PayloadDecompositionBlockFor([]*PayloadDecomposition{a, b})
+	if err != nil {
+		t.Fatalf("PayloadDecompositionBlockFor: %v", err)
+	}
+	if block.AccountingSource.IsZero() {
+		t.Error("the block must name a populated accounting source")
+	}
+	for i, row := range block.Shapes {
+		if row.ShareAnnotationsPct != nil {
+			t.Errorf("shape %d: the annotation share must be null (not measurable from a "+
+				"corpus that carries no annotations), got %v", i, *row.ShareAnnotationsPct)
+		}
+		if row.Provenance != ProvenanceMeasured {
+			t.Errorf("shape %d: provenance %q", i, row.Provenance)
+		}
+	}
+}
+
+// FR-024 wants at least two shapes, so a single-corpus block is an error.
+//
+// One shape is exactly the evidence base spec 102 projected from, and the point
+// of the requirement is to make that shape of claim impossible to emit.
+func TestPayloadDecompositionBlock_RequiresTwoShapes(t *testing.T) {
+	tk := runnerTokenizer(t)
+
+	d, err := DecomposePayload(tk, decompCorpus(), "only@1")
+	if err != nil {
+		t.Fatalf("DecomposePayload: %v", err)
+	}
+	if _, err := PayloadDecompositionBlockFor([]*PayloadDecomposition{d}); err == nil {
+		t.Error("a single-shape decomposition block must be an error — one corpus is what " +
+			"spec 102 projected from")
+	}
+}

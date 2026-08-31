@@ -500,8 +500,14 @@ type PayloadDecompositionRow struct {
 	// The four attributions, as percentages of the definition payload.
 	ShareNamesPct        float64 `json:"share_names_pct"`
 	ShareDescriptionsPct float64 `json:"share_descriptions_pct"`
-	ShareAnnotationsPct  float64 `json:"share_annotations_pct"`
-	ShareSchemasPct      float64 `json:"share_schemas_pct"`
+	// ShareAnnotationsPct is a POINTER because null and zero mean different
+	// things here. The frozen corpora carry no annotations field, so a
+	// corpus-based decomposition cannot measure this share at all — and a 0
+	// would read as "measured, and annotations cost nothing", which is the
+	// silent-zero failure the rest of this report works to avoid. nil marshals
+	// to null: not measured.
+	ShareAnnotationsPct *float64 `json:"share_annotations_pct"`
+	ShareSchemasPct     float64  `json:"share_schemas_pct"`
 	// AchievableCeilingPct is recomputed for THIS shape. Carrying a
 	// previously published ceiling forward is precisely the error spec 102
 	// made when it projected from a single corpus.

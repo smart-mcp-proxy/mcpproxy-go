@@ -382,6 +382,7 @@ func sampleAgentLoopBlock() *AgentLoopBlock {
 // samplePayloadDecomposition attributes definition cost across two fleet
 // shapes, each with its own recomputed ceiling and spec-102 verdict.
 func samplePayloadDecomposition() *PayloadDecompositionBlock {
+	annShare45, annShare527 := 1.5, 0.9
 	delta := -12.5
 	return &PayloadDecompositionBlock{
 		AccountingSource: AccountingSource{Kind: AccountingKindTokenizer, Identity: "cl100k_base"},
@@ -391,7 +392,7 @@ func samplePayloadDecomposition() *PayloadDecompositionBlock {
 				Provenance:           ProvenanceMeasured,
 				ShareNamesPct:        3.1,
 				ShareDescriptionsPct: 21.4,
-				ShareAnnotationsPct:  1.5,
+				ShareAnnotationsPct:  &annShare45,
 				ShareSchemasPct:      74.0,
 				AchievableCeilingPct: 68.2,
 				Spec102Verdict:       Spec102Confirmed,
@@ -401,7 +402,7 @@ func samplePayloadDecomposition() *PayloadDecompositionBlock {
 				Provenance:           ProvenanceMeasured,
 				ShareNamesPct:        2.2,
 				ShareDescriptionsPct: 30.8,
-				ShareAnnotationsPct:  0.9,
+				ShareAnnotationsPct:  &annShare527,
 				ShareSchemasPct:      66.1,
 				AchievableCeilingPct: 55.7,
 				Spec102Verdict:       Spec102Corrected,

@@ -266,3 +266,47 @@ func canonicalSchemaJSON(raw json.RawMessage) (string, error) {
 	}
 	return string(out), nil
 }
+
+// PayloadDecompositionBlockFor builds the report block from one decomposition
+// per fleet shape (T053).
+//
+// FR-024 asks for at least two shapes, because the whole point is to show how
+// the attribution MOVES with fleet size rather than to publish a single-corpus
+// projection — which is the shape of mistake spec 102 made. Fewer than two is
+// therefore an error rather than a smaller block.
+func PayloadDecompositionBlockFor(ds []*PayloadDecomposition) (*PayloadDecompositionBlock, error) {
+	if len(ds) < 2 {
+		return nil, fmt.Errorf("payload decomposition: %d fleet shape(s); FR-024 requires at "+
+			"least two so the attribution can be seen to move with fleet size", len(ds))
+	}
+
+	block := &PayloadDecompositionBlock{
+		AccountingSource: AccountingSource{
+			Kind:     AccountingKindTokenizer,
+			Identity: DefaultEncoding,
+		},
+	}
+
+	for _, d := range ds {
+		if d == nil {
+			return nil, fmt.Errorf("payload decomposition: nil shape")
+		}
+		block.Shapes = append(block.Shapes, PayloadDecompositionRow{
+			FleetShape: FleetShape{
+				ID:        d.FleetID,
+				ToolCount: d.ToolCount,
+			},
+			Provenance:           d.Provenance,
+			ShareNamesPct:        d.NamePct,
+			ShareDescriptionsPct: d.DescriptionPct,
+			// Deliberately nil: see the field's doc comment. The corpora carry
+			// no annotations, and a zero here would claim a measurement that
+			// was never taken.
+			ShareAnnotationsPct:  nil,
+			ShareSchemasPct:      d.SchemaPct,
+			AchievableCeilingPct: d.SchemaCeilingPct,
+			Spec102Verdict:       d.Spec102Verdict,
+		})
+	}
+	return block, nil
+}

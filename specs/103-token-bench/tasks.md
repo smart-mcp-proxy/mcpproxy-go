@@ -273,7 +273,7 @@ recomputed per corpus and an explicit `confirmed`/`corrected` verdict.
 
 - [x] T052 [US4] Implement the decomposition in `bench/payloaddecomp.go` over at least two fleet
       shapes (the 45-tool reference corpus and the 527-tool snapshot)
-- [ ] T053 [US4] Emit the `payload_decomposition` block from `bench/payloaddecomp.go` with a
+- [x] T053 [US4] Emit the `payload_decomposition` block from `bench/payloaddecomp.go` with a
       populated `accounting_source` and an explicit `spec102_verdict` (`confirmed` or
       `corrected`, with the delta)
 
