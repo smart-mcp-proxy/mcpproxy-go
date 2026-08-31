@@ -70,6 +70,15 @@ storage record, documented as *measured pre-truncation*, but are absent from the
 contract entirely. Adding them (two DTO fields, two lines in the export projection) lets a
 truncated record carry an explicitly-estimated response cost instead of being dropped.
 
+**A second backend change turns out to be necessary too.** Truncation is not recorded for
+internal tool calls: `wasTruncated` is computed in the `retrieve_tools` handler
+(`internal/server/mcp.go:2019-2035`) and only logged, and `emitActivityInternalToolCall`
+(`:810`) has no truncation parameter. So a truncated `retrieve_tools` record is
+indistinguishable from a complete one, and tokenizing its stored full response would overstate
+what the agent paid — the exact failure class FR-002 exists to prevent. Either propagate the
+flag onto internal tool-call activity, or exclude every internal `retrieve_tools` record from
+response-cost accounting as an explicit, reported decision.
+
 **Correction applied after review, then corrected again**: an early draft claimed these give
 an *accurate* cost basis without bodies. They do not — they are byte lengths, and tokenizing
 needs the text. A second draft over-corrected, claiming tool-surface cost carries the headline
