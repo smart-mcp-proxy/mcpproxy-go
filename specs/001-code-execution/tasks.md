@@ -197,10 +197,10 @@
 
 ### Tests for User Story 5
 
-- [ ] T071 [P] [US5] Integration test: enable_code_execution=false excludes tool from tools/list in internal/server/mcp_test.go
-- [ ] T072 [P] [US5] Integration test: enable_code_execution=false rejects code_execution requests in internal/server/mcp_test.go
-- [ ] T073 [P] [US5] Integration test: enable_code_execution=true includes tool in tools/list in internal/server/mcp_test.go
-- [ ] T074 [US5] Integration test: Config defaults apply when options omitted in internal/server/mcp_code_execution_test.go
+- [x] T071 [P] [US5] Integration test: enable_code_execution=false excludes tool from tools/list in internal/server/mcp_test.go
+- [x] T072 [P] [US5] Integration test: enable_code_execution=false rejects code_execution requests in internal/server/mcp_test.go
+- [x] T073 [P] [US5] Integration test: enable_code_execution=true includes tool in tools/list in internal/server/mcp_test.go
+- [x] T074 [US5] Integration test: Config defaults apply when options omitted in internal/server/mcp_code_execution_test.go
 
 ### Implementation for User Story 5
 
