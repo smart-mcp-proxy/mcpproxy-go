@@ -158,7 +158,6 @@ tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/
 - **Windows installer**: [docs/github-actions-windows-wix-research.md](docs/github-actions-windows-wix-research.md). **Prerelease** (`next` branch + `v*-rc.*` tags, opt-in, off stable channels): [docs/prerelease-builds.md](docs/prerelease-builds.md).
 
 ## Recent Changes
+- 103-token-bench: Go 1.25 (`bench/`) + existing only — tiktoken-go v0.1.8 (cl100k_base), the mcp-go transport already used by `bench/mcpcaller.go`. MCPMark is an external SHA-pinned tool invoked out of process, not a module dependency. **No new dependencies.**
 - 102-schema-deferred: Go 1.25.5 module toolchain (`go.mod`), backend-only + existing only — mark3labs/mcp-go v0.57.0 (tool surface), santhosh-tekuri/jsonschema/v6 (Spec-085 validator reuse), zap, stdlib. **No new dependencies.**
 - 101-tpa-db: Go 1.25.5 module toolchain (`go.mod`), backend-only + stdlib only for the new work — `crypto/ed25519`, `crypto/sha256`, `syscall` (no ed25519 usage in the tree before this); existing bbolt (state), zap, Cobra. **No new dependencies.**
-- 098-tools-preflight: Added Go 1.24 module toolchain (repo builds with local Go 1.25) + existing only — chi (httpapi), bbolt (storage), Bleve (index), zap (logging), Cobra (CLI), swaggo/swag v2 (contract regen). **No new dependencies.**
-- 097-stored-scripts: Added Go 1.25 (os.Root/Root.ReadFile available — R1) + stdlib only (os.Root). **No new dependencies.**
