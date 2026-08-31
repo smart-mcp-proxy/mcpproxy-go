@@ -1757,10 +1757,12 @@ type AddServerRequest struct {
 	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
 	QueueSize             *int             `json:"queue_size,omitempty"`
 	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty" swaggertype:"string"`
-	// Isolation carries per-server Docker isolation overrides (image,
-	// network_mode, extra_args, working_dir, enabled). A nil pointer
-	// means "do not touch isolation config"; an empty-but-present
-	// object on PATCH intentionally clears the overrides.
+	// Isolation carries per-server Docker isolation overrides (enabled,
+	// mode_override, image, network_mode, extra_args, working_dir). A nil
+	// pointer means "do not touch isolation config". A present object is
+	// applied field-by-field ON TOP of the persisted overrides, so omitting a
+	// field leaves it alone; clear an individual override by sending it
+	// explicitly (`"enabled": null`, `"image": ""`).
 	Isolation *IsolationRequest `json:"isolation,omitempty"`
 }
 
@@ -1769,24 +1771,89 @@ type AddServerRequest struct {
 // a nil pointer means "leave this field alone", a present value
 // (including empty string or empty slice) means "set it".
 type IsolationRequest struct {
-	Enabled     *bool     `json:"enabled,omitempty"`
-	Image       *string   `json:"image,omitempty"`
-	NetworkMode *string   `json:"network_mode,omitempty"`
-	ExtraArgs   *[]string `json:"extra_args,omitempty"`
-	WorkingDir  *string   `json:"working_dir,omitempty"`
+	// Enabled is the tri-state per-server override. It has THREE meaningful
+	// wire states, and collapsing them is what silently un-isolated servers
+	// (GH #1142):
+	//   - absent          → leave the persisted override untouched
+	//   - null            → clear the override, back to inheriting the global
+	//   - true / false    → set an explicit opt-in / opt-out
+	Enabled NullableBool `json:"enabled,omitempty" swaggertype:"boolean"`
+	// ModeOverride sets `isolation.mode` ("docker" | "sandbox" | "none").
+	// nil leaves the persisted value alone; an empty string clears it.
+	ModeOverride *string   `json:"mode_override,omitempty"`
+	Image        *string   `json:"image,omitempty"`
+	NetworkMode  *string   `json:"network_mode,omitempty"`
+	ExtraArgs    *[]string `json:"extra_args,omitempty"`
+	WorkingDir   *string   `json:"working_dir,omitempty"`
 }
 
-// toConfig materializes the request into a config.IsolationConfig.
-// Fields left nil on the request do not appear on the resulting struct
-// so UpdateServer's merge logic (in Controller) can distinguish them
-// from explicit clears.
-func (r *IsolationRequest) toConfig() *config.IsolationConfig {
+// NullableBool distinguishes an absent JSON key from an explicit `null` and
+// from a real boolean, which a plain *bool cannot do. Used for tri-state PATCH
+// fields where "clear this back to the default" has to be expressible.
+type NullableBool struct {
+	// Set is true when the key was present in the request body at all.
+	Set bool
+	// Value is the decoded boolean, or nil when the key was present as `null`.
+	Value *bool
+}
+
+// UnmarshalJSON records that the key was present, and decodes its value unless
+// it was the literal `null`.
+func (n *NullableBool) UnmarshalJSON(data []byte) error {
+	n.Set = true
+	if string(data) == "null" {
+		n.Value = nil
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err != nil {
+		return err
+	}
+	n.Value = &b
+	return nil
+}
+
+// MarshalJSON keeps round-trips honest: an unset field encodes as null, the
+// same shape that clears the override on the way in.
+func (n NullableBool) MarshalJSON() ([]byte, error) {
+	if !n.Set || n.Value == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(*n.Value)
+}
+
+// resolve materializes the request into a complete config.IsolationConfig,
+// starting from the server's PERSISTED overrides and applying only the fields
+// the request actually carried.
+//
+// Resolving here (rather than in the controller's field-by-field merge) is what
+// makes three things work at once: an omitted `enabled` cannot become an
+// explicit opt-out, an explicit null CAN clear the override, and the fields this
+// request type does not expose (mode, log driver/size/files) survive untouched
+// — which in turn lets UpdateServer replace the block wholesale.
+func (r *IsolationRequest) resolve(existing *config.IsolationConfig) *config.IsolationConfig {
 	if r == nil {
 		return nil
 	}
-	out := &config.IsolationConfig{}
-	if r.Enabled != nil {
-		out.Enabled = config.BoolPtr(*r.Enabled)
+	out := config.CopyIsolationConfig(existing)
+	if out == nil {
+		out = &config.IsolationConfig{}
+	}
+
+	if r.Enabled.Set {
+		if r.Enabled.Value == nil {
+			out.Enabled = nil // back to "inherit global"
+		} else {
+			out.Enabled = config.BoolPtr(*r.Enabled.Value)
+		}
+	}
+	if r.ModeOverride != nil {
+		if *r.ModeOverride == "" {
+			out.Mode = nil
+		} else {
+			mode := config.IsolationMode(*r.ModeOverride)
+			out.Mode = &mode
+		}
 	}
 	if r.Image != nil {
 		out.Image = *r.Image
@@ -1953,10 +2020,10 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// silently dropped, so a caller could not, for example, opt a host-run
 	// stdio server OUT of isolation when global docker_isolation.enabled=true
 	// (the server would be forced into a container and fail to start). Mirror
-	// the update path's toConfig() mapping so the field means the same thing
-	// on both verbs.
+	// the update path's mapping so the field means the same thing on both
+	// verbs. There is nothing persisted yet, so the patch resolves against nil.
 	if req.Isolation != nil {
-		serverConfig.Isolation = req.Isolation.toConfig()
+		serverConfig.Isolation = req.Isolation.resolve(nil)
 	}
 
 	// Add server via controller
@@ -2236,8 +2303,16 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	} else if existingSrv != nil {
 		updates.QueueTimeout = existingSrv.QueueTimeout
 	}
+	// Isolation is resolved against the PERSISTED overrides, so an omitted
+	// `enabled` cannot become an explicit opt-out and the fields the request
+	// does not expose (mode, log driver) survive (GH #1142). The controller
+	// then replaces the block wholesale.
 	if req.Isolation != nil {
-		updates.Isolation = req.Isolation.toConfig()
+		var existingIso *config.IsolationConfig
+		if existingSrv != nil {
+			existingIso = existingSrv.Isolation
+		}
+		updates.Isolation = req.Isolation.resolve(existingIso)
 		hasUpdates = true
 	}
 

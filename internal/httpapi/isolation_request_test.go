@@ -8,17 +8,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsolationRequestToConfigNil(t *testing.T) {
+func TestIsolationRequestResolveNil(t *testing.T) {
 	var r *IsolationRequest
-	assert.Nil(t, r.toConfig(), "nil request must produce nil config")
+	assert.Nil(t, r.resolve(nil), "nil request must produce nil config")
 }
 
-func TestIsolationRequestToConfigEmpty(t *testing.T) {
+func TestIsolationRequestResolveEmpty(t *testing.T) {
 	// An empty-but-present IsolationRequest means "I am touching
-	// isolation but setting nothing explicitly" — toConfig returns a
+	// isolation but setting nothing explicitly" — resolve returns a
 	// non-nil struct so the update path can distinguish this from nil.
 	r := &IsolationRequest{}
-	got := r.toConfig()
+	got := r.resolve(nil)
 	require.NotNil(t, got)
 	assert.Nil(t, got.Enabled)
 	assert.Empty(t, got.Image)
@@ -27,7 +27,7 @@ func TestIsolationRequestToConfigEmpty(t *testing.T) {
 	assert.Empty(t, got.WorkingDir)
 }
 
-func TestIsolationRequestToConfigAllFields(t *testing.T) {
+func TestIsolationRequestResolveAllFields(t *testing.T) {
 	enabled := true
 	image := "python:3.11"
 	networkMode := "bridge"
@@ -35,13 +35,13 @@ func TestIsolationRequestToConfigAllFields(t *testing.T) {
 	workingDir := "/vault"
 
 	r := &IsolationRequest{
-		Enabled:     &enabled,
+		Enabled:     NullableBool{Set: true, Value: &enabled},
 		Image:       &image,
 		NetworkMode: &networkMode,
 		ExtraArgs:   &extra,
 		WorkingDir:  &workingDir,
 	}
-	got := r.toConfig()
+	got := r.resolve(nil)
 	require.NotNil(t, got)
 	require.NotNil(t, got.Enabled)
 	assert.True(t, *got.Enabled)
@@ -51,30 +51,30 @@ func TestIsolationRequestToConfigAllFields(t *testing.T) {
 	assert.Equal(t, workingDir, got.WorkingDir)
 }
 
-func TestIsolationRequestToConfigDisabledExplicitly(t *testing.T) {
+func TestIsolationRequestResolveDisabledExplicitly(t *testing.T) {
 	// A present enabled:false must produce a pointer to false, not nil
 	// (nil means "do not touch"; false means "set to false").
 	enabled := false
-	r := &IsolationRequest{Enabled: &enabled}
-	got := r.toConfig()
+	r := &IsolationRequest{Enabled: NullableBool{Set: true, Value: &enabled}}
+	got := r.resolve(nil)
 	require.NotNil(t, got)
 	require.NotNil(t, got.Enabled)
 	assert.False(t, *got.Enabled)
 }
 
-func TestIsolationRequestToConfigExtraArgsCopies(t *testing.T) {
+func TestIsolationRequestResolveExtraArgsCopies(t *testing.T) {
 	// The resulting slice must not alias the request slice, so later
 	// mutations on the config do not leak back into the request
 	// (matters when the request gets held in memory by a log sink).
 	src := []string{"-v", "/foo:/bar"}
 	r := &IsolationRequest{ExtraArgs: &src}
-	got := r.toConfig()
+	got := r.resolve(nil)
 	require.NotNil(t, got)
 	got.ExtraArgs[0] = "mutated"
 	assert.Equal(t, "-v", src[0], "request slice must remain untouched after mutating config copy")
 }
 
-// Compile-time assertion that toConfig returns *config.IsolationConfig
+// Compile-time assertion that resolve returns *config.IsolationConfig
 // (not contracts.IsolationConfig). Lives outside a test function so
 // static analysers don't flag the unused LHS inside a test body.
-var _ func(*IsolationRequest) *config.IsolationConfig = (*IsolationRequest).toConfig
+var _ func(*IsolationRequest, *config.IsolationConfig) *config.IsolationConfig = (*IsolationRequest).resolve

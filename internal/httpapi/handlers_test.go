@@ -95,7 +95,7 @@ func TestHandleAddServer(t *testing.T) {
 			Command:   "/usr/local/bin/mcpfixture",
 			Args:      []string{"--transport", "stdio"},
 			Protocol:  "stdio",
-			Isolation: &IsolationRequest{Enabled: &optOut},
+			Isolation: &IsolationRequest{Enabled: NullableBool{Set: true, Value: &optOut}},
 		}
 		body, _ := json.Marshal(reqBody)
 
@@ -125,7 +125,7 @@ func TestHandleAddServer(t *testing.T) {
 			Command:   "/mcpfixture",
 			Args:      []string{"--transport", "stdio"},
 			Protocol:  "stdio",
-			Isolation: &IsolationRequest{Enabled: &on, Image: &image},
+			Isolation: &IsolationRequest{Enabled: NullableBool{Set: true, Value: &on}, Image: &image},
 		}
 		body, _ := json.Marshal(reqBody)
 

@@ -1738,30 +1738,18 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.InitTimeout = updates.InitTimeout
 	}
 
-	// Isolation is PATCH-semantic: nil means "leave unchanged"; a
-	// present struct means "replace". Within the struct, the caller
-	// only populates fields they want to set (handled upstream by
-	// IsolationRequest.toConfig), so we merge into the existing
-	// override set rather than wholesale replacing.
+	// Isolation is PATCH-semantic: nil means "leave unchanged"; a present
+	// struct REPLACES the override set wholesale.
+	//
+	// The old field-by-field non-zero merge here could not express a clear —
+	// an empty image or a nil `enabled` was indistinguishable from "not
+	// supplied" — which is half of why an inheriting server could never be
+	// restored once something wrote an explicit opt-out (GH #1142). The REST
+	// handler now resolves the patch against the persisted overrides
+	// (IsolationRequest.resolve) and hands over a complete struct, so replacing
+	// is both correct and the only way clears can work.
 	if updates.Isolation != nil {
-		if existing.Isolation == nil {
-			existing.Isolation = &config.IsolationConfig{}
-		}
-		if updates.Isolation.Enabled != nil {
-			existing.Isolation.Enabled = updates.Isolation.Enabled
-		}
-		if updates.Isolation.Image != "" {
-			existing.Isolation.Image = updates.Isolation.Image
-		}
-		if updates.Isolation.NetworkMode != "" {
-			existing.Isolation.NetworkMode = updates.Isolation.NetworkMode
-		}
-		if updates.Isolation.ExtraArgs != nil {
-			existing.Isolation.ExtraArgs = updates.Isolation.ExtraArgs
-		}
-		if updates.Isolation.WorkingDir != "" {
-			existing.Isolation.WorkingDir = updates.Isolation.WorkingDir
-		}
+		existing.Isolation = config.CopyIsolationConfig(updates.Isolation)
 	}
 
 	// Save to storage
