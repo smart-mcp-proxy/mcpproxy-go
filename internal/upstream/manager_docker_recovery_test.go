@@ -155,11 +155,14 @@ func TestFreshenLoadedDockerRecoveryState_NilSafe(t *testing.T) {
 }
 
 // TestShouldEnableDockerRecovery_PerServerTriState pins the behaviour of the
-// per-server isolation clause in shouldEnableDockerRecovery across the *bool
-// tri-state. It was written to guard the GH #1142 rename of
-// IsolationConfig.IsEnabled() → IsExplicitlyEnabled(): that clause has always
-// meant "an explicit per-server opt-in", so an inheriting (nil) override must
-// NOT switch Docker recovery on when global isolation is off.
+// per-server isolation clause in shouldEnableDockerRecovery across the legacy
+// `enabled` *bool tri-state, now that the clause routes through
+// config.ServerDependsOnDocker instead of reading the bool by hand (GH #1142).
+// With global isolation off, NO value of the legacy bool containerises the
+// server: nil is "inherit" (which the global answer already covers), false is
+// an opt-out, and true is an opt-in the resolver deliberately IGNORES under a
+// none global mode. Isolation MODES are covered by
+// TestShouldEnableDockerRecovery_HonorsIsolationModes.
 func TestShouldEnableDockerRecovery_PerServerTriState(t *testing.T) {
 	newManager := func(servers ...*config.ServerConfig) *Manager {
 		m := &Manager{logger: zap.NewNop()}
@@ -192,14 +195,30 @@ func TestShouldEnableDockerRecovery_PerServerTriState(t *testing.T) {
 		}
 	})
 
-	t.Run("per-server explicit true enables recovery", func(t *testing.T) {
+	t.Run("global off and per-server explicit true stays off", func(t *testing.T) {
+		// The resolver reports IsolationSourceServerOptInIgnored here: a legacy
+		// bool opt-in cannot revive isolation while the global mode is none, so
+		// the server is NOT containerised and there are no containers to
+		// monitor or clean up. The old hand-rolled clause started the monitor
+		// anyway.
 		m := newManager(&config.ServerConfig{
 			Name:      "npx-server",
 			Command:   "npx",
 			Isolation: &config.IsolationConfig{Enabled: config.BoolPtr(true)},
 		})
+		if m.shouldEnableDockerRecovery() {
+			t.Error("a bool opt-in the resolver ignores must not enable Docker recovery")
+		}
+	})
+
+	t.Run("a server whose own command is docker enables recovery", func(t *testing.T) {
+		m := newManager(&config.ServerConfig{
+			Name:    "already-dockerised",
+			Command: "docker",
+			Args:    []string{"run", "-i", "--rm", "mcp/foo"},
+		})
 		if !m.shouldEnableDockerRecovery() {
-			t.Error("an explicit per-server opt-in must enable Docker recovery")
+			t.Error("a server that shells out to docker itself needs the daemon, and its containers need cleanup")
 		}
 	})
 

@@ -247,9 +247,31 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 	return manager
 }
 
-// shouldEnableDockerRecovery returns true when Docker recovery should run based on config.
-// It respects docker_recovery.enabled=false and only enables monitoring when Docker
-// isolation is turned on or any server is explicitly using Docker commands.
+// shouldEnableDockerRecovery returns true when Docker recovery should run based
+// on config: does this proxy depend on a working Docker daemon at all?
+//
+// It respects docker_recovery.enabled=false, and otherwise composes the
+// per-server config.ServerDependsOnDocker predicate into the per-manager
+// question the monitor actually asks. The two halves are deliberately
+// different shapes:
+//
+//   - The GLOBAL half is forward-looking. The monitor is started once, at
+//     manager construction, but servers are added at runtime — so a global
+//     resolved mode of "docker" means "anything stdio we launch from now on is
+//     containerised", regardless of which servers happen to be configured now
+//     (this is also why an empty Servers list under global docker still
+//     enables recovery).
+//   - The PER-SERVER half then covers the configs the global mode does not:
+//     a per-server `isolation.mode: "docker"` override wins outright even when
+//     the global mode is none, and a server whose own command invokes docker
+//     needs the daemon whatever isolation says.
+//
+// It replaced a hand-rolled mirror of the two LEGACY booleans that never
+// consulted isolation MODES, so `{mode:"docker", enabled:false}` (and a
+// per-server mode override under a legacy-off global) left recovery monitoring
+// off and let shutdown skip container cleanup, leaking containers — while a
+// legacy per-server `enabled:true` under a none global mode, which the resolver
+// IGNORES, switched the monitor on for containers that never exist (GH #1142).
 func (m *Manager) shouldEnableDockerRecovery() bool {
 	if m == nil {
 		return false
@@ -264,26 +286,15 @@ func (m *Manager) shouldEnableDockerRecovery() bool {
 		return false
 	}
 
-	// Global Docker isolation enabled
-	if gc.DockerIsolation != nil && gc.DockerIsolation.Enabled {
+	// Global half: every stdio server, present or future, is containerised.
+	if gc.DockerIsolation.ResolvedMode() == config.IsolationModeDocker {
 		return true
 	}
 
-	// Detect servers that explicitly use Docker (e.g., docker run/exec commands)
+	// Per-server half: an override that resolves to docker, or a server whose
+	// own command is docker.
 	for _, srv := range gc.Servers {
-		if srv == nil {
-			continue
-		}
-
-		// An EXPLICIT per-server opt-in only. A nil Enabled means "inherit
-		// the global setting", which the clause above already answered
-		// (GH #1142) — treating it as an opt-in here would start the Docker
-		// recovery monitor for every server on a host with isolation off.
-		if srv.Isolation.IsExplicitlyEnabled() {
-			return true
-		}
-
-		if strings.Contains(srv.Command, "docker") {
+		if config.ServerDependsOnDocker(gc.DockerIsolation, srv) {
 			return true
 		}
 	}
@@ -292,29 +303,35 @@ func (m *Manager) shouldEnableDockerRecovery() bool {
 }
 
 // UsesDockerIsolation reports whether this manager could have launched
-// Docker-isolated containers (global isolation on, a per-server isolation, or
-// a docker command). When false, no container cleanup verification is needed
-// on shutdown — shelling out to `docker ps` would be pure waste (and, in test
-// processes, adds ~17s/Close via the verification loop). Same predicate the
-// Docker recovery monitor uses, so behavior stays consistent.
+// Docker containers (a global or per-server isolation mode that resolves to
+// docker, or a server whose own command is docker). When false, no container
+// cleanup verification is needed on shutdown — shelling out to `docker ps`
+// would be pure waste (and, in test processes, adds ~17s/Close via the
+// verification loop). Same predicate the Docker recovery monitor uses, so
+// behavior stays consistent.
 func (m *Manager) UsesDockerIsolation() bool {
 	return m.shouldEnableDockerRecovery()
 }
 
 // resolveConnectTimeout computes the deadline for an upstream's MCP `initialize`
 // handshake (MCP-3322 / GH #760). It resolves the per-server → global → 30s
-// default init_timeout via Config.ResolveInitTimeout. For Docker-isolated
-// servers — which may need to pull/install a package before answering
-// `initialize` — it keeps a 3-minute floor so a small init_timeout never
-// regresses the historical Docker grace period; a larger init_timeout still
-// wins. Un-isolated stdio servers (the bite in #760) now get the resolved
+// default init_timeout via Config.ResolveInitTimeout. For servers that depend on
+// Docker — which may need to pull an image or install a package before
+// answering `initialize` — it keeps a 3-minute floor so a small init_timeout
+// never regresses the historical Docker grace period; a larger init_timeout
+// still wins. Un-isolated stdio servers (the bite in #760) now get the resolved
 // deadline instead of silently inheriting the caller's ~30s context.
-func (m *Manager) resolveConnectTimeout(serverConfig *config.ServerConfig, dockerIsolated bool) time.Duration {
+//
+// dependsOnDocker is managed.Client.DependsOnDocker: it covers BOTH "we
+// containerise it" and "its own command is docker". It is deliberately not the
+// launch-shape question — a server that already runs docker is never wrapped by
+// us, yet pays exactly the same image-pull latency (GH #1142).
+func (m *Manager) resolveConnectTimeout(serverConfig *config.ServerConfig, dependsOnDocker bool) time.Duration {
 	timeout := 30 * time.Second
 	if gc := m.globalConfig.Load(); gc != nil {
 		timeout = gc.ResolveInitTimeout(serverConfig)
 	}
-	if dockerIsolated && timeout < 3*time.Minute {
+	if dependsOnDocker && timeout < 3*time.Minute {
 		timeout = 3 * time.Minute
 	}
 	return timeout
@@ -546,7 +563,7 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 
 		// Connect to server with the resolved init_timeout (MCP-3322) to prevent
 		// hanging while still honoring a per-server/global handshake deadline.
-		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.IsDockerIsolated()))
+		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
 			// Check if this is an OAuth error - don't fail AddServer for OAuth
@@ -1527,7 +1544,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			// un-isolated stdio servers silently inherited the caller's ~30s
 			// context — the #760 bite. resolveConnectTimeout keeps the 3min floor
 			// for Docker isolation while honoring a per-server/global override.
-			connectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(c.GetConfig(), c.IsDockerIsolated()))
+			connectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(c.GetConfig(), c.DependsOnDocker()))
 			defer cancel()
 
 			if err := c.Connect(connectCtx); err != nil {
@@ -1906,7 +1923,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 		// Honor the resolved init_timeout (MCP-3322) on the post-OAuth retry too,
 		// with a 2-minute floor so this path never regresses below its historical
 		// grace period.
-		retryTimeout := m.resolveConnectTimeout(client.GetConfig(), client.IsDockerIsolated())
+		retryTimeout := m.resolveConnectTimeout(client.GetConfig(), client.DependsOnDocker())
 		if retryTimeout < 2*time.Minute {
 			retryTimeout = 2 * time.Minute
 		}

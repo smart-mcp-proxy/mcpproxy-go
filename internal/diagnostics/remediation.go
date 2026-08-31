@@ -59,9 +59,9 @@ func RuntimeAwareRemediation(code Code, hints ClassifierHints) string {
 // core.IsolationManager.DetectRuntimeType (internal/upstream/core/isolation.go)
 // — the diagnostics package must not import upstream/core, and faithfulness for
 // the display path matters more than sharing the implementation. (The sibling
-// question, "is this server Docker-isolated at all", is NOT mirrored: both
-// supervisor.usesDockerIsolation and managed.Client.IsDockerIsolated delegate to
-// config.ResolveIsolation, the resolver the spawn path branches on.) Unknown commands
+// question, "is this server Docker-isolated at all", is NOT mirrored:
+// supervisor.usesDockerIsolation delegates to config.ResolveIsolation, the
+// resolver the spawn path branches on.) Unknown commands
 // fall back to the base command name so the message still names something
 // concrete rather than a generic "interpreter".
 func detectDockerRuntimeType(command string) string {

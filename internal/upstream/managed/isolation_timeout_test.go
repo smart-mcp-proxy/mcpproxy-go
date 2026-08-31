@@ -10,19 +10,25 @@ import (
 
 func isoModePtr(m config.IsolationMode) *config.IsolationMode { return &m }
 
-// TestIsDockerIsolated_MatchesResolver is the "one algorithm" invariant for the
-// connect-timeout selection: IsDockerIsolated picks the long Docker timeout
-// (image pull + package install) instead of the short stdio one, so it must
-// agree with the resolver the SPAWN path branches on — config.ResolveIsolation.
+// TestDependsOnDocker_MatchesResolver is the "one algorithm" invariant for the
+// connect-timeout selection: DependsOnDocker picks the long Docker budget
+// (image pull + package install) instead of the short stdio one, so for every
+// server we CONTAINERISE it must agree with the resolver the SPAWN path
+// branches on — config.ResolveIsolation.
 //
 // The predicate predated isolation MODES and only read the two legacy booleans,
 // so it disagreed with the spawn decision in both directions: a per-server
 // `mode: "docker"` override is honoured at spawn even over a legacy
 // `enabled: false`, but was given the SHORT timeout and could time out mid-pull;
-// while a `mode: "sandbox"` server — and a server whose command already invokes
-// docker, which is never double-wrapped — were given the long Docker timeout
-// they have no use for, stretching every failed connect.
-func TestIsDockerIsolated_MatchesResolver(t *testing.T) {
+// while a `mode: "sandbox"` server was given the long Docker timeout it has no
+// use for, stretching every failed connect.
+//
+// The one deliberate DIVERGENCE from the resolver is a server whose own command
+// is `docker`: the resolver reports mode=none there because we must never
+// double-wrap it, but it still pays image-pull latency, so it still needs the
+// long budget. That case is asserted separately in
+// TestDependsOnDocker_ServerRunningDockerItself.
+func TestDependsOnDocker_MatchesResolver(t *testing.T) {
 	optOut, optIn := false, true
 
 	tests := []struct {
@@ -56,12 +62,6 @@ func TestIsDockerIsolated_MatchesResolver(t *testing.T) {
 				Isolation: &config.IsolationConfig{Mode: isoModePtr(config.IsolationModeSandbox)},
 			},
 			want: false,
-		},
-		{
-			name:   "a server that already runs docker is never double-wrapped",
-			global: &config.DockerIsolationConfig{Enabled: true},
-			srv:    &config.ServerConfig{Name: "dockerised", Command: "docker"},
-			want:   false,
 		},
 		{
 			name:   "legacy opt-out still wins when there is no mode override",
@@ -110,20 +110,55 @@ func TestIsDockerIsolated_MatchesResolver(t *testing.T) {
 			mc.SetConfig(tc.srv)
 			mc.globalConfig.Store(&config.Config{DockerIsolation: tc.global})
 
-			if got := mc.IsDockerIsolated(); got != tc.want {
-				t.Errorf("IsDockerIsolated() = %v, want %v (resolver mode=%q source=%q)",
+			if got := mc.DependsOnDocker(); got != tc.want {
+				t.Errorf("DependsOnDocker() = %v, want %v (resolver mode=%q source=%q)",
 					got, tc.want, resolved.Mode, resolved.Source)
 			}
 		})
 	}
 }
 
-// TestIsDockerIsolated_NilGlobalConfig keeps the hand-constructed-client path
+// TestDependsOnDocker_ServerRunningDockerItself pins the deliberate divergence
+// from config.ResolveIsolation described above. The resolver's already-docker
+// structural gate answers the SPAWN question ("do we wrap this?" — no, never
+// double-wrap), but the connect budget answers a different one ("will this
+// server sit in an image pull before it answers initialize?" — yes). Collapsing
+// the two dropped such a server from the 3-minute floor to the resolved
+// init_timeout (30s by default), where it can be killed mid-pull (GH #1142).
+func TestDependsOnDocker_ServerRunningDockerItself(t *testing.T) {
+	srv := &config.ServerConfig{
+		Name:    "dockerised",
+		Command: "docker",
+		Args:    []string{"run", "-i", "--rm", "mcp/foo"},
+	}
+
+	for _, global := range []*config.DockerIsolationConfig{
+		{Enabled: true},
+		{Enabled: false},
+		nil,
+	} {
+		resolved := config.ResolveIsolation(global, srv)
+		if resolved.Mode == config.IsolationModeDocker {
+			t.Fatalf("precondition: the resolver must NOT report mode=docker for a docker command, got %q (source %q)",
+				resolved.Mode, resolved.Source)
+		}
+
+		mc := &Client{logger: zap.NewNop()}
+		mc.SetConfig(srv)
+		mc.globalConfig.Store(&config.Config{DockerIsolation: global})
+
+		if !mc.DependsOnDocker() {
+			t.Errorf("DependsOnDocker() = false for a command:\"docker\" server (global isolation %+v); it still pays image-pull latency", global)
+		}
+	}
+}
+
+// TestDependsOnDocker_NilGlobalConfig keeps the hand-constructed-client path
 // (no global config stored at all) answering false rather than panicking.
-func TestIsDockerIsolated_NilGlobalConfig(t *testing.T) {
+func TestDependsOnDocker_NilGlobalConfig(t *testing.T) {
 	mc := &Client{logger: zap.NewNop()}
 	mc.SetConfig(&config.ServerConfig{Name: "no-global", Command: "npx"})
-	if mc.IsDockerIsolated() {
-		t.Error("IsDockerIsolated() = true with no global config stored, want false")
+	if mc.DependsOnDocker() {
+		t.Error("DependsOnDocker() = true with no global config stored, want false")
 	}
 }

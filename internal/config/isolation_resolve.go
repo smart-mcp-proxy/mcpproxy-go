@@ -231,3 +231,33 @@ func resolveConfiguredIsolationMode(iso *IsolationConfig, globalMode IsolationMo
 func IsDockerCommand(command string) bool {
 	return filepath.Base(command) == "docker" || strings.Contains(command, "docker")
 }
+
+// ServerDependsOnDocker reports whether STARTING this server needs a working
+// Docker daemon — which is a different question from "do we isolate it".
+//
+// Two disjoint ways a server ends up talking to Docker:
+//
+//  1. We containerise it: ResolveIsolation resolves its effective mode to
+//     docker, so the spawn path wraps the command in `docker run`.
+//  2. It containerises itself: its own command already invokes docker, so
+//     ResolveIsolation's already-docker structural gate deliberately forces
+//     mode=none (never double-wrap) — yet the process still shells out to the
+//     daemon and still pays image-pull latency.
+//
+// Callers that care about the LAUNCH SHAPE (which wrapper runs, which
+// remediation to offer) must keep asking ResolveIsolation. Callers that care
+// about DOCKER-THE-DEPENDENCY — the connect budget that must survive an image
+// pull, the recovery monitor, shutdown container cleanup — ask this, so the
+// two questions cannot silently collapse into one predicate again (GH #1142).
+//
+// It is built ON TOP of the resolver plus the already-docker structural fact,
+// so there is still exactly one implementation of the isolation algorithm.
+func ServerDependsOnDocker(globalConfig *DockerIsolationConfig, serverConfig *ServerConfig) bool {
+	if serverConfig == nil {
+		return false
+	}
+	if ResolveIsolation(globalConfig, serverConfig).Mode == IsolationModeDocker {
+		return true
+	}
+	return serverConfig.Command != "" && IsDockerCommand(serverConfig.Command)
+}
