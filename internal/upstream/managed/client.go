@@ -562,18 +562,24 @@ func (mc *Client) ShouldRetry() bool {
 }
 
 // IsDockerIsolated returns true if this server will use Docker isolation.
-// Used to select appropriate connect timeouts (Docker containers need more time for package installation).
+// Used to select appropriate connect timeouts (Docker containers need more time
+// for image pulls and package installation).
+//
+// It delegates to config.ResolveIsolation — the SAME resolver the spawn path
+// branches on — so the timeout can never be chosen for a launch shape the
+// server will not have. It previously re-derived the answer from the two LEGACY
+// booleans, which pre-date isolation modes: a per-server `mode: "docker"`
+// override is honoured at spawn even over a legacy `enabled: false`, yet got the
+// SHORT stdio timeout and could be killed mid-pull; while `mode: "sandbox"`
+// servers, and servers whose command already invokes docker (never
+// double-wrapped), were handed the long Docker budget they have no use for
+// (GH #1142).
 func (mc *Client) IsDockerIsolated() bool {
-	gc := mc.globalConfig.Load()
-	if gc == nil || gc.DockerIsolation == nil || !gc.DockerIsolation.Enabled {
-		return false
+	var global *config.DockerIsolationConfig
+	if gc := mc.globalConfig.Load(); gc != nil {
+		global = gc.DockerIsolation
 	}
-	// Check if server has isolation explicitly disabled
-	if mc.GetConfig().Isolation != nil && mc.GetConfig().Isolation.Enabled != nil && !*mc.GetConfig().Isolation.Enabled {
-		return false
-	}
-	// Only stdio servers with commands get Docker-isolated
-	return mc.GetConfig().Command != ""
+	return config.ResolveIsolation(global, mc.GetConfig()).Mode == config.IsolationModeDocker
 }
 
 // SetUserLoggedOut marks that the user has explicitly logged out

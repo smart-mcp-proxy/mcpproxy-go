@@ -313,8 +313,16 @@ type addServerRequest struct {
 }
 
 // isolationRequest mirrors httpapi.IsolationRequest (the subset we use).
+//
+// The writable key is `enabled_override`, NOT `enabled`: on a read
+// `isolation.enabled` is the EFFECTIVE state (global setting + per-server
+// override + structural gates), so the write surfaces refuse it with a 400
+// rather than let a read-modify-write client turn "inherits the global
+// setting" into a permanent explicit override (GH #1142). Tri-state, matching
+// the server: absent leaves the persisted override alone, `false` is an
+// explicit opt-out.
 type isolationRequest struct {
-	Enabled *bool `json:"enabled,omitempty"`
+	EnabledOverride *bool `json:"enabled_override,omitempty"`
 }
 
 func (c *Client) addServer(ctx context.Context, req addServerRequest) error {

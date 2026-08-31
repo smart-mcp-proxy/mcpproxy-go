@@ -913,7 +913,6 @@ struct ServerDetailView: View {
         }
     }
 
-    @ViewBuilder
     /// Builds the `isolation` PATCH body from the edit form, or nil when
     /// nothing changed.
     ///
@@ -990,6 +989,7 @@ struct ServerDetailView: View {
         }
     }
 
+    @ViewBuilder
     private func configToggleRow(label: String, isOn: Binding<Bool>, hint: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
