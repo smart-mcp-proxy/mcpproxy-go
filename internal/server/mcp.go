@@ -3260,30 +3260,33 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	}
 	requestID := mintCorrelationID("upstream_servers")
 
+	// Issue #1146: the resolved server name must reach every emit site, or the
+	// Activity Log Server column renders "-" and --server filtering misses the
+	// mutation entirely. Hoisted above the first emit so even a malformed
+	// request is attributable.
+	targetServer := activityTargetServer(request)
+
 	operation, err := request.RequireString("operation")
 	if err != nil {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgsFromRequest(request), nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
 	}
 
-	// Build arguments map for activity logging (Spec 024)
-	args := map[string]interface{}{
-		"operation": operation,
-	}
-	if name := request.GetString("name", ""); name != "" {
-		args["name"] = name
-	}
+	// Build arguments map for activity logging (Spec 024). Issue #1146: record
+	// the FULL redacted argument set, not just {operation, name} — see
+	// mcp_activity_args.go for the redaction policy.
+	args := activityArgsFromRequest(request)
 
 	// Security checks
 	if p.config.ReadOnlyMode {
 		if operation != operationList {
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Operation not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Operation not allowed in read-only mode"), nil
 		}
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 
@@ -3294,12 +3297,12 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		// must honor the same AllowServerAdd gate — otherwise the "Let agents add
 		// servers" setting is bypassable by registry reference (MCP-800 finding 1).
 		if !p.config.AllowServerAdd {
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
 		}
 	case operationRemove:
 		if !p.config.AllowServerRemove {
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+			p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", "Removing servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Removing servers is not allowed"), nil
 		}
 	}
@@ -3310,13 +3313,17 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// /api/v1/servers handlers, so the two can never drift (issues #877/#878).
 	if authCtx := auth.AuthContextFromContext(ctx); !auth.AuthorizeServerOp(authCtx, operation) {
 		errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Execute operation and track result
 	var result *mcp.CallToolResult
 	var opErr error
+	// Issue #1146: update/patch resolve a before/after diff that the raw
+	// request cannot express (deep merge, `null` means remove). Capture it so
+	// the activity record says what actually CHANGED, not just what was asked.
+	var configDiff *config.ConfigDiff
 
 	switch operation {
 	case operationList:
@@ -3326,9 +3333,9 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	case operationRemove:
 		result, opErr = p.handleRemoveUpstream(ctx, request)
 	case "update":
-		result, opErr = p.handleUpdateUpstream(ctx, request)
+		result, configDiff, opErr = p.handleUpdateUpstream(ctx, request)
 	case "patch":
-		result, opErr = p.handlePatchUpstream(ctx, request)
+		result, configDiff, opErr = p.handlePatchUpstream(ctx, request)
 	case "tail_log":
 		result, opErr = p.handleTailLog(ctx, request)
 	case "enable":
@@ -3342,7 +3349,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	case "add_from_registry":
 		result, opErr = p.handleAddServerFromRegistry(ctx, request)
 	default:
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
 	}
 
@@ -3354,18 +3361,30 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		}
 	}
 
+	// Issue #1146: record the resolved diff alongside the raw request, and
+	// attribute add_from_registry rows to the name the registry resolved.
+	if redacted := redactedConfigDiff(configDiff); redacted != nil {
+		if args == nil {
+			args = make(map[string]interface{}, 1)
+		}
+		args["config_diff"] = redacted
+	}
+	if targetServer == "" && operation == "add_from_registry" {
+		targetServer = serverNameFromRegistryResult(responseText)
+	}
+
 	// Spec 024: Emit activity event based on result with args and response
 	if opErr != nil {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else if result != nil && result.IsError {
 		// Extract error message from result if available
 		errMsg := "operation failed"
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
-		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
 	}
 
 	return result, opErr
@@ -3384,45 +3403,42 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	}
 	requestID := mintCorrelationID("quarantine_security")
 
+	// Issue #1146: see handleUpstreamServers — the resolved server name must
+	// reach every emit site, including the pre-gate denials.
+	targetServer := activityTargetServer(request)
+
 	operation, err := request.RequireString("operation")
 	if err != nil {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgsFromRequest(request), nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'operation': %v", err)), nil
 	}
 
-	// Build arguments map for activity logging (Spec 024)
-	args := map[string]interface{}{
-		"operation": operation,
-	}
-	if name := request.GetString("name", ""); name != "" {
-		args["name"] = name
-	}
+	// Build arguments map for activity logging (Spec 024). Issue #1146: the full
+	// redacted argument set — this also picks up prompt_name, which the old
+	// hand-rolled builder never recorded.
+	args := activityArgsFromRequest(request)
 
 	// Spec 028: Agent tokens cannot perform quarantine operations
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		errMsg := "Agent tokens cannot perform quarantine security operations"
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Security checks
 	if p.config.ReadOnlyMode {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Quarantine operations not allowed in read-only mode", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Quarantine operations not allowed in read-only mode"), nil
 	}
 
 	if p.config.DisableManagement {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", "Server management is disabled for security", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError("Server management is disabled for security"), nil
 	}
 
 	// Execute operation and track result
 	var result *mcp.CallToolResult
 	var opErr error
-
-	if toolNameArg := request.GetString("tool_name", ""); toolNameArg != "" {
-		args["tool_name"] = toolNameArg
-	}
 
 	switch operation {
 	case "list_quarantined":
@@ -3458,7 +3474,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	case "approve_all_prompts":
 		result, opErr = p.handleApproveAllPromptsByServer(request)
 	default:
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown quarantine operation: %s", operation)), nil
 	}
 
@@ -3472,16 +3488,16 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 
 	// Spec 024: Emit activity event based on result with args and response
 	if opErr != nil {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", opErr.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else if result != nil && result.IsError {
 		// Extract error message from result if available
 		errMsg := "operation failed"
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
-		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
 	}
 
 	return result, opErr
@@ -4855,16 +4871,20 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// handleUpdateUpstream returns the resolved config diff alongside the result so
+// handleUpstreamServers can record what actually changed in the activity log
+// (issue #1146). The diff is returned RAW — every rendering seam below and in
+// the caller passes it through redactedConfigDiff first.
+func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, *config.ConfigDiff, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
+		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
 	// Find server by name first
 	servers, err := p.storage.ListUpstreams()
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil, nil
 	}
 
 	var serverID string
@@ -4878,32 +4898,36 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	}
 
 	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil, nil
 	}
 
 	// Build patch config from request parameters
 	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return mcp.NewToolResultError(err.Error()), nil, nil
 	}
 
 	// Use smart merge to preserve existing config fields (Fix for #239, #240)
 	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
 	}
 
-	// Log the config diff for audit trail (FR-006)
-	if configDiff != nil && !configDiff.IsEmpty() {
+	// Log the config diff for audit trail (FR-006). Issue #1146: config.FieldChange
+	// carries raw before/after VALUES, so logging Modified verbatim wrote env
+	// values, Authorization headers and oauth.client_secret to main.log in the
+	// clear. Render through the shared redactor instead.
+	redactedDiff := redactedConfigDiff(configDiff)
+	if redactedDiff != nil {
 		p.logger.Info("Server config updated via MCP tool",
 			zap.String("server", name),
-			zap.Any("modified", configDiff.Modified),
+			zap.Any("modified", redactedDiff["modified"]),
 			zap.Strings("removed", configDiff.Removed))
 	}
 
 	// Update in storage
 	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
 	}
 
 	// Update in upstream manager with connection monitoring
@@ -4942,12 +4966,10 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		"connection_message": connectionMessage,
 	}
 
-	// Include diff in response for LLM transparency (T4.3)
-	if configDiff != nil && !configDiff.IsEmpty() {
-		responseMap["changes"] = map[string]interface{}{
-			"modified": configDiff.Modified,
-			"removed":  configDiff.Removed,
-		}
+	// Include diff in response for LLM transparency (T4.3). Issue #1146: values
+	// are masked — field paths, which is what agents branch on, are preserved.
+	if redactedDiff != nil {
+		responseMap["changes"] = redactedDiff
 	}
 
 	if isolationManager := p.getIsolationManager(); isolationManager != nil {
@@ -4958,22 +4980,24 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 
 	jsonResult, err := json.Marshal(responseMap)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil, nil
 	}
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(string(jsonResult)), configDiff, nil
 }
 
-func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// handlePatchUpstream returns the resolved config diff alongside the result; see
+// handleUpdateUpstream for why (issue #1146).
+func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, *config.ConfigDiff, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
+		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
 	// Find server by name first
 	servers, err := p.storage.ListUpstreams()
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil, nil
 	}
 
 	var serverID string
@@ -4987,32 +5011,33 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	}
 
 	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil, nil
 	}
 
 	// Build patch config from request parameters
 	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return mcp.NewToolResultError(err.Error()), nil, nil
 	}
 
 	// Use smart merge to preserve existing config fields (Fix for #239, #240)
 	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
 	}
 
-	// Log the config diff for audit trail (FR-006)
-	if configDiff != nil && !configDiff.IsEmpty() {
+	// Log the config diff for audit trail (FR-006), values masked (issue #1146).
+	redactedDiff := redactedConfigDiff(configDiff)
+	if redactedDiff != nil {
 		p.logger.Info("Server config patched via MCP tool",
 			zap.String("server", name),
-			zap.Any("modified", configDiff.Modified),
+			zap.Any("modified", redactedDiff["modified"]),
 			zap.Strings("removed", configDiff.Removed))
 	}
 
 	// Update in storage
 	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
 	}
 
 	// Update in upstream manager
@@ -5040,12 +5065,9 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		"enabled": mergedServer.Enabled,
 	}
 
-	// Include diff in response for LLM transparency (T4.3)
-	if configDiff != nil && !configDiff.IsEmpty() {
-		responseMap["changes"] = map[string]interface{}{
-			"modified": configDiff.Modified,
-			"removed":  configDiff.Removed,
-		}
+	// Include diff in response for LLM transparency (T4.3), values masked.
+	if redactedDiff != nil {
+		responseMap["changes"] = redactedDiff
 	}
 
 	if isolationManager := p.getIsolationManager(); isolationManager != nil {
@@ -5056,10 +5078,10 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 
 	jsonResult, err := json.Marshal(responseMap)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil, nil
 	}
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(string(jsonResult)), configDiff, nil
 }
 
 // buildPatchConfigFromRequest constructs a partial ServerConfig from request parameters
