@@ -264,14 +264,14 @@ recomputed per corpus and an explicit `confirmed`/`corrected` verdict.
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T050 [US4] In `bench/payloaddecomp_test.go`: the four shares sum to the whole payload
-- [ ] T051 [US4] In `bench/payloaddecomp_test.go`: the achievable ceiling is recomputed per
+- [x] T050 [US4] In `bench/payloaddecomp_test.go`: the four shares sum to the whole payload
+- [x] T051 [US4] In `bench/payloaddecomp_test.go`: the achievable ceiling is recomputed per
       corpus and never carried forward as a constant — that carry-forward is precisely the error
       spec 102 made. Same file as the task above, so not parallel
 
 ### Implementation for User Story 4
 
-- [ ] T052 [US4] Implement the decomposition in `bench/payloaddecomp.go` over at least two fleet
+- [x] T052 [US4] Implement the decomposition in `bench/payloaddecomp.go` over at least two fleet
       shapes (the 45-tool reference corpus and the 527-tool snapshot)
 - [ ] T053 [US4] Emit the `payload_decomposition` block from `bench/payloaddecomp.go` with a
       populated `accounting_source` and an explicit `spec102_verdict` (`confirmed` or
