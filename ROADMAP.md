@@ -48,7 +48,6 @@ graph LR
   tool_graph["Tool co-occurrence graph (experimental,…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
-  discovery_eval_harness["Discovery-quality eval harness (Spec 06…"]
 
   scanner_v2 --> sandbox_isolation
   ux_audit --> action_log_transparency
@@ -61,17 +60,16 @@ graph LR
   schema_deferred --> token_bench
   analytics_dashboard --> tool_graph
   telemetry_identity --> telemetry_v7_churn
-  token_bench --> discovery_eval_harness
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,discovery_eval_harness done;
+  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred done;
   class ux_audit,action_log_transparency,telemetry_identity,telemetry_v7_churn in_progress;
   class tpa_db,remote_access_tunnel,token_bench,tool_graph todo;
 ```
 
-**Independent epics** (14) — no cross-epic prerequisites; each stands alone:
+**Independent epics** (15) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🔵 **Planning/docs truth automation** — In progress · P2
@@ -87,6 +85,7 @@ graph LR
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
+- 🟢 **Discovery-quality eval harness (Spec 065 second half)** — Done · P3
 
 ## Epic details
 
@@ -743,7 +742,7 @@ graph LR
 <details>
 <summary>🟢 Discovery-quality eval harness (Spec 065 second half) — Done · P3</summary>
 
-> DONE — 2026-08-31 audit: both halves shipped INDEPENDENTLY, not via token-bench-harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note it is REPORT-ONLY on pull requests (continue-on-error, npx/uvx fetch flake) and blocks only on the nightly schedule, so promoting it to PR-blocking after a green soak is still open (MCP-742). A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness.
+> DONE — 2026-08-31 audit: both halves shipped INDEPENDENTLY, not via token-bench-harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note continue-on-error is scoped to github.event_name == 'pull_request', so the job is REPORT-ONLY on PRs (npx/uvx fetch flake) and BLOCKING on both the nightly schedule and manual workflow_dispatch runs. Promoting it to PR-blocking after a green soak is still open (MCP-742). NB the workflow's own inline comment says 'blocking on the nightly schedule' and omits workflow_dispatch. A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness.
 
 Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 
