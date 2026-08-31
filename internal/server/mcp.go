@@ -4734,7 +4734,15 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 		p.mainServer.OnUpstreamServerChange()
 
-		// Spec 024: Emit config change activity for server addition
+		// Spec 024: Emit config change activity for server addition.
+		//
+		// Issue #1146 (review round 3): this is a SECOND activity row for the
+		// same `add`, built from the resolved values rather than the request
+		// map, so it does not pass through activityArgsFromRequest. It has the
+		// same durability class — BBolt, SSE, `mcpproxy activity list` — and
+		// `url` routinely carries a credential in its query string, so it gets
+		// the same redaction. Masking one row and publishing the other is not a
+		// redaction policy.
 		newValues := map[string]interface{}{
 			"protocol":    protocol,
 			"enabled":     enabled,
@@ -4746,7 +4754,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		if command != "" {
 			newValues["command"] = command
 		}
-		p.mainServer.runtime.EmitActivityConfigChange("server_added", name, "mcp", nil, nil, newValues)
+		p.mainServer.runtime.EmitActivityConfigChange("server_added", name, "mcp", nil, nil, redactActivityConfigValues(newValues))
 	}
 
 	// Wait briefly for supervisor to reconcile and connect (if enabled)

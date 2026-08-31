@@ -129,9 +129,12 @@ func TestActivityArgs_KeyringReferencePassesThrough(t *testing.T) {
 	assert.Equal(t, "${keyring:gh}", env["API_KEY"])
 }
 
-// (b””) A malformed *_json parameter must still be recorded (scrubbed and
-// capped), not silently dropped — a rejected mutation is audit-relevant too.
-func TestActivityArgs_MalformedJSONParamIsScrubbedNotDropped(t *testing.T) {
+// (b””) A malformed *_json parameter must still be RECORDED — a rejected
+// mutation is audit-relevant too — but not recorded verbatim: review round 3
+// showed the old heuristic string scrubbing is regex-shaped and misses a
+// payload that is merely malformed, so the placeholder reports that the
+// parameter was sent, and its size, and withholds the bytes.
+func TestActivityArgs_MalformedJSONParamIsRecordedAsPlaceholder(t *testing.T) {
 	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
 		Name: "upstream_servers",
 		Arguments: map[string]interface{}{
@@ -142,7 +145,7 @@ func TestActivityArgs_MalformedJSONParamIsScrubbedNotDropped(t *testing.T) {
 	}}
 	args := activityArgsFromRequest(req)
 	require.Contains(t, args, "env_json")
-	assert.Equal(t, `{not json`, args["env_json"])
+	assert.Equal(t, "<unparsable json omitted: 9 bytes>", args["env_json"])
 }
 
 // Over-masking is the safe direction, but the log must stay readable: ordinary

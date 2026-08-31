@@ -47,6 +47,28 @@ var sensitiveHeaderSegments = map[string]bool{
 
 var headerNameSegmentPattern = regexp.MustCompile(`[a-z0-9]+`)
 
+// headerNameCamelSegmentPattern splits a CamelCase header name on its case
+// transitions. Issue #1146 (review round 3): the delimiter-based pass above
+// only ever sees whole `-`/`_`-separated segments, so `X-AuthToken` collapsed
+// to the single segment "authtoken", matched nothing, and a credential under a
+// custom header name was recorded and logged in the clear. Splitting on case
+// transitions as well recovers "Auth" and "Token" without reopening the
+// substring false positives the segment rule exists to prevent: "Author" and
+// "Monkey" are still single segments that equal no marker.
+//
+// Only mixed-case words are extracted here — an all-caps run like
+// `X-CUSTOM-TOKEN` has no case transition to split on and is already covered by
+// the delimiter pass.
+var headerNameCamelSegmentPattern = regexp.MustCompile(`[A-Z][a-z0-9]*`)
+
+// IsSensitiveHeaderName reports whether an HTTP header NAME looks like it
+// carries a credential. Exported for callers that must decide masking from a
+// name they hold apart from the value (the activity/audit redactor, issue
+// #1146) so the rule stays defined in exactly one place.
+func IsSensitiveHeaderName(name string) bool {
+	return isSensitiveHeaderKey(name)
+}
+
 func isSensitiveHeaderKey(name string) bool {
 	if sensitiveHeaders[strings.ToLower(name)] {
 		return true
@@ -54,6 +76,12 @@ func isSensitiveHeaderKey(name string) bool {
 
 	for _, segment := range headerNameSegmentPattern.FindAllString(strings.ToLower(name), -1) {
 		if sensitiveHeaderSegments[segment] {
+			return true
+		}
+	}
+
+	for _, segment := range headerNameCamelSegmentPattern.FindAllString(name, -1) {
+		if sensitiveHeaderSegments[strings.ToLower(segment)] {
 			return true
 		}
 	}
@@ -159,13 +187,28 @@ func RedactHeaders(headers http.Header) map[string]string {
 // "Convert to secret" affordance work on the UI side because the user
 // can confirm a recognisable suffix before approving.
 func RedactStringHeaders(headers map[string]string) map[string]string {
+	return RedactStringHeadersWith(headers, MaskValue)
+}
+
+// RedactStringHeadersWith is RedactStringHeaders with a caller-chosen mask.
+//
+// Issue #1146 (review round 3): MaskValue's `••••<last2> (<N> chars)` rendering
+// is a deliberate trade for the INTERACTIVE surfaces — it lets an operator
+// recognise which token is configured, and the write path (UnmaskHeaders)
+// depends on being able to recognise it when a client echoes it back. On the
+// AUDIT surfaces that trade is wrong: those rows are persisted, streamed and
+// exported, so the length and trailing bytes become a durable fingerprint of
+// every credential. Those callers pass AuditMaskValue instead. Splitting the
+// mask out — rather than forking the "which name is sensitive" rules — keeps
+// one definition of sensitivity behind both renderings.
+func RedactStringHeadersWith(headers map[string]string, mask func(string) string) map[string]string {
 	if headers == nil {
 		return nil
 	}
 	redacted := make(map[string]string, len(headers))
 	for key, value := range headers {
 		if isSensitiveHeaderKey(key) {
-			redacted[key] = MaskValue(value)
+			redacted[key] = mask(value)
 		} else {
 			redacted[key] = RedactSensitiveData(value)
 		}
@@ -228,12 +271,18 @@ func isSensitiveEnvKey(name string) bool {
 // with a RedactSensitiveData pass over the value as a defence-in-depth fallback
 // for embedded secrets (it leaves ordinary values like `debug` untouched).
 func RedactEnvValues(env map[string]string) map[string]string {
+	return RedactEnvValuesWith(env, MaskValue)
+}
+
+// RedactEnvValuesWith is RedactEnvValues with a caller-chosen mask. See
+// RedactStringHeadersWith for why the audit surfaces need a different one.
+func RedactEnvValuesWith(env map[string]string, mask func(string) string) map[string]string {
 	if env == nil {
 		return nil
 	}
 	redacted := make(map[string]string, len(env))
 	for key, value := range env {
-		redacted[key] = maskedEnvValue(key, value)
+		redacted[key] = maskedEnvValueWith(key, value, mask)
 	}
 	return redacted
 }
@@ -249,11 +298,15 @@ func RedactEnvValues(env map[string]string) map[string]string {
 // embedded userinfo password and any credential query params are masked while
 // scheme/host/db stay readable.
 func maskedEnvValue(key, value string) string {
+	return maskedEnvValueWith(key, value, MaskValue)
+}
+
+func maskedEnvValueWith(key, value string, mask func(string) string) string {
 	if isSensitiveEnvKey(key) {
-		return MaskValue(value)
+		return mask(value)
 	}
 	if strings.Contains(value, "://") {
-		return RedactURLQueryParams(value)
+		return RedactURLQueryParamsWith(value, mask)
 	}
 	return RedactSensitiveData(value)
 }
@@ -312,6 +365,12 @@ func isSensitiveQueryParam(name string) bool {
 // are labels, not secrets. A URL with no query, or no sensitive params, is
 // returned unchanged. On parse failure it falls back to the regex RedactURL.
 func RedactURLQueryParams(rawURL string) string {
+	return RedactURLQueryParamsWith(rawURL, MaskValue)
+}
+
+// RedactURLQueryParamsWith is RedactURLQueryParams with a caller-chosen mask.
+// See RedactStringHeadersWith for why the audit surfaces need a different one.
+func RedactURLQueryParamsWith(rawURL string, mask func(string) string) string {
 	if rawURL == "" {
 		return rawURL
 	}
@@ -328,7 +387,7 @@ func RedactURLQueryParams(rawURL string) string {
 	// below.
 	if u.User != nil {
 		if pw, hasPW := u.User.Password(); hasPW && !isConfigReference(pw) {
-			u.User = url.UserPassword(u.User.Username(), MaskValue(pw))
+			u.User = url.UserPassword(u.User.Username(), mask(pw))
 			changed = true
 		}
 	}
@@ -361,7 +420,7 @@ func RedactURLQueryParams(rawURL string) string {
 			if isConfigReference(decVal) {
 				continue
 			}
-			parts[i] = key + "=" + url.QueryEscape(MaskValue(decVal))
+			parts[i] = key + "=" + url.QueryEscape(mask(decVal))
 			queryChanged = true
 		}
 		if queryChanged {
@@ -390,6 +449,39 @@ var configRefPattern = regexp.MustCompile(`^\$\{(?:keyring|env):[^}]+\}$`)
 // with a reference but has extra bytes is NOT a reference and is masked.
 func isConfigReference(v string) bool {
 	return configRefPattern.MatchString(v)
+}
+
+// IsConfigReference is the exported form of isConfigReference, for callers
+// outside this package that must decide whether a value is a secret-store
+// LABEL rather than a secret (issue #1146: the activity redactor runs a
+// value-shaped detector over everything the name rules pass through, and a
+// reference must not be mangled by it).
+func IsConfigReference(v string) bool {
+	return isConfigReference(v)
+}
+
+// AuditMaskValue is the mask for surfaces that PERSIST and EXPORT what they
+// redact — the activity store, its SSE payloads and `mcpproxy activity list`
+// (issue #1146, review round 3).
+//
+// Unlike MaskValue it carries no length and no trailing bytes. On an
+// interactive surface those help an operator recognise which token is
+// configured and are re-read within seconds; written into an audit row they
+// become a durable fingerprint of the credential — a correlation handle across
+// records and a materially smaller search space for a low-entropy secret. The
+// audit surfaces have no need for the affordance, so they do not pay for it.
+//
+// ${keyring:…} / ${env:…} references still pass through unchanged: they are
+// labels pointing at the secret store, and masking them would erase exactly the
+// information the audit row exists to carry.
+func AuditMaskValue(v string) string {
+	if v == "" {
+		return "(empty)"
+	}
+	if isConfigReference(v) {
+		return v
+	}
+	return "••••"
 }
 
 // MaskValue renders a string secret as `••••<last2> (<N> chars)` for
