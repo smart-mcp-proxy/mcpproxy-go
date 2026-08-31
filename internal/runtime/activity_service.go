@@ -852,6 +852,12 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	// Extract content trust metadata if present (Spec 035)
 	contentTrust := getStringPayload(evt.Payload, "content_trust")
 
+	// Spec 103: the recorded response can be larger than the one the agent
+	// received (retrieve_tools stores the full pre-truncation text). Carry the
+	// flag onto the record so a cost recomputation can exclude it instead of
+	// tokenizing text the agent never paid for.
+	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
+
 	metadata := map[string]interface{}{
 		"internal_tool_name": internalToolName,
 	}
@@ -877,20 +883,21 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	metadata = s.withClientInfo(metadata, sessionID)
 
 	record := &storage.ActivityRecord{
-		Type:          storage.ActivityTypeInternalToolCall,
-		Source:        storage.ActivitySourceMCP,
-		ToolName:      internalToolName,
-		ServerName:    targetServer,
-		Arguments:     arguments,
-		Response:      responseStr,
-		Status:        status,
-		ErrorMessage:  errorMsg,
-		DurationMs:    durationMs,
-		Metadata:      metadata,
-		Timestamp:     evt.Timestamp,
-		SessionID:     sessionID,
-		WorkSessionID: s.resolveWorkSession(sessionID),
-		RequestID:     requestID,
+		Type:              storage.ActivityTypeInternalToolCall,
+		Source:            storage.ActivitySourceMCP,
+		ToolName:          internalToolName,
+		ServerName:        targetServer,
+		Arguments:         arguments,
+		Response:          responseStr,
+		Status:            status,
+		ErrorMessage:      errorMsg,
+		DurationMs:        durationMs,
+		Metadata:          metadata,
+		Timestamp:         evt.Timestamp,
+		SessionID:         sessionID,
+		WorkSessionID:     s.resolveWorkSession(sessionID),
+		RequestID:         requestID,
+		ResponseTruncated: responseTruncated,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (server edition)

@@ -807,9 +807,37 @@ func mintActivityRequestID(serverName, toolName string) string {
 // targetServer and targetTool are used for call_tool_* handlers
 // arguments contains the input parameters, response contains the output
 // intent is the intent declaration metadata
+//
+// This is the whole-response form: the built-in returned to the agent exactly
+// the text it recorded. Handlers that SHAPE their text before returning it —
+// today only retrieve_tools, which is subject to tool_response_limit — must use
+// emitActivityInternalToolCallTruncated instead, so the record says so.
 func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
+	p.emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, false)
+}
+
+// emitActivityInternalToolCallTruncated is emitActivityInternalToolCall for a
+// handler whose recorded response is LARGER than what the agent received,
+// mirroring the responseTruncated argument the non-internal path already
+// carries through emitActivityToolCallCompleted.
+//
+// Why the flag has to reach the record and not just the log (Spec 103): the
+// activity log deliberately stores the FULL pre-truncation retrieve_tools
+// response while the agent only ever consumed the cut text. A record that does
+// not say it was truncated is indistinguishable from a complete one, so anything
+// that recomputes cost from the log — the token benchmark's replay loader is the
+// motivating consumer — tokenizes text the agent never paid for and OVERSTATES
+// what mcpproxy cost. That is the one direction of error the benchmark exists to
+// prevent, and it is not detectable after the fact.
+//
+// The flag reaches the stored record through Runtime.EmitActivityInternalToolCallTruncated
+// (internal/runtime/event_bus.go), which carries "response_truncated" in the
+// event payload, and ActivityService.handleInternalToolCall, which reads it back
+// onto ActivityRecord.ResponseTruncated — the same two hops the non-internal
+// path has always used.
+func (p *MCPProxyServer) emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseTruncated bool) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust)
+		p.mainServer.runtime.EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, responseTruncated)
 	}
 }
 
@@ -2060,8 +2088,10 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	// Emit success event with args and response (Spec 024). The FULL response
 	// goes to the activity log — truncation only shapes what the agent sees
-	// (same order handleReadCache uses).
-	p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
+	// (same order handleReadCache uses). Which is exactly why wasTruncated has
+	// to travel with it: the stored response is not what the agent paid for, and
+	// nothing downstream can tell the two apart without the flag (Spec 103).
+	p.emitActivityInternalToolCallTruncated("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "", wasTruncated)
 
 	return mcp.NewToolResultText(text), nil
 }

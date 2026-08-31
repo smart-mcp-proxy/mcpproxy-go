@@ -24,13 +24,13 @@ changes in `internal/`. Paths below are repo-relative and exact.
 
 **Purpose**: Make the deterministic half reproducible before anything depends on it.
 
-- [ ] T001 Set `TIKTOKEN_CACHE_DIR` in `.github/workflows/bench.yml` AND add a cache
+- [x] T001 Set `TIKTOKEN_CACHE_DIR` in `.github/workflows/bench.yml` AND add a cache
       restore/save step so the vocabulary is present offline — setting the variable alone only
       names a cache, it does not fill one (research.md "Cross-cutting: reproducibility hazards")
-- [ ] T002 [P] Add a PR-triggered required workflow step asserting no report is tracked:
+- [x] T002 [P] Add a PR-triggered required workflow step asserting no report is tracked:
       `test -z "$(git ls-files bench/results)"`. It must NOT live in `.github/workflows/bench.yml`,
       which triggers only on `v*` tags and `workflow_dispatch` and so cannot block a PR (SC-011)
-- [ ] T003 [P] Document the replay + agent-loop entry points in `bench/README.md`, including the
+- [x] T003 [P] Document the replay + agent-loop entry points in `bench/README.md`, including the
       mandatory fleet input and the bodies-off/bodies-on distinction (Principle VI)
 
 ---
@@ -42,16 +42,16 @@ until this phase completes.**
 
 **Production changes (both small, both required before US1 can be honest). Tests first:**
 
-- [ ] T004 Write a FAILING test asserting the export projection carries both byte fields, in
+- [x] T004 Write a FAILING test asserting the export projection carries both byte fields, in
       `internal/httpapi/activity_test.go` (TDD, Principle V — must precede the DTO change below)
-- [ ] T005 Write a FAILING test asserting a truncated `retrieve_tools` call produces an activity
+- [x] T005 Write a FAILING test asserting a truncated `retrieve_tools` call produces an activity
       record flagged truncated. Create `internal/server/mcp_activity_truncation_test.go` — no
       such file exists today (must precede the truncation-propagation task below)
-- [ ] T006 Add `RequestBytes` / `ResponseBytes` to the export DTO in
+- [x] T006 Add `RequestBytes` / `ResponseBytes` to the export DTO in
       `internal/contracts/activity.go` and copy them in `storageToContractActivityForExport`
       in `internal/httpapi/activity.go`. They exist on the storage record as pre-truncation
       measurements but never reach the export (contracts/replay-input.md). Turns the export-projection test green
-- [ ] T007 Propagate the already-computed `wasTruncated` into the internal tool-call activity
+- [x] T007 Propagate the already-computed `wasTruncated` into the internal tool-call activity
       emit: extend `emitActivityInternalToolCall` in `internal/server/mcp.go:810` and pass the
       value the `retrieve_tools` handler already holds at `internal/server/mcp.go:2019-2035`.
       **Without this a truncated `retrieve_tools` record cannot be identified and the loader
@@ -60,39 +60,39 @@ until this phase completes.**
 
 **Report envelope (additive, no `report_version` bump). Tests first:**
 
-- [ ] T008 Write FAILING tests in `bench/reportv2_test.go` asserting: the new blocks validate
+- [x] T008 Write FAILING tests in `bench/reportv2_test.go` asserting: the new blocks validate
       against the schema; every emitted block carries a populated `accounting_source`; and each
       new row type carries a `provenance` value from the closed enum. A field that exists but is
       never set does not satisfy the contract
-- [ ] T009 Add a `provenance` field to every new row type and constrain it to
+- [x] T009 Add a `provenance` field to every new row type and constrain it to
       `measured|computed|estimated` in `bench/reportv2.go`. Section-level provenance cannot
       express FR-013, which lets measured and estimated figures coexist in one block
-- [ ] T010 Add a per-block `accounting_source` field in `bench/reportv2.go`. **Do NOT narrow
+- [x] T010 Add a per-block `accounting_source` field in `bench/reportv2.go`. **Do NOT narrow
       the existing document-level `Tokenizer` field** — that would be a meaning change requiring
       a version bump (contracts/report-v2-additions.md). Same file as the provenance task, so
       not parallel
-- [ ] T011 Declare the new optional blocks (`replay`, `agent_loop`, `payload_decomposition`) in
+- [x] T011 Declare the new optional blocks (`replay`, `agent_loop`, `payload_decomposition`) in
       `specs/083-discovery-profiler/contracts/report-v2.schema.json`. The schema has no
       `additionalProperties: false`, so an undeclared block would validate silently — declare
       them anyway, the schema file is the reviewed contract
 
 **Mode matrix:**
 
-- [ ] T012 Write FAILING tests for the matrix in `bench/modematrix_test.go`: exactly 5 distinct
+- [x] T012 Write FAILING tests for the matrix in `bench/modematrix_test.go`: exactly 5 distinct
       cells; the 7 redundant combinations each produce a skip row naming the cell it collapses
       onto; `code_execution` + `enable_code_execution:false` yields reason `degenerate`
-- [ ] T013 Write FAILING tests in `bench/modematrix_test.go` for the FR-016 capability
+- [x] T013 Write FAILING tests in `bench/modematrix_test.go` for the FR-016 capability
       conditions — batching, stored scripts and validate-before-dispatch as BINARY conditions
       over the cells where each is available, with the report enumerating applicable rows.
       Same file as the task above, so not parallel
-- [ ] T014 Implement `bench/modematrix.go` per `contracts/mode-matrix.md`, including the FR-016
+- [x] T014 Implement `bench/modematrix.go` per `contracts/mode-matrix.md`, including the FR-016
       capability conditions. **Compose existing pieces through structural interfaces — do not
       re-derive any serialization.** Reuse mode constants and proxy catalogs
       (`bench/tokens.go`), full rendering (`bench/arms/baseline.go`), compact measurement
       (`bench/flipgate.go`), deferred-direct rendering (`bench/arms/directdeferred.go`), MCP
       transport (`bench/mcpcaller.go`). Reuse the existing skip shape
       (`ArmResult.Skipped`/`SkipReason`, `SkippedArmResult`)
-- [ ] T015 Map a cell to its endpoint URL in `bench/modematrix.go`. The routing-mode axis needs
+- [x] T015 Map a cell to its endpoint URL in `bench/modematrix.go`. The routing-mode axis needs
       no config change — all three routing-mode servers are mounted at startup
       (`internal/server/server.go:2514-2536`). The two serialization axes need config but both
       hot-reload, so the matrix crosses on one long-lived instance with a config apply between
@@ -113,66 +113,66 @@ report beside them — and that two runs are identical modulo `generated_at`.
 
 ### Tests for User Story 1 ⚠️ (write first, confirm they fail)
 
-- [ ] T016 [P] [US1] Loader tests in `bench/replaycorpus/load_test.go`: JSONL decoding; CSV
+- [x] T016 [P] [US1] Loader tests in `bench/replaycorpus/load_test.go`: JSONL decoding; CSV
       rejected; grouping by `work_session_id`; `parent_id` ↔ `request_id` join for
       code-execution sub-calls
-- [ ] T017 [P] [US1] Usability-flag tests in `bench/replaycorpus/flags_test.go`: truncated,
+- [x] T017 [P] [US1] Usability-flag tests in `bench/replaycorpus/flags_test.go`: truncated,
       bodies-missing, sensitive and unreplayable are each detected, and every exclusion is
       counted — **assert a truncated record never contributes silently** (FR-002, SC-008)
-- [ ] T018 [P] [US1] Privacy tests in `bench/replaycorpus/privacy_test.go`: no body text escapes
+- [x] T018 [P] [US1] Privacy tests in `bench/replaycorpus/privacy_test.go`: no body text escapes
       the package; tokenization happens inside the loader and only counts cross the boundary;
       **bodies-off is the DEFAULT**; bodies-on requires an explicit opt-in and emits a warning
       (FR-006, SC-009, contracts/replay-input.md)
-- [ ] T019 [US1] In `bench/replay_test.go`: a recording-only invocation (no fleet input) is a
+- [x] T019 [US1] In `bench/replay_test.go`: a recording-only invocation (no fleet input) is a
       hard error, not a degraded run
-- [ ] T020 [US1] In `bench/replay_test.go`: no cell reports an absolute complete-workload cost
+- [x] T020 [US1] In `bench/replay_test.go`: no cell reports an absolute complete-workload cost
       bodies-off, and only the `direct_full` vs `direct_deferred` delta is produced. Same file
       as the task above, so not parallel
-- [ ] T021 [US1] In `bench/replay_test.go`: two runs over the same inputs are byte-identical
+- [x] T021 [US1] In `bench/replay_test.go`: two runs over the same inputs are byte-identical
       after `generated_at` is excluded (SC-002). Same file as the task above, so not parallel
 
 ### Implementation for User Story 1
 
-- [ ] T022 [P] [US1] Create `bench/replaycorpus/load.go` — decode `contracts.ActivityRecord`
+- [x] T022 [P] [US1] Create `bench/replaycorpus/load.go` — decode `contracts.ActivityRecord`
       JSONL from `mcpproxy activity export --format json`. **This package MUST import nothing
       from `bench`**, or `bench/replay.go` cannot import it without a cycle (`bench/corpusio`
       imports `bench`, which is why mirroring it would fail)
-- [ ] T023 [P] [US1] Create `bench/replaycorpus/group.go` — group by `work_session_id`, join
+- [x] T023 [P] [US1] Create `bench/replaycorpus/group.go` — group by `work_session_id`, join
       code-execution sub-calls via `parent_id` ↔ `request_id` so they are neither
       double-counted nor orphaned
-- [ ] T024 [US1] Create `bench/replaycorpus/flags.go` — compute usability flags once at load.
+- [x] T024 [US1] Create `bench/replaycorpus/flags.go` — compute usability flags once at load.
       Handle the two byte-coverage gaps: internal `retrieve_tools` records carry no byte counts,
       and code-execution sub-calls emit both as zero
       (`internal/server/mcp_code_execution.go:811-818`); both fall to exclusion accounting
-- [ ] T025 [US1] Enforce the privacy posture in `bench/replaycorpus/load.go`: bodies-off by
+- [x] T025 [US1] Enforce the privacy posture in `bench/replaycorpus/load.go`: bodies-off by
       DEFAULT, bodies-on only via explicit opt-in that prints a warning, and refuse an input
       path inside the repository working tree (replay inputs live outside it and are never
       committed). Turns the privacy test green
-- [ ] T026 [US1] In `bench/replaycorpus/tokenize.go`, tokenize inside the loader for bodies-on
+- [x] T026 [US1] In `bench/replaycorpus/tokenize.go`, tokenize inside the loader for bodies-on
       runs and emit counts only, so no text crosses the boundary. Exclude (or re-apply
       truncation to) truncated `retrieve_tools` records — the log stores the FULL pre-truncation
       response while the agent consumed truncated text, so tokenizing it as-is would OVERSTATE
       cost
-- [ ] T027 [US1] Create `bench/replay.go` — per-cell menu cost from the fleet input, plus the
+- [x] T027 [US1] Create `bench/replay.go` — per-cell menu cost from the fleet input, plus the
       direct-cell delta. Reuse `arms.CanonicalToolText` / `CountToolWithSchema` for the tool
       surface and the `bench/respcost.go` span-partition technique for responses, so components
       sum exactly. Populate the `replay` block's `accounting_source` as the deterministic
       tokenizer
-- [ ] T028 [US1] Add the `-replay` flag plus a mandatory fleet input to `bench/cmd/bench/main.go`
+- [x] T028 [US1] Add the `-replay` flag plus a mandatory fleet input to `bench/cmd/bench/main.go`
       as a top-level branch beside the profiler check, emitting a `replay` block into `ReportV2`
       (not an `OfflineSection` — replay crosses the matrix, it is not one more corpus)
-- [ ] T029 [US1] Exclude or pin `generated_at` for replay reports in `bench/replay.go` so
+- [x] T029 [US1] Exclude or pin `generated_at` for replay reports in `bench/replay.go` so
       SC-002's determinism check is meaningful
-- [ ] T030 [US1] Write a FAILING assertion in `bench/replay_test.go`: no replay figure may be
+- [x] T030 [US1] Write a FAILING assertion in `bench/replay_test.go`: no replay figure may be
       emitted without the counterfactual marker (FR-004)
-- [ ] T031 [US1] Label every replay figure as a COUNTERFACTUAL over recorded traffic, not
+- [x] T031 [US1] Label every replay figure as a COUNTERFACTUAL over recorded traffic, not
       observed agent behaviour, in `bench/replay.go` — FR-004 forbids presenting it as observed,
       and the Replay Boundary is the spec's most load-bearing constraint. Turns the assertion
       above green
-- [ ] T032 [US1] Render the `replay` block in the dashboard template in `bench/report.go`,
+- [x] T032 [US1] Render the `replay` block in the dashboard template in `bench/report.go`,
       showing the exclusion report, the counterfactual label, and that figures are scored against
       **today's** fleet, not the fleet as recorded
-- [ ] T033 [US1] Document in `bench/README.md` how to delete a replay input when finished
+- [x] T033 [US1] Document in `bench/README.md` how to delete a replay input when finished
       (contracts/replay-input.md privacy rule 6)
 
 **Checkpoint**: US1 is independently shippable and delivers real-workload numbers with no model spend.
@@ -264,16 +264,16 @@ recomputed per corpus and an explicit `confirmed`/`corrected` verdict.
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T050 [US4] In `bench/payloaddecomp_test.go`: the four shares sum to the whole payload
-- [ ] T051 [US4] In `bench/payloaddecomp_test.go`: the achievable ceiling is recomputed per
+- [x] T050 [US4] In `bench/payloaddecomp_test.go`: the four shares sum to the whole payload
+- [x] T051 [US4] In `bench/payloaddecomp_test.go`: the achievable ceiling is recomputed per
       corpus and never carried forward as a constant — that carry-forward is precisely the error
       spec 102 made. Same file as the task above, so not parallel
 
 ### Implementation for User Story 4
 
-- [ ] T052 [US4] Implement the decomposition in `bench/payloaddecomp.go` over at least two fleet
+- [x] T052 [US4] Implement the decomposition in `bench/payloaddecomp.go` over at least two fleet
       shapes (the 45-tool reference corpus and the 527-tool snapshot)
-- [ ] T053 [US4] Emit the `payload_decomposition` block from `bench/payloaddecomp.go` with a
+- [x] T053 [US4] Emit the `payload_decomposition` block from `bench/payloaddecomp.go` with a
       populated `accounting_source` and an explicit `spec102_verdict` (`confirmed` or
       `corrected`, with the delta)
 

@@ -854,3 +854,65 @@ func keysOf(m map[string]interface{}) []string {
 	}
 	return keys
 }
+
+// The pre-truncation byte lengths are the only cost signal a bodies-off export
+// carries: with payloads suppressed there is no text left to measure, so a
+// consumer that has to account for a record it cannot read (spec 103's replay
+// loader) has nothing but these two numbers. They are byte LENGTHS, not token
+// counts — they support an explicit estimate, never a measured figure — but
+// without them a truncated record can only be dropped, and dropped records
+// understate a workload silently. They must therefore survive the export
+// projection in BOTH modes: bodies-off is the default and the one that needs
+// them most.
+func TestActivityExport_CarriesPreTruncationByteLengths(t *testing.T) {
+	record := &storage.ActivityRecord{
+		ID:            "activity-byte-lengths",
+		Type:          "tool_call",
+		ServerName:    "github",
+		ToolName:      "create_issue",
+		Status:        "success",
+		Timestamp:     time.Now(),
+		RequestBytes:  1234,
+		ResponseBytes: 98765,
+	}
+
+	withoutBodies := storageToContractActivityForExport(record, false)
+	assert.Equal(t, 1234, withoutBodies.RequestBytes,
+		"bodies-off export must still carry the request byte length")
+	assert.Equal(t, 98765, withoutBodies.ResponseBytes,
+		"bodies-off export must still carry the pre-truncation response byte length")
+
+	withBodies := storageToContractActivityForExport(record, true)
+	assert.Equal(t, 1234, withBodies.RequestBytes)
+	assert.Equal(t, 98765, withBodies.ResponseBytes)
+
+	// The wire names are fixed by contracts/replay-input.md and mirror the
+	// storage record's own tags, so a consumer reads one vocabulary end to end.
+	raw, err := json.Marshal(withoutBodies)
+	require.NoError(t, err)
+	var wire map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	assert.Equal(t, float64(1234), wire["request_bytes"])
+	assert.Equal(t, float64(98765), wire["response_bytes"])
+}
+
+// Zero means "unknown" on the storage record (legacy rows, and the code
+// execution sub-call path which records both counts as zero), so the fields are
+// omitempty: an absent key tells the loader to fall to exclusion accounting,
+// while a present zero would read as a free call and silently understate cost.
+func TestActivityExport_OmitsUnknownByteLengths(t *testing.T) {
+	record := &storage.ActivityRecord{
+		ID:        "activity-legacy-no-bytes",
+		Type:      "tool_call",
+		Status:    "success",
+		Timestamp: time.Now(),
+	}
+
+	raw, err := json.Marshal(storageToContractActivityForExport(record, false))
+	require.NoError(t, err)
+
+	var wire map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	assert.NotContains(t, wire, "request_bytes", "unknown must be absent, not zero")
+	assert.NotContains(t, wire, "response_bytes", "unknown must be absent, not zero")
+}

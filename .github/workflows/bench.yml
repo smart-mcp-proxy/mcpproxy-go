@@ -58,6 +58,30 @@ jobs:
       - name: Set up uv (uvx-launched MCP reference servers)
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
 
+      # tiktoken (bench/tokens.go) fetches its BPE vocabulary from a remote host
+      # the first time an encoding is loaded, unless TIKTOKEN_CACHE_DIR points at
+      # a directory that already holds it. Naming the directory does not fill it,
+      # so the restore below is the half that actually buys offline reproduction:
+      # on a hit the vocabulary is on disk before the first bench run, on a miss
+      # the run fetches it once and the post-job save publishes it for next time.
+      # Kept under RUNNER_TEMP so the vocabulary never lands in the working tree
+      # that Cloudflare Pages publishes.
+      - name: Configure tiktoken vocabulary cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/tiktoken"
+          echo "TIKTOKEN_CACHE_DIR=$RUNNER_TEMP/tiktoken" >> "$GITHUB_ENV"
+
+      # Keyed on bench/tokens.go because that file pins the encoding name
+      # (DefaultEncoding = cl100k_base); the prefix restore-key still serves an
+      # unrelated edit to that file, at worst re-fetching one vocabulary.
+      - name: Restore tiktoken vocabulary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tiktoken
+          key: ${{ runner.os }}-tiktoken-${{ hashFiles('bench/tokens.go') }}
+          restore-keys: |
+            ${{ runner.os }}-tiktoken-
+
       - name: Build mcpproxy (personal edition)
         run: go build -o mcpproxy ./cmd/mcpproxy
 
@@ -248,6 +272,22 @@ jobs:
 
       - name: Set up uv (ToolRet parquet fetch)
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+
+      # Same tiktoken vocabulary cache as the dashboard job above (this job also
+      # runs the bench binary, so it needs the vocabulary on disk); see there for
+      # why naming the directory is not enough on its own.
+      - name: Configure tiktoken vocabulary cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/tiktoken"
+          echo "TIKTOKEN_CACHE_DIR=$RUNNER_TEMP/tiktoken" >> "$GITHUB_ENV"
+
+      - name: Restore tiktoken vocabulary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tiktoken
+          key: ${{ runner.os }}-tiktoken-${{ hashFiles('bench/tokens.go') }}
+          restore-keys: |
+            ${{ runner.os }}-tiktoken-
 
       # Pinned HF revisions live inside the script; bumping a pin is a
       # reviewed event. Cache lands in bench/results/cache/toolret/<revision>/.

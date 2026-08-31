@@ -471,6 +471,13 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		RequestID:         a.RequestID,
 		ParentID:          a.ParentID,
 		Metadata:          a.Metadata,
+		// Pre-truncation byte lengths (Spec 069 A1). Copied unconditionally,
+		// NOT under includeBodies: they are sizes, not content, and the
+		// bodies-off export is exactly the case where they are the only cost
+		// signal left (spec 103). Gating them on the bodies flag would leave the
+		// default export with nothing to account a suppressed payload by.
+		RequestBytes:  a.RequestBytes,
+		ResponseBytes: a.ResponseBytes,
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
 		DetectionTypes:   detectionTypes,
