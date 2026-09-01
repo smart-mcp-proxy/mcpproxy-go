@@ -72,11 +72,21 @@ except KeyboardInterrupt:
 
 	url := "http://127.0.0.1:" + itoa(port) + "/mcp"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// The budget is generous on purpose. What this test proves is that Spawn and
+	// WaitForURL AGREE on a real listening child — not how fast a CI runner can
+	// start CPython. The original 3s had to cover process spawn + interpreter
+	// startup + the script's own 250ms pre-bind sleep, and a loaded
+	// ubuntu-latest runner blew it (PR #1162: "not reachable in 3s ... connection
+	// refused", while the same test runs in 0.41s locally). Widening the ceiling
+	// costs nothing — a genuinely broken WaitForURL still fails, just later —
+	// and the `elapsed >= 200ms` assertion below still pins the polling
+	// behaviour, because the child's 250ms sleep is what guarantees a first dial
+	// must miss.
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	start := time.Now()
-	err = WaitForURL(ctx, url, 3*time.Second)
+	err = WaitForURL(ctx, url, 30*time.Second)
 	elapsed := time.Since(start)
 	assert.NoError(t, err)
 	assert.GreaterOrEqual(t, elapsed, 200*time.Millisecond, "should have polled while python warmed up")
