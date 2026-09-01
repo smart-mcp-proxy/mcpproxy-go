@@ -200,7 +200,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	}
 
 	logger.Debug("🔐 Attempting OAuth authentication",
-		zap.String("url", c.config.URL))
+		zap.String("url", c.logSafeURL()))
 
 	// Mark OAuth as in progress (local state, coordinator handles cross-goroutine coordination)
 	c.markOAuthInProgress()
@@ -642,7 +642,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	}
 
 	logger.Debug("🔐 Attempting SSE OAuth authentication",
-		zap.String("url", c.config.URL))
+		zap.String("url", c.logSafeURL()))
 
 	// Mark OAuth as in progress
 	c.markOAuthInProgress()
@@ -2093,7 +2093,7 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr er
 	}
 	c.logger.Error("❌ OAuth provider requires a client_id but none is available (DCR unsupported or failed)",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.NamedError("dcr_error", dcrErr),
 		zap.String("help", "Register an OAuth app with the provider and set oauth.client_id in the server config"))
 	details := &contracts.OAuthErrorDetails{

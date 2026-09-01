@@ -116,7 +116,7 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 
 	c.logger.Info("waiting for upstream URL to become reachable",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.Duration("timeout", waitTimeout))
 
 	if err := launcher.WaitForURL(ctx, c.config.URL, waitTimeout); err != nil {
@@ -145,7 +145,7 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 
 	c.logger.Info("upstream URL is reachable",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL))
+		zap.String("url", c.logSafeURL()))
 	return nil
 }
 

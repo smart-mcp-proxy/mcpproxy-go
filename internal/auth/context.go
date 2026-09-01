@@ -25,6 +25,17 @@ type AuthContext struct {
 	DisplayName string // User's display name
 	Role        string // "admin" or "user" (empty for API key / agent token auth)
 	Provider    string // OAuth provider used (e.g., "google", "github")
+
+	// Anonymous marks a context that was NOT authenticated and only carries
+	// admin type for backward compatibility (issue #1148).
+	//
+	// /mcp is deliberately unprotected by default (require_mcp_auth=false) so
+	// MCP clients that cannot send an API key keep working, and the middleware
+	// therefore hands an unauthenticated request an admin context. That is
+	// fine for the operations those clients need — and it is NOT an identity,
+	// so it must not satisfy a check that hands back raw credentials. See
+	// CanRevealSecrets.
+	Anonymous bool
 }
 
 // contextKey is an unexported type used as context key to avoid collisions.
@@ -104,6 +115,40 @@ func AdminContext() *AuthContext {
 	return &AuthContext{
 		Type: AuthTypeAdmin,
 	}
+}
+
+// AnonymousContext returns the back-compat admin context for an
+// UNAUTHENTICATED MCP request (issue #1148).
+//
+// Type stays AuthTypeAdmin on purpose: every existing IsAdmin()-based
+// allowance — ordinary tool calls, retrieve_tools, server add/update/patch,
+// quarantine approvals — behaves exactly as it did, so no MCP client that
+// works today stops working. The only thing the Anonymous bit changes is
+// CanRevealSecrets.
+func AnonymousContext() *AuthContext {
+	return &AuthContext{
+		Type:      AuthTypeAdmin,
+		Anonymous: true,
+	}
+}
+
+// CanRevealSecrets reports whether this caller may be handed RAW credential
+// values (issue #1148) — today, `upstream_servers list` under the opt-in
+// `reveal_secret_headers` flag.
+//
+// It is deliberately stricter than IsAdmin and deliberately nil-safe:
+//
+//   - an unauthenticated /mcp caller is admin for back-compat but has proved no
+//     identity, so it gets masked values like everyone else;
+//   - a nil context (the stdio transport before it installs one, an in-process
+//     caller, a test) is unprivileged rather than admin-by-absence — the
+//     opposite of the `authCtx != nil && !authCtx.IsAdmin()` shape, which lets
+//     the ABSENCE of a token pass a gate that a scoped token fails.
+//
+// Authenticated admins — the API key, a tray/socket connection, stdio, an
+// OAuth admin user in the server edition — are unaffected.
+func (ac *AuthContext) CanRevealSecrets() bool {
+	return ac != nil && ac.IsAdmin() && !ac.Anonymous
 }
 
 // UserContext returns an AuthContext for a regular OAuth-authenticated user.

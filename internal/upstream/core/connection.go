@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 
 	"go.uber.org/zap"
@@ -51,6 +52,24 @@ const (
 // parseOAuthError extracts structured error information from OAuth provider responses
 
 // Connect establishes connection to the upstream server
+// logSafeURL renders the configured upstream URL for a LOG FIELD, with its
+// query credentials masked (issue #1148).
+//
+// Connect() logs the URL on every attempt, to main.log and to the per-server
+// server-<name>.log — and `upstream_servers tail_log` hands the latter to any
+// MCP caller. A URL is one of the commonest places an MCP credential lives
+// (`?token=…`, an Azure SAS `sig=`, an AWS `X-Amz-Signature=`), so the value is
+// masked at the point it is written rather than only where it is read back:
+// the file outlives the process and is readable by anything with disk access.
+//
+// The host and path survive, which is what makes the line diagnostic.
+func (c *Client) logSafeURL() string {
+	if c.config == nil {
+		return ""
+	}
+	return oauth.RedactURLQueryParams(c.config.URL)
+}
+
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -98,7 +117,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.String("command", c.config.Command),
 		zap.String("protocol", c.config.Protocol))
 
@@ -109,7 +128,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Starting connection attempt",
 			zap.String("transport", c.transportType),
-			zap.String("url", c.config.URL),
+			zap.String("url", c.logSafeURL()),
 			zap.String("command", c.config.Command),
 			zap.String("protocol", c.config.Protocol))
 	}
@@ -118,7 +137,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.logger.Debug("🔍 Transport Type Determination",
 		zap.String("server", c.config.Name),
 		zap.String("command", c.config.Command),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.String("protocol", c.config.Protocol),
 		zap.String("determined_transport", c.transportType))
 

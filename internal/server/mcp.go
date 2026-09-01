@@ -3258,12 +3258,17 @@ func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, reques
 
 	// Slim, stable projection mirroring the REST AddedServerSummary so every
 	// surface reports the persisted server identically.
+	// Issue #1148: URL and Args are the two credential-bearing fields of this
+	// summary (a registry entry can carry `?token=…`, and a user-supplied arg
+	// vector routinely carries `--api-key …`). Source them from the redacted
+	// view so the echo cannot republish what the caller just configured.
+	registryView := redactedServerView(cfg, liveRedaction)
 	summary := contracts.AddedServerSummary{
 		Name:        cfg.Name,
 		Protocol:    cfg.Protocol,
 		Command:     cfg.Command,
-		Args:        cfg.Args,
-		URL:         cfg.URL,
+		Args:        redactedArgs(cfg.Args, liveRedaction),
+		URL:         viewString(registryView, "url", cfg.URL),
 		Enabled:     cfg.Enabled,
 		Quarantined: cfg.Quarantined,
 	}
@@ -3415,9 +3420,14 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamText(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
-		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
+		// Issue #1148: the activity store persists in BBolt, streams over SSE
+		// and is exported by `mcpproxy activity list`, so the response is
+		// re-rendered under the AUDIT policy (a fixed marker carrying neither
+		// the secret's length nor its trailing bytes). One net here covers
+		// every current and future operation of this built-in.
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, redactBuiltinResponseForActivity(responseText), nil, "")
 	}
 
 	return result, opErr
@@ -3528,9 +3538,10 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamText(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
-		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
+		// Issue #1148: see the matching net in handleUpstreamServers.
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, redactBuiltinResponseForActivity(responseText), nil, "")
 	}
 
 	return result, opErr
@@ -3748,27 +3759,43 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 
 	// Enhance server list with connection status and Docker isolation info
 	enhancedServers := make([]map[string]interface{}, len(servers))
-	revealHeaders := p.config != nil && p.config.RevealSecretHeaders
+	// Redact sensitive header values (Authorization, X-API-Key, Cookie, etc.),
+	// env-var secrets, URL query credentials and argv tokens before surfacing
+	// them through the MCP tool. An MCP agent inside a sandbox should never be
+	// able to read another upstream's Bearer token, API key, or URL-embedded
+	// secret via `upstream_servers list`.
+	//
+	// Issue #1148: `reveal_secret_headers` is an operator opt-in for a TRUSTED
+	// read surface, so it now additionally requires an AUTHENTICATED admin.
+	// /mcp is unprotected by default, so before this an anonymous caller on
+	// that endpoint got the raw values the flag was meant to hand the
+	// operator. CanRevealSecrets is nil-safe: an in-process/stdio caller with
+	// no context gets masked values rather than admin-by-absence.
+	revealHeaders := p.config != nil && p.config.RevealSecretHeaders &&
+		auth.AuthContextFromContext(ctx).CanRevealSecrets()
 	for i, server := range servers {
-		// Redact sensitive header values (Authorization, X-API-Key, Cookie,
-		// etc.), env-var secrets, and URL query credentials before surfacing
-		// them through the MCP tool. An MCP agent inside a sandbox should
-		// never be able to read another upstream's Bearer token, API key, or
-		// URL-embedded secret via `upstream_servers list`. Operators who
-		// genuinely need the raw values can set `reveal_secret_headers: true`.
-		headers := server.Headers
-		serverURL := server.URL
-		serverEnv := server.Env
+		// The secret-bearing fields are sourced from redactedServerView — the
+		// shared walker over the config's own JSON — rather than from a
+		// per-field redactor call, so this projection cannot drift from the
+		// one `list_quarantined` uses. viewField falls back to the raw value
+		// only for keys ServerConfig omits when empty, which keeps the
+		// response shape byte-identical to before.
+		view := redactedServerView(server, liveRedaction)
+		headers := interface{}(server.Headers)
+		serverURL := interface{}(server.URL)
+		serverEnv := interface{}(server.Env)
+		serverArgs := interface{}(server.Args)
 		if !revealHeaders {
-			headers = oauth.RedactStringHeaders(server.Headers)
-			serverEnv = oauth.RedactEnvValues(server.Env)
-			serverURL = oauth.RedactURLQueryParams(server.URL)
+			headers = viewField(view, "headers", server.Headers)
+			serverEnv = viewField(view, "env", server.Env)
+			serverURL = viewField(view, "url", server.URL)
+			serverArgs = redactedArgs(server.Args, liveRedaction)
 		}
 		serverMap := map[string]interface{}{
 			"name":        server.Name,
 			"protocol":    server.Protocol,
 			"command":     server.Command,
-			"args":        server.Args,
+			"args":        serverArgs,
 			"url":         serverURL,
 			"env":         serverEnv,
 			"headers":     headers,
@@ -3803,7 +3830,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				// all) is commonly echoed into the error; scrub it before it
 				// reaches connection_status.last_error and health.detail.
 				if !revealHeaders {
-					lastError = oauth.RedactSensitiveData(lastError)
+					lastError = scrubUpstreamText(lastError)
 				}
 			}
 			isConnected = connInfo.State.String() == "connected"
@@ -4218,7 +4245,16 @@ func (p *MCPProxyServer) handleListQuarantinedUpstreams(ctx context.Context) (*m
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"servers": servers,
+		// Issue #1148: this used to marshal the raw []*config.ServerConfig, so
+		// env values, header values, oauth.client_secret, URL query
+		// credentials and argv tokens all left through the MCP surface in the
+		// clear — to any caller, /mcp being unauthenticated by default — and
+		// were recorded verbatim into the activity store.
+		//
+		// The full (masked) config is still the right payload here: the point
+		// of inspecting a quarantined server is to see HOW it is configured,
+		// including WHICH secrets it carries. Only the values go.
+		"servers": redactedServerViews(servers, liveRedaction),
 		"total":   len(servers),
 		// One line per server so "nobody ever scanned this" is visible right
 		// here, next to the decision it should inform.
@@ -5004,7 +5040,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 			connectionStatus = statusError
-			connectionMessage = fmt.Sprintf("Failed to update server config: %v", err)
+			connectionMessage = scrubUpstreamText(fmt.Sprintf("Failed to update server config: %v", err))
 		} else {
 			// Monitor connection status for 1 minute
 			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
@@ -5214,7 +5250,12 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return nil, opts, fmt.Errorf("invalid args_json format: %v", err)
 		}
-		patch.Args = args
+		// #1148: the read path masks credential-shaped argv tokens; restore
+		// any the caller echoed back masked, so the mask is never persisted
+		// over the real value (parity with the env/header/url unmaskers).
+		// args_json REPLACES the vector, so an unedited echo of a masked list
+		// would otherwise wipe the credential.
+		patch.Args = unmaskArgv(args, existingServer.Args)
 	}
 
 	// Handle env JSON string - maps are deep merged with RFC 7396 null-means-remove
@@ -5566,7 +5607,13 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 		"server_name":     name,
 		"lines_requested": lines,
 		"lines_returned":  len(logLines),
-		"log_lines":       logLines,
+		// Issue #1148 (c2): the per-server log is written by mcpproxy AND by
+		// the child process, and both put credentials in it — the connection
+		// logger records the upstream URL with its `?token=…`, and an MCP
+		// server is free to print its own API key. Scrub every line before it
+		// leaves through the tool response and is recorded into the activity
+		// store.
+		"log_lines": scrubUpstreamLines(logLines),
 		"server_status": map[string]interface{}{
 			"enabled":     serverConfig.Enabled,
 			"quarantined": serverConfig.Quarantined,
@@ -5576,6 +5623,10 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 	// Add connection status if available
 	if client, exists := p.upstreamManager.GetClient(name); exists {
 		connectionStatus := client.GetConnectionStatus()
+		// last_error commonly echoes the upstream URL, credentials included.
+		if lastError, ok := connectionStatus["last_error"].(string); ok {
+			connectionStatus["last_error"] = scrubUpstreamText(lastError)
+		}
 		result["connection_status"] = connectionStatus
 	}
 
@@ -5854,12 +5905,15 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 				case types.StateReady:
 					return "ready", "Server connected and ready"
 				case types.StateError:
-					return "error", fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+					// Issue #1148 (c3): scrubbed like the `last_error` this
+					// same string feeds in `upstream_servers list` — it lands
+					// in connection_message and in the activity record.
+					return "error", scrubUpstreamText(fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError))
 				case types.StatePendingAuth:
 					// Parked awaiting user login (#1013): waiting out the monitor
 					// timeout would just stall the caller — nothing will change
 					// until a human signs in.
-					return statusError, fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+					return statusError, scrubUpstreamText(fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError))
 				case types.StateDisconnected:
 					// If server is explicitly disconnected and enabled is false, return disabled
 					for _, serverConfig := range p.config.Servers {

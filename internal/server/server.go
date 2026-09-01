@@ -349,9 +349,25 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"Authentication required. Provide an API key or agent token."}`, http.StatusUnauthorized)
 				return
 			}
+			// Tray connections carry OS-level authentication (Unix socket /
+			// named pipe permissions), so they are a real identity even
+			// without a token. Checked BEFORE the anonymous fallback so a
+			// socket caller is not downgraded (issue #1148).
+			if transport.GetConnectionSource(r.Context()) == transport.ConnectionSourceTray {
+				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
 			// No token provided — preserve existing unprotected MCP behavior.
-			// Treat as admin (backward compatibility for MCP clients without auth).
-			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			// Treat as admin (backward compatibility for MCP clients without
+			// auth), but mark the context ANONYMOUS: issue #1148: this
+			// deliberate upgrade is what let an unauthenticated caller through
+			// a gate written as `authCtx != nil && !authCtx.IsAdmin()`. Every
+			// operation that worked before still works; only the
+			// secret-REVEALING check (AuthContext.CanRevealSecrets) tells the
+			// two apart.
+			ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -424,8 +440,10 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"Invalid authentication token"}`, http.StatusUnauthorized)
 			return
 		}
-		// Backward compatibility: allow through with admin context
-		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+		// Backward compatibility: allow through with an ANONYMOUS admin
+		// context. The token proved nothing, so it is no more of an identity
+		// than no token at all (issue #1148).
+		ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -959,13 +977,24 @@ func (s *Server) Start(ctx context.Context) error {
 			configPath,
 		)
 
-		// Serve using stdio (standard MCP transport)
-		if err := server.ServeStdio(s.mcpProxy.GetMCPServer()); err != nil {
+		// Serve using stdio (standard MCP transport).
+		//
+		// Issue #1148: stdio has no HTTP middleware, so it used to run with NO
+		// auth context and relied on every gate reading nil as admin. Declare
+		// the identity explicitly instead — a stdio peer is the local process
+		// that launched us, which is as authenticated as the tray socket.
+		if err := server.ServeStdio(s.mcpProxy.GetMCPServer(), server.WithStdioContextFunc(stdioAuthContext)); err != nil {
 			return fmt.Errorf("MCP server error: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// stdioAuthContext installs the authenticated-admin context for the stdio
+// transport. See the ServeStdio call site above (issue #1148).
+func stdioAuthContext(ctx context.Context) context.Context {
+	return auth.WithAuthContext(ctx, auth.AdminContext())
 }
 
 // discoverAndIndexTools discovers tools from upstream servers and indexes them

@@ -146,6 +146,22 @@ To disable redaction (for debugging only), set `reveal_secret_headers: true`
 in `mcp_config.json`. **It's not normally needed**: the editing flow
 described below works without ever exposing the plaintext to the client.
 
+Since v0.64 (issue #1148) the flag additionally requires an **authenticated**
+caller. `/mcp` is deliberately unprotected by default
+(`require_mcp_auth: false`), so an unauthenticated MCP client is treated as
+admin for backward compatibility — but that is not an identity, and it no
+longer satisfies a check that hands back raw credentials. With the flag on,
+raw values are returned to a caller presenting the API key or an admin agent
+token, to a tray/socket connection (authenticated by OS-level socket
+permissions), and over stdio; an unauthenticated TCP `/mcp` caller gets the
+masked values. Nothing else changes: every other operation an unauthenticated
+MCP client can perform today still works.
+
+Argument vectors are masked too: a credential passed as `--api-key sk-…` in
+`args` is masked by flag name and by value shape, and a masked argument echoed
+back through `args_json` is reverted to the stored value rather than persisted
+over it.
+
 ### How you edit them
 
 #### Web UI / macOS tray

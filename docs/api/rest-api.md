@@ -152,6 +152,11 @@ preserved) and the [`config-to-secret`](#post-apiv1serversnameconfig-to-secret)
 endpoint reads the real value server-side. Flip the flag only if you
 need to inspect a raw value through the API for debugging.
 
+On the MCP channel the flag also requires an **authenticated** caller
+(issue #1148): an unauthenticated `/mcp` client is admin only for backward
+compatibility, and gets the masked values regardless of the flag. The REST
+API always requires an API key, so it is unaffected.
+
 The MCP `upstream_servers` tool was the original motivator for redaction
 (see [PR #425](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/425)) —
 a prompt-injected agent could otherwise read another upstream's PAT via
