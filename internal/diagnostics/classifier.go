@@ -393,7 +393,20 @@ var execNoSuchFileRe = regexp.MustCompile(`(?:^|[\s"'(])exec(?:ve)?\b[^\n]{0,200
 // classifyStdio below and for the suppression guard above, so the two cannot
 // drift apart.
 func isStdioHandshakeTimeout(msg string) bool {
-	return isMCPProxyHandshakeTimeout(msg) || strings.Contains(msg, "handshake timeout")
+	if isMCPProxyHandshakeTimeout(msg) {
+		return true
+	}
+	// The loose substring is unbounded CHILD STDERR — Go's own
+	// `net/http: TLS handshake timeout` carries it, and a docker image pull over
+	// TLS prints exactly that. mcpproxy never writes both of its wrappers, so
+	// when the premature-exit wrapper is present the child provably DIED and the
+	// timeout reading (child alive, merely silent) is impossible: the text came
+	// from the tail. Letting it win there suppressed every docker arm and turned
+	// a real image-pull failure into "raise your timeout".
+	if isStdioExitBeforeInitialize(msg) {
+		return false
+	}
+	return strings.Contains(msg, "handshake timeout")
 }
 
 // isMCPProxyHandshakeTimeout matches only the sentence mcpproxy itself writes
