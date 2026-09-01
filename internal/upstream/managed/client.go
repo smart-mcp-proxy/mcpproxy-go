@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -1052,6 +1053,24 @@ func (mc *Client) cancelInFlightConnect() {
 	cancel()
 }
 
+// logSafeURL renders the configured upstream URL for a LOG FIELD, with its
+// credential-bearing query parameters and any userinfo password masked.
+//
+// Issue #1148, round 4: the deprecated-endpoint branch of onStateChange below
+// logged mc.GetConfig().URL verbatim, at Error level — the exact twin of the
+// connection_oauth.go site round 3 fixed, and it fires on every 410 Gone from a
+// server whose URL carries `?token=…`. The line goes to main.log and to the
+// per-server log, and `upstream_servers tail_log` hands the latter to any MCP
+// caller. Scheme, host, path and non-sensitive parameters survive, so the
+// "your URL needs updating" advice stays actionable.
+func (mc *Client) logSafeURL() string {
+	cfg := mc.GetConfig()
+	if cfg == nil {
+		return ""
+	}
+	return oauth.RedactURLQueryParams(cfg.URL)
+}
+
 // onStateChange handles state transition events
 func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 	mc.logger.Info("State transition",
@@ -1065,7 +1084,7 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 		if mc.isDeprecatedEndpointError(info.LastError) {
 			mc.logger.Error("⚠️ ENDPOINT DEPRECATED: Server URL needs to be updated",
 				zap.String("server", mc.GetConfig().Name),
-				zap.String("current_url", mc.GetConfig().URL),
+				zap.String("current_url", mc.logSafeURL()),
 				zap.String("error_type", "endpoint_deprecated"),
 				zap.String("action", "Update the server URL in your configuration"),
 				zap.String("hint", "The server may have migrated from /sse to /mcp - check the server's documentation"),

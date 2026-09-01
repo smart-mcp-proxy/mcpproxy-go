@@ -196,7 +196,9 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		lr.logger.Error("❌ SSE STREAM ERROR", zap.Error(err))
+		// #1148 round 4: a stream read can fail with a *url.Error that quotes
+		// the request URL, credentials and all.
+		lr.logger.Error("❌ SSE STREAM ERROR", logSafeErrorField(err))
 	}
 
 	lr.logger.Info("🔴 SSE STREAM CLOSED",

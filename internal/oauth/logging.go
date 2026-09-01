@@ -135,15 +135,12 @@ var secretPattern = regexp.MustCompile(`(?i)(secret|password|token|key)["']?\s*[
 // credential failed, and it is not the secret.
 var urlUserinfoPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)([^\s/:@]+):([^\s/@]+)@`)
 
-// RedactSensitiveData redacts sensitive information from a string.
-// It replaces tokens, secrets, and other sensitive data with redacted placeholders.
-func RedactSensitiveData(data string) string {
-	if data == "" {
-		return data
-	}
-
-	// Redact URL userinfo passwords (scheme://user:pass@host).
-	result := urlUserinfoPattern.ReplaceAllStringFunc(data, func(match string) string {
+// redactURLUserinfo masks the password half of every `scheme://user:pass@`
+// prefix in s, keeping the username. Shared by RedactSensitiveData (free-form
+// text) and RedactURL (the parse-failure fallback) so the two cannot disagree
+// about whether a basic-auth password is a secret.
+func redactURLUserinfo(s string) string {
+	return urlUserinfoPattern.ReplaceAllStringFunc(s, func(match string) string {
 		groups := urlUserinfoPattern.FindStringSubmatch(match)
 		if len(groups) != 4 {
 			return match
@@ -155,6 +152,17 @@ func RedactSensitiveData(data string) string {
 		}
 		return groups[1] + groups[2] + ":***REDACTED***@"
 	})
+}
+
+// RedactSensitiveData redacts sensitive information from a string.
+// It replaces tokens, secrets, and other sensitive data with redacted placeholders.
+func RedactSensitiveData(data string) string {
+	if data == "" {
+		return data
+	}
+
+	// Redact URL userinfo passwords (scheme://user:pass@host).
+	result := redactURLUserinfo(data)
 
 	// Redact Bearer tokens
 	result = tokenPattern.ReplaceAllString(result, "${1}***REDACTED***")
@@ -736,12 +744,21 @@ func unmaskMapValues(incoming, stored map[string]string, rendered func(k, v stri
 }
 
 // RedactURL redacts sensitive query parameters from a URL string.
+//
+// Issue #1148, round 4: this is not only a standalone helper — it is the
+// fallback RedactURLQueryParams takes when url.Parse FAILS, and a URL that
+// fails to parse is precisely the URL a connection error is being logged
+// about. It masked the query params but had no `user:pass@` rule, so the
+// basic-auth password survived every logSafeURL() site in
+// internal/upstream/core, internal/upstream/managed and internal/transport
+// whenever the configured URL was malformed. Reuse RedactSensitiveData's
+// urlUserinfoPattern so the two scrubbers cannot drift apart.
 func RedactURL(urlStr string) string {
 	if urlStr == "" {
 		return urlStr
 	}
 
-	result := urlStr
+	result := redactURLUserinfo(urlStr)
 	for _, param := range sensitiveParams {
 		pattern := regexp.MustCompile(`(?i)(` + param + `=)[^&]+`)
 		result = pattern.ReplaceAllString(result, "${1}***REDACTED***")

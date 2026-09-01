@@ -162,27 +162,46 @@ Argument vectors are masked too: a credential passed as `--api-key sk-…` in
 the same issue — by URL shape in every spelling (`--flag <url>`, `--flag=<url>`
 and a bare positional token all mask `?token=…` and `https://user:pass@host`).
 
-A masked value echoed back on the write path is reverted to the stored value
-rather than persisted over it, and every revert is **bound to where the value
-was read from**:
+For the **keyed** fields, a masked value echoed back on the write path is
+reverted to the stored value rather than persisted over it, and every revert is
+**bound to where the value was read from**:
 
 | Field | Bound by |
 |-------|----------|
 | `env_json` / `headers_json` | the map key |
 | `url` | the stored scheme, host:port and username |
 | `oauth_json` → `client_secret` | the field |
-| `args_json` | the **index**, plus the flag that preceded it |
+| `args_json` | *nothing — an argv mask is **refused**, never reverted* |
 
-The argv binding matters: `args_json` replaces the whole vector and the caller
-also chooses `command`, so a revert matched by value alone would let a caller
-move a stored credential into a command line of its own choosing — or into a
-positional slot the read path does not mask, and read it back in the clear. A
-reordered or resized vector therefore does **not** round-trip its masks; resend
-the real values, or omit `args_json` when you are not changing the arguments.
+**`args_json` is different: an echoed mask is rejected with an error, not
+restored.** An argv token has no key to bind a secret to — only its index and
+its neighbours — and `args_json` replaces the whole vector while the same patch
+also chooses `command`. Every candidate binding is therefore caller-controlled:
+an index can be picked, a preceding flag copied verbatim, and a byte-identical
+argv means nothing once `command` moves from `mcp-foo` to `curl`. Any revert
+rule would let a caller relocate a stored credential into a command line of its
+own choosing.
+
+So a write whose `args_json` still carries a mask this proxy rendered fails
+with:
+
+```
+args_json[2] is a redaction placeholder, not an argument value: credential-shaped
+argv tokens are masked on read and are never restored on write, because an argv
+slot carries no key to bind the secret to. Resend the real value for that
+argument, or omit args_json to leave the stored arguments unchanged
+```
+
+Do not build a read-modify-write loop that feeds a masked `args` list back in:
+**resend the real values**, or omit `args_json` entirely when you are not
+changing the arguments (omitting it leaves the stored vector untouched).
+Rejecting is deliberate rather than silently keeping the stored vector —
+`args_json` replaces the vector, so ignoring it would make the write look
+applied when it was not.
 
 The argv mask is a rendering of the **MCP** read surface. The REST API returns
 `args` unredacted and accepts it unchanged, so REST reads and writes remain
-self-consistent; only the MCP write path reverts an MCP-rendered mask.
+self-consistent; only the MCP write path refuses an MCP-rendered mask.
 
 ### How you edit them
 

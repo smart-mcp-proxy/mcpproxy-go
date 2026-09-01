@@ -248,7 +248,9 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)
 		if err != nil {
-			logger.Error("Failed to create OAuth client", zap.Error(err))
+			// #1148 round 4: mcp-go builds this error from url.Parse, and
+			// *url.Error quotes the raw URL it was handed.
+			logger.Error("Failed to create OAuth client", logSafeErrorField(err))
 			return nil, fmt.Errorf("failed to create OAuth client: %w", err)
 		}
 
@@ -361,7 +363,8 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)
 		if err != nil {
-			logger.Error("Failed to create OAuth SSE client", zap.Error(err))
+			// #1148 round 4: see the streamable-HTTP twin above.
+			logger.Error("Failed to create OAuth SSE client", logSafeErrorField(err))
 			return nil, fmt.Errorf("failed to create OAuth SSE client: %w", err)
 		}
 

@@ -84,3 +84,80 @@ func hasEntryContaining(entries []observer.LoggedEntry, msg string) bool {
 	}
 	return false
 }
+
+// TestGetStats_MasksURLAndErrorCredentials covers issue #1148 round 4.
+//
+// GetStats builds the per-server status map that /api/v1/status, /api/v1/servers
+// and the SSE `status` event all serve verbatim as `upstream_stats`, and it put
+// cfg.URL in raw. The sibling surfaces on the very same responses —
+// httpapi.redactServerSecrets and Runtime.redactServerSecrets — already mask
+// exactly these fields, so half of one payload was masked and half was not.
+func TestGetStats_MasksURLAndErrorCredentials(t *testing.T) {
+	const urlSecret = "urlsecret999"
+
+	logger := zap.NewNop()
+	tempDir := t.TempDir()
+	db, err := storage.NewBoltDB(tempDir, logger.Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	serverConfig := &config.ServerConfig{
+		Name:     "leaky",
+		Protocol: "http",
+		URL:      "https://alice:hunter2phrase@host/mcp?token=" + urlSecret + "&debug=1",
+		Enabled:  true,
+	}
+
+	manager := &Manager{
+		clients:        make(map[string]*managed.Client),
+		logger:         logger,
+		storage:        db,
+		secretResolver: secret2Resolver(),
+	}
+	manager.globalConfig.Store(&config.Config{})
+	client, err := managed.NewClient(serverConfig.Name, serverConfig, logger, nil, &config.Config{}, db, secret2Resolver())
+	require.NoError(t, err)
+	manager.clients[serverConfig.Name] = client
+
+	stats := manager.GetStats()
+	rendered := fmt.Sprint(stats)
+
+	assert.Contains(t, rendered, "host/mcp", "precondition: the status map carries the URL")
+	assert.NotContains(t, rendered, urlSecret, "the query credential must not reach the status map")
+	assert.NotContains(t, rendered, "hunter2phrase", "the userinfo password must not reach the status map")
+	assert.Contains(t, rendered, "debug=1", "non-sensitive parameters must stay readable")
+}
+
+// TestGetStats_RevealSecretHeadersOptOut mirrors the escape hatch the two
+// sibling redactors honour, so a user who has deliberately opted in still sees
+// the real URL on every surface rather than only some of them.
+func TestGetStats_RevealSecretHeadersOptOut(t *testing.T) {
+	const urlSecret = "urlsecret999"
+
+	logger := zap.NewNop()
+	tempDir := t.TempDir()
+	db, err := storage.NewBoltDB(tempDir, logger.Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	serverConfig := &config.ServerConfig{
+		Name:     "leaky",
+		Protocol: "http",
+		URL:      "https://host/mcp?token=" + urlSecret,
+		Enabled:  true,
+	}
+
+	manager := &Manager{
+		clients:        make(map[string]*managed.Client),
+		logger:         logger,
+		storage:        db,
+		secretResolver: secret2Resolver(),
+	}
+	manager.globalConfig.Store(&config.Config{RevealSecretHeaders: true})
+	client, err := managed.NewClient(serverConfig.Name, serverConfig, logger, nil, &config.Config{}, db, secret2Resolver())
+	require.NoError(t, err)
+	manager.clients[serverConfig.Name] = client
+
+	assert.Contains(t, fmt.Sprint(manager.GetStats()), urlSecret,
+		"reveal_secret_headers:true must expose the real URL, as it does on /api/v1/servers")
+}
