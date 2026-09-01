@@ -34,6 +34,22 @@ var glanceManagementBuiltins = map[string]bool{
 	"quarantine_security": true,
 }
 
+// IsManagementBuiltin reports whether a record is one of mcpproxy's own
+// management built-ins (upstream_servers / quarantine_security) rather than
+// something a user asked an upstream for.
+//
+// It is the same population CountsAsCall excludes above, exported because the
+// per-server aggregation needs it too: issue #1146 gave these rows a
+// target_server so the Activity Log could render a Server column and --server
+// could filter on it, and without this predicate a burst of config edits would
+// then read as traffic TO the server being configured — and "github:
+// upstream_servers" would show up as one of github's busiest tools.
+func IsManagementBuiltin(rec *ActivityRecord) bool {
+	return rec != nil &&
+		rec.Type == ActivityTypeInternalToolCall &&
+		glanceManagementBuiltins[rec.ToolName]
+}
+
 // CountsAsCall reports whether a record is one of the calls the user made, and
 // whether that call is a failure.
 //

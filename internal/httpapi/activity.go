@@ -754,12 +754,25 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 			otherCount++
 		}
 
-		// Count by server
+		// Count by server / by tool — UPSTREAM traffic only.
+		//
+		// Issue #1146 gave the management built-ins a target_server so the
+		// Activity Log could render a Server column and --server could filter
+		// on it. These two lists answer a different question ("which upstreams
+		// is this proxy talking to"), and they used to skip those rows only by
+		// the accident of an empty ServerName. Excluding them explicitly keeps
+		// a burst of config edits from reading as traffic to the server being
+		// configured, and keeps "github:upstream_servers" — a built-in no
+		// upstream owns — out of the top-tools list. The rows stay in
+		// totalCount: they are real activity, just not upstream traffic.
+		if storage.IsManagementBuiltin(a) {
+			continue
+		}
+
 		if a.ServerName != "" {
 			serverCounts[a.ServerName]++
 		}
 
-		// Count by tool (server:tool)
 		if a.ServerName != "" && a.ToolName != "" {
 			key := a.ServerName + ":" + a.ToolName
 			toolCounts[key]++

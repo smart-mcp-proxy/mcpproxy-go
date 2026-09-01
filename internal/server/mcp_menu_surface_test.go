@@ -158,6 +158,8 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 					assertCodeExecutionDelta(t, surface, preM, curM)
 				case name == "quarantine_security":
 					assertQuarantineSecurityDelta(t, surface, preM, curM)
+				case name == "upstream_servers":
+					assertUpstreamServersDelta(t, surface, preM, curM)
 				default:
 					assert.Equal(t, preM, curM,
 						"surface %s: tool %q must be byte-identical to the pre-feature snapshot (SC-003)", surface, name)
@@ -279,6 +281,33 @@ func schemaWithout(schema map[string]interface{}, drop ...string) map[string]int
 		delete(out, k)
 	}
 	return out
+}
+
+// upstreamServersRedactionMarker is the verbatim marker the upstream_servers
+// description must carry. Issue #1146 made update/patch mask secret-bearing
+// values in the `changes` diff they return — an agent that reads the diff back
+// to verify what it wrote observes that, so the surface has to say so. The
+// literal is pinned here so the sentence cannot be silently dropped or reworded
+// into something an agent would miss.
+const upstreamServersRedactionMarker = "REDACTION (update/patch):"
+
+// assertUpstreamServersDelta: upstream_servers may change by EXACTLY its
+// description, which gains the redaction note above. No parameter may be added,
+// removed or altered — this is a documentation change over an existing
+// behaviour, not a new capability.
+func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	assert.Equal(t, schemaWithout(preM, "description"), schemaWithout(curM, "description"),
+		"surface %s: only upstream_servers' description may move (issue #1146)", surface)
+
+	assert.Contains(t, curM["description"], upstreamServersRedactionMarker,
+		"surface %s: upstream_servers must document that update/patch mask secret values in the diff", surface)
+
+	preDesc, _ := preM["description"].(string)
+	curDesc, _ := curM["description"].(string)
+	assert.True(t, strings.HasPrefix(curDesc, preDesc),
+		"surface %s: the redaction note is APPENDED — no pre-feature prose may be rewritten", surface)
 }
 
 // assertQuarantineSecurityDelta: quarantine_security may grow the two scan
