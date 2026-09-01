@@ -120,21 +120,16 @@ func detectDockerRuntimeType(command string) string {
 // together.
 const gitCapableImageKey = "uvx-git"
 
-// builtInGitCapableImage / builtInPythonRunnerImage mirror the VALUES config
-// ships for the git-capable key and for every Python package runner.
+// builtInPythonRunnerImage mirrors the VALUE config ships for every Python
+// package runner. A runtime entry that differs from it is one the operator
+// retargeted — for the seeded runtime keys, value inequality is the only signal
+// that survives the merge (config.IsBuiltInDefaultImage says why).
 //
-// Values, not presence, are what say whether mcpproxy's automatic selection
-// actually ran: a config file's `default_images` is merged INTO the built-in
-// map, so both keys are populated in every install, and an operator who
-// retargeted their runtime at a mirror keeps a shipped `uvx-git` they never
-// chose. In that case core.IsolationManager.resolveDefaultImage deliberately
-// does NOT substitute — it will not pull a public image behind a mirrored host
-// — so claiming an automatic swap here would name an image the install never
-// ran. TestMirroredBuiltInImagesMatchConfig pins these to config.
-const (
-	builtInGitCapableImage   = "ghcr.io/astral-sh/uv:python3.13-bookworm"
-	builtInPythonRunnerImage = "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
-)
+// There is deliberately no mirrored value for the git-capable key: mcpproxy
+// does not seed it, so its PRESENCE is the operator's choice and no value
+// comparison is involved. TestMirroredBuiltInImagesMatchConfig pins this to
+// config.
+const builtInPythonRunnerImage = "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
 
 // missingToolchainRemediation explains a DockerMissingToolchain failure: the
 // container ran, but the image lacks a tool the server calls. The git case is
@@ -170,11 +165,11 @@ func missingToolchainRemediation(hints ClassifierHints) string {
 	runtimeImage := strings.TrimSpace(hints.DockerDefaultImages[runtimeType])
 	// An explicitly emptied key is the documented opt-out, not an absent one.
 	optedOut := gitKeySet && gitImage == ""
-	// The operator retargeted this runtime at their own registry and left the
-	// git key at the value mcpproxy ships: no substitution happened, and the
-	// server ran on their image. Mirrors the resolver's own rule.
-	deferredToRuntimeImage := !optedOut && runtimeImage != "" && runtimeImage != builtInPythonRunnerImage &&
-		(gitImage == "" || gitImage == builtInGitCapableImage)
+	// The operator retargeted this runtime at their own registry and never set
+	// the git key: no substitution happened, and the server ran on their image.
+	// Mirrors the resolver's own rule — including that a git key the operator
+	// DID set wins outright, whatever its value, so it can never be a deferral.
+	deferredToRuntimeImage := !gitKeySet && runtimeImage != "" && runtimeImage != builtInPythonRunnerImage
 
 	b.WriteString(" It installs from a git URL, so the image must contain `git`.")
 	switch {

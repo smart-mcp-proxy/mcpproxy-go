@@ -85,13 +85,15 @@ func TestLoadedConfigWithMirroredImagesNeverResolvesAPublicGitImage(t *testing.T
 	}
 }
 
-// The seeded key is the same trap seen from the other side: the built-in value
-// being present in the merged map must not outrank an operator who retargeted
-// the runtime at their own registry.
-func TestSeededGitKeyDoesNotOutrankAMirroredRuntimeImage(t *testing.T) {
+// The same trap seen from the other side: the built-in map must never carry a
+// git-capable value of its own that outranks an operator who retargeted the
+// runtime at their own registry. (mcpproxy no longer seeds the key at all —
+// TestShippedDefaultImagesDoNotSeedTheGitKey pins that — so this is the shape a
+// mirrored install really has after load.)
+func TestUnsetGitKeyDoesNotOutrankAMirroredRuntimeImage(t *testing.T) {
 	images := config.DefaultDockerIsolationConfig().DefaultImages
-	if images[config.GitCapableImageKey] == "" {
-		t.Fatal("precondition: the built-in map is expected to seed the git-capable key")
+	if v, ok := images[config.GitCapableImageKey]; ok {
+		t.Fatalf("precondition: the built-in map must not seed %q (got %q)", config.GitCapableImageKey, v)
 	}
 	images["uvx"] = mirroredUvImage
 	images["python"] = mirroredUvImage

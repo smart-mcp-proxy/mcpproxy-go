@@ -162,7 +162,14 @@ func TestClassifierHints_CarryArgsForGitDependencies(t *testing.T) {
 	if len(hints.DockerArgs) != len(srv.Args) {
 		t.Fatalf("classifierHints().DockerArgs = %v, want %v", hints.DockerArgs, srv.Args)
 	}
-	if got := hints.DockerDefaultImages[config.GitCapableImageKey]; got != config.DefaultGitCapableImage {
-		t.Errorf("hints do not carry the git-capable default image: %q", got)
+	// The whole default_images map has to reach the remediation layer, which
+	// reads both the runtime entry and whether the operator set the git key at
+	// all. (mcpproxy does not seed the git key, so its absence here is the
+	// point: an unset key must arrive unset.)
+	if got := hints.DockerDefaultImages["uvx"]; got == "" {
+		t.Error("hints do not carry the runtime default image")
+	}
+	if got, ok := hints.DockerDefaultImages[config.GitCapableImageKey]; ok {
+		t.Errorf("hints carry a git-capable key the operator never set: %q", got)
 	}
 }

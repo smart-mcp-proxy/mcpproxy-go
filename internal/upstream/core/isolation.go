@@ -308,23 +308,24 @@ const (
 // whose args actually reference a git URL.
 //
 // The operator's `default_images` map is authoritative throughout: the
-// substitution never reaches past it to a PUBLIC image that a mirrored or
-// air-gapped host cannot fetch at all. Key presence cannot express that,
-// because a config file's `default_images` is decoded INTO the built-in map —
-// the key is present in every install (TestDefaultImagesMergeOverBuiltInsOnLoad)
-// — so the question asked is whose VALUE it holds (config.IsBuiltInDefaultImage):
+// substitution never reaches past it to an image a mirrored or air-gapped host
+// cannot fetch at all.
 //
-//   - git key holds an operator value → use it, whatever else is configured;
-//   - git key emptied                 → opt out, keep the runtime default (the
-//     lever for an operator who does not want a second large image);
-//   - git key still mcpproxy's own value, and the runtime image is too → the
-//     built-in git-capable image. Nothing here is mirrored, so a public pull is
-//     what this install already does for every other image;
-//   - git key still mcpproxy's own value, but the operator retargeted the
-//     RUNTIME at their registry → their image stands. It may or may not contain
-//     git; that is diagnosable (MCPX_DOCKER_MISSING_TOOLCHAIN names the key to
-//     set, and BuildDockerArgs warns on spawn), whereas a pull their host
-//     cannot make is a failure with no path forward.
+//   - git key PRESENT with a value → the operator's explicit choice, used
+//     whatever else is configured. Presence is trustworthy here because
+//     mcpproxy never seeds this key (config.DefaultGitCapableImage explains
+//     why that matters: every seeded key is written back into the operator's
+//     file on save, so a seeded key's presence would say nothing). This is
+//     what lets an operator name mcpproxy's own public image on purpose;
+//   - git key present and EMPTY → opt out, keep the runtime default (the lever
+//     for an operator who does not want a second large image);
+//   - git key absent, and the operator retargeted the RUNTIME at their own
+//     registry → their image stands. It may or may not contain git; that is
+//     diagnosable (MCPX_DOCKER_MISSING_TOOLCHAIN names the key to set, and
+//     BuildDockerArgs warns on spawn), whereas a pull their host cannot make
+//     is a failure with no path forward;
+//   - git key absent, nothing retargeted → mcpproxy's own git-capable image,
+//     qualified with `docker_isolation.registry` when one is configured.
 func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfig, runtimeType string) (image string, decision gitImageDecision) {
 	runtimeImage, runtimeExists := im.globalConfig.DefaultImages[runtimeType]
 	runtimeImage = strings.TrimSpace(runtimeImage)
@@ -333,15 +334,13 @@ func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfi
 	if needsGit {
 		gitImage, gitKeySet := im.globalConfig.DefaultImages[config.GitCapableImageKey]
 		gitImage = strings.TrimSpace(gitImage)
-		operatorChoseGitImage := gitImage != "" &&
-			!config.IsBuiltInDefaultImage(config.GitCapableImageKey, gitImage)
 		operatorChoseRuntimeImage := runtimeExists && runtimeImage != "" &&
 			!config.IsBuiltInDefaultImage(runtimeType, runtimeImage)
 
 		switch {
-		case operatorChoseGitImage:
+		case gitKeySet && gitImage != "":
 			return im.buildFullImageName(gitImage), gitImageSubstituted
-		case gitKeySet && gitImage == "":
+		case gitKeySet:
 			// Explicitly emptied: the operator opted out of the substitution.
 		case operatorChoseRuntimeImage:
 			return im.buildFullImageName(runtimeImage), gitImageDeferredToRuntime
@@ -349,7 +348,7 @@ func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfi
 			// Nothing is retargeted (or there is no runtime entry at all, where
 			// the only alternative is the alpine fallback, which has neither
 			// git nor python).
-			return im.buildFullImageName(config.DefaultGitCapableImage), gitImageSubstituted
+			return im.builtInGitCapableImage(), gitImageSubstituted
 		}
 	}
 
@@ -360,6 +359,31 @@ func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfi
 
 	// Fallback to alpine for unknown runtime types
 	return im.buildFullImageName("alpine:3.18"), gitImageNotApplicable
+}
+
+// builtInGitCapableImage returns mcpproxy's OWN git-capable image, qualified
+// with `docker_isolation.registry` when the operator configured one.
+//
+// The shipped constant names a public ghcr.io host, and buildFullImageName
+// hands any already-qualified reference straight back — so an operator who set
+// only `registry` (the one knob an air-gapped install is guaranteed to set, and
+// the whole point of the field) still had every git-dependency server try to
+// pull ghcr.io from a host that cannot reach it. Earlier rounds fixed only the
+// `default_images` path; nothing covered a bare `registry`.
+//
+// Only the built-in image is rewritten this way. An operator's own
+// `default_images` value goes through buildFullImageName unchanged, because a
+// fully-qualified value they wrote already says which host they meant.
+func (im *IsolationManager) builtInGitCapableImage() string {
+	registry := strings.TrimSpace(im.globalConfig.Registry)
+	// "" and the shipped "docker.io" both mean "the public default": neither
+	// is an operator telling us where their images live, and the built-in
+	// image is not on Docker Hub, so rewriting it there would break a pull
+	// that works today.
+	if registry == "" || registry == config.DefaultDockerRegistry || registry == config.GitCapableImageRegistry {
+		return config.DefaultGitCapableImage
+	}
+	return registry + "/" + config.GitCapableImageRepo
 }
 
 // ResolvedIsolationDefaults captures the per-runtime default values that

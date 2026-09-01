@@ -101,7 +101,6 @@ Add to your `~/.mcpproxy/mcp_config.json`:
       "uvx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
       "pip": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
       "pipx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
-      "uvx-git": "ghcr.io/astral-sh/uv:python3.13-bookworm",
       "node": "node:22",
       "npm": "node:22",
       "npx": "node:22",
@@ -132,7 +131,7 @@ Add to your `~/.mcpproxy/mcp_config.json`:
 | `timeout` | Container startup timeout | `"30s"` |
 | `network_mode` | Docker network mode | `"bridge"` |
 | `registry` | Docker registry to use | `"docker.io"` |
-| `default_images` | Runtime to image mappings (including `uvx-git`, used when a Python runner installs from a `git+` URL) | See above |
+| `default_images` | Runtime to image mappings. The optional `uvx-git` key (not shipped in the defaults) overrides the git-capable image used when a Python runner installs from a `git+` URL | See above |
 | `extra_args` | Additional docker run arguments | `[]` |
 
 ### Git dependencies (`uvx-git`)
@@ -147,10 +146,10 @@ The Python default image is Astral's **slim** `uv` image, which does not contain
 — cannot resolve without it, and fails with `Git executable not found` /
 `Git operation failed` ([`MCPX_DOCKER_MISSING_TOOLCHAIN`](errors/MCPX_DOCKER_MISSING_TOOLCHAIN.md)).
 
-MCPProxy detects the `git+` URL in a Python package runner's arguments and uses
-the **`uvx-git`** image (`ghcr.io/astral-sh/uv:python3.13-bookworm`, which ships
-git) for that server only — everyone else keeps the small slim image. Retarget
-the key to use your own mirror or a custom build:
+MCPProxy detects the `git+` URL in a Python package runner's arguments and runs
+that server only on a git-capable image — everyone else keeps the small slim
+image. By default that is `ghcr.io/astral-sh/uv:python3.13-bookworm`, which
+ships git. Set the **`uvx-git`** key to use your own mirror or a custom build:
 
 ```json
 { "docker_isolation": { "default_images": { "uvx-git": "my-registry.example/uv-git:1" } } }
@@ -160,14 +159,18 @@ the key to use your own mirror or a custom build:
 partial map like the one above only changes the keys it lists — every other
 runtime keeps its built-in image.
 
-**Mirrored / air-gapped registries.** Because of that merge, `uvx-git` is
-present in every install whether or not you wrote it, so MCPProxy decides by
-*value*, not presence: if you have retargeted `uvx`/`python` at your own
-registry and left `uvx-git` at its shipped `ghcr.io` value, that shipped value
-is not treated as your choice — the server runs on **your** image instead of
-pulling a public one your host may not be able to reach, and MCPProxy logs a
-warning naming this key. Point `uvx-git` at a git-capable image in your registry
-to get the substitution back:
+**Mirrored / air-gapped registries.** `uvx-git` is deliberately *not* part of
+the built-in map, so its presence in your config means exactly one thing: you
+chose that image, and it is used — even if you set it to the same public value
+MCPProxy ships. Two things follow:
+
+- If you set `registry`, the built-in git-capable image is pulled from **your**
+  registry (`<registry>/astral-sh/uv:python3.13-bookworm`) rather than from
+  `ghcr.io`.
+- If you retargeted `uvx`/`python` at your own registry and never set
+  `uvx-git`, the server runs on **your** image instead of MCPProxy reaching
+  outside your registry for a public one, and a warning naming this key is
+  logged. Point `uvx-git` at a git-capable image to get the substitution back:
 
 ```json
 { "docker_isolation": { "default_images": { "uvx-git": "mirror.internal/astral/uv:python3.13-bookworm" } } }

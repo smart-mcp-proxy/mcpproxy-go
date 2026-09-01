@@ -12,9 +12,11 @@ import (
 // than replacing it. The built-in entry therefore survives the merge, and the
 // operator's own entries win where they overlap.
 //
-// This is also why the resolver does not need to hardcode a public image as its
-// upgrade fallback, and why a partial `default_images` in a config file does
-// not blank out the runtimes it omits.
+// It is also why a partial `default_images` in a config file does not blank out
+// the runtimes it omits — and why the git-capable key is deliberately NOT part
+// of the built-in map: a key the merge seeds is written straight back into the
+// operator's file by the next SaveConfig, so its presence could never mean
+// "the operator chose this".
 func TestDefaultImagesMergeOverBuiltInsOnLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ConfigFileName)
@@ -43,9 +45,9 @@ func TestDefaultImagesMergeOverBuiltInsOnLoad(t *testing.T) {
 	if got := images["uvx"]; got != "mirror.internal/astral/uv:slim" {
 		t.Errorf("operator's uvx entry = %q, want it to win the merge", got)
 	}
-	if got := images[GitCapableImageKey]; got != DefaultGitCapableImage {
-		t.Errorf("default_images[%q] = %q, want the built-in %q seeded by the merge",
-			GitCapableImageKey, got, DefaultGitCapableImage)
+	if got, ok := images[GitCapableImageKey]; ok {
+		t.Errorf("default_images[%q] = %q — the merge seeded a key the operator never wrote",
+			GitCapableImageKey, got)
 	}
 	if got := images["ruby"]; got == "" {
 		t.Error("a runtime the config file omits lost its built-in image — the map was replaced, not merged")

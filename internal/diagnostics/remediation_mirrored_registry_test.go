@@ -21,11 +21,10 @@ func TestMissingToolchainRemediationDoesNotClaimASubstitutionThatDidNotHappen(t 
 		DockerCommand:  "uvx",
 		DockerArgs:     []string{"--from", "srv@git+https://github.com/o/r", "srv"},
 		// Exactly what a mirrored config looks like after load: the operator's
-		// runtime entry, and the git key still holding its shipped value
-		// because the merge put it there.
+		// runtime entry, and no git key at all (mcpproxy does not seed one, so
+		// an unset key really is unset).
 		DockerDefaultImages: map[string]string{
-			"uvx":     mirrored,
-			"uvx-git": config.DefaultGitCapableImage,
+			"uvx": mirrored,
 		},
 	}
 
@@ -49,8 +48,9 @@ func TestMissingToolchainRemediationDoesNotClaimASubstitutionThatDidNotHappen(t 
 // answered from stale strings.
 func TestMirroredBuiltInImagesMatchConfig(t *testing.T) {
 	images := config.DefaultDockerIsolationConfig().DefaultImages
-	if builtInGitCapableImage != config.DefaultGitCapableImage {
-		t.Errorf("builtInGitCapableImage = %q, config ships %q", builtInGitCapableImage, config.DefaultGitCapableImage)
+	if got, ok := images[gitCapableImageKey]; ok {
+		t.Errorf("config seeds default_images[%q] = %q — this package assumes presence means operator intent",
+			gitCapableImageKey, got)
 	}
 	for runtimeType := range gitCapableRuntimeTypes {
 		if got := images[runtimeType]; got != builtInPythonRunnerImage {

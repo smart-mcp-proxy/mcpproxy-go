@@ -12,19 +12,22 @@ import "testing"
 // So every `uvx --from …git+https://…` server fails under Docker isolation
 // (#1143). The git-capable image is named by its own default_images key so
 // operators can retarget it instead of us bumping a ~1.5GB image on everyone.
-func TestDefaultDockerIsolationConfig_HasGitCapableKey(t *testing.T) {
+//
+// The key is NOT seeded into the shipped map. SaveConfig marshals the whole
+// merged map back into the operator's file, so any key mcpproxy seeds reappears
+// there as if they had typed it — which is why presence, not value equality, is
+// what says "the operator chose this image" (see DefaultGitCapableImage).
+func TestDefaultDockerIsolationConfig_DoesNotSeedGitCapableKey(t *testing.T) {
 	images := DefaultDockerIsolationConfig().DefaultImages
 
-	got, ok := images[GitCapableImageKey]
-	if !ok {
-		t.Fatalf("default_images has no %q key; keys=%v", GitCapableImageKey, images)
+	if got, ok := images[GitCapableImageKey]; ok {
+		t.Fatalf("default_images seeds %q = %q; presence can no longer mean operator intent",
+			GitCapableImageKey, got)
 	}
-	if got != DefaultGitCapableImage {
-		t.Errorf("default_images[%q] = %q, want %q", GitCapableImageKey, got, DefaultGitCapableImage)
-	}
-	// The git-capable default must not be the slim image it exists to replace.
-	if got == images["uvx"] {
-		t.Errorf("git-capable default equals the (git-less) uvx default %q", got)
+	// The built-in git-capable image must still not be the slim image it exists
+	// to replace.
+	if DefaultGitCapableImage == images["uvx"] {
+		t.Errorf("built-in git-capable image equals the (git-less) uvx default %q", images["uvx"])
 	}
 }
 

@@ -1560,11 +1560,15 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 			"pip":     "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 			"pipx":    "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 
-			// Python + git: the slim image above has no git, so a server
-			// installed from a git URL (`uvx --from …git+https://…`) cannot
-			// resolve at all. Selected per-server by NeedsGitCapableImage —
-			// see internal/config/isolation_git.go (#1143).
-			GitCapableImageKey: DefaultGitCapableImage,
+			// NOTE: no GitCapableImageKey ("uvx-git") entry. The slim image
+			// above has no git, so a server installed from a git URL
+			// (`uvx --from …git+https://…`) cannot resolve at all, and
+			// mcpproxy substitutes a git-capable image per-server — but that
+			// substitution is decided in code (core.resolveDefaultImage), not
+			// by seeding a value here. Seeding it would write a public ghcr.io
+			// URL into every operator's config file on the next save and make
+			// the key's presence unable to mean "the operator chose this".
+			// See internal/config/isolation_git.go (#1143).
 
 			// Node.js environments - full image for git deps and native modules (LTS until Apr 2028)
 			"node": "node:22",
