@@ -120,14 +120,35 @@ jobs:
           New-Item -ItemType Directory -Force -Path web/frontend
           Copy-Item -Recurse frontend/dist web/frontend/
 
+      # Warm the tiktoken vocabulary ONCE, before the parallel test run.
+      #
+      # tiktoken-go downloads the BPE on first use into a shared temp dir and
+      # finishes with an atomic rename. `go test ./...` runs packages in
+      # parallel, so several test binaries race to download the same file, and
+      # on Windows the loser hits "Access is denied" on the rename and the
+      # package fails — observed as TestBaseline_CountToolWithSchemaParity
+      # flaking in bench/arms with no code change anywhere near it.
+      #
+      # Setting TIKTOKEN_CACHE_DIR alone does NOT fix this: it only names a
+      # cache, and an empty one still races. Populating it first does, because
+      # every later tokenizer construction is a cache hit with no rename.
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: go test -v -race -timeout 10m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
         run: go test -v -race -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
       - name: Generate coverage report (Windows)
         if: matrix.os == 'windows-latest'

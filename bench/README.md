@@ -684,3 +684,17 @@ headline numbers (image drift can change the tool corpus).
 
 Methodology questions / disputes: open an issue in `smart-mcp-proxy/mcpproxy-go`
 and tag the maintainers, or comment on the roadmap benchmark ticket (MCP-42).
+
+Warm it with the one-line command rather than by hand — the same step CI runs
+before its parallel test sweep:
+
+```bash
+export TIKTOKEN_CACHE_DIR="$HOME/.cache/tiktoken"
+go run ./bench/cmd/warmtiktoken
+```
+
+Why a dedicated step: `go test ./...` runs packages in parallel, and several
+test binaries race to download the same vocabulary into one cache dir. On
+Windows the loser fails its whole package on the atomic rename — it surfaced as
+`bench/arms` flaking with no code change near it. Naming the cache does not fix
+that; populating it first does.
