@@ -41,36 +41,20 @@ import (
 // Pass liveRedaction for an interactive MCP read surface (keeps the
 // `••••<last2> (<N> chars)` rendering the patch-path unmaskers recognise) and
 // auditRedaction for anything persisted. Returns nil for a nil config.
+//
+// It is a thin alias for oauth.RedactedServerConfigView. The rule moved into
+// internal/oauth beside the leaf rules and the walk once a THIRD door onto
+// config.ServerConfig turned up — the server edition's
+// `GET /api/v1/user/servers`, which embeds the struct in its ServerResponse and
+// cannot import internal/server. A rule reachable from only some of its doors
+// is what every round of #1148 has been.
 func redactedServerView(sc *config.ServerConfig, r redactionPolicy) map[string]interface{} {
-	if sc == nil {
-		return nil
-	}
-
-	normalized, ok := normalizeForRedaction(sc).(map[string]interface{})
-	if !ok {
-		// ServerConfig always marshals to an object; a failure here can only
-		// mean the encoder broke. Fail CLOSED — an empty view loses
-		// information, a raw struct loses secrets.
-		return map[string]interface{}{"name": sc.Name}
-	}
-
-	redacted, ok := redactValueWith("", normalized, r).(map[string]interface{})
-	if !ok {
-		return map[string]interface{}{"name": sc.Name}
-	}
-	return redacted
+	return oauth.RedactedServerConfigView(sc, r)
 }
 
 // redactedServerViews renders a slice of server configs, skipping nils.
 func redactedServerViews(servers []*config.ServerConfig, r redactionPolicy) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(servers))
-	for _, sc := range servers {
-		if sc == nil {
-			continue
-		}
-		out = append(out, redactedServerView(sc, r))
-	}
-	return out
+	return oauth.RedactedServerConfigViews(servers, r)
 }
 
 // scrubUpstreamText scrubs free-form text that originated OUTSIDE mcpproxy's

@@ -15,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 )
 
@@ -202,6 +203,45 @@ type ServerListResponse struct {
 	Shared   []*ServerResponse `json:"shared"`
 }
 
+// sharedServerResponse renders one ADMIN-CONFIGURED shared server for an
+// ordinary user, with every secret-bearing field masked.
+//
+// Issue #1148, applied to the server edition's per-user door. ServerResponse
+// EMBEDS the raw *config.ServerConfig, and for a shared server that config is
+// the ADMIN's: its `headers` (Authorization, X-API-Key), `env`, URL query
+// credentials, `oauth.client_secret` and `auth_broker.client_secret` were
+// handed to every authenticated user of the deployment in the clear, on
+// listServers, getServer and enableServer alike. This is the same defect class
+// the MCP, REST and SSE doors closed; this door that sweep did not reach.
+//
+// The rules are oauth.LiveRedaction — the SAME ones every other door applies —
+// reached through oauth.RedactServerConfigSecrets, which walks the struct
+// rather than enumerating it, so a field added to config.ServerConfig (or to
+// the build-tagged auth_broker block) is masked because the walk reaches it.
+//
+// It returns a masked COPY: `h.sharedServers` is the LIVE admin configuration,
+// and writing a mask through it would be the #1142/#1146 read-modify-write
+// corruption with every user of the deployment as the blast radius.
+//
+// Masking is safe here — and ONLY here — because shared servers are READ-ONLY
+// to users: updateServer and deleteServer both answer 403, and enableServer
+// stores a per-user preference without touching the shared config. So there is
+// no write path that could persist an echoed mask over the real credential,
+// which is the hazard every other door on this issue had to guard against.
+// PERSONAL servers are deliberately NOT masked: they are the caller's own
+// credentials (no cross-tenant disclosure to close), and updateServer replaces
+// URL, Args and Headers WHOLESALE from the request body, so masking them
+// without a key-bound unmask mirror (oauth.UnmaskLiveHeaders / UnmaskLiveURL +
+// oauth.CheckArgvMaskEcho) would let a read-modify-write client persist the
+// masks over the user's real secrets.
+func sharedServerResponse(sc *config.ServerConfig, userEnabled *bool) *ServerResponse {
+	return &ServerResponse{
+		ServerConfig: oauth.RedactServerConfigSecrets(sc),
+		Ownership:    "shared",
+		UserEnabled:  userEnabled,
+	}
+}
+
 // --- Handlers ---
 
 // listServers returns the user's personal servers and the shared (admin-configured) servers.
@@ -238,15 +278,12 @@ func (h *UserHandlers) listServers(w http.ResponseWriter, r *http.Request) {
 	shared := make([]*ServerResponse, 0)
 	for _, sc := range h.sharedServers {
 		if sc.Shared {
-			resp := &ServerResponse{
-				ServerConfig: sc,
-				Ownership:    "shared",
-			}
+			var userEnabled *bool
 			// Apply user preference if set
 			if pref, ok := sharedPrefs[sc.Name]; ok {
-				resp.UserEnabled = &pref.Enabled
+				userEnabled = &pref.Enabled
 			}
-			shared = append(shared, resp)
+			shared = append(shared, sharedServerResponse(sc, userEnabled))
 		}
 	}
 
@@ -354,10 +391,7 @@ func (h *UserHandlers) getServer(w http.ResponseWriter, r *http.Request) {
 	// Check shared servers.
 	for _, shared := range h.sharedServers {
 		if shared.Shared && strings.EqualFold(shared.Name, name) {
-			writeJSON(w, http.StatusOK, &ServerResponse{
-				ServerConfig: shared,
-				Ownership:    "shared",
-			})
+			writeJSON(w, http.StatusOK, sharedServerResponse(shared, nil))
 			return
 		}
 	}
@@ -515,11 +549,7 @@ func (h *UserHandlers) enableServer(w http.ResponseWriter, r *http.Request) {
 			}
 
 			h.logger.Infow("shared server user preference set", "user_id", userID, "name", name, "enabled", req.Enabled)
-			writeJSON(w, http.StatusOK, &ServerResponse{
-				ServerConfig: shared,
-				Ownership:    "shared",
-				UserEnabled:  &req.Enabled,
-			})
+			writeJSON(w, http.StatusOK, sharedServerResponse(shared, &req.Enabled))
 			return
 		}
 	}
