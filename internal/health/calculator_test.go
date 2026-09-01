@@ -1037,3 +1037,48 @@ func TestCalculateHealth_EndpointAddressErrors(t *testing.T) {
 		assert.Equal(t, ActionLogin, result.Action)
 	})
 }
+
+// TestCalculateHealth_RetryStopped covers GH #1145's no-silent-swallow rule: a
+// server whose automatic reconnection has been given up must say so, with the
+// reason and a Restart CTA — otherwise the user stares at a generic "Connection
+// error" waiting for a retry that is never coming.
+func TestCalculateHealth_RetryStopped(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name:               "broken-toolchain",
+		Enabled:            true,
+		State:              "error",
+		LastError:          `exec: "uvx": executable file not found in $PATH`,
+		RetryStopped:       true,
+		RetryStoppedCode:   "MCPX_DOCKER_EXEC_NOT_FOUND",
+		RetryStoppedReason: "The Docker image is missing the interpreter this server needs.",
+		RetryCount:         2,
+	}
+
+	result := CalculateHealth(input, nil)
+
+	assert.Equal(t, LevelUnhealthy, result.Level)
+	assert.Equal(t, StateEnabled, result.AdminState)
+	assert.Equal(t, ActionRestart, result.Action)
+	assert.Equal(t, "The Docker image is missing the interpreter this server needs.", result.Summary)
+	assert.Contains(t, result.Detail, "Automatic reconnection stopped after 2 attempts")
+	assert.Contains(t, result.Detail, "MCPX_DOCKER_EXEC_NOT_FOUND")
+	assert.Contains(t, result.Detail, "executable file not found")
+}
+
+// The control case: with RetryStopped unset nothing about today's error
+// reporting changes.
+func TestCalculateHealth_RetryStoppedControl(t *testing.T) {
+	input := HealthCalculatorInput{
+		Name:      "flaky",
+		Enabled:   true,
+		State:     "error",
+		LastError: "connection reset by peer",
+	}
+
+	result := CalculateHealth(input, nil)
+
+	assert.Equal(t, LevelUnhealthy, result.Level)
+	assert.Equal(t, ActionRestart, result.Action)
+	assert.Equal(t, "connection reset by peer", result.Detail)
+	assert.NotContains(t, result.Summary, "Automatic reconnection stopped")
+}

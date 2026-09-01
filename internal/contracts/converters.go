@@ -337,6 +337,15 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		case float64:
 			server.RetryCount = int(rc)
 		}
+		if retryStopped, ok := generic["retry_stopped"].(bool); ok {
+			server.RetryStopped = retryStopped
+		}
+		if code, ok := generic["retry_stopped_code"].(string); ok {
+			server.RetryStoppedCode = code
+		}
+		if reason, ok := generic["retry_stopped_reason"].(string); ok {
+			server.RetryStoppedReason = reason
+		}
 		switch v := generic["last_retry_time"].(type) {
 		case time.Time:
 			server.LastRetryTime = &v

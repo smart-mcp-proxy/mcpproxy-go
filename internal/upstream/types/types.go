@@ -70,6 +70,58 @@ type ConnectionInfo struct {
 	// (#1040). Zero when the upstream gave no hint. It acts as a floor under the
 	// retry ladder — the effective delay is max(backoff, Retry-After).
 	RetryAfter time.Time `json:"retry_after,omitempty"`
+
+	// Terminal marks a failure the diagnostics classifier proved deterministic:
+	// the same attempt will fail identically until a human edits the config, the
+	// image, or the machine. Automatic reconnection stops once the confirmation
+	// budget (PermanentFailureAttempts) is spent — retrying a guaranteed failure
+	// burns a container spawn, a package install and a log flood per attempt for
+	// no chance of success (GH #1145: 55 identical attempts over 19 hours).
+	//
+	// It is CLEARED by every recovery path — a successful connection, an
+	// explicit Reset (manual reconnect / disconnect), and client recreation on a
+	// config change — so a user who fixes the problem always gets the server
+	// back. See StateManager.SetTerminalError.
+	Terminal bool `json:"terminal,omitempty"`
+	// TerminalCode is the stable MCPX_* diagnostics code that proved the failure
+	// permanent. Carried as a plain string so this package stays a leaf (no
+	// import of internal/diagnostics). Empty unless Terminal is set.
+	TerminalCode string `json:"terminal_code,omitempty"`
+}
+
+// PermanentFailureAttempts is how many classified-permanent connection failures
+// are required before automatic reconnection stops.
+//
+// Two, not one: the second attempt is a confirmation. A classifier false
+// positive then costs one wasted retry instead of stranding a server that would
+// have recovered — while still cutting the GH #1145 log from 55 attempts to 2.
+const PermanentFailureAttempts = 2
+
+// GaveUpProbeBackoff returns how long to wait between post-give-up probes.
+//
+// The flat GaveUpProbeInterval self-heals a long outage, but for a failure that
+// will never fix itself it is simply a 30-minute-forever loop — 35 of the 55
+// attempts in GH #1145. Codes we can PROVE permanent are parked outright (see
+// ConnectionInfo.Terminal); this decay covers the tail we cannot prove, without
+// ever claiming permanence: 30m, 1h, 2h, 4h, then a 6h ceiling. The counter is
+// free — SetError keeps bumping RetryCount past MaxConnectionRetries.
+//
+// The first probe is deliberately unchanged at GaveUpProbeInterval, so the
+// #1013 self-healing guarantee holds for every outage that recovers promptly.
+func GaveUpProbeBackoff(retryCount int) time.Duration {
+	exponent := retryCount - MaxConnectionRetries
+	if exponent < 0 {
+		exponent = 0
+	}
+	const maxExponent = 4 // 30m << 4 == 8h, clamped to the 6h ceiling below
+	if exponent > maxExponent {
+		exponent = maxExponent
+	}
+	d := GaveUpProbeInterval << uint(exponent)
+	if d > MaxGaveUpProbeInterval {
+		return MaxGaveUpProbeInterval
+	}
+	return d
 }
 
 // RetryBackoffDuration returns the exponential backoff to wait after the given
@@ -119,6 +171,11 @@ func OAuthRetryBackoffDuration(oauthRetryCount int) time.Duration {
 // that self-healing at ~48 requests/day instead of ~2880.
 const GaveUpProbeInterval = 30 * time.Minute
 
+// MaxGaveUpProbeInterval is the ceiling of the escalating post-give-up probe
+// (GaveUpProbeBackoff). Bounded at 6 hours so an unattended machine still
+// recovers within a working day after a very long outage.
+const MaxGaveUpProbeInterval = 6 * time.Hour
+
 // ShouldAutoReconnect reports whether an automatic (supervisor-driven) reconnect
 // attempt is appropriate given the connection's failure history. It returns false
 // while a backoff window from the last failure has not elapsed and for servers
@@ -136,6 +193,13 @@ func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 	if !ci.RetryAfter.IsZero() && now.Before(ci.RetryAfter) {
 		return false
 	}
+	// A confirmed-permanent failure is parked for good (GH #1145). This sits
+	// ABOVE the state switch on purpose: ResetForReconnect leaves a mid-attempt
+	// client in StateDisconnected, which the default arm answers "true" — so a
+	// gate inside the StateError arm would leak on every teardown.
+	if ci.Terminal && ci.RetryCount >= PermanentFailureAttempts {
+		return false
+	}
 	switch ci.State {
 	case StatePendingAuth:
 		return false
@@ -149,7 +213,7 @@ func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 			return false
 		}
 		if ci.GaveUp || ci.RetryCount >= MaxConnectionRetries {
-			return now.Sub(ci.LastRetryTime) >= GaveUpProbeInterval
+			return now.Sub(ci.LastRetryTime) >= GaveUpProbeBackoff(ci.RetryCount)
 		}
 		if ci.RetryCount == 0 {
 			return true
@@ -185,6 +249,11 @@ type StateManager struct {
 	// response (#1040), set by SetRetryAfter and cleared on a successful
 	// connection or an explicit Reset.
 	retryAfter time.Time
+	// terminal / terminalCode record a failure the diagnostics classifier proved
+	// deterministic (GH #1145). Set only by SetTerminalError; cleared by
+	// SetError, ClearTerminal, Reset and a successful connection.
+	terminal     bool
+	terminalCode string
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
@@ -234,6 +303,8 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
 		RetryAfter:       sm.retryAfter,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
 		GaveUp:           sm.retryCount >= MaxConnectionRetries,
 	}
 }
@@ -260,6 +331,9 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 		sm.oauthRetryCount = 0
 		sm.userLoggedOut = false // Clear logout flag on successful connection
 		sm.retryAfter = time.Time{}
+		// The problem is demonstrably fixed — un-park.
+		sm.terminal = false
+		sm.terminalCode = ""
 	}
 
 	info := ConnectionInfo{
@@ -273,6 +347,8 @@ func (sm *StateManager) TransitionTo(newState ConnectionState) {
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
 		RetryAfter:       sm.retryAfter,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
 	}
 
 	callback := sm.onStateChange
@@ -294,6 +370,12 @@ func (sm *StateManager) SetError(err error) {
 	sm.lastError = err
 	sm.retryCount++
 	sm.lastRetryTime = time.Now()
+	// An unclassified (or differently classified) failure is NOT evidence of
+	// permanence, so it revokes any earlier park rather than inheriting it. This
+	// is the safe default for the health-probe and call-path callers of
+	// SetError, none of which observe the connect attempt that proved the fault.
+	sm.terminal = false
+	sm.terminalCode = ""
 
 	info := ConnectionInfo{
 		State:            sm.currentState,
@@ -306,6 +388,8 @@ func (sm *StateManager) SetError(err error) {
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
 		RetryAfter:       sm.retryAfter,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
 	}
 
 	callback := sm.onStateChange
@@ -314,6 +398,74 @@ func (sm *StateManager) SetError(err error) {
 	if callback != nil {
 		go callback(oldState, StateError, &info)
 	}
+}
+
+// SetTerminalError records a connection failure that the diagnostics classifier
+// proved deterministic and unrecoverable — a missing binary, an image without
+// the interpreter, an unparseable config. Retrying it cannot succeed until a
+// human changes something, so after PermanentFailureAttempts confirmations both
+// retry gates stop dialing and the server is surfaced as terminally failed.
+//
+// It is otherwise exactly SetError: the state, error, counter and timestamp all
+// advance identically, so every existing consumer keeps working. `code` is the
+// stable MCPX_* string that justified the park, carried through to the API so
+// the failure is visible with its reason rather than silently swallowed.
+//
+// Call this ONLY from the connect path, and only for a code that
+// diagnostics.IsPermanent accepts. Plain SetError deliberately clears the park.
+func (sm *StateManager) SetTerminalError(err error, code string) {
+	sm.mu.Lock()
+
+	oldState := sm.currentState
+	sm.currentState = StateError
+	sm.lastError = err
+	sm.retryCount++
+	sm.lastRetryTime = time.Now()
+	sm.terminal = true
+	sm.terminalCode = code
+
+	info := ConnectionInfo{
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
+		RetryAfter:       sm.retryAfter,
+		GaveUp:           sm.retryCount >= MaxConnectionRetries,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
+	}
+
+	callback := sm.onStateChange
+	sm.mu.Unlock()
+
+	// Dispatched in a goroutine, matching SetError — the callback chain reaches
+	// notification handlers that must not run under the state lock.
+	if callback != nil {
+		go callback(oldState, StateError, &info)
+	}
+}
+
+// ClearTerminal un-parks a terminally failed connection without otherwise
+// touching the retry ladder. It exists for the "the user changed something"
+// paths that keep the existing client instead of recreating it.
+func (sm *StateManager) ClearTerminal() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.terminal = false
+	sm.terminalCode = ""
+}
+
+// IsTerminal reports whether the connection is parked on a classifier-proven
+// permanent failure, and the code that proved it.
+func (sm *StateManager) IsTerminal() (bool, string) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.terminal, sm.terminalCode
 }
 
 // SetPendingAuth parks the connection in StatePendingAuth with the deferred-OAuth
@@ -346,6 +498,8 @@ func (sm *StateManager) SetPendingAuth(err error) {
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
 		RetryAfter:       sm.retryAfter,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
 		GaveUp:           sm.retryCount >= MaxConnectionRetries,
 	}
 
@@ -433,6 +587,13 @@ func (sm *StateManager) ShouldRetry() bool {
 		return false
 	}
 
+	// A classifier-proven permanent failure stops once its confirmation attempt
+	// is spent — the same policy ConnectionInfo.ShouldAutoReconnect applies for
+	// the supervisor (GH #1145).
+	if sm.terminal && sm.retryCount >= PermanentFailureAttempts {
+		return false
+	}
+
 	// Stop retrying after max consecutive failures
 	if sm.retryCount >= MaxConnectionRetries {
 		return false
@@ -510,6 +671,11 @@ func (sm *StateManager) Reset() {
 	sm.oauthRetryCount = 0
 	sm.isOAuthError = false
 	sm.retryAfter = time.Time{}
+	// Reset is the explicit "start over" path — manual reconnect (ForceReconnect)
+	// and Disconnect both route through it. It MUST un-park a terminal server, or
+	// a user who fixed the config would find the Restart button inert (GH #1145).
+	sm.terminal = false
+	sm.terminalCode = ""
 
 	info := ConnectionInfo{
 		State:            sm.currentState,
@@ -522,6 +688,8 @@ func (sm *StateManager) Reset() {
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
 		RetryAfter:       sm.retryAfter,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
 	}
 
 	callback := sm.onStateChange
@@ -557,6 +725,8 @@ func (sm *StateManager) ResetForReconnect() {
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
 		RetryAfter:       sm.retryAfter,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
 	}
 
 	callback := sm.onStateChange
@@ -589,6 +759,8 @@ func (sm *StateManager) SetOAuthError(err error) {
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
 		RetryAfter:       sm.retryAfter,
+		Terminal:         sm.terminal,
+		TerminalCode:     sm.terminalCode,
 	}
 
 	callback := sm.onStateChange

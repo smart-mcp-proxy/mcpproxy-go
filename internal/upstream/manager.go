@@ -1512,8 +1512,9 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		}
 
 		// Same retry policy the supervisor's reconcile honors: plain backoff,
-		// the coarse OAuth ladder, half-hourly probes after give-up, and no
-		// redial at all for a server parked awaiting login. ConnectAll runs on
+		// the coarse OAuth ladder, escalating probes after give-up, no redial at
+		// all for a server parked awaiting login, and none for one whose failure
+		// was proven permanent (GH #1145). ConnectAll runs on
 		// every config reload, so gating only on StateError+ShouldRetry (as it
 		// used to) let a reload re-dial servers their own client had paused
 		// (#1013). A user-driven config change for THIS server still reconnects
