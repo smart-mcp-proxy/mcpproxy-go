@@ -589,6 +589,14 @@ func TestRaisedCapGoesToTheWaiterNotANewcomer(t *testing.T) {
 // TestFastPathDoesNotOvertakeAQueue is the same rule in steady state: while
 // anyone is queued, an arriving call joins the back of the line even if its own
 // generation would let it run.
+//
+// Admission order is recorded by each caller stamping a shared counter the
+// moment Acquire returns and BEFORE it releases — the same trick as the raise
+// test above. It has to be that way round: the second waiter can only be
+// granted from inside the first one's release, so a stamp taken before the
+// release is a faithful record of the grant order. Reporting order is not:
+// both callers finish while the test is still parked, so waiting on their
+// result channels would only measure which goroutine got scheduled first.
 func TestFastPathDoesNotOvertakeAQueue(t *testing.T) {
 	l := New(ScopeServer, "srv", Limits{Max: 1, QueueSize: 4, QueueTimeout: time.Hour})
 
@@ -597,24 +605,32 @@ func TestFastPathDoesNotOvertakeAQueue(t *testing.T) {
 		t.Fatalf("first acquire: %v", err)
 	}
 
-	first := make(chan error, 1)
+	var admissions atomic.Int64
+	type admission struct {
+		seq int64
+		err error
+	}
+
+	first := make(chan admission, 1)
 	go func() {
 		release, aerr := l.Acquire(context.Background(), deadlineIn(time.Hour))
+		seq := admissions.Add(1)
 		if aerr == nil {
 			release()
 		}
-		first <- aerr
+		first <- admission{seq: seq, err: aerr}
 	}()
 	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 1 })
 
 	// A stale generation with a bigger cap must not let this call jump the queue.
-	second := make(chan error, 1)
+	second := make(chan admission, 1)
 	go func() {
 		release, aerr := l.acquire(context.Background(), Limits{Max: 5, QueueSize: 4, QueueTimeout: time.Hour}, deadlineIn(time.Hour))
+		seq := admissions.Add(1)
 		if aerr == nil {
 			release()
 		}
-		second <- aerr
+		second <- admission{seq: seq, err: aerr}
 	}()
 	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 2 })
 
@@ -623,22 +639,31 @@ func TestFastPathDoesNotOvertakeAQueue(t *testing.T) {
 	}
 
 	held()
-	for i := 0; i < 2; i++ {
-		select {
-		case aerr := <-first:
-			if aerr != nil {
-				t.Fatalf("queued call: %v", aerr)
-			}
-			first = nil
-		case aerr := <-second:
-			if first != nil {
-				t.Fatal("the second caller was served before the first (FIFO violated)")
-			}
-			if aerr != nil {
-				t.Fatalf("second queued call: %v", aerr)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("queued calls did not drain")
-		}
+	firstAdmission := awaitAdmission(t, first, "first queued call")
+	secondAdmission := awaitAdmission(t, second, "second queued call")
+	if firstAdmission.err != nil {
+		t.Fatalf("queued call: %v", firstAdmission.err)
+	}
+	if secondAdmission.err != nil {
+		t.Fatalf("second queued call: %v", secondAdmission.err)
+	}
+	if firstAdmission.seq != 1 || secondAdmission.seq != 2 {
+		t.Fatalf("admission order: first was #%d and second was #%d, want #1 then #2 (FIFO violated)",
+			firstAdmission.seq, secondAdmission.seq)
+	}
+}
+
+// awaitAdmission collects one caller's outcome, failing the test if the queue
+// never drained. Both result channels are buffered, so the callers finish
+// regardless of the order they are collected in.
+func awaitAdmission[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s did not drain", what)
+		var zero T
+		return zero
 	}
 }
