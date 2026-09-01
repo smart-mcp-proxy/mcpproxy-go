@@ -158,36 +158,31 @@ func TestTerminalClearedByRecoveryPaths(t *testing.T) {
 	})
 }
 
-// TestGaveUpProbeBackoff covers the unclassified tail: a failure we could NOT
-// prove permanent still must not probe at a flat 30 minutes forever. The first
-// probe is unchanged, so every previously-pinned case still holds.
-func TestGaveUpProbeBackoff(t *testing.T) {
-	tests := []struct {
-		retryCount int
-		expected   time.Duration
-	}{
-		{0, GaveUpProbeInterval},
-		{MaxConnectionRetries, GaveUpProbeInterval},
-		{MaxConnectionRetries + 1, 1 * time.Hour},
-		{MaxConnectionRetries + 2, 2 * time.Hour},
-		{MaxConnectionRetries + 3, 4 * time.Hour},
-		{MaxConnectionRetries + 4, 6 * time.Hour},
-		{MaxConnectionRetries + 50, 6 * time.Hour},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.expected, GaveUpProbeBackoff(tt.retryCount), "retryCount=%d", tt.retryCount)
-	}
-}
-
-// TestShouldAutoReconnect_GaveUpProbeEscalates proves the escalation is live in
-// the gate, not just in the helper.
-func TestShouldAutoReconnect_GaveUpProbeEscalates(t *testing.T) {
+// TestGaveUpProbe_StaysFlatForUnprovenFailures pins the #1013 self-heal
+// guarantee against the permanence work in GH #1145. Parking is reserved for
+// failures we can PROVE deterministic (ConnectionInfo.Terminal). Everything
+// else — a Docker daemon that is off, a VPN that is down, a laptop that slept,
+// a rate-limited upstream — must keep its documented 30-minute probe. An
+// escalating probe applied to the whole give-up tail would silently stretch
+// unattended recovery to hours for failures this same change classifies as
+// transient, and nothing in the tree shortens it again.
+func TestGaveUpProbe_StaysFlatForUnprovenFailures(t *testing.T) {
 	now := time.Now()
 
-	// 22 failures in: the probe window is 2h, so 45 minutes is too soon.
-	within := &ConnectionInfo{State: StateError, GaveUp: true, RetryCount: MaxConnectionRetries + 2, LastRetryTime: now.Add(-45 * time.Minute)}
-	assert.False(t, within.ShouldAutoReconnect(now))
+	for _, retryCount := range []int{
+		MaxConnectionRetries,
+		MaxConnectionRetries + 1,
+		MaxConnectionRetries + 4,
+		MaxConnectionRetries + 50,
+	} {
+		info := &ConnectionInfo{State: StateError, GaveUp: true, RetryCount: retryCount}
 
-	elapsed := &ConnectionInfo{State: StateError, GaveUp: true, RetryCount: MaxConnectionRetries + 2, LastRetryTime: now.Add(-3 * time.Hour)}
-	assert.True(t, elapsed.ShouldAutoReconnect(now))
+		info.LastRetryTime = now.Add(-GaveUpProbeInterval + time.Minute)
+		assert.False(t, info.ShouldAutoReconnect(now),
+			"retryCount=%d: must wait out the probe interval", retryCount)
+
+		info.LastRetryTime = now.Add(-GaveUpProbeInterval - time.Minute)
+		assert.True(t, info.ShouldAutoReconnect(now),
+			"retryCount=%d: a non-terminal failure must still be probed every %s", retryCount, GaveUpProbeInterval)
+	}
 }

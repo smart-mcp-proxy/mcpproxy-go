@@ -261,9 +261,14 @@ func seedHTTP() {
 		},
 		DocsURL: docsURL(HTTPTimeout),
 	})
+	// NOT RetryPermanent, however deterministic the name sounds: mcp-go returns
+	// its ErrLegacySSEServer sentinel for ANY 4xx on the initialize POST except
+	// 401 (client/transport/streamable_http.go). A 429 from a rate-limited
+	// upstream — or a 403/404/408 during a deploy — arrives as this exact code,
+	// and parking on it would strand a server that is merely busy (GH #1145
+	// review).
 	register(CatalogEntry{
 		Code:        HTTPLegacySSE,
-		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "This endpoint rejected the streamable-HTTP handshake; it looks like a legacy SSE server.",
 		FixSteps: []FixStep{

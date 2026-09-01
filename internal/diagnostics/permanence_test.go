@@ -31,7 +31,6 @@ func TestPermanentCodes_AreRegistered(t *testing.T) {
 		DockerOCIRuntime,
 		ConfigInvalidCommand,
 		ConfigParseError,
-		HTTPLegacySSE,
 	}
 	for _, c := range permanent {
 		if !Has(c) {
@@ -74,6 +73,14 @@ func TestTransientCodes_StayRetryable(t *testing.T) {
 		OAuthCallbackTimeout,
 		OAuthCallbackMismatch,
 		// Network/HTTP reachability.
+		//
+		// MCPX_HTTP_LEGACY_SSE looks deterministic and is not: mcp-go returns
+		// its ErrLegacySSEServer sentinel for ANY 4xx on the initialize POST
+		// except 401 (client/transport/streamable_http.go). A 429 from a
+		// rate-limited upstream — the textbook transient — is indistinguishable
+		// from a genuine legacy-SSE endpoint at this layer, so parking on it
+		// would strand a server that is merely busy.
+		HTTPLegacySSE,
 		HTTPDNSFailed,
 		HTTPTLSFailed,
 		HTTPUnauth,

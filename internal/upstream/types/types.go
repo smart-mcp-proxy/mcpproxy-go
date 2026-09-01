@@ -97,33 +97,6 @@ type ConnectionInfo struct {
 // have recovered — while still cutting the GH #1145 log from 55 attempts to 2.
 const PermanentFailureAttempts = 2
 
-// GaveUpProbeBackoff returns how long to wait between post-give-up probes.
-//
-// The flat GaveUpProbeInterval self-heals a long outage, but for a failure that
-// will never fix itself it is simply a 30-minute-forever loop — 35 of the 55
-// attempts in GH #1145. Codes we can PROVE permanent are parked outright (see
-// ConnectionInfo.Terminal); this decay covers the tail we cannot prove, without
-// ever claiming permanence: 30m, 1h, 2h, 4h, then a 6h ceiling. The counter is
-// free — SetError keeps bumping RetryCount past MaxConnectionRetries.
-//
-// The first probe is deliberately unchanged at GaveUpProbeInterval, so the
-// #1013 self-healing guarantee holds for every outage that recovers promptly.
-func GaveUpProbeBackoff(retryCount int) time.Duration {
-	exponent := retryCount - MaxConnectionRetries
-	if exponent < 0 {
-		exponent = 0
-	}
-	const maxExponent = 4 // 30m << 4 == 8h, clamped to the 6h ceiling below
-	if exponent > maxExponent {
-		exponent = maxExponent
-	}
-	d := GaveUpProbeInterval << uint(exponent)
-	if d > MaxGaveUpProbeInterval {
-		return MaxGaveUpProbeInterval
-	}
-	return d
-}
-
 // RetryBackoffDuration returns the exponential backoff to wait after the given
 // number of consecutive connection failures: 1s, 2s, 4s, ... capped at 5 minutes.
 func RetryBackoffDuration(retryCount int) time.Duration {
@@ -169,12 +142,14 @@ func OAuthRetryBackoffDuration(oauthRetryCount int) time.Duration {
 // overnight maintenance) until a human notices and reconnects by hand — a failed
 // upstream is invisible to the operator (#1013). One probe every 30 minutes keeps
 // that self-healing at ~48 requests/day instead of ~2880.
+//
+// The interval is deliberately FLAT. Parking is reserved for failures the
+// classifier can PROVE deterministic (ConnectionInfo.Terminal, GH #1145); an
+// escalating probe applied to the rest of the give-up tail would stretch
+// unattended recovery to hours for exactly the failures that heal on their own
+// — a stopped Docker daemon, a dropped VPN, a rate-limited upstream — and
+// nothing in the tree shortens it again until a human looks.
 const GaveUpProbeInterval = 30 * time.Minute
-
-// MaxGaveUpProbeInterval is the ceiling of the escalating post-give-up probe
-// (GaveUpProbeBackoff). Bounded at 6 hours so an unattended machine still
-// recovers within a working day after a very long outage.
-const MaxGaveUpProbeInterval = 6 * time.Hour
 
 // ShouldAutoReconnect reports whether an automatic (supervisor-driven) reconnect
 // attempt is appropriate given the connection's failure history. It returns false
@@ -213,7 +188,7 @@ func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 			return false
 		}
 		if ci.GaveUp || ci.RetryCount >= MaxConnectionRetries {
-			return now.Sub(ci.LastRetryTime) >= GaveUpProbeBackoff(ci.RetryCount)
+			return now.Sub(ci.LastRetryTime) >= GaveUpProbeInterval
 		}
 		if ci.RetryCount == 0 {
 			return true
@@ -412,7 +387,9 @@ func (sm *StateManager) SetError(err error) {
 // the failure is visible with its reason rather than silently swallowed.
 //
 // Call this ONLY from the connect path, and only for a code that
-// diagnostics.IsPermanent accepts. Plain SetError deliberately clears the park.
+// diagnostics.ParkableCode accepts — permanence in the catalog is necessary but
+// not sufficient, because the classifier's string fallbacks read the child
+// process's own stderr. Plain SetError deliberately clears the park.
 func (sm *StateManager) SetTerminalError(err error, code string) {
 	sm.mu.Lock()
 

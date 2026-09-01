@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -97,4 +98,50 @@ func TestConnect_TransientFailureStaysRetryable(t *testing.T) {
 	info := mc.StateManager.GetConnectionInfo()
 	assert.False(t, info.Terminal, "an unreachable endpoint must stay retryable (code %q)", info.TerminalCode)
 	assert.Empty(t, info.TerminalCode)
+}
+
+// TestConnect_ChildStderrNeverParks is the regression for the review of GH
+// #1145. The stdio classifier's substring fallbacks read an error string that
+// embeds the child's captured stderr, so a server that merely crashed while
+// printing "no such file or directory" was classified MCPX_STDIO_SPAWN_ENOENT —
+// a code declared permanent — and parked for good after two attempts. The
+// classification is still the most useful message we have; what it must not do
+// is stop automatic recovery on the child's own words.
+func TestConnect_ChildStderrNeverParks(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+	}{
+		{"ENOENT on a data file", "Error: ENOENT: no such file or directory, open '/tmp/agent-state.json'"},
+		{"EACCES on a cache dir", "EACCES: permission denied, mkdir '/var/cache/agent'"},
+		{"a helper it shelled out to is missing", "sh: line 1: helper-tool: command not found"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc := newClientForConnect(t, &config.ServerConfig{
+				Name:     "transiently-crashing",
+				Protocol: "stdio",
+				Command:  "sh",
+				Args:     []string{"-c", "echo " + strconv.Quote(tt.stderr) + " >&2; exit 1"},
+				Enabled:  true,
+				Created:  time.Now(),
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			require.Error(t, mc.Connect(ctx))
+
+			info := mc.StateManager.GetConnectionInfo()
+			assert.False(t, info.Terminal,
+				"a crash whose stderr merely contains a spawn-like phrase must stay retryable (code %q, err %v)",
+				info.TerminalCode, info.LastError)
+			assert.Empty(t, info.TerminalCode)
+
+			backdated := info
+			backdated.LastRetryTime = time.Now().Add(-time.Hour)
+			assert.True(t, backdated.ShouldAutoReconnect(time.Now()),
+				"the supervisor must keep probing an unproven failure")
+		})
+	}
 }
