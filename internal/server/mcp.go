@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
@@ -3818,6 +3819,9 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		var isConnected bool
 		var toolCount int
 		var userLoggedOut bool
+		var retryStopped bool
+		var retryStoppedCode, retryStoppedReason string
+		var retryCount int
 
 		if client, exists := p.upstreamManager.GetClient(server.Name); exists {
 			connInfo := client.GetConnectionInfo()
@@ -3850,6 +3854,16 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				}
 			}
 
+			// GH #1145: automatic reconnection permanently given up. Reported
+			// on the MCP surface too — an agent that keeps polling a parked
+			// server otherwise has no way to learn nothing will ever retry.
+			retryStopped = connInfo.Terminal && connInfo.RetryCount >= types.PermanentFailureAttempts
+			if retryStopped {
+				retryStoppedCode = connInfo.TerminalCode
+				retryStoppedReason = diagnostics.PermanentFailureReason(diagnostics.Code(connInfo.TerminalCode), lastError)
+			}
+			retryCount = connInfo.RetryCount
+
 			serverMap["connection_status"] = map[string]interface{}{
 				"state":            connState,
 				"last_error":       lastError,
@@ -3857,6 +3871,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				"last_retry_time":  connInfo.LastRetryTime.Format(time.RFC3339),
 				"container_id":     containerInfo["container_id"],
 				"container_status": containerInfo["status"],
+				"retry_stopped":    retryStopped,
 			}
 		} else {
 			connState = "disconnected"
@@ -3892,6 +3907,12 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			// to edit. Must be supplied at every CalculateHealth call site or
 			// the REST, MCP and tray surfaces disagree about the remedy.
 			HasEndpointURL: server.URL != "",
+			// GH #1145 — must be supplied here too, or the MCP surface reports
+			// a parked server as an ordinary retrying error.
+			RetryStopped:       retryStopped,
+			RetryStoppedCode:   retryStoppedCode,
+			RetryStoppedReason: retryStoppedReason,
+			RetryCount:         retryCount,
 		}
 
 		// T032: Wire refresh state into health calculation (Spec 023)

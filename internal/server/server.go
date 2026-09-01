@@ -1423,6 +1423,12 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			// CalculateHealth call site must supply this or the surfaces
 			// disagree about how to fix the same server.
 			HasEndpointURL: url != "",
+			// GH #1145: automatic reconnection given up for good. Supplied at
+			// every CalculateHealth call site or the surfaces disagree.
+			RetryStopped:       serverStatus.RetryStopped,
+			RetryStoppedCode:   serverStatus.RetryStoppedCode,
+			RetryStoppedReason: serverStatus.RetryStoppedReason,
+			RetryCount:         serverStatus.RetryCount,
 		}
 
 		// Check if OAuth is required for this server
@@ -1478,6 +1484,17 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 		// mode as the management-service path. Raw value; omitted when unset.
 		if cfg != nil && cfg.TrustMode != "" {
 			serverMap["trust_mode"] = cfg.TrustMode
+		}
+
+		// GH #1145: automatic reconnection permanently given up. This is the
+		// projection the REST API actually serves (internal/server.Server is the
+		// httpapi controller), so omitting it here would leave the health text as
+		// the only trace of a parked server. Emitted only when set, so the
+		// payload shape is unchanged for every other server.
+		if serverStatus.RetryStopped {
+			serverMap["retry_stopped"] = true
+			serverMap["retry_stopped_code"] = serverStatus.RetryStoppedCode
+			serverMap["retry_stopped_reason"] = serverStatus.RetryStoppedReason
 		}
 
 		// Spec 039: Add security scan summary if available
