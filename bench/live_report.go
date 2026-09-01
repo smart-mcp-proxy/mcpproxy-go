@@ -92,7 +92,7 @@ type LiveReport struct {
 	BreakEven *BreakEvenAnalysis `json:"break_even,omitempty"`
 	// SessionEstimates are the FR-019 estimator rows for the measured live
 	// encoding (baseline_json — the proxy's own full-JSON responses).
-	SessionEstimates []SessionCostEstimate `json:"session_estimates,omitempty"`
+	SessionEstimates []SessionCostRow `json:"session_estimates,omitempty"`
 	// MCPDiscoveryLatency aggregates the MCP retrieve_tools call latencies
 	// from the per-query response-cost rows (FR-023). It is a DIFFERENT
 	// surface than Latency, which times REST /api/v1/index/search calls —
@@ -251,8 +251,12 @@ func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet, opts Li
 			rep.BreakEven = be
 			// The measured live encoding is the proxy's own full-JSON
 			// response rendering — the baseline_json arm by definition.
-			rep.SessionEstimates = EstimateSessionCosts(proxyMenuTokens,
-				map[string]float64{"baseline_json": respCost.Mean})
+			// Rows, not bare estimates: no measured outcomes exist on the
+			// live path yet, so every row comes back badged estimated — which
+			// is the honest state, and is now VISIBLE in the table rather
+			// than asserted in a footnote.
+			rep.SessionEstimates = EstimateSessionCostRows(proxyMenuTokens,
+				map[string]float64{"baseline_json": respCost.Mean}, nil)
 		}
 	}
 

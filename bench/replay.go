@@ -805,6 +805,19 @@ func (b *ReplayBlock) ValidateExclusionBalance() error {
 // but empty — replay measures no encoding arms over a corpus; it crosses the
 // mode matrix, which is why it is a block rather than one more OfflineSection.
 func ReplayReport(tk *Tokenizer, block *ReplayBlock) *ReportV2 {
+	// US3 (FR-030): a replay is scored over the operator's OWN recorded
+	// traffic, which cannot be published, so an outsider cannot reproduce its
+	// figures. Stamping that here rather than leaving it to the caller is the
+	// difference between an honest limitation and an implied guarantee — and
+	// the field existed unpopulated until this wiring, which meant every
+	// replay report silently read as independently reproducible.
+	if block != nil && block.Inputs == nil {
+		block.Inputs = PrivateRecordingInputs(
+			"Scored over a private activity-log recording that is raw user traffic and is never " +
+				"committed. The deterministic figures reproduce for anyone holding the SAME recording " +
+				"and the same fleet input, but an outsider cannot obtain the recording, so these " +
+				"figures must not be the sole support for a published claim (FR-030).")
+	}
 	return &ReportV2{
 		ReportVersion: ReportVersion2,
 		GeneratedAt:   ReplayGeneratedAt,
