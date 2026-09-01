@@ -191,56 +191,56 @@ appear per cell, badged `measured`, averaged over k≥4 runs with spread.
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T034 [US2] Classification tests in `bench/agentloop_test.go` for the binding Definitions:
+- [x] T034 [US2] Classification tests in `bench/agentloop_test.go` for the binding Definitions:
       first-attempt success, corrective vs infrastructure retry, unit of work, task completion.
       **The same rule must apply to the baseline arm and the proxy arms**, or the comparison is
       biased toward whichever carries richer error signal
-- [ ] T035 [US2] In `bench/agentloop_test.go`: `completion: no-signal` excludes a record from
+- [x] T035 [US2] In `bench/agentloop_test.go`: `completion: no-signal` excludes a record from
       completion-dependent figures rather than counting it as success or failure. Same file as
       the task above, so not parallel
-- [ ] T036 [US2] In `bench/agentloop_test.go`: a model-dependent figure with `runs < 4` is
+- [x] T036 [US2] In `bench/agentloop_test.go`: a model-dependent figure with `runs < 4` is
       refused as a headline (FR-021)
-- [ ] T037 [US2] In `bench/agentloop_test.go`: a mode with lower token cost but lower completion
+- [x] T037 [US2] In `bench/agentloop_test.go`: a mode with lower token cost but lower completion
       is flagged a regression by the completion threshold and is NOT reported as a saving
       (SC-007) — drive it with a deliberately degraded mode
-- [ ] T038 [US2] In `bench/agentloop_test.go`: a cross-accounting-source aggregate is WITHHELD
+- [x] T038 [US2] In `bench/agentloop_test.go`: a cross-accounting-source aggregate is WITHHELD
       with a stated reason, never computed, mirroring the existing
       `AuthoritativeHeadline`/`withholdHeadline` pattern in `bench/live_report.go`
 
 ### Implementation for User Story 2
 
-- [ ] T039 [US2] Create `bench/agentloop.go` — driver parameterised over a function type so the
+- [x] T039 [US2] Create `bench/agentloop.go` — driver parameterised over a function type so the
       arithmetic is unit-testable with no suite running, following the `bench/flipgate.go`
       precedent
-- [ ] T040 [US2] Implement the FR-020 BASELINE ARM in `bench/agentloop.go`: the same agent
+- [x] T040 [US2] Implement the FR-020 BASELINE ARM in `bench/agentloop.go`: the same agent
       running the same tasks with every upstream tool loaded directly, **bypassing mcpproxy
       entirely**. This is the denominator every published percentage is measured against, and
       without it no saving can be quoted. It is NOT the deterministic `baseline` renderer used
       by the offline arms
-- [ ] T041 [US2] Ingest the suite's per-task `meta.json` (`execution_result.success`,
+- [x] T041 [US2] Ingest the suite's per-task `meta.json` (`execution_result.success`,
       `token_usage`, `turn_count`) and `messages.json` trajectories for retry classification
-- [ ] T042 [US2] Capture provider-reported `usage` in the driver for the input/output/cache-read
+- [x] T042 [US2] Capture provider-reported `usage` in the driver for the input/output/cache-read
       split. **The suite's own output has no cache-read field**, so that axis must come from the
       driver or be explicitly declared out of reach (research.md)
-- [ ] T043 [US2] Emit the `agent_loop` block from `bench/agentloop.go` with its own populated
+- [x] T043 [US2] Emit the `agent_loop` block from `bench/agentloop.go` with its own populated
       `accounting_source` (provider + pinned model), never summed with tokenizer-sourced figures
-- [ ] T044 [US2] Write a FAILING test in `bench/session_test.go`: where a measured retry rate
+- [x] T044 [US2] Write a FAILING test in `bench/session_test.go`: where a measured retry rate
       exists it supersedes the assumed default, and where none exists the row stays badged
       `estimated`. `RetryRateForArm` returns `0.0` for unknown arms (`bench/session.go:49-62`),
       indistinguishable from a measured `0.0` — this test is what prevents the silent mix
-- [ ] T045 [US2] Implement FR-013 in `bench/session.go`: measured success and retry rates
+- [x] T045 [US2] Implement FR-013 in `bench/session.go`: measured success and retry rates
       supersede the literature-derived `armRetryRates` defaults wherever a measurement exists,
       and add a per-row provenance field to session-cost rows so measured and estimated rows are
       distinguishable inside one table
-- [ ] T046 [US2] Implement the FR-023 COST-VERSUS-OUTCOME VIEW in `bench/report.go`: cost
+- [x] T046 [US2] Implement the FR-023 COST-VERSUS-OUTCOME VIEW in `bench/report.go`: cost
       plotted against completion outcome per cell, so a reader sees which modes are worth their
       savings rather than only which are cheapest. Completion rate must sit beside cost at equal
       prominence (FR-018)
-- [ ] T047 [US2] Patch the pinned suite's single MCP factory — `src/agents/mcpmark_agent.py`
+- [x] T047 [US2] Patch the pinned suite's single MCP factory — `src/agents/mcpmark_agent.py`
       `_create_mcp_server()` in the external MCPMark clone, NOT a file in this repo — with an
       env-gated branch returning an HTTP MCP server at mcpproxy's URL with the API-key header.
       Pin by commit SHA and record the SHA in `bench/README.md` (FR-028)
-- [ ] T048 [US2] In the benchmark's mcpproxy config (a scratch `mcp_config.json`, never
+- [x] T048 [US2] In the benchmark's mcpproxy config (a scratch `mcp_config.json`, never
       committed), configure ALL suite services simultaneously while running one service's tasks
       — a single server's toolset is too small a fleet to show the asymptote, and the full fleet
       is also the honest FR-020 baseline
@@ -288,24 +288,24 @@ recomputed per corpus and an explicit `confirmed`/`corrected` verdict.
 **Independent Test**: Someone with no prior context follows the procedure and reproduces the
 deterministic figures exactly, the model-dependent ones within the stated tolerance.
 
-- [ ] T054 [US3] Write FAILING tests in `bench/reportv2_test.go` for the US3 report behaviours:
+- [x] T054 [US3] Write FAILING tests in `bench/reportv2_test.go` for the US3 report behaviours:
       a private-session-derived figure is marked not-independently-reproducible; a partial run is
       marked partial and refused for publication
 - [ ] T055 [US3] Measure the tokenizer's divergence from the pinned model with the
       provider's token-counting endpoint (no inference spend) and record it in `bench/README.md`
       as FR-022's numeric tolerance. **The repo currently states ~60% while the provider's
       guidance says ~15–20%** — neither is sourced, and they differ threefold
-- [ ] T056 [US3] In `bench/reportv2.go`, mark figures derived from private recorded sessions as
+- [x] T056 [US3] In `bench/reportv2.go`, mark figures derived from private recorded sessions as
       NOT independently reproducible; they must never be the sole support for a published claim
       (FR-030)
-- [ ] T057 [US3] In `bench/replay.go` and `bench/agentloop.go`, retain raw per-run records under
+- [x] T057 [US3] In `bench/replay.go` and `bench/agentloop.go`, retain raw per-run records under
       the gitignored `bench/results/` and reference them from the report by RUN-LOCAL path, with
       an explicit note that they are not durable across a results cleanup. A report reference
       must degrade to "records not retained" rather than dangling (FR-029, and consistent with
       SC-011's never-committed rule)
-- [ ] T058 [US3] In `bench/reportv2.go`, mark partial or interrupted runs as partial and block
+- [x] T058 [US3] In `bench/reportv2.go`, mark partial or interrupted runs as partial and block
       them from publication (FR-032)
-- [ ] T059 [US3] Write the reproduction procedure into `bench/README.md`, including warming the
+- [x] T059 [US3] Write the reproduction procedure into `bench/README.md`, including warming the
       tokenizer cache and supplying a fleet input
 
 **Checkpoint**: The numbers survive outside scrutiny.
@@ -316,7 +316,7 @@ deterministic figures exactly, the model-dependent ones within the stated tolera
 
 **Goal**: Results reach developers deciding whether to adopt.
 
-- [ ] T060 [US5] Draft the write-up for `mcpproxy.app/blog` (separate repository): measured
+- [x] T060 [US5] Draft the write-up for `mcpproxy.app/blog` (separate repository): measured
       figures, the fleet shapes they hold for, known limitations, the reproduction procedure,
       and **plainly where savings do not materialise** (FR-031, SC-012). Extend the existing
       2026-03-19 "BM25 vs Embeddings vs Lua" post rather than duplicating it
@@ -325,11 +325,11 @@ deterministic figures exactly, the model-dependent ones within the stated tolera
 
 ## Phase 8: Polish & Cross-Cutting
 
-- [ ] T061 [P] Compare the Web-UI/status savings figure (`internal/server/tokens/savings.go`,
+- [x] T061 [P] Compare the Web-UI/status savings figure (`internal/server/tokens/savings.go`,
       surfaced via `internal/runtime/runtime.go`) against the bench headline over one live
       fleet. They are independently implemented over the same data and have never been compared;
       the spec's own Assumptions say a contradiction is a finding to investigate
-- [ ] T062 [P] Verify no generated report became tracked: `git ls-files bench/results` is empty
+- [x] T062 [P] Verify no generated report became tracked: `git ls-files bench/results` is empty
 - [ ] T063 Full gates: `go build ./cmd/mcpproxy` and `-tags server`;
       `go test -race -count=1 ./internal/... ./bench/...`;
       `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...`;

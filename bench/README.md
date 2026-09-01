@@ -465,12 +465,108 @@ offline reproduction needs the cache pre-populated — warm it once with network
 access, or restore a known-good copy (which is what `.github/workflows/bench.yml`
 does via its `actions/cache` step).
 
+### Reproducing a published figure (SC-004)
+
+Someone with no prior context reproduces the deterministic figures **exactly**,
+and the model-dependent ones within the stated numeric tolerance (FR-022 — see
+the tokenizer caveat under "Known limitations"), by following these steps and
+nothing else.
+
+**1. Populate the tokenizer cache. Naming it is not filling it.**
+
+```bash
+export TIKTOKEN_CACHE_DIR="$HOME/.cache/tiktoken"
+go run ./bench/cmd/bench \
+  -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
+  -out /tmp/warm             # downloads the vocabulary once — needs network
+ls "$TIKTOKEN_CACHE_DIR"     # non-empty ⇒ every later run is genuinely offline
+```
+
+`TIKTOKEN_CACHE_DIR` only *names* a directory. A first run with the variable set
+and the directory empty still reaches the network, so a machine "configured for
+offline" but never warmed fails at the first token count rather than at
+configuration time — and it fails the same way on an air-gapped reviewer's
+laptop as it does in a network-restricted CI job. Warm it once with network
+access, or restore a known-good copy (which is what `.github/workflows/bench.yml`
+does via its `actions/cache` step).
+
+**2. Supply a fleet input. There is no default, and there is no fallback.**
+
+A menu cost is a property of the tool definitions the agent was shown. A
+recording carries the *call shape* — sequence, tool mix, call counts — and no
+fleet snapshot whatsoever, so a recording-only invocation has nothing to price:
+
+```bash
+go run ./bench/cmd/bench -replay ~/replay-corpus.jsonl -out bench/results
+# bench: replay requires a fleet input as well as a recording: a menu is a
+# property of the tool definitions and the activity export carries no fleet
+# snapshot, so a recording on its own computes nothing — pass a frozen corpus
+# or a live-proxy catalog (this is an error, not a degraded run)
+# exit status 1
+```
+
+That is a **hard error, not a degraded run**. The alternative — quietly scoring
+against an empty or assumed fleet — would produce a plausible-looking number
+with no fleet shape behind it, which is exactly the failure every percentage in
+this report carries a `fleet_shape` to prevent. Pass the frozen corpus for a
+reproducible figure, or a live `-proxy` for today's fleet.
+
+**3. Run the pinned command, twice.** The deterministic half is byte-identical
+across runs once the wall-clock stamp is removed — the `diff` recipe under
+"Verify determinism" above is the check, and it is what SC-002 means. If two
+runs on the same machine differ by anything other than `generated_at`, stop:
+nothing downstream is worth comparing yet.
+
+**4. Read the three honesty marks before quoting anything.** They are fields in
+`report.json`, not prose in this file, because a report travels without its
+README:
+
+| Field | Says | If it is missing |
+|-------|------|------------------|
+| `run_status.completeness` | `complete`, or `partial` with a reason and the unmeasured cells named | Undeclared completeness — the run is **not publishable** as a complete comparison (FR-032) |
+| `<block>.inputs.independently_reproducible` | whether an outsider can obtain the inputs at all | Undeclared availability — treated as **not** reproducible, and blocks publication (FR-030) |
+| `<block>.records` | where this block's raw per-run records sit, as a path relative to the run directory | No `records` key at all blocks publication; `retention: not_retained` does not — the figure is real, just no longer traceable to its inputs (FR-029) |
+
+`bench.ReportV2.PublicationCheck()` applies all three and returns blockers plus
+caveats. A partial run blocks. An undeclared input blocks. A report in which
+*every* block rests on a private recording blocks — see step 5.
+
+**5. Know what you cannot reproduce.** A replay run over someone's own exported
+activity is scored from **private recorded sessions**: the recording is raw user
+traffic, it is never published (FR-006), and no procedure exists that would hand
+it to you. Such a block is marked `independently_reproducible: false` with the
+limitation stated in the document, and it may **never be the sole support for a
+published claim** — a report whose only figures come from one operator's
+recording is a claim nobody outside can check, however honestly each row is
+labelled. Publish it beside a block an outsider *can* reproduce (the committed
+corpora, or a pinned public task suite), and keep the caveat attached.
+
+**6. Raw records are run-local and not durable.** They are written under the
+gitignored `bench/results/` tree — the same tree SC-011 forbids committing and
+the same tree a cleanup empties. The report references them by a path relative
+to its own directory, never an absolute one: an absolute path would carry the
+operator's filesystem into a published document and would dangle on every other
+machine. Copy the run directory elsewhere before relying on those records; once
+they are gone the reference degrades to `records not retained` rather than
+pointing at nothing.
+
+Each mark is written by the run that produces the block: the replay entry point
+sets `replay.inputs` (`private-recording` for an operator's own export) and
+`replay.records`; the agent loop sets its own pair plus the report-level
+`run_status`, derived from the cells it planned against the cells it actually
+measured. `WriteJSON` re-checks every records reference against the directory it
+is writing into, so a reference cannot be published pointing at a file that is
+already gone.
+
 ### Before publishing a replay or agent-loop number
 
 1. Recompute the achievable ceiling **for each fleet shape**; never carry a
    previous fleet's ceiling forward.
 2. Quote the fleet shape beside every percentage.
-3. Confirm no report is tracked:
+3. Confirm the run is not `partial`, and that no private-recording figure is
+   standing alone — `PublicationCheck()` answers both, and returns the caveats
+   that must travel with the number even when it publishes.
+4. Confirm no report is tracked:
    ```bash
    test -z "$(git ls-files bench/results)" && echo "clean (SC-011)"
    ```
