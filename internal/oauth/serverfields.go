@@ -128,6 +128,17 @@ func RedactServerSecretFields(server *contracts.Server) {
 	if server.LastError != "" {
 		server.LastError = MaskDetectedSecrets(RedactSensitiveData(server.LastError))
 	}
+	// GH #1145's retry_stopped_reason is free-form UPSTREAM text, not the fixed
+	// catalog string its name suggests: diagnostics.PermanentFailureReason falls
+	// through to the raw error whenever the terminal code has no catalog
+	// message, and that raw error is ci.LastError.Error() — which
+	// core.enrichTransportClosedError folds the CHILD PROCESS'S captured stderr
+	// into, and which routinely carries the upstream URL with its query
+	// credentials. So it is scrubbed in parity with LastError / Health.Detail /
+	// Diagnostic.Cause rather than trusted for its name.
+	if server.RetryStoppedReason != "" {
+		server.RetryStoppedReason = MaskDetectedSecrets(RedactSensitiveData(server.RetryStoppedReason))
+	}
 	if server.Health != nil && server.Health.Detail != "" {
 		health := *server.Health
 		health.Detail = MaskDetectedSecrets(RedactSensitiveData(health.Detail))
@@ -284,7 +295,13 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"connected_at":      MaskDecisionNotSecret,
 	"last_reconnect_at": MaskDecisionNotSecret,
 	"reconnect_count":   MaskDecisionNotSecret,
-	"tool_count":        MaskDecisionNotSecret,
+	// GH #1145 parked-server state. `retry_stopped_code` is a stable MCPX_*
+	// catalog code this proxy produced. `retry_stopped_reason` falls back to the
+	// RAW upstream error when the code has no catalog message, so it is scrubbed
+	// on read exactly like last_error; nothing writes back through either.
+	"retry_stopped_code":   MaskDecisionNotSecret,
+	"retry_stopped_reason": MaskDecisionNotSecret, // scrubbed free-form text
+	"tool_count":           MaskDecisionNotSecret,
 	// isolation_defaults is READ-ONLY output, but round 7 finding 4 re-judged
 	// it: it is resolved from the operator-supplied GLOBAL docker_isolation
 	// block, so a credential in the global `extra_args` lands in it verbatim.

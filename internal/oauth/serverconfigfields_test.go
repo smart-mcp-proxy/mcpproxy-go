@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // Issue #1148: the *config.ServerConfig door. RedactServerConfigSecrets is what
@@ -201,4 +202,31 @@ func mustParseScheme(t *testing.T, raw string) string {
 		}
 	}
 	return ""
+}
+
+// GH #1145's `retry_stopped_reason` arrived on contracts.Server from main while
+// this branch was open, and the coverage canary caught it with no decision.
+//
+// Its name says "catalog message", but diagnostics.PermanentFailureReason falls
+// through to the RAW error whenever the terminal code has no catalog entry —
+// and that raw error is ci.LastError.Error(), which
+// core.enrichTransportClosedError folds the child process's captured stderr
+// into. So it is upstream free text of exactly the last_error kind, and it must
+// be scrubbed rather than trusted for its name.
+func TestRedactServerSecretFields_ScrubsRetryStoppedReason(t *testing.T) {
+	srv := &contracts.Server{
+		Name: "parked",
+		RetryStoppedReason: "dial https://api.example.com/mcp?access_token=" + ghpToken +
+			" failed; recent stderr:\nAPI_KEY=" + ghpToken,
+		RetryStoppedCode: "MCPX_STDIO_EXEC_NOT_FOUND",
+	}
+
+	RedactServerSecretFields(srv)
+
+	assert.NotContains(t, srv.RetryStoppedReason, ghpToken,
+		"retry_stopped_reason falls back to the raw upstream error, so it carries the same "+
+			"credentials last_error does and takes the same scrub")
+	assert.Equal(t, "MCPX_STDIO_EXEC_NOT_FOUND", srv.RetryStoppedCode,
+		"the terminal code is a stable catalog identifier this proxy produced; blanking it "+
+			"would cost the operator the one field that says WHY the server parked")
 }
