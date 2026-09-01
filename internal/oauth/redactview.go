@@ -26,34 +26,37 @@ import (
 // read rendering and the write revert defined side by side, which is the
 // invariant this issue keeps breaking.
 
-// Redaction is the pair of decisions that separate the two surfaces the rules
-// serve. The RULES — which key names are sensitive, which values look like
-// credentials, how argv pairs up — are shared; only the rendering and whether
-// the value-shaped detector runs over oauth's own contracted leaves differ, so
-// the two surfaces cannot drift on the part that decides what is a secret.
+// Redaction is the shared rule set for masking one server's secret-bearing
+// leaves. The RULES — which key names are sensitive, which values look like
+// credentials, how argv pairs up, how a URL is rendered component-wise — are
+// shared by EVERY door: the MCP `upstream_servers list` /
+// `quarantine_security list_quarantined` payloads, `GET /api/v1/servers`, the
+// `/events` SSE `servers.changed` payload and the activity store. Only the
+// mask RENDERING differs, and that difference is the one thing this struct
+// carries.
 type Redaction struct {
 	// Mask renders one masked secret. Defaults to MaskValue when nil.
 	Mask func(string) string
 
-	// DetectContracted runs the value-shaped secret detector over the THREE
-	// leaf kinds this package owns a write-path unmask contract for — env
-	// values, header values and the server URL — EVEN WHEN the name/URL rules
-	// already rewrote them.
+	// DetectContracted collapses a URL-shaped rendering: the value-shaped
+	// detector runs over the WHOLE string rather than component by component.
 	//
-	// Only the AUDIT policy sets it. Audit rows are never written back, so
-	// nothing constrains their rendering and maximal masking wins.
+	// Only the AUDIT policy sets it. Audit rows are never written back and are
+	// never edited by an operator, so nothing constrains their rendering and
+	// maximal masking wins.
 	//
-	// A LIVE surface cannot mask unconditionally: UnmaskEnvValues /
-	// UnmaskHeaders / UnmaskURL recognise an echoed mask by comparing against
-	// this package's own rendering byte for byte, and #872 deliberately renders
-	// a connection string component-wise (`postgres://u:••••(N chars)@host/db`)
+	// A LIVE surface cannot collapse the rendering: #872 deliberately renders a
+	// connection string component-wise (`postgres://u:••••(N chars)@host/db`)
 	// so an operator can edit the database name without the password mask being
-	// persisted as the password.
+	// persisted as the password, and UnmaskURL recognises exactly that
+	// rendering on the write path.
 	//
-	// It does NOT follow that a live surface skips the detector entirely: a
-	// vendor-shaped credential under a benign name (`env: {BENIGN: ghp_…}`) is
-	// invisible to the name matcher. detectContracted below carries the narrow
-	// rule that closes that without collapsing the component-wise rendering.
+	// It does NOT follow that a live surface skips the detector. Round 6
+	// finding 1: the old guard skipped it for the ENTIRE string as soon as the
+	// name rule rewrote any one component, so a URL holding two credentials
+	// published the second in the clear. The detector now runs per component
+	// (see maskDetectedPreservingURL), which closes that without collapsing
+	// anything the write path depends on.
 	DetectContracted bool
 }
 
@@ -78,8 +81,8 @@ func (r Redaction) masker() func(string) string {
 // then by the value's own shape.
 //
 // The name rule decides first — it is what keeps the payload readable and says
-// WHICH credential is configured — and whatever it passes through is offered to
-// the value-shaped detector. A key name is never the only rule: `--endpoint=ghp_…`,
+// WHICH credential is configured — and whatever survives it is offered to the
+// value-shaped detector. A key name is never the only rule: `--endpoint=ghp_…`,
 // a credential under a header name no matcher recognises, or a token pasted
 // into a field nobody thought of is invisible to name matching and obvious to
 // the detector.
@@ -91,25 +94,24 @@ func (r Redaction) Leaf(key, s string) string {
 	case IsHeadersFieldName(key):
 		return r.HeaderValue(key, s)
 	case strings.EqualFold(key, "url"):
-		return r.detectContracted(s, RedactURLQueryParamsWith(s, r.masker()))
+		return r.URLValue(s)
 	default:
 		// An UNCONTRACTED leaf: a plain config field, a future field, or an
-		// argv token's value. Nothing unmasks these, so the detector always
-		// runs. The env-var rule is this package's single source of truth for
-		// "does this key name look like it holds a secret": it masks
-		// sensitive-looking keys, passes ${keyring:…}/${env:…} references
-		// through, URL-redacts connection strings, and runs RedactSensitiveData
-		// over everything else as defence in depth.
-		named := RedactEnvValuesWith(map[string]string{key: s}, r.masker())[key]
-		return MaskDetectedSecrets(named)
+		// argv token's value. The env-var rule is this package's single source
+		// of truth for "does this key name look like it holds a secret": it
+		// masks sensitive-looking keys, passes ${keyring:…}/${env:…}
+		// references through, URL-redacts connection strings, and runs
+		// RedactSensitiveData over everything else.
+		return r.finish(s, maskedEnvValueWith(key, s, r.masker()))
 	}
 }
 
-// EnvValue masks one environment-variable leaf, reproducing maskedEnvValue
-// exactly so UnmaskEnvValues can recognise the rendering if a client echoes it
-// back on the write path.
+// EnvValue masks one environment-variable leaf, reproducing maskedEnvValue's
+// NAME rule exactly so UnmaskEnvValues can recognise the rendering if a client
+// echoes it back on the write path, then running the value-shaped detector over
+// whatever the name rule left of the original value.
 func (r Redaction) EnvValue(name, value string) string {
-	return r.detectContracted(value, RedactEnvValuesWith(map[string]string{name: value}, r.masker())[name])
+	return r.finish(value, maskedEnvValueWith(name, value, r.masker()))
 }
 
 // HeaderValue masks one HTTP header leaf, judged by the header NAME first and
@@ -117,32 +119,122 @@ func (r Redaction) EnvValue(name, value string) string {
 // sufficient: the name matcher cannot enumerate every custom credential header,
 // and the detector cannot recognise an opaque value with no credential shape.
 func (r Redaction) HeaderValue(name, value string) string {
-	return r.detectContracted(value, RedactStringHeadersWith(map[string]string{name: value}, r.masker())[name])
+	return r.finish(value, maskedHeaderValueWith(name, value, r.masker()))
 }
 
-// detectContracted runs the value-shaped detector over a leaf this package owns
-// a write-path unmask contract for. `original` is the value before the name/URL
-// rule ran, `masked` the value after.
+// URLValue masks one URL leaf: the name rule first (sensitive query parameters
+// and the userinfo password, rendered component-wise per #872), then the
+// value-shaped detector over every component the name rule left alone.
+func (r Redaction) URLValue(s string) string {
+	return r.finish(s, RedactURLQueryParamsWith(s, r.masker()))
+}
+
+// finish runs the value-shaped detector over the output of a NAME rule.
+// `original` is the leaf before the name rule ran, `masked` after it.
 //
-// AUDIT: always. Nothing writes back through an audit row.
+// The detector is what closes the gap the name rules structurally cannot see: a
+// vendor-shaped credential under a benign key (`env: {BENIGN: ghp_…}`), a
+// header name no matcher enumerates, a query parameter called `opaque`.
 //
-// LIVE: only when the name/URL rule left the value BYTE-IDENTICAL — exactly the
-// gap where a credential the name matcher cannot see (`ghp_…` under
-// `BENIGN_NAME`) would otherwise be published. The guard is what keeps it from
-// collapsing the #872 component-wise connection-string rendering, whose
-// readable scheme/host/db the operator's edit flow depends on.
+// It is skipped in exactly ONE case: when the name rule already replaced the
+// WHOLE value with this package's own mask rendering. No byte of the secret
+// survives there for the detector to find, and re-masking would produce a
+// rendering UnmaskEnvValues / UnmaskHeaders could not recognise on the write
+// path — trading a non-disclosure for the read-modify-write corruption of
+// #1142/#1146.
 //
-// When the detector DOES fire on a live surface the rendering is no longer this
-// package's, so UnmaskEnvValues / UnmaskHeaders / UnmaskURL can no longer
-// recognise an echoed mask. The live surfaces reproduce THIS rendering on the
-// write path (see UnmaskLiveURLParams here, and unmaskLive* in
-// internal/server/mcp_server_view.go), so the round trip still cannot persist a
-// mask over a secret.
-func (r Redaction) detectContracted(original, masked string) string {
-	if !r.DetectContracted && masked != original {
+// Everything else — a partially-rewritten value, a URL rendered component-wise,
+// an untouched one — still carries original bytes, so the detector runs. For a
+// URL it runs PER COMPONENT so the scheme, host and component-wise userinfo
+// mask the write path binds to are preserved (round 6 finding 1).
+func (r Redaction) finish(original, masked string) string {
+	if r.DetectContracted {
+		return MaskDetectedSecrets(masked)
+	}
+	if masked == r.masker()(original) {
 		return masked
 	}
-	return MaskDetectedSecrets(masked)
+	return maskDetectedPreservingURL(masked)
+}
+
+// maskDetectedPreservingURL runs the value-shaped detector over s, component by
+// component when s is a whole absolute URL.
+//
+// Round 6 finding 1. The detector must not be handed a URL whole on a LIVE
+// surface: it would re-mask the `••••<last2> (<N> chars)` userinfo/query
+// renderings that UnmaskURL binds to on the write path. But skipping it for the
+// whole string — which is what the old `masked != original` guard did — meant
+// one masked component silenced the detector for every other one, publishing a
+// second credential in the clear.
+//
+// So it runs on the components the name rule does not own: the path, the
+// fragment, and every query parameter whose name no matcher recognises. Those
+// are exactly the components UnmaskLiveURLParams reverts, and the ones it
+// cannot are refused by the write doors' residual-mask check.
+func maskDetectedPreservingURL(s string) string {
+	if u, err := url.Parse(s); err != nil || u.Scheme == "" || u.Host == "" {
+		return MaskDetectedSecrets(s)
+	}
+
+	main, fragment, hasFragment := strings.Cut(s, "#")
+	base, rawQuery, hasQuery := strings.Cut(main, "?")
+
+	out := maskDetectedInURLPath(base)
+	if hasQuery {
+		out += "?" + maskDetectedInURLQuery(rawQuery)
+	}
+	if hasFragment {
+		out += "#" + MaskDetectedSecrets(fragment)
+	}
+	return out
+}
+
+// maskDetectedInURLPath runs the detector over the PATH of `scheme://authority/path`,
+// leaving the scheme, the host and the userinfo — whose password the name rule
+// has already rendered component-wise — byte-identical.
+func maskDetectedInURLPath(base string) string {
+	start := 0
+	if i := strings.Index(base, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	slash := strings.IndexByte(base[start:], '/')
+	if slash < 0 {
+		return base
+	}
+	cut := start + slash
+	return base[:cut] + MaskDetectedSecrets(base[cut:])
+}
+
+// maskDetectedInURLQuery runs the detector over each query parameter value the
+// NAME rule did not already mask.
+//
+// The detector sees the RAW (still percent-encoded) value bytes, because that
+// is what UnmaskLiveURLParams compares against when it reverts an echoed mask
+// per parameter — the two must render the same bytes or the revert silently
+// stops working.
+func maskDetectedInURLQuery(rawQuery string) string {
+	parts := strings.Split(rawQuery, "&")
+	for i, part := range parts {
+		eq := strings.IndexByte(part, '=')
+		if eq < 0 {
+			// A bare token carries no parameter name at all, so nothing but the
+			// detector can judge it.
+			parts[i] = MaskDetectedSecrets(part)
+			continue
+		}
+		key, value := part[:eq], part[eq+1:]
+		if isSensitiveQueryParam(queryUnescapeOr(key)) {
+			// The name rule already replaced this value with MaskValue's
+			// rendering; re-masking it would defeat UnmaskURL.
+			continue
+		}
+		if isConfigReference(queryUnescapeOr(value)) {
+			// A ${keyring:…} / ${env:…} label, not a secret.
+			continue
+		}
+		parts[i] = key + "=" + MaskDetectedSecrets(value)
+	}
+	return strings.Join(parts, "&")
 }
 
 // Argv masks a command-line argument vector. Returns nil for nil.

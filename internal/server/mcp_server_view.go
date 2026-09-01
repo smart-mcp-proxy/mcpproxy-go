@@ -252,170 +252,44 @@ func checkArgvMaskEcho(incoming, stored []string) error {
 	return oauth.CheckArgvMaskEcho("args_json", incoming, stored)
 }
 
+// The unmaskLive* helpers below are thin bindings onto the shared write rules
+// in internal/oauth (serverwrite.go), which is where they have to live: REST
+// `PATCH /api/v1/servers/{name}` needs exactly the same reverts, and
+// internal/httpapi cannot import this package (issue #1148, rounds 4 and 6).
+
 // unmaskLiveEnvValues reverts env values a client echoed back exactly as the
 // LIVE VIEW rendered them, before oauth.UnmaskEnvValues gets the map.
-//
-// Round 2 finding 7 let the live policy's value-shaped detector fire on a leaf
-// the name rule left untouched (`env: {BENIGN: ghp_…}`), which is a rendering
-// oauth.UnmaskEnvValues cannot recognise — it compares against oauth.
-// maskedEnvValue. Without this mirror, masking that leaf would trade a
-// disclosure for the read-modify-write corruption of #1142/#1146.
-//
-// Binding is by KEY, exactly as oauth's own unmaskers bind, so a value can only
-// ever be restored to the variable it was read from.
 func unmaskLiveEnvValues(incoming, stored map[string]string) map[string]string {
-	return unmaskLiveMap(incoming, stored, func(k, v string) string {
-		return redactEnvValueWith(k, v, liveRedaction)
-	})
+	return oauth.UnmaskLiveEnvValues(incoming, stored)
 }
 
 // unmaskLiveHeaders is unmaskLiveEnvValues for header maps.
 func unmaskLiveHeaders(incoming, stored map[string]string) map[string]string {
-	return unmaskLiveMap(incoming, stored, func(k, v string) string {
-		return redactHeaderValueWith(k, v, liveRedaction)
-	})
-}
-
-func unmaskLiveMap(incoming, stored map[string]string, rendered func(k, v string) string) map[string]string {
-	if incoming == nil || len(stored) == 0 {
-		return incoming
-	}
-	out := make(map[string]string, len(incoming))
-	for k, v := range incoming {
-		if sv, ok := stored[k]; ok && v == rendered(k, sv) {
-			out[k] = sv
-			continue
-		}
-		out[k] = v
-	}
-	return out
+	return oauth.UnmaskLiveHeaders(incoming, stored)
 }
 
 // unmaskLiveURL reverts a masked URL on the write path, and REFUSES the write
 // when a mask it cannot bind survives.
-//
-// Three steps, widest binding first:
-//
-//  1. The whole URL echoed back byte for byte — revert to the stored URL.
-//  2. A genuine edit — oauth.UnmaskURL restores the userinfo password and the
-//     SENSITIVE query params under its own authority safeguard, then
-//     oauth.UnmaskLiveURLParams restores, PER PARAMETER, anything the
-//     value-shaped detector masked under a parameter name no matcher
-//     recognises.
-//  3. Whatever still carries a mask marker is refused.
-//
-// Round 4 finding 2 is why (2) needs the per-parameter pass and (3) exists at
-// all: for `https://host/old?opaque=ghp_…` the LIVE detector masks the value,
-// but changing `/old` to `/new` defeats the whole-URL comparison in (1) and
-// oauth.UnmaskURL ignores the unrecognised `opaque` parameter — so the mask was
-// written through as the credential. The per-parameter revert is bound to the
-// parameter name and the authority and to nothing else, so it survives an
-// unrelated edit; the refusal covers everything that binding cannot reach (a
-// URL moved to another host, a mask in the path or the fragment, a parameter
-// whose stored counterpart is gone).
 func unmaskLiveURL(incoming, stored string) (string, error) {
-	if incoming == "" {
-		return incoming, nil
-	}
-	if stored != "" {
-		if incoming == redactStringWith("url", stored, liveRedaction) {
-			return stored, nil
-		}
-		incoming = oauth.UnmaskLiveURLParams(oauth.UnmaskURL(incoming, stored), stored)
-	}
-	if oauth.ContainsMaskMarker(incoming) {
-		return "", errors.New("url is a redaction placeholder, not a URL: " +
-			"credentials inside the URL are masked on read, and this one cannot be bound back to the stored " +
-			"value (the scheme/host changed, or the credential does not sit in a query parameter). " +
-			"Resend the real URL, or omit url to leave the stored one unchanged")
-	}
-	return incoming, nil
+	return oauth.UnmaskLiveURL(incoming, stored)
 }
 
 // unmaskLiveOAuth reverts masked oauth fields echoed back by a client, and
-// REFUSES the write when a mask it cannot bind survives.
-//
-// `oauth_json` REPLACES the whole oauth block, and the live view masks every
-// leaf of it that looks like a credential — not just client_secret. Round 2
-// finding 6 fixed client_secret; round 4 finding 1 caught the rest:
-// `extra_params` routinely holds an RFC 8707 resource indicator with a signed
-// URL, which the URL rule masks, and any leaf can be masked by the value-shaped
-// detector. A read-modify-write through `oauth_json` therefore persisted the
-// MASK STRING over those values.
-//
-// The rule this file now applies uniformly: every field newly masked on a read
-// surface gets either a matching KEY-BOUND revert or a refusal.
-//
-//   - client_secret, client_id, redirect_uri — reverted, each bound to its own
-//     field name, using the same rendering the read path produced.
-//   - extra_params — reverted per PARAMETER NAME, exactly as env vars and
-//     headers are reverted per key.
-//   - scopes, and any field added to config.OAuthConfig in future — REFUSED. A
-//     scope's only context is its position in a caller-supplied slice, which is
-//     the same non-binding an argv token has (see checkArgvMaskEcho), and a
-//     future field has no revert at all. The residual check walks the whole
-//     block, so a new field fails CLOSED instead of silently corrupting.
-//
-// The REST API is unaffected: contracts.OAuthConfig is read-only there (there
-// is no oauth field on AddServerRequest), so no REST write can echo one back.
+// REFUSES the write when a mask it cannot bind survives. `oauth_json` is the
+// MCP surface's spelling of the parameter.
 func unmaskLiveOAuth(incoming, stored *config.OAuthConfig) error {
-	if incoming == nil {
-		return nil
-	}
-	if stored != nil {
-		incoming.ClientSecret = unmaskLiveField("client_secret", incoming.ClientSecret, stored.ClientSecret)
-		incoming.ClientID = unmaskLiveField("client_id", incoming.ClientID, stored.ClientID)
-		incoming.RedirectURI = unmaskLiveField("redirect_uri", incoming.RedirectURI, stored.RedirectURI)
-		incoming.ExtraParams = unmaskLiveMap(incoming.ExtraParams, stored.ExtraParams,
-			func(k, v string) string { return redactStringWith(k, v, liveRedaction) })
-	}
-	if path, ok := findMaskMarker("oauth", normalizeForRedaction(incoming)); ok {
-		return fmt.Errorf("oauth_json%s is a redaction placeholder, not a value: "+
-			"it carries no key this proxy can bind the stored secret to, so it is never restored on write. "+
-			"Resend the real value, or omit oauth_json to leave the stored oauth block unchanged",
-			strings.TrimPrefix(path, "oauth"))
+	if err := oauth.UnmaskLiveOAuth(incoming, stored); err != nil {
+		return errors.New("oauth_json" + strings.TrimPrefix(err.Error(), "oauth"))
 	}
 	return nil
 }
 
-// unmaskLiveField reverts one scalar field echoed back exactly as the live view
-// rendered it, bound to the field NAME the rendering was keyed on.
-func unmaskLiveField(key, incoming, stored string) string {
-	if incoming == "" || stored == "" {
-		return incoming
-	}
-	if incoming == redactStringWith(key, stored, liveRedaction) {
-		return stored
-	}
-	return incoming
-}
-
-// findMaskMarker walks a generic JSON value and returns the dotted path of the
-// first string leaf still carrying a mask this proxy rendered.
-//
-// Walking the whole value rather than checking a hand-written field list is the
-// point: it is what makes a field ADDED to the struct later fail closed instead
-// of quietly round-tripping its own mask into the config.
-func findMaskMarker(path string, v interface{}) (string, bool) {
-	switch typed := v.(type) {
-	case map[string]interface{}:
-		for k, val := range typed {
-			if p, ok := findMaskMarker(path+"."+k, val); ok {
-				return p, true
-			}
-		}
-	case []interface{}:
-		for i, val := range typed {
-			if p, ok := findMaskMarker(fmt.Sprintf("%s[%d]", path, i), val); ok {
-				return p, true
-			}
-		}
-	case string:
-		if oauth.ContainsMaskMarker(typed) {
-			return path, true
-		}
-	}
-	return "", false
+// checkServerWriteMasks is the fail-closed residual net every write door runs
+// after its key-bound reverts: anything still carrying a mask this proxy
+// rendered is refused rather than persisted over a live credential. It is what
+// makes a field ADDED to config.ServerConfig later fail closed.
+func checkServerWriteMasks(what string, v interface{}) error {
+	return oauth.CheckServerWriteMasks(what, v)
 }
 
 // inspectConnectionTimeoutError renders `inspect_quarantined`'s

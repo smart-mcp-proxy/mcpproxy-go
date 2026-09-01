@@ -719,8 +719,14 @@ func UnmaskHeaders(incoming, stored map[string]string) map[string]string {
 // renders one (key, value) pair; reused by UnmaskHeaders to recognise echoed
 // masks.
 func maskedHeaderValue(key, value string) string {
+	return maskedHeaderValueWith(key, value, MaskValue)
+}
+
+// maskedHeaderValueWith is maskedHeaderValue with a caller-chosen mask. See
+// RedactStringHeadersWith for why the audit surfaces need a different one.
+func maskedHeaderValueWith(key, value string, mask func(string) string) string {
 	if isSensitiveHeaderKey(key) {
-		return MaskValue(value)
+		return mask(value)
 	}
 	return RedactSensitiveData(value)
 }

@@ -319,11 +319,14 @@ func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
 // redactServerSecrets masks the secret-bearing fields of every server in an SSE
 // payload unless the loaded config opts out via reveal_secret_headers: true.
 //
-// The field list is oauth.RedactServerSecretFields — the same function the REST
-// list path calls. It used to be a hand-copied MIRROR of that list, which is
-// exactly how `args` and `oauth.extra_params` came to be masked on the MCP
-// surface and published in the clear on both of these doors (issue #1148, round
-// 4 finding 3). Keeping SSE subscribers behind the exact same trust boundary as
+// The field list AND the rules are oauth.RedactServerSecretFields — the same
+// function the REST list path calls, applying the same oauth.LiveRedaction the
+// MCP payloads are built from. It used to be a hand-copied MIRROR of that list,
+// which is exactly how `args` and `oauth.extra_params` came to be masked on the
+// MCP surface and published in the clear on both of these doors (issue #1148,
+// round 4 finding 3); sharing the list but not the value-shaped detector then
+// left a credential under a benign env/header name in the clear here (round 6
+// finding 2). Keeping SSE subscribers behind the exact same trust boundary as
 // the REST list is load-bearing: the Web UI's mergeServers treats each payload
 // as authoritative, so a masked-vs-plaintext mismatch between the two would
 // flicker on every delivery.

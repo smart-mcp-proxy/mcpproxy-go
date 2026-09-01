@@ -4787,6 +4787,17 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// #1148 round 6 (finding 4): on CREATE there is no stored value to bind a
+	// mask back to, so ANY mask this proxy rendered can only be a placeholder
+	// an agent copied out of another server's read payload — never a value
+	// worth persisting. Refusing beats persisting literal text like
+	// `••••AL (12 chars)` as an argv token or a header, which produces a server
+	// that fails to connect for a non-obvious reason. REST
+	// `POST /api/v1/servers` runs the same check, so the two create doors agree.
+	if err := checkServerWriteMasks("", serverConfig); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	// Save to storage
 	if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
@@ -5381,6 +5392,17 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 			patch.OAuth = &oauth
 		}
+	}
+
+	// #1148 round 6: the fail-closed net. Every mask this proxy can bind back
+	// to the value it was read from has been reverted above; anything still
+	// carrying one is refused rather than persisted over a live credential.
+	// This is what covers the fields with no revert (isolation.extra_args) AND
+	// every field added to config.ServerConfig later — a new field fails CLOSED
+	// instead of silently round-tripping its own mask into the config. See
+	// oauth.ServerFieldMaskDecisions.
+	if err := checkServerWriteMasks("", patch); err != nil {
+		return nil, opts, err
 	}
 
 	return patch, opts, nil

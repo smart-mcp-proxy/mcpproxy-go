@@ -278,6 +278,13 @@ curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 - key absent from body → preserve (this is how the UI sends a diff
   against the masked view without overwriting unchanged values)
 
+A client that sends the **whole** map back is safe too: a value that is exactly
+the mask the read path rendered for that key is reverted to the stored secret,
+bound to the key it was read from. What cannot be bound to a key is **refused**
+with `400` rather than written through — `args`, `oauth.scopes`,
+`isolation.extra_args`, a mask moved to a different key, and a URL mask whose
+scheme/host changed. Resend the real value, or omit the field.
+
 See [REST API › PATCH](../api/rest-api.md#patch-apiv1serversname) for the
 full reference, including the
 [`/config-to-secret`](../api/rest-api.md#post-apiv1serversnameconfig-to-secret)

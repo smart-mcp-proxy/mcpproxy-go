@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -262,20 +261,7 @@ func redactedConfigDiff(diff *config.ConfigDiff) map[string]interface{} {
 // float64 and rendering as 1.048576e+06. On failure the value is returned
 // unchanged; the walker's default branch then passes it through.
 func normalizeForRedaction(v interface{}) interface{} {
-	if v == nil {
-		return nil
-	}
-	encoded, err := json.Marshal(v)
-	if err != nil {
-		return v
-	}
-	dec := json.NewDecoder(bytes.NewReader(encoded))
-	dec.UseNumber()
-	var out interface{}
-	if err := dec.Decode(&out); err != nil {
-		return v
-	}
-	return out
+	return oauth.NormalizeForRedaction(v)
 }
 
 // redactionPolicy pairs the SHARED redaction rules (oauth.Redaction — which
