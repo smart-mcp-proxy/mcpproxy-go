@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
@@ -34,7 +35,11 @@ func redactHealthDetail(healthRaw interface{}, reveal bool) interface{} {
 		return healthRaw
 	}
 	clone := *hs
-	clone.Detail = oauth.RedactSensitiveData(clone.Detail)
+	// Round 8 finding 2: oauth.ScrubUpstreamText is the ONE rule for
+	// free-form upstream text. RedactSensitiveData alone is its name half, and
+	// oauth.RedactServerSecretFields scrubs this very field with both halves on
+	// the sibling /api/v1/servers door.
+	clone.Detail = oauth.ScrubUpstreamText(clone.Detail)
 	return &clone
 }
 
@@ -45,7 +50,8 @@ func redactDiagnosticCause(diag map[string]interface{}, reveal bool) {
 		return
 	}
 	if cause, ok := diag["cause"].(string); ok && cause != "" {
-		diag["cause"] = oauth.RedactSensitiveData(cause)
+		// Round 8 finding 2: the same one rule the sibling REST door applies.
+		diag["cause"] = oauth.ScrubUpstreamText(cause)
 	}
 }
 
@@ -126,4 +132,38 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 	resp["catalog_size"] = len(diagnostics.All())
 
 	s.writeSuccess(w, resp)
+}
+
+// viewString reads one string leaf out of a redacted server view (see
+// oauth.RedactedConfigView), falling back to the raw value when the key was
+// omitted — every string field of config.ServerConfig is `omitempty`, and an
+// empty value carries no secret. It is the httpapi twin of the helper the MCP
+// door uses, so the two build their echoes from the view the same way.
+func viewString(view map[string]interface{}, key, fallback string) string {
+	if v, ok := view[key].(string); ok {
+		return v
+	}
+	return fallback
+}
+
+// redactedRegistrySummary renders one registry source for a REST echo with its
+// URLs masked by the shared LIVE rule.
+//
+// Issue #1148, round 8: a CUSTOM registry source is operator-configured, so its
+// URL can carry a credential in the query string exactly as an upstream URL
+// can — and it was echoed verbatim by add-source / edit-source / remove-source
+// and republished by `list_registries` on every surface. The write doors
+// (Server.AddRegistrySource / EditRegistrySource) refuse an echoed mask rather
+// than persisting it over the credential, which is the same bind-or-refuse
+// answer the server write path gives.
+func redactedRegistrySummary(entry *config.RegistryEntry) contracts.RegistrySummary {
+	return contracts.RegistrySummary{
+		ID:         entry.ID,
+		Name:       entry.Name,
+		URL:        oauth.LiveRedaction.URLValue(entry.URL),
+		ServersURL: oauth.LiveRedaction.URLValue(entry.ServersURL),
+		Protocol:   entry.Protocol,
+		Provenance: entry.Provenance,
+		Trusted:    entry.IsTrusted(),
+	}
 }

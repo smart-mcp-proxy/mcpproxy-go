@@ -1537,7 +1537,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		m.logger.Info("Attempting to connect client",
 			zap.String("id", id),
 			zap.String("name", client.GetConfig().Name),
-			zap.String("url", oauth.RedactURLQueryParams(client.GetConfig().URL)),
+			zap.String("url", oauth.LiveRedaction.URLValue(client.GetConfig().URL)),
 			zap.String("command", client.GetConfig().Command),
 			zap.String("protocol", client.GetConfig().Protocol))
 
@@ -1739,10 +1739,6 @@ func (m *Manager) GetStats() map[string]interface{} {
 			}
 		}
 
-		if !revealSecrets {
-			url = oauth.RedactURLQueryParams(url)
-		}
-
 		status := map[string]interface{}{
 			"state":        connectionInfo.State.String(),
 			"connected":    connectionInfo.State == types.StateReady,
@@ -1767,14 +1763,9 @@ func (m *Manager) GetStats() map[string]interface{} {
 		}
 
 		if connectionInfo.LastError != nil {
-			lastError := connectionInfo.LastError.Error()
-			if !revealSecrets {
-				// A transport error quotes the request URL inside its own
-				// message (`Post "https://host/mcp?token=…": dial tcp …`), so
-				// masking the `url` key alone would not close this.
-				lastError = oauth.RedactSensitiveData(lastError)
-			}
-			status["last_error"] = lastError
+			// Masked below by oauth.RedactUpstreamStats, at the one wire
+			// boundary both upstream_stats implementations pass through.
+			status["last_error"] = connectionInfo.LastError.Error()
 		}
 
 		if connectionInfo.ServerName != "" {
@@ -1792,6 +1783,14 @@ func (m *Manager) GetStats() map[string]interface{} {
 			if serverInfo := client.GetServerInfo(); serverInfo != nil && serverInfo.ProtocolVersion != "" {
 				status["protocol_version"] = serverInfo.ProtocolVersion
 			}
+		}
+
+		// Round 8 finding 1: `url` and `last_error` are masked by the ONE
+		// shared rule (oauth.RedactUpstreamStatsEntry), not by name-only
+		// redactors chosen here — the server list in the SAME response applies
+		// exactly that rule to exactly these two strings.
+		if !revealSecrets {
+			oauth.RedactUpstreamStatsEntry(status)
 		}
 
 		serverStatus[id] = status

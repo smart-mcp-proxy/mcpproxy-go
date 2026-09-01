@@ -4260,7 +4260,8 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 		if server.LastError != "" {
 			errMsg := server.LastError
 			if !reveal {
-				errMsg = oauth.RedactSensitiveData(errMsg)
+				// Round 8 finding 2: the ONE shared free-text rule.
+				errMsg = oauth.ScrubUpstreamText(errMsg)
 			}
 			upstreamErrors = append(upstreamErrors, contracts.DiagnosticIssue{
 				Type:      "error",
@@ -5421,13 +5422,20 @@ func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Issue #1148, round 8: the MCP twin of this handler
+	// (`upstream_servers add_from_registry`) has sourced this echo from the
+	// shared redacted view since round 1; this one still read the struct, so a
+	// registry entry carrying `?token=…` or a `--api-key …` arg vector was
+	// masked on one surface and republished on the other. Same summary, same
+	// view, one answer.
+	registryView := oauth.RedactedConfigView("", cfg)
 	s.writeSuccess(w, contracts.AddFromRegistryData{
 		Server: contracts.AddedServerSummary{
 			Name:        cfg.Name,
 			Protocol:    cfg.Protocol,
-			Command:     cfg.Command,
-			Args:        cfg.Args,
-			URL:         cfg.URL,
+			Command:     viewString(registryView, "command", cfg.Command),
+			Args:        oauth.LiveRedaction.Argv(cfg.Args),
+			URL:         viewString(registryView, "url", cfg.URL),
 			Enabled:     cfg.Enabled,
 			Quarantined: cfg.Quarantined,
 		},
@@ -5472,15 +5480,7 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSuccess(w, contracts.AddRegistrySourceData{
-		Registry: contracts.RegistrySummary{
-			ID:         entry.ID,
-			Name:       entry.Name,
-			URL:        entry.URL,
-			ServersURL: entry.ServersURL,
-			Protocol:   entry.Protocol,
-			Provenance: entry.Provenance,
-			Trusted:    entry.IsTrusted(),
-		},
+		Registry: redactedRegistrySummary(entry),
 	})
 }
 
@@ -5517,15 +5517,7 @@ func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.writeSuccess(w, contracts.RemoveRegistrySourceData{
-		Registry: contracts.RegistrySummary{
-			ID:         entry.ID,
-			Name:       entry.Name,
-			URL:        entry.URL,
-			ServersURL: entry.ServersURL,
-			Protocol:   entry.Protocol,
-			Provenance: entry.Provenance,
-			Trusted:    entry.IsTrusted(),
-		},
+		Registry: redactedRegistrySummary(entry),
 	})
 }
 
@@ -5570,15 +5562,7 @@ func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request
 	}
 
 	s.writeSuccess(w, contracts.EditRegistrySourceData{
-		Registry: contracts.RegistrySummary{
-			ID:         entry.ID,
-			Name:       entry.Name,
-			URL:        entry.URL,
-			ServersURL: entry.ServersURL,
-			Protocol:   entry.Protocol,
-			Provenance: entry.Provenance,
-			Trusted:    entry.IsTrusted(),
-		},
+		Registry: redactedRegistrySummary(entry),
 	})
 }
 
@@ -5817,13 +5801,15 @@ func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"docker_available":   dockerAvailable,
-		"isolation_enabled":  isolationEnabled,
-		"recovery_mode":      status.RecoveryMode,
-		"failure_count":      status.FailureCount,
-		"attempts_since_up":  status.AttemptsSinceUp,
-		"last_attempt":       status.LastAttempt,
-		"last_error":         status.LastError,
+		"docker_available":  dockerAvailable,
+		"isolation_enabled": isolationEnabled,
+		"recovery_mode":     status.RecoveryMode,
+		"failure_count":     status.FailureCount,
+		"attempts_since_up": status.AttemptsSinceUp,
+		"last_attempt":      status.LastAttempt,
+		// Round 8: a Docker daemon failure quotes the `docker run` command line
+		// it choked on, `-e API_KEY=…` and all. One shared free-text rule.
+		"last_error":         oauth.ScrubUpstreamText(status.LastError),
 		"last_successful_at": status.LastSuccessfulAt,
 	}
 

@@ -2022,8 +2022,11 @@ func (r *Runtime) ListRegistries() ([]interface{}, error) {
 			"id":          reg.ID,
 			"name":        reg.Name,
 			"description": reg.Description,
-			"url":         reg.URL,
-			"servers_url": reg.ServersURL,
+			// Issue #1148, round 8: a custom registry source is
+			// operator-configured, so its URL can carry a query credential
+			// exactly as an upstream URL can. Same shared rule.
+			"url":         oauth.LiveRedaction.URLValue(reg.URL),
+			"servers_url": oauth.LiveRedaction.URLValue(reg.ServersURL),
 			"tags":        reg.Tags,
 			"protocol":    reg.Protocol,
 			"count":       reg.Count,

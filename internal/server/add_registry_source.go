@@ -12,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
@@ -89,6 +90,16 @@ func AddRegistrySourceErrorCode(err error) string {
 func (s *Server) AddRegistrySource(req *AddRegistrySourceRequest) (*config.RegistryEntry, error) {
 	if req == nil {
 		return nil, errors.New("nil request")
+	}
+	// Issue #1148, round 8: the read doors mask a registry source URL with the
+	// shared LIVE rule, so a client can echo that mask back here. Nothing binds
+	// a revert to a registry URL — the caller replaces it wholesale — so the
+	// answer is the same bind-or-refuse one the server write path gives:
+	// refuse, and let the caller resend the real value.
+	if err := oauth.CheckServerWriteMasks("registry_source.", map[string]interface{}{
+		"url": req.URL, "servers_url": "",
+	}); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRegistryURL, err)
 	}
 
 	entry, err := buildRegistrySourceEntry(req.URL, req.Protocol, req.ID, req.Name)

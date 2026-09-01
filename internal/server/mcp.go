@@ -1524,9 +1524,10 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 			"id":          reg.ID,
 			"name":        reg.Name,
 			"description": reg.Description,
-			"url":         reg.URL,
-			"tags":        reg.Tags,
-			"count":       reg.Count,
+			// Issue #1148, round 8: same shared rule as every other URL door.
+			"url":   liveRedaction.URLValue(reg.URL),
+			"tags":  reg.Tags,
+			"count": reg.Count,
 			// MCP-866: provenance/trust so an agent can tell official from
 			// user-added third-party sources.
 			"provenance": reg.Provenance,
@@ -3267,7 +3268,7 @@ func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, reques
 	summary := contracts.AddedServerSummary{
 		Name:        cfg.Name,
 		Protocol:    cfg.Protocol,
-		Command:     cfg.Command,
+		Command:     viewString(registryView, "command", cfg.Command),
 		Args:        redactedArgs(cfg.Args, liveRedaction),
 		URL:         viewString(registryView, "url", cfg.URL),
 		Enabled:     cfg.Enabled,
@@ -3792,10 +3793,17 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			serverURL = viewField(view, "url", server.URL)
 			serverArgs = redactedArgs(server.Args, liveRedaction)
 		}
+		serverCommand := interface{}(server.Command)
+		if !revealHeaders {
+			// Round 8 finding 3: `command` is the one leaf of this projection
+			// that was still read off the struct instead of the view, so it
+			// was masked on `list_quarantined` and raw here.
+			serverCommand = viewField(view, "command", server.Command)
+		}
 		serverMap := map[string]interface{}{
 			"name":        server.Name,
 			"protocol":    server.Protocol,
-			"command":     server.Command,
+			"command":     serverCommand,
 			"args":        serverArgs,
 			"url":         serverURL,
 			"env":         serverEnv,
@@ -5763,12 +5771,16 @@ func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, tool
 	// Check if it's our enhanced error types
 	if errors.As(err, &httpErr) {
 		// We have HTTP error details
+		// Issue #1148, round 8: `server_url` is the FULL upstream request URL,
+		// query credentials and all, and `response_body` is whatever the
+		// upstream printed — both went out of the MCP surface verbatim. Route
+		// them through the same two shared rules every other door uses.
 		errorDetails := map[string]interface{}{
-			"error": httpErr.Error(),
+			"error": scrubUpstreamText(httpErr.Error()),
 			"http_details": map[string]interface{}{
 				"status_code":   httpErr.StatusCode,
-				"response_body": httpErr.Body,
-				"server_url":    httpErr.URL,
+				"response_body": scrubUpstreamText(httpErr.Body),
+				"server_url":    liveRedaction.URLValue(httpErr.URL),
 				"method":        httpErr.Method,
 			},
 			"troubleshooting": p.generateTroubleshootingAdvice(httpErr.StatusCode, httpErr.Body),
@@ -5781,16 +5793,16 @@ func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, tool
 	if errors.As(err, &jsonRPCErr) {
 		// We have JSON-RPC error details
 		errorDetails := map[string]interface{}{
-			"error":      jsonRPCErr.Message,
+			"error":      scrubUpstreamText(jsonRPCErr.Message),
 			"error_code": jsonRPCErr.Code,
-			"error_data": jsonRPCErr.Data,
+			"error_data": redactValueWith("error_data", normalizeForRedaction(jsonRPCErr.Data), liveRedaction),
 		}
 
 		if jsonRPCErr.HTTPError != nil {
 			errorDetails["http_details"] = map[string]interface{}{
 				"status_code":   jsonRPCErr.HTTPError.StatusCode,
-				"response_body": jsonRPCErr.HTTPError.Body,
-				"server_url":    jsonRPCErr.HTTPError.URL,
+				"response_body": scrubUpstreamText(jsonRPCErr.HTTPError.Body),
+				"server_url":    liveRedaction.URLValue(jsonRPCErr.HTTPError.URL),
 			}
 			errorDetails["troubleshooting"] = p.generateTroubleshootingAdvice(jsonRPCErr.HTTPError.StatusCode, jsonRPCErr.HTTPError.Body)
 		}

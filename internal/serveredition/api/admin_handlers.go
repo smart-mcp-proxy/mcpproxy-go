@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/multiuser"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
@@ -481,9 +482,15 @@ func (h *AdminHandlers) toggleSharedServer(w http.ResponseWriter, r *http.Reques
 	}
 
 	h.logger.Infow("server shared status toggled", "server", name, "shared", req.Shared)
+	// Issue #1148, round 8: `found` is a raw *config.ServerConfig — every env
+	// value, header, oauth.client_secret and URL credential the operator
+	// configured. Echoing it back handed the whole upstream credential set to
+	// any admin session over the server edition's REST API. Build the echo from
+	// the shared redacted view instead, exactly as every personal-edition door
+	// does.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": fmt.Sprintf("Server %q shared status set to %v", name, req.Shared),
-		"server":  found,
+		"server":  oauth.RedactedConfigView("", found),
 	})
 }
 
@@ -499,8 +506,11 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 	}
 	mgmt, ok := h.managementSvc.(lister)
 	if !ok {
-		// Fallback to config-only listing when management service is not available.
-		writeJSON(w, http.StatusOK, h.config.Servers)
+		// Issue #1148, round 8: this fallback wrote the raw
+		// []*config.ServerConfig straight to JSON — the exact shape
+		// `quarantine_security list_quarantined` was fixed for in round 1,
+		// still open on the server edition's admin API. One shared view.
+		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.config.Servers))
 		return
 	}
 
@@ -508,7 +518,7 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		h.logger.Errorw("failed to list servers via management service", "error", err)
 		// Fallback to config-only listing on error.
-		writeJSON(w, http.StatusOK, h.config.Servers)
+		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.config.Servers))
 		return
 	}
 
@@ -523,9 +533,18 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 		*contracts.Server
 		Shared bool `json:"shared"`
 	}
+	// Issue #1148, round 8: management.ListServers hands back RAW
+	// contracts.Server values — the personal edition redacts them at its own
+	// serialization boundary (httpapi.redactServerSecrets), and this door,
+	// which is the server edition's boundary onto the same structs, did not.
+	// The copy matters: the projection may still share maps/slices with the
+	// stored config, and RedactServerSecretFields replaces rather than mutates
+	// them.
 	enriched := make([]*enrichedServer, len(servers))
 	for i, s := range servers {
-		enriched[i] = &enrichedServer{Server: s, Shared: sharedMap[s.Name]}
+		redacted := *s
+		oauth.RedactServerSecretFields(&redacted)
+		enriched[i] = &enrichedServer{Server: &redacted, Shared: sharedMap[s.Name]}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

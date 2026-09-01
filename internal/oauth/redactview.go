@@ -334,6 +334,86 @@ func MaskDetectedSecrets(s string) string {
 	return masked
 }
 
+// ScrubUpstreamText is the ONE rule for free-form text that originated OUTSIDE
+// mcpproxy's own structured fields — an upstream connection error, a health
+// detail, a diagnostic cause, a line tailed from a child server's log.
+//
+// Such a string has no enclosing key to judge it by, so BOTH rules run: the
+// name rule (RedactSensitiveData, which masks `<param>=<value>` shapes, bearer
+// tokens and URL userinfo) and then the value-shaped detector (which masks a
+// vendor-formatted credential wherever it sits — `?opaque=ghp_…`, a token a
+// child process printed).
+//
+// Issue #1148, round 8 findings 1 and 2: FIVE doors published the same three
+// strings (`last_error`, `health.detail`, `diagnostic.cause`) and disagreed
+// about the rule. `RedactServerSecretFields` (REST + SSE) and the MCP view ran
+// both rules; `upstream.Manager.GetStats` (`upstream_stats` on /api/v1/status
+// and the SSE status event), the per-server diagnostics route, the doctor route
+// and the management diagnostics aggregator ran only the name rule — so the
+// same error string was masked on one door of one response and published in the
+// clear on another. Same strings, one rule, one answer.
+func ScrubUpstreamText(s string) string {
+	if s == "" {
+		return s
+	}
+	return MaskDetectedSecrets(RedactSensitiveData(s))
+}
+
+// RedactUpstreamStats masks the secret-bearing leaves of an `upstream_stats`
+// map IN PLACE and returns it.
+//
+// `upstream_stats` is served verbatim on GET /api/v1/status, embedded in the
+// /api/v1/servers response and pushed on every SSE `status` event, so its
+// per-server entries sit behind the same trust boundary as the server list on
+// those same payloads.
+//
+// Issue #1148, rounds 4 and 8. The map is built by TWO implementations —
+// upstream.Manager.GetStats (the fallback) and server.Server.GetUpstreamStats
+// (the StateView path that actually runs) — and they disagreed: round 4 masked
+// the first with name-only rules and never touched the second at all, so the
+// path that serves nearly every request published `url` and `last_error`
+// verbatim. One rule, applied at the wire boundary both implementations pass
+// through, is the only shape that cannot drift again.
+//
+// Returns the map unchanged when `reveal` is true, honouring the same
+// reveal_secret_headers opt-out every sibling read door honours.
+func RedactUpstreamStats(stats map[string]interface{}, reveal bool) map[string]interface{} {
+	if stats == nil || reveal {
+		return stats
+	}
+	servers, ok := stats["servers"].(map[string]interface{})
+	if !ok {
+		return stats
+	}
+	for _, raw := range servers {
+		entry, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		RedactUpstreamStatsEntry(entry)
+	}
+	return stats
+}
+
+// RedactUpstreamStatsEntry masks one per-server `upstream_stats` entry in place.
+//
+// `url` takes the shared LIVE URL rule (the name rule PLUS the value-shaped
+// detector) and `last_error` the shared free-form rule, which are the same two
+// rules the server list in the SAME response applies to the same two strings.
+// Every other leaf of the entry — state, counters, the upstream's self-reported
+// name and version — is proxy-computed and carries no operator value.
+func RedactUpstreamStatsEntry(entry map[string]interface{}) {
+	if entry == nil {
+		return
+	}
+	if u, ok := entry["url"].(string); ok && u != "" {
+		entry["url"] = LiveRedaction.URLValue(u)
+	}
+	if e, ok := entry["last_error"].(string); ok && e != "" {
+		entry["last_error"] = ScrubUpstreamText(e)
+	}
+}
+
 // maskRendering is one function that RENDERS a secret as a mask on a read door,
 // paired with the MARKER constant its output is built from and a probe input it
 // is guaranteed to mask.
@@ -370,6 +450,24 @@ var maskRenderings = []maskRendering{
 	{"oauth.RedactSensitiveData/userinfo", redactedMarker, "postgres://u:supersecretvalue@host/db", RedactSensitiveData},
 	{"oauth.RedactURL", redactedMarker, "https://host/mcp?access_token=supersecretvalue", RedactURL},
 	{"security.MaskValue/prefix", securityMaskSuffixMarker(), "AKIAIOSFODNN7EXAMPLE", MaskDetectedSecrets},
+	// Round 8. A URL is re-serialised through net/url after its components are
+	// masked, so the mask reaches the wire PERCENT-ENCODED
+	// (`%E2%80%A2%E2%80%A2%E2%80%A2%E2%80%A2ue+%2816+chars%29`) — a rendering
+	// no marker in the set matched. Every live read door publishes it (`url`,
+	// a connection string in `env`, `oauth.extra_params`), and
+	// UnmaskLiveURL's residual check is ContainsMaskMarker — so an echoed
+	// masked URL that the key-bound revert could not bind was ACCEPTED and
+	// persisted over the credential, which is the #1142 corruption this branch
+	// exists to prevent. Found by TestExportedStringFuncs_RenderOnlyRecognisedMasks.
+	{"oauth.LiveRedaction.URLValue/query", escapedMarker(bulletMarker), "https://host/mcp?access_token=supersecretvalue", LiveRedaction.URLValue},
+	{"oauth.LiveRedaction.URLValue/userinfo", escapedMarker(bulletMarker), "postgres://u:supersecretvalue@host/db", LiveRedaction.URLValue},
+}
+
+// escapedMarker is a marker as it appears once net/url has re-serialised the
+// URL that carries it. Derived with the same escaper net/url uses, so a change
+// there cannot silently narrow the net.
+func escapedMarker(marker string) string {
+	return url.QueryEscape(marker)
 }
 
 // maskOAuthSecret / maskExtraParams are deliberately NOT in the registry. They
@@ -410,12 +508,19 @@ func deriveMaskMarkers() []string {
 	}
 	for _, r := range maskRenderings {
 		add(r.marker)
+		// A marker that travels inside a URL reaches the wire percent-encoded,
+		// and the fail-closed net has to recognise BOTH spellings: the read
+		// doors publish the escaped one and the write doors compare against
+		// whatever the client echoes back. Deriving the escaped form here
+		// rather than listing it keeps the two in step by construction.
+		add(escapedMarker(r.marker))
 	}
 	// security.MaskValue has a SECOND rendering for values too short to keep a
 	// prefix; taking the package's whole marker set rather than only the one
 	// the registry probe exercises is what keeps that from being a hole.
 	for _, marker := range security.MaskMarkers() {
 		add(marker)
+		add(escapedMarker(marker))
 	}
 	return out
 }

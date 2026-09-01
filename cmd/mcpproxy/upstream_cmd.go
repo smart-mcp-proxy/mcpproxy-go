@@ -23,6 +23,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
@@ -1783,14 +1784,21 @@ func outputImportResultStructured(result *configimport.ImportResult, format stri
 
 // buildImportedServersOutput builds the output structure for imported servers
 func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[string]interface{} {
+	// Issue #1148, round 8: the import preview echoes the operator's source
+	// file back as CLI JSON — a shape an agent pipes as readily as a human
+	// reads. The shared LIVE rule leaves an ordinary command, path or URL
+	// byte-identical and renders a credential as `••••<last2> (<N> chars)`, so
+	// the operator can still verify that the secret imported and how long it
+	// is without the value itself reaching stdout.
 	result := make([]map[string]interface{}, len(imported))
 	for i, s := range imported {
+		view := oauth.RedactedConfigView("", s.Server)
 		result[i] = map[string]interface{}{
 			"name":           s.Server.Name,
 			"protocol":       s.Server.Protocol,
-			"url":            s.Server.URL,
-			"command":        s.Server.Command,
-			"args":           s.Server.Args,
+			"url":            viewOr(view, "url", s.Server.URL),
+			"command":        viewOr(view, "command", s.Server.Command),
+			"args":           oauth.LiveRedaction.Argv(s.Server.Args),
 			"enabled":        s.Server.Enabled,
 			"quarantined":    s.Server.Quarantined,
 			"source_format":  s.SourceFormat,
@@ -2284,4 +2292,15 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	return nil
+}
+
+// viewOr reads one string leaf out of a redacted server view (see
+// oauth.RedactedConfigView), falling back to the raw value when the key was
+// omitted — every string field of config.ServerConfig is `omitempty`, and an
+// empty value carries no secret.
+func viewOr(view map[string]interface{}, key, fallback string) string {
+	if v, ok := view[key].(string); ok {
+		return v
+	}
+	return fallback
 }

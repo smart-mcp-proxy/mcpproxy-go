@@ -29,6 +29,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -1193,6 +1194,17 @@ func (s *Server) SuggestAlternateListen(baseAddr string) (string, error) {
 
 // GetUpstreamStats returns statistics about upstream servers
 func (s *Server) GetUpstreamStats() map[string]interface{} {
+	// Issue #1148, round 8. This is the SECOND implementation of
+	// `upstream_stats` and the one that actually runs: round 4 masked
+	// upstream.Manager.GetStats, which is only the fallback below, so the
+	// StateView path served `url` and `last_error` verbatim on
+	// GET /api/v1/status and on every SSE status event. Both implementations
+	// now hand their map to the one shared rule at this boundary.
+	reveal := false
+	if cfg, err := s.GetConfig(); err == nil && cfg != nil {
+		reveal = cfg.RevealSecretHeaders
+	}
+
 	if supervisor := s.runtime.Supervisor(); supervisor != nil {
 		if view := supervisor.StateView(); view != nil {
 			snapshot := view.Snapshot()
@@ -1305,17 +1317,20 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 				serverStats[name] = entry
 			}
 
-			return map[string]interface{}{
+			return oauth.RedactUpstreamStats(map[string]interface{}{
 				"connected_servers":   connectedCount,
 				"connecting_servers":  connectingCount,
 				"quarantined_servers": quarantinedCount,
 				"total_servers":       len(snapshot.Servers),
 				"servers":             serverStats,
 				"total_tools":         totalTools,
-			}
+			}, reveal)
 		}
 	}
 
+	// The fallback masks its own entries (upstream.Manager.GetStats applies the
+	// same oauth.RedactUpstreamStatsEntry rule with the same reveal gate), so
+	// this path is already redacted by the time it gets here.
 	stats := s.runtime.UpstreamManager().GetStats()
 
 	// Enhance stats with tool counts per server when falling back

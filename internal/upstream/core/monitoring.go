@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 const (
@@ -449,12 +451,16 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	// Issue #1148, round 8: this map is a server-payload shape (command + argv)
+	// and nothing about it is private to this package, so it takes the shared
+	// LIVE rule like every other door — before it acquires a caller rather than
+	// after.
 	diagnostics := map[string]interface{}{
 		"connected":       c.connected,
 		"transport_type":  c.transportType,
 		"server_name":     c.config.Name,
-		"command":         c.config.Command,
-		"args":            c.config.Args,
+		"command":         oauth.LiveRedaction.Leaf("command", c.config.Command),
+		"args":            oauth.LiveRedaction.Argv(c.config.Args),
 		"has_stderr":      c.stderr != nil,
 		"has_process_cmd": c.processCmd != nil,
 	}
@@ -470,7 +476,7 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 	// Add Docker-specific diagnostics
 	if c.isDockerCommand {
 		diagnostics["is_docker"] = true
-		diagnostics["docker_args"] = c.config.Args
+		diagnostics["docker_args"] = oauth.LiveRedaction.Argv(c.config.Args)
 		diagnostics["container_id"] = c.containerID
 
 		// Check Docker daemon connectivity

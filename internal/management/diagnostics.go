@@ -71,7 +71,10 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		if s.config != nil && s.config.RevealSecretHeaders {
 			return msg
 		}
-		return oauth.RedactSensitiveData(msg)
+		// Round 8 finding 2: the ONE shared free-text rule — the same one
+		// oauth.RedactServerSecretFields applies to health.detail and last_error
+		// on the REST/SSE door these strings are copied from.
+		return oauth.ScrubUpstreamText(msg)
 	}
 
 	// Aggregate diagnostics from Health.Action (single source of truth)
