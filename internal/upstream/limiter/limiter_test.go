@@ -586,9 +586,74 @@ func TestRaisedCapGoesToTheWaiterNotANewcomer(t *testing.T) {
 	}
 }
 
+// parkedCall is one Acquire running on its own goroutine that reports the moment
+// it is ADMITTED and then HOLDS the slot until the test hands it back.
+//
+// Holding is what makes grant order observable without a race (GH #1150). A
+// caller that releases its slot before reporting lets the next caller be granted
+// — and report — concurrently, so both reports can be in flight at once and the
+// test observes goroutine completion order rather than admission order. Parking
+// the caller in the slot means at most one call can be past admission at a time
+// under a cap of 1, so whichever report arrives IS the grant order.
+type parkedCall struct {
+	admitted chan error    // exactly one send: nil on admission, else the rejection
+	proceed  chan struct{} // closed by the test to make the call give the slot back
+	done     chan struct{} // closed once the slot is back
+}
+
+// startParkedCall runs acquire on a goroutine and parks it in the slot it wins.
+func startParkedCall(acquire func() (func(), error)) *parkedCall {
+	c := &parkedCall{
+		admitted: make(chan error, 1),
+		proceed:  make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	go func() {
+		defer close(c.done)
+		release, aerr := acquire()
+		c.admitted <- aerr
+		if aerr != nil {
+			return
+		}
+		<-c.proceed
+		release()
+	}()
+	return c
+}
+
+// awaitAdmitted blocks until the call is admitted (or rejected) and returns the
+// Acquire error.
+func (c *parkedCall) awaitAdmitted(t *testing.T, what string) error {
+	t.Helper()
+	select {
+	case aerr := <-c.admitted:
+		return aerr
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s was never admitted", what)
+		return nil
+	}
+}
+
+// release hands the slot back and waits for the goroutine to finish, so the
+// limiter's occupancy is settled before the test looks at it again.
+func (c *parkedCall) release(t *testing.T) {
+	t.Helper()
+	close(c.proceed)
+	select {
+	case <-c.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked call did not release its slot")
+	}
+}
+
 // TestFastPathDoesNotOvertakeAQueue is the same rule in steady state: while
 // anyone is queued, an arriving call joins the back of the line even if its own
 // generation would let it run.
+//
+// The interleaving is forced, not hoped for: with a cap of 1 and both queued
+// calls parked in whatever slot they win, freeing the held slot can put exactly
+// ONE of them past admission, so the two admissions can never be reported
+// concurrently and the order the test reads is the order the limiter granted.
 func TestFastPathDoesNotOvertakeAQueue(t *testing.T) {
 	l := New(ScopeServer, "srv", Limits{Max: 1, QueueSize: 4, QueueTimeout: time.Hour})
 
@@ -597,48 +662,49 @@ func TestFastPathDoesNotOvertakeAQueue(t *testing.T) {
 		t.Fatalf("first acquire: %v", err)
 	}
 
-	first := make(chan error, 1)
-	go func() {
-		release, aerr := l.Acquire(context.Background(), deadlineIn(time.Hour))
-		if aerr == nil {
-			release()
-		}
-		first <- aerr
-	}()
+	first := startParkedCall(func() (func(), error) {
+		return l.Acquire(context.Background(), deadlineIn(time.Hour))
+	})
 	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 1 })
 
 	// A stale generation with a bigger cap must not let this call jump the queue.
-	second := make(chan error, 1)
-	go func() {
-		release, aerr := l.acquire(context.Background(), Limits{Max: 5, QueueSize: 4, QueueTimeout: time.Hour}, deadlineIn(time.Hour))
-		if aerr == nil {
-			release()
-		}
-		second <- aerr
-	}()
+	second := startParkedCall(func() (func(), error) {
+		return l.acquire(context.Background(), Limits{Max: 5, QueueSize: 4, QueueTimeout: time.Hour}, deadlineIn(time.Hour))
+	})
 	waitFor(t, time.Second, func() bool { return l.Stats().Queued == 2 })
 
 	if got := l.Stats().Running; got != 1 {
 		t.Fatalf("Running = %d, want 1 — a permissive generation must not overtake the queue", got)
 	}
 
+	// One slot comes free. Only the head of the queue may take it, and because it
+	// parks there, the second call cannot also be admitted: at most one of these
+	// two receives can ever be ready.
 	held()
-	for i := 0; i < 2; i++ {
-		select {
-		case aerr := <-first:
-			if aerr != nil {
-				t.Fatalf("queued call: %v", aerr)
-			}
-			first = nil
-		case aerr := <-second:
-			if first != nil {
-				t.Fatal("the second caller was served before the first (FIFO violated)")
-			}
-			if aerr != nil {
-				t.Fatalf("second queued call: %v", aerr)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("queued calls did not drain")
+	select {
+	case aerr := <-second.admitted:
+		t.Fatalf("the second caller was served before the first (FIFO violated): err = %v", aerr)
+	case aerr := <-first.admitted:
+		if aerr != nil {
+			t.Fatalf("queued call: %v", aerr)
 		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the head of the queue was not granted the freed slot")
+	}
+
+	// The freed slot is still parked in the first call, so the second must still
+	// be waiting behind it rather than sharing the cap of 1.
+	if got := l.Stats(); got.Running != 1 || got.Queued != 1 {
+		t.Fatalf("stats = %+v while the first caller holds the only slot, want Running 1 / Queued 1", got)
+	}
+
+	first.release(t)
+	if aerr := second.awaitAdmitted(t, "the second queued call"); aerr != nil {
+		t.Fatalf("second queued call: %v", aerr)
+	}
+	second.release(t)
+
+	if got := l.Stats(); got.Running != 0 || got.Queued != 0 {
+		t.Fatalf("stats = %+v after both queued calls drained, want empty", got)
 	}
 }
