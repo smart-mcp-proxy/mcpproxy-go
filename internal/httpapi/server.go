@@ -4754,13 +4754,50 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Issue #1148, round 9: this endpoint used to serve the RAW config.Config —
+	// every server's env, headers, oauth.client_secret and url credentials, the
+	// global docker_isolation.extra_args and the api_key — while every sibling
+	// door masked the same leaves. It was the widest door on the tree and it
+	// had no row in the decision table at all.
+	//
+	// The shared LIVE walk answers here too. Its write twin is
+	// oauth.UnmaskLiveConfigTree, called by handleApplyConfig and
+	// handlePatchConfig below: the raw-JSON editor and the onboarding wizard
+	// GET this document and POST it straight back, so masking the read without
+	// the matching bind-or-refuse would persist the mask over the credential —
+	// the #1142 corruption. The two are one change.
+	//
+	// `reveal_secret_headers` opts out exactly as it does on GET
+	// /api/v1/servers and the /events payload; the flag is read off the RUNNING
+	// config, not the desired one, so a client cannot widen its own read by
+	// staging the flag and re-reading before the restart.
+	published := cfg
+	if !s.revealSecretHeaders() {
+		published = oauth.RedactedConfig(cfg)
+		if published == nil {
+			// Fail CLOSED. Serving the unmasked config because the walk could
+			// not round-trip is the fail-open shape this issue is made of.
+			s.logger.Errorw("Failed to redact configuration for publication")
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
+			return
+		}
+	}
+
 	// Convert config to contracts type for consistent API response
 	response := contracts.GetConfigResponse{
-		Config:     contracts.ConvertConfigToContract(cfg),
+		Config:     contracts.ConvertConfigToContract(published),
 		ConfigPath: s.controller.GetConfigPath(),
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// revealSecretHeaders reports the operator's opt-out of secret masking. Read
+// from the RUNNING config, which is the same source redactServerSecrets uses,
+// so the two doors cannot disagree about whether this response is masked.
+func (s *Server) revealSecretHeaders() bool {
+	cfg, err := s.controller.GetConfig()
+	return err == nil && cfg != nil && cfg.RevealSecretHeaders
 }
 
 // handleValidateConfig godoc
@@ -4826,11 +4863,35 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var cfg config.Config
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	// Decoded as a generic document first, so the masks a client echoed back
+	// from GET /api/v1/config can be resolved BEFORE anything is typed or
+	// persisted (issue #1148, round 9). UseNumber keeps integers exact through
+	// the round trip instead of degrading them to float64.
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
+	var document map[string]interface{}
+	if err := decoder.Decode(&document); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
+
+	stored, err := s.desiredConfigForPatch()
+	if err != nil {
+		s.logger.Errorw("Failed to read configuration for apply", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
+		return
+	}
+
+	// Revert what binds to a key, refuse what does not. Without this the
+	// raw-JSON editor's own GET → edit → POST round trip would write the read
+	// door's masks over the operator's credentials.
+	resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
+	if err != nil {
+		s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	cfg := *resolved
 
 	// Get config path from controller
 	cfgPath := s.controller.GetConfigPath()
@@ -4988,6 +5049,22 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
+	}
+
+	// Issue #1148, round 9: resolve any mask the client echoed back BEFORE the
+	// merge. A patch is exactly the shape that used to corrupt — the client
+	// read `env: {GITHUB_TOKEN: "••••56 (40 chars)"}` off a read door and sent
+	// it back — and the merge would have written the mask straight over the
+	// stored credential. Bound by key it is reverted; unbound (an argv slot, a
+	// renamed server) the write is refused.
+	resolvedPatch, err := oauth.UnmaskLiveConfigTree(patchMap, cfg)
+	if err != nil {
+		s.logger.Warnw("Refused a configuration patch carrying an unbindable mask", "error", err)
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	if m, ok := resolvedPatch.(map[string]interface{}); ok {
+		patchMap = m
 	}
 
 	deepMergeJSON(baseMap, patchMap)

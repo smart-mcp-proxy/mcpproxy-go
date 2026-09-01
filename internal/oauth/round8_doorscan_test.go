@@ -88,6 +88,27 @@ var rawServerLeafDoors = map[string]string{
 	"internal/upstream/core/connection_oauth.go:(m).handleOAuthAuthorizationWithResult": "same discovered endpoints.",
 }
 
+// openDoors is the third state a door can be in, and the only honest one for a
+// leak that is real, known and being fixed somewhere else: NOT exempted (an
+// exemption reads as "a decision was made, and the answer is no rule"), NOT
+// routed, but recorded, with the issue that owns it.
+//
+// Every row here is a live defect. The scan still finds them, so when the fix
+// lands the row goes stale and the test says so — the same rule that keeps
+// rawServerLeafDoors from rotting. Nothing may be added here to silence a
+// finding; a row without an issue number fails.
+var openDoors = map[string]string{
+	"internal/serveredition/api/user_handlers.go:(m).listServers": "#1161 — the server edition's per-user " +
+		"server API hands the raw *config.ServerConfig to writeJSON through the ServerResponse wrapper, " +
+		"publishing env/headers/url/oauth to the authenticated user. Fixed separately.",
+	"internal/serveredition/api/user_handlers.go:(m).getServer":    "#1161 — same wrapper, single-server route.",
+	"internal/serveredition/api/user_handlers.go:(m).createServer": "#1161 — same wrapper, create echo.",
+	"internal/serveredition/api/user_handlers.go:(m).updateServer": "#1161 — same wrapper, update echo.",
+	"internal/serveredition/api/user_handlers.go:(m).enableServer": "#1161 — same wrapper, enable/disable echo. " +
+		"Found by the round-9 widening, and NOT among the four handlers the issue names: the shape is " +
+		"identical and it needs the same fix.",
+}
+
 // routedDoors is the other half of the inventory: the doors that DO put a
 // server-derived string on a client-facing wire and route it through the shared
 // rules. The raw-leaf scan cannot see them — that is the point — so they are
@@ -101,6 +122,28 @@ var routedDoors = map[string]string{
 	"internal/server/mcp.go:(m).handleAddServerFromRegistry": "add_from_registry echo — command/url from redactedServerView, args via liveRedaction.Argv",
 	"internal/server/mcp.go:(m).handleListRegistries":        "list_registries — registry source url via liveRedaction.URLValue",
 	"internal/server/mcp.go:(m).createDetailedErrorResponse": "MCP error payload — server_url via liveRedaction.URLValue; error/response_body/error_data scrubbed",
+	"internal/server/mcp.go:(m).handleListQuarantinedUpstreams": "quarantine_security list_quarantined — the " +
+		"ORIGINAL #1148 door. Whole server blocks via redactedServerViews (the shared walk).",
+	"internal/server/mcp.go:(m).handleInspectQuarantinedTools": "quarantine_security inspect — the analysis " +
+		"echoes the upstream's own text; scrubbed with scrubUpstreamText.",
+	"internal/server/mcp.go:(m).handleQuarantineSecurity": "the quarantine_security dispatcher — records its own mutation payload through scrubUpstreamTextForAudit.",
+	"internal/server/mcp.go:(m).handleUpstreamServers":    "the upstream_servers dispatcher — every add/update/patch payload is recorded through scrubUpstreamTextForAudit.",
+	"internal/server/mcp.go:(m).handleUpdateUpstream":     "upstream_servers update — the error it reports carries the upstream URL; scrubUpstreamText.",
+	"internal/server/mcp.go:(m).handleTailLog":            "tail_log — upstream log lines carry whatever the server printed; scrubUpstreamLines/scrubUpstreamText.",
+	"internal/httpapi/server.go:(m).handleGetDiagnostics": "GET /api/v1/diagnostics — the same upstream error prose via oauth.ScrubUpstreamText.",
+
+	// REST — the whole-config door and its write twins (round 9)
+	"internal/httpapi/server.go:(m).handleGetConfig": "GET /api/v1/config — the WHOLE config " +
+		"(every server's env/headers/url/oauth plus the global docker_isolation.extra_args and the api_key) " +
+		"through oauth.RedactedConfig, reveal-gated, failing closed when the walk cannot round-trip",
+	"internal/httpapi/server.go:(m).handleApplyConfig": "POST /api/v1/config/apply — the write twin of the " +
+		"above: oauth.UnmaskLiveConfigDocument reverts what binds to a key and REFUSES what does not, " +
+		"before anything is typed or persisted",
+	"internal/httpapi/server.go:(m).handlePatchConfig": "PATCH /api/v1/config — oauth.UnmaskLiveConfigTree " +
+		"resolves the patch against the stored config BEFORE the deep merge, so an echoed mask is reverted " +
+		"or refused instead of being written over the credential",
+	"internal/httpapi/import.go:(m).runImport": "POST /api/v1/servers/import{,/json,/path} preview — " +
+		"url/command from oauth.RedactedConfigView, args via LiveRedaction.Argv, in parity with the CLI twin",
 
 	// REST
 	"internal/httpapi/server.go:(m).handleAddFromRegistry":      "POST registry-add echo — command/url from oauth.RedactedConfigView, args via LiveRedaction.Argv",
@@ -119,11 +162,12 @@ var routedDoors = map[string]string{
 	"internal/upstream/core/monitoring.go:(m).GetConnectionDiagnostics": "command/args/docker_args via oauth.LiveRedaction",
 	"internal/httpapi/diagnostics_per_server.go:redactHealthDetail":     "GET /api/v1/servers/{id}/diagnostics — health.detail via oauth.ScrubUpstreamText",
 	"internal/httpapi/diagnostics_per_server.go:redactDiagnosticCause":  "same route — diagnostic.cause via oauth.ScrubUpstreamText",
-	"internal/oauth/serverfields.go:RedactServerSecretFields":           "the REST + SSE door onto contracts.Server; the shared rule itself",
-	"internal/runtime/event_bus.go:(m).redactServerSecrets":             "/events servers.changed — oauth.RedactServerSecretFields",
-	"internal/httpapi/server.go:redactServerSecretFields":               "GET /api/v1/servers and its children — oauth.RedactServerSecretFields",
-	"internal/upstream/manager.go:(m).GetStats":                         "upstream_stats fallback — oauth.RedactUpstreamStatsEntry, reveal-gated",
-	"internal/management/diagnostics.go:(m).Doctor":                     "doctor UpstreamErrors.ErrorMessage via oauth.ScrubUpstreamText",
+	"internal/oauth/serverfields.go:RedactServerSecretFields": "the REST + SSE door onto contracts.Server; " +
+		"the shared rule itself, built entirely from LiveRedaction",
+	"internal/runtime/event_bus.go:(m).redactServerSecrets": "/events servers.changed — oauth.RedactServerSecretFields",
+	"internal/httpapi/server.go:redactServerSecretFields":   "GET /api/v1/servers and its children — oauth.RedactServerSecretFields",
+	"internal/upstream/manager.go:(m).GetStats":             "upstream_stats fallback — oauth.RedactUpstreamStatsEntry, reveal-gated",
+	"internal/management/diagnostics.go:(m).Doctor":         "doctor UpstreamErrors.ErrorMessage via oauth.ScrubUpstreamText",
 }
 
 // sharedRuleTokens are the identifiers that mean "this function routed its
@@ -134,6 +178,7 @@ var sharedRuleTokens = []string{
 	"RedactUpstreamStats", "RedactUpstreamStatsEntry",
 	"ScrubUpstreamText", "scrubUpstreamText", "scrubUpstreamTextForAudit",
 	"redactedServerView", "redactedArgs", "redactedRegistrySummary",
+	"RedactedConfig", "UnmaskLiveConfigTree", "UnmaskLiveConfigDocument", "viewString",
 	"isolationValues", "globalIsolationView", "MaskDetectedSecrets",
 }
 
@@ -173,6 +218,7 @@ var redactionCalls = map[string]bool{
 	"scrubbedConnectionStatus": true, "scrubUpstreamLines": true,
 	"redactedServerView": true, "redactedServerViews": true, "redactedArgs": true,
 	"redactedRegistrySummary": true, "isolationValues": true, "globalIsolationView": true,
+	"RedactedConfig": true, "UnmaskLiveConfigTree": true, "UnmaskLiveConfigDocument": true,
 	"redactValueWith": true, "redactActivityValue": true, "NormalizeForRedaction": true,
 	"normalizeForRedaction": true, "FindMaskMarker": true, "ContainsMaskMarker": true,
 	"URLValue": true, "Leaf": true, "Argv": true, "EnvValue": true, "HeaderValue": true,
@@ -192,6 +238,12 @@ func TestNoDoorPublishesARawServerLeaf(t *testing.T) {
 	require.NotEmpty(t, found, "the door scan found nothing — it has stopped testing anything")
 
 	for _, key := range sortedKeys(found) {
+		if issue, open := openDoors[key]; open {
+			assert.Contains(t, issue, "#",
+				"openDoors records %s with no issue number. A row here is a live defect somebody owns; "+
+					"without an owner it is an exemption wearing a different name.", key)
+			continue
+		}
 		reason, ok := rawServerLeafDoors[key]
 		if !assert.True(t, ok,
 			"NEW DOOR: %s puts an unredacted %s into a response payload.\n"+
@@ -211,6 +263,14 @@ func TestNoDoorPublishesARawServerLeaf(t *testing.T) {
 			"rawServerLeafDoors exempts %s, which the scan no longer finds. Delete the row — a stale "+
 				"exemption reads as a decision that was made, about code that is gone.", key)
 	}
+
+	for key := range openDoors {
+		_, ok := found[key]
+		assert.True(t, ok,
+			"openDoors records %s as a KNOWN OPEN LEAK, and the scan no longer finds it — the fix landed. "+
+				"Delete the row (or move it to routedDoors) so the next reader is not told a closed door "+
+				"is still open.", key)
+	}
 }
 
 // The other half of the inventory. A routed door is INVISIBLE to the raw-leaf
@@ -224,19 +284,110 @@ func TestRoutedDoors_StillCallASharedRule(t *testing.T) {
 		if !assert.True(t, ok, "routedDoors records %s, which no longer exists — delete the row or fix the name", key) {
 			continue
 		}
-		routed := false
-		for _, token := range sharedRuleTokens {
-			if strings.Contains(body, token) {
-				routed = true
-				break
+		// The row's own prose NAMES the rules the door routes through, and
+		// each one named must still be there. Round 9: matching "any shared
+		// rule token anywhere in the body" was too weak to be a guard —
+		// deleting `redactedServerViews` from handleListQuarantinedUpstreams
+		// left the test green, because the same body still mentioned
+		// `liveRedaction` in an unrelated argument. The documentation is now
+		// the assertion.
+		required := rulesNamedIn(routedDoors[key])
+		if !assert.NotEmpty(t, required,
+			"routedDoors records %s with prose that names no shared rule, so nothing about it is checked. "+
+				"Name the rule(s) it routes through — that sentence IS the assertion.", key) {
+			continue
+		}
+		for _, rule := range required {
+			assert.Contains(t, body, rule,
+				"%s no longer calls %s.\n%s\n"+
+					"It publishes server-derived strings, so removing the rule republishes them in the clear — "+
+					"and the raw-leaf scan cannot see it, because the leaf reaches the payload through a local.",
+				key, rule, routedDoors[key])
+		}
+	}
+}
+
+// Round 9 finding 4. routedDoors is the half of the inventory the raw-leaf scan
+// CANNOT see, so nothing kept it complete: it was written from the
+// implementer's prose and it omitted several doors that prose itself lists as
+// routed — including handleListQuarantinedUpstreams, the ORIGINAL #1148 door.
+// A pin list with holes is worse than none, because the holes are invisible:
+// a door missing from it can have its redaction deleted later with nothing
+// going red.
+//
+// The two halves can no longer drift. A ROUTED DOOR is derivable from the
+// source — a function that calls one of the shared rules AND reaches a publish
+// sink — and every one the scan derives must be pinned here.
+func TestRoutedDoors_AreCompleteAgainstTheSource(t *testing.T) {
+	derived := scanSharedRuleDoors(t)
+	require.NotEmpty(t, derived, "the routed-door scan found nothing — it has stopped testing anything")
+
+	for _, key := range sortedKeys(derived) {
+		_, ok := routedDoors[key]
+		assert.True(t, ok,
+			"UNPINNED ROUTED DOOR: %s calls a shared redaction rule and publishes the result, but no row in "+
+				"routedDoors pins it. The raw-leaf scan is blind to it BY CONSTRUCTION — the leaf reaches the "+
+				"payload through a local — so deleting its redaction call would reopen the leak in silence. "+
+				"Add the row.", key)
+	}
+}
+
+// scanSharedRuleDoors derives the routed doors: functions in the door packages
+// whose body reaches BOTH a shared redaction rule and a publish sink.
+func scanSharedRuleDoors(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	bodies := indexFunctionBodies(t)
+	forEachSourceFile(t, doorPackages, func(_, rel string, fset *token.FileSet, file *ast.File) {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			name := fn.Name.Name
+			if fn.Recv != nil {
+				name = "(m)." + name
+			}
+			key := rel + ":" + name
+			body, ok := bodies[key]
+			if !ok {
+				continue
+			}
+			rule := ""
+			for _, token := range sharedRuleTokens {
+				if strings.Contains(body, token) {
+					rule = token
+					break
+				}
+			}
+			if rule == "" {
+				continue
+			}
+			publishes := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && publishSinks[calleeName(call.Fun)] {
+					publishes = true
+				}
+				return true
+			})
+			if publishes {
+				out[key] = rule
 			}
 		}
-		assert.True(t, routed,
-			"%s no longer calls any shared redaction rule.\n%s\n"+
-				"It publishes server-derived strings, so removing the rule republishes them in the clear — "+
-				"and the raw-leaf scan cannot see it, because the leaf reaches the payload through a local.",
-			key, routedDoors[key])
+		_ = fset
+	})
+	return out
+}
+
+// rulesNamedIn returns the shared-rule tokens a routedDoors row's prose names.
+func rulesNamedIn(why string) []string {
+	var named []string
+	for _, token := range sharedRuleTokens {
+		if strings.Contains(why, token) {
+			named = append(named, token)
+		}
 	}
+	return named
 }
 
 // indexFunctionBodies renders every top-level function in the door packages
@@ -279,17 +430,390 @@ func indexFunctionBodies(t *testing.T) map[string]string {
 	return out
 }
 
-// scanServerPayloadDoors parses the door packages and returns, per function,
-// the secret-bearing leaves it puts into a response map, a contracts.* literal
-// or a publish sink.
-func scanServerPayloadDoors(t *testing.T) map[string]string {
+// --- round 9: the shapes the round-8 scan was blind to -----------------------
+//
+// The round-8 scan matched map literals, `contracts.*` literals, map-index
+// assignments, and identifiers tainted from an expression whose SOURCE TEXT
+// ended in `.Servers`. Round 9 found live doors it could not see, all of them
+// one of two shapes:
+//
+//   - a NAMED STRUCT that embeds or holds a raw config value and is handed to a
+//     publish sink (`writeJSON(w, 200, &ServerResponse{...})`), or that copies
+//     the leaves out of one (`ImportedServerResponse{URL: imported.Server.URL}`
+//     on `POST /api/v1/servers/import`, whose CLI twin round 8 redacted), and
+//   - a whole `*config.Config` reaching a publish sink through a call —
+//     `contracts.ConvertConfigToContract(cfg)` on `GET /api/v1/config`, which
+//     serves every server's env, headers, oauth.client_secret and url
+//     credentials plus the global docker_isolation.extra_args in one response.
+//
+// A guard that cannot see the shape the real defects have is worse than none,
+// because it reads as coverage. So the scan no longer judges by source text: it
+// indexes the declared TYPES of the scanned trees and derives, at a fixpoint,
+// which named types carry a raw `config.Config` / `config.ServerConfig`, which
+// expose a secret-bearing leaf field, which actually REACH a publish sink, and
+// which functions RETURN a raw config — all from the same source it scans.
+
+// configTypeIndex is that derived index. Every set is keyed by the type's
+// PACKAGE-QUALIFIED name (`api.ServerResponse`, `config.ServerConfig`): a bare
+// name collides across the tree — a dozen packages declare a `Client` — and a
+// collision in a fail-closed scan is noise, which is how an inventory stops
+// being kept green.
+type configTypeIndex struct {
+	// bearing names the types that transitively hold a raw config value:
+	// `api.ServerResponse` (it embeds *config.ServerConfig),
+	// `api.ServerListResponse` (it holds []*api.ServerResponse), and anything
+	// else built the same way.
+	bearing map[string]bool
+	// leafy names the struct types with a secret-bearing leaf field of their
+	// own — the `httpapi.ImportedServerResponse` shape, a response DTO that
+	// copies `url` / `command` / `args` out of a config.
+	leafy map[string]bool
+	// published names the types a value of which actually REACHES a publish
+	// sink, derived in two steps below. It is what keeps the widened scan from
+	// flagging every internal struct that holds a config: an inventory nobody
+	// keeps green is the same fail-open shape as no inventory at all.
+	published map[string]bool
+	// returning names the functions, methods and interface methods whose
+	// declared results include a raw config value, so an identifier assigned
+	// from one is known to hold a config without a type checker.
+	//
+	// Only UNANIMOUS names qualify: `Load` and `ListServers` are each declared
+	// a dozen times across this tree, and only some of those return a config,
+	// so taking any of them would taint an identifier that holds something
+	// else entirely. Without a type checker the call site cannot tell them
+	// apart — and a scan whose findings are mostly collisions is a scan whose
+	// exemption table stops being read.
+	returning map[string]bool
+	// fieldsOf and results are the graph the derivations walk. Field type
+	// expressions are stored with the package they were written in, since an
+	// unqualified name in a field means "this package".
+	fieldsOf map[string][]qualifiedExpr
+	results  map[string][]string
+	// declared / declaredRawConfig count the declarations behind each function
+	// name, so `returning` can require unanimity.
+	declared          map[string]int
+	declaredRawConfig map[string]int
+	// containerFields are the struct FIELD names declared as a map or slice of
+	// raw configs (`serverConfigs map[string]*config.ServerConfig`). Writing
+	// into one is a config write, not a publish — the same judgement
+	// rawConfigContainers makes for locals, for the fields a function reaches
+	// through its receiver.
+	containerFields map[string]bool
+}
+
+// qualifiedExpr is a type expression plus the package it was written in.
+type qualifiedExpr struct {
+	expr ast.Expr
+	pkg  string
+}
+
+// nonCarryingCalls cannot hand a config onward whatever they are given: they
+// return a length or a scalar conversion of it.
+var nonCarryingCalls = map[string]bool{
+	"len": true, "cap": true, "int": true, "int32": true, "int64": true,
+	"uint": true, "uint32": true, "uint64": true, "float64": true, "bool": true,
+}
+
+// configTypeTrees are the trees whose type declarations are indexed. The door
+// packages and internal/contracts contribute types; internal/config contributes
+// only function signatures — its own structs are the INPUT shape, not a
+// payload, and indexing them would flag every site that builds a ServerConfig
+// from a request body.
+var configTypeTrees = append(append([]string{}, doorPackages...), "internal/contracts")
+
+// inConfigTypeTrees reports whether a file contributes STRUCT types to the
+// index. internal/config is excluded: its own structs are the INPUT shape, not
+// a payload, and indexing them would flag every site that builds a
+// ServerConfig from a request body.
+func inConfigTypeTrees(rel string) bool {
+	for _, tree := range configTypeTrees {
+		if rel == tree || strings.HasPrefix(rel, tree+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// rawConfigTypes are the qualified names of a raw, unredacted config value.
+var rawConfigTypes = map[string]bool{
+	"config.Config": true, "config.ServerConfig": true,
+}
+
+// namedTypesIn reports every named type a type expression references, qualified
+// by `selfPkg` when the source wrote it unqualified. It looks through
+// pointers, slices, arrays, maps and variadics.
+func namedTypesIn(e ast.Expr, selfPkg string, out func(qualified string)) {
+	switch t := e.(type) {
+	case *ast.Ident:
+		out(selfPkg + "." + t.Name)
+	case *ast.SelectorExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			out(id.Name + "." + t.Sel.Name)
+		}
+	case *ast.StarExpr:
+		namedTypesIn(t.X, selfPkg, out)
+	case *ast.ArrayType:
+		namedTypesIn(t.Elt, selfPkg, out)
+	case *ast.MapType:
+		namedTypesIn(t.Key, selfPkg, out)
+		namedTypesIn(t.Value, selfPkg, out)
+	case *ast.Ellipsis:
+		namedTypesIn(t.Elt, selfPkg, out)
+	}
+}
+
+// indexConfigTypes builds the index by parsing the same trees the scan walks.
+func indexConfigTypes(t *testing.T) *configTypeIndex {
+	t.Helper()
+	idx := &configTypeIndex{
+		bearing:   map[string]bool{},
+		leafy:     map[string]bool{},
+		published: map[string]bool{},
+		returning: map[string]bool{},
+		fieldsOf:  map[string][]qualifiedExpr{},
+		results:   map[string][]string{},
+
+		declared:          map[string]int{},
+		declaredRawConfig: map[string]int{},
+		containerFields:   map[string]bool{},
+	}
+
+	// Struct types come from the door packages and internal/contracts; function
+	// SIGNATURES are censused across the whole tree, because unanimity can only
+	// be judged against every declaration of a name, not against the subset a
+	// narrower walk happens to see.
+	forEachSourceFile(t, []string{"internal", "cmd"},
+		func(_, rel string, _ *token.FileSet, file *ast.File) {
+			selfPkg := file.Name.Name
+			indexStructs := inConfigTypeTrees(rel)
+
+			recordResults := func(name string, results *ast.FieldList) {
+				idx.declared[name]++
+				if results == nil {
+					return
+				}
+				raw := false
+				for _, res := range results.List {
+					namedTypesIn(res.Type, selfPkg, func(q string) {
+						if rawConfigTypes[q] {
+							raw = true
+						}
+						idx.results[name] = append(idx.results[name], q)
+					})
+				}
+				if raw {
+					idx.declaredRawConfig[name]++
+				}
+			}
+
+			ast.Inspect(file, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.FuncDecl:
+					recordResults(x.Name.Name, x.Type.Results)
+				case *ast.InterfaceType:
+					for _, m := range x.Methods.List {
+						ft, ok := m.Type.(*ast.FuncType)
+						if !ok || len(m.Names) == 0 {
+							continue
+						}
+						recordResults(m.Names[0].Name, ft.Results)
+					}
+				case *ast.TypeSpec:
+					st, ok := x.Type.(*ast.StructType)
+					if !ok || !indexStructs || st.Fields == nil {
+						return true
+					}
+					name := selfPkg + "." + x.Name.Name
+					for _, f := range st.Fields.List {
+						idx.fieldsOf[name] = append(idx.fieldsOf[name], qualifiedExpr{f.Type, selfPkg})
+						for _, fieldName := range f.Names {
+							if secretLeafFields[fieldName.Name] {
+								idx.leafy[name] = true
+							}
+							if isRawConfigContainerType(f.Type, selfPkg) {
+								idx.containerFields[fieldName.Name] = true
+							}
+						}
+						if len(f.Names) == 0 {
+							// An embedded field: its own name is its type's.
+							namedTypesIn(f.Type, selfPkg, func(q string) {
+								if secretLeafFields[q[strings.LastIndex(q, ".")+1:]] {
+									idx.leafy[name] = true
+								}
+							})
+						}
+					}
+				}
+				return true
+			})
+		})
+
+	// A type is config-bearing if any field is a raw config value, or is a
+	// type that is itself config-bearing. Iterate to a fixpoint so the wrapper
+	// of a wrapper is caught.
+	for changed := true; changed; {
+		changed = false
+		for name, fieldTypes := range idx.fieldsOf {
+			if idx.bearing[name] {
+				continue
+			}
+			for _, ft := range fieldTypes {
+				hit := false
+				namedTypesIn(ft.expr, ft.pkg, func(q string) {
+					if rawConfigTypes[q] || idx.bearing[q] {
+						hit = true
+					}
+				})
+				if hit {
+					idx.bearing[name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	for name, n := range idx.declaredRawConfig {
+		if n == idx.declared[name] {
+			idx.returning[name] = true
+		}
+	}
+	idx.derivePublishedTypes(t)
+	return idx
+}
+
+// derivePublishedTypes finds the named types a value of which actually reaches
+// a wire.
+//
+// Step 1, the SEED: every argument of every publish sink in the door packages
+// whose named type the source makes evident — a composite literal, an
+// identifier assigned from one or from a call, or a call whose declared result
+// type is known. `s.writeSuccess(w, result)` where `result, err :=
+// s.runImport(...)` seeds `httpapi.ImportResponse`.
+//
+// Step 2, the CLOSURE: a published type publishes its fields' types too, so
+// `httpapi.ImportedServerResponse` is published because ImportResponse holds a
+// slice of it. That is the hop the round-8 scan had no way to make, and it is
+// why the import preview's `url` / `command` / `args` were invisible to it
+// while its CLI twin was being redacted.
+func (idx *configTypeIndex) derivePublishedTypes(t *testing.T) {
+	t.Helper()
+	forEachSourceFile(t, doorPackages, func(_, _ string, _ *token.FileSet, file *ast.File) {
+		selfPkg := file.Name.Name
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			locals := idx.localTypes(fn, selfPkg)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || !publishSinks[calleeName(call.Fun)] {
+					return true
+				}
+				for _, arg := range call.Args {
+					if name, ok := idx.exprTypeName(arg, selfPkg, locals); ok {
+						idx.published[name] = true
+					}
+				}
+				return true
+			})
+		}
+	})
+	for changed := true; changed; {
+		changed = false
+		for name := range idx.published {
+			for _, ft := range idx.fieldsOf[name] {
+				namedTypesIn(ft.expr, ft.pkg, func(q string) {
+					if _, known := idx.fieldsOf[q]; known && !idx.published[q] {
+						idx.published[q] = true
+						changed = true
+					}
+				})
+			}
+		}
+	}
+}
+
+// localTypes maps this function's identifiers to the named type they hold,
+// where the source says so syntactically.
+func (idx *configTypeIndex) localTypes(fn *ast.FuncDecl, selfPkg string) map[string]string {
+	locals := map[string]string{}
+	for pass := 0; pass < 2; pass++ {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.AssignStmt:
+				for i, lhs := range x.Lhs {
+					id, ok := lhs.(*ast.Ident)
+					if !ok || i >= len(x.Rhs) {
+						continue
+					}
+					if name, ok := idx.exprTypeName(x.Rhs[i], selfPkg, locals); ok {
+						locals[id.Name] = name
+					}
+				}
+			case *ast.ValueSpec:
+				if x.Type == nil {
+					return true
+				}
+				namedTypesIn(x.Type, selfPkg, func(q string) {
+					for _, id := range x.Names {
+						locals[id.Name] = q
+					}
+				})
+			}
+			return true
+		})
+	}
+	return locals
+}
+
+// exprTypeName resolves the qualified named type of an expression from the
+// source alone.
+func (idx *configTypeIndex) exprTypeName(e ast.Expr, selfPkg string, locals map[string]string) (string, bool) {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return idx.exprTypeName(x.X, selfPkg, locals)
+	case *ast.UnaryExpr:
+		if x.Op == token.AND {
+			return idx.exprTypeName(x.X, selfPkg, locals)
+		}
+	case *ast.CompositeLit:
+		return litTypeName(x, selfPkg)
+	case *ast.Ident:
+		if name, ok := locals[x.Name]; ok {
+			return name, true
+		}
+	case *ast.CallExpr:
+		for _, name := range idx.results[calleeName(x.Fun)] {
+			if _, known := idx.fieldsOf[name]; known {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// isPayloadLitType reports whether a named struct type is a response payload:
+// a value of it reaches a publish sink (directly, or as a field of something
+// that does) AND it carries a secret-bearing leaf field or a raw config of its
+// own.
+//
+// Both halves are needed. Without "reaches a sink" the scan flags every
+// internal struct with a `URL` field, including the REQUEST bodies the write
+// doors parse; without "carries a leaf" it flags every DTO on the tree.
+func (idx *configTypeIndex) isPayloadLitType(name string) bool {
+	return idx.published[name] && (idx.leafy[name] || idx.bearing[name])
+}
+
+// forEachSourceFile parses every non-test .go file of the given trees. Build
+// tags are deliberately NOT honoured: `internal/serveredition` is behind
+// `//go:build server`, and a door that only exists in one edition is still a
+// door.
+func forEachSourceFile(t *testing.T, trees []string, visit func(pkg, rel string, fset *token.FileSet, file *ast.File)) {
 	t.Helper()
 	root := repoRoot(t)
-	out := map[string]string{}
-
-	for _, pkg := range doorPackages {
-		dir := filepath.Join(root, pkg)
-		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	for _, pkg := range trees {
+		err := filepath.WalkDir(filepath.Join(root, pkg), func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return err
 			}
@@ -299,76 +823,118 @@ func scanServerPayloadDoors(t *testing.T) map[string]string {
 				return nil
 			}
 			rel, _ := filepath.Rel(root, path)
-			rel = filepath.ToSlash(rel)
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				if leaves := scanFuncForPublishedLeaves(fn); len(leaves) > 0 {
-					name := fn.Name.Name
-					if fn.Recv != nil {
-						name = "(m)." + name
-					}
-					out[rel+":"+name] = strings.Join(leaves, ", ")
-				}
-			}
+			visit(pkg, filepath.ToSlash(rel), fset, file)
 			return nil
 		})
 		require.NoError(t, err, "walking %s", pkg)
 	}
+}
+
+// scanServerPayloadDoors parses the door packages and returns, per function,
+// the secret-bearing leaves it puts into a response map, a payload struct, or a
+// publish sink.
+func scanServerPayloadDoors(t *testing.T) map[string]string {
+	t.Helper()
+	idx := indexConfigTypes(t)
+	require.NotEmpty(t, idx.bearing, "the type index found no config-bearing type — the widened scan is inert")
+	require.NotEmpty(t, idx.published, "the type index found no published type — the widened scan is inert")
+	out := map[string]string{}
+
+	forEachSourceFile(t, doorPackages, func(_, rel string, _ *token.FileSet, file *ast.File) {
+		selfPkg := file.Name.Name
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if leaves := scanFuncForPublishedLeaves(fn, selfPkg, idx); len(leaves) > 0 {
+				name := fn.Name.Name
+				if fn.Recv != nil {
+					name = "(m)." + name
+				}
+				out[rel+":"+name] = strings.Join(leaves, ", ")
+			}
+		}
+	})
 	return out
 }
 
 // scanFuncForPublishedLeaves reports the secret-bearing leaves this function
 // puts on a wire.
 //
-// Two shapes are matched. First, a SELECTOR on one of secretLeafFields used as
-// a value in a map/contracts composite literal, assigned into a map index, or
-// passed to a publish sink — that is `serverMap["url"] = cfg.URL`, the shape
-// every leak on this issue has had. Second, a bare IDENTIFIER that was assigned
-// (directly or through a range) from a raw config collection — that is
-// `writeJSON(w, 200, found)` where `found` came out of `h.config.Servers`,
-// which is how the server edition published the whole struct.
-func scanFuncForPublishedLeaves(fn *ast.FuncDecl) []string {
-	rawIdents := rawConfigIdents(fn)
+// Four shapes are matched. A SELECTOR on one of secretLeafFields used as a
+// value in a response literal, assigned into a map index, or passed to a
+// publish sink — that is `serverMap["url"] = cfg.URL`, the shape every leak on
+// this issue has had. A bare IDENTIFIER holding a raw config value — from a raw
+// config collection, from a function DECLARED to return one, or from a
+// `config.Config{}` literal. A COMPOSITE LITERAL of a config-bearing named type
+// — `&ServerResponse{ServerConfig: sc}`, which no source-text rule could see.
+// And a CALL carrying a raw config into a payload —
+// `contracts.ConvertConfigToContract(cfg)` on `GET /api/v1/config`.
+func scanFuncForPublishedLeaves(fn *ast.FuncDecl, selfPkg string, idx *configTypeIndex) []string {
+	rawIdents := rawConfigIdents(fn, selfPkg, idx)
+	containers := rawConfigContainers(fn, selfPkg)
 	seen := map[string]bool{}
 	var leaves []string
 
-	record := func(e ast.Expr) {
-		var name string
-		switch x := e.(type) {
-		case *ast.SelectorExpr:
-			switch {
-			case secretLeafFields[x.Sel.Name]:
-				name = x.Sel.Name
-			case isRawConfigExpr(renderExpr(x)):
-				// A whole raw config collection published as a value —
-				// `writeJSON(w, 200, h.config.Servers)`, the shape the server
-				// edition's admin API had.
-				name = "raw config collection (" + renderExpr(x) + ")"
-			default:
-				return
-			}
-		case *ast.Ident:
-			if !rawIdents[x.Name] {
-				return
-			}
-			name = "raw *config.ServerConfig (" + x.Name + ")"
-		default:
-			return
-		}
-		if seen[name] {
+	add := func(name string) {
+		if name == "" || seen[name] {
 			return
 		}
 		seen[name] = true
 		leaves = append(leaves, name)
 	}
 
+	var record func(ast.Expr)
+	record = func(e ast.Expr) {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			record(x.X)
+		case *ast.UnaryExpr:
+			if x.Op == token.AND {
+				record(x.X)
+			}
+		case *ast.SelectorExpr:
+			switch {
+			case secretLeafFields[x.Sel.Name]:
+				add(x.Sel.Name)
+			case isRawConfigExpr(renderExpr(x)):
+				// A whole raw config collection published as a value —
+				// `writeJSON(w, 200, h.config.Servers)`, the shape the server
+				// edition's admin API had.
+				add("raw config collection (" + renderExpr(x) + ")")
+			}
+		case *ast.Ident:
+			if rawIdents[x.Name] {
+				add("raw config value (" + x.Name + ")")
+			}
+		case *ast.CompositeLit:
+			// Gated on `published` for the same reason isPayloadLitType is:
+			// plenty of internal structs hold a config and never reach a wire.
+			// A bearing type newly handed to a sink is published BY that hand-
+			// off, so the gate costs the scan nothing it needs.
+			if name, ok := litTypeName(x, selfPkg); ok && idx.bearing[name] && idx.published[name] {
+				add("named type holding a raw config (" + name + ")")
+			}
+		case *ast.CallExpr:
+			if redactionCalls[calleeName(x.Fun)] || nonCarryingCalls[calleeName(x.Fun)] {
+				return
+			}
+			// A raw config carried into a payload through a call. The call is
+			// not a redaction rule — the scan checked — so whatever it returns
+			// still holds the operator's credentials.
+			for _, arg := range x.Args {
+				if id, ok := arg.(*ast.Ident); ok && rawIdents[id.Name] {
+					add("raw config value (" + calleeName(x.Fun) + "(" + id.Name + "))")
+				}
+			}
+		}
+	}
+
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.CompositeLit:
-			if !isResponseLit(x) {
+			if !isResponseLit(x, selfPkg, idx) {
 				return true
 			}
 			for _, el := range x.Elts {
@@ -380,9 +946,20 @@ func scanFuncForPublishedLeaves(fn *ast.FuncDecl) []string {
 			}
 		case *ast.AssignStmt:
 			for i, lhs := range x.Lhs {
-				if _, ok := lhs.(*ast.IndexExpr); ok && i < len(x.Rhs) {
-					record(x.Rhs[i])
+				ix, ok := lhs.(*ast.IndexExpr)
+				if !ok || i >= len(x.Rhs) {
+					continue
 				}
+				// `updated.Servers[i] = stamped` and
+				// `storedServerMap[name] = storedServer` write INTO a config or
+				// a map of them; they do not publish one. Only the response-map
+				// shape (`payload["url"] = …`) is a door.
+				base := renderExpr(ix.X)
+				if strings.HasSuffix(base, ".Servers") || containers[base] ||
+					idx.containerFields[base[strings.LastIndex(base, ".")+1:]] {
+					continue
+				}
+				record(x.Rhs[i])
 			}
 		case *ast.CallExpr:
 			callee := calleeName(x.Fun)
@@ -404,31 +981,82 @@ func scanFuncForPublishedLeaves(fn *ast.FuncDecl) []string {
 	return leaves
 }
 
-// rawConfigIdents returns the local identifiers that hold a RAW config server
-// value: assigned from, or ranged over, an expression that renders as
-// `<something-config>.Servers`, plus one hop of aliasing so
-// `for _, sc := range h.config.Servers { found = sc }` taints `found` too.
+// litTypeName returns the package-qualified name of a composite literal's type.
+func litTypeName(x *ast.CompositeLit, selfPkg string) (string, bool) {
+	switch t := x.Type.(type) {
+	case *ast.Ident:
+		return selfPkg + "." + t.Name, true
+	case *ast.SelectorExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return id.Name + "." + t.Sel.Name, true
+		}
+	}
+	return "", false
+}
+
+// rawConfigIdents returns the local identifiers that hold a RAW config value.
 //
-// The rule is deliberately narrow — the rendered text of the source, not "any
-// expression mentioning Config" — because a scan that flags a hundred
-// plumbing functions is a scan nobody keeps green, and an inventory nobody
-// keeps green is the fail-open shape this whole issue is made of.
-func rawConfigIdents(fn *ast.FuncDecl) map[string]bool {
+// Four sources, each derived rather than asserted: an expression that renders
+// as `<something-config>.Servers`; a call to a function whose DECLARED results
+// include a `config.Config` / `config.ServerConfig` — that is what makes
+// `cfg, err := s.desiredConfigForPatch()` visible without a type checker; a
+// `config.Config{}` literal or a `var cfg config.Config` declaration, which is
+// how the config WRITE doors receive one; and one hop of aliasing or ranging
+// off any of those, so `for _, sc := range h.config.Servers { found = sc }`
+// taints `found` too.
+func rawConfigIdents(fn *ast.FuncDecl, selfPkg string, idx *configTypeIndex) map[string]bool {
 	tainted := map[string]bool{}
 	isRawSource := func(e ast.Expr) bool {
+		switch x := e.(type) {
+		case *ast.UnaryExpr:
+			if x.Op == token.AND {
+				return isRawConfigLit(x.X, selfPkg)
+			}
+		case *ast.CompositeLit:
+			return isRawConfigLit(x, selfPkg)
+		case *ast.CallExpr:
+			if idx.returning[calleeName(x.Fun)] {
+				return true
+			}
+		}
 		rendered := renderExpr(e)
 		return isRawConfigExpr(rendered) || tainted[rendered]
 	}
+	redacted := map[string]bool{}
 	for pass := 0; pass < 2; pass++ {
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch x := n.(type) {
+			case *ast.CallExpr:
+				// A value handed to a shared rule has been masked IN PLACE.
+				// `s.redactServerSecrets(serverValues)` is the whole reason
+				// GET /api/v1/servers is safe, so the identifier it masked is
+				// no longer a raw config on the wire.
+				if redactionCalls[calleeName(x.Fun)] {
+					for _, arg := range x.Args {
+						if id, ok := arg.(*ast.Ident); ok {
+							redacted[id.Name] = true
+						}
+					}
+				}
 			case *ast.AssignStmt:
 				for i, lhs := range x.Lhs {
 					id, ok := lhs.(*ast.Ident)
 					if !ok || i >= len(x.Rhs) {
 						continue
 					}
+					// `published = oauth.RedactedConfig(cfg)` — the identifier
+					// now holds the MASKED copy, whatever it held before.
+					if call, ok := x.Rhs[i].(*ast.CallExpr); ok && redactionCalls[calleeName(call.Fun)] {
+						redacted[id.Name] = true
+						continue
+					}
 					if isRawSource(x.Rhs[i]) {
+						tainted[id.Name] = true
+					}
+				}
+			case *ast.ValueSpec:
+				for _, id := range x.Names {
+					if x.Type != nil && isRawConfigTypeExpr(x.Type, selfPkg) {
 						tainted[id.Name] = true
 					}
 				}
@@ -442,8 +1070,85 @@ func rawConfigIdents(fn *ast.FuncDecl) map[string]bool {
 			return true
 		})
 	}
+	for name := range redacted {
+		delete(tainted, name)
+	}
 	delete(tainted, "_")
 	return tainted
+}
+
+// isRawConfigContainerType reports whether a type expression is a map or slice
+// of raw configs.
+func isRawConfigContainerType(e ast.Expr, selfPkg string) bool {
+	switch t := e.(type) {
+	case *ast.MapType:
+		return isRawConfigTypeExpr(t.Value, selfPkg)
+	case *ast.ArrayType:
+		return isRawConfigTypeExpr(t.Elt, selfPkg)
+	}
+	return false
+}
+
+// rawConfigContainers returns the rendered expressions that name a MAP or
+// SLICE of raw configs — `storedServerMap := make(map[string]*config.ServerConfig)`,
+// `w.servers = make(map[string]*config.ServerConfig, n)`.
+//
+// Writing into one of those is a config write, not a publish, so the
+// response-map rule (`payload["url"] = cfg.URL`) must not fire on it. The
+// container is identified from the source that BUILDS it, so a map nobody can
+// see the type of still counts as a response map and still fails closed.
+func rawConfigContainers(fn *ast.FuncDecl, selfPkg string) map[string]bool {
+	containers := map[string]bool{}
+	isContainerType := func(e ast.Expr) bool { return isRawConfigContainerType(e, selfPkg) }
+	isContainerSource := func(e ast.Expr) bool {
+		switch x := e.(type) {
+		case *ast.CallExpr:
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "make" && len(x.Args) > 0 {
+				return isContainerType(x.Args[0])
+			}
+		case *ast.CompositeLit:
+			return x.Type != nil && isContainerType(x.Type)
+		}
+		return false
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range x.Lhs {
+				if i < len(x.Rhs) && isContainerSource(x.Rhs[i]) {
+					containers[renderExpr(lhs)] = true
+				}
+			}
+		case *ast.ValueSpec:
+			if x.Type != nil && isContainerType(x.Type) {
+				for _, id := range x.Names {
+					containers[id.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return containers
+}
+
+// isRawConfigTypeExpr reports whether a type expression names a raw config value.
+func isRawConfigTypeExpr(e ast.Expr, selfPkg string) bool {
+	raw := false
+	namedTypesIn(e, selfPkg, func(q string) {
+		if rawConfigTypes[q] {
+			raw = true
+		}
+	})
+	return raw
+}
+
+// isRawConfigLit reports whether a composite literal builds a raw config value.
+func isRawConfigLit(e ast.Expr, selfPkg string) bool {
+	lit, ok := e.(*ast.CompositeLit)
+	if !ok || lit.Type == nil {
+		return false
+	}
+	return isRawConfigTypeExpr(lit.Type, selfPkg)
 }
 
 // isRawConfigExpr reports whether a rendered expression names a raw config
@@ -462,18 +1167,27 @@ func renderExpr(e ast.Expr) string {
 }
 
 // isResponseLit reports whether a composite literal is a response payload: a
-// map, a contracts.* struct, or a nested element of one.
-func isResponseLit(x *ast.CompositeLit) bool {
-	switch t := x.Type.(type) {
-	case *ast.MapType:
-		return true
-	case *ast.SelectorExpr:
-		id, ok := t.X.(*ast.Ident)
-		return ok && id.Name == "contracts"
-	case nil:
+// map, a contracts.* struct, a payload struct type (round 9), or a nested
+// element of one.
+//
+// The payload-struct arm is round 9's widening. `ImportedServerResponse{URL:
+// …}` — the import preview's response DTO — is a plain named struct, so the
+// round-8 rule (map / contracts / nested) walked straight past it while its
+// CLI twin was being redacted.
+func isResponseLit(x *ast.CompositeLit, selfPkg string, idx *configTypeIndex) bool {
+	if x.Type == nil {
 		return true
 	}
-	return false
+	if _, ok := x.Type.(*ast.MapType); ok {
+		return true
+	}
+	if t, ok := x.Type.(*ast.SelectorExpr); ok {
+		if id, ok := t.X.(*ast.Ident); ok && id.Name == "contracts" {
+			return true
+		}
+	}
+	name, ok := litTypeName(x, selfPkg)
+	return ok && idx.isPayloadLitType(name)
 }
 
 func calleeName(fun ast.Expr) string {

@@ -46,13 +46,58 @@ var exportedStringFuncs = map[string]func(string) string{
 	"ArgvFlagKey":          ArgvFlagKey,
 }
 
-// notMaskRenderings records the exported `func(string) string` values that are
-// NOT mask renderings, with the reason. A row here is a deliberate decision,
-// and a stale one (naming a function that no longer exists) fails the test —
-// the same rule the field decision table lives by.
+// Round 9 finding 5. Discovery covered PACKAGE-LEVEL functions only, and the
+// renderings that actually reach the live read doors are METHODS on Redaction:
+// `Leaf`, `EnvValue`, `HeaderValue`, `URLValue` and `Argv` are what
+// RedactServerSecretFields, the MCP view and the generic walk all call, and
+// they were hand-listed in maskRenderings with nothing enforcing registration
+// — the exact hole round 8 closed for functions and left open for the half
+// that matters.
+//
+// redactionMethodRenderers binds each one, under both policies and under both
+// a sensitive and a benign key, so the property below probes the rendering a
+// read door actually publishes.
+var redactionMethodRenderers = map[string][]func(string) string{
+	"Redaction.Leaf": {
+		func(s string) string { return LiveRedaction.Leaf("token", s) },
+		func(s string) string { return LiveRedaction.Leaf("benign", s) },
+		func(s string) string { return LiveRedaction.Leaf("url", s) },
+		func(s string) string { return AuditRedaction.Leaf("token", s) },
+	},
+	"Redaction.EnvValue": {
+		func(s string) string { return LiveRedaction.EnvValue("API_KEY", s) },
+		func(s string) string { return LiveRedaction.EnvValue("BENIGN", s) },
+		func(s string) string { return AuditRedaction.EnvValue("API_KEY", s) },
+	},
+	"Redaction.HeaderValue": {
+		func(s string) string { return LiveRedaction.HeaderValue("Authorization", s) },
+		func(s string) string { return LiveRedaction.HeaderValue("X-Trace", s) },
+		func(s string) string { return AuditRedaction.HeaderValue("Authorization", s) },
+	},
+	"Redaction.URLValue": {
+		func(s string) string { return LiveRedaction.URLValue(s) },
+		func(s string) string { return AuditRedaction.URLValue(s) },
+	},
+	"Redaction.Argv": {
+		// A flag/value pair and a lone positional token: the two shapes the
+		// argv rule renders differently.
+		func(s string) string { return strings.Join(LiveRedaction.Argv([]string{"--token", s}), " ") },
+		func(s string) string { return strings.Join(LiveRedaction.Argv([]string{s}), " ") },
+		func(s string) string { return strings.Join(AuditRedaction.Argv([]string{"--token", s}), " ") },
+	},
+}
+
+// notMaskRenderings records the discovered renderers that are NOT mask
+// renderings, with the reason. A row here is a deliberate decision, and a stale
+// one (naming something that no longer exists) fails the test — the same rule
+// the field decision table lives by.
 var notMaskRenderings = map[string]string{
 	"ExtractResourceMetadataURL": "parses a WWW-Authenticate header and returns the resource-metadata URL it advertises; " +
 		"it extracts, it does not mask, and its output never reaches a write door as an echoed value",
+	"Redaction.CapString": "a property of the DESTINATION, not a rule: it caps a leaf for a PERSISTED surface " +
+		"(the activity store) and introduces no mask of its own. The live read policies set no limit precisely " +
+		"so a masked value is never truncated below what the write path can recognise, which is why binding it " +
+		"here would probe an identity function and prove nothing.",
 }
 
 // maskProbes are the value shapes a read door actually carries: bare secrets,
@@ -75,9 +120,16 @@ var maskProbes = []string{
 func TestExportedStringFuncs_AreAllBound(t *testing.T) {
 	discovered := discoverExportedStringFuncs(t)
 	require.NotEmpty(t, discovered, "the AST discovery found nothing — it has stopped testing anything")
+	require.Contains(t, discovered, "Redaction.Leaf",
+		"discovery no longer reaches the Redaction METHODS — the renderings the live read doors actually "+
+			"publish. That is the half round 9 found unenforced; a discovery that cannot see them reads as "+
+			"coverage without being any.")
 
 	for _, name := range discovered {
 		_, bound := exportedStringFuncs[name]
+		if _, boundMethod := redactionMethodRenderers[name]; boundMethod {
+			bound = true
+		}
 		_, exempt := notMaskRenderings[name]
 		assert.True(t, bound || exempt,
 			"oauth.%s is an exported func(string) string — the shape of a mask rendering — and is "+
@@ -94,6 +146,9 @@ func TestExportedStringFuncs_AreAllBound(t *testing.T) {
 	for name := range exportedStringFuncs {
 		assert.True(t, known[name], "exportedStringFuncs binds oauth.%s, which no longer exists", name)
 	}
+	for name := range redactionMethodRenderers {
+		assert.True(t, known[name], "redactionMethodRenderers binds oauth.%s, which no longer exists", name)
+	}
 	for name := range notMaskRenderings {
 		assert.True(t, known[name], "notMaskRenderings exempts oauth.%s, which no longer exists", name)
 	}
@@ -103,23 +158,36 @@ func TestExportedStringFuncs_AreAllBound(t *testing.T) {
 // value, the fail-closed net must recognise the result. A renderer that emits a
 // marker MaskMarkers does not carry is a mask a write door would accept.
 func TestExportedStringFuncs_RenderOnlyRecognisedMasks(t *testing.T) {
+	check := func(name, probe, got string) {
+		if got == probe {
+			return // pass-through: nothing was masked, nothing to recognise
+		}
+		assert.True(t, ContainsMaskMarker(got),
+			"oauth.%s(%q) = %q, which carries no marker the fail-closed net recognises. "+
+				"Register the rendering in maskRenderings so MaskMarkers is derived from it, "+
+				"or the net will accept this string on a write and persist it over the credential.",
+			name, probe, got)
+	}
 	for name, fn := range exportedStringFuncs {
 		for _, probe := range maskProbes {
-			got := fn(probe)
-			if got == probe {
-				continue // pass-through: nothing was masked, nothing to recognise
+			check(name, probe, fn(probe))
+		}
+	}
+	// The half that matters: the METHODS the live read doors publish through.
+	for name, renderers := range redactionMethodRenderers {
+		for _, render := range renderers {
+			for _, probe := range maskProbes {
+				check(name, probe, render(probe))
 			}
-			assert.True(t, ContainsMaskMarker(got),
-				"oauth.%s(%q) = %q, which carries no marker the fail-closed net recognises. "+
-					"Register the rendering in maskRenderings so MaskMarkers is derived from it, "+
-					"or the net will accept this string on a write and persist it over the credential.",
-				name, probe, got)
 		}
 	}
 }
 
 // discoverExportedStringFuncs parses this package's own source and returns the
-// names of every exported top-level `func(string) string`.
+// names of every exported top-level `func(string) string`, PLUS every exported
+// method on Redaction that renders a value — one `string` or `[]string` result
+// (round 9 finding 5). Methods come back as `Redaction.<Name>` so the two
+// namespaces cannot collide.
 func discoverExportedStringFuncs(t *testing.T) []string {
 	t.Helper()
 	dir := packageDir(t)
@@ -135,11 +203,17 @@ func discoverExportedStringFuncs(t *testing.T) []string {
 		for _, file := range pkg.Files {
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Recv != nil || !fn.Name.IsExported() {
+				if !ok || !fn.Name.IsExported() {
 					continue
 				}
-				if isStringToString(fn.Type) {
-					names = append(names, fn.Name.Name)
+				if fn.Recv == nil {
+					if isStringToString(fn.Type) {
+						names = append(names, fn.Name.Name)
+					}
+					continue
+				}
+				if receiverTypeName(fn.Recv) == "Redaction" && rendersAValue(fn.Type) {
+					names = append(names, "Redaction."+fn.Name.Name)
 				}
 			}
 		}
@@ -167,6 +241,37 @@ func isStringToString(ft *ast.FuncType) bool {
 		count += n
 	}
 	return count == 1
+}
+
+// receiverTypeName returns the bare type name of a method receiver.
+func receiverTypeName(recv *ast.FieldList) string {
+	if recv == nil || len(recv.List) == 0 {
+		return ""
+	}
+	t := recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// rendersAValue reports whether a method returns exactly one rendered value —
+// a `string` or a `[]string`. That is the shape of every mask rendering on
+// Redaction, and it excludes the ones that return a policy (WithLimit) or a
+// generic tree (Value, RedactNested).
+func rendersAValue(ft *ast.FuncType) bool {
+	if ft.Results == nil || len(ft.Results.List) != 1 {
+		return false
+	}
+	res := ft.Results.List[0].Type
+	if isStringIdent(res) {
+		return true
+	}
+	arr, ok := res.(*ast.ArrayType)
+	return ok && arr.Len == nil && isStringIdent(arr.Elt)
 }
 
 func isStringIdent(e ast.Expr) bool {
