@@ -134,3 +134,43 @@ func TestClassifierHints_DockerIsolationMatchesResolver(t *testing.T) {
 		})
 	}
 }
+
+// The DockerMissingToolchain remediation can only say whether mcpproxy's
+// automatic git-capable image selection covers the failure if the server's args
+// reach the classifier (#1143/#1144).
+func TestClassifierHints_CarryArgsForGitDependencies(t *testing.T) {
+	srv := &config.ServerConfig{
+		Name:    "git-server",
+		Command: "uvx",
+		Args:    []string{"--from", "srv@git+https://github.com/o/r", "srv"},
+	}
+	cfg := &config.Config{
+		DockerIsolation: &config.DockerIsolationConfig{Enabled: true, DefaultImages: config.DefaultDockerIsolationConfig().DefaultImages},
+		Servers:         []*config.ServerConfig{srv},
+	}
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	s := New(configSvc, mockUpstream, zap.NewNop())
+
+	hints := s.classifierHints(srv, "stdio")
+	if !hints.DockerIsolated {
+		t.Fatal("expected the server to be classified Docker-isolated")
+	}
+	if len(hints.DockerArgs) != len(srv.Args) {
+		t.Fatalf("classifierHints().DockerArgs = %v, want %v", hints.DockerArgs, srv.Args)
+	}
+	// The whole default_images map has to reach the remediation layer, which
+	// reads both the runtime entry and whether the operator set the git key at
+	// all. (mcpproxy does not seed the git key, so its absence here is the
+	// point: an unset key must arrive unset.)
+	if got := hints.DockerDefaultImages["uvx"]; got == "" {
+		t.Error("hints do not carry the runtime default image")
+	}
+	if got, ok := hints.DockerDefaultImages[config.GitCapableImageKey]; ok {
+		t.Errorf("hints carry a git-capable key the operator never set: %q", got)
+	}
+}

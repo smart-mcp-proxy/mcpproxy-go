@@ -343,6 +343,17 @@ func seedDOCKER() {
 		DocsURL: docsURL(DockerExecNotFound),
 	})
 	register(CatalogEntry{
+		Code:     DockerMissingToolchain,
+		Severity: SeverityError,
+		UserMessage: "The Docker image is missing a tool this server needs at runtime (e.g. no `git` for a `git+https://…` dependency). " +
+			"Use an image that ships it, or drop a per-server `isolation.image` override so mcpproxy can pick one.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Check whether the image has the tool", Command: "docker run --rm --entrypoint sh <image> -c 'git --version'"},
+			{Type: FixStepLink, Label: "Choosing a Docker isolation image", URL: docsURL(DockerMissingToolchain)},
+		},
+		DocsURL: docsURL(DockerMissingToolchain),
+	})
+	register(CatalogEntry{
 		Code:        DockerOCIRuntime,
 		Retry:       RetryPermanent,
 		Severity:    SeverityError,

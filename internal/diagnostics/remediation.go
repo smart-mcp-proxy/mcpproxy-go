@@ -21,6 +21,9 @@ import (
 //
 // This is diagnostics-only: it never changes classification or image selection.
 func RuntimeAwareRemediation(code Code, hints ClassifierHints) string {
+	if code == DockerMissingToolchain {
+		return missingToolchainRemediation(hints)
+	}
 	if code != DockerExecNotFound || hints.DockerCommand == "" {
 		return ""
 	}
@@ -107,4 +110,113 @@ func detectDockerRuntimeType(command string) string {
 		}
 		return cmdName
 	}
+}
+
+// gitCapableImageKey mirrors config.GitCapableImageKey — the default_images key
+// naming the git-capable image mcpproxy substitutes for a git dependency
+// (#1143). It is mirrored rather than imported for the same reason
+// detectDockerRuntimeType is: this package stays dependency-free so it can be
+// used from every layer. TestGitCapableImageKeyMatchesConfig pins the two
+// together.
+const gitCapableImageKey = "uvx-git"
+
+// builtInPythonRunnerImage mirrors the VALUE config ships for every Python
+// package runner. A runtime entry that differs from it is one the operator
+// retargeted — for the seeded runtime keys, value inequality is the only signal
+// that survives the merge (config.IsBuiltInDefaultImage says why).
+//
+// There is deliberately no mirrored value for the git-capable key: mcpproxy
+// does not seed it, so its PRESENCE is the operator's choice and no value
+// comparison is involved. TestMirroredBuiltInImagesMatchConfig pins this to
+// config.
+const builtInPythonRunnerImage = "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
+
+// missingToolchainRemediation explains a DockerMissingToolchain failure: the
+// container ran, but the image lacks a tool the server calls. The git case is
+// special — mcpproxy now selects a git-capable image automatically (#1143), so
+// the message must say so, or it sends the user editing config for a problem
+// that is already handled (and leaves the real remaining cause — a per-server
+// `isolation.image` override, which opts OUT of that selection — unnamed).
+func missingToolchainRemediation(hints ClassifierHints) string {
+	runtimeType := ""
+	if hints.DockerCommand != "" {
+		runtimeType = detectDockerRuntimeType(hints.DockerCommand)
+	}
+	override := strings.TrimSpace(hints.DockerImageOverride)
+
+	var b strings.Builder
+	if runtimeType != "" {
+		fmt.Fprintf(&b, "This Docker-isolated `%s` server ran, but its image is missing a command it needs.", runtimeType)
+	} else {
+		b.WriteString("This Docker-isolated server ran, but its image is missing a command it needs.")
+	}
+
+	if !hintsHaveGitDependency(hints) {
+		if override != "" {
+			fmt.Fprintf(&b, " The per-server `isolation.image` override `%s` is the likely culprit — remove it to inherit the runtime default, or pick an image that ships the missing tool.", override)
+		} else {
+			b.WriteString(" Pin an `isolation.image` that ships the missing tool (or build one) for this server.")
+		}
+		return b.String()
+	}
+
+	rawGitImage, gitKeySet := hints.DockerDefaultImages[gitCapableImageKey]
+	gitImage := strings.TrimSpace(rawGitImage)
+	runtimeImage := strings.TrimSpace(hints.DockerDefaultImages[runtimeType])
+	// An explicitly emptied key is the documented opt-out, not an absent one.
+	optedOut := gitKeySet && gitImage == ""
+	// The operator retargeted this runtime at their own registry and never set
+	// the git key: no substitution happened, and the server ran on their image.
+	// Mirrors the resolver's own rule — including that a git key the operator
+	// DID set wins outright, whatever its value, so it can never be a deferral.
+	deferredToRuntimeImage := !gitKeySet && runtimeImage != "" && runtimeImage != builtInPythonRunnerImage
+
+	b.WriteString(" It installs from a git URL, so the image must contain `git`.")
+	switch {
+	case override != "" && gitImage != "":
+		fmt.Fprintf(&b, " The per-server `isolation.image` override `%s` is the likely culprit: it opts out of the automatic git-capable image selection. Remove the override to inherit `%s`, or pin an image that ships git.", override, gitImage)
+	case override != "":
+		fmt.Fprintf(&b, " The per-server `isolation.image` override `%s` is the likely culprit: it opts out of the automatic git-capable image selection. Remove the override, or pin an image that ships git.", override)
+	case optedOut:
+		fmt.Fprintf(&b, " `docker_isolation.default_images.%s` is set to `\"\"`, which opts out of the automatic git-capable image selection, so this server runs on your `%s` image. Remove the empty value, or point that key at an image that ships git.", gitCapableImageKey, runtimeType)
+	case deferredToRuntimeImage:
+		fmt.Fprintf(&b, " No git-capable image was substituted here: your `%s` entry (`%s`) is not the image mcpproxy ships, so this install pulls from its own registry and mcpproxy kept the server on your image rather than reaching outside it for the public default. Set `docker_isolation.default_images.%s` to an image in your registry that ships git.", runtimeType, runtimeImage, gitCapableImageKey)
+	case gitImage != "":
+		fmt.Fprintf(&b, " mcpproxy selects a git-capable image (`%s`, from `docker_isolation.default_images.%s`) automatically for git dependencies — if this still fails, that key points at an image without git, or this server is running an older mcpproxy.", gitImage, gitCapableImageKey)
+	default:
+		fmt.Fprintf(&b, " mcpproxy selects a git-capable image automatically for git dependencies — set `docker_isolation.default_images.%s` to an image that ships git if this still fails.", gitCapableImageKey)
+	}
+	return b.String()
+}
+
+// gitCapableRuntimeTypes mirrors config.gitCapableRuntimeTypes — the runtime
+// types whose default image is the git-less slim uv image, and therefore the
+// only ones config.NeedsGitCapableImage substitutes an image for. Mirrored for
+// the same reason gitCapableImageKey is; TestMirroredGitRuntimeGateMatchesConfig
+// pins the two together.
+var gitCapableRuntimeTypes = map[string]bool{
+	"uvx":     true,
+	"python":  true,
+	"python3": true,
+	"pip":     true,
+	"pipx":    true,
+}
+
+// hintsHaveGitDependency reports whether mcpproxy's automatic git-capable image
+// selection applies to this server — i.e. whether config.NeedsGitCapableImage
+// would fire for it. BOTH halves of that gate matter: the `git+` marker pip/uv
+// URLs require, AND the Python-package-runner runtime type. node:22 already
+// ships git and is deliberately left alone, so a node/go/ruby server never gets
+// the substitution — claiming otherwise promises a fix that never runs and
+// points at a `default_images` key with no effect on that server.
+func hintsHaveGitDependency(hints ClassifierHints) bool {
+	if hints.DockerCommand == "" || !gitCapableRuntimeTypes[detectDockerRuntimeType(hints.DockerCommand)] {
+		return false
+	}
+	for _, arg := range hints.DockerArgs {
+		if strings.Contains(strings.ToLower(arg), "git+") {
+			return true
+		}
+	}
+	return false
 }

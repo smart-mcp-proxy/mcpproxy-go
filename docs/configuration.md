@@ -925,9 +925,10 @@ See [Logging Documentation](logging.md) for complete details.
   "docker_isolation": {
     "enabled": false,
     "default_images": {
-      "python": "python:3.11",
-      "node": "node:20",
-      "npx": "node:20"
+      "python": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "uvx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "node": "node:22",
+      "npx": "node:22"
     },
     "registry": "docker.io",
     "network_mode": "bridge",
@@ -945,7 +946,7 @@ See [Logging Documentation](logging.md) for complete details.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable Docker isolation globally |
-| `default_images` | object | See below | Map of runtime type to Docker image |
+| `default_images` | object | See below | Map of runtime type to Docker image, merged over the built-in map (a partial map only overrides the keys it lists). The optional `uvx-git` key — **not** part of the built-in map — overrides the git-capable image used instead of the Python default when a Python package runner installs from a `git+` URL (the slim uv image has no git); set it to `""` to opt out. Setting it always wins, including at the value MCPProxy ships. Leave it unset and MCPProxy picks the image: your own `uvx`/`python` image if you retargeted it at your registry, otherwise `ghcr.io/astral-sh/uv:python3.13-bookworm` — qualified with `registry` when you set one |
 | `registry` | string | `"docker.io"` | Docker registry to use |
 | `network_mode` | string | `"bridge"` | Docker network mode |
 | `memory_limit` | string | `"512m"` | Memory limit for containers |

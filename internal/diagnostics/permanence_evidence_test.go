@@ -25,47 +25,72 @@ func stdioPrematureExit(childStderr string) error {
 // "permission denied" or "command not found" was classified with a code marked
 // RetryPermanent, and the server was parked forever after two attempts.
 //
-// The classification itself is unchanged — it is still the most useful message
-// we can show. Only the authority to STOP RETRYING is withdrawn.
+// Only the authority to STOP RETRYING is withdrawn here; the classification is
+// whatever Classify thinks is the most useful message.
+//
+// #1156 later removed most of the hazard at the SOURCE: a child printing ENOENT
+// for its own data file is no longer read as a spawn ENOENT at all. Those rows
+// therefore no longer reach a code declared permanent, which is a strictly
+// better outcome than the gate catching them — so `permanent` records per row
+// whether this input still exercises the gate, and the last two rows keep a
+// stderr-derived PERMANENT code in the table so the gate is never left untested.
 func TestParkableCode_ChildStderrNeverProvesPermanence(t *testing.T) {
 	tests := []struct {
-		name     string
-		err      error
-		hints    ClassifierHints
-		wantCode Code
+		name      string
+		err       error
+		hints     ClassifierHints
+		wantCode  Code
+		permanent bool // does this input still reach a code declared permanent?
 	}{
 		{
 			// A Node server that cannot open its own state file on this boot.
 			name:     "stdio child prints ENOENT for a data file",
 			err:      stdioPrematureExit("[stderr] Error: ENOENT: no such file or directory, open '/tmp/agent/state.json'"),
 			hints:    ClassifierHints{Transport: "stdio"},
-			wantCode: STDIOSpawnENOENT,
+			wantCode: STDIOExitBeforeInitialize,
 		},
 		{
 			// A cache directory that is not writable yet — clears on its own.
 			name:     "stdio child prints EACCES for a cache directory",
 			err:      stdioPrematureExit("[stderr] EACCES: permission denied, mkdir '/var/cache/foo'"),
 			hints:    ClassifierHints{Transport: "stdio"},
-			wantCode: STDIOSpawnEACCES,
+			wantCode: STDIOExitBeforeInitialize,
 		},
 		{
 			name:     "stdio child prints exec format error from a helper it shelled out to",
 			err:      stdioPrematureExit("[stderr] ./vendor/helper: exec format error"),
 			hints:    ClassifierHints{Transport: "stdio"},
-			wantCode: STDIOSpawnExecFormat,
+			wantCode: STDIOExitBeforeInitialize,
 		},
 		{
 			// The GH #1145 report itself: a package install inside a container.
 			name:     "docker-isolated child prints command not found",
 			err:      stdioPrematureExit("[stderr] sh: line 1: jq: command not found"),
 			hints:    ClassifierHints{Transport: "stdio", DockerIsolated: true},
-			wantCode: DockerExecNotFound,
+			wantCode: DockerMissingToolchain,
 		},
 		{
 			name:     "docker-isolated child prints a bare ENOENT",
 			err:      stdioPrematureExit("[stderr] npm ERR! enoent no such file or directory, open '/root/.npm/_cacache/tmp/x'"),
 			hints:    ClassifierHints{Transport: "stdio", DockerIsolated: true},
-			wantCode: DockerExecNotFound,
+			wantCode: STDIOExitBeforeInitialize,
+		},
+		{
+			// Still reaches a PERMANENT code from stderr alone, so the gate
+			// itself stays under test rather than being incidentally bypassed
+			// by #1156's better classification.
+			name:      "container entrypoint genuinely missing, reported only by stderr",
+			err:       stdioPrematureExit(`[stderr] docker: Error response from daemon: OCI runtime create failed: exec: "uvx": executable file not found in $PATH`),
+			hints:     ClassifierHints{Transport: "stdio", DockerIsolated: true},
+			wantCode:  DockerExecNotFound,
+			permanent: true,
+		},
+		{
+			name:      "container exec ENOENT, reported only by stderr",
+			err:       stdioPrematureExit("[stderr] exec /usr/local/bin/uvx: no such file or directory"),
+			hints:     ClassifierHints{Transport: "stdio", DockerIsolated: true},
+			wantCode:  DockerExecNotFound,
+			permanent: true,
 		},
 	}
 
@@ -73,8 +98,13 @@ func TestParkableCode_ChildStderrNeverProvesPermanence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.wantCode, Classify(tt.err, tt.hints),
 				"the user-facing classification is deliberately unchanged")
-			require.True(t, IsPermanent(tt.wantCode),
-				"precondition: this code is declared permanent, which is why the gate matters")
+			if tt.permanent {
+				require.True(t, IsPermanent(tt.wantCode),
+					"precondition: this code is declared permanent, which is why the gate matters")
+			} else {
+				require.False(t, IsPermanent(tt.wantCode),
+					"#1156 classifies this benign stderr to a non-permanent code, so the hazard is gone at the source")
+			}
 
 			code, parkable := ParkableCode(tt.err, tt.hints)
 			assert.Equal(t, tt.wantCode, code, "ParkableCode must report the same code as Classify")

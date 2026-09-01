@@ -75,6 +75,7 @@ docker run --rm <image> which uvx   # or: node, npx, python3 …
 ## Related
 
 - [Docker Isolation](../features/docker-isolation.md)
+- [`MCPX_DOCKER_MISSING_TOOLCHAIN`](MCPX_DOCKER_MISSING_TOOLCHAIN.md) — the interpreter is present but a tool it calls (e.g. `git`) is not
 - [`MCPX_DOCKER_IMAGE_PULL_FAILED`](MCPX_DOCKER_IMAGE_PULL_FAILED.md)
 - [`MCPX_DOCKER_DAEMON_DOWN`](MCPX_DOCKER_DAEMON_DOWN.md)
 </content>

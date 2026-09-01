@@ -41,6 +41,11 @@ func For(global *config.Config, srv *config.ServerConfig, transport string) diag
 	}
 
 	h.DockerCommand = srv.Command
+	// The args carry the git-dependency signal (`--from pkg@git+https://…`) that
+	// the #1143 remediation reads to decide whether the automatic git-capable
+	// image substitution applies to this server. Without them the toolchain
+	// remediation cannot tell a git install from an ordinary one.
+	h.DockerArgs = srv.Args
 	if srv.Isolation != nil {
 		h.DockerImageOverride = srv.Isolation.Image
 	}
