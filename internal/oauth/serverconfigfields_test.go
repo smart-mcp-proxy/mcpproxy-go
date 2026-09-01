@@ -26,7 +26,7 @@ func TestRedactServerConfigSecrets_MasksEverySecretBearingLeaf(t *testing.T) {
 	sc := &config.ServerConfig{}
 	fillTextLeaves(reflect.ValueOf(sc).Elem(), ghpToken)
 
-	masked := RedactServerConfigSecrets(sc)
+	masked := RedactServerConfigSecrets(sc, LiveRedaction)
 	require.NotNil(t, masked)
 
 	for _, path := range findTokenPaths(t, masked, ghpToken) {
@@ -42,7 +42,7 @@ func TestRedactServerConfigSecrets_MasksEverySecretBearingLeaf(t *testing.T) {
 func TestRedactServerConfigSecrets_MasksTheNamedShapes(t *testing.T) {
 	sc := secretBearingServerConfig()
 
-	masked := RedactServerConfigSecrets(sc)
+	masked := RedactServerConfigSecrets(sc, LiveRedaction)
 	require.NotNil(t, masked)
 
 	assert.NotContains(t, masked.Headers["Authorization"], "hdrsecretvalue")
@@ -73,7 +73,7 @@ func TestRedactServerConfigSecrets_LeavesTheInputUntouched(t *testing.T) {
 	sc := secretBearingServerConfig()
 	pristine := secretBearingServerConfig()
 
-	masked := RedactServerConfigSecrets(sc)
+	masked := RedactServerConfigSecrets(sc, LiveRedaction)
 	require.NotNil(t, masked)
 
 	assert.Equal(t, pristine, sc, "redacting a read payload mutated the config it was built from")
@@ -120,7 +120,7 @@ func TestRedactServerConfigSecrets_PreservesNonSecretFields(t *testing.T) {
 		SourceRegistryProvenance: "official",
 	}
 
-	masked := RedactServerConfigSecrets(sc)
+	masked := RedactServerConfigSecrets(sc, LiveRedaction)
 	require.NotNil(t, masked)
 
 	assert.Equal(t, sc.Name, masked.Name)
@@ -151,7 +151,7 @@ func TestRedactServerConfigSecrets_PreservesNonSecretFields(t *testing.T) {
 }
 
 func TestRedactServerConfigSecrets_NilIsNil(t *testing.T) {
-	assert.Nil(t, RedactServerConfigSecrets(nil))
+	assert.Nil(t, RedactServerConfigSecrets(nil, LiveRedaction))
 	assert.Nil(t, RedactedServerConfigView(nil, LiveRedaction))
 }
 
@@ -162,7 +162,7 @@ func TestRedactServerConfigSecrets_AgreesWithTheMapView(t *testing.T) {
 	sc := secretBearingServerConfig()
 
 	view := RedactedServerConfigView(sc, LiveRedaction)
-	typed := RedactServerConfigSecrets(sc)
+	typed := RedactServerConfigSecrets(sc, LiveRedaction)
 	require.NotNil(t, typed)
 
 	assert.Equal(t, view, NormalizeForRedaction(typed),

@@ -79,9 +79,19 @@ func RedactedServerConfigViews(servers []*config.ServerConfig, r Redaction) []ma
 	return out
 }
 
-// RedactServerConfigSecrets returns a masked COPY of sc under the LIVE policy,
+// RedactServerConfigSecrets returns a masked COPY of sc under the given policy,
 // for a door that must hand back a *config.ServerConfig rather than a map (the
 // server edition's ServerResponse embeds one).
+//
+// The policy is a PARAMETER because the choice is the caller's and it is not
+// obvious. Pass LiveRedaction on a surface whose reader owns the credential and
+// may edit it — MaskValue's `••••<last2> (<N> chars)` says which token is
+// configured and the write-path unmaskers recognise it. Pass AuditRedaction
+// wherever the reader is NOT the owner: for a server edition shared server the
+// affordance buys that reader nothing (shared servers are read-only to users)
+// while publishing the admin credential's exact length and trailing bytes to
+// every tenant of the deployment — a durable fingerprint and a correlation
+// handle, which is the case AuditMaskValue was written for.
 //
 // The input is never mutated and the result shares no map, slice or pointer
 // with it: the masked view is decoded into a FRESH struct. That matters because
@@ -96,11 +106,11 @@ func RedactedServerConfigViews(servers []*config.ServerConfig, r Redaction) []ma
 // unredacted credential is this issue.
 //
 // Returns nil for a nil config.
-func RedactServerConfigSecrets(sc *config.ServerConfig) *config.ServerConfig {
+func RedactServerConfigSecrets(sc *config.ServerConfig, r Redaction) *config.ServerConfig {
 	if sc == nil {
 		return nil
 	}
-	view := RedactedServerConfigView(sc, LiveRedaction)
+	view := RedactedServerConfigView(sc, r)
 	encoded, err := json.Marshal(view)
 	if err != nil {
 		return &config.ServerConfig{Name: sc.Name}

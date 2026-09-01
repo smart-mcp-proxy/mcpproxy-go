@@ -234,7 +234,7 @@ jobs:
         run: |
           ./dist-bin/release-gate run-suite \
             --name suite/server-race --report-dir "${GATE_REPORT_DIR}" \
-            -- go test -tags server -race ./internal/serveredition/...
+            -- go test -tags server -race ./internal/serveredition/... ./internal/oauth/...
 
       - name: Upload report fragment
         if: always()
