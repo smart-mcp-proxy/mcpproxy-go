@@ -275,11 +275,20 @@ func classifyDockerIsolatedSpawn(err error) Code {
 	builtinOnly := onlyShellBuiltinsMissing(msg)
 
 	// The docker LAYER failing — daemon refusing, absent, or unable to fetch
-	// the image — is decided before any stderr-tail reading, and is exempt from
-	// toolchainSuppressed for the same reason arms (1) and (5) are: it means no
-	// container ever started, which cannot be true of one that is alive and
-	// merely silent.
-	layerCode := dockerLayerCode(msg)
+	// the image — is decided before any stderr-tail reading.
+	//
+	// It IS subject to toolchainSuppressed, unlike arms (1) and (5). A layer
+	// failure means no container ever started, so it cannot coexist with a
+	// handshake timeout, which means the container is alive and merely silent.
+	// When both appear, the daemon wording came from the container's OWN stderr
+	// tail — an application log line — and reporting MCPX_DOCKER_DAEMON_DOWN
+	// sends the user restarting Docker over a message their server printed.
+	// A genuine daemon refusal is unaffected: it surfaces on the exit path,
+	// where isStdioHandshakeTimeout is false.
+	var layerCode Code
+	if !toolchainSuppressed {
+		layerCode = dockerLayerCode(msg)
+	}
 
 	switch {
 	// (1) docker binary unresolved: shellwrap resolution failure, or the shell
