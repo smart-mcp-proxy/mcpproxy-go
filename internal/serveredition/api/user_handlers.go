@@ -214,10 +214,19 @@ type ServerListResponse struct {
 // listServers, getServer and enableServer alike. This is the same defect class
 // the MCP, REST and SSE doors closed; this door that sweep did not reach.
 //
-// The rules are oauth.LiveRedaction — the SAME ones every other door applies —
-// reached through oauth.RedactServerConfigSecrets, which walks the struct
-// rather than enumerating it, so a field added to config.ServerConfig (or to
-// the build-tagged auth_broker block) is masked because the walk reaches it.
+// The rules are the SAME ones every other door applies, reached through
+// oauth.RedactServerConfigSecrets, which walks the struct rather than
+// enumerating it, so a field added to config.ServerConfig (or to the
+// build-tagged auth_broker block) is masked because the walk reaches it.
+//
+// The POLICY is oauth.AuditRedaction, not the LiveRedaction an owner-facing
+// surface uses. MaskValue's `••••<last2> (<N> chars)` rendering is an
+// affordance for someone editing their OWN credential; here the reader is a
+// different tenant who cannot edit this server at all, so the affordance buys
+// them nothing while publishing the admin credential's exact length and
+// trailing bytes to every user of the deployment — a durable fingerprint, a
+// correlation handle across tenants, and a materially smaller search space for
+// a low-entropy secret.
 //
 // It returns a masked COPY: `h.sharedServers` is the LIVE admin configuration,
 // and writing a mask through it would be the #1142/#1146 read-modify-write
@@ -236,7 +245,7 @@ type ServerListResponse struct {
 // masks over the user's real secrets.
 func sharedServerResponse(sc *config.ServerConfig, userEnabled *bool) *ServerResponse {
 	return &ServerResponse{
-		ServerConfig: oauth.RedactServerConfigSecrets(sc),
+		ServerConfig: oauth.RedactServerConfigSecrets(sc, oauth.AuditRedaction),
 		Ownership:    "shared",
 		UserEnabled:  userEnabled,
 	}
@@ -391,7 +400,23 @@ func (h *UserHandlers) getServer(w http.ResponseWriter, r *http.Request) {
 	// Check shared servers.
 	for _, shared := range h.sharedServers {
 		if shared.Shared && strings.EqualFold(shared.Name, name) {
-			writeJSON(w, http.StatusOK, sharedServerResponse(shared, nil))
+			// The caller's own preference belongs on the DETAIL read too.
+			// Rendering it as unset made this route disagree with listServers
+			// (which threads it from GetSharedServerPrefs) and with the 200 body
+			// of .../enable: a user who had disabled a shared server saw only
+			// the admin's `enabled` and no `user_enabled` at all.
+			//
+			// Keyed on shared.Name — the canonical name the preference is
+			// stored under — rather than on the case-insensitively matched URL
+			// param, matching how listServers and enableServer key it.
+			var userEnabled *bool
+			if pref, perr := h.userStore.GetSharedServerPref(userID, shared.Name); perr != nil {
+				// Non-fatal: the server itself is still worth returning.
+				h.logger.Errorw("failed to load shared server pref", "user_id", userID, "name", shared.Name, "error", perr)
+			} else if pref != nil {
+				userEnabled = &pref.Enabled
+			}
+			writeJSON(w, http.StatusOK, sharedServerResponse(shared, userEnabled))
 			return
 		}
 	}

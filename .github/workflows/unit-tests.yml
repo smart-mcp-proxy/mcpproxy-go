@@ -243,8 +243,16 @@ jobs:
       - name: Build server edition
         run: go build -tags server ./cmd/mcpproxy
 
+      # internal/oauth is where the redaction rules live, and half of them are
+      # build-tagged: serverfields_serveredition.go holds the mask decisions for
+      # the `auth_broker` block, whose fields do not exist in the personal
+      # edition. Its canaries — the walk over config.ServerConfig that fails
+      # when a text-carrying leaf has no decision — therefore only compile under
+      # `-tags server`. Without this package in the list they never ran, and the
+      # guarantee the #1161 fix rests on (a field added to the tagged block is
+      # masked because the walk reaches it) was unenforced in CI.
       - name: Test server edition packages
-        run: go test -race -tags server ./internal/serveredition/... ./internal/config/...
+        run: go test -race -tags server ./internal/serveredition/... ./internal/config/... ./internal/oauth/...
 
   build:
     name: Build

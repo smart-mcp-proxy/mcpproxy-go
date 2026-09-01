@@ -323,11 +323,28 @@ func (h *CredentialHandlers) lookupServer(w http.ResponseWriter, r *http.Request
 	return srv, true
 }
 
+// brokerEntitled reports whether a per-user credential surface may act on this
+// upstream at all.
+//
+// `Shared` is the ENTITLEMENT check (issue #1161 follow-up), not a formality:
+// setup.go hands these handlers `deps.Config.Servers` — the admin's WHOLE
+// server list — under the name `sharedServers`. Selecting on `AuthBroker != nil`
+// alone therefore reached admin upstreams the admin deliberately did not share,
+// disclosing their existence and broker mode through the list, and letting any
+// authenticated user drive the connect flow against the admin's registered
+// OAuth client for a server they were never granted.
+//
+// Every credential surface selects through this one predicate so a new one
+// cannot reintroduce the gap by copying the old two-thirds of the condition.
+func brokerEntitled(s *config.ServerConfig) bool {
+	return s != nil && s.Shared && s.AuthBroker != nil
+}
+
 // brokerServerList returns the shared servers that carry an auth_broker block.
 func (h *CredentialHandlers) brokerServerList() []*config.ServerConfig {
 	out := make([]*config.ServerConfig, 0, len(h.brokerServers))
 	for _, s := range h.brokerServers {
-		if s != nil && s.AuthBroker != nil {
+		if brokerEntitled(s) {
 			out = append(out, s)
 		}
 	}
@@ -337,7 +354,7 @@ func (h *CredentialHandlers) brokerServerList() []*config.ServerConfig {
 // brokerServerByName finds a brokered upstream by case-insensitive name.
 func (h *CredentialHandlers) brokerServerByName(name string) *config.ServerConfig {
 	for _, s := range h.brokerServers {
-		if s != nil && s.AuthBroker != nil && strings.EqualFold(s.Name, name) {
+		if brokerEntitled(s) && strings.EqualFold(s.Name, name) {
 			return s
 		}
 	}

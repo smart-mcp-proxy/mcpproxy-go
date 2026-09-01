@@ -131,7 +131,16 @@ func (h *UserActivityHandlers) getDiagnostics(w http.ResponseWriter, r *http.Req
 	var diagnostics []*ServerDiagnostic
 
 	// Add shared servers.
+	//
+	// The `Shared` gate is the ENTITLEMENT check, not a formality (issue #1161
+	// follow-up): setup.go hands every handler `deps.Config.Servers` — the
+	// admin's whole server list — under the name `sharedServers`, so a loop
+	// without this guard reports admin upstreams the admin deliberately did not
+	// share, labelled `ownership:"shared"`, to every authenticated user.
 	for _, sc := range h.sharedServers {
+		if sc == nil || !sc.Shared {
+			continue
+		}
 		diagnostics = append(diagnostics, &ServerDiagnostic{
 			Name:      sc.Name,
 			Ownership: "shared",
