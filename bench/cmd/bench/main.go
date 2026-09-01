@@ -35,10 +35,19 @@
 //	go run ./bench/cmd/bench -replay /path/outside/the/repo/activity.jsonl \
 //	  -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json -out bench/results
 //
-// The fleet input is not optional. A menu is a property of the tool
-// definitions and the activity export carries no fleet snapshot, so a
-// recording on its own computes nothing — `-replay` without `-corpus-v2` or
-// `-livemcptool` is an error, not a degraded run.
+// The fleet may instead be read live from a running proxy's direct MCP
+// surface, so an operator can price their OWN fleet without exporting a corpus
+// first (Spec 103):
+//
+//	go run ./bench/cmd/bench -replay /path/outside/the/repo/activity.jsonl \
+//	  -proxy http://127.0.0.1:8080 -api-key KEY -out bench/results
+//
+// The fleet input is not optional, and it is not plural. A menu is a property
+// of the tool definitions and the activity export carries no fleet snapshot,
+// so a recording on its own computes nothing — `-replay` with no fleet flag at
+// all is an error, not a degraded run. Supplying TWO (say -corpus-v2 and
+// -proxy) is also an error: every figure is quoted for exactly one fleet
+// shape, and silently preferring one would make the reported fleet_id false.
 //
 // A LAP lint artifact (`uvx --from lap-score==0.8.0 lap lint --json`) merges
 // into either report via -lap-json. Reports land in bench/results/
@@ -91,9 +100,21 @@ func main() {
 	// the EXISTING corpus flags (-corpus-v2 / -livemcptool) rather than a new
 	// one: a replay fleet is a tool corpus, and a second way to name one would
 	// be a second loader to keep honest.
-	replayPath := flag.String("replay", "", "path to an activity JSONL export (mcpproxy activity export --format json) to recompute cost over; REQUIRES a fleet input (-corpus-v2 or -livemcptool) — a recording alone computes nothing. The file must live OUTSIDE this repository and is never committed")
+	replayPath := flag.String("replay", "", "path to an activity JSONL export (mcpproxy activity export --format json) to recompute cost over; REQUIRES exactly one fleet input (-corpus-v2, -livemcptool, or -proxy to read a running proxy's own catalog over MCP tools/list) — a recording alone computes nothing, and two fleets is an error. The file must live OUTSIDE this repository and is never committed")
 	replayBodies := flag.Bool("replay-bodies-on-unmasked", false, "replay: read recorded request/response bodies. OFF by default. The activity export path does NOT mask, so this reads raw unmasked user traffic; bodies are tokenized inside the loader and only counts leave it")
 	flag.Parse()
+
+	// -proxy carries a non-empty DEFAULT, so its value cannot tell a replay
+	// run whether an operator actually asked for a live fleet. flag.Visit
+	// reports only what was set on the command line, which is the difference
+	// between "read this proxy's catalog" and "a default nobody typed" —
+	// without it, every -replay run would try to open a socket.
+	proxySet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "proxy" {
+			proxySet = true
+		}
+	})
 
 	// -live and -replay are different measurements over different inputs, and
 	// -live is checked first. Accepting both would silently run live mode and
@@ -132,6 +153,9 @@ func main() {
 			outDir:          *outDir,
 			corpusV2Path:    *corpusV2Path,
 			livemcptoolPath: *livemcptoolPath,
+			liveProxy:       *proxy,
+			liveProxySet:    proxySet,
+			apiKey:          *apiKey,
 		})
 		return
 	}
@@ -474,6 +498,14 @@ type replayCLIOptions struct {
 	outDir          string
 	corpusV2Path    string
 	livemcptoolPath string
+
+	// liveProxy is the base URL a live fleet is read from, and liveProxySet
+	// records whether the operator actually typed -proxy. The two are separate
+	// because -proxy has a default: the URL alone cannot distinguish "read
+	// this proxy" from "nobody asked for a live fleet".
+	liveProxy    string
+	liveProxySet bool
+	apiKey       string
 }
 
 // runReplay is the Spec 103 US1 entry point: recompute per-cell menu cost and
@@ -490,6 +522,15 @@ func runReplay(opts replayCLIOptions) {
 	}
 
 	fleet, fleetID := loadReplayFleet(opts.corpusV2Path, opts.livemcptoolPath)
+
+	// The live fleet source is CONSTRUCTED here but not read: RunReplay
+	// resolves it, so "exactly one fleet input" and "a live fetch failure is
+	// fatal" are decided in one place (bench.ResolveFleet) rather than being
+	// half-implemented by every caller.
+	var liveFleet bench.FleetSource
+	if opts.liveProxySet {
+		liveFleet = bench.NewLiveFleetSource(context.Background(), opts.liveProxy, opts.apiKey)
+	}
 
 	// Resolve exactly the arms the matrix needs to price a menu. A missing arm
 	// is fatal rather than a skipped row: an absent cell reads as "not
@@ -512,6 +553,7 @@ func runReplay(opts replayCLIOptions) {
 		RecordingPath: opts.recording,
 		Fleet:         fleet,
 		FleetID:       fleetID,
+		LiveFleet:     liveFleet,
 		Bodies:        bodies,
 		Encoding:      opts.encoding,
 		Arms:          armsByName,
@@ -535,12 +577,18 @@ func runReplay(opts replayCLIOptions) {
 	fmt.Fprintf(os.Stderr, "bench: the replay input is raw recorded traffic — delete %s when this run is finished\n", opts.recording)
 }
 
-// loadReplayFleet resolves the fleet input from the existing corpus flags.
+// loadReplayFleet resolves the FROZEN fleet input from the corpus flags.
 //
 // Neither flag returns a nil fleet on purpose: the refusal belongs to
 // bench.RunReplay, whose error explains WHY a recording alone computes
-// nothing. Supplying both is refused here, because silently preferring one
+// nothing. Two frozen corpora is refused here, because silently preferring one
 // would make the reported fleet shape a coin toss.
+//
+// The LIVE fleet input (-proxy) is deliberately not resolved here. Frozen
+// against live is the same ambiguity as frozen against frozen, but it is
+// decided by bench.ResolveFleet so that the rule — and the decision to treat a
+// failed live fetch as fatal rather than as grounds to fall back — is stated
+// once, in the package a test can reach without a CLI.
 func loadReplayFleet(corpusV2Path, livemcptoolPath string) (*bench.Corpus, string) {
 	if corpusV2Path != "" && livemcptoolPath != "" {
 		log.Fatalf("bench: replay takes ONE fleet input; -corpus-v2 and -livemcptool were both given, and every figure is quoted for exactly one fleet shape")

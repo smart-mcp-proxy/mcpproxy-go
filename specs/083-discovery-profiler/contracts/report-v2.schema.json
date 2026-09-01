@@ -996,6 +996,11 @@
         },
         "p95_definition_tokens": {
           "type": "integer"
+        },
+        "schemaless_tools": {
+          "type": "integer",
+          "minimum": 0,
+          "$comment": "Tools in this fleet carrying no priceable input schema. A fleet is refused only when NO tool has a real schema; a PARTIAL regression passes that guard, prices the stubbed tools at nothing and inflates the headline. This count is the only trace such a regression leaves."
         }
       }
     },

@@ -427,7 +427,7 @@ func TestRunReplay_MenuCostsFollowTheSurface(t *testing.T) {
 	if menu[CellDirectDeferred] >= menu[CellDirectFull] {
 		t.Errorf("deferred direct rendering must cost less than full: %d vs %d", menu[CellDirectDeferred], menu[CellDirectFull])
 	}
-	if block.FleetShape.ToolCount != len(runnerCorpus().Tools) {
+	if block.FleetShape.ToolCount != len(liveFleetCorpus().Tools) {
 		t.Errorf("the fleet shape travels with every figure; want %d tools, got %d", len(runnerCorpus().Tools), block.FleetShape.ToolCount)
 	}
 }
@@ -592,5 +592,153 @@ func TestRunReplay_SurfacesLoaderLevelAccounting(t *testing.T) {
 	}
 	if len(acc.Withheld) == 0 {
 		t.Error("a withheld cost must carry its reason, not just a total — the total alone is not actionable")
+	}
+}
+
+// --- Spec 103: the live fleet source ---------------------------------------
+//
+// A replay may take its fleet from a running proxy instead of a frozen corpus
+// (bench/mcptools.go). These three tests hold the invocation rules AT THE
+// RunReplay boundary, because that is where a caller meets them: the mapping
+// and stub-guard arithmetic is covered in mcptools_test.go.
+
+// liveFleetCorpus is the shape a LIVE surface actually serves: real input
+// schemas on every tool. runnerCorpus() is the frozen schema-less shape, which
+// the stub guard refuses off a live source by design.
+func liveFleetCorpus() *Corpus {
+	return &Corpus{
+		Version: "live:127.0.0.1:18421/mcp/all",
+		Tools: []Tool{
+			{ToolID: "fs:read_file", Server: "fs", Name: "read_file",
+				Description: "Read the contents of a file from disk",
+				Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+			{ToolID: "git:git_log", Server: "git", Name: "git_log",
+				Description: "Show recent commit history of a repository",
+				Schema:      json.RawMessage(`{"type":"object","properties":{"repo_path":{"type":"string"},"max_count":{"type":"integer","default":10}},"required":["repo_path"]}`)},
+			{ToolID: "time:get_current_time", Server: "time", Name: "get_current_time",
+				Description: "Get current time in a specific timezone",
+				Schema:      json.RawMessage(`{"type":"object","properties":{"timezone":{"type":"string"}}}`)},
+		},
+	}
+}
+
+// A live fleet drives a complete replay, and the block is quoted for the live
+// fleet's id — not the corpus version it never had.
+func TestRunReplay_AcceptsALiveFleetSource(t *testing.T) {
+	tk := runnerTokenizer(t)
+	opts := replayOptions(t)
+	opts.Fleet, opts.FleetID = nil, ""
+	// A real live fleet carries real schemas — runnerCorpus() is the frozen
+	// schema-less shape, which the stub guard rightly refuses off a live
+	// surface. Use a schema-bearing fleet so this exercises the happy path
+	// rather than the guard.
+	opts.LiveFleet = &fakeFleetSource{id: "live:127.0.0.1:18421/mcp/all", corpus: liveFleetCorpus()}
+
+	block, err := RunReplay(tk, opts)
+	if err != nil {
+		t.Fatalf("a live fleet must be a valid fleet input: %v", err)
+	}
+	if block.FleetShape.ID != "live:127.0.0.1:18421/mcp/all" {
+		t.Errorf("the block must be quoted for the live fleet id, got %q", block.FleetShape.ID)
+	}
+	if block.FleetShape.ToolCount != len(liveFleetCorpus().Tools) {
+		t.Errorf("live fleet tool count not carried through: %d", block.FleetShape.ToolCount)
+	}
+	for _, cell := range block.Cells {
+		if cell.MenuTokens <= 0 {
+			t.Errorf("cell %s priced no menu over the live fleet", cell.CellID)
+		}
+	}
+}
+
+// Two fleets is an error at the RunReplay boundary too: a report carries ONE
+// fleet_id, and preferring one input silently would make it false.
+func TestRunReplay_CorpusAndLiveProxyTogetherIsAnError(t *testing.T) {
+	tk := runnerTokenizer(t)
+	opts := replayOptions(t) // already carries a frozen corpus
+	opts.LiveFleet = &fakeFleetSource{id: "live:x", corpus: runnerCorpus()}
+
+	block, err := RunReplay(tk, opts)
+	if !errors.Is(err, ErrReplayFleetAmbiguous) {
+		t.Fatalf("want ErrReplayFleetAmbiguous, got %v", err)
+	}
+	if block != nil {
+		t.Fatalf("a refused replay must return no block, got %+v", block)
+	}
+}
+
+// The live source ADDS a way to supply a fleet. It does not make one optional:
+// a nil source is still no fleet.
+func TestRunReplay_NilLiveFleetLeavesTheFleetMandatory(t *testing.T) {
+	tk := runnerTokenizer(t)
+	opts := replayOptions(t)
+	opts.Fleet, opts.FleetID, opts.LiveFleet = nil, "", nil
+
+	if _, err := RunReplay(tk, opts); !errors.Is(err, ErrReplayFleetRequired) {
+		t.Fatalf("want ErrReplayFleetRequired, got %v", err)
+	}
+}
+
+// A live fleet whose schemas are stubbed must abort the whole run.
+//
+// The previous version of this test injected ErrStubToolSchemas from a fake
+// source, which proved only that RunReplay propagates an error it was handed —
+// it passed with guardToolSchemas deleted entirely. This one feeds REAL stubbed
+// tool definitions through the real guard, so deleting the guard fails it.
+func TestRunReplay_StubSchemaFleetRefusesTheWholeRun(t *testing.T) {
+	tk := runnerTokenizer(t)
+	opts := replayOptions(t)
+	opts.Fleet, opts.FleetID = nil, ""
+	opts.LiveFleet = &fakeFleetSource{
+		id: "live:deferred",
+		corpus: &Corpus{
+			Version: "live:deferred",
+			Tools: []Tool{
+				// Exactly what /mcp/all serves under
+				// direct_tool_response_mode:"deferred": the schema is folded
+				// into the description and replaced by a bare placeholder.
+				{ToolID: "git:git_log", Server: "git", Name: "git_log",
+					Description: "Shows the commit logs",
+					Schema:      json.RawMessage(`{"type":"object"}`)},
+				{ToolID: "fs:read_file", Server: "fs", Name: "read_file",
+					Description: "Read a file",
+					Schema:      json.RawMessage(`{"type":"object"}`)},
+			},
+		},
+	}
+
+	if _, err := RunReplay(tk, opts); !errors.Is(err, ErrStubToolSchemas) {
+		t.Fatalf("a stub-schema live fleet must abort the replay, got %v", err)
+	}
+}
+
+// A PARTIALLY stubbed fleet passes the guard — the guard only refuses an
+// all-stub population — so the report must at least record how much of it could
+// not be priced.
+//
+// Without this the difference between a clean 45-tool fleet and one where 20
+// tools lost their schemas is invisible in the output, while the second quietly
+// shrinks the baseline and inflates the headline.
+func TestRunReplay_CountsPartiallyStubbedFleet(t *testing.T) {
+	tk := runnerTokenizer(t)
+	partial := liveFleetCorpus()
+	// One of the three loses its schema: a partial regression, not a stubbed
+	// surface, so the run proceeds.
+	partial.Tools[1].Schema = json.RawMessage(`{"type":"object"}`)
+
+	opts := replayOptions(t)
+	opts.Fleet, opts.FleetID = nil, ""
+	opts.LiveFleet = &fakeFleetSource{id: "live:partial", corpus: partial}
+
+	block, err := RunReplay(tk, opts)
+	if err != nil {
+		t.Fatalf("a partially stubbed fleet still runs: %v", err)
+	}
+	if block.FleetShape.SchemalessTools != 1 {
+		t.Errorf("the report must record the unpriceable remainder; want 1, got %d",
+			block.FleetShape.SchemalessTools)
+	}
+	if block.FleetShape.ToolCount != 3 {
+		t.Errorf("tool count %d", block.FleetShape.ToolCount)
 	}
 }
