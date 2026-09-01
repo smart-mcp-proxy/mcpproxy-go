@@ -107,7 +107,9 @@ func TestReconcile_TerminalServerRecoversOnConfigChange(t *testing.T) {
 		mutate func(*config.ServerConfig)
 	}{
 		{"args fixed", func(c *config.ServerConfig) { c.Args = []string{"working-package"} }},
-		{"isolation image fixed", func(c *config.ServerConfig) { c.Isolation = &config.IsolationConfig{Image: "ghcr.io/astral-sh/uv:latest"} }},
+		{"isolation image fixed", func(c *config.ServerConfig) {
+			c.Isolation = &config.IsolationConfig{Image: "ghcr.io/astral-sh/uv:latest"}
+		}},
 		{"env fixed", func(c *config.ServerConfig) { c.Env = map[string]string{"PATH": "/usr/local/bin"} }},
 	}
 
