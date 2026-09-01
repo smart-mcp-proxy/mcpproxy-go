@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
 
 func TestParseSARIFMinimal(t *testing.T) {
@@ -885,5 +887,44 @@ func TestClassifyThreat_StillClassifiesLegacy(t *testing.T) {
 	}
 	if f.ThreatLevel != ThreatLevelDangerous {
 		t.Errorf("legacy finding threat_level = %q, want %q", f.ThreatLevel, ThreatLevelDangerous)
+	}
+}
+
+// TestMergeFindingsUnionsSpans covers the one enrichment field MergeFindings
+// used to drop. It backfills a dozen scalars and unions Signals from an absorbed
+// same-(rule_id, location) duplicate, so keeping that duplicate's signal id
+// while discarding the spans that point at it would leave the UI naming a check
+// it cannot highlight.
+func TestMergeFindingsUnionsSpans(t *testing.T) {
+	a := ScanFinding{
+		RuleID: "detect.shadowing.cross_server", Location: "srv:tool", ThreatLevel: "warning",
+		Signals: []string{"shadowing.cross_server"},
+		Spans: []detect.Span{
+			{Field: detect.SpanFieldDescription, Start: 10, End: 16, CheckID: "shadowing.cross_server", Tier: "soft", Snippet: "reason"},
+		},
+	}
+	b := ScanFinding{
+		RuleID: "detect.shadowing.cross_server", Location: "srv:tool", ThreatLevel: "dangerous",
+		Signals: []string{"tpa.TPA-2026-0001.hidden_instruction"},
+		Spans: []detect.Span{
+			// One genuinely new span, and one byte-identical duplicate.
+			{Field: detect.SpanFieldDescription, Start: 40, End: 60, CheckID: "tpa.TPA-2026-0001.hidden_instruction", Tier: "hard", Snippet: "<important>…"},
+			{Field: detect.SpanFieldDescription, Start: 10, End: 16, CheckID: "shadowing.cross_server", Tier: "soft", Snippet: "reason"},
+		},
+	}
+
+	merged := MergeFindings([]ScanFinding{a, b})
+	if len(merged) != 1 {
+		t.Fatalf("MergeFindings returned %d findings, want 1", len(merged))
+	}
+	got := merged[0].Spans
+	if len(got) != 2 {
+		t.Fatalf("Spans = %+v, want the 2-span union (duplicate collapsed)", got)
+	}
+	if got[0].Start != 10 || got[1].Start != 40 {
+		t.Errorf("Spans = %+v, want kept-first order 10 then 40", got)
+	}
+	if got[0].Tier != "soft" || got[1].Tier != "hard" {
+		t.Errorf("per-span tiers lost on merge: %+v", got)
 	}
 }

@@ -1,6 +1,9 @@
 package detect
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // Severity levels — string values mirror internal/security/scanner so a Finding
 // maps onto scanner.ScanFinding without translation (the scanner wiring copies
@@ -53,6 +56,9 @@ type Finding struct {
 	Evidence    string
 	Confidence  float64
 	Signals     []string
+	// Spans is the UNION of every contributing signal's spans (deduped, sorted,
+	// capped), not just the primary's. See unionSpans.
+	Spans []Span
 }
 
 // aggregate combines every signal emitted for one tool into a single Finding,
@@ -111,6 +117,7 @@ func aggregate(tool ToolView, signals []Signal, scannerID string) (Finding, bool
 		Evidence:    primary.Evidence,
 		Confidence:  ClampConfidence(confSum),
 		Signals:     ids,
+		Spans:       unionSpans(signals),
 	}
 
 	if haveHard {
@@ -125,6 +132,61 @@ func aggregate(tool ToolView, signals []Signal, scannerID string) (Finding, bool
 		f.Severity = softSeverity(len(distinctSoft))
 	}
 	return f, true
+}
+
+// unionSpans collects the highlight spans from EVERY signal, not just the
+// primary one. aggregate emits exactly one Finding per tool and takes
+// Evidence/Description from the primary alone; primary-wins is tolerable for
+// prose and fatal for highlighting, because a description tripping both
+// tpa.bundle and shadowing.cross_server would mark one rule's words and
+// silently swallow the other's.
+//
+// Duplicates are keyed on (Field, Start, End, CheckID) — deliberately NOT on
+// Tier/Snippet — and the FIRST occurrence keeps its metadata, so which
+// duplicate survives does not depend on signal ordering. The result is then
+// sorted on that same key so output is byte-identical for any input ordering
+// (the baseline-determinism tests compare whole reports with DeepEqual), and
+// capped at MaxSpansPerFinding AFTER the sort, which keeps the earliest matches
+// in the text rather than an arbitrary slice of the signal order.
+func unionSpans(signals []Signal) []Span {
+	type spanKey struct {
+		field   SpanField
+		start   int
+		end     int
+		checkID string
+	}
+	var out []Span
+	seen := make(map[spanKey]struct{})
+	for _, s := range signals {
+		for _, sp := range s.Spans {
+			k := spanKey{field: sp.Field, start: sp.Start, end: sp.End, checkID: sp.CheckID}
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			out = append(out, sp)
+		}
+	}
+	if len(out) == 0 {
+		return nil // absent key in JSON, never an empty array
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Field != b.Field {
+			return a.Field < b.Field
+		}
+		if a.Start != b.Start {
+			return a.Start < b.Start
+		}
+		if a.End != b.End {
+			return a.End < b.End
+		}
+		return a.CheckID < b.CheckID
+	})
+	if len(out) > MaxSpansPerFinding {
+		out = out[:MaxSpansPerFinding]
+	}
+	return out
 }
 
 // softSeverity maps the count of distinct soft CheckIDs to a severity:

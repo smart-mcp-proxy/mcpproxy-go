@@ -316,11 +316,11 @@
                 to="/security"
                 :class="{ 'active': isActiveRoute('/security') }"
                 class="rounded-lg font-medium"
-                :title="collapsed ? 'Security Scanners' : ''"
-                :aria-label="collapsed ? 'Security Scanners' : undefined"
+                :title="collapsed ? 'Security' : ''"
+                :aria-label="collapsed ? 'Security' : undefined"
               >
                 <IconShield class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Security Scanners</span>
+                <span v-show="!collapsed">Security</span>
               </router-link>
             </li>
           </ul>

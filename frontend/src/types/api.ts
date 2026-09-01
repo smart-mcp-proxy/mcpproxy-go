@@ -57,6 +57,31 @@ export interface SecurityScanSummary {
 export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
 export type ThreatLevel = 'dangerous' | 'warning' | 'info'
 
+// FindingSpan locates ONE check's match inside ONE raw (un-normalized) tool text
+// field — the backend mirror is `detect.Span` (internal/security/detect/span.go).
+//
+// `start`/`end` are half-open [start, end) offsets in UTF-16 code units, i.e.
+// plain JavaScript string indices, so `description.slice(start, end)` is exactly
+// the matched text including across surrogate pairs. The backend converts its
+// byte offsets before emitting them.
+//
+// `snippet` is the backend's CapEvidence() of the matched text (control and Cf
+// runes escaped to a visible \uXXXX form, capped at 200 runes + '…'). It is a
+// STALENESS CHECKSUM only: the UI renders the tool's own LIVE description sliced
+// by the offsets and never renders `snippet` itself. See utils/highlightSpans.ts.
+//
+// `check_id`/`tier` are per-span because `aggregate()` emits exactly one Finding
+// per tool with the PRIMARY signal's rule_id/threat_level — a mark must be
+// labelled from its own span, never from the finding-level fields.
+export interface FindingSpan {
+  field: 'description' | 'input_schema' | 'output_schema'
+  start: number
+  end: number
+  check_id: string
+  tier: 'hard' | 'soft'
+  snippet?: string
+}
+
 export interface SecurityScanFinding {
   rule_id?: string
   severity?: string             // critical, high, medium, low, info
@@ -80,6 +105,10 @@ export interface SecurityScanFinding {
   tier?: string                 // "hard" (gates approval) | "soft" (review-only)
   confidence?: number           // 0.0–1.0; raised when independent sources agree
   signals?: string[]            // Deterministic detect check ids that fired
+  // Exact text ranges inside the tool's raw description that triggered this
+  // finding, unioned across every contributing signal. Absent for checks that
+  // match normalized text, and for external/Docker scanners.
+  spans?: FindingSpan[]
 }
 
 export interface SecurityScanReport {

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
 
 // consensusConfidenceStep is how much each additional independent source raises
@@ -561,6 +563,10 @@ func MergeFindings(findings []ScanFinding) []ScanFinding {
 				result[pos].ThreatLevel = f.ThreatLevel
 			}
 			result[pos].Signals = sortedUnion(result[pos].Signals, f.Signals)
+			// Spans get the same union treatment as Signals. Dropping them here
+			// would silently lose one duplicate's highlight ranges while keeping
+			// its signal id, so the UI would name a check it cannot point at.
+			result[pos].Spans = unionScanSpans(result[pos].Spans, f.Spans)
 			// Backfill any enrichment field the kept finding lacks from the
 			// absorbed duplicate (Spec 077 US2, Codex R2 #2). Union semantics:
 			// prefer the kept/most-severe finding's non-empty values and fill only
@@ -822,4 +828,37 @@ func isSupplyChainAudit(f *ScanFinding) bool {
 		return true
 	}
 	return strings.HasPrefix(strings.ToLower(f.RuleID), "cve-")
+}
+
+// unionScanSpans merges two findings' highlight spans, de-duplicating on the
+// same key detect.aggregate uses — (Field, Start, End, CheckID) — keeping the
+// first occurrence's metadata so the result does not depend on which duplicate
+// MergeFindings happened to keep, and capping at detect.MaxSpansPerFinding.
+func unionScanSpans(kept, absorbed []detect.Span) []detect.Span {
+	if len(absorbed) == 0 {
+		return kept
+	}
+	type spanKey struct {
+		field   detect.SpanField
+		start   int
+		end     int
+		checkID string
+	}
+	seen := make(map[spanKey]struct{}, len(kept)+len(absorbed))
+	out := make([]detect.Span, 0, len(kept)+len(absorbed))
+	for _, sp := range append(append([]detect.Span{}, kept...), absorbed...) {
+		k := spanKey{field: sp.Field, start: sp.Start, end: sp.End, checkID: sp.CheckID}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, sp)
+	}
+	if len(out) > detect.MaxSpansPerFinding {
+		out = out[:detect.MaxSpansPerFinding]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
