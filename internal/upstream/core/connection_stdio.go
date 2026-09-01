@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
@@ -34,7 +35,13 @@ func validateStdioConfig(cfg *config.ServerConfig) error {
 	}
 	if len(cfg.Args) == 0 {
 		if hint, ok := packageRunnerNoArgs[cfg.Command]; ok {
-			return fmt.Errorf("server %q: command %q has no args — %s is required", cfg.Name, cfg.Command, hint)
+			// Attributed with WrapError rather than left to the classifier's
+			// free-text fallback. This is mcpproxy's OWN pre-spawn verdict —
+			// no subprocess has run, so nothing here can be a child's stderr —
+			// which makes it the kind of structured signal the retry policy is
+			// allowed to park a server on (diagnostics.ParkableCode, GH #1145).
+			return diagnostics.WrapError(diagnostics.ConfigInvalidCommand,
+				fmt.Errorf("server %q: command %q has no args — %s is required", cfg.Name, cfg.Command, hint))
 		}
 	}
 	return nil

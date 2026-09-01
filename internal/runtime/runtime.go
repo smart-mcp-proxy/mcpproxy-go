@@ -2566,6 +2566,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			ToolCount:             availableToolCount,
 			MissingSecret:         health.ExtractMissingSecret(lastError),
 			OAuthConfigErr:        health.ExtractOAuthConfigError(lastError),
+			// GH #1145: a permanently parked server must not render as a
+			// generic "Connection error" that looks like it is still retrying.
+			RetryStopped:       serverStatus.RetryStopped,
+			RetryStoppedCode:   serverStatus.RetryStoppedCode,
+			RetryStoppedReason: serverStatus.RetryStoppedReason,
+			RetryCount:         serverStatus.RetryCount,
 		}
 		if !tokenExpiresAt.IsZero() {
 			healthInput.TokenExpiresAt = &tokenExpiresAt
@@ -2583,6 +2589,15 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		healthStatus := health.CalculateHealth(healthInput, healthConfig)
 		serverMap["health"] = healthStatus
+
+		// GH #1145: agents and the CLI read these directly rather than parsing
+		// the health summary. Emitted only when set, so the payload shape is
+		// unchanged for every healthy or ordinarily-failing server.
+		if serverStatus.RetryStopped {
+			serverMap["retry_stopped"] = true
+			serverMap["retry_stopped_code"] = serverStatus.RetryStoppedCode
+			serverMap["retry_stopped_reason"] = serverStatus.RetryStoppedReason
+		}
 
 		// M-005: Log health status for debugging
 		r.logger.Debug("Server health calculated",
