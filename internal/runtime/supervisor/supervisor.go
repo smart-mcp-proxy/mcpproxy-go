@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics/hints"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	transportpkg "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -55,6 +56,38 @@ func classifyAndAttach(status *stateview.ServerStatus, err error, hints diagnost
 	}
 }
 
+// applyRetryStopped projects a connection's permanent-park state onto the read
+// model. Both stateview writers (the reconcile sweep and the event fast path)
+// call it, because RetryCount is written by both and a status that carried a
+// stale RetryStopped next to a fresh RetryCount would tell the user the opposite
+// of the truth (GH #1145).
+func applyRetryStopped(status *stateview.ServerStatus, ci *types.ConnectionInfo) {
+	if ci == nil || !ci.Terminal || ci.RetryCount < types.PermanentFailureAttempts {
+		status.RetryStopped = false
+		status.RetryStoppedCode = ""
+		status.RetryStoppedReason = ""
+		return
+	}
+	status.RetryStopped = true
+	status.RetryStoppedCode = ci.TerminalCode
+	status.RetryStoppedReason = terminalReason(ci)
+}
+
+// terminalReason renders the user-facing cause of a permanent park. It prefers
+// the diagnostics catalog message for the code that justified stopping — that is
+// the text written to tell a user how to fix exactly this — and falls back to
+// the raw error so the reason is never empty.
+func terminalReason(ci *types.ConnectionInfo) string {
+	if ci == nil {
+		return ""
+	}
+	raw := ""
+	if ci.LastError != nil {
+		raw = ci.LastError.Error()
+	}
+	return diagnostics.PermanentFailureReason(diagnostics.Code(ci.TerminalCode), raw)
+}
+
 // classifierHints builds the diagnostics.ClassifierHints for a server's failure,
 // including the Docker-isolation enrichment context (MCP-2909) the
 // DockerExecNotFound remediation needs: the configured command (→ detected
@@ -65,50 +98,11 @@ func classifyAndAttach(status *stateview.ServerStatus, err error, hints diagnost
 // only populated for Docker-isolated servers; they are inert for every other
 // code.
 func (s *Supervisor) classifierHints(srv *config.ServerConfig, transport string) diagnostics.ClassifierHints {
-	hints := diagnostics.ClassifierHints{
-		Transport:      transport,
-		DockerIsolated: s.usesDockerIsolation(srv),
+	var global *config.Config
+	if snap := s.configSvc.Current(); snap != nil {
+		global = snap.Config
 	}
-	if hints.DockerIsolated && srv != nil {
-		hints.DockerCommand = srv.Command
-		hints.DockerArgs = srv.Args
-		if srv.Isolation != nil {
-			hints.DockerImageOverride = srv.Isolation.Image
-		}
-		if snap := s.configSvc.Current(); snap != nil && snap.Config != nil && snap.Config.DockerIsolation != nil {
-			hints.DockerDefaultImages = snap.Config.DockerIsolation.DefaultImages
-		}
-	}
-	return hints
-}
-
-// usesDockerIsolation reports whether the given server would be launched
-// through Docker isolation, so the classifier can attribute spawn/exec failures
-// to DOCKER codes (#696 CLI missing, in-container interpreter missing) rather
-// than a generic stdio ENOENT.
-//
-// It delegates to config.ResolveIsolation — the SAME resolver the spawn path
-// branches on (core.IsolationManager.ShouldIsolate wraps it) — so the hint
-// cannot drift from the launch decision. It previously mirrored the rules by
-// hand and only read the two LEGACY booleans, which pre-date isolation modes:
-// a per-server `mode: "docker"` override wins outright in the resolver, so such
-// a server was Docker-spawned but classified non-Docker (generic ENOENT
-// remediation, no image enrichment); and a `mode: "sandbox"` server under
-// global Docker isolation was classified Docker-isolated and offered Docker
-// remediation for a Landlock failure (GH #1142).
-//
-// The predicate is Mode == docker, not ResolvedIsolation.Isolated: the DOCKER
-// remediation codes describe the container LAUNCH path, which runs whenever the
-// mode is docker.
-func (s *Supervisor) usesDockerIsolation(srv *config.ServerConfig) bool {
-	if srv == nil {
-		return false
-	}
-	var global *config.DockerIsolationConfig
-	if snap := s.configSvc.Current(); snap != nil && snap.Config != nil {
-		global = snap.Config.DockerIsolation
-	}
-	return config.ResolveIsolation(global, srv).Mode == config.IsolationModeDocker
+	return hints.For(global, srv, transport)
 }
 
 // Supervisor manages the desired vs actual state reconciliation for upstream servers.
@@ -498,10 +492,12 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot, ac
 					// parked waiting on user OAuth login. Without this gate the
 					// periodic 30s reconciliation re-dials a dead upstream forever,
 					// hammering the remote server (~3 requests per tick).
-					s.logger.Debug("Skipping auto-reconnect (backoff/pending-auth)",
+					s.logger.Debug("Skipping auto-reconnect (backoff/pending-auth/permanent)",
 						zap.String("server", name),
 						zap.String("state", actual.ConnectionInfo.State.String()),
-						zap.Int("retry_count", actual.ConnectionInfo.RetryCount))
+						zap.Int("retry_count", actual.ConnectionInfo.RetryCount),
+						zap.Bool("terminal", actual.ConnectionInfo.Terminal),
+						zap.String("terminal_code", actual.ConnectionInfo.TerminalCode))
 					plan.Actions[name] = ActionNone
 				} else {
 					plan.Actions[name] = ActionConnect
@@ -532,17 +528,18 @@ func (s *Supervisor) computeReconcilePlan(configSnapshot *configsvc.Snapshot, ac
 	return plan
 }
 
-// configChanged checks if server configuration has changed.
+// configChanged checks if a server's connection configuration has changed, which
+// makes the reconcile plan ActionReconnect.
+//
+// ActionReconnect is computed BEFORE the auto-reconnect backoff gate, so it is
+// the documented bypass: a user-driven config change for this server reconnects
+// it whatever the ladder says. Since GH #1145 that bypass is also the ONLY way a
+// permanently parked server comes back on its own, so the comparison has to see
+// every connection field — this used to check five of them, and an unresolvable
+// `args` or a wrong `isolation.image` (the two most likely causes of a permanent
+// failure) were both invisible to it.
 func (s *Supervisor) configChanged(old, new *config.ServerConfig) bool {
-	if old == nil || new == nil {
-		return old != new
-	}
-
-	return old.URL != new.URL ||
-		old.Protocol != new.Protocol ||
-		old.Command != new.Command ||
-		old.Enabled != new.Enabled ||
-		old.Quarantined != new.Quarantined
+	return !config.ConnectionEquivalent(old, new)
 }
 
 // executeAction performs the specified action on a server.
@@ -746,6 +743,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 			status.LastError = ""
 			status.LastErrorTime = nil
 			status.Diagnostic = nil
+			applyRetryStopped(status, nil)
 		}
 
 		// Update connection info if available
@@ -787,6 +785,11 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 
 			// Copy retry count
 			status.RetryCount = state.ConnectionInfo.RetryCount
+
+			// GH #1145: surface a permanently parked server explicitly. Without
+			// this it is indistinguishable from a server still working through
+			// its backoff, and the user waits for a retry that never comes.
+			applyRetryStopped(status, state.ConnectionInfo)
 
 			// Store full connection info in metadata for debugging
 			if status.Metadata == nil {
@@ -1108,6 +1111,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					// Note: We already cleared error above when connected=true
 					// Only set error from connInfo if it has one
 					status.RetryCount = connInfo.RetryCount
+					applyRetryStopped(status, connInfo)
 				}
 			})
 			s.notifyErrorCode(classifiedCode)

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics/hints"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -350,6 +352,20 @@ func (mc *Client) Connect(ctx context.Context) error {
 				zap.Bool("token_refresh_scenario", isRefreshScenario),
 				zap.Error(connectErr))
 			mc.StateManager.SetOAuthError(connectErr)
+		} else if code, parkable := mc.classifyConnectFailure(connectErr); parkable {
+			// Deterministic, unrecoverable AND proven so by a typed signal — a
+			// code we attached ourselves, or an errno from our own spawn syscall.
+			// Park it so the reconcile loop stops re-spawning a guaranteed
+			// failure every ladder tick — 55 byte-identical attempts over 19
+			// hours in GH #1145. diagnostics.ParkableCode, not IsPermanent: the
+			// classifier's string fallbacks match against the child's captured
+			// stderr, which can say "no such file or directory" for reasons that
+			// clear on their own.
+			mc.logger.Warn("Connection failed permanently — automatic reconnection will stop",
+				zap.String("server", mc.GetConfig().Name),
+				zap.String("code", string(code)),
+				zap.Error(connectErr))
+			mc.StateManager.SetTerminalError(connectErr, string(code))
 		} else {
 			mc.StateManager.SetError(connectErr)
 		}
@@ -471,6 +487,17 @@ func (mc *Client) Disconnect() error {
 		zap.Bool("list_tools_in_progress", mc.listToolsInProgress))
 
 	return nil
+}
+
+// classifyConnectFailure resolves a failed connection attempt to a stable MCPX_*
+// code and reports whether that classification is strong enough to park the
+// server. It uses the SAME hints builder the supervisor uses for the status
+// view (internal/diagnostics/hints) so the retry decision and the message the
+// user reads can never disagree about, for instance, whether the server was
+// launched through Docker.
+func (mc *Client) classifyConnectFailure(err error) (diagnostics.Code, bool) {
+	cfg := mc.GetConfig()
+	return diagnostics.ParkableCode(err, hints.For(mc.GetGlobalConfig(), cfg, transport.DetermineTransportType(cfg)))
 }
 
 // IsConnected returns whether the client is ready for operations

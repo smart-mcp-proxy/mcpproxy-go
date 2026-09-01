@@ -7,6 +7,12 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        # A unified diff encodes meaning in leading whitespace: an unchanged
+        # context line begins with a single space, and a blank context line IS
+        # that lone space. Stripping it turns valid patches into ones git apply
+        # rejects — observed on bench/mcpmark/mcpproxy_arm.patch, where the hook
+        # silently rewrote 4 context lines.
+        exclude: '\.(patch|diff)$'
       - id: end-of-file-fixer
       - id: check-merge-conflict
 

@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // WriteJSON writes the report as indented JSON to path.
@@ -67,6 +68,17 @@ func (r *ReportV2) WriteHTML(path string) error {
 	tmpl, err := template.New("dashboardV2").Funcs(template.FuncMap{
 		"f1":  func(f float64) string { return fmt.Sprintf("%.1f", f) },
 		"pc1": func(f float64) string { return fmt.Sprintf("%.1f%%", f) },
+		// n0 renders a token count at full precision without exponent
+		// notation — a headline cost printed as "4.1e+04" is unreadable.
+		"n0": func(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) },
+		// derefF unwraps an optional figure for display. The TEMPLATE must
+		// branch on nil before calling it — a nil figure means "not measured",
+		// and printing its zero is the silent-zero defect this guards against.
+		"derefF": derefF,
+		// costoutcome builds the FR-023 plot. The arithmetic lives in Go
+		// (NewCostOutcomeView) so a degenerate axis cannot emit NaN into an
+		// SVG attribute, where it would fail silently.
+		"costoutcome": NewCostOutcomeView,
 		// prov looks a section's provenance label up for badge rendering;
 		// missing keys render no badge rather than a wrong one.
 		"prov": func(m map[string]string, key string) string { return m[key] },
@@ -176,6 +188,17 @@ const dashboardV2HTML = `<!doctype html>
   .stat b { display: block; font-size: 1.4rem; }
   .notes, .small { font-size: .85rem; opacity: .8; }
   .warn { color: #c0392b; font-weight: 600; }
+  /* .hl gives the two FR-018 headline figures — cost and completion —
+     IDENTICAL weight and size, in the table and in the plot legend. Equal
+     prominence is a layout property, so it is enforced by one shared class
+     rather than by two hand-matched declarations that can drift apart. */
+  .hl { font-weight: 600; font-size: 1.05rem; }
+  .plot { max-width: 100%; height: auto; margin: 1rem 0; }
+  .axis { stroke: #8886; stroke-width: 1; }
+  .grid { stroke: #8883; stroke-width: 1; stroke-dasharray: 3 3; }
+  .axlabel { font: 11px system-ui, sans-serif; fill: currentColor; opacity: .7; }
+  .axtitle { font: 12px system-ui, sans-serif; fill: currentColor; opacity: .85; font-weight: 600; }
+  .ptlabel { font: 11px system-ui, sans-serif; fill: currentColor; }
 </style>
 </head>
 <body>
@@ -240,6 +263,71 @@ const dashboardV2HTML = `<!doctype html>
 {{end}}
 {{end}}
 <p class="small">Every figure above scores the recorded call shape against the SUPPLIED fleet &mdash; today's fleet, not the fleet as it stood when the sessions were recorded. It is internally valid across mode cells and is not a historical reconstruction. <code>generated_at</code> is pinned rather than stamped so two runs over the same inputs are byte-identical.</p>
+{{end}}
+
+{{if .AgentLoop}}
+<h2>Cost versus outcome &mdash; which modes are worth their savings{{with prov .Provenance "agent_loop"}}<span class="badge badge-{{.}}">{{.}}</span>{{end}}</h2>
+<p class="small">accounting source <code>{{.AgentLoop.AccountingSource.Kind}}</code> &middot; <code>{{.AgentLoop.AccountingSource.Identity}}</code>{{if .AgentLoop.AccountingSource.Model}} &middot; pinned model <code>{{.AgentLoop.AccountingSource.Model}}</code>{{end}}{{if .AgentLoop.Suite}} &middot; suite <code>{{.AgentLoop.Suite}}</code>{{if .AgentLoop.SuiteVersion}} <code>{{.AgentLoop.SuiteVersion}}</code>{{end}}{{end}} &middot; fleet shape <code>{{.AgentLoop.FleetShape.ID}}</code>, {{.AgentLoop.FleetShape.ToolCount}} tools</p>
+<div class="caveat">&#9888;&#65039; <b>These figures come from provider-reported usage under the pinned model above.</b> They are NEVER summed with the tokenizer-counted figures elsewhere in this report: a cross-accounting-source aggregate is withheld with a stated reason rather than computed. Read this section against itself, not against the deterministic sections.</div>
+<p class="small">The cheapest mode is not automatically the best mode. A mode can be cheap because the agent gave up, so cost is plotted AGAINST the share of tasks completed: <b>up and to the left is better</b> &mdash; more tasks finished, fewer tokens spent per finished task.</p>
+
+{{with costoutcome .AgentLoop}}
+{{if .HasPlot}}
+<svg class="plot" viewBox="0 0 640 340" role="img" aria-label="Tokens per completed task plotted against completion rate, per mode cell">
+  <title>Cost versus outcome per mode cell</title>
+  {{range .CompletionTicks}}
+  <line class="grid" x1="70" y1="{{f1 .Pos}}" x2="610" y2="{{f1 .Pos}}"></line>
+  <text class="axlabel" x="62" y="{{f1 .Pos}}" text-anchor="end" dominant-baseline="middle">{{.Label}}</text>
+  {{end}}
+  {{range .CostTicks}}
+  <text class="axlabel" x="{{f1 .Pos}}" y="308" text-anchor="middle">{{.Label}}</text>
+  {{end}}
+  <line class="axis" x1="70" y1="290" x2="610" y2="290"></line>
+  <line class="axis" x1="70" y1="30" x2="70" y2="290"></line>
+  <text class="axtitle" x="340" y="330" text-anchor="middle">Tokens per completed task (axis starts at zero)</text>
+  <text class="axtitle" x="16" y="160" text-anchor="middle" transform="rotate(-90 16 160)">Completion rate</text>
+  {{range .Points}}
+  <circle cx="{{f1 .PlotX}}" cy="{{f1 .PlotY}}" r="7"
+          fill="{{if not .Headline}}none{{else if .Regression}}#c0392b{{else}}#1a8f3c{{end}}"
+          stroke="{{if .Regression}}#c0392b{{else}}#1a8f3c{{end}}" stroke-width="2"
+          stroke-dasharray="{{if .Headline}}0{{else}}3 2{{end}}">
+    <title>{{.CellID}}: {{n0 .TokensPerCompletedTask}} tokens per completed task, {{f1 .CompletionRatePct}}% completed, {{.Runs}} run(s), {{.Provenance}}</title>
+  </circle>
+  <text class="ptlabel" x="{{f1 .PlotX}}" y="{{f1 .PlotY}}" dx="{{f1 .LabelDX}}" dy="4" text-anchor="{{.LabelAnchor}}">{{.CellID}}</text>
+  {{end}}
+</svg>
+<p class="small">Filled marker: a headline-eligible cell (FR-021 &mdash; at least four runs). Hollow dashed marker: measured but provisional, published without headline status. Red: a completion regression, which is never reported as a saving however cheap it is.</p>
+{{else}}
+<p class="small">No cell carries a plottable figure &mdash; see the exclusions below.</p>
+{{end}}
+{{if .Excluded}}
+<p class="small">Not plotted (no honest coordinates &mdash; a withheld figure is not a zero): {{range .Excluded}}<code>{{.CellID}}</code> &mdash; {{.Reason}}. {{end}}</p>
+{{end}}
+{{end}}
+
+<table>
+  <thead><tr><th>Mode cell</th><th class="hl">Tokens per completed task</th><th class="hl">Completion rate</th><th>First-attempt success</th><th>Corrective retries</th><th>Infra retries</th><th>Runs &amp; spread</th><th>Verdict</th><th>Provenance</th></tr></thead>
+  <tbody>
+  {{range .AgentLoop.Cells}}
+    <tr>
+      <td><code>{{.CellID}}</code></td>
+      {{if .Withheld}}
+      <td colspan="2" class="l warn">withheld &mdash; {{.WithheldReason}}</td>
+      {{else}}
+      <td class="hl">{{n0 .TokensPerCompletedTask}}</td>
+      <td class="hl {{if .Regression}}neg{{end}}">{{f1 .CompletionRatePct}}%</td>
+      {{end}}
+      {{if .Withheld}}<td class="l">&mdash;</td><td class="l">&mdash;</td><td class="l">&mdash;</td>{{else}}<td>{{if .FirstAttemptSuccessPct}}{{f1 (derefF .FirstAttemptSuccessPct)}}%{{else}}<span class="small">not measured</span>{{end}}</td>
+      <td>{{.RetriesCorrective}}</td>
+      <td>{{.RetriesInfrastructure}}</td>{{end}}
+      <td>{{.Runs}} runs &middot; {{if .SpreadPct}}&plusmn;{{f1 (derefF .SpreadPct)}}%{{else}}<span class="small">spread undefined</span>{{end}}{{if .PartialRuns}}<div class="small">{{.PartialRuns}} partial run(s) excluded</div>{{end}}</td>
+      <td class="l">{{if .Withheld}}&mdash;{{else if .Regression}}<span class="warn">REGRESSION</span> &mdash; completes fewer tasks than the baseline; not a saving{{else if not .Headline}}provisional &mdash; {{.Runs}} runs, below the four-run headline bar{{else}}headline{{end}}</td>
+      <td>{{if .Withheld}}&mdash;{{else}}<span class="badge badge-{{.Provenance}}">{{.Provenance}}</span>{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+<p class="small">Cost and completion carry equal weight here by construction (FR-018): a cell is only cheaper in a way worth having if its completion rate holds. A cell badged <span class="badge badge-estimated">estimated</span> still rests on an assumed figure rather than a measurement, and is shown beside its measured neighbours rather than hidden behind one section-level badge (FR-013).</p>
 {{end}}
 
 {{if .Corpora}}
@@ -332,14 +420,22 @@ const dashboardV2HTML = `<!doctype html>
 {{if .SessionEstimates}}
 <h2>Session cost estimates{{with prov .Provenance "session_estimates"}}<span class="badge badge-{{.}}">{{.}}</span>{{end}}</h2>
 <table>
-  <thead><tr><th>Arm</th><th>Calls / session</th><th>Retry rate</th><th>Estimated session tokens</th></tr></thead>
+  <thead><tr><th>Arm</th><th>Calls / session</th><th>Retry rate</th><th>Retry rate source</th><th>Runs</th><th>Estimated session tokens</th><th>Provenance</th></tr></thead>
   <tbody>
   {{range .SessionEstimates}}
-    <tr><td><code>{{.Arm}}</code></td><td>{{.CallsPerSession}}</td><td>{{.RetryRate}}</td><td>{{.EstimatedTokens}}</td></tr>
+    <tr><td><code>{{.Arm}}</code></td><td>{{.CallsPerSession}}</td><td>{{.RetryRate}}</td>
+      <td><span class="badge badge-{{.RetryRateProvenance}}">{{.RetryRateProvenance}}</span></td>
+      <td>{{if .MeasuredRuns}}{{.MeasuredRuns}}{{else}}&mdash;{{end}}</td>
+      <td>{{.EstimatedTokens}}</td>
+      <td><span class="badge badge-{{.Provenance}}">{{.Provenance}}</span></td></tr>
   {{end}}
   </tbody>
 </table>
-<p class="small">session_cost = proxy_menu + calls &times; mean_response(arm) &times; (1 + retry_rate(arm)); retry rates are literature-derived defaults (research D8), so these rows are estimates, not measurements.</p>
+<p class="small">session_cost = proxy_menu + calls &times; mean_response(arm) &times; (1 + retry_rate(arm)).
+A row badged <span class="badge badge-estimated">estimated</span> uses a literature-derived retry default
+(research D8); one badged <span class="badge badge-measured">measured</span> uses an observed rate over the
+run count shown. The per-row badge exists because a defaulted 0.0 and a measured 0.0 are the same number
+and a different claim (FR-013).</p>
 {{end}}
 
 {{if .Latency}}
@@ -375,3 +471,221 @@ const dashboardV2HTML = `<!doctype html>
 </body>
 </html>
 `
+
+// ---------------------------------------------------------------------------
+// FR-023 — the cost-versus-outcome view
+// ---------------------------------------------------------------------------
+//
+// A table sorted by token cost answers "which mode is cheapest". That is the
+// wrong question, and answering it well is actively misleading: the cheapest
+// mode is often cheap because the agent gave up, retried into a dead end, or
+// never finished the task at all. FR-023 therefore asks for cost plotted
+// AGAINST completion outcome, so a reader sees which modes are worth their
+// savings, and FR-018 requires completion rate to sit beside cost at equal
+// prominence rather than in a footnote.
+//
+// Two axis decisions carry the honesty of the picture:
+//
+//   - The cost axis starts at ZERO. A truncated axis turns a 5% saving into a
+//     visually dominant one; on a chart whose whole purpose is judging whether
+//     a saving is worth its outcome, that is the failure mode to design out.
+//   - The completion axis is FIXED at 0..100%, not scaled to the data. Scaling
+//     it would make a 92%-vs-90% difference look like a chasm, and would make
+//     two runs of the report incomparable at a glance.
+//
+// A cell whose figure was withheld (a cross-accounting-source aggregate, above
+// all) is NOT plotted. It has no honest coordinates, and plotting it at the
+// origin would read as "free, and never completes anything" — a claim nobody
+// measured. It is named in an exclusion list beside the plot instead, the same
+// silence-is-never-success posture the replay block's exclusion table takes.
+
+// Plot geometry, in the SVG's own viewBox units. Kept as constants so the
+// axis mapping used to place points is the same one the gridlines are drawn
+// with — a plot whose points and axes disagree is worse than no plot.
+const (
+	costOutcomePlotLeft   = 70.0
+	costOutcomePlotRight  = 610.0
+	costOutcomePlotTop    = 30.0
+	costOutcomePlotBottom = 290.0
+)
+
+// CostOutcomePoint is one mode cell positioned in the cost/outcome plane. It
+// carries both the raw figures (so the table and the plot cannot drift apart)
+// and the pre-computed SVG coordinates (so the template does no arithmetic).
+type CostOutcomePoint struct {
+	CellID string
+	// TokensPerCompletedTask is the FR-018 cost headline, and
+	// CompletionRatePct is its equal-prominence companion.
+	TokensPerCompletedTask float64
+	CompletionRatePct      float64
+	// PlotX/PlotY are viewBox coordinates from the axis mappings below.
+	PlotX float64
+	PlotY float64
+	// Headline is false when the cell has not met the FR-021 bar; such a
+	// point is drawn hollow, present but not load-bearing.
+	Headline bool
+	// Regression marks a cell that completes materially fewer tasks than the
+	// baseline. It is drawn in the warning colour and must never be described
+	// as a saving (FR-019).
+	Regression bool
+	// Provenance is the cell's own row provenance (FR-013): a cell still
+	// resting on an assumption is badged as such beside its measured
+	// neighbours.
+	Provenance string
+	// Runs and SpreadPct travel with the point so the plot's tooltip can say
+	// how much evidence stands behind it.
+	Runs      int
+	SpreadPct float64
+	// LabelAnchor and LabelDX place the cell name clear of its marker. A
+	// point in the right half of the plot is labelled to its LEFT, or a long
+	// cell name on the expensive end of the axis runs off the viewBox and
+	// the reader loses the identity of the most costly cell — the one they
+	// most need to identify.
+	LabelAnchor string
+	LabelDX     float64
+}
+
+// CostOutcomeExclusion names a cell that could not be plotted, with the reason
+// carried through verbatim. An unexplained absence is indistinguishable from
+// an oversight.
+type CostOutcomeExclusion struct {
+	CellID string
+	Reason string
+}
+
+// CostOutcomeTick is one labelled axis gridline, positioned in viewBox units.
+type CostOutcomeTick struct {
+	Label string
+	Pos   float64
+}
+
+// CostOutcomeView is everything the dashboard needs to draw the FR-023 plot.
+// It is built in Go rather than in the template so the axis arithmetic is
+// unit-testable and so a degenerate input (one cell, all-zero costs, a nil
+// block) cannot produce NaN coordinates inside an SVG attribute, where they
+// would fail silently.
+type CostOutcomeView struct {
+	Points   []CostOutcomePoint
+	Excluded []CostOutcomeExclusion
+	// CostAxisMaxTokens is the zero-based cost axis maximum: the most
+	// expensive plotted cell plus headroom, never less than the data.
+	CostAxisMaxTokens float64
+	// CompletionAxisMaxPct is fixed at 100 — see the block comment.
+	CompletionAxisMaxPct float64
+	CostTicks            []CostOutcomeTick
+	CompletionTicks      []CostOutcomeTick
+}
+
+// PlotX maps a token cost onto the horizontal axis.
+func (v CostOutcomeView) PlotX(tokens float64) float64 {
+	if v.CostAxisMaxTokens <= 0 {
+		return costOutcomePlotLeft
+	}
+	frac := tokens / v.CostAxisMaxTokens
+	return costOutcomePlotLeft + frac*(costOutcomePlotRight-costOutcomePlotLeft)
+}
+
+// PlotY maps a completion rate onto the vertical axis (0% at the bottom).
+func (v CostOutcomeView) PlotY(pct float64) float64 {
+	if v.CompletionAxisMaxPct <= 0 {
+		return costOutcomePlotBottom
+	}
+	frac := pct / v.CompletionAxisMaxPct
+	return costOutcomePlotBottom - frac*(costOutcomePlotBottom-costOutcomePlotTop)
+}
+
+// HasPlot reports whether there is anything to draw. A block whose every cell
+// was withheld still renders its exclusion list, but no empty axes.
+func (v CostOutcomeView) HasPlot() bool { return len(v.Points) > 0 }
+
+// NewCostOutcomeView builds the plot for one agent-loop block. A nil block
+// yields an empty view rather than a panic, so the template can call this
+// unconditionally.
+func NewCostOutcomeView(b *AgentLoopBlock) CostOutcomeView {
+	view := CostOutcomeView{CompletionAxisMaxPct: 100}
+	if b == nil {
+		return view
+	}
+
+	maxCost := 0.0
+	for i := range b.Cells {
+		cell := &b.Cells[i]
+		if cell.Withheld {
+			reason := cell.WithheldReason
+			if reason == "" {
+				reason = "figure withheld, no reason recorded"
+			}
+			view.Excluded = append(view.Excluded, CostOutcomeExclusion{CellID: cell.CellID, Reason: reason})
+			continue
+		}
+		if cell.TokensPerCompletedTask > maxCost {
+			maxCost = cell.TokensPerCompletedTask
+		}
+		view.Points = append(view.Points, CostOutcomePoint{
+			CellID:                 cell.CellID,
+			TokensPerCompletedTask: cell.TokensPerCompletedTask,
+			CompletionRatePct:      cell.CompletionRatePct,
+			Headline:               cell.Headline,
+			Regression:             cell.Regression,
+			Provenance:             cell.Provenance,
+			Runs:                   cell.Runs,
+			SpreadPct:              derefF(cell.SpreadPct),
+		})
+	}
+
+	// Headroom so the rightmost marker is not clipped by the axis edge. The
+	// floor of 1 keeps an all-zero (or single-cell-at-zero) input finite
+	// rather than dividing by zero into NaN.
+	view.CostAxisMaxTokens = maxCost * 1.1
+	if view.CostAxisMaxTokens <= 0 {
+		view.CostAxisMaxTokens = 1
+	}
+
+	midX := (costOutcomePlotLeft + costOutcomePlotRight) / 2
+	for i := range view.Points {
+		view.Points[i].PlotX = view.PlotX(view.Points[i].TokensPerCompletedTask)
+		view.Points[i].PlotY = view.PlotY(view.Points[i].CompletionRatePct)
+		if view.Points[i].PlotX > midX {
+			view.Points[i].LabelAnchor, view.Points[i].LabelDX = "end", -12
+		} else {
+			view.Points[i].LabelAnchor, view.Points[i].LabelDX = "start", 12
+		}
+	}
+
+	for _, frac := range []float64{0, 0.25, 0.5, 0.75, 1} {
+		value := view.CostAxisMaxTokens * frac
+		view.CostTicks = append(view.CostTicks, CostOutcomeTick{
+			Label: shortTokenLabel(value),
+			Pos:   view.PlotX(value),
+		})
+		pct := view.CompletionAxisMaxPct * frac
+		view.CompletionTicks = append(view.CompletionTicks, CostOutcomeTick{
+			Label: fmt.Sprintf("%.0f%%", pct),
+			Pos:   view.PlotY(pct),
+		})
+	}
+	return view
+}
+
+// shortTokenLabel renders an axis label compactly ("41k") without implying
+// more precision than an axis tick carries.
+func shortTokenLabel(v float64) string {
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("%.1fM", v/1_000_000)
+	case v >= 1000:
+		return fmt.Sprintf("%.0fk", v/1000)
+	default:
+		return fmt.Sprintf("%.0f", v)
+	}
+}
+
+// derefF renders a nil "undefined" figure as zero for PLOTTING only. Callers
+// that display a number must branch on nil instead: a plotted point at zero is
+// a position, whereas a printed "0.0%" is a claim.
+func derefF(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}

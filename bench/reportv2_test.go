@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -76,8 +77,17 @@ func sampleReportV2() *ReportV2 {
 			NaiveFullMenuTokens: 420000, ProxyMenuTokens: 4000,
 			MeanResponseTokens: 11000, BreakEvenCalls: 37.8,
 		},
-		SessionEstimates: []SessionCostEstimate{
-			{Arm: "baseline_json", CallsPerSession: 3, RetryRate: 0, EstimatedTokens: 37000},
+		SessionEstimates: []SessionCostRow{
+			{
+				SessionCostEstimate: SessionCostEstimate{
+					Arm: "baseline_json", CallsPerSession: 3, RetryRate: 0, EstimatedTokens: 37000,
+				},
+				// RetryRate 0 with an ESTIMATED source: the defaulted zero.
+				// The badge is the only thing separating it from a measured
+				// zero, which is why the row type exists.
+				Provenance:          ProvenanceEstimated,
+				RetryRateProvenance: ProvenanceEstimated,
+			},
 		},
 		Latency: &LatencyV2{
 			P50Ms: 4.2, P95Ms: 9.8, P99Ms: 15.1, MaxMs: 22.0,
@@ -319,6 +329,10 @@ func sampleReplayBlock() *ReplayBlock {
 		AccountingSource: AccountingSource{Kind: AccountingKindTokenizer, Identity: "cl100k_base"},
 		Counterfactual:   "cost recomputation over recorded traffic scored against the supplied fleet; not observed agent behaviour",
 		BodiesIncluded:   false,
+		// The recording is the operator's own activity export: marked, per
+		// FR-030, as an input nobody outside the project can obtain.
+		Inputs:  PrivateRecordingInputs("recorded on the maintainer's machine via `mcpproxy activity export`; raw user traffic, never publishable"),
+		Records: RetainedRecords("records/replay.jsonl", 9),
 		FleetShape: FleetShape{
 			ID: "corpus_v2@2026-07-14", ToolCount: 45,
 			MeanDefinitionTokens: 444.4, P95DefinitionTokens: 900,
@@ -359,18 +373,20 @@ func sampleAgentLoopBlock() *AgentLoopBlock {
 		},
 		Suite:        "mcpmark",
 		SuiteVersion: "v0.3.1",
+		Inputs:       ReproducibleInputs(InputAvailabilityPinnedProcedure, "MCPMark v0.3.1, pinned suite revision; see bench/README.md"),
+		Records:      RetainedRecords("records/agent_loop.jsonl", 7),
 		FleetShape:   FleetShape{ID: "corpus_v2@2026-07-14", ToolCount: 45},
 		Cells: []AgentLoopCell{
 			{
-				CellID: "baseline", Provenance: ProvenanceMeasured, Runs: 5, SpreadPct: 8.4,
-				TokensPerCompletedTask: 41000, CompletionRatePct: 92.0, FirstAttemptSuccessPct: 71.0,
+				CellID: "baseline", Provenance: ProvenanceMeasured, Runs: 5, SpreadPct: fptr(8.4),
+				TokensPerCompletedTask: 41000, CompletionRatePct: 92.0, FirstAttemptSuccessPct: fptr(71.0),
 				RetriesCorrective: 6, RetriesInfrastructure: 1,
 				InputTokens: 180000, OutputTokens: 12000, CacheReadTokens: 60000,
 				Headline: true,
 			},
 			{
-				CellID: "retrieve_compact", Provenance: ProvenanceEstimated, Runs: 2, SpreadPct: 21.0,
-				TokensPerCompletedTask: 18000, CompletionRatePct: 74.0, FirstAttemptSuccessPct: 55.0,
+				CellID: "retrieve_compact", Provenance: ProvenanceEstimated, Runs: 2, SpreadPct: fptr(21.0),
+				TokensPerCompletedTask: 18000, CompletionRatePct: 74.0, FirstAttemptSuccessPct: fptr(55.0),
 				RetriesCorrective: 11, RetriesInfrastructure: 0, PartialRuns: 1,
 				InputTokens: 70000, OutputTokens: 9000, CacheReadTokens: 21000,
 				Headline: false, Regression: true,
@@ -780,3 +796,432 @@ sys.exit(1)
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// US3 — an outsider reproduces the numbers (T054/T056/T057/T058).
+//
+// The three behaviours asserted below are the ones that separate an honest
+// limitation from an implied guarantee, so each is tested against the
+// MARSHALED document as well as the struct: a mark that exists in Go but never
+// reaches the report protects nobody.
+// ---------------------------------------------------------------------------
+
+// TestInputProvenance_PrivateRecordingIsNotIndependentlyReproducible is the
+// FR-030 mark (T056). A replay block sourced from an operator's own recording
+// cannot be reproduced by an outsider — the recording is private and must stay
+// so (FR-006) — and the report has to say that in the document, not in a
+// README an aggregator will never read.
+func TestInputProvenance_PrivateRecordingIsNotIndependentlyReproducible(t *testing.T) {
+	p := PrivateRecordingInputs("exported from the maintainer's own mcpproxy activity log; the recording is not publishable")
+	if p.Availability != InputAvailabilityPrivateRecording {
+		t.Errorf("availability = %q, want %q", p.Availability, InputAvailabilityPrivateRecording)
+	}
+	if p.IndependentlyReproducible {
+		t.Error("a private-recording input must never be marked independently reproducible")
+	}
+	if p.Limitation == "" {
+		t.Error("a private-recording input must state its limitation")
+	}
+	if err := p.Validate("replay"); err != nil {
+		t.Fatalf("well-formed private-recording provenance rejected: %v", err)
+	}
+
+	// The converse, so the mark is not vacuously always-false.
+	pub := ReproducibleInputs(InputAvailabilityRepository, "specs/083-discovery-profiler/datasets/corpus_v2.tools.json")
+	if !pub.IndependentlyReproducible {
+		t.Error("a repository input must be marked independently reproducible")
+	}
+	if err := pub.Validate("payload_decomposition"); err != nil {
+		t.Fatalf("well-formed repository provenance rejected: %v", err)
+	}
+
+	t.Run("mismarked as reproducible", func(t *testing.T) {
+		bad := PrivateRecordingInputs("private export")
+		bad.IndependentlyReproducible = true
+		if err := bad.Validate("replay"); err == nil {
+			t.Error("a private-recording input claiming independent reproducibility must be rejected")
+		}
+	})
+	t.Run("limitation not stated", func(t *testing.T) {
+		bad := PrivateRecordingInputs("")
+		if err := bad.Validate("replay"); err == nil {
+			t.Error("a not-reproducible mark with no stated limitation is the implied guarantee this field exists to prevent")
+		}
+	})
+	t.Run("pinned procedure not named", func(t *testing.T) {
+		bad := ReproducibleInputs(InputAvailabilityPinnedProcedure, "")
+		if err := bad.Validate("agent_loop"); err == nil {
+			t.Error("a 'documented, pinned procedure' that names no procedure is not documented")
+		}
+	})
+	t.Run("availability outside the enum", func(t *testing.T) {
+		bad := &InputProvenance{Availability: "somewhere", IndependentlyReproducible: true}
+		if err := bad.Validate("replay"); err == nil {
+			t.Error("an availability outside the closed enum must be rejected")
+		}
+	})
+
+	// The mark must survive marshaling onto the block that carries it.
+	r := sampleReportV2WithBlocks()
+	r.Replay.Inputs = PrivateRecordingInputs("private activity export")
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	replay, _ := doc["replay"].(map[string]interface{})
+	inputs, ok := replay["inputs"].(map[string]interface{})
+	if !ok {
+		t.Fatal("replay.inputs missing from the emitted report")
+	}
+	if repro, _ := inputs["independently_reproducible"].(bool); repro {
+		t.Error("emitted replay.inputs.independently_reproducible = true for a private recording")
+	}
+}
+
+// TestPublicationCheck_PrivateFigureIsNeverSoleSupport is the second half of
+// FR-030 (T056): the mark alone is not enough, because a marked figure can
+// still be the only figure in the document. A report in which EVERY block
+// rests on a private recording is refused for publication outright; the same
+// private block beside a reproducible one publishes with a caveat.
+func TestPublicationCheck_PrivateFigureIsNeverSoleSupport(t *testing.T) {
+	soleSupport := &ReportV2{
+		ReportVersion: ReportVersion2,
+		RunStatus:     DeriveRunStatus([]string{"direct_full", "direct_deferred"}, []string{"direct_full", "direct_deferred"}, nil, false, ""),
+		Replay:        sampleReplayBlock(),
+	}
+	soleSupport.Replay.Inputs = PrivateRecordingInputs("maintainer's own activity export")
+	soleSupport.Replay.Records = RetainedRecords("records/replay.jsonl", 120)
+
+	decision := soleSupport.PublicationCheck()
+	if decision.Publishable {
+		t.Error("a report whose only figures come from a private recording must not be publishable (FR-030)")
+	}
+	if !containsSubstring(decision.Blockers, "sole support") {
+		t.Errorf("blockers do not name the sole-support rule: %v", decision.Blockers)
+	}
+
+	// Add a block an outsider CAN reproduce: the private figure is no longer
+	// the sole support, so it publishes — carrying its caveat.
+	corroborated := soleSupport
+	corroborated.PayloadDecomposition = samplePayloadDecomposition()
+	corroborated.PayloadDecomposition.Inputs = ReproducibleInputs(
+		InputAvailabilityRepository, "specs/083-discovery-profiler/datasets/corpus_v2.tools.json")
+
+	decision = corroborated.PublicationCheck()
+	if !decision.Publishable {
+		t.Errorf("a private figure corroborated by a reproducible block must be publishable: %v", decision.Blockers)
+	}
+	if !containsSubstring(decision.Caveats, "not independently reproducible") {
+		t.Errorf("the caveat must survive publication, not disappear with the blocker: %v", decision.Caveats)
+	}
+}
+
+// TestPublicationCheck_UndeclaredInputsAreNotPublishable: an unset field is not
+// a reproducible input. Silence is never success anywhere else in this
+// harness, and it must not become success at the publication boundary.
+func TestPublicationCheck_UndeclaredInputsAreNotPublishable(t *testing.T) {
+	r := &ReportV2{
+		ReportVersion:        ReportVersion2,
+		RunStatus:            DeriveRunStatus([]string{"a"}, []string{"a"}, nil, false, ""),
+		PayloadDecomposition: samplePayloadDecomposition(), // no Inputs set
+	}
+	decision := r.PublicationCheck()
+	if decision.Publishable {
+		t.Error("a block that never declared its input availability must not be publishable")
+	}
+	if !containsSubstring(decision.Blockers, "payload_decomposition") {
+		t.Errorf("blockers do not name the offending block: %v", decision.Blockers)
+	}
+}
+
+// TestRunStatus_PartialRunIsMarkedAndBlocked is FR-032 (T058). A run that did
+// not measure every planned cell, or that was interrupted, is a comparison
+// over a subset; presented as complete it is a comparison over a subset
+// presented as the whole.
+func TestRunStatus_PartialRunIsMarkedAndBlocked(t *testing.T) {
+	planned := []string{"baseline", "retrieve_full", "retrieve_compact", "direct_full", "direct_deferred", "code_exec"}
+
+	t.Run("missing cell", func(t *testing.T) {
+		s := DeriveRunStatus(planned, planned[:4], []string{"code_exec"}, false, "")
+		if s.Completeness != RunCompletenessPartial {
+			t.Errorf("completeness = %q, want %q", s.Completeness, RunCompletenessPartial)
+		}
+		if len(s.MissingCells) != 1 || s.MissingCells[0] != "direct_deferred" {
+			t.Errorf("missing cells = %v, want [direct_deferred]", s.MissingCells)
+		}
+		if s.Reason == "" {
+			t.Error("a partial run must carry a reason; an unexplained partial is the silence FR-032 forbids")
+		}
+		if err := s.Validate(); err != nil {
+			t.Fatalf("derived status rejected by its own validation: %v", err)
+		}
+	})
+
+	t.Run("interrupted with every cell measured", func(t *testing.T) {
+		s := DeriveRunStatus(planned, planned, nil, true, "SIGINT during the third repetition")
+		if s.Completeness != RunCompletenessPartial {
+			t.Error("an interrupted run is partial even when every planned cell produced a figure")
+		}
+	})
+
+	t.Run("complete", func(t *testing.T) {
+		s := DeriveRunStatus(planned, planned[:5], []string{"code_exec"}, false, "")
+		if s.Completeness != RunCompletenessComplete {
+			t.Errorf("completeness = %q, want %q — a deliberately skipped cell with a stated reason is not a gap",
+				s.Completeness, RunCompletenessComplete)
+		}
+		if err := s.Validate(); err != nil {
+			t.Fatalf("complete status rejected: %v", err)
+		}
+	})
+
+	t.Run("hand-stamped complete over a gap", func(t *testing.T) {
+		s := DeriveRunStatus(planned, planned[:4], nil, false, "")
+		s.Completeness = RunCompletenessComplete
+		if err := s.Validate(); err == nil {
+			t.Error("a status claiming complete while cells are unaccounted for must be rejected")
+		}
+	})
+
+	t.Run("blocked from publication", func(t *testing.T) {
+		r := sampleReportV2WithBlocks()
+		r.Replay.Inputs = ReproducibleInputs(InputAvailabilityRepository, "committed corpus")
+		r.AgentLoop.Inputs = ReproducibleInputs(InputAvailabilityPinnedProcedure, "mcpmark v0.3.1")
+		r.PayloadDecomposition.Inputs = ReproducibleInputs(InputAvailabilityRepository, "committed corpus")
+		r.Replay.Records = RetainedRecords("records/replay.jsonl", 9)
+		r.AgentLoop.Records = RetainedRecords("records/agent_loop.jsonl", 7)
+
+		r.RunStatus = DeriveRunStatus(planned, planned, nil, false, "")
+		if d := r.PublicationCheck(); !d.Publishable {
+			t.Fatalf("a complete, reproducible report must be publishable: %v", d.Blockers)
+		}
+
+		r.RunStatus = DeriveRunStatus(planned, planned[:4], nil, true, "operator interrupted the run")
+		d := r.PublicationCheck()
+		if d.Publishable {
+			t.Error("a partial run must not be publishable as a complete comparison (FR-032)")
+		}
+		if !containsSubstring(d.Blockers, "partial") {
+			t.Errorf("blockers do not name the run as partial: %v", d.Blockers)
+		}
+	})
+
+	t.Run("undeclared completeness", func(t *testing.T) {
+		r := sampleReportV2WithBlocks()
+		r.Replay.Inputs = ReproducibleInputs(InputAvailabilityRepository, "committed corpus")
+		r.RunStatus = nil
+		if r.PublicationCheck().Publishable {
+			t.Error("a report that never declared its run completeness must not be publishable")
+		}
+	})
+
+	// The mark must reach the document.
+	r := sampleReportV2WithBlocks()
+	r.RunStatus = DeriveRunStatus(planned, planned[:4], nil, true, "operator interrupted the run")
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	status, ok := doc["run_status"].(map[string]interface{})
+	if !ok {
+		t.Fatal("run_status missing from the emitted report")
+	}
+	if c, _ := status["completeness"].(string); c != RunCompletenessPartial {
+		t.Errorf("emitted run_status.completeness = %q, want %q", c, RunCompletenessPartial)
+	}
+}
+
+// TestRawRecordsRef_RunLocalAndNotDurable is FR-029 (T057), report side. The
+// records live under the gitignored bench/results/ tree, so the reference is
+// RUN-LOCAL and explicitly non-durable: an absolute path would leak the
+// operator's filesystem into a published document and would dangle on any
+// other machine, and a reference with no durability note invites a reader to
+// treat a scratch directory as an archive.
+func TestRawRecordsRef_RunLocalAndNotDurable(t *testing.T) {
+	ref := RetainedRecords("records/replay-2026-09-01.jsonl", 120)
+	if ref.Retention != RecordsRetained {
+		t.Errorf("retention = %q, want %q", ref.Retention, RecordsRetained)
+	}
+	if ref.Durable {
+		t.Error("no bench/results record is durable — a results cleanup removes it")
+	}
+	if ref.Note == "" {
+		t.Error("a records reference must carry its non-durability note")
+	}
+	if err := ref.Validate("replay"); err != nil {
+		t.Fatalf("well-formed run-local reference rejected: %v", err)
+	}
+
+	notRetained := NotRetainedRecords("bodies-off run: no per-record artifact was written")
+	if notRetained.Retention != RecordsNotRetained {
+		t.Errorf("retention = %q, want %q", notRetained.Retention, RecordsNotRetained)
+	}
+	if notRetained.RunLocalPath != "" {
+		t.Error("a not-retained reference must carry no path — that is precisely the dangling reference it replaces")
+	}
+	if err := notRetained.Validate("replay"); err != nil {
+		t.Fatalf("well-formed not-retained reference rejected: %v", err)
+	}
+
+	bad := []struct {
+		name string
+		ref  *RawRecordsRef
+	}{
+		{"absolute path", &RawRecordsRef{Retention: RecordsRetained, RunLocalPath: "/Users/someone/bench/results/replay.jsonl", Note: RecordsNotDurableNote}},
+		{"escaping path", &RawRecordsRef{Retention: RecordsRetained, RunLocalPath: "../../secrets.jsonl", Note: RecordsNotDurableNote}},
+		{"retained with no path", &RawRecordsRef{Retention: RecordsRetained, Note: RecordsNotDurableNote}},
+		{"claimed durable", &RawRecordsRef{Retention: RecordsRetained, RunLocalPath: "records/r.jsonl", Durable: true, Note: RecordsNotDurableNote}},
+		{"not retained but still pointing somewhere", &RawRecordsRef{Retention: RecordsNotRetained, RunLocalPath: "records/r.jsonl", Note: "gone"}},
+		{"retention outside the enum", &RawRecordsRef{Retention: "archived", RunLocalPath: "records/r.jsonl", Note: RecordsNotDurableNote}},
+		{"no note", &RawRecordsRef{Retention: RecordsRetained, RunLocalPath: "records/r.jsonl"}},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.ref.Validate("replay"); err == nil {
+				t.Errorf("malformed records reference accepted: %+v", tc.ref)
+			}
+		})
+	}
+}
+
+// TestRawRecordsRef_DegradesRatherThanDangles is the other half of T057: the
+// report is written to the same gitignored tree the records live in, so by the
+// time anyone reads it the records may already have been cleaned away. The
+// reference must then say "records not retained" — a reader who follows a
+// dangling path concludes the harness is broken, or worse, that the figure was
+// never traceable at all.
+func TestRawRecordsRef_DegradesRatherThanDangles(t *testing.T) {
+	t.Run("records absent", func(t *testing.T) {
+		dir := t.TempDir()
+		r := sampleReportV2WithBlocks()
+		r.Replay.Records = RetainedRecords("records/replay.jsonl", 120)
+
+		path, err := r.WriteJSON(dir)
+		if err != nil {
+			t.Fatalf("WriteJSON: %v", err)
+		}
+		raw, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			t.Fatalf("read report: %v", err)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("unmarshal report: %v", err)
+		}
+		replay, _ := doc["replay"].(map[string]interface{})
+		records, ok := replay["records"].(map[string]interface{})
+		if !ok {
+			t.Fatal("replay.records missing from the emitted report")
+		}
+		if got, _ := records["retention"].(string); got != RecordsNotRetained {
+			t.Errorf("retention = %q, want %q — an absent artifact must degrade, not dangle", got, RecordsNotRetained)
+		}
+		if p, _ := records["run_local_path"].(string); p != "" {
+			t.Errorf("degraded reference still carries a path %q", p)
+		}
+	})
+
+	t.Run("records present", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "records"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "records", "replay.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("write records: %v", err)
+		}
+		r := sampleReportV2WithBlocks()
+		r.Replay.Records = RetainedRecords("records/replay.jsonl", 120)
+
+		path, err := r.WriteJSON(dir)
+		if err != nil {
+			t.Fatalf("WriteJSON: %v", err)
+		}
+		raw, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			t.Fatalf("read report: %v", err)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("unmarshal report: %v", err)
+		}
+		replay, _ := doc["replay"].(map[string]interface{})
+		records, _ := replay["records"].(map[string]interface{})
+		if got, _ := records["retention"].(string); got != RecordsRetained {
+			t.Errorf("retention = %q, want %q — a present artifact must stay referenced", got, RecordsRetained)
+		}
+		if p, _ := records["run_local_path"].(string); p != "records/replay.jsonl" {
+			t.Errorf("run_local_path = %q, want records/replay.jsonl", p)
+		}
+	})
+}
+
+// TestReportV2_ValidateAdditiveBlocksCoversUS3Structures keeps the new
+// structures inside the existing emission-time guard. They are OPTIONAL — a
+// report that sets none of them validates exactly as before, which is what
+// keeps this change additive — but a malformed one is an error rather than a
+// silently-valid document.
+func TestReportV2_ValidateAdditiveBlocksCoversUS3Structures(t *testing.T) {
+	if err := sampleReportV2WithBlocks().ValidateAdditiveBlocks(); err != nil {
+		t.Fatalf("sample with the US3 fields rejected: %v", err)
+	}
+
+	t.Run("bad inputs", func(t *testing.T) {
+		r := sampleReportV2WithBlocks()
+		r.Replay.Inputs = &InputProvenance{Availability: InputAvailabilityPrivateRecording, IndependentlyReproducible: true}
+		if err := r.ValidateAdditiveBlocks(); err == nil {
+			t.Error("a mismarked input provenance must be rejected at emission time")
+		}
+	})
+	t.Run("bad records", func(t *testing.T) {
+		r := sampleReportV2WithBlocks()
+		r.AgentLoop.Records = &RawRecordsRef{Retention: RecordsRetained, RunLocalPath: "/tmp/leak.jsonl", Note: RecordsNotDurableNote}
+		if err := r.ValidateAdditiveBlocks(); err == nil {
+			t.Error("an absolute records path must be rejected at emission time")
+		}
+	})
+	t.Run("bad run status", func(t *testing.T) {
+		r := sampleReportV2WithBlocks()
+		r.RunStatus = &RunStatus{Completeness: "mostly", CellsPlanned: 1, CellsMeasured: 1}
+		if err := r.ValidateAdditiveBlocks(); err == nil {
+			t.Error("a completeness outside the closed enum must be rejected")
+		}
+	})
+	t.Run("still additive", func(t *testing.T) {
+		data, err := json.Marshal(sampleReportV2())
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if _, ok := doc["run_status"]; ok {
+			t.Error("run_status appeared in a report that never set it — must be omitempty")
+		}
+	})
+}
+
+// containsSubstring reports whether any entry of list contains want. The
+// publication decision is prose meant for a human about to publish, so the
+// assertions match on the load-bearing phrase rather than on an exact string
+// nobody should be pinned to.
+func containsSubstring(list []string, want string) bool {
+	for _, s := range list {
+		if strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// fptr makes an optional report figure. Nil means NOT MEASURED, which is a
+// different claim from a measured zero — see the field docs on AgentLoopCell.
+func fptr(f float64) *float64 { return &f }

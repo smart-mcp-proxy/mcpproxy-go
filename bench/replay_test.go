@@ -742,3 +742,30 @@ func TestRunReplay_CountsPartiallyStubbedFleet(t *testing.T) {
 		t.Errorf("tool count %d", block.FleetShape.ToolCount)
 	}
 }
+
+// FR-030 — a replay report must declare that its figures are NOT independently
+// reproducible.
+//
+// The field existed unpopulated until it was wired, which meant every replay
+// report read as reproducible by omission. An outsider cannot obtain the
+// operator's recording, so these figures may not be the sole support for a
+// published claim, and the report has to say so rather than leave it inferred.
+func TestReplayReport_DeclaresPrivateRecordingProvenance(t *testing.T) {
+	tk := runnerTokenizer(t)
+	block, err := RunReplay(tk, replayOptions(t))
+	if err != nil {
+		t.Fatalf("RunReplay: %v", err)
+	}
+
+	rep := ReplayReport(tk, block)
+	if rep.Replay.Inputs == nil {
+		t.Fatal("a replay report must carry input provenance — silence reads as reproducible")
+	}
+	if rep.Replay.Inputs.IndependentlyReproducible {
+		t.Error("a figure scored over a private recording is NOT independently reproducible")
+	}
+	if !strings.Contains(strings.ToLower(rep.Replay.Inputs.Limitation), "sole support") {
+		t.Errorf("the limitation must say the figure cannot be the sole support for a published "+
+			"claim; got %q", rep.Replay.Inputs.Limitation)
+	}
+}
