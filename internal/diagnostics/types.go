@@ -96,6 +96,13 @@ type ClassifierHints struct {
 	// DockerDefaultImages is the global default_images map (runtime → image).
 	// Used to name the recommended image for the detected runtime.
 	DockerDefaultImages map[string]string
+
+	// DockerArgs is the configured stdio args for a Docker-isolated server.
+	// The DockerMissingToolchain remediation reads it to tell a git-dependency
+	// server (`--from …git+https://…`) apart from any other missing tool, so it
+	// can say whether mcpproxy's automatic git-capable image selection already
+	// covers the failure (#1143).
+	DockerArgs []string
 }
 
 // FixRequest is the input to a registered fixer.

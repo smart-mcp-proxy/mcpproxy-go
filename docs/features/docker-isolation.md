@@ -89,15 +89,16 @@ Add to your `~/.mcpproxy/mcp_config.json`:
     "network_mode": "bridge",
     "registry": "docker.io",
     "default_images": {
-      "python": "python:3.11",
-      "python3": "python:3.11",
-      "uvx": "python:3.11",
-      "pip": "python:3.11",
-      "pipx": "python:3.11",
-      "node": "node:20",
-      "npm": "node:20",
-      "npx": "node:20",
-      "yarn": "node:20",
+      "python": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "python3": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "uvx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "pip": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "pipx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "uvx-git": "ghcr.io/astral-sh/uv:python3.13-bookworm",
+      "node": "node:22",
+      "npm": "node:22",
+      "npx": "node:22",
+      "yarn": "node:22",
       "go": "golang:1.21-alpine",
       "cargo": "rust:1.75-slim",
       "rustc": "rust:1.75-slim",
@@ -124,8 +125,33 @@ Add to your `~/.mcpproxy/mcp_config.json`:
 | `timeout` | Container startup timeout | `"30s"` |
 | `network_mode` | Docker network mode | `"bridge"` |
 | `registry` | Docker registry to use | `"docker.io"` |
-| `default_images` | Runtime to image mappings | See above |
+| `default_images` | Runtime to image mappings (including `uvx-git`, used when a Python runner installs from a `git+` URL) | See above |
 | `extra_args` | Additional docker run arguments | `[]` |
+
+### Git dependencies (`uvx-git`)
+
+The Python default image is Astral's **slim** `uv` image, which does not contain
+`git`. A server installed straight from a repository —
+
+```json
+{ "name": "my-server", "command": "uvx", "args": ["--from", "my-server@git+https://github.com/o/r", "my-server"] }
+```
+
+— cannot resolve without it, and fails with `Git executable not found` /
+`Git operation failed` ([`MCPX_DOCKER_MISSING_TOOLCHAIN`](../errors/MCPX_DOCKER_MISSING_TOOLCHAIN.md)).
+
+MCPProxy detects the `git+` URL in a Python package runner's arguments and uses
+the **`uvx-git`** image (`ghcr.io/astral-sh/uv:python3.13-bookworm`, which ships
+git) for that server only — everyone else keeps the small slim image. Retarget
+the key to use your own mirror or a custom build:
+
+```json
+{ "docker_isolation": { "default_images": { "uvx-git": "my-registry.example/uv-git:1" } } }
+```
+
+A per-server `isolation.image` override always wins over this selection, so a
+pinned image must ship git itself. `node`/`npx` need no equivalent: `node:22`
+already includes git.
 
 ### Per-Server Configuration
 

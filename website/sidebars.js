@@ -199,6 +199,7 @@ const sidebars = {
             'errors/MCPX_DOCKER_NO_PERMISSION',
             'errors/MCPX_DOCKER_SNAP_APPARMOR',
             'errors/MCPX_DOCKER_EXEC_NOT_FOUND',
+            'errors/MCPX_DOCKER_MISSING_TOOLCHAIN',
           ],
         },
         {

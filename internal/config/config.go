@@ -1560,6 +1560,12 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 			"pip":     "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 			"pipx":    "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 
+			// Python + git: the slim image above has no git, so a server
+			// installed from a git URL (`uvx --from …git+https://…`) cannot
+			// resolve at all. Selected per-server by NeedsGitCapableImage —
+			// see internal/config/isolation_git.go (#1143).
+			GitCapableImageKey: DefaultGitCapableImage,
+
 			// Node.js environments - full image for git deps and native modules (LTS until Apr 2028)
 			"node": "node:22",
 			"npm":  "node:22",

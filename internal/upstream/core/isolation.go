@@ -256,20 +256,55 @@ func (im *IsolationManager) DetectRuntimeType(command string) string {
 	}
 }
 
-// GetDockerImage returns the appropriate Docker image for a server
+// GetDockerImage returns the appropriate Docker image for a server.
+//
+// Resolution order:
+//  1. the per-server `isolation.image` override — an explicit user choice
+//     always wins;
+//  2. the git-capable image, when the server is a Python package runner
+//     installing from a git URL (#1143 — see resolveDefaultImage);
+//  3. the runtime type's entry in `default_images`;
+//  4. alpine, for unknown runtime types.
 func (im *IsolationManager) GetDockerImage(serverConfig *config.ServerConfig, runtimeType string) (string, error) {
 	// Check if server has custom image override
 	if serverConfig.Isolation != nil && serverConfig.Isolation.Image != "" {
 		return im.buildFullImageName(serverConfig.Isolation.Image), nil
 	}
 
+	image, _ := im.resolveDefaultImage(serverConfig, runtimeType)
+	return image, nil
+}
+
+// resolveDefaultImage computes the image a server gets from the GLOBAL config
+// — per-server `isolation.image` overrides are handled by the caller. The
+// second return value reports whether the git-capable image was substituted,
+// so the spawn path can say why it is pulling a much larger image.
+//
+// The substitution exists because the Python default is Astral's slim uv image,
+// which contains no git; a `uvx --from …git+https://…` server therefore died
+// with "Git executable not found" / "Git operation failed" under isolation
+// (#1143). Bumping the global Python default instead would cost every user a
+// ~1.5GB pull for a case many never hit, so the swap is scoped to the servers
+// whose args actually reference a git URL.
+func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfig, runtimeType string) (image string, gitSubstituted bool) {
+	if serverConfig != nil && config.NeedsGitCapableImage(runtimeType, serverConfig.Args) {
+		gitImage, exists := im.globalConfig.DefaultImages[config.GitCapableImageKey]
+		if !exists || gitImage == "" {
+			// Configs written before this key existed keep their own
+			// default_images map and are not re-seeded on load, so the
+			// built-in value is the fallback rather than the alpine one.
+			gitImage = config.DefaultGitCapableImage
+		}
+		return im.buildFullImageName(gitImage), true
+	}
+
 	// Use default image from global config
-	if image, exists := im.globalConfig.DefaultImages[runtimeType]; exists {
-		return im.buildFullImageName(image), nil
+	if img, exists := im.globalConfig.DefaultImages[runtimeType]; exists {
+		return im.buildFullImageName(img), false
 	}
 
 	// Fallback to alpine for unknown runtime types
-	return im.buildFullImageName("alpine:3.18"), nil
+	return im.buildFullImageName("alpine:3.18"), false
 }
 
 // ResolvedIsolationDefaults captures the per-runtime default values that
@@ -320,12 +355,10 @@ func (im *IsolationManager) ResolveDefaults(serverConfig *config.ServerConfig) *
 	// Compute the default image without consulting per-server overrides.
 	// We deliberately avoid calling GetDockerImage(serverConfig, ...)
 	// because that prefers the override; here we want the *baseline*.
-	var image string
-	if img, exists := im.globalConfig.DefaultImages[runtimeType]; exists {
-		image = im.buildFullImageName(img)
-	} else {
-		image = im.buildFullImageName("alpine:3.18")
-	}
+	// The git-capable substitution IS part of that baseline (it is derived
+	// from the server's args, not from an override), so the placeholder shows
+	// the image the container will really run (#1143).
+	image, _ := im.resolveDefaultImage(serverConfig, runtimeType)
 
 	defaults := &ResolvedIsolationDefaults{
 		RuntimeType:         runtimeType,
@@ -372,6 +405,18 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 	image, err := im.GetDockerImage(serverConfig, runtimeType)
 	if err != nil {
 		return nil, err
+	}
+
+	// A git dependency silently switches the server to a much larger image, so
+	// say so once per spawn — otherwise the first pull looks like an
+	// unexplained multi-hundred-MB download (#1143).
+	if im.logger != nil && !hasImageOverride(serverConfig) &&
+		config.NeedsGitCapableImage(runtimeType, serverConfig.Args) {
+		im.logger.Info("using git-capable isolation image for a git dependency",
+			zap.String("server", serverConfig.Name),
+			zap.String("runtime", runtimeType),
+			zap.String("image", image),
+			zap.String("hint", "override docker_isolation.default_images."+config.GitCapableImageKey+" to use a different image"))
 	}
 
 	args := []string{"run", "--rm", "-i"}
@@ -506,6 +551,11 @@ func (im *IsolationManager) TransformCommandForContainer(command string, args []
 		// This assumes the binary is available in the container
 		return command, args
 	}
+}
+
+// hasImageOverride reports whether the server pins its own isolation image.
+func hasImageOverride(serverConfig *config.ServerConfig) bool {
+	return serverConfig != nil && serverConfig.Isolation != nil && serverConfig.Isolation.Image != ""
 }
 
 // generateContainerName creates a Docker container name from server name with random suffix

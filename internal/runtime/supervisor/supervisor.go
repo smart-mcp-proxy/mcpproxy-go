@@ -59,7 +59,9 @@ func classifyAndAttach(status *stateview.ServerStatus, err error, hints diagnost
 // including the Docker-isolation enrichment context (MCP-2909) the
 // DockerExecNotFound remediation needs: the configured command (→ detected
 // runtime), the per-server isolation.image override (likely culprit), and the
-// global default_images map (→ recommended image). The enrichment fields are
+// global default_images map (→ recommended image). The args come along for
+// DockerMissingToolchain, which reads them to tell a git dependency apart from
+// any other missing tool (#1144). The enrichment fields are
 // only populated for Docker-isolated servers; they are inert for every other
 // code.
 func (s *Supervisor) classifierHints(srv *config.ServerConfig, transport string) diagnostics.ClassifierHints {
@@ -69,6 +71,7 @@ func (s *Supervisor) classifierHints(srv *config.ServerConfig, transport string)
 	}
 	if hints.DockerIsolated && srv != nil {
 		hints.DockerCommand = srv.Command
+		hints.DockerArgs = srv.Args
 		if srv.Isolation != nil {
 			hints.DockerImageOverride = srv.Isolation.Image
 		}

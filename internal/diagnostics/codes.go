@@ -73,6 +73,15 @@ const (
 	// DockerOCIRuntime: the OCI runtime (runc) failed to start the container —
 	// e.g. an `exec format error` (image/host architecture mismatch).
 	DockerOCIRuntime Code = "MCPX_DOCKER_OCI_RUNTIME"
+	// DockerMissingToolchain: the container started and its entrypoint ran, but
+	// a tool the server shells out to is absent from the image — git for a
+	// `uvx --from …git+https://…` server, or any `<tool>: not found` on the
+	// container's stderr. Distinct from DockerExecNotFound, which is the
+	// ENTRYPOINT interpreter missing (an OCI exec failure, before the process
+	// runs). Container stderr is its own failure surface, and everything the
+	// image lacked used to land in MCPX_UNKNOWN_UNCLASSIFIED — i.e. a
+	// "please file a bug report" CTA on an image/config problem (#1144).
+	DockerMissingToolchain Code = "MCPX_DOCKER_MISSING_TOOLCHAIN"
 )
 
 // CONFIG domain — configuration parsing and validation failures.

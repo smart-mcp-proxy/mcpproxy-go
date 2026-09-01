@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os/exec"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -216,18 +217,76 @@ func classifyDockerIsolatedSpawn(err error) Code {
 		strings.Contains(msg, "docker not found in path"),
 		strings.Contains(msg, "docker not found in login shell"):
 		return DockerCLINotFound
-	// (2) in-container interpreter missing (image lacks uvx/node/python/…).
+	// (2) a TOOL the server shells out to is missing from the image. git is
+	// the case that matters in practice: the Python default image is slim and
+	// has no git, so every `--from …git+https://…` server fails here (#1143).
+	// Must precede (3): bash reports it as "git: command not found", which
+	// would otherwise be read as the ENTRYPOINT interpreter missing and put
+	// the wrong image advice in front of the user.
+	case isContainerGitMissing(msg):
+		return DockerMissingToolchain
+	// (3) in-container interpreter missing (image lacks uvx/node/python/…).
 	case strings.Contains(msg, "executable file not found"),
 		strings.Contains(msg, "no such file or directory"),
 		strings.Contains(msg, "command not found"):
 		return DockerExecNotFound
-	// (3) other OCI runtime failures (arch mismatch, runc start failure).
+	// (4) other OCI runtime failures (arch mismatch, runc start failure).
 	case strings.Contains(msg, "oci runtime"),
 		strings.Contains(msg, "exec format error"),
 		strings.Contains(msg, "runc"):
 		return DockerOCIRuntime
+	// (5) any other `<tool>: not found` on the container's stderr — the dash /
+	// BusyBox wording, which none of the cases above match. The image simply
+	// lacks something the server calls.
+	case shellToolNotFoundRe.MatchString(msg):
+		return DockerMissingToolchain
 	}
 	return ""
+}
+
+// shellToolNotFoundRe matches the shell "missing command" line as dash, ash and
+// BusyBox write it — `sh: 1: git: not found`, `sh: make: not found` — which no
+// other classifier arm covers ("command not found" is the bash/zsh wording and
+// is handled above). Anchored on `<word>: not found` so a docker daemon message
+// such as "manifest for x:latest not found" does not match.
+var shellToolNotFoundRe = regexp.MustCompile(`(?:^|[\s:])[\w.+-]+: (?:command )?not found`)
+
+// gitCloneFailureCauses are causes of a failed git clone that are NOT a missing
+// git binary. `uv` collapses them all into "Git operation failed", so without
+// this guard a private-repo or offline clone would be diagnosed as a
+// missing-toolchain problem and send the user changing images for nothing.
+var gitCloneFailureCauses = []string{
+	"authentication failed",
+	"could not read username",
+	"could not read password",
+	"permission denied (publickey)",
+	"could not resolve host",
+	"repository not found",
+	"connection timed out",
+	"ssl certificate problem",
+}
+
+// isContainerGitMissing reports whether the container stderr says git is absent
+// from the image. It covers uv's own wording ("Git executable not found…" and
+// the terser "Git operation failed" of newer releases) plus the shell wordings
+// for a missing `git` binary.
+func isContainerGitMissing(msg string) bool {
+	switch {
+	case strings.Contains(msg, "git executable not found"),
+		strings.Contains(msg, "ensure that git is installed"),
+		strings.Contains(msg, "git: not found"),
+		strings.Contains(msg, "git: command not found"),
+		strings.Contains(msg, "command not found: git"):
+		return true
+	case strings.Contains(msg, "git operation failed"):
+		for _, cause := range gitCloneFailureCauses {
+			if strings.Contains(msg, cause) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // classifyStdio handles os/exec spawn errors and handshake failures.
