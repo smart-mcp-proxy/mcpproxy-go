@@ -1,6 +1,7 @@
 package replaycorpus
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -349,4 +350,63 @@ func TestCodeExecSaving_PricedSavingRefusesByteEstimates(t *testing.T) {
 
 	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
 	assert.False(t, ok, "byte lengths cannot be priced as tokens")
+}
+
+// A stored-script invocation sends a NAME, not source. mcpproxy records the
+// resolved source under "code" too, so the audit trail shows what ran — but
+// billing that source as model-generated output charges ~5,200 tokens per run
+// for a request the model wrote in ~17. Found by cross-model review, and it hits
+// the exact configuration stored scripts exist to make cheap.
+func TestBillableArguments_DropsServerResolvedScriptSource(t *testing.T) {
+	stored := map[string]interface{}{
+		"script": "jira-triage",
+		"input":  map[string]interface{}{"board": "GCLOUD2"},
+		"code":   "const huge = 'twenty kilobytes of resolved source';",
+	}
+	billable, resolved := billableArguments(stored)
+	require.True(t, resolved, "the record carried content the model did not send")
+	assert.NotContains(t, billable, "code", "the model never generated the source")
+	assert.Equal(t, "jira-triage", billable["script"], "it did send the name")
+	assert.Contains(t, billable, "input")
+	assert.Contains(t, stored, "code", "the caller's map must not be mutated")
+
+	// An INLINE call genuinely sent its source and must keep it.
+	inline := map[string]interface{}{"code": "call_tool('a','b',{})", "language": "javascript"}
+	back, resolved2 := billableArguments(inline)
+	assert.False(t, resolved2)
+	assert.Contains(t, back, "code", "an inline call really did generate this")
+
+	// A script name with no resolved source recorded: nothing to strip.
+	nameOnly := map[string]interface{}{"script": "x"}
+	_, resolved3 := billableArguments(nameOnly)
+	assert.False(t, resolved3)
+
+	// An empty script name is an inline call.
+	_, resolved4 := billableArguments(map[string]interface{}{"script": "", "code": "x"})
+	assert.False(t, resolved4)
+}
+
+// NaN, infinity and negative prices propagate silently through the arithmetic
+// and would be reported as a confident dollar figure.
+func TestCodeExecSaving_PricedSavingRejectsNonsensePrices(t *testing.T) {
+	got := CodeExecSavingFor(codeExecCall(measured(78), measured(11),
+		subCall(measured(12), measured(105))))
+	require.Equal(t, CostMeasured, got.Basis)
+
+	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
+	require.True(t, ok, "the sane case must still price")
+
+	for _, bad := range []struct {
+		name              string
+		in, out, cacheMul float64
+	}{
+		{"NaN cache multiplier", 3, 15, math.NaN()},
+		{"infinite output price", 3, math.Inf(1), 0.1},
+		{"NaN input price", math.NaN(), 15, 0.1},
+		{"negative price", -3, 15, 0.1},
+		{"negative multiplier", 3, 15, -0.1},
+	} {
+		_, ok := got.PricedSavingUSD(bad.in, bad.out, bad.cacheMul)
+		assert.False(t, ok, "%s must be refused, not reported", bad.name)
+	}
 }

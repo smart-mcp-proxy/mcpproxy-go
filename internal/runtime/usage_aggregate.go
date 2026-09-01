@@ -337,7 +337,7 @@ func (a *UsageAggregate) countInTimeBucket(rec *storage.ActivityRecord, isError 
 	if isError {
 		b.Errors++
 	}
-	if rec.ResponseBytes > 0 {
+	if rec.ResponseBytes > 0 && !truncatedBuiltinOverstatesDelivery(rec) {
 		b.RespBytesSum += int64(rec.ResponseBytes)
 	}
 	a.evictOldBuckets()
@@ -470,4 +470,24 @@ func (s *UsageStore) Snapshot() *UsageAggregate {
 	snap := s.snap.Load()
 	s.mu.Unlock()
 	return snap
+}
+
+// truncatedBuiltinOverstatesDelivery reports whether a record's ResponseBytes
+// describes MORE than the agent actually consumed, and so must not be added to
+// delivered traffic.
+//
+// The direction differs by record type, and that is the whole point:
+//
+//   - an upstream tool_call is truncated on the way into the LOG while the agent
+//     received the whole response, so the pre-truncation length is honest;
+//   - an internal built-in — retrieve_tools above all — is the reverse: the log
+//     keeps the FULL response and the agent consumed the CUT text, so the
+//     pre-truncation length describes something larger than was delivered.
+//
+// Counting the second case inflates the usage timeline in the flattering
+// direction, which is the one error a cost surface must not make. It became
+// reachable only when internal calls began carrying byte counts at all (spec
+// 103); before that they contributed zero and the question could not arise.
+func truncatedBuiltinOverstatesDelivery(rec *storage.ActivityRecord) bool {
+	return rec.ResponseTruncated && rec.Type == storage.ActivityTypeInternalToolCall
 }

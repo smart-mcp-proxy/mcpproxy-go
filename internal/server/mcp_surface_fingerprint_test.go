@@ -167,3 +167,36 @@ func TestDirectSurfaceUnchanged_RequiresBothHalves(t *testing.T) {
 	assert.False(t, directSurfaceUnchanged("", "", "t1", "r1"),
 		"nothing published yet: the first rebuild must always proceed")
 }
+
+// The code-exec guard is a bare `p.codeExecSurfaceFP == fp` comparison against a
+// zero value that starts as "". It is only safe because a fingerprint is NEVER
+// the empty string — otherwise the very first refresh after init, which
+// registers via AddTool and so leaves the stored fingerprint empty, would match
+// and skip, leaving the surface holding whatever AddTool put there.
+//
+// The direct guard states this explicitly via directSurfaceUnchanged; this one
+// relies on the property, so pin the property.
+func TestToolSetFingerprint_IsNeverEmpty(t *testing.T) {
+	assert.NotEmpty(t, toolSetFingerprint(nil),
+		"an empty surface must still fingerprint to something, or the first refresh silently skips")
+	assert.NotEmpty(t, toolSetFingerprint([]mcpserver.ServerTool{}))
+	assert.NotEqual(t, toolSetFingerprint(nil), toolSetFingerprint([]mcpserver.ServerTool{st("a", "x")}),
+		"empty and non-empty must not collide")
+}
+
+// A nil catalog is a real state — initRoutingModeServers publishes an empty one
+// before upstreams connect — and it must not fingerprint as equal to a populated
+// catalog.
+func TestDirectCatalogRoutingFingerprint_NilAndEmptyAreDistinct(t *testing.T) {
+	var nilCat *directCatalog
+	empty := &directCatalog{mode: config.DirectToolResponseModeFull}
+	populated := &directCatalog{
+		mode:          config.DirectToolResponseModeFull,
+		byDisplayName: map[string]*directCatalogEntry{"s__t": {DisplayName: "s__t", ServerName: "s", ToolName: "t"}},
+	}
+
+	assert.NotEmpty(t, nilCat.routingFingerprint(), "nil must be representable, not a panic")
+	assert.NotEqual(t, nilCat.routingFingerprint(), empty.routingFingerprint())
+	assert.NotEqual(t, empty.routingFingerprint(), populated.routingFingerprint(),
+		"an empty catalog must not look like a populated one")
+}

@@ -12,6 +12,8 @@
 // is what this file computes, and nothing else in bench measures it.
 package replaycorpus
 
+import "math"
+
 // CodeExecToolName is the built-in whose activity records parent a sandbox's
 // sub-calls. Sub-calls join to it by parent_id (see group.go).
 const CodeExecToolName = "code_execution"
@@ -256,6 +258,15 @@ func CodeExecSavingsFor(sessions []*ReplaySession) *CodeExecReport {
 func (s CodeExecSaving) PricedSavingUSD(inPerMTok, outPerMTok, cacheMult float64) (float64, bool) {
 	if s.Basis != CostMeasured {
 		return 0, false
+	}
+	// Reject prices that cannot produce a meaningful figure. NaN and +/-Inf
+	// propagate silently through the arithmetic and would be reported as a
+	// confident dollar amount; a negative price is not a price. ok=false is the
+	// same answer this function gives for anything it cannot honestly compute.
+	for _, v := range []float64{inPerMTok, outPerMTok, cacheMult} {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return 0, false
+		}
 	}
 	cost := func(outTok, inTok int) float64 {
 		return (float64(outTok)*outPerMTok + float64(inTok)*inPerMTok*cacheMult) / 1e6
