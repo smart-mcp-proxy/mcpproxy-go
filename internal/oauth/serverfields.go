@@ -53,6 +53,20 @@ func RedactServerSecretFields(server *contracts.Server) {
 	if server.URL != "" {
 		server.URL = LiveRedaction.URLValue(server.URL)
 	}
+	// Round 8 finding 3: `command` and `working_dir` are ONE leaf with THREE
+	// doors, and this one published them RAW while the generic MCP view (the
+	// shared walk behind `quarantine_security list_quarantined`) ran the leaf
+	// rule over them. A command path is rarely a credential, which is a reason
+	// for the RULE to leave it readable — the shared leaf rule passes `npx` and
+	// `/opt/tools` through byte-identical — not a reason for two doors to
+	// answer differently about the same string. The rule is also the only thing
+	// that catches a token pasted into either field.
+	if server.Command != "" {
+		server.Command = LiveRedaction.Leaf("command", server.Command)
+	}
+	if server.WorkingDir != "" {
+		server.WorkingDir = LiveRedaction.Leaf("working_dir", server.WorkingDir)
+	}
 	if len(server.Args) > 0 {
 		server.Args = LiveRedaction.Argv(server.Args)
 	}
@@ -126,7 +140,7 @@ func RedactServerSecretFields(server *contracts.Server) {
 		}
 	}
 	if server.LastError != "" {
-		server.LastError = MaskDetectedSecrets(RedactSensitiveData(server.LastError))
+		server.LastError = ScrubUpstreamText(server.LastError)
 	}
 	// GH #1145's retry_stopped_reason is free-form UPSTREAM text, not the fixed
 	// catalog string its name suggests: diagnostics.PermanentFailureReason falls
@@ -141,7 +155,7 @@ func RedactServerSecretFields(server *contracts.Server) {
 	}
 	if server.Health != nil && server.Health.Detail != "" {
 		health := *server.Health
-		health.Detail = MaskDetectedSecrets(RedactSensitiveData(health.Detail))
+		health.Detail = ScrubUpstreamText(health.Detail)
 		server.Health = &health
 	}
 	// Spec 044 diagnostic — its Cause echoes the raw connect error, which
@@ -149,7 +163,7 @@ func RedactServerSecretFields(server *contracts.Server) {
 	// with LastError / Health.Detail.
 	if server.Diagnostic != nil && server.Diagnostic.Cause != "" {
 		diag := *server.Diagnostic
-		diag.Cause = MaskDetectedSecrets(RedactSensitiveData(diag.Cause))
+		diag.Cause = ScrubUpstreamText(diag.Cause)
 		server.Diagnostic = &diag
 	}
 }
@@ -214,12 +228,21 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	// --- masked on read, never reverted ---
 	"args": MaskDecisionRefuse, // CheckArgvMaskEcho: an argv slot carries no key
 
+	// Round 8 finding 3. These two used to be recorded as not-secret, which was
+	// the THIRD answer to a leaf two doors already disagreed about: the generic
+	// MCP view masked them, the REST/SSE door and `upstream_servers list`
+	// published them raw. Every read door now runs the shared leaf rule over
+	// them — which leaves an ordinary command or path byte-identical and masks
+	// a token pasted into either — and nothing binds a revert to a single
+	// string field the caller replaces wholesale, so an echoed mask is refused
+	// by the residual net.
+	"command":     MaskDecisionRefuse,
+	"working_dir": MaskDecisionRefuse,
+
 	// --- not secret-bearing ---
 	"id":                         MaskDecisionNotSecret,
 	"name":                       MaskDecisionNotSecret,
 	"protocol":                   MaskDecisionNotSecret,
-	"command":                    MaskDecisionNotSecret,
-	"working_dir":                MaskDecisionNotSecret,
 	"enabled":                    MaskDecisionNotSecret,
 	"quarantined":                MaskDecisionNotSecret,
 	"skip_quarantine":            MaskDecisionNotSecret,
@@ -375,4 +398,51 @@ func init() {
 	for path, decision := range editionServerFieldMaskDecisions {
 		ServerFieldMaskDecisions[path] = decision
 	}
+}
+
+// RedactedConfigView renders one config.ServerConfig — or any other config
+// struct that carries server-derived strings — as a generic JSON map with every
+// secret-bearing leaf masked under the LIVE policy.
+//
+// Issue #1148, round 8. internal/server has had this shape since round 1
+// (`redactedServerView`), but it lived up there, so the doors BELOW it in the
+// import graph could not reach it: the server edition's `/admin/servers`
+// fallback wrote `h.config.Servers` — the raw []*config.ServerConfig, every env
+// value, header and oauth.client_secret in it — straight to JSON, and its
+// shared-toggle handler echoed back a raw *config.ServerConfig. The view moves
+// here so EVERY door can build a payload from a redacted view rather than from
+// the struct.
+//
+// `key` is the enclosing wire field name; pass "" for a whole server config.
+// Returns nil for nil. A value that cannot round-trip through generic JSON
+// fails CLOSED: nil is returned rather than the raw struct.
+func RedactedConfigView(key string, v interface{}) map[string]interface{} {
+	if v == nil {
+		return nil
+	}
+	normalized, ok := NormalizeForRedaction(v).(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	redacted, ok := LiveRedaction.Value(key, normalized).(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return redacted
+}
+
+// RedactedConfigViews is RedactedConfigView over a slice, skipping nils.
+// Returns an empty (non-nil) slice for an empty input so JSON callers keep
+// emitting `[]`.
+func RedactedConfigViews[T any](key string, items []*T) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if view := RedactedConfigView(key, item); view != nil {
+			out = append(out, view)
+		}
+	}
+	return out
 }

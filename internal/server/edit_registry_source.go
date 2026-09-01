@@ -10,6 +10,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
@@ -55,6 +56,15 @@ func EditRegistrySourceErrorCode(err error) string {
 func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.RegistryEntry, error) {
 	if req == nil {
 		return nil, errors.New("nil request")
+	}
+
+	// Issue #1148, round 8: an echoed read mask is REFUSED, never persisted
+	// over the stored credential — the same answer the server write path gives
+	// for every field with no key-bound revert.
+	if err := oauth.CheckServerWriteMasks("registry_source.", map[string]interface{}{
+		"url": req.URL, "servers_url": req.ServersURL,
+	}); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRegistryURL, err)
 	}
 
 	currentConfig := s.runtime.Config()

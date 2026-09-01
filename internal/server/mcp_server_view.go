@@ -78,10 +78,7 @@ func redactedServerViews(servers []*config.ServerConfig, r redactionPolicy) []ma
 // debugging surface and a long line is precisely what an operator opens it for.
 // The cap now lives on scrubUpstreamTextForAudit, where it belongs.
 func scrubUpstreamText(s string) string {
-	if s == "" {
-		return s
-	}
-	return maskDetectedSecrets(oauth.RedactSensitiveData(s))
+	return oauth.ScrubUpstreamText(s)
 }
 
 // scrubUpstreamTextForAudit is scrubUpstreamText for a string that will be

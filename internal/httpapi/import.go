@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 // ImportRequest represents a request to import servers from JSON/TOML content
@@ -427,12 +428,23 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	}
 
 	for i, imported := range result.Imported {
+		// Issue #1148, round 9: this preview echoes the operator's SOURCE FILE
+		// back — an agent pipes it as readily as a human reads it — and it did
+		// so with `url`, `command` and `args` raw, while its CLI twin
+		// (`upstream import`, buildImportedServersOutput) was routed through
+		// the shared LIVE rule in round 8. Same data, two doors, one redacted.
+		//
+		// The shared rule leaves an ordinary command, path or flag
+		// byte-identical and renders a credential as `••••<last2> (<N> chars)`,
+		// so the operator can still verify that a secret imported and how long
+		// it is without the value itself reaching the wire.
+		view := oauth.RedactedConfigView("", imported.Server)
 		response.Imported[i] = ImportedServerResponse{
 			Name:          imported.Server.Name,
 			Protocol:      imported.Server.Protocol,
-			URL:           imported.Server.URL,
-			Command:       imported.Server.Command,
-			Args:          imported.Server.Args,
+			URL:           viewString(view, "url", imported.Server.URL),
+			Command:       viewString(view, "command", imported.Server.Command),
+			Args:          oauth.LiveRedaction.Argv(imported.Server.Args),
 			SourceFormat:  string(imported.SourceFormat),
 			OriginalName:  imported.OriginalName,
 			FieldsSkipped: imported.FieldsSkipped,
