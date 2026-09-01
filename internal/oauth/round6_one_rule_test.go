@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
@@ -138,63 +137,11 @@ func TestRedactServerSecretFields_MasksOAuthScopes(t *testing.T) {
 // ROUND 6, GUIDING PRINCIPLE — the per-field decision is made ONCE, and a field
 // added to either server struct cannot silently opt out of it.
 //
-// Five review rounds on this issue found the same shape every time: a rule
-// applied at one door and not its sibling, or a field masked on read with no
-// answer on write. This test is the structural guard. It fails when a field
-// appears on the wire without a recorded decision, which forces the author to
-// answer "revert bound to what key, or refuse?" instead of inheriting "leaked
-// by default" or "corrupted by default".
-func TestServerFieldMaskDecisions_CoverEveryServerField(t *testing.T) {
-	for _, subject := range []struct {
-		name string
-		typ  reflect.Type
-	}{
-		{"config.ServerConfig", reflect.TypeOf(config.ServerConfig{})},
-		{"contracts.Server", reflect.TypeOf(contracts.Server{})},
-	} {
-		t.Run(subject.name, func(t *testing.T) {
-			for i := 0; i < subject.typ.NumField(); i++ {
-				field := subject.typ.Field(i)
-				if !field.IsExported() {
-					continue
-				}
-				name := jsonFieldName(field)
-				if name == "" || name == "-" {
-					continue
-				}
-				decision, ok := ServerFieldMaskDecisions[name]
-				require.True(t, ok,
-					"%s.%s is on the wire as %q with no entry in oauth.ServerFieldMaskDecisions.\n"+
-						"Every server field needs an answer to: when a client echoes this field's mask back on a "+
-						"write, is it REVERTED (bound to which key?) or REFUSED? Record it there — the default of "+
-						"silence is exactly what issue #1148 kept re-creating.",
-					subject.name, field.Name, name)
-				require.Contains(t,
-					[]MaskDecision{MaskDecisionRevertByKey, MaskDecisionRefuse, MaskDecisionNotSecret},
-					decision, "%s: unknown decision %q", name, decision)
-			}
-		})
-	}
-}
-
-// The table must not accumulate entries for fields that no longer exist —
-// a stale row reads as a decision that is being enforced somewhere when it is
-// not.
-func TestServerFieldMaskDecisions_HaveNoStaleEntries(t *testing.T) {
-	onTheWire := map[string]bool{}
-	for _, typ := range []reflect.Type{reflect.TypeOf(config.ServerConfig{}), reflect.TypeOf(contracts.Server{})} {
-		for i := 0; i < typ.NumField(); i++ {
-			if name := jsonFieldName(typ.Field(i)); name != "" && name != "-" {
-				onTheWire[name] = true
-			}
-		}
-	}
-	for name := range ServerFieldMaskDecisions {
-		assert.True(t, onTheWire[name],
-			"oauth.ServerFieldMaskDecisions has a decision for %q, which is no longer a field of "+
-				"config.ServerConfig or contracts.Server", name)
-	}
-}
+// The guard itself now lives in round7_derived_net_test.go: round 7 finding 4
+// found THIS version failing open, because it reflected over TOP-LEVEL fields
+// only and every credential-bearing leaf that round found lives one level down.
+// See TestServerFieldMaskDecisions_CoverEveryNestedLeaf and
+// TestServerFieldMaskDecisions_HaveNoStaleNestedEntries.
 
 func jsonFieldName(field reflect.StructField) string {
 	tag := field.Tag.Get("json")

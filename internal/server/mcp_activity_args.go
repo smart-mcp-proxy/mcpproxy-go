@@ -264,25 +264,26 @@ func normalizeForRedaction(v interface{}) interface{} {
 	return oauth.NormalizeForRedaction(v)
 }
 
-// redactionPolicy pairs the SHARED redaction rules (oauth.Redaction — which
-// key names are sensitive, which values look like credentials, how argv pairs
-// up) with the one decision that is local to this package: the activity
-// store's per-leaf size cap.
+// redactionPolicy is the SHARED redaction rule set (oauth.Redaction — which key
+// names are sensitive, which values look like credentials, how argv pairs up,
+// and how the generic walk descends into a nested payload) as applied at this
+// package's doors.
 //
-// The rules themselves live in internal/oauth because there are TWO doors onto
-// the same server config — the MCP payloads built here and `GET /api/v1/servers`
-// in internal/httpapi, which sits BELOW this package in the import graph. See
-// the header of internal/oauth/redactview.go.
-type redactionPolicy struct {
-	oauth.Redaction
-	// limit caps each string leaf, or 0 for no cap.
-	limit int
-}
+// It is an ALIAS, not a wrapper. Issue #1148 round 7 findings 2 and 3 were both
+// a door that could not reach the WALK because the walk lived here: the leaf
+// rules were already shared, but `RedactServerSecretFields` (REST + SSE) and
+// the hand-built isolation projections in `upstream_servers list` each
+// re-derived the descent field by field, and each missed
+// `isolation.extra_args`. The walk now lives in internal/oauth beside the
+// rules — below both internal/server and internal/httpapi in the import graph —
+// so every door runs the same code. The one thing that used to be local, the
+// activity store's per-leaf size cap, is expressed as oauth.Redaction.Limit.
+type redactionPolicy = oauth.Redaction
 
 // auditRedaction is the policy for anything PERSISTED or EXPORTED: the fixed
 // `••••` marker (no length, no trailing bytes — see the file header) and the
 // activity-store size cap.
-var auditRedaction = redactionPolicy{Redaction: oauth.AuditRedaction, limit: activityArgValueLimit}
+var auditRedaction = oauth.AuditRedaction.WithLimit(activityArgValueLimit)
 
 // liveRedaction is the policy for the LIVE MCP read surfaces (upstream_servers
 // list, quarantine_security list_quarantined).
@@ -296,15 +297,7 @@ var auditRedaction = redactionPolicy{Redaction: oauth.AuditRedaction, limit: act
 //
 // It does not cap: a truncated URL or arg is no longer equal to mask(stored),
 // so the unmasker would write the truncation through.
-var liveRedaction = redactionPolicy{Redaction: oauth.LiveRedaction, limit: 0}
-
-// capString applies the policy's length cap, if any.
-func (r redactionPolicy) capString(s string) string {
-	if r.limit <= 0 || len(s) <= r.limit {
-		return s
-	}
-	return s[:safeTruncateBytes(s, r.limit)] + activityErrorMessageEllipsis
-}
+var liveRedaction = oauth.LiveRedaction
 
 // redactActivityValue walks a generic JSON value under the audit policy.
 func redactActivityValue(key string, v interface{}) interface{} {
@@ -315,64 +308,27 @@ func redactActivityValue(key string, v interface{}) interface{} {
 // key that encloses them. `key` is the enclosing field name (for a slice, the
 // name of the slice itself).
 func redactValueWith(key string, v interface{}, r redactionPolicy) interface{} {
-	switch typed := v.(type) {
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(typed))
-		isHeaders := isActivityHeadersKey(key)
-		isEnv := isActivityEnvKey(key)
-		for k, val := range typed {
-			if s, ok := val.(string); ok {
-				switch {
-				case isHeaders:
-					// HTTP header semantics: mask by header name.
-					out[k] = redactHeaderValueWith(k, s, r)
-					continue
-				case isEnv:
-					// Environment-variable semantics: mask by var name, using
-					// oauth's own rendering so the write path can recognise an
-					// echoed mask.
-					out[k] = redactEnvValueWith(k, s, r)
-					continue
-				}
-			}
-			out[k] = redactValueWith(k, val, r)
-		}
-		return out
-	case []interface{}:
-		if isActivityArgvKey(key) {
-			return redactArgvWith(typed, r)
-		}
-		out := make([]interface{}, len(typed))
-		for i, val := range typed {
-			out[i] = redactValueWith(key, val, r)
-		}
-		return out
-	case string:
-		return redactStringWith(key, typed, r)
-	default:
-		// Bools, json.Number and nil carry no secrets and stay verbatim.
-		return v
-	}
+	return r.Value(key, v)
 }
 
 // redactStringWith masks one string leaf under the shared leaf rule, then
 // applies the policy's size cap. `key` is the enclosing field name ("" for a
 // leaf with no key, such as a positional argv token).
 func redactStringWith(key, s string, r redactionPolicy) string {
-	return r.capString(r.Leaf(key, s))
+	return r.CapString(r.Leaf(key, s))
 }
 
 // redactEnvValueWith masks one environment-variable leaf, reproducing
 // oauth.maskedEnvValue exactly so oauth.UnmaskEnvValues can recognise the
 // rendering if a client echoes it back on the write path.
 func redactEnvValueWith(name, value string, r redactionPolicy) string {
-	return r.capString(r.EnvValue(name, value))
+	return r.CapString(r.EnvValue(name, value))
 }
 
 // redactHeaderValueWith masks one HTTP header leaf, judged by the header NAME
 // first and then by the value's own shape.
 func redactHeaderValueWith(name, value string, r redactionPolicy) string {
-	return r.capString(r.HeaderValue(name, value))
+	return r.CapString(r.HeaderValue(name, value))
 }
 
 // redactActivityConfigValues redacts a flat before/after value map for a
@@ -394,57 +350,8 @@ func redactActivityConfigValues(values map[string]interface{}) map[string]interf
 	return out
 }
 
-// isActivityArgvKey reports whether a slice is a command-line argument vector.
-// Covers the `args` config field (config.MergeServerConfig's diff) and the
-// `args_json` tool parameter (the suffix is trimmed before the walk).
-func isActivityArgvKey(key string) bool {
-	return strings.EqualFold(key, "args")
-}
-
-// redactArgvWith masks a command-line argument vector reached through the
-// generic JSON walk. The argv rules themselves live in oauth.Redaction.Argv so
-// the MCP and REST doors share one implementation (issue #1148, round 4).
-//
-// Non-string elements (only reachable from a malformed `args_json` payload)
-// carry no flag semantics: they are walked with no enclosing key and stand in
-// as an empty token, which resets the flag pairing exactly as the typed walk
-// did.
-func redactArgvWith(argv []interface{}, r redactionPolicy) []interface{} {
-	tokens := make([]string, len(argv))
-	for i, item := range argv {
-		if s, ok := item.(string); ok {
-			tokens[i] = s
-		}
-	}
-	masked := r.Argv(tokens)
-
-	out := make([]interface{}, len(argv))
-	for i, item := range argv {
-		if _, ok := item.(string); !ok {
-			out[i] = redactValueWith("", item, r)
-			continue
-		}
-		out[i] = r.capString(masked[i])
-	}
-	return out
-}
-
 // maskDetectedSecrets masks any credential the value-shaped detector
 // recognises, leaving text it does not recognise untouched.
 func maskDetectedSecrets(s string) string {
 	return oauth.MaskDetectedSecrets(s)
-}
-
-// isActivityHeadersKey reports whether a map should be masked with HTTP-header
-// semantics. Covers both the `headers` config field and the `headers_json` tool
-// parameter (the suffix is trimmed before the walk).
-func isActivityHeadersKey(key string) bool {
-	return oauth.IsHeadersFieldName(key)
-}
-
-// isActivityEnvKey reports whether a map should be masked with
-// environment-variable semantics. Covers both the `env` config field and the
-// `env_json` tool parameter (the suffix is trimmed before the walk).
-func isActivityEnvKey(key string) bool {
-	return strings.EqualFold(key, "env")
 }

@@ -3940,17 +3940,30 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				}
 			}
 
-			// Add server-specific isolation config. This block is deliberately
-			// the RAW per-server override — it is named server_isolation — so
-			// `enabled` is omitted entirely when the server inherits the global
-			// setting rather than being flattened to false. The effective state
-			// lives in applies_to_server / isolation_mode above.
+			// Add server-specific isolation config. This block is the RAW
+			// per-server OVERRIDE — it is named server_isolation — so `enabled`
+			// is omitted entirely when the server inherits the global setting
+			// rather than being flattened to false. The effective state lives
+			// in applies_to_server / isolation_mode above.
+			//
+			// "Raw override" means the override SET, not raw secrets: issue
+			// #1148 round 7 finding 3 found this block republishing
+			// `isolation.extra_args` verbatim in the SAME response that masks
+			// env, url and args — and `extra_args` is free text an operator
+			// puts `-e API_KEY=<token>` into. The values are therefore sourced
+			// from the redacted view, under the same reveal_secret_headers gate
+			// as every other secret-bearing field on this surface.
 			if server.Isolation != nil {
+				// viewField keeps the payload SHAPE byte-identical: every
+				// string field of config.IsolationConfig is `omitempty`, so an
+				// unset one is absent from the view and falls back to the raw
+				// (empty) value rather than turning into a JSON null.
+				isoSource := isolationValues(server.Isolation, revealHeaders)
 				serverIso := map[string]interface{}{
-					"image":        server.Isolation.Image,
-					"network_mode": server.Isolation.NetworkMode,
-					"working_dir":  server.Isolation.WorkingDir,
-					"extra_args":   server.Isolation.ExtraArgs,
+					"image":        viewField(isoSource, "image", server.Isolation.Image),
+					"network_mode": viewField(isoSource, "network_mode", server.Isolation.NetworkMode),
+					"working_dir":  viewField(isoSource, "working_dir", server.Isolation.WorkingDir),
+					"extra_args":   viewField(isoSource, "extra_args", server.Isolation.ExtraArgs),
 				}
 				if server.Isolation.Enabled != nil {
 					serverIso["enabled"] = *server.Isolation.Enabled
@@ -3981,10 +3994,14 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		"servers": enhancedServers,
 		"total":   len(servers),
 		"docker_status": map[string]interface{}{
-			"available":        dockerAvailable,
-			"docker_path":      dockerPath,
-			"global_enabled":   dockerIsolationGlobalEnabled,
-			"isolation_config": p.config.DockerIsolation,
+			"available":      dockerAvailable,
+			"docker_path":    dockerPath,
+			"global_enabled": dockerIsolationGlobalEnabled,
+			// The WHOLE global docker_isolation block, including its own
+			// `extra_args` — which is exactly as credential-bearing as a
+			// server's, and was published here in the clear beside the masked
+			// per-server fields (issue #1148, round 7 finding 3).
+			"isolation_config": globalIsolationView(p.config.DockerIsolation, revealHeaders),
 		},
 	}
 

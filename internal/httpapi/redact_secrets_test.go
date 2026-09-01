@@ -73,3 +73,48 @@ func TestRedactServerSecretFields_NoSecrets(t *testing.T) {
 	assert.Equal(t, "info", srv.Env["LOG_LEVEL"])
 	assert.Nil(t, srv.Health)
 }
+
+// Issue #1148, round 7 finding 2: the REST/SSE door skipped the isolation
+// blocks entirely, so `isolation.extra_args` — free text an operator puts
+// `-e API_KEY=<token>` into — was masked on the MCP door and published in the
+// clear here and on every /events servers.changed payload.
+//
+// `isolation_defaults` is included because it is RESOLVED FROM the global
+// docker_isolation block: a credential in the global `extra_args` lands in it
+// verbatim (internal/management/service.go). Round 7 finding 4 re-judged it
+// from "not secret" for exactly that reason.
+func TestRedactServerSecretFields_MasksIsolationBlocks(t *testing.T) {
+	const token = "ghp_1234567890abcdefghijABCDEFGHIJ123456"
+	srv := &contracts.Server{
+		Name: "alpha",
+		Isolation: &contracts.IsolationConfig{
+			Enabled:   true,
+			Image:     "python:3.12",
+			ExtraArgs: []string{"-e", "SERVER_API_KEY=" + token},
+		},
+		IsolationDefaults: &contracts.IsolationDefaults{
+			RuntimeType: "uvx",
+			Image:       "ghcr.io/astral-sh/uv:python3.13-alpine",
+			ExtraArgs:   []string{"-e", "GLOBAL_API_KEY=" + token},
+		},
+	}
+
+	redactServerSecretFields(srv)
+
+	for _, arg := range srv.Isolation.ExtraArgs {
+		assert.NotContains(t, arg, token, "isolation.extra_args published a credential")
+	}
+	for _, arg := range srv.IsolationDefaults.ExtraArgs {
+		assert.NotContains(t, arg, token, "isolation_defaults.extra_args published a credential")
+	}
+
+	// Masked-but-PRESENT: the UI renders these as override placeholders, so the
+	// non-secret values must survive byte for byte.
+	assert.True(t, srv.Isolation.Enabled)
+	assert.Equal(t, "python:3.12", srv.Isolation.Image)
+	assert.Equal(t, "ghcr.io/astral-sh/uv:python3.13-alpine", srv.IsolationDefaults.Image)
+	assert.Equal(t, "uvx", srv.IsolationDefaults.RuntimeType)
+	assert.Equal(t, "-e", srv.Isolation.ExtraArgs[0])
+	assert.Contains(t, srv.Isolation.ExtraArgs[1], "SERVER_API_KEY",
+		"the variable NAME is the audit signal and must survive")
+}

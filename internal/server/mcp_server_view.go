@@ -105,7 +105,7 @@ func scrubUpstreamText(s string) string {
 // adds the activity store's size cap so one enormous upstream error cannot
 // bloat BBolt, which is the only thing the two paths need to differ on.
 func scrubUpstreamTextForAudit(s string) string {
-	return auditRedaction.capString(scrubUpstreamText(s))
+	return auditRedaction.CapString(scrubUpstreamText(s))
 }
 
 // scrubbedConnectionStatus returns a copy of a managed client's
@@ -196,7 +196,7 @@ func viewString(view map[string]interface{}, key, fallback string) string {
 func redactedArgs(args []string, r redactionPolicy) []string {
 	masked := r.Argv(args)
 	for i, m := range masked {
-		masked[i] = r.capString(m)
+		masked[i] = r.CapString(m)
 	}
 	return masked
 }
@@ -332,4 +332,56 @@ func inspectConnectionFailedAnalysis(serverName string, status map[string]interf
 		"next_steps":      "The server connection failed. Check server process status, logs, and configuration. Server may need to be restarted.",
 		"security_note":   "Connection failure prevents tool analysis. Server must be stable and connected for security inspection.",
 	}}
+}
+
+// isolationValues renders one server's per-server isolation override as a
+// generic map with every secret-bearing leaf masked.
+//
+// Issue #1148, round 7 finding 3. `upstream_servers list` built its
+// `docker_isolation.server_isolation` block by reading the config struct field
+// by field, so `extra_args` — free text an operator puts `-e API_KEY=<token>`
+// into — was republished verbatim in the SAME response that masked env, url and
+// args. Sourcing the values from the shared walk instead means a field added to
+// config.IsolationConfig is masked because the walk reaches it.
+//
+// `reveal` is the caller's authenticated `reveal_secret_headers` opt-in; it is
+// honoured here exactly as it is for env/headers/url, so an operator who asked
+// for raw values still gets them and nobody else does.
+//
+// A walk that cannot round-trip fails CLOSED: an empty map publishes nothing.
+func isolationValues(iso *config.IsolationConfig, reveal bool) map[string]interface{} {
+	if iso == nil {
+		return map[string]interface{}{}
+	}
+	normalized, ok := normalizeForRedaction(iso).(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{}
+	}
+	if reveal {
+		return normalized
+	}
+	redacted, ok := redactValueWith("isolation", normalized, liveRedaction).(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{}
+	}
+	return redacted
+}
+
+// globalIsolationView renders the GLOBAL docker_isolation block for the
+// `docker_status` section of `upstream_servers list`, masked under the same
+// rule and the same reveal gate.
+//
+// It used to be the raw *config.DockerIsolationConfig, so the global
+// `extra_args` — one place an operator configures a registry credential for
+// every isolated server at once — travelled out of this surface in the clear.
+// Returns nil for nil so the payload keeps emitting `null` as before.
+func globalIsolationView(global *config.DockerIsolationConfig, reveal bool) interface{} {
+	if global == nil {
+		return nil
+	}
+	normalized := normalizeForRedaction(global)
+	if reveal {
+		return normalized
+	}
+	return redactValueWith("docker_isolation", normalized, liveRedaction)
 }

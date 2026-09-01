@@ -13,6 +13,26 @@ import (
 	"go.uber.org/zap"
 )
 
+// Mask MARKERS — the substrings this package's own mask renderings are built
+// from. They exist as constants, and every renderer below is written in terms
+// of them, because the fail-closed write-path net has to RECOGNISE what the
+// read doors rendered: MaskMarkers in redactview.go is assembled from exactly
+// these constants (plus security's), so a rendering cannot be added or changed
+// without the net learning about it in the same edit.
+//
+// Issue #1148, round 7 finding 1: the marker list used to be hand-maintained
+// beside the renderers and did not know about `***REDACTED***`, so an echoed
+// RedactSensitiveData rendering was accepted on a write and persisted over the
+// live credential.
+const (
+	// redactedMarker is what the REGEX scrubbers (RedactSensitiveData,
+	// RedactURL, RedactHeaders) put in place of a matched secret.
+	redactedMarker = "***REDACTED***"
+
+	// bulletMarker opens every MaskValue / AuditMaskValue rendering.
+	bulletMarker = "••••"
+)
+
 // Sensitive header names that should be redacted in logs.
 var sensitiveHeaders = map[string]bool{
 	"authorization":       true,
@@ -150,7 +170,7 @@ func redactURLUserinfo(s string) string {
 		if isConfigReference(groups[3]) {
 			return match
 		}
-		return groups[1] + groups[2] + ":***REDACTED***@"
+		return groups[1] + groups[2] + ":" + redactedMarker + "@"
 	})
 }
 
@@ -165,23 +185,23 @@ func RedactSensitiveData(data string) string {
 	result := redactURLUserinfo(data)
 
 	// Redact Bearer tokens
-	result = tokenPattern.ReplaceAllString(result, "${1}***REDACTED***")
+	result = tokenPattern.ReplaceAllString(result, "${1}"+redactedMarker)
 
 	// Redact secrets and passwords
 	result = secretPattern.ReplaceAllStringFunc(result, func(match string) string {
 		// Find the position of = or : and redact everything after
 		for _, sep := range []string{"=", ":"} {
 			if idx := strings.Index(match, sep); idx != -1 {
-				return match[:idx+1] + "***REDACTED***"
+				return match[:idx+1] + redactedMarker
 			}
 		}
-		return "***REDACTED***"
+		return redactedMarker
 	})
 
 	// Redact sensitive URL parameters
 	for _, param := range sensitiveParams {
 		pattern := regexp.MustCompile(`(?i)(` + param + `=)[^&\s]+`)
-		result = pattern.ReplaceAllString(result, "${1}***REDACTED***")
+		result = pattern.ReplaceAllString(result, "${1}"+redactedMarker)
 	}
 
 	return result
@@ -194,7 +214,7 @@ func RedactHeaders(headers http.Header) map[string]string {
 
 	for key, values := range headers {
 		if isSensitiveHeaderKey(key) {
-			redacted[key] = "***REDACTED***"
+			redacted[key] = redactedMarker
 		} else {
 			// Join multiple values and redact any sensitive data within
 			value := strings.Join(values, ", ")
@@ -518,7 +538,7 @@ func AuditMaskValue(v string) string {
 	if isConfigReference(v) {
 		return v
 	}
-	return "••••"
+	return bulletMarker
 }
 
 // MaskValue renders a string secret as `••••<last2> (<N> chars)` for
@@ -538,9 +558,9 @@ func MaskValue(v string) string {
 		return v
 	}
 	if len(v) <= 4 {
-		return "••••"
+		return bulletMarker
 	}
-	return "••••" + v[len(v)-2:] + " (" + strconv.Itoa(len(v)) + " chars)"
+	return bulletMarker + v[len(v)-2:] + " (" + strconv.Itoa(len(v)) + " chars)"
 }
 
 // UnmaskURL protects the write path from a client that echoes a masked URL
@@ -767,7 +787,7 @@ func RedactURL(urlStr string) string {
 	result := redactURLUserinfo(urlStr)
 	for _, param := range sensitiveParams {
 		pattern := regexp.MustCompile(`(?i)(` + param + `=)[^&]+`)
-		result = pattern.ReplaceAllString(result, "${1}***REDACTED***")
+		result = pattern.ReplaceAllString(result, "${1}"+redactedMarker)
 	}
 
 	return result

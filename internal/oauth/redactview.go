@@ -1,10 +1,13 @@
 package oauth
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
@@ -58,6 +61,21 @@ type Redaction struct {
 	// (see maskDetectedPreservingURL), which closes that without collapsing
 	// anything the write path depends on.
 	DetectContracted bool
+
+	// Limit caps each string leaf the generic walker produces, or 0 for no cap.
+	//
+	// It is a property of the DESTINATION, not of the rules: the activity store
+	// caps every leaf so one mutation carrying a large env map cannot bloat
+	// BBolt, while a LIVE read surface must not cap — a truncated URL or arg is
+	// no longer equal to mask(stored), so the write-path unmasker would write
+	// the truncation through.
+	Limit int
+}
+
+// WithLimit returns a copy of the policy that caps each string leaf at n bytes.
+func (r Redaction) WithLimit(n int) Redaction {
+	r.Limit = n
+	return r
 }
 
 // LiveRedaction is the policy for the LIVE read surfaces (the MCP
@@ -316,15 +334,91 @@ func MaskDetectedSecrets(s string) string {
 	return masked
 }
 
-// MaskMarkers are the substrings every masked rendering carries: MaskValue /
-// AuditMaskValue open with the bullet run, and the value-shaped detector
-// (security.MaskValue) ends with the elision+asterisks.
+// maskRendering is one function that RENDERS a secret as a mask on a read door,
+// paired with the MARKER constant its output is built from and a probe input it
+// is guaranteed to mask.
+//
+// This registry is the single source the fail-closed net reads. MaskMarkers
+// below is assembled from it and from nothing else, and
+// TestMaskMarkers_CoverEveryRendering runs each entry's probe through its
+// renderer and fails when the net cannot detect the result — so a rendering
+// cannot be added, or an existing one changed, without the net learning about
+// it in the same edit.
+//
+// Issue #1148, round 7 finding 1. The marker list used to be hand-maintained
+// beside the renderers and listed only the bullet run and the detector's
+// elision. It did not know about `***REDACTED***`, which is what
+// RedactSensitiveData emits — and RedactSensitiveData runs on every
+// UNCONTRACTED leaf through Redaction.Leaf, so `isolation.extra_args` holding
+// `-e API_KEY=<token>` was rendered `-e API_KEY=***REDACTED***` on the read
+// door and that echo was ACCEPTED and PERSISTED over the real credential.
+// Hand-maintaining a list beside the thing it is supposed to track is the same
+// fail-open shape as every other defect on this issue; the list is now derived.
+type maskRendering struct {
+	name   string
+	marker string
+	probe  string
+	render func(string) string
+}
+
+var maskRenderings = []maskRendering{
+	{"oauth.MaskValue", bulletMarker, "supersecretvalue", MaskValue},
+	{"oauth.MaskValue/short", bulletMarker, "abcd", MaskValue},
+	{"oauth.AuditMaskValue", bulletMarker, "supersecretvalue", AuditMaskValue},
+	{"oauth.RedactSensitiveData/secret", redactedMarker, "API_KEY=supersecretvalue", RedactSensitiveData},
+	{"oauth.RedactSensitiveData/bearer", redactedMarker, "Authorization: Bearer supersecretvalue", RedactSensitiveData},
+	{"oauth.RedactSensitiveData/userinfo", redactedMarker, "postgres://u:supersecretvalue@host/db", RedactSensitiveData},
+	{"oauth.RedactURL", redactedMarker, "https://host/mcp?access_token=supersecretvalue", RedactURL},
+	{"security.MaskValue/prefix", securityMaskSuffixMarker(), "AKIAIOSFODNN7EXAMPLE", MaskDetectedSecrets},
+}
+
+// maskOAuthSecret / maskExtraParams are deliberately NOT in the registry. They
+// render `abc***wxyz` / `***` for zap DEBUG LOGS only (config.go,
+// transport_wrapper.go) — no client ever reads them off a door and echoes them
+// back at a write, so widening the net to `***` would refuse legitimate values
+// to protect a path that does not exist. The registry is the set of renderings
+// that reach a READ DOOR; if one of them ever does, it belongs here and the
+// test below will be what proves the net follows.
+
+// securityMaskSuffixMarker is security.MaskValue's own long-value marker, read
+// from that package rather than copied, so a change there breaks the registry
+// test instead of silently narrowing the net.
+func securityMaskSuffixMarker() string {
+	return security.MaskMarkers()[0]
+}
+
+// MaskMarkers are the substrings every masked rendering carries. They are
+// DERIVED from maskRenderings above plus security.MaskMarkers(), so the net can
+// never fall behind a rendering.
 //
 // They back up the byte-for-byte echo checks so a mask is still recognised when
 // the stored value has since changed and the exact comparison no longer
-// matches. TestArgvMaskMarkers_MatchTheRenderings pins them to the functions
-// that produce them.
-var MaskMarkers = []string{"••••", "…****"}
+// matches. TestArgvMaskMarkers_MatchTheRenderings and
+// TestMaskMarkers_CoverEveryRendering pin them to the functions that produce
+// them.
+var MaskMarkers = deriveMaskMarkers()
+
+func deriveMaskMarkers() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(marker string) {
+		if marker == "" || seen[marker] {
+			return
+		}
+		seen[marker] = true
+		out = append(out, marker)
+	}
+	for _, r := range maskRenderings {
+		add(r.marker)
+	}
+	// security.MaskValue has a SECOND rendering for values too short to keep a
+	// prefix; taking the package's whole marker set rather than only the one
+	// the registry probe exercises is what keeps that from being a hole.
+	for _, marker := range security.MaskMarkers() {
+		add(marker)
+	}
+	return out
+}
 
 // ContainsMaskMarker reports whether a string carries a mask this proxy
 // rendered.
@@ -466,4 +560,176 @@ func UnmaskLiveURLParams(incoming, stored string) string {
 	}
 	inU.RawQuery = strings.Join(parts, "&")
 	return inU.String()
+}
+
+// ---------------------------------------------------------------------------
+// The generic walk.
+//
+// Issue #1148, round 7 findings 2 and 3. Both are the same hole: the leaf RULES
+// were shared by every door, but the WALK that applies them to a nested payload
+// lived in internal/server, so the two doors that could not import it —
+// RedactServerSecretFields (REST + SSE) and the hand-built isolation blocks in
+// `upstream_servers list` — each reached into the config struct field by field
+// and each missed `isolation.extra_args`.
+//
+// So the walk moves here, beside the rules, and every door calls it. A field
+// added under a server payload is then masked because the walk reaches it, not
+// because somebody remembered to add a line.
+// ---------------------------------------------------------------------------
+
+// Value walks a generic JSON value (as produced by NormalizeForRedaction),
+// masking every string leaf according to the key that encloses it. `key` is the
+// enclosing field name — pass "" at the root, and for a slice the name of the
+// slice itself.
+func (r Redaction) Value(key string, v interface{}) interface{} {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(typed))
+		isHeaders := IsHeadersFieldName(key)
+		isEnv := IsEnvFieldName(key)
+		for k, val := range typed {
+			if s, ok := val.(string); ok {
+				switch {
+				case isHeaders:
+					// HTTP header semantics: mask by header name.
+					out[k] = r.CapString(r.HeaderValue(k, s))
+					continue
+				case isEnv:
+					// Environment-variable semantics: mask by var name, using
+					// oauth's own rendering so the write path can recognise an
+					// echoed mask.
+					out[k] = r.CapString(r.EnvValue(k, s))
+					continue
+				}
+			}
+			out[k] = r.Value(k, val)
+		}
+		return out
+	case []interface{}:
+		if IsArgvFieldName(key) {
+			return r.argvValue(typed)
+		}
+		out := make([]interface{}, len(typed))
+		for i, val := range typed {
+			out[i] = r.Value(key, val)
+		}
+		return out
+	case string:
+		return r.CapString(r.Leaf(key, typed))
+	default:
+		// Bools, json.Number and nil carry no secrets and stay verbatim.
+		return v
+	}
+}
+
+// argvValue masks a command-line argument vector reached through the generic
+// walk, using the same Argv rules the typed doors use.
+//
+// Non-string elements (only reachable from a malformed `args_json` payload)
+// carry no flag semantics: they are walked with no enclosing key and stand in
+// as an empty token, which resets the flag pairing exactly as the typed walk
+// does.
+func (r Redaction) argvValue(argv []interface{}) []interface{} {
+	tokens := make([]string, len(argv))
+	for i, item := range argv {
+		if s, ok := item.(string); ok {
+			tokens[i] = s
+		}
+	}
+	masked := r.Argv(tokens)
+
+	out := make([]interface{}, len(argv))
+	for i, item := range argv {
+		if _, ok := item.(string); !ok {
+			out[i] = r.Value("", item)
+			continue
+		}
+		out[i] = r.CapString(masked[i])
+	}
+	return out
+}
+
+// CapString applies the policy's per-leaf length cap, if any, cutting on a rune
+// boundary and marking the cut.
+func (r Redaction) CapString(s string) string {
+	if r.Limit <= 0 || len(s) <= r.Limit {
+		return s
+	}
+	return s[:safeTruncateBytes(s, r.Limit)] + capEllipsis
+}
+
+// capEllipsis marks a leaf the cap shortened.
+const capEllipsis = "…"
+
+// safeTruncateBytes returns the largest cut <= limit that does not split a
+// UTF-8 rune.
+func safeTruncateBytes(s string, limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	if limit >= len(s) {
+		return len(s)
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return cut
+}
+
+// IsEnvFieldName reports whether a map should be masked with
+// environment-variable semantics. Covers both the `env` config field and the
+// `env_json` tool parameter (the suffix is trimmed before the walk).
+func IsEnvFieldName(key string) bool {
+	return strings.EqualFold(key, "env")
+}
+
+// IsArgvFieldName reports whether a slice is a command-line argument vector.
+// Covers the `args` config field and the `args_json` tool parameter.
+//
+// `isolation.extra_args` is deliberately NOT argv here: `Redaction.Argv` pairs
+// `--flag value` and keeps unrecognised tokens verbatim, which is right for a
+// vector whose command it belongs to is also on the wire. An extra_args vector
+// is docker-run flags, and its elements go through Leaf like any other free
+// text — which is what masks `-e API_KEY=<token>`.
+func IsArgvFieldName(key string) bool {
+	return strings.EqualFold(key, "args")
+}
+
+// RedactNested masks every secret-bearing leaf of an arbitrary nested value in
+// place, returning a value of the SAME Go type.
+//
+// It is how the typed doors (RedactServerSecretFields) redact a nested block
+// without enumerating its fields: the value is normalised to generic JSON,
+// walked by the shared rules, and decoded back over `dst`. A field added to the
+// nested struct is therefore masked by default.
+//
+// On any encode/decode failure `dst` is left UNTOUCHED and false is returned,
+// so the caller can fail closed rather than publish a half-redacted block.
+//
+// The masked value is decoded into a FRESH zero value and only then assigned
+// over `dst`. Decoding straight into `dst` would be the #1142 corruption in a
+// new place: encoding/json REUSES an existing slice's backing array, so a
+// projection whose []string still aliases the stored config (a caller that
+// assigned the slice instead of copying it) would have its live credentials
+// overwritten with their own masks by the act of rendering a read response.
+func (r Redaction) RedactNested(key string, dst interface{}) bool {
+	if dst == nil {
+		return false
+	}
+	ptr := reflect.ValueOf(dst)
+	if ptr.Kind() != reflect.Ptr || ptr.IsNil() {
+		return false
+	}
+	walked := r.Value(key, NormalizeForRedaction(dst))
+	encoded, err := json.Marshal(walked)
+	if err != nil {
+		return false
+	}
+	fresh := reflect.New(ptr.Type().Elem())
+	if err := json.Unmarshal(encoded, fresh.Interface()); err != nil {
+		return false
+	}
+	ptr.Elem().Set(fresh.Elem())
+	return true
 }

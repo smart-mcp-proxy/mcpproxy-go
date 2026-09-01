@@ -92,6 +92,39 @@ func RedactServerSecretFields(server *contracts.Server) {
 		}
 		server.OAuth = &masked
 	}
+	// The isolation blocks are REDACTED THROUGH THE SHARED WALK rather than
+	// field by field (issue #1148, round 7 finding 2).
+	//
+	// This function used to skip them entirely, so `isolation.extra_args` —
+	// free text an operator can put `-e API_KEY=<token>` into — was masked on
+	// the MCP door and published IN THE CLEAR on `GET /api/v1/servers` and on
+	// every `/events` servers.changed payload. The decision table asserted in
+	// prose that it was covered; it was not.
+	//
+	// Walking rather than enumerating is the durable half: a field added to
+	// contracts.IsolationConfig / IsolationDefaults is masked because the walk
+	// reaches it. `isolation_defaults` is included because its contents are
+	// resolved from the SAME operator-supplied global config — a credential in
+	// the global `docker_isolation.extra_args` lands there verbatim.
+	//
+	// A walk that cannot round-trip fails CLOSED: the block is dropped rather
+	// than published half-redacted.
+	if server.Isolation != nil {
+		iso := *server.Isolation
+		if LiveRedaction.RedactNested("isolation", &iso) {
+			server.Isolation = &iso
+		} else {
+			server.Isolation = nil
+		}
+	}
+	if server.IsolationDefaults != nil {
+		defaults := *server.IsolationDefaults
+		if LiveRedaction.RedactNested("isolation_defaults", &defaults) {
+			server.IsolationDefaults = &defaults
+		} else {
+			server.IsolationDefaults = nil
+		}
+	}
 	if server.LastError != "" {
 		server.LastError = MaskDetectedSecrets(RedactSensitiveData(server.LastError))
 	}
@@ -143,14 +176,23 @@ const (
 )
 
 // ServerFieldMaskDecisions records the decision for every field of a server as
-// it appears on the wire, keyed by JSON field name. Both config.ServerConfig
-// (the MCP door + the config file) and contracts.Server (the REST/SSE door) are
-// covered; the two share most names.
+// it appears on the wire, keyed by its DOTTED WIRE PATH. Both
+// config.ServerConfig (the MCP door + the config file) and contracts.Server
+// (the REST/SSE door) are covered; the two share most names.
 //
-// TestServerFieldMaskDecisions_CoverEveryServerField reflects over BOTH structs
-// and fails when a field appears here without a decision — so adding a field to
-// either struct forces the author to answer the question rather than inheriting
-// "leaked by default" or "corrupted by default".
+// The keys are paths, not top-level field names, because round 7 finding 4
+// found the guard itself failing open: it reflected over the TOP LEVEL only,
+// and all three of that round's leaks — `isolation.extra_args` published in the
+// clear on two doors and its mask accepted on a third — lived one level down,
+// under a single `isolation` row that claimed in prose to cover them.
+//
+// TestServerFieldMaskDecisions_CoverEveryNestedLeaf walks BOTH structs
+// recursively (into nested structs, slices and maps) and fails when any leaf
+// that can carry TEXT — and therefore a credential — appears without a
+// decision. Whether a leaf can carry text is derived from its Go type, not
+// asserted here: a bool, an int or a time.Time structurally cannot hold a
+// token, so it needs no row. Everything else does, which is what stops a new
+// nested field inheriting "leaked by default" or "corrupted by default".
 var ServerFieldMaskDecisions = map[string]MaskDecision{
 	// --- masked on read, reverted on write, bound to a key ---
 	"url":     MaskDecisionRevertByKey, // UnmaskURL + UnmaskLiveURLParams, bound to the parameter name and the stored scheme+host:port
@@ -190,11 +232,44 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"source_registry_id":         MaskDecisionNotSecret,
 	"source_registry_provenance": MaskDecisionNotSecret,
 
-	// Docker/sandbox overrides. `extra_args` is free text an operator can put a
-	// `-e API_KEY=…` into, so the read doors mask it through the same leaf rule
-	// as any other config string; nothing binds a mask back to an element of a
-	// caller-replaced slice, so an echo is refused by the residual net.
-	"isolation": MaskDecisionRefuse,
+	// Docker/sandbox overrides, leaf by leaf. `extra_args` is free text an
+	// operator can put a `-e API_KEY=…` into, and the rest are free-form
+	// strings a credential can be pasted into just as easily; the read doors
+	// mask them through the same leaf rule as any other config string, and
+	// nothing binds a mask back to an element of a caller-replaced block, so an
+	// echo is refused by the residual net.
+	//
+	// Round 7 finding 3: this row used to stand alone and was read as covering
+	// the subtree, while `upstream_servers list` republished
+	// `docker_isolation.server_isolation.extra_args` (and the whole global
+	// `docker_status.isolation_config`) in the clear in the same payload.
+	"isolation":               MaskDecisionRefuse,
+	"isolation.mode":          MaskDecisionRefuse,
+	"isolation.mode_override": MaskDecisionRefuse,
+	"isolation.image":         MaskDecisionRefuse,
+	"isolation.network_mode":  MaskDecisionRefuse,
+	"isolation.extra_args":    MaskDecisionRefuse,
+	"isolation.working_dir":   MaskDecisionRefuse,
+	"isolation.memory_limit":  MaskDecisionRefuse,
+	"isolation.cpu_limit":     MaskDecisionRefuse,
+	"isolation.timeout":       MaskDecisionRefuse,
+	"isolation.log_driver":    MaskDecisionRefuse,
+	"isolation.log_max_size":  MaskDecisionRefuse,
+	"isolation.log_max_files": MaskDecisionRefuse,
+
+	// oauth, leaf by leaf. UnmaskLiveOAuth binds a revert to the field NAME for
+	// the four leaves that have one; everything else — including any leaf added
+	// later — is refused by the residual net that closes UnmaskLiveOAuth.
+	"oauth.client_secret": MaskDecisionRevertByKey,
+	"oauth.client_id":     MaskDecisionRevertByKey,
+	"oauth.redirect_uri":  MaskDecisionRevertByKey,
+	"oauth.extra_params":  MaskDecisionRevertByKey, // bound per parameter name
+	"oauth.scopes":        MaskDecisionRefuse,      // a scope slot has no key, exactly as an argv slot has none
+	// auth_url / token_url are DISCOVERED endpoints that exist only on the
+	// contracts projection; nothing writes back through them, and a mask
+	// arriving in one is refused rather than bound.
+	"oauth.auth_url":  MaskDecisionRefuse,
+	"oauth.token_url": MaskDecisionRefuse,
 
 	// Server edition only (//go:build server); the personal edition carries an
 	// empty stub. Brokered credentials are masked by the leaf rules on read and
@@ -202,27 +277,85 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"auth_broker": MaskDecisionRefuse,
 
 	// --- contracts.Server-only projections (read-only; never accepted on a write) ---
-	"connected":            MaskDecisionNotSecret,
-	"connecting":           MaskDecisionNotSecret,
-	"status":               MaskDecisionNotSecret,
-	"last_error":           MaskDecisionNotSecret, // scrubbed free-form text; nothing writes back through it
-	"connected_at":         MaskDecisionNotSecret,
-	"last_reconnect_at":    MaskDecisionNotSecret,
-	"reconnect_count":      MaskDecisionNotSecret,
-	"tool_count":           MaskDecisionNotSecret,
-	"isolation_defaults":   MaskDecisionNotSecret,
-	"isolation_effective":  MaskDecisionNotSecret,
-	"authenticated":        MaskDecisionNotSecret,
-	"oauth_status":         MaskDecisionNotSecret,
-	"token_expires_at":     MaskDecisionNotSecret,
-	"tool_list_token_size": MaskDecisionNotSecret,
-	"should_retry":         MaskDecisionNotSecret,
-	"retry_count":          MaskDecisionNotSecret,
-	"last_retry_time":      MaskDecisionNotSecret,
-	"user_logged_out":      MaskDecisionNotSecret,
-	"health":               MaskDecisionNotSecret, // health.detail is scrubbed free-form text
-	"quarantine":           MaskDecisionNotSecret,
-	"security_scan":        MaskDecisionNotSecret,
-	"diagnostic":           MaskDecisionNotSecret, // diagnostic.cause is scrubbed free-form text
-	"error_code":           MaskDecisionNotSecret,
+	"connected":         MaskDecisionNotSecret,
+	"connecting":        MaskDecisionNotSecret,
+	"status":            MaskDecisionNotSecret,
+	"last_error":        MaskDecisionNotSecret, // scrubbed free-form text; nothing writes back through it
+	"connected_at":      MaskDecisionNotSecret,
+	"last_reconnect_at": MaskDecisionNotSecret,
+	"reconnect_count":   MaskDecisionNotSecret,
+	"tool_count":        MaskDecisionNotSecret,
+	// isolation_defaults is READ-ONLY output, but round 7 finding 4 re-judged
+	// it: it is resolved from the operator-supplied GLOBAL docker_isolation
+	// block, so a credential in the global `extra_args` lands in it verbatim.
+	// It is masked on read like any other isolation block, and an echo is
+	// refused — nothing binds a mask back into a derived projection.
+	"isolation_defaults":              MaskDecisionRefuse,
+	"isolation_defaults.runtime_type": MaskDecisionRefuse,
+	"isolation_defaults.image":        MaskDecisionRefuse,
+	"isolation_defaults.network_mode": MaskDecisionRefuse,
+	"isolation_defaults.extra_args":   MaskDecisionRefuse,
+	"isolation_defaults.working_dir":  MaskDecisionRefuse,
+
+	// isolation_effective is derived state: an enum mode, the resolved global
+	// mode and the name of the deciding rule. None of the three can carry an
+	// operator-supplied value.
+	"isolation_effective":             MaskDecisionNotSecret,
+	"isolation_effective.mode":        MaskDecisionNotSecret,
+	"isolation_effective.global_mode": MaskDecisionNotSecret,
+	"isolation_effective.source":      MaskDecisionNotSecret,
+	"authenticated":                   MaskDecisionNotSecret,
+	"oauth_status":                    MaskDecisionNotSecret,
+	"token_expires_at":                MaskDecisionNotSecret,
+	"tool_list_token_size":            MaskDecisionNotSecret,
+	"should_retry":                    MaskDecisionNotSecret,
+	"retry_count":                     MaskDecisionNotSecret,
+	"last_retry_time":                 MaskDecisionNotSecret,
+	"user_logged_out":                 MaskDecisionNotSecret,
+	"quarantine":                      MaskDecisionNotSecret,
+	"error_code":                      MaskDecisionNotSecret,
+
+	// Health: computed status plus operator-facing prose. `detail` is the only
+	// leaf that echoes upstream text, and RedactServerSecretFields scrubs it;
+	// nothing writes back through any of them.
+	"health":             MaskDecisionNotSecret,
+	"health.level":       MaskDecisionNotSecret,
+	"health.admin_state": MaskDecisionNotSecret,
+	"health.summary":     MaskDecisionNotSecret,
+	"health.detail":      MaskDecisionNotSecret, // scrubbed free-form text
+	"health.action":      MaskDecisionNotSecret,
+
+	// Spec 044 diagnostic: a classified failure. `cause` echoes the raw connect
+	// error and is scrubbed; the rest are codes and fixed prose. Read-only.
+	"diagnostic":                       MaskDecisionNotSecret,
+	"diagnostic.code":                  MaskDecisionNotSecret,
+	"diagnostic.severity":              MaskDecisionNotSecret,
+	"diagnostic.cause":                 MaskDecisionNotSecret, // scrubbed free-form text
+	"diagnostic.user_message":          MaskDecisionNotSecret,
+	"diagnostic.docs_url":              MaskDecisionNotSecret,
+	"diagnostic.fix_steps[].type":      MaskDecisionNotSecret,
+	"diagnostic.fix_steps[].label":     MaskDecisionNotSecret,
+	"diagnostic.fix_steps[].command":   MaskDecisionNotSecret,
+	"diagnostic.fix_steps[].url":       MaskDecisionNotSecret,
+	"diagnostic.fix_steps[].fixer_key": MaskDecisionNotSecret,
+
+	// Scan results: statuses and scanner identifiers this proxy produced.
+	// Read-only; no operator value reaches them.
+	"security_scan":                                MaskDecisionNotSecret,
+	"security_scan.status":                         MaskDecisionNotSecret,
+	"security_scan.deep_scan.skipped_scanners":     MaskDecisionNotSecret,
+	"security_scan.deep_scan.scanners_failed[].id": MaskDecisionNotSecret,
+	// `reason` is a scanner's own error text; it is produced by this proxy's
+	// scanner layer, never round-tripped, and the residual net still refuses a
+	// mask arriving in it.
+	"security_scan.deep_scan.scanners_failed[].reason": MaskDecisionNotSecret,
+}
+
+func init() {
+	// Edition-gated fields (//go:build server) are recorded in their own file
+	// so the personal build does not carry decisions for paths that do not
+	// exist in it — a stale row reads as a rule being enforced when it is not.
+	for path, decision := range editionServerFieldMaskDecisions {
+		ServerFieldMaskDecisions[path] = decision
+	}
 }
