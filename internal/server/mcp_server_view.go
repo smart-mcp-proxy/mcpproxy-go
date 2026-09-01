@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
@@ -82,11 +84,50 @@ func redactedServerViews(servers []*config.ServerConfig, r redactionPolicy) []ma
 // mcp.go's `upstream_servers list` already did exactly this for `last_error`;
 // routing every such site through one helper is what stops the four call sites
 // drifting apart again.
+//
+// It does NOT truncate. Round 2 finding 3: this used to apply the 512-byte
+// ACTIVITY-STORE cap, which is a property of a persisted row and not of a live
+// read — so every `tail_log` line, `connection_status.last_error` and
+// `connection_message` was silently cut at 512 bytes. tail_log is the primary
+// debugging surface and a long line is precisely what an operator opens it for.
+// The cap now lives on scrubUpstreamTextForAudit, where it belongs.
 func scrubUpstreamText(s string) string {
 	if s == "" {
 		return s
 	}
-	return auditRedaction.capString(maskDetectedSecrets(oauth.RedactSensitiveData(s)))
+	return maskDetectedSecrets(oauth.RedactSensitiveData(s))
+}
+
+// scrubUpstreamTextForAudit is scrubUpstreamText for a string that will be
+// PERSISTED — an activity row's error message or a non-JSON response body. It
+// adds the activity store's size cap so one enormous upstream error cannot
+// bloat BBolt, which is the only thing the two paths need to differ on.
+func scrubUpstreamTextForAudit(s string) string {
+	return auditRedaction.capString(scrubUpstreamText(s))
+}
+
+// scrubbedConnectionStatus returns a copy of a managed client's
+// GetConnectionStatus() map with every string leaf scrubbed.
+//
+// Round 2 finding 2: `inspect_quarantined` — the sibling operation of the
+// `list_quarantined` path #1148 fixed, one screen away in the same file —
+// rendered this map straight into its response, and the map carries
+// `last_error`, which routinely echoes the upstream URL with its query
+// credentials. The copy matters: the map belongs to the caller's diagnostic
+// path, which must keep seeing the real error.
+func scrubbedConnectionStatus(status map[string]interface{}) map[string]interface{} {
+	if status == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(status))
+	for k, v := range status {
+		if s, ok := v.(string); ok {
+			out[k] = scrubUpstreamText(s)
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // scrubUpstreamLines scrubs a batch of log lines.
@@ -118,7 +159,7 @@ func redactBuiltinResponseForActivity(responseText string) interface{} {
 	}
 	var parsed interface{}
 	if err := json.Unmarshal([]byte(responseText), &parsed); err != nil || parsed == nil {
-		return scrubUpstreamText(responseText)
+		return scrubUpstreamTextForAudit(responseText)
 	}
 	return redactValueWith("", parsed, auditRedaction)
 }
@@ -191,41 +232,194 @@ func redactedArgsFallback(args []string, r redactionPolicy) []string {
 // env and headers.
 //
 // The mapping is built from the STORED vector through redactedArgs, i.e. the
-// same function the read path used, so the two cannot drift. Matching is by
-// VALUE rather than by position, because `args_json` may legitimately reorder
-// or resize the vector.
+// same function the read path used, so the two cannot drift.
 //
-// Two deliberate refusals:
-//   - a masked rendering produced by two DIFFERENT stored tokens is ambiguous;
-//     reverting it would be a guess, so it is left as the client sent it;
-//   - a token whose masked rendering equals itself (an ordinary argument the
-//     read path did not touch) is not a mask at all and is never reverted.
+// The revert is BOUND to the slot the mask came from — round 2 finding 1. The
+// first cut matched by VALUE anywhere in the vector, which made this far worse
+// than the disclosure it was added to prevent:
+//
+//   - RELOCATION. `args_json` replaces the whole vector and the caller also
+//     controls `command`, so `{"command":"sh","args_json":"[\"-c\",\"<mask>\"]"}`
+//     had mcpproxy substitute the real credential into an attacker-chosen
+//     command line.
+//   - RE-DISCLOSURE, which is the sharper one. A credential masked because of
+//     the FLAG in front of it (`--api-key <secret>`) has no credential shape of
+//     its own. Move it into a bare positional slot and the read path no longer
+//     recognises it, so the very next `upstream_servers list` hands it back in
+//     the clear — a masked-read → relocate-write → read-back chain that undoes
+//     all of #1148, over an endpoint that is unauthenticated by default.
+//
+// So a stored token is restored ONLY to the index it was masked at, and only
+// when the token that BOUND the mask is unchanged:
+//
+//   - a value masked because of the preceding flag requires that same flag
+//     still to precede it (`--api-key` cannot become `--exfil-to`);
+//   - an inline `--flag=<mask>` carries its own flag inside the token, so token
+//     equality already binds it;
+//   - a detector-recognised token (`ghp_…`) is masked by its own shape, so it
+//     is still masked wherever it ends up and re-disclosure is impossible.
+//
+// This is the same shape as the safeguards the sibling contracts already carry:
+// oauth.UnmaskEnvValues / UnmaskHeaders bind to the map KEY, and UnmaskURL
+// refuses to move a stored secret onto a different scheme/host. A vector that
+// was reordered or resized simply does not round-trip its masks; the caller
+// resends the real values, which is the safe direction.
 func unmaskArgv(incoming, stored []string) []string {
 	if incoming == nil || len(stored) == 0 {
 		return incoming
 	}
 
 	maskedStored := redactedArgs(stored, liveRedaction)
-	revert := make(map[string]string, len(stored))
-	ambiguous := make(map[string]bool, len(stored))
-	for i, masked := range maskedStored {
-		if masked == stored[i] {
-			continue // not a mask
-		}
-		if existing, seen := revert[masked]; seen && existing != stored[i] {
-			ambiguous[masked] = true
-			continue
-		}
-		revert[masked] = stored[i]
-	}
+	flagBound := argvFlagBoundMasks(stored)
 
 	out := make([]string, len(incoming))
 	for i, token := range incoming {
-		if original, ok := revert[token]; ok && !ambiguous[token] {
-			out[i] = original
+		out[i] = token
+		if i >= len(stored) || maskedStored[i] == stored[i] || token != maskedStored[i] {
+			// Out of range, not a mask at all, or a genuine edit.
 			continue
 		}
-		out[i] = token
+		// argvFlagBoundMasks never marks index 0, so i >= 1 here.
+		if flagBound[i] && incoming[i-1] != stored[i-1] {
+			// The flag that made this value a secret is gone or different;
+			// restoring here would move the credential to a flag the caller
+			// chose. Leave the mask literal — the write then carries a value
+			// that is obviously not a credential rather than the real one.
+			continue
+		}
+		out[i] = stored[i]
 	}
 	return out
+}
+
+// argvFlagBoundMasks reports, per index of the stored vector, whether that
+// token would be masked BECAUSE OF the flag in front of it rather than because
+// of its own shape. Mirrors the `maskNext` rule in redactArgvWith.
+//
+// It deliberately over-reports rather than under-reports: after a masked value
+// is consumed, redactArgvWith resets the pairing, so a run of sensitive-looking
+// flags marks one index here that the masker did not pair. An extra index only
+// makes unmaskArgv stricter (it also demands the preceding token be unchanged),
+// which is the safe direction; a missed index would drop a binding.
+func argvFlagBoundMasks(stored []string) []bool {
+	bound := make([]bool, len(stored))
+	for i := 1; i < len(stored); i++ {
+		prev := stored[i-1]
+		bound[i] = isArgvFlag(prev) && oauth.IsSensitiveKeyName(argvFlagKey(prev))
+	}
+	return bound
+}
+
+// unmaskLiveEnvValues reverts env values a client echoed back exactly as the
+// LIVE VIEW rendered them, before oauth.UnmaskEnvValues gets the map.
+//
+// Round 2 finding 7 let the live policy's value-shaped detector fire on a leaf
+// the name rule left untouched (`env: {BENIGN: ghp_…}`), which is a rendering
+// oauth.UnmaskEnvValues cannot recognise — it compares against oauth.
+// maskedEnvValue. Without this mirror, masking that leaf would trade a
+// disclosure for the read-modify-write corruption of #1142/#1146.
+//
+// Binding is by KEY, exactly as oauth's own unmaskers bind, so a value can only
+// ever be restored to the variable it was read from.
+func unmaskLiveEnvValues(incoming, stored map[string]string) map[string]string {
+	return unmaskLiveMap(incoming, stored, func(k, v string) string {
+		return redactEnvValueWith(k, v, liveRedaction)
+	})
+}
+
+// unmaskLiveHeaders is unmaskLiveEnvValues for header maps.
+func unmaskLiveHeaders(incoming, stored map[string]string) map[string]string {
+	return unmaskLiveMap(incoming, stored, func(k, v string) string {
+		return redactHeaderValueWith(k, v, liveRedaction)
+	})
+}
+
+func unmaskLiveMap(incoming, stored map[string]string, rendered func(k, v string) string) map[string]string {
+	if incoming == nil || len(stored) == 0 {
+		return incoming
+	}
+	out := make(map[string]string, len(incoming))
+	for k, v := range incoming {
+		if sv, ok := stored[k]; ok && v == rendered(k, sv) {
+			out[k] = sv
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// unmaskLiveURL reverts a URL echoed back exactly as the live view rendered it.
+// A genuinely edited URL falls through to oauth.UnmaskURL, which restores the
+// individual masked components under its own authority safeguard.
+func unmaskLiveURL(incoming, stored string) string {
+	if incoming == "" || stored == "" {
+		return incoming
+	}
+	if incoming == redactStringWith("url", stored, liveRedaction) {
+		return stored
+	}
+	return oauth.UnmaskURL(incoming, stored)
+}
+
+// unmaskLiveOAuth reverts a masked oauth.client_secret echoed back by a client.
+//
+// Round 2 finding 6: #1148 started masking client_secret on the MCP read
+// surface (`quarantine_security list_quarantined` renders the WHOLE config)
+// without giving the write path anything to recognise the mask by, so a
+// read-modify-write through `oauth_json` — which REPLACES the oauth block —
+// persisted `••••42 (17 chars)` as the client secret. Read and write now agree
+// on the same rendering, bound to the field it came from.
+//
+// The REST API is not affected in either direction: contracts.OAuthConfig
+// carries no client_secret, so no REST response ever renders one.
+func unmaskLiveOAuth(incoming, stored *config.OAuthConfig) {
+	if incoming == nil || stored == nil || stored.ClientSecret == "" {
+		return
+	}
+	if incoming.ClientSecret == redactStringWith("client_secret", stored.ClientSecret, liveRedaction) {
+		incoming.ClientSecret = stored.ClientSecret
+	}
+}
+
+// inspectConnectionTimeoutError renders `inspect_quarantined`'s
+// connection-timeout diagnostic (issue #1148, round 2 finding 2).
+//
+// The status map is scrubbed rather than dropped: which state the client is in,
+// how many retries it has burned and what the (redacted) error was is the whole
+// value of this message to an operator deciding whether a quarantined server is
+// merely broken or actively hostile.
+func inspectConnectionTimeoutError(serverName string, timeout time.Duration, status map[string]interface{}) string {
+	return fmt.Sprintf(
+		"Quarantined server '%s' failed to connect within %v timeout. Connection status: %v. "+
+			"This may indicate the server process is not running, there's a network issue, "+
+			"or the server is unstable (see issue #105).",
+		serverName, timeout, scrubbedConnectionStatus(status))
+}
+
+// inspectConnectionFailedAnalysis renders `inspect_quarantined`'s
+// tool-retrieval-failed payload with the connection status and the raw upstream
+// error scrubbed (issue #1148, round 2 finding 2).
+func inspectConnectionFailedAnalysis(serverName string, status map[string]interface{}, err error) []map[string]interface{} {
+	info := scrubbedConnectionStatus(status)
+	if info == nil {
+		info = map[string]interface{}{}
+	}
+	detail := ""
+	if err != nil {
+		detail = scrubUpstreamText(err.Error())
+	}
+	info["connection_error"] = detail
+
+	return []map[string]interface{}{{
+		"server_name": serverName,
+		"status":      "QUARANTINED_CONNECTION_FAILED",
+		"message": fmt.Sprintf(
+			"Server '%s' is quarantined and connection failed during tool retrieval. "+
+				"This may indicate the server process crashed or disconnected.", serverName),
+		"connection_info": info,
+		"error_details":   detail,
+		"next_steps":      "The server connection failed. Check server process status, logs, and configuration. Server may need to be restarted.",
+		"security_note":   "Connection failure prevents tool analysis. Server must be stable and connected for security inspection.",
+	}}
 }

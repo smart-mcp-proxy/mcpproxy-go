@@ -346,15 +346,18 @@ func TestUnmaskArgv_RevertsEchoedMasks(t *testing.T) {
 		assert.Equal(t, incoming, unmaskArgv(incoming, stored))
 	})
 
-	t.Run("an ambiguous mask is not guessed", func(t *testing.T) {
-		// Two DIFFERENT stored tokens whose masked renderings collide
-		// (MaskValue carries only the length and last two bytes): reverting
-		// either would be a guess, so the mask is left alone rather than
-		// restoring the wrong secret over the other one.
-		ambiguous := []string{"--api-key", "aaaaaaaaaXY", "--token", "bbbbbbbbbXY"}
-		maskedAmbiguous := redactedArgs(ambiguous, liveRedaction)
-		got := unmaskArgv(maskedAmbiguous, ambiguous)
-		assert.Equal(t, maskedAmbiguous, got)
+	t.Run("colliding masks are resolved by position, not guessed", func(t *testing.T) {
+		// Two DIFFERENT stored tokens whose masked renderings collide —
+		// MaskValue carries only the length and the last two bytes. The first
+		// cut matched by VALUE, so it could not tell them apart and refused to
+		// revert either. Binding the revert to the index it was masked at
+		// (round 2, finding 1) makes the collision a non-event: each slot
+		// restores its OWN stored token and neither secret can land in the
+		// other's slot.
+		colliding := []string{"--api-key", "aaaaaaaaaXY", "--token", "bbbbbbbbbXY"}
+		maskedColliding := redactedArgs(colliding, liveRedaction)
+		require.Equal(t, maskedColliding[1], maskedColliding[3], "precondition: the renderings collide")
+		assert.Equal(t, colliding, unmaskArgv(maskedColliding, colliding))
 	})
 
 	t.Run("nil and empty are passed through", func(t *testing.T) {

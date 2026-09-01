@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -183,7 +184,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	logger := zap.L().Named("transport")
 
 	logger.Error("🚨 TRANSPORT HTTP CLIENT CREATION",
-		zap.String("url", cfg.URL),
+		zap.String("url", cfg.logSafeURL()),
 		zap.Bool("oauth_config_nil", cfg.OAuthConfig == nil),
 		zap.Bool("use_oauth", cfg.UseOAuth))
 
@@ -192,34 +193,34 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	logger.Debug("Creating HTTP client",
-		zap.String("url", cfg.URL),
+		zap.String("url", cfg.logSafeURL()),
 		zap.Bool("use_oauth", cfg.UseOAuth),
 		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
 
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
 		// Use OAuth-enabled client with Dynamic Client Registration
 		logger.Info("Creating OAuth-enabled streamable HTTP client with Dynamic Client Registration",
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
 			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
 			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled))
 
 		logger.Debug("OAuth config details",
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
-			zap.String("client_secret", cfg.OAuthConfig.ClientSecret),
+			zap.Bool("has_client_secret", cfg.OAuthConfig.ClientSecret != ""),
 			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
 
 		logger.Debug("🔧 About to create OAuth client with mcp-go library",
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI))
 
 		logger.Info("Creating OAuth HTTP client with context-based timeout",
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.String("note", "Using 30-minute context timeout from tray"))
 
 		// Add detailed logging about the OAuth config and token store
 		logger.Info("🔍 OAuth HTTP client creation details",
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
 			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
 			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled),
@@ -255,7 +256,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		return client, nil
 	}
 
-	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.URL))
+	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.logSafeURL()))
 
 	// Apply brokered per-user auth injection (spec 074): replaces any configured
 	// auth header with the resolved per-user credential and never forwards the
@@ -311,30 +312,30 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	logger.Debug("Creating SSE client",
-		zap.String("url", cfg.URL),
+		zap.String("url", cfg.logSafeURL()),
 		zap.Bool("use_oauth", cfg.UseOAuth),
 		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
 
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
 		// Use OAuth-enabled SSE client with Dynamic Client Registration
 		logger.Info("Creating OAuth-enabled SSE client with Dynamic Client Registration",
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
 			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
 			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled))
 
 		logger.Debug("OAuth SSE config details",
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
-			zap.String("client_secret", cfg.OAuthConfig.ClientSecret),
+			zap.Bool("has_client_secret", cfg.OAuthConfig.ClientSecret != ""),
 			zap.Any("token_store", cfg.OAuthConfig.TokenStore))
 
 		logger.Info("Creating OAuth SSE client with context-based timeout",
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.String("note", "Using 30-minute context timeout from tray"))
 
 		// Add detailed logging about the OAuth config and token store
 		logger.Info("🔍 OAuth SSE client creation details",
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.String("redirect_uri", cfg.OAuthConfig.RedirectURI),
 			zap.Strings("scopes", cfg.OAuthConfig.Scopes),
 			zap.Bool("pkce_enabled", cfg.OAuthConfig.PKCEEnabled),
@@ -368,7 +369,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		return client, nil
 	}
 
-	logger.Debug("Creating regular SSE client", zap.String("url", cfg.URL))
+	logger.Debug("Creating regular SSE client", zap.String("url", cfg.logSafeURL()))
 
 	// Apply brokered per-user auth injection (spec 074): replaces any configured
 	// auth header with the resolved per-user credential and never forwards the
@@ -400,7 +401,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	logger.Info("Creating SSE MCP client with indefinite timeout for long-lived streams",
-		zap.String("url", cfg.URL),
+		zap.String("url", cfg.logSafeURL()),
 		zap.Duration("idle_timeout", 300*time.Second),
 		zap.Duration("header_timeout", 30*time.Second),
 		zap.Int("header_count", len(headers)),
@@ -410,7 +411,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	if logger.Core().Enabled(zap.DebugLevel - 1) { // Trace level
 		logger.Debug("TRACE SSE TRANSPORT SETUP",
 			zap.String("transport_type", "sse"),
-			zap.String("url", cfg.URL),
+			zap.String("url", cfg.logSafeURL()),
 			zap.Duration("idle_timeout", 300*time.Second),
 			zap.Duration("response_header_timeout", 30*time.Second),
 			zap.String("debug_note", "SSE client will establish persistent connection for JSON-RPC over SSE with no overall timeout"))
@@ -458,4 +459,24 @@ func DetermineTransportType(serverConfig *config.ServerConfig) string {
 
 	// Default to stdio
 	return TransportStdio
+}
+
+// logSafeURL renders the configured upstream URL for a LOG FIELD, with its
+// credential-bearing query parameters and any userinfo password masked.
+//
+// Issue #1148 (round 2, finding 8): every HTTP/SSE client creation logged the
+// raw cfg.URL — at Error level on the streamable-HTTP path, so it fired on
+// every attempt regardless of log level — writing `?token=…` and
+// `https://user:pass@host` straight into main.log. internal/upstream/core
+// already routes its own connection logging through an identical helper
+// (Client.logSafeURL); this is the same fix for the transport layer, which the
+// first cut of #1148 missed.
+//
+// oauth.RedactURLQueryParams leaves scheme, host, path and non-sensitive
+// parameters verbatim, so the log field stays as diagnosable as it was.
+func (c *HTTPTransportConfig) logSafeURL() string {
+	if c == nil {
+		return ""
+	}
+	return oauth.RedactURLQueryParams(c.URL)
 }

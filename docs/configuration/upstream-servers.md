@@ -158,9 +158,31 @@ masked values. Nothing else changes: every other operation an unauthenticated
 MCP client can perform today still works.
 
 Argument vectors are masked too: a credential passed as `--api-key sk-…` in
-`args` is masked by flag name and by value shape, and a masked argument echoed
-back through `args_json` is reverted to the stored value rather than persisted
-over it.
+`args` is masked by flag name, by value shape and — since the review round on
+the same issue — by URL shape in every spelling (`--flag <url>`, `--flag=<url>`
+and a bare positional token all mask `?token=…` and `https://user:pass@host`).
+
+A masked value echoed back on the write path is reverted to the stored value
+rather than persisted over it, and every revert is **bound to where the value
+was read from**:
+
+| Field | Bound by |
+|-------|----------|
+| `env_json` / `headers_json` | the map key |
+| `url` | the stored scheme, host:port and username |
+| `oauth_json` → `client_secret` | the field |
+| `args_json` | the **index**, plus the flag that preceded it |
+
+The argv binding matters: `args_json` replaces the whole vector and the caller
+also chooses `command`, so a revert matched by value alone would let a caller
+move a stored credential into a command line of its own choosing — or into a
+positional slot the read path does not mask, and read it back in the clear. A
+reordered or resized vector therefore does **not** round-trip its masks; resend
+the real values, or omit `args_json` when you are not changing the arguments.
+
+The argv mask is a rendering of the **MCP** read surface. The REST API returns
+`args` unredacted and accepts it unchanged, so REST reads and writes remain
+self-consistent; only the MCP write path reverts an MCP-rendered mask.
 
 ### How you edit them
 

@@ -290,21 +290,31 @@ type redactionPolicy struct {
 	// limit caps each string leaf, or 0 for no cap.
 	limit int
 	// detectContractedLeaves runs the value-shaped secret detector over the
-	// THREE leaf kinds internal/oauth owns a write-path unmask contract for:
-	// env values, header values and the server URL.
+	// THREE leaf kinds internal/oauth owns a write-path unmask contract for —
+	// env values, header values and the server URL — EVEN WHEN the name/URL
+	// rules already rewrote them.
 	//
-	// Those three must render EXACTLY as oauth.maskedEnvValue /
-	// maskedHeaderValue / RedactURLQueryParams do, because
-	// oauth.UnmaskEnvValues / UnmaskHeaders / UnmaskURL recognise an echoed
-	// mask by comparing against that rendering byte for byte. A live surface
-	// that rendered them any other way would make a read-modify-write client
-	// persist the mask OVER the real secret — so live surfaces turn this off
-	// and inherit oauth's coverage (which already includes
-	// RedactSensitiveData) for those three.
+	// Only the audit policy sets it. Those rows are never written back, so
+	// nothing constrains their rendering and maximal masking wins.
+	//
+	// A LIVE surface cannot mask unconditionally: oauth.UnmaskEnvValues /
+	// UnmaskHeaders / UnmaskURL recognise an echoed mask by comparing against
+	// oauth's own rendering byte for byte, and #872 deliberately renders a
+	// connection string component-wise (`postgres://u:••••(N chars)@host/db`)
+	// so an operator can edit the database name without the password mask
+	// being persisted as the password.
+	//
+	// It does NOT follow that a live surface must skip the detector entirely,
+	// which is what round 2 finding 7 caught: a vendor-shaped credential under
+	// a benign name (`env: {BENIGN: ghp_…}`) is invisible to the name matcher,
+	// so the audit policy masked it while the LIVE surface — the one an
+	// unauthenticated /mcp caller reads — published it. See detectContracted
+	// for the narrow rule that closes it, and unmaskLive* in
+	// mcp_server_view.go for the matching write-path revert.
 	//
 	// Every OTHER leaf — argv tokens, and any present or future string field
-	// of ServerConfig — is detector-masked unconditionally: nothing unmasks
-	// those, so there is no contract to honour and maximal masking wins.
+	// of ServerConfig — is detector-masked unconditionally under both
+	// policies: nothing unmasks those, so there is no contract to honour.
 	detectContractedLeaves bool
 }
 
@@ -410,7 +420,7 @@ func redactStringWith(key, s string, r redactionPolicy) string {
 	case isActivityHeadersKey(key):
 		return redactHeaderValueWith(key, s, r)
 	case strings.EqualFold(key, "url"):
-		return r.capString(r.detectContracted(oauth.RedactURLQueryParamsWith(s, r.mask)))
+		return r.capString(r.detectContracted(s, oauth.RedactURLQueryParamsWith(s, r.mask)))
 	default:
 		// An UNCONTRACTED leaf: a plain config field, a future field, or an
 		// argv token's value. Nothing unmasks these, so the detector always
@@ -425,16 +435,32 @@ func redactStringWith(key, s string, r redactionPolicy) string {
 // rendering if a client echoes it back on the write path.
 func redactEnvValueWith(name, value string, r redactionPolicy) string {
 	masked := oauth.RedactEnvValuesWith(map[string]string{name: value}, r.mask)[name]
-	return r.capString(r.detectContracted(masked))
+	return r.capString(r.detectContracted(value, masked))
 }
 
-// detectContracted runs the value-shaped detector only for a policy that opted
-// in for the contracted leaves. See redactionPolicy.detectContractedLeaves.
-func (r redactionPolicy) detectContracted(s string) string {
-	if !r.detectContractedLeaves {
-		return s
+// detectContracted runs the value-shaped detector over a leaf that
+// internal/oauth owns a write-path unmask contract for (env value, header
+// value, server URL). `original` is the value before the name/URL rule ran,
+// `masked` the value after.
+//
+// AUDIT: always. Nothing writes back through an audit row.
+//
+// LIVE: only when the name/URL rule left the value BYTE-IDENTICAL (round 2
+// finding 7). That is exactly the reported gap — a credential the name matcher
+// cannot see, like `ghp_…` under `BENIGN_NAME` — and the guard is what keeps it
+// from collapsing the #872 component-wise connection-string rendering, whose
+// readable scheme/host/db the operator's edit flow depends on.
+//
+// When the detector does fire on a live surface the rendering is no longer
+// oauth's, so oauth.UnmaskEnvValues / UnmaskHeaders / UnmaskURL can no longer
+// recognise an echoed mask. unmaskLiveEnvValues / unmaskLiveHeaders /
+// unmaskLiveURL (mcp_server_view.go) reproduce THIS rendering and run first on
+// the write path, so the round trip still cannot persist a mask over a secret.
+func (r redactionPolicy) detectContracted(original, masked string) string {
+	if !r.detectContractedLeaves && masked != original {
+		return masked
 	}
-	return maskDetectedSecrets(s)
+	return maskDetectedSecrets(masked)
 }
 
 // redactHeaderValueWith masks one HTTP header leaf, judged by the header
@@ -448,7 +474,7 @@ func (r redactionPolicy) detectContracted(s string) string {
 // both is the only combination that closes each other's gap.
 func redactHeaderValueWith(name, value string, r redactionPolicy) string {
 	masked := oauth.RedactStringHeadersWith(map[string]string{name: value}, r.mask)[name]
-	return r.capString(r.detectContracted(masked))
+	return r.capString(r.detectContracted(value, masked))
 }
 
 // redactActivityConfigValues redacts a flat before/after value map for a
@@ -532,7 +558,20 @@ func redactArgvWith(argv []interface{}, r redactionPolicy) []interface{} {
 			continue
 		}
 
-		out[i] = r.capString(maskDetectedSecrets(s))
+		// An unpaired token — a positional argument, a flag name, or the value
+		// of a flag whose name says nothing. Round 2 finding 5: this ran the
+		// value-shaped detector ALONE, which knows database connection strings
+		// but not `https://user:pass@host` or `https://host?token=…`. So
+		// `--endpoint https://host?token=…` and the bare positional spelling
+		// both emitted the credential verbatim while the identical
+		// `--endpoint=https://host?token=…` was masked — the same
+		// inline-vs-space asymmetry round 3 of #1146 already fixed once.
+		//
+		// Routing through redactStringWith with NO enclosing key is what keeps
+		// the two spellings in step by construction: it is the same function
+		// the inline branch delegates to, so the URL rule, the env-name rule
+		// and the detector all apply to every spelling.
+		out[i] = redactStringWith("", s, r)
 		maskNext = isArgvFlag(s) && oauth.IsSensitiveKeyName(argvFlagKey(s))
 	}
 

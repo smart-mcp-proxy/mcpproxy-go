@@ -3420,7 +3420,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamText(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamTextForAudit(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
 		// Issue #1148: the activity store persists in BBolt, streams over SSE
 		// and is exported by `mcpproxy activity list`, so the response is
@@ -3538,7 +3538,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamText(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamTextForAudit(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
 		// Issue #1148: see the matching net in handleUpstreamServers.
 		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, redactBuiltinResponseForActivity(responseText), nil, "")
@@ -4404,8 +4404,9 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 
 		// Try to get connection status for diagnostics
 		if c, exists := p.upstreamManager.GetClient(serverName); exists {
-			connectionStatus := c.GetConnectionStatus()
-			return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within %v timeout. Connection status: %v. This may indicate the server process is not running, there's a network issue, or the server is unstable (see issue #105).", serverName, connectionTimeout, connectionStatus)), nil
+			// Issue #1148 (round 2, finding 2): the status map carries
+			// last_error, which echoes the upstream URL with its credentials.
+			return mcp.NewToolResultError(inspectConnectionTimeoutError(serverName, connectionTimeout, c.GetConnectionStatus())), nil
 		}
 
 		return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within %v timeout. Client was never created, indicating the server may not be properly configured.", serverName, connectionTimeout)), nil
@@ -4417,7 +4418,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 				zap.String("server", serverName),
 				zap.Error(result.err))
 			supervisor.RecordInspectionFailure(serverName)
-			return mcp.NewToolResultError(fmt.Sprintf("Connection wait failed: %v", result.err)), nil
+			return mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Connection wait failed: %v", result.err))), nil
 		}
 
 		client = result.client
@@ -4451,21 +4452,11 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 			// Force disconnect the client to update its state
 			_ = client.Disconnect()
 
-			// Provide connection error information instead of failing completely
-			connectionStatus := client.GetConnectionStatus()
-			connectionStatus["connection_error"] = err.Error()
-
-			toolsAnalysis = []map[string]interface{}{
-				{
-					"server_name":     serverName,
-					"status":          "QUARANTINED_CONNECTION_FAILED",
-					"message":         fmt.Sprintf("Server '%s' is quarantined and connection failed during tool retrieval. This may indicate the server process crashed or disconnected.", serverName),
-					"connection_info": connectionStatus,
-					"error_details":   err.Error(),
-					"next_steps":      "The server connection failed. Check server process status, logs, and configuration. Server may need to be restarted.",
-					"security_note":   "Connection failure prevents tool analysis. Server must be stable and connected for security inspection.",
-				},
-			}
+			// Provide connection error information instead of failing
+			// completely — scrubbed, because both the status map's last_error
+			// and the raw ListTools error echo the upstream URL with its
+			// credentials (issue #1148, round 2, finding 2).
+			toolsAnalysis = inspectConnectionFailedAnalysis(serverName, client.GetConnectionStatus(), err)
 		} else {
 			// Successfully retrieved tools, proceed with security analysis
 			for _, tool := range tools {
@@ -5204,7 +5195,9 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		// #872: the read path masks URL query/userinfo secrets; if a caller
 		// echoes the masked url back, restore the stored real secrets so the
 		// mask is never persisted over them (parity with the REST PATCH path).
-		patch.URL = oauth.UnmaskURL(url, existingServer.URL)
+		// #1148 round 2: unmaskLiveURL recognises THIS surface's rendering
+		// first, then defers to oauth.UnmaskURL for a genuinely edited URL.
+		patch.URL = unmaskLiveURL(url, existingServer.URL)
 	}
 	if protocol := request.GetString("protocol", ""); protocol != "" {
 		patch.Protocol = protocol
@@ -5279,7 +5272,10 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 		}
 		// #872: revert any masked env value echoed back by the caller.
-		patch.Env = oauth.UnmaskEnvValues(patch.Env, existingServer.Env)
+		// #1148 round 2: the live view can mask a value oauth's name rule left
+		// alone (a vendor-shaped credential under a benign name), so this
+		// surface's own rendering is recognised first.
+		patch.Env = oauth.UnmaskEnvValues(unmaskLiveEnvValues(patch.Env, existingServer.Env), existingServer.Env)
 	}
 
 	// Handle headers JSON string - maps are deep merged with RFC 7396 null-means-remove
@@ -5303,7 +5299,8 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 		}
 		// #872: revert any masked header value echoed back by the caller.
-		patch.Headers = oauth.UnmaskHeaders(patch.Headers, existingServer.Headers)
+		// #1148 round 2: see the env note above.
+		patch.Headers = oauth.UnmaskHeaders(unmaskLiveHeaders(patch.Headers, existingServer.Headers), existingServer.Headers)
 	}
 
 	// Handle isolation JSON string - deep merge for nested config
@@ -5359,6 +5356,11 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			if err := json.Unmarshal([]byte(oauthJSON), &oauth); err != nil {
 				return nil, opts, fmt.Errorf("invalid oauth_json format: %v", err)
 			}
+			// #1148 round 2 (finding 6): list_quarantined renders the WHOLE
+			// config, so client_secret is masked on the read surface — and
+			// oauth_json REPLACES the block, so an unedited echo would persist
+			// the mask over the real secret. Revert it, bound to the field.
+			unmaskLiveOAuth(&oauth, existingServer.OAuth)
 			if err := oauth.Validate(); err != nil {
 				return nil, opts, fmt.Errorf("invalid oauth_json: %w", err)
 			}

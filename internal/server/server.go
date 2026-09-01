@@ -993,6 +993,40 @@ func (s *Server) Start(ctx context.Context) error {
 
 // stdioAuthContext installs the authenticated-admin context for the stdio
 // transport. See the ServeStdio call site above (issue #1148).
+//
+// Round 2 finding 9 asked for the nil-sensitive paths this changes to be
+// enumerated rather than assumed. Every consumer of auth.AuthContextFromContext
+// reachable from an MCP handler, and what a stdio session now does differently:
+//
+//	CHANGED, and intended — stdio now behaves exactly like the API-key admin it
+//	is, instead of like an absent identity:
+//	  - workspace.go principalFromContext: "" → "admin". Session grouping names
+//	    the local principal instead of degrading to client+project.
+//	  - preflight_glue.go sessionPreflightScope: nil (unrestricted) → a Scope
+//	    over the whole server universe. An admin is in scope for every server,
+//	    so the same set is allowed; the scope is merely materialised, and can
+//	    now surface a storage error that only fires when ListUpstreams itself
+//	    fails.
+//	  - mcp.go handleListUpstreams: CanRevealSecrets() nil → false, admin →
+//	    true. This is the point of the change: `reveal_secret_headers` keeps
+//	    working for the local operator on stdio.
+//
+//	CHANGED shape, identical outcome:
+//	  - mcp_code_execution.go: options.AuthContext and ToolAnnotationFunc are
+//	    now set. jsruntime's AuthInfo.CanAccessServer / HasPermission both
+//	    short-circuit true for type "admin", so nothing is newly denied; only
+//	    an annotation lookup is added per dispatch.
+//	  - mcp_routing.go direct dispatch: the access and permission checks now
+//	    run, and both pass for an admin.
+//	  - mcp_describe_check.go: record.UserID / UserEmail are read off the
+//	    context and are empty on an admin context, so the record is unchanged.
+//
+//	UNCHANGED — these gate on agent/user identity, which an admin context is
+//	not, or already read nil as admin:
+//	  profile_resolver.go, mcp_direct_scope.go, mcp_direct_callability.go,
+//	  mcp_describe_direct.go, mcp_visibility.go,
+//	  observability_edition_server.go, auth.AuthorizeServerOp and the
+//	  `authCtx != nil && !authCtx.IsAdmin()` gates in mcp.go.
 func stdioAuthContext(ctx context.Context) context.Context {
 	return auth.WithAuthContext(ctx, auth.AdminContext())
 }

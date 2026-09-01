@@ -120,6 +120,21 @@ var tokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[a-zA-Z0-9\-_\.]+`)
 // secretPattern matches common secret patterns.
 var secretPattern = regexp.MustCompile(`(?i)(secret|password|token|key)["']?\s*[:=]\s*["']?[a-zA-Z0-9\-_\.]+`)
 
+// urlUserinfoPattern matches the `scheme://user:password@` prefix of a URL
+// embedded in free-form text (issue #1148, review round 2).
+//
+// RedactURLQueryParams has masked the userinfo password since #872, but that
+// function only ever sees a value the caller already knows is a URL. The
+// free-form scrubbers — connection errors, tailed log lines, health.detail —
+// see a URL buried in a sentence, and neither tokenPattern (bearer only) nor
+// secretPattern (`<name>=<value>`) nor the `<param>=` sweep below has any
+// `user:pass@` shape, so a basic-auth password travelled through all of them in
+// the clear.
+//
+// The username is deliberately kept: it is the operator's signal for WHICH
+// credential failed, and it is not the secret.
+var urlUserinfoPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)([^\s/:@]+):([^\s/@]+)@`)
+
 // RedactSensitiveData redacts sensitive information from a string.
 // It replaces tokens, secrets, and other sensitive data with redacted placeholders.
 func RedactSensitiveData(data string) string {
@@ -127,8 +142,22 @@ func RedactSensitiveData(data string) string {
 		return data
 	}
 
+	// Redact URL userinfo passwords (scheme://user:pass@host).
+	result := urlUserinfoPattern.ReplaceAllStringFunc(data, func(match string) string {
+		groups := urlUserinfoPattern.FindStringSubmatch(match)
+		if len(groups) != 4 {
+			return match
+		}
+		// A ${keyring:…}/${env:…} reference is a label, not a secret; masking
+		// it would erase exactly what makes the line diagnosable.
+		if isConfigReference(groups[3]) {
+			return match
+		}
+		return groups[1] + groups[2] + ":***REDACTED***@"
+	})
+
 	// Redact Bearer tokens
-	result := tokenPattern.ReplaceAllString(data, "${1}***REDACTED***")
+	result = tokenPattern.ReplaceAllString(result, "${1}***REDACTED***")
 
 	// Redact secrets and passwords
 	result = secretPattern.ReplaceAllStringFunc(result, func(match string) string {
