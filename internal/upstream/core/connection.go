@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 
 	"go.uber.org/zap"
@@ -51,6 +52,67 @@ const (
 // parseOAuthError extracts structured error information from OAuth provider responses
 
 // Connect establishes connection to the upstream server
+// logSafeURL renders the configured upstream URL for a LOG FIELD, with its
+// query credentials masked (issue #1148).
+//
+// Connect() logs the URL on every attempt, to main.log and to the per-server
+// server-<name>.log — and `upstream_servers tail_log` hands the latter to any
+// MCP caller. A URL is one of the commonest places an MCP credential lives
+// (`?token=…`, an Azure SAS `sig=`, an AWS `X-Amz-Signature=`), so the value is
+// masked at the point it is written rather than only where it is read back:
+// the file outlives the process and is readable by anything with disk access.
+//
+// The host and path survive, which is what makes the line diagnostic.
+func (c *Client) logSafeURL() string {
+	if c.config == nil {
+		return ""
+	}
+	return oauth.RedactURLQueryParams(c.config.URL)
+}
+
+// redactURLCredentialsInError strips URL-embedded credentials from an error's
+// TEXT while keeping the error itself intact for errors.Is/As and for the
+// substring classification the connect paths do (isAuthError, isConfigError,
+// "connection refused"): only the sensitive query values and userinfo
+// passwords are rewritten.
+//
+// Issue #1148, round 3: masking the `url` LOG FIELDS is not enough, because the
+// transport error carries the same URL inside its message —
+// `Post "http://host/mcp?token=…": dial tcp: connection refused` — and that
+// message is logged at Error level by the manager on every failed attempt, is
+// written to the per-server log, and is stored as the client's last error.
+// Redacting once, where the transport error enters mcpproxy, is what keeps a
+// future log site from re-leaking it.
+func redactURLCredentialsInError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := oauth.RedactSensitiveData(err.Error())
+	if msg == err.Error() {
+		return err
+	}
+	return &urlRedactedError{msg: msg, cause: err}
+}
+
+// urlRedactedError re-renders an error's message with credentials removed and
+// keeps the original reachable through Unwrap.
+type urlRedactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *urlRedactedError) Error() string { return e.msg }
+func (e *urlRedactedError) Unwrap() error { return e.cause }
+
+// logSafeErrorField renders an error as a log field with any URL-embedded
+// credential removed. Use it instead of zap.Error on the connection paths.
+func logSafeErrorField(err error) zap.Field {
+	if err == nil {
+		return zap.Skip()
+	}
+	return zap.String("error", oauth.RedactSensitiveData(err.Error()))
+}
+
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -98,7 +160,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.String("command", c.config.Command),
 		zap.String("protocol", c.config.Protocol))
 
@@ -109,7 +171,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Starting connection attempt",
 			zap.String("transport", c.transportType),
-			zap.String("url", c.config.URL),
+			zap.String("url", c.logSafeURL()),
 			zap.String("command", c.config.Command),
 			zap.String("protocol", c.config.Protocol))
 	}
@@ -118,7 +180,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.logger.Debug("🔍 Transport Type Determination",
 		zap.String("server", c.config.Name),
 		zap.String("command", c.config.Command),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.String("protocol", c.config.Protocol),
 		zap.String("determined_transport", c.transportType))
 
@@ -154,6 +216,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	if err != nil {
+		// #1148: the transport error text embeds the configured URL, credentials
+		// and all. Redact it HERE, before it is logged, returned, or stored as
+		// the client's last error — every consumer downstream inherits the safe
+		// rendering, and the original is still reachable through Unwrap.
+		err = redactURLCredentialsInError(err)
+
 		// Log connection failure to server-specific log
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Error("Connection failed",

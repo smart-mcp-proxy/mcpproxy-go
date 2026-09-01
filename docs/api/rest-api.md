@@ -152,6 +152,51 @@ preserved) and the [`config-to-secret`](#post-apiv1serversnameconfig-to-secret)
 endpoint reads the real value server-side. Flip the flag only if you
 need to inspect a raw value through the API for debugging.
 
+On the MCP channel the flag also requires an **authenticated** caller
+(issue #1148): an unauthenticated `/mcp` client is admin only for backward
+compatibility, and gets the masked values regardless of the flag. The REST
+API always requires an API key, so it is unaffected.
+
+Redaction is not limited to headers. The same responses — and the `/events`
+SSE `servers.changed` payloads, which go through the identical redactor — also
+mask env values, URL query credentials, `oauth.extra_params`, `oauth.scopes`
+and credential-shaped **argv tokens** (`--api-key sk-…`, `--endpoint=ghp_…`),
+using one shared rule set so the REST, SSE and MCP doors cannot drift.
+
+Two rules decide, in that order, and **both** run on every field:
+
+1. The **field name** — `Authorization`, `GITHUB_TOKEN`, `?access_token=`,
+   `--api-key`. This is what keeps a payload readable: it says *which*
+   credential is configured without revealing it.
+2. The **value's own shape** — an AWS key, a GitHub token, a PEM block, a
+   high-entropy blob — wherever it sits. A credential under a benign name
+   (`env: {BUILD_ID: ghp_…}`, `?opaque=ghp_…`, a custom header) is invisible to
+   rule 1 and obvious to rule 2, so rule 2 runs over everything rule 1 left
+   alone. In a URL it runs per component, so the readable
+   `scheme://user:••••(N chars)@host/db` rendering survives while a second
+   credential elsewhere in the same URL is still masked.
+
+Three consequences for clients:
+
+- A masked value **echoed back on a write** is reverted only when it can be
+  bound to a key it cannot be moved away from — a map key for `env` / `headers`
+  / `oauth.extra_params`, a query-parameter name plus the stored scheme and
+  `host:port` for `url`, a field name for `oauth.client_secret` /
+  `client_id` / `redirect_uri`. So a read-modify-write that edits one field
+  never persists another field's mask over the real secret.
+- Everything else is **refused** with `400`, never reverted: `args`,
+  `oauth.scopes`, `isolation.extra_args`, a mask moved to a different key or
+  host, and any field added to the server config later. An argv slot (like a
+  scope) has no key to bind a stored secret to — only its index and its
+  neighbours, all of them caller-supplied in the same request — so an echoed
+  mask is refused rather than reverted. Resend the real value, or omit the
+  field to leave the stored one unchanged. `POST /api/v1/servers` refuses
+  *every* echoed mask, since on create there is no stored value to bind one to.
+  See [Upstream servers](../configuration/upstream-servers.md#how-you-edit-them).
+- `GET /api/v1/servers/{id}/logs` scrubs credentials out of the returned log
+  lines (mcpproxy logs the upstream URL with its query string, and a child MCP
+  server may print its own API key), matching the MCP `tail_log` operation.
+
 The MCP `upstream_servers` tool was the original motivator for redaction
 (see [PR #425](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/425)) —
 a prompt-injected agent could otherwise read another upstream's PAT via

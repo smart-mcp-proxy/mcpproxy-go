@@ -146,6 +146,75 @@ To disable redaction (for debugging only), set `reveal_secret_headers: true`
 in `mcp_config.json`. **It's not normally needed**: the editing flow
 described below works without ever exposing the plaintext to the client.
 
+Since v0.64 (issue #1148) the flag additionally requires an **authenticated**
+caller. `/mcp` is deliberately unprotected by default
+(`require_mcp_auth: false`), so an unauthenticated MCP client is treated as
+admin for backward compatibility — but that is not an identity, and it no
+longer satisfies a check that hands back raw credentials. With the flag on,
+raw values are returned to a caller presenting the API key or an admin agent
+token, to a tray/socket connection (authenticated by OS-level socket
+permissions), and over stdio; an unauthenticated TCP `/mcp` caller gets the
+masked values. Nothing else changes: every other operation an unauthenticated
+MCP client can perform today still works.
+
+Argument vectors are masked too: a credential passed as `--api-key sk-…` in
+`args` is masked by flag name, by value shape and — since the review round on
+the same issue — by URL shape in every spelling (`--flag <url>`, `--flag=<url>`
+and a bare positional token all mask `?token=…` and `https://user:pass@host`).
+
+For the **keyed** fields, a masked value echoed back on the write path is
+reverted to the stored value rather than persisted over it, and every revert is
+**bound to where the value was read from**:
+
+| Field | Bound by |
+|-------|----------|
+| `env_json` / `headers_json` | the map key |
+| `url` | the stored scheme and host:port (per query parameter, and the userinfo username) |
+| `oauth_json` → `client_secret`, `client_id`, `redirect_uri` | the field |
+| `oauth_json` → `extra_params` | the parameter name |
+| `oauth_json` → `scopes`, and any future oauth field | *nothing — **refused**, never reverted* |
+| `args_json` | *nothing — an argv mask is **refused**, never reverted* |
+
+A mask that none of those bindings can reach is refused rather than written
+through. For `url` that covers a URL whose scheme/host changed and a credential
+that does not sit in a query parameter; for `oauth_json` it covers a scope (its
+only context is a position in a caller-supplied slice) and any field added to
+the oauth block later, which fails closed instead of silently persisting its own
+mask.
+
+**`args_json` is different: an echoed mask is rejected with an error, not
+restored.** An argv token has no key to bind a secret to — only its index and
+its neighbours — and `args_json` replaces the whole vector while the same patch
+also chooses `command`. Every candidate binding is therefore caller-controlled:
+an index can be picked, a preceding flag copied verbatim, and a byte-identical
+argv means nothing once `command` moves from `mcp-foo` to `curl`. Any revert
+rule would let a caller relocate a stored credential into a command line of its
+own choosing.
+
+So a write whose `args_json` still carries a mask this proxy rendered fails
+with:
+
+```
+args_json[2] is a redaction placeholder, not an argument value: credential-shaped
+argv tokens are masked on read and are never restored on write, because an argv
+slot carries no key to bind the secret to. Resend the real value for that
+argument, or omit args_json to leave the stored arguments unchanged
+```
+
+Do not build a read-modify-write loop that feeds a masked `args` list back in:
+**resend the real values**, or omit `args_json` entirely when you are not
+changing the arguments (omitting it leaves the stored vector untouched).
+Rejecting is deliberate rather than silently keeping the stored vector —
+`args_json` replaces the vector, so ignoring it would make the write look
+applied when it was not.
+
+The same contract applies on REST. `GET /api/v1/servers` masks `args` and
+`oauth.extra_params` with the same rules (they are one shared implementation in
+`internal/oauth`, so the two doors cannot drift), and `POST`/`PATCH
+/api/v1/servers` refuse an echoed `args` mask with `400` for the same reason the
+MCP path does — `args` replaces the vector there too. The `oauth` block is
+read-only over REST, so no REST write can echo its mask back.
+
 ### How you edit them
 
 #### Web UI / macOS tray
@@ -208,6 +277,13 @@ curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 - JSON `null` value → delete
 - key absent from body → preserve (this is how the UI sends a diff
   against the masked view without overwriting unchanged values)
+
+A client that sends the **whole** map back is safe too: a value that is exactly
+the mask the read path rendered for that key is reverted to the stored secret,
+bound to the key it was read from. What cannot be bound to a key is **refused**
+with `400` rather than written through — `args`, `oauth.scopes`,
+`isolation.extra_args`, a mask moved to a different key, and a URL mask whose
+scheme/host changed. Resend the real value, or omit the field.
 
 See [REST API › PATCH](../api/rest-api.md#patch-apiv1serversname) for the
 full reference, including the

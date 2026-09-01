@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 // LoggingTransport wraps http.RoundTripper to log all HTTP traffic including SSE frames
@@ -58,9 +60,13 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	duration := time.Since(startTime)
 
 	if err != nil {
-		fmt.Printf("❌ HTTP REQUEST FAILED: %v (duration: %v)\n", err, duration)
+		// #1148: the transport error quotes the request URL, credentials and
+		// all. Both sinks get the redacted rendering; the error itself is
+		// returned untouched to the caller.
+		safeErr := oauth.RedactSensitiveData(err.Error())
+		fmt.Printf("❌ HTTP REQUEST FAILED: %v (duration: %v)\n", safeErr, duration)
 		t.logger.Error("❌ HTTP REQUEST FAILED",
-			zap.Error(err),
+			logSafeErrorField(err),
 			zap.Duration("duration", duration))
 		return nil, err
 	}
@@ -190,7 +196,9 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		lr.logger.Error("❌ SSE STREAM ERROR", zap.Error(err))
+		// #1148 round 4: a stream read can fail with a *url.Error that quotes
+		// the request URL, credentials and all.
+		lr.logger.Error("❌ SSE STREAM ERROR", logSafeErrorField(err))
 	}
 
 	lr.logger.Info("🔴 SSE STREAM CLOSED",

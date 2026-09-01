@@ -1,11 +1,9 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -263,101 +261,74 @@ func redactedConfigDiff(diff *config.ConfigDiff) map[string]interface{} {
 // float64 and rendering as 1.048576e+06. On failure the value is returned
 // unchanged; the walker's default branch then passes it through.
 func normalizeForRedaction(v interface{}) interface{} {
-	if v == nil {
-		return nil
-	}
-	encoded, err := json.Marshal(v)
-	if err != nil {
-		return v
-	}
-	dec := json.NewDecoder(bytes.NewReader(encoded))
-	dec.UseNumber()
-	var out interface{}
-	if err := dec.Decode(&out); err != nil {
-		return v
-	}
-	return out
+	return oauth.NormalizeForRedaction(v)
 }
 
-// redactActivityValue walks a generic JSON value, masking leaves according to
-// the key that encloses them. `key` is the enclosing field name (for a slice,
-// the name of the slice itself).
+// redactionPolicy is the SHARED redaction rule set (oauth.Redaction — which key
+// names are sensitive, which values look like credentials, how argv pairs up,
+// and how the generic walk descends into a nested payload) as applied at this
+// package's doors.
+//
+// It is an ALIAS, not a wrapper. Issue #1148 round 7 findings 2 and 3 were both
+// a door that could not reach the WALK because the walk lived here: the leaf
+// rules were already shared, but `RedactServerSecretFields` (REST + SSE) and
+// the hand-built isolation projections in `upstream_servers list` each
+// re-derived the descent field by field, and each missed
+// `isolation.extra_args`. The walk now lives in internal/oauth beside the
+// rules — below both internal/server and internal/httpapi in the import graph —
+// so every door runs the same code. The one thing that used to be local, the
+// activity store's per-leaf size cap, is expressed as oauth.Redaction.Limit.
+type redactionPolicy = oauth.Redaction
+
+// auditRedaction is the policy for anything PERSISTED or EXPORTED: the fixed
+// `••••` marker (no length, no trailing bytes — see the file header) and the
+// activity-store size cap.
+var auditRedaction = oauth.AuditRedaction.WithLimit(activityArgValueLimit)
+
+// liveRedaction is the policy for the LIVE MCP read surfaces (upstream_servers
+// list, quarantine_security list_quarantined).
+//
+// It keeps oauth.MaskValue's `••••<last2> (<N> chars)` rendering, and that is
+// load-bearing rather than cosmetic: the patch/update path calls
+// oauth.UnmaskURL / UnmaskEnvValues / UnmaskHeaders, which recognise exactly
+// that rendering when a client echoes a value back. A read-modify-write agent
+// that round-tripped an `••••` marker instead would OVERWRITE the real secret
+// with the mask string.
+//
+// It does not cap: a truncated URL or arg is no longer equal to mask(stored),
+// so the unmasker would write the truncation through.
+var liveRedaction = oauth.LiveRedaction
+
+// redactActivityValue walks a generic JSON value under the audit policy.
 func redactActivityValue(key string, v interface{}) interface{} {
-	switch typed := v.(type) {
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(typed))
-		isHeaders := isActivityHeadersKey(key)
-		for k, val := range typed {
-			if isHeaders {
-				if s, ok := val.(string); ok {
-					// HTTP header semantics: mask by header name.
-					out[k] = redactActivityHeaderValue(k, s)
-					continue
-				}
-			}
-			out[k] = redactActivityValue(k, val)
-		}
-		return out
-	case []interface{}:
-		if isActivityArgvKey(key) {
-			return redactActivityArgv(typed)
-		}
-		out := make([]interface{}, len(typed))
-		for i, val := range typed {
-			out[i] = redactActivityValue(key, val)
-		}
-		return out
-	case string:
-		return redactActivityString(key, typed)
-	default:
-		// Bools, json.Number and nil carry no secrets and stay verbatim.
-		return v
-	}
+	return redactValueWith(key, v, auditRedaction)
 }
 
-// redactActivityString masks one string leaf. The default policy is the env-var
-// rule (oauth.RedactEnvValuesWith over a single pair), which is the package's
-// single source of truth for "does this key name look like it holds a secret":
-// it masks sensitive-looking keys, passes ${keyring:…}/${env:…} references
-// through, URL-redacts connection strings, and runs RedactSensitiveData over
-// everything else as defence in depth. Over-masking a harmless field is the safe
-// direction; ordinary configuration (protocol, command, LOG_LEVEL, an image
-// named python:3.12) stays readable.
-//
-// Issue #1146, review round 3 — the lesson from the argv leak, applied to EVERY
-// leaf: a key name is never the only rule. `--endpoint=ghp_…`, a credential
-// under a header name no matcher recognises, a token pasted into a field nobody
-// thought of — each is invisible to name matching and obvious to the
-// value-shaped detector. So the name rule decides first (it is what keeps the
-// record readable and says WHICH credential moved), and whatever it passes
-// through is then offered to the detector. A value the name rule already masked
-// is inert by the time the detector sees it.
-//
-// The mask is oauth.AuditMaskValue, not oauth.MaskValue — see the file header.
-func redactActivityString(key, s string) string {
-	switch {
-	case isActivityHeadersKey(key):
-		return redactActivityHeaderValue(key, s)
-	case strings.EqualFold(key, "url"):
-		return capActivityValue(maskDetectedSecrets(oauth.RedactURLQueryParamsWith(s, oauth.AuditMaskValue)))
-	default:
-		named := oauth.RedactEnvValuesWith(map[string]string{key: s}, oauth.AuditMaskValue)[key]
-		return capActivityValue(maskDetectedSecrets(named))
-	}
+// redactValueWith walks a generic JSON value, masking leaves according to the
+// key that encloses them. `key` is the enclosing field name (for a slice, the
+// name of the slice itself).
+func redactValueWith(key string, v interface{}, r redactionPolicy) interface{} {
+	return r.Value(key, v)
 }
 
-// redactActivityHeaderValue masks one HTTP header leaf, judged by the header
-// NAME first and then by the value's own shape.
-//
-// Both rules are needed and neither is sufficient. oauth's name matcher cannot
-// enumerate every custom credential header (issue #1146 round 3 widened it to
-// split CamelCase, which is what recovers X-AuthToken / X-SecretValue, but
-// `X-Zyx` holding a bearer token is still unknowable from the name); the
-// detector cannot recognise an opaque value with no credential shape. Running
-// both is the only combination that closes each other's gap.
-func redactActivityHeaderValue(name, value string) string {
-	masked := oauth.RedactStringHeadersWith(map[string]string{name: value}, oauth.AuditMaskValue)[name]
-	return capActivityValue(maskDetectedSecrets(masked))
+// redactStringWith masks one string leaf under the shared leaf rule, then
+// applies the policy's size cap. `key` is the enclosing field name ("" for a
+// leaf with no key, such as a positional argv token).
+func redactStringWith(key, s string, r redactionPolicy) string {
+	return r.CapString(r.Leaf(key, s))
+}
+
+// redactEnvValueWith masks one environment-variable leaf, reproducing
+// oauth.maskedEnvValue exactly so oauth.UnmaskEnvValues can recognise the
+// rendering if a client echoes it back on the write path.
+func redactEnvValueWith(name, value string, r redactionPolicy) string {
+	return r.CapString(r.EnvValue(name, value))
+}
+
+// redactHeaderValueWith masks one HTTP header leaf, judged by the header NAME
+// first and then by the value's own shape.
+func redactHeaderValueWith(name, value string, r redactionPolicy) string {
+	return r.CapString(r.HeaderValue(name, value))
 }
 
 // redactActivityConfigValues redacts a flat before/after value map for a
@@ -379,116 +350,8 @@ func redactActivityConfigValues(values map[string]interface{}) map[string]interf
 	return out
 }
 
-// isActivityArgvKey reports whether a slice is a command-line argument vector.
-// Covers the `args` config field (config.MergeServerConfig's diff) and the
-// `args_json` tool parameter (the suffix is trimmed before the walk).
-func isActivityArgvKey(key string) bool {
-	return strings.EqualFold(key, "args")
-}
-
-// redactActivityArgv masks a command-line argument vector.
-//
-// Issue #1146, review round: argv was the one leak the key-driven walker could
-// not see. An argv token has no enclosing key — the slice branch recursed with
-// the PARENT key ("args"), so every element reached redactActivityString("args",
-// elem) and fell through unmasked. Passing a credential as an argv token
-// (`uvx mcp-foo --api-key sk-live-…`) is one of the commonest MCP server config
-// shapes, so the record persisted in BBolt, the SSE payload and
-// `mcpproxy activity list` all carried it in the clear.
-//
-// Two rules, because argv secrets announce themselves in two ways:
-//
-//   - The FLAG names the credential — `--api-key VALUE` and `--api-key=VALUE`.
-//     Delegated to redactActivityString with the de-dashed flag as the key, so
-//     the same single source of truth the env map uses decides, and the flag
-//     itself stays readable (it is the audit signal: WHICH credential moved).
-//   - The VALUE is recognisably a credential on its own — an AWS key, a GitHub
-//     token, a PEM block, a high-entropy blob — wherever it sits. That is what
-//     internal/security's detector is for, so it is reused rather than
-//     re-invented as another regex here.
-//
-// BOTH rules run on BOTH spellings. Round 3 found the inline form consulting
-// only the first: `--endpoint=ghp_…` names nothing sensitive, so nothing ever
-// looked at the value and the token was stored in the clear, while the
-// identical `--endpoint ghp_…` was masked. redactActivityString now ends in the
-// detector for every leaf, which is what keeps the two spellings in step by
-// construction rather than by two call sites remembering to agree.
-//
-// Everything else round-trips verbatim: package names, subcommands, paths and
-// ports are what make the record useful.
-func redactActivityArgv(argv []interface{}) []interface{} {
-	out := make([]interface{}, len(argv))
-	maskNext := false
-
-	for i, item := range argv {
-		s, ok := item.(string)
-		if !ok {
-			// A non-string element carries no flag semantics; walk it with no
-			// enclosing key and reset the pairing.
-			out[i] = redactActivityValue("", item)
-			maskNext = false
-			continue
-		}
-
-		if maskNext {
-			out[i] = capActivityValue(oauth.AuditMaskValue(s))
-			maskNext = false
-			continue
-		}
-
-		if flag, value, inline := strings.Cut(s, "="); inline && isArgvFlag(flag) {
-			out[i] = capActivityValue(flag + "=" + redactActivityString(argvFlagKey(flag), value))
-			continue
-		}
-
-		out[i] = capActivityValue(maskDetectedSecrets(s))
-		maskNext = isArgvFlag(s) && oauth.IsSensitiveKeyName(argvFlagKey(s))
-	}
-
-	return out
-}
-
-// isArgvFlag reports whether a token is an option rather than a positional
-// argument. A bare "-" or "--" is a convention, not a flag.
-func isArgvFlag(token string) bool {
-	return strings.HasPrefix(token, "-") && strings.Trim(token, "-") != ""
-}
-
-// argvFlagKey turns `--api-key` into the key name the env/header redactors
-// match on.
-func argvFlagKey(flag string) string {
-	return strings.TrimLeft(flag, "-")
-}
-
-// activitySecretMasker is the value-shaped secret masker used for argv tokens,
-// which have no key to be judged by.
-//
-// It is built from the DEFAULT detection config rather than the running one on
-// purpose: masking here is a property of the audit STORE, and an operator who
-// turned sensitive-data detection off for the call path must not thereby cause
-// credentials to be written to that store in the clear. (Detector.MaskText
-// ignores the `enabled` flag for the same reason.)
-var activitySecretMasker = sync.OnceValue(func() *security.Detector {
-	return security.NewDetector(config.DefaultSensitiveDataDetectionConfig())
-})
-
-// maskDetectedSecrets masks any credential the detector recognises inside one
-// argv token, leaving text it does not recognise untouched.
+// maskDetectedSecrets masks any credential the value-shaped detector
+// recognises, leaving text it does not recognise untouched.
 func maskDetectedSecrets(s string) string {
-	masked, _ := activitySecretMasker().MaskText(s)
-	return masked
-}
-
-// isActivityHeadersKey reports whether a map should be masked with HTTP-header
-// semantics. Covers both the `headers` config field and the `headers_json` tool
-// parameter (the suffix is trimmed before the walk).
-func isActivityHeadersKey(key string) bool {
-	return strings.EqualFold(key, "headers")
-}
-
-func capActivityValue(s string) string {
-	if len(s) <= activityArgValueLimit {
-		return s
-	}
-	return s[:safeTruncateBytes(s, activityArgValueLimit)] + activityErrorMessageEllipsis
+	return oauth.MaskDetectedSecrets(s)
 }

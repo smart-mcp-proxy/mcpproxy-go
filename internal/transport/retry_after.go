@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 // MaxRetryAfterDelay caps how long an upstream-supplied Retry-After may park a
@@ -185,7 +187,11 @@ func (t *RetryAfterTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	if !deadline.IsZero() {
 		t.logger.Info("Upstream asked us to back off",
 			zap.Int("status", resp.StatusCode),
-			zap.String("url", req.URL.Redacted()),
+			// Issue #1148, round 4: url.URL.Redacted() masks ONLY the userinfo
+			// password — it leaves `?token=…` in the query verbatim, and this
+			// line fires at Info on every 429/503-with-a-hint. Route it through
+			// the project's own redactor, which masks both.
+			zap.String("url", oauth.RedactURLQueryParams(req.URL.String())),
 			zap.Duration("retry_after", delay),
 			zap.Time("retry_not_before", deadline))
 	}

@@ -13,6 +13,26 @@ import (
 	"go.uber.org/zap"
 )
 
+// Mask MARKERS — the substrings this package's own mask renderings are built
+// from. They exist as constants, and every renderer below is written in terms
+// of them, because the fail-closed write-path net has to RECOGNISE what the
+// read doors rendered: MaskMarkers in redactview.go is assembled from exactly
+// these constants (plus security's), so a rendering cannot be added or changed
+// without the net learning about it in the same edit.
+//
+// Issue #1148, round 7 finding 1: the marker list used to be hand-maintained
+// beside the renderers and did not know about `***REDACTED***`, so an echoed
+// RedactSensitiveData rendering was accepted on a write and persisted over the
+// live credential.
+const (
+	// redactedMarker is what the REGEX scrubbers (RedactSensitiveData,
+	// RedactURL, RedactHeaders) put in place of a matched secret.
+	redactedMarker = "***REDACTED***"
+
+	// bulletMarker opens every MaskValue / AuditMaskValue rendering.
+	bulletMarker = "••••"
+)
+
 // Sensitive header names that should be redacted in logs.
 var sensitiveHeaders = map[string]bool{
 	"authorization":       true,
@@ -120,6 +140,40 @@ var tokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[a-zA-Z0-9\-_\.]+`)
 // secretPattern matches common secret patterns.
 var secretPattern = regexp.MustCompile(`(?i)(secret|password|token|key)["']?\s*[:=]\s*["']?[a-zA-Z0-9\-_\.]+`)
 
+// urlUserinfoPattern matches the `scheme://user:password@` prefix of a URL
+// embedded in free-form text (issue #1148, review round 2).
+//
+// RedactURLQueryParams has masked the userinfo password since #872, but that
+// function only ever sees a value the caller already knows is a URL. The
+// free-form scrubbers — connection errors, tailed log lines, health.detail —
+// see a URL buried in a sentence, and neither tokenPattern (bearer only) nor
+// secretPattern (`<name>=<value>`) nor the `<param>=` sweep below has any
+// `user:pass@` shape, so a basic-auth password travelled through all of them in
+// the clear.
+//
+// The username is deliberately kept: it is the operator's signal for WHICH
+// credential failed, and it is not the secret.
+var urlUserinfoPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)([^\s/:@]+):([^\s/@]+)@`)
+
+// redactURLUserinfo masks the password half of every `scheme://user:pass@`
+// prefix in s, keeping the username. Shared by RedactSensitiveData (free-form
+// text) and RedactURL (the parse-failure fallback) so the two cannot disagree
+// about whether a basic-auth password is a secret.
+func redactURLUserinfo(s string) string {
+	return urlUserinfoPattern.ReplaceAllStringFunc(s, func(match string) string {
+		groups := urlUserinfoPattern.FindStringSubmatch(match)
+		if len(groups) != 4 {
+			return match
+		}
+		// A ${keyring:…}/${env:…} reference is a label, not a secret; masking
+		// it would erase exactly what makes the line diagnosable.
+		if isConfigReference(groups[3]) {
+			return match
+		}
+		return groups[1] + groups[2] + ":" + redactedMarker + "@"
+	})
+}
+
 // RedactSensitiveData redacts sensitive information from a string.
 // It replaces tokens, secrets, and other sensitive data with redacted placeholders.
 func RedactSensitiveData(data string) string {
@@ -127,24 +181,27 @@ func RedactSensitiveData(data string) string {
 		return data
 	}
 
+	// Redact URL userinfo passwords (scheme://user:pass@host).
+	result := redactURLUserinfo(data)
+
 	// Redact Bearer tokens
-	result := tokenPattern.ReplaceAllString(data, "${1}***REDACTED***")
+	result = tokenPattern.ReplaceAllString(result, "${1}"+redactedMarker)
 
 	// Redact secrets and passwords
 	result = secretPattern.ReplaceAllStringFunc(result, func(match string) string {
 		// Find the position of = or : and redact everything after
 		for _, sep := range []string{"=", ":"} {
 			if idx := strings.Index(match, sep); idx != -1 {
-				return match[:idx+1] + "***REDACTED***"
+				return match[:idx+1] + redactedMarker
 			}
 		}
-		return "***REDACTED***"
+		return redactedMarker
 	})
 
 	// Redact sensitive URL parameters
 	for _, param := range sensitiveParams {
 		pattern := regexp.MustCompile(`(?i)(` + param + `=)[^&\s]+`)
-		result = pattern.ReplaceAllString(result, "${1}***REDACTED***")
+		result = pattern.ReplaceAllString(result, "${1}"+redactedMarker)
 	}
 
 	return result
@@ -157,7 +214,7 @@ func RedactHeaders(headers http.Header) map[string]string {
 
 	for key, values := range headers {
 		if isSensitiveHeaderKey(key) {
-			redacted[key] = "***REDACTED***"
+			redacted[key] = redactedMarker
 		} else {
 			// Join multiple values and redact any sensitive data within
 			value := strings.Join(values, ", ")
@@ -481,7 +538,7 @@ func AuditMaskValue(v string) string {
 	if isConfigReference(v) {
 		return v
 	}
-	return "••••"
+	return bulletMarker
 }
 
 // MaskValue renders a string secret as `••••<last2> (<N> chars)` for
@@ -501,9 +558,9 @@ func MaskValue(v string) string {
 		return v
 	}
 	if len(v) <= 4 {
-		return "••••"
+		return bulletMarker
 	}
-	return "••••" + v[len(v)-2:] + " (" + strconv.Itoa(len(v)) + " chars)"
+	return bulletMarker + v[len(v)-2:] + " (" + strconv.Itoa(len(v)) + " chars)"
 }
 
 // UnmaskURL protects the write path from a client that echoes a masked URL
@@ -682,8 +739,14 @@ func UnmaskHeaders(incoming, stored map[string]string) map[string]string {
 // renders one (key, value) pair; reused by UnmaskHeaders to recognise echoed
 // masks.
 func maskedHeaderValue(key, value string) string {
+	return maskedHeaderValueWith(key, value, MaskValue)
+}
+
+// maskedHeaderValueWith is maskedHeaderValue with a caller-chosen mask. See
+// RedactStringHeadersWith for why the audit surfaces need a different one.
+func maskedHeaderValueWith(key, value string, mask func(string) string) string {
 	if isSensitiveHeaderKey(key) {
-		return MaskValue(value)
+		return mask(value)
 	}
 	return RedactSensitiveData(value)
 }
@@ -707,15 +770,24 @@ func unmaskMapValues(incoming, stored map[string]string, rendered func(k, v stri
 }
 
 // RedactURL redacts sensitive query parameters from a URL string.
+//
+// Issue #1148, round 4: this is not only a standalone helper — it is the
+// fallback RedactURLQueryParams takes when url.Parse FAILS, and a URL that
+// fails to parse is precisely the URL a connection error is being logged
+// about. It masked the query params but had no `user:pass@` rule, so the
+// basic-auth password survived every logSafeURL() site in
+// internal/upstream/core, internal/upstream/managed and internal/transport
+// whenever the configured URL was malformed. Reuse RedactSensitiveData's
+// urlUserinfoPattern so the two scrubbers cannot drift apart.
 func RedactURL(urlStr string) string {
 	if urlStr == "" {
 		return urlStr
 	}
 
-	result := urlStr
+	result := redactURLUserinfo(urlStr)
 	for _, param := range sensitiveParams {
 		pattern := regexp.MustCompile(`(?i)(` + param + `=)[^&]+`)
-		result = pattern.ReplaceAllString(result, "${1}***REDACTED***")
+		result = pattern.ReplaceAllString(result, "${1}"+redactedMarker)
 	}
 
 	return result

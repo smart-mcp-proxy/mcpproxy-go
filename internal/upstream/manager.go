@@ -1529,10 +1529,15 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		// #1148: the configured upstream URL can carry its credential in the
+		// query (`?token=…`) or the userinfo (`user:pass@`), and this line runs
+		// on every connect attempt, so the raw form would be written to
+		// main.log on a loop. Redacted through the same helper the core client
+		// and the HTTP transport use.
 		m.logger.Info("Attempting to connect client",
 			zap.String("id", id),
 			zap.String("name", client.GetConfig().Name),
-			zap.String("url", client.GetConfig().URL),
+			zap.String("url", oauth.RedactURLQueryParams(client.GetConfig().URL)),
 			zap.String("command", client.GetConfig().Command),
 			zap.String("protocol", client.GetConfig().Protocol))
 
@@ -1684,7 +1689,22 @@ func (m *Manager) HasDockerContainers() bool {
 // GetStats returns statistics about upstream connections
 // GetStats returns statistics about all managed clients.
 // Phase 6 Fix: Lock-free implementation to prevent deadlock with async operations.
+//
+// Issue #1148, round 4: this map is not an internal counter — it is served
+// verbatim as `upstream_stats` on GET /api/v1/status, on the /api/v1/servers
+// response, and on every SSE `status` event, and it is what the tray renders.
+// Its per-server entries therefore sit behind the same trust boundary as the
+// server list on those same payloads, which httpapi.redactServerSecrets and
+// Runtime.redactServerSecrets already mask. Leaving `url` and `last_error` raw
+// here meant one half of a single response was masked and the other half was
+// not. Mask them at the point they are written, honouring the same
+// reveal_secret_headers opt-out the two sibling redactors honour.
 func (m *Manager) GetStats() map[string]interface{} {
+	revealSecrets := false
+	if gc := m.globalConfig.Load(); gc != nil {
+		revealSecrets = gc.RevealSecretHeaders
+	}
+
 	// Phase 6: Copy client references while holding lock briefly
 	m.mu.RLock()
 	clientsCopy := make(map[string]*managed.Client, len(m.clients))
@@ -1719,6 +1739,10 @@ func (m *Manager) GetStats() map[string]interface{} {
 			}
 		}
 
+		if !revealSecrets {
+			url = oauth.RedactURLQueryParams(url)
+		}
+
 		status := map[string]interface{}{
 			"state":        connectionInfo.State.String(),
 			"connected":    connectionInfo.State == types.StateReady,
@@ -1743,7 +1767,14 @@ func (m *Manager) GetStats() map[string]interface{} {
 		}
 
 		if connectionInfo.LastError != nil {
-			status["last_error"] = connectionInfo.LastError.Error()
+			lastError := connectionInfo.LastError.Error()
+			if !revealSecrets {
+				// A transport error quotes the request URL inside its own
+				// message (`Post "https://host/mcp?token=…": dial tcp …`), so
+				// masking the `url` key alone would not close this.
+				lastError = oauth.RedactSensitiveData(lastError)
+			}
+			status["last_error"] = lastError
 		}
 
 		if connectionInfo.ServerName != "" {

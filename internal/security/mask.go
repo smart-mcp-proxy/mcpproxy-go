@@ -12,6 +12,19 @@ const maskedSuffix = "…****"
 // maskedWhole is the mask for values too short to keep any prefix from.
 const maskedWhole = "****"
 
+// MaskMarkers are the substrings every MaskValue rendering carries: a value
+// long enough to keep a prefix ends in maskedSuffix, a shorter one collapses to
+// maskedWhole.
+//
+// They are exported because the write doors have to RECOGNISE this package's
+// renderings — internal/oauth's fail-closed net refuses a client that echoes
+// one back, and it must derive the substrings it looks for from the constants
+// the renderer is built from rather than keep its own copy beside them (issue
+// #1148, round 7 finding 1).
+func MaskMarkers() []string {
+	return []string{maskedSuffix, maskedWhole}
+}
+
 // maskPrefixRunes is how much of a detected value survives masking. Four runes
 // is enough to recognise WHICH credential was flagged (`AKIA…`, `ghp_…`,
 // `sk-a…`) without being enough to use, and matches the prefix length the

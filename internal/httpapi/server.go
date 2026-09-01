@@ -1625,31 +1625,21 @@ func (s *Server) redactServerSecrets(servers []contracts.Server) {
 }
 
 // redactServerSecretFields masks the secret-bearing fields of a single server
-// in place. Shared by the REST list/get path and the SSE event stream so both
-// sit behind the same trust boundary (parity is load-bearing: the Web UI's
-// mergeServers would flicker masked-vs-plaintext otherwise).
+// in place.
+//
+// The field list AND the rules live in oauth.RedactServerSecretFields because
+// THREE doors serve this struct — the REST list/get path here, the `/events`
+// SSE stream in internal/runtime, and the clients reading either — and each
+// used to carry its own copy. That is how `args` and `oauth.extra_params`
+// ended up masked on the MCP surface and published in the clear on both of
+// these (issue #1148, round 4 finding 3), and how a credential under a benign
+// env/header name stayed in the clear here after the field list was shared but
+// the value-shaped detector was not (round 6 finding 2). Parity is load-bearing
+// beyond the leak: the Web UI's mergeServers treats each payload as
+// authoritative, so a masked-vs-plaintext mismatch would flicker on every
+// delivery.
 func redactServerSecretFields(server *contracts.Server) {
-	if len(server.Headers) > 0 {
-		server.Headers = oauth.RedactStringHeaders(server.Headers)
-	}
-	if len(server.Env) > 0 {
-		server.Env = oauth.RedactEnvValues(server.Env)
-	}
-	if server.URL != "" {
-		server.URL = oauth.RedactURLQueryParams(server.URL)
-	}
-	if server.LastError != "" {
-		server.LastError = oauth.RedactSensitiveData(server.LastError)
-	}
-	if server.Health != nil && server.Health.Detail != "" {
-		server.Health.Detail = oauth.RedactSensitiveData(server.Health.Detail)
-	}
-	// Spec 044 diagnostic — its Cause echoes the raw connect error, which
-	// carries the full upstream URL (query secrets and all); scrub it in
-	// parity with LastError / Health.Detail.
-	if server.Diagnostic != nil && server.Diagnostic.Cause != "" {
-		server.Diagnostic.Cause = oauth.RedactSensitiveData(server.Diagnostic.Cause)
-	}
+	oauth.RedactServerSecretFields(server)
 }
 
 // enrichServersWithQuarantineStats adds quarantine metrics (pending/changed tool counts)
@@ -1996,6 +1986,14 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #1148 round 4: refuse an argv mask on create too. There is no stored
+	// vector to bind one to here, so a mask can only be a placeholder copied
+	// out of another server's read payload — never a value worth persisting.
+	if err := oauth.CheckArgvMaskEcho("args", req.Args, nil); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
 	// isolation mode BEFORE anything is persisted.
 	if err := req.Isolation.validate(); err != nil {
@@ -2106,6 +2104,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// verbs. There is nothing persisted yet, so the patch resolves against nil.
 	if req.Isolation != nil {
 		serverConfig.Isolation = req.Isolation.resolve(nil)
+	}
+
+	// #1148 round 6: on CREATE there is no stored value to bind a mask back to,
+	// so ANY mask this proxy rendered can only be a placeholder copied out of
+	// another server's read payload — never a value worth persisting. Refusing
+	// beats persisting literal text like `••••ab (12 chars)` as a credential,
+	// which produces a server that fails to connect for a non-obvious reason.
+	// The MCP `upstream_servers add` door runs the same check.
+	if err := oauth.CheckServerWriteMasks("server.", serverConfig); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// Add server via controller
@@ -2237,16 +2246,29 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 
 	if req.URL != "" {
 		// #872: the read path masks secrets in the URL query string / userinfo
-		// (redactServerSecrets → oauth.RedactURLQueryParams), but url is a single
-		// string field with no field-level diff. If a client edits a non-secret
-		// part and echoes the masked url back, restore the stored real secrets so
-		// the mask is never persisted over them. Protects ALL clients, not just
-		// the tray.
+		// (redactServerSecrets → oauth.RedactServerSecretFields), but url is a
+		// single string field with no field-level diff. If a client edits a
+		// non-secret part and echoes the masked url back, restore the stored
+		// real secrets so the mask is never persisted over them. Protects ALL
+		// clients, not just the tray.
+		//
+		// #1148 round 6: this is oauth.UnmaskLiveURL, the SAME function the MCP
+		// patch door calls — the whole-URL echo, then the sensitive-param and
+		// per-parameter reverts, then a refusal for any mask left unbound. The
+		// plain oauth.UnmaskURL used here before knew only the params it had
+		// masked itself, so once the REST read door started masking a
+		// credential under an unrecognised parameter name the mask was written
+		// through as the credential.
+		var storedURL string
 		if existingSrv != nil {
-			updates.URL = oauth.UnmaskURL(req.URL, existingSrv.URL)
-		} else {
-			updates.URL = req.URL
+			storedURL = existingSrv.URL
 		}
+		unmaskedURL, err := oauth.UnmaskLiveURL(req.URL, storedURL)
+		if err != nil {
+			s.writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		updates.URL = unmaskedURL
 		hasUpdates = true
 	}
 	if req.Command != "" {
@@ -2254,6 +2276,19 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	}
 	if req.Args != nil {
+		// #1148 round 4: `args` REPLACES the vector, and the read path masks
+		// credential-shaped argv tokens. Unlike env/headers/url there is no
+		// unmask contract for argv — an argv slot has no key to bind a stored
+		// secret to, and the caller supplies the whole vector *and* `command`
+		// in the same request — so an echoed mask is refused, not reverted.
+		var storedArgs []string
+		if existingSrv != nil {
+			storedArgs = existingSrv.Args
+		}
+		if err := oauth.CheckArgvMaskEcho("args", req.Args, storedArgs); err != nil {
+			s.writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
 		updates.Args = req.Args
 		hasUpdates = true
 	}
@@ -2280,8 +2315,14 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		// #872: a client could echo a masked env value back (the tray diffs, but
 		// other clients may send the full map). Revert any value that is exactly
 		// the masked rendering of the stored one.
+		//
+		// #1148 round 6: UnmaskLiveEnvValues first, because the LIVE read door
+		// masks a vendor-shaped credential under a benign variable name — a
+		// rendering UnmaskEnvValues (which compares against oauth's own name
+		// rule) cannot recognise. Both bind by KEY, so a value is only ever
+		// restored to the variable it was read from.
 		if existingSrv != nil {
-			merged = oauth.UnmaskEnvValues(merged, existingSrv.Env)
+			merged = oauth.UnmaskEnvValues(oauth.UnmaskLiveEnvValues(merged, existingSrv.Env), existingSrv.Env)
 		}
 		updates.Env = merged
 		hasUpdates = true
@@ -2300,9 +2341,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 				merged[k] = *vp
 			}
 		}
-		// #872: revert any masked header value echoed back (see env note above).
+		// #872 / #1148 round 6: revert any masked header value echoed back (see
+		// the env note above — same two-step, same key binding).
 		if existingSrv != nil {
-			merged = oauth.UnmaskHeaders(merged, existingSrv.Headers)
+			merged = oauth.UnmaskHeaders(oauth.UnmaskLiveHeaders(merged, existingSrv.Headers), existingSrv.Headers)
 		}
 		updates.Headers = merged
 		hasUpdates = true
@@ -2407,6 +2449,19 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 
 	if !hasUpdates {
 		s.writeError(w, r, http.StatusBadRequest, "No fields to update")
+		return
+	}
+
+	// #1148 round 6: the fail-closed net. The key-bound reverts above restored
+	// every mask this proxy can bind back to the value it was read from;
+	// anything still carrying one is refused rather than persisted over a live
+	// credential. This is what covers the fields with no revert (args,
+	// oauth.scopes, isolation.extra_args) AND every field added to
+	// config.ServerConfig later — a new field fails CLOSED instead of silently
+	// round-tripping its own mask into the config. See
+	// oauth.ServerFieldMaskDecisions.
+	if err := oauth.CheckServerWriteMasks("server.", updates); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 

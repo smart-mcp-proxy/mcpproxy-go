@@ -3259,12 +3259,17 @@ func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, reques
 
 	// Slim, stable projection mirroring the REST AddedServerSummary so every
 	// surface reports the persisted server identically.
+	// Issue #1148: URL and Args are the two credential-bearing fields of this
+	// summary (a registry entry can carry `?token=…`, and a user-supplied arg
+	// vector routinely carries `--api-key …`). Source them from the redacted
+	// view so the echo cannot republish what the caller just configured.
+	registryView := redactedServerView(cfg, liveRedaction)
 	summary := contracts.AddedServerSummary{
 		Name:        cfg.Name,
 		Protocol:    cfg.Protocol,
 		Command:     cfg.Command,
-		Args:        cfg.Args,
-		URL:         cfg.URL,
+		Args:        redactedArgs(cfg.Args, liveRedaction),
+		URL:         viewString(registryView, "url", cfg.URL),
 		Enabled:     cfg.Enabled,
 		Quarantined: cfg.Quarantined,
 	}
@@ -3416,9 +3421,14 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamTextForAudit(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
-		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
+		// Issue #1148: the activity store persists in BBolt, streams over SSE
+		// and is exported by `mcpproxy activity list`, so the response is
+		// re-rendered under the AUDIT policy (a fixed marker carrying neither
+		// the secret's length nor its trailing bytes). One net here covers
+		// every current and future operation of this built-in.
+		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, redactBuiltinResponseForActivity(responseText), nil, "")
 	}
 
 	return result, opErr
@@ -3529,9 +3539,10 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		if responseText != "" {
 			errMsg = responseText
 		}
-		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", scrubUpstreamTextForAudit(errMsg), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	} else {
-		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, responseText, nil, "")
+		// Issue #1148: see the matching net in handleUpstreamServers.
+		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, redactBuiltinResponseForActivity(responseText), nil, "")
 	}
 
 	return result, opErr
@@ -3749,27 +3760,43 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 
 	// Enhance server list with connection status and Docker isolation info
 	enhancedServers := make([]map[string]interface{}, len(servers))
-	revealHeaders := p.config != nil && p.config.RevealSecretHeaders
+	// Redact sensitive header values (Authorization, X-API-Key, Cookie, etc.),
+	// env-var secrets, URL query credentials and argv tokens before surfacing
+	// them through the MCP tool. An MCP agent inside a sandbox should never be
+	// able to read another upstream's Bearer token, API key, or URL-embedded
+	// secret via `upstream_servers list`.
+	//
+	// Issue #1148: `reveal_secret_headers` is an operator opt-in for a TRUSTED
+	// read surface, so it now additionally requires an AUTHENTICATED admin.
+	// /mcp is unprotected by default, so before this an anonymous caller on
+	// that endpoint got the raw values the flag was meant to hand the
+	// operator. CanRevealSecrets is nil-safe: an in-process/stdio caller with
+	// no context gets masked values rather than admin-by-absence.
+	revealHeaders := p.config != nil && p.config.RevealSecretHeaders &&
+		auth.AuthContextFromContext(ctx).CanRevealSecrets()
 	for i, server := range servers {
-		// Redact sensitive header values (Authorization, X-API-Key, Cookie,
-		// etc.), env-var secrets, and URL query credentials before surfacing
-		// them through the MCP tool. An MCP agent inside a sandbox should
-		// never be able to read another upstream's Bearer token, API key, or
-		// URL-embedded secret via `upstream_servers list`. Operators who
-		// genuinely need the raw values can set `reveal_secret_headers: true`.
-		headers := server.Headers
-		serverURL := server.URL
-		serverEnv := server.Env
+		// The secret-bearing fields are sourced from redactedServerView — the
+		// shared walker over the config's own JSON — rather than from a
+		// per-field redactor call, so this projection cannot drift from the
+		// one `list_quarantined` uses. viewField falls back to the raw value
+		// only for keys ServerConfig omits when empty, which keeps the
+		// response shape byte-identical to before.
+		view := redactedServerView(server, liveRedaction)
+		headers := interface{}(server.Headers)
+		serverURL := interface{}(server.URL)
+		serverEnv := interface{}(server.Env)
+		serverArgs := interface{}(server.Args)
 		if !revealHeaders {
-			headers = oauth.RedactStringHeaders(server.Headers)
-			serverEnv = oauth.RedactEnvValues(server.Env)
-			serverURL = oauth.RedactURLQueryParams(server.URL)
+			headers = viewField(view, "headers", server.Headers)
+			serverEnv = viewField(view, "env", server.Env)
+			serverURL = viewField(view, "url", server.URL)
+			serverArgs = redactedArgs(server.Args, liveRedaction)
 		}
 		serverMap := map[string]interface{}{
 			"name":        server.Name,
 			"protocol":    server.Protocol,
 			"command":     server.Command,
-			"args":        server.Args,
+			"args":        serverArgs,
 			"url":         serverURL,
 			"env":         serverEnv,
 			"headers":     headers,
@@ -3807,7 +3834,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				// all) is commonly echoed into the error; scrub it before it
 				// reaches connection_status.last_error and health.detail.
 				if !revealHeaders {
-					lastError = oauth.RedactSensitiveData(lastError)
+					lastError = scrubUpstreamText(lastError)
 				}
 			}
 			isConnected = connInfo.State.String() == "connected"
@@ -3934,17 +3961,30 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				}
 			}
 
-			// Add server-specific isolation config. This block is deliberately
-			// the RAW per-server override — it is named server_isolation — so
-			// `enabled` is omitted entirely when the server inherits the global
-			// setting rather than being flattened to false. The effective state
-			// lives in applies_to_server / isolation_mode above.
+			// Add server-specific isolation config. This block is the RAW
+			// per-server OVERRIDE — it is named server_isolation — so `enabled`
+			// is omitted entirely when the server inherits the global setting
+			// rather than being flattened to false. The effective state lives
+			// in applies_to_server / isolation_mode above.
+			//
+			// "Raw override" means the override SET, not raw secrets: issue
+			// #1148 round 7 finding 3 found this block republishing
+			// `isolation.extra_args` verbatim in the SAME response that masks
+			// env, url and args — and `extra_args` is free text an operator
+			// puts `-e API_KEY=<token>` into. The values are therefore sourced
+			// from the redacted view, under the same reveal_secret_headers gate
+			// as every other secret-bearing field on this surface.
 			if server.Isolation != nil {
+				// viewField keeps the payload SHAPE byte-identical: every
+				// string field of config.IsolationConfig is `omitempty`, so an
+				// unset one is absent from the view and falls back to the raw
+				// (empty) value rather than turning into a JSON null.
+				isoSource := isolationValues(server.Isolation, revealHeaders)
 				serverIso := map[string]interface{}{
-					"image":        server.Isolation.Image,
-					"network_mode": server.Isolation.NetworkMode,
-					"working_dir":  server.Isolation.WorkingDir,
-					"extra_args":   server.Isolation.ExtraArgs,
+					"image":        viewField(isoSource, "image", server.Isolation.Image),
+					"network_mode": viewField(isoSource, "network_mode", server.Isolation.NetworkMode),
+					"working_dir":  viewField(isoSource, "working_dir", server.Isolation.WorkingDir),
+					"extra_args":   viewField(isoSource, "extra_args", server.Isolation.ExtraArgs),
 				}
 				if server.Isolation.Enabled != nil {
 					serverIso["enabled"] = *server.Isolation.Enabled
@@ -3975,10 +4015,14 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		"servers": enhancedServers,
 		"total":   len(servers),
 		"docker_status": map[string]interface{}{
-			"available":        dockerAvailable,
-			"docker_path":      dockerPath,
-			"global_enabled":   dockerIsolationGlobalEnabled,
-			"isolation_config": p.config.DockerIsolation,
+			"available":      dockerAvailable,
+			"docker_path":    dockerPath,
+			"global_enabled": dockerIsolationGlobalEnabled,
+			// The WHOLE global docker_isolation block, including its own
+			// `extra_args` — which is exactly as credential-bearing as a
+			// server's, and was published here in the clear beside the masked
+			// per-server fields (issue #1148, round 7 finding 3).
+			"isolation_config": globalIsolationView(p.config.DockerIsolation, revealHeaders),
 		},
 	}
 
@@ -4239,7 +4283,16 @@ func (p *MCPProxyServer) handleListQuarantinedUpstreams(ctx context.Context) (*m
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"servers": servers,
+		// Issue #1148: this used to marshal the raw []*config.ServerConfig, so
+		// env values, header values, oauth.client_secret, URL query
+		// credentials and argv tokens all left through the MCP surface in the
+		// clear — to any caller, /mcp being unauthenticated by default — and
+		// were recorded verbatim into the activity store.
+		//
+		// The full (masked) config is still the right payload here: the point
+		// of inspecting a quarantined server is to see HOW it is configured,
+		// including WHICH secrets it carries. Only the values go.
+		"servers": redactedServerViews(servers, liveRedaction),
 		"total":   len(servers),
 		// One line per server so "nobody ever scanned this" is visible right
 		// here, next to the decision it should inform.
@@ -4389,8 +4442,9 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 
 		// Try to get connection status for diagnostics
 		if c, exists := p.upstreamManager.GetClient(serverName); exists {
-			connectionStatus := c.GetConnectionStatus()
-			return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within %v timeout. Connection status: %v. This may indicate the server process is not running, there's a network issue, or the server is unstable (see issue #105).", serverName, connectionTimeout, connectionStatus)), nil
+			// Issue #1148 (round 2, finding 2): the status map carries
+			// last_error, which echoes the upstream URL with its credentials.
+			return mcp.NewToolResultError(inspectConnectionTimeoutError(serverName, connectionTimeout, c.GetConnectionStatus())), nil
 		}
 
 		return mcp.NewToolResultError(fmt.Sprintf("Quarantined server '%s' failed to connect within %v timeout. Client was never created, indicating the server may not be properly configured.", serverName, connectionTimeout)), nil
@@ -4402,7 +4456,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 				zap.String("server", serverName),
 				zap.Error(result.err))
 			supervisor.RecordInspectionFailure(serverName)
-			return mcp.NewToolResultError(fmt.Sprintf("Connection wait failed: %v", result.err)), nil
+			return mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Connection wait failed: %v", result.err))), nil
 		}
 
 		client = result.client
@@ -4436,21 +4490,11 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 			// Force disconnect the client to update its state
 			_ = client.Disconnect()
 
-			// Provide connection error information instead of failing completely
-			connectionStatus := client.GetConnectionStatus()
-			connectionStatus["connection_error"] = err.Error()
-
-			toolsAnalysis = []map[string]interface{}{
-				{
-					"server_name":     serverName,
-					"status":          "QUARANTINED_CONNECTION_FAILED",
-					"message":         fmt.Sprintf("Server '%s' is quarantined and connection failed during tool retrieval. This may indicate the server process crashed or disconnected.", serverName),
-					"connection_info": connectionStatus,
-					"error_details":   err.Error(),
-					"next_steps":      "The server connection failed. Check server process status, logs, and configuration. Server may need to be restarted.",
-					"security_note":   "Connection failure prevents tool analysis. Server must be stable and connected for security inspection.",
-				},
-			}
+			// Provide connection error information instead of failing
+			// completely — scrubbed, because both the status map's last_error
+			// and the raw ListTools error echo the upstream URL with its
+			// credentials (issue #1148, round 2, finding 2).
+			toolsAnalysis = inspectConnectionFailedAnalysis(serverName, client.GetConnectionStatus(), err)
 		} else {
 			// Successfully retrieved tools, proceed with security analysis
 			for _, tool := range tools {
@@ -4781,6 +4825,17 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// #1148 round 6 (finding 4): on CREATE there is no stored value to bind a
+	// mask back to, so ANY mask this proxy rendered can only be a placeholder
+	// an agent copied out of another server's read payload — never a value
+	// worth persisting. Refusing beats persisting literal text like
+	// `••••AL (12 chars)` as an argv token or a header, which produces a server
+	// that fails to connect for a non-obvious reason. REST
+	// `POST /api/v1/servers` runs the same check, so the two create doors agree.
+	if err := checkServerWriteMasks("", serverConfig); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	// Save to storage
 	if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
@@ -5025,7 +5080,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 			connectionStatus = statusError
-			connectionMessage = fmt.Sprintf("Failed to update server config: %v", err)
+			connectionMessage = scrubUpstreamText(fmt.Sprintf("Failed to update server config: %v", err))
 		} else {
 			// Monitor connection status for 1 minute
 			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
@@ -5189,7 +5244,15 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		// #872: the read path masks URL query/userinfo secrets; if a caller
 		// echoes the masked url back, restore the stored real secrets so the
 		// mask is never persisted over them (parity with the REST PATCH path).
-		patch.URL = oauth.UnmaskURL(url, existingServer.URL)
+		// #1148 round 2: unmaskLiveURL recognises THIS surface's rendering
+		// first, then defers to oauth.UnmaskURL for a genuinely edited URL.
+		// #1148 round 4: a mask the per-parameter revert cannot bind is
+		// REFUSED rather than persisted over the credential.
+		unmaskedURL, err := unmaskLiveURL(url, existingServer.URL)
+		if err != nil {
+			return nil, opts, err
+		}
+		patch.URL = unmaskedURL
 	}
 	if protocol := request.GetString("protocol", ""); protocol != "" {
 		patch.Protocol = protocol
@@ -5235,6 +5298,18 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return nil, opts, fmt.Errorf("invalid args_json format: %v", err)
 		}
+		// #1148 round 3: the read path masks credential-shaped argv tokens,
+		// and unlike env/headers/url there is NO unmask contract for argv —
+		// an argv slot has no key to bind a stored secret to, and the caller
+		// controls both the whole vector and `command`, so any revert can be
+		// steered into relocating the credential (see checkArgvMaskEcho).
+		// An echoed mask is therefore refused, not reverted: the caller
+		// resends the real value, so the mask is never restored into an
+		// attacker-chosen command line and never persisted over the
+		// credential either.
+		if err := checkArgvMaskEcho(args, existingServer.Args); err != nil {
+			return nil, opts, err
+		}
 		patch.Args = args
 	}
 
@@ -5259,7 +5334,10 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 		}
 		// #872: revert any masked env value echoed back by the caller.
-		patch.Env = oauth.UnmaskEnvValues(patch.Env, existingServer.Env)
+		// #1148 round 2: the live view can mask a value oauth's name rule left
+		// alone (a vendor-shaped credential under a benign name), so this
+		// surface's own rendering is recognised first.
+		patch.Env = oauth.UnmaskEnvValues(unmaskLiveEnvValues(patch.Env, existingServer.Env), existingServer.Env)
 	}
 
 	// Handle headers JSON string - maps are deep merged with RFC 7396 null-means-remove
@@ -5283,7 +5361,8 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 		}
 		// #872: revert any masked header value echoed back by the caller.
-		patch.Headers = oauth.UnmaskHeaders(patch.Headers, existingServer.Headers)
+		// #1148 round 2: see the env note above.
+		patch.Headers = oauth.UnmaskHeaders(unmaskLiveHeaders(patch.Headers, existingServer.Headers), existingServer.Headers)
 	}
 
 	// Handle isolation JSON string - deep merge for nested config
@@ -5339,11 +5418,29 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			if err := json.Unmarshal([]byte(oauthJSON), &oauth); err != nil {
 				return nil, opts, fmt.Errorf("invalid oauth_json format: %v", err)
 			}
+			// #1148 round 2 (finding 6): list_quarantined renders the WHOLE
+			// config, so client_secret is masked on the read surface — and
+			// oauth_json REPLACES the block, so an unedited echo would persist
+			// the mask over the real secret. Revert it, bound to the field.
+			if err := unmaskLiveOAuth(&oauth, existingServer.OAuth); err != nil {
+				return nil, opts, err
+			}
 			if err := oauth.Validate(); err != nil {
 				return nil, opts, fmt.Errorf("invalid oauth_json: %w", err)
 			}
 			patch.OAuth = &oauth
 		}
+	}
+
+	// #1148 round 6: the fail-closed net. Every mask this proxy can bind back
+	// to the value it was read from has been reverted above; anything still
+	// carrying one is refused rather than persisted over a live credential.
+	// This is what covers the fields with no revert (isolation.extra_args) AND
+	// every field added to config.ServerConfig later — a new field fails CLOSED
+	// instead of silently round-tripping its own mask into the config. See
+	// oauth.ServerFieldMaskDecisions.
+	if err := checkServerWriteMasks("", patch); err != nil {
+		return nil, opts, err
 	}
 
 	return patch, opts, nil
@@ -5587,7 +5684,13 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 		"server_name":     name,
 		"lines_requested": lines,
 		"lines_returned":  len(logLines),
-		"log_lines":       logLines,
+		// Issue #1148 (c2): the per-server log is written by mcpproxy AND by
+		// the child process, and both put credentials in it — the connection
+		// logger records the upstream URL with its `?token=…`, and an MCP
+		// server is free to print its own API key. Scrub every line before it
+		// leaves through the tool response and is recorded into the activity
+		// store.
+		"log_lines": scrubUpstreamLines(logLines),
 		"server_status": map[string]interface{}{
 			"enabled":     serverConfig.Enabled,
 			"quarantined": serverConfig.Quarantined,
@@ -5597,6 +5700,10 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 	// Add connection status if available
 	if client, exists := p.upstreamManager.GetClient(name); exists {
 		connectionStatus := client.GetConnectionStatus()
+		// last_error commonly echoes the upstream URL, credentials included.
+		if lastError, ok := connectionStatus["last_error"].(string); ok {
+			connectionStatus["last_error"] = scrubUpstreamText(lastError)
+		}
 		result["connection_status"] = connectionStatus
 	}
 
@@ -5875,12 +5982,15 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 				case types.StateReady:
 					return "ready", "Server connected and ready"
 				case types.StateError:
-					return "error", fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+					// Issue #1148 (c3): scrubbed like the `last_error` this
+					// same string feeds in `upstream_servers list` — it lands
+					// in connection_message and in the activity record.
+					return "error", scrubUpstreamText(fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError))
 				case types.StatePendingAuth:
 					// Parked awaiting user login (#1013): waiting out the monitor
 					// timeout would just stall the caller — nothing will change
 					// until a human signs in.
-					return statusError, fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError)
+					return statusError, scrubUpstreamText(fmt.Sprintf("Server connection failed: %v", connectionInfo.LastError))
 				case types.StateDisconnected:
 					// If server is explicitly disconnected and enabled is false, return disabled
 					for _, serverConfig := range p.config.Servers {

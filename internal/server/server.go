@@ -349,9 +349,25 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"Authentication required. Provide an API key or agent token."}`, http.StatusUnauthorized)
 				return
 			}
+			// Tray connections carry OS-level authentication (Unix socket /
+			// named pipe permissions), so they are a real identity even
+			// without a token. Checked BEFORE the anonymous fallback so a
+			// socket caller is not downgraded (issue #1148).
+			if transport.GetConnectionSource(r.Context()) == transport.ConnectionSourceTray {
+				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
 			// No token provided — preserve existing unprotected MCP behavior.
-			// Treat as admin (backward compatibility for MCP clients without auth).
-			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			// Treat as admin (backward compatibility for MCP clients without
+			// auth), but mark the context ANONYMOUS: issue #1148: this
+			// deliberate upgrade is what let an unauthenticated caller through
+			// a gate written as `authCtx != nil && !authCtx.IsAdmin()`. Every
+			// operation that worked before still works; only the
+			// secret-REVEALING check (AuthContext.CanRevealSecrets) tells the
+			// two apart.
+			ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -424,8 +440,10 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"Invalid authentication token"}`, http.StatusUnauthorized)
 			return
 		}
-		// Backward compatibility: allow through with admin context
-		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+		// Backward compatibility: allow through with an ANONYMOUS admin
+		// context. The token proved nothing, so it is no more of an identity
+		// than no token at all (issue #1148).
+		ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -959,13 +977,58 @@ func (s *Server) Start(ctx context.Context) error {
 			configPath,
 		)
 
-		// Serve using stdio (standard MCP transport)
-		if err := server.ServeStdio(s.mcpProxy.GetMCPServer()); err != nil {
+		// Serve using stdio (standard MCP transport).
+		//
+		// Issue #1148: stdio has no HTTP middleware, so it used to run with NO
+		// auth context and relied on every gate reading nil as admin. Declare
+		// the identity explicitly instead — a stdio peer is the local process
+		// that launched us, which is as authenticated as the tray socket.
+		if err := server.ServeStdio(s.mcpProxy.GetMCPServer(), server.WithStdioContextFunc(stdioAuthContext)); err != nil {
 			return fmt.Errorf("MCP server error: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// stdioAuthContext installs the authenticated-admin context for the stdio
+// transport. See the ServeStdio call site above (issue #1148).
+//
+// Round 2 finding 9 asked for the nil-sensitive paths this changes to be
+// enumerated rather than assumed. Every consumer of auth.AuthContextFromContext
+// reachable from an MCP handler, and what a stdio session now does differently:
+//
+//	CHANGED, and intended — stdio now behaves exactly like the API-key admin it
+//	is, instead of like an absent identity:
+//	  - workspace.go principalFromContext: "" → "admin". Session grouping names
+//	    the local principal instead of degrading to client+project.
+//	  - preflight_glue.go sessionPreflightScope: nil (unrestricted) → a Scope
+//	    over the whole server universe. An admin is in scope for every server,
+//	    so the same set is allowed; the scope is merely materialised, and can
+//	    now surface a storage error that only fires when ListUpstreams itself
+//	    fails.
+//	  - mcp.go handleListUpstreams: CanRevealSecrets() nil → false, admin →
+//	    true. This is the point of the change: `reveal_secret_headers` keeps
+//	    working for the local operator on stdio.
+//
+//	CHANGED shape, identical outcome:
+//	  - mcp_code_execution.go: options.AuthContext and ToolAnnotationFunc are
+//	    now set. jsruntime's AuthInfo.CanAccessServer / HasPermission both
+//	    short-circuit true for type "admin", so nothing is newly denied; only
+//	    an annotation lookup is added per dispatch.
+//	  - mcp_routing.go direct dispatch: the access and permission checks now
+//	    run, and both pass for an admin.
+//	  - mcp_describe_check.go: record.UserID / UserEmail are read off the
+//	    context and are empty on an admin context, so the record is unchanged.
+//
+//	UNCHANGED — these gate on agent/user identity, which an admin context is
+//	not, or already read nil as admin:
+//	  profile_resolver.go, mcp_direct_scope.go, mcp_direct_callability.go,
+//	  mcp_describe_direct.go, mcp_visibility.go,
+//	  observability_edition_server.go, auth.AuthorizeServerOp and the
+//	  `authCtx != nil && !authCtx.IsAdmin()` gates in mcp.go.
+func stdioAuthContext(ctx context.Context) context.Context {
+	return auth.WithAuthContext(ctx, auth.AdminContext())
 }
 
 // discoverAndIndexTools discovers tools from upstream servers and indexes them
@@ -3374,7 +3437,15 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 	return logEntries, nil
 }
 
-// parseLogLine parses a log line into a LogEntry
+// parseLogLine parses a log line into a LogEntry.
+//
+// Issue #1148, round 4 finding 4: this is the REST twin of `tail_log`. The
+// per-server log file is written by mcpproxy AND by the child process, and both
+// put credentials in it — the connection logger records the upstream URL with
+// its `?token=…`, and an MCP server is free to print its own API key.
+// `GET /api/v1/servers/{id}/logs` served those lines verbatim while the MCP
+// door scrubbed them. Scrubbing HERE, where a raw line becomes a LogEntry,
+// covers every reader of GetServerLogs rather than one handler.
 func parseLogLine(line string, serverName string) contracts.LogEntry {
 	// Try to parse structured format: "2025-01-20 15:04:05 [LEVEL] message"
 	parts := strings.SplitN(line, " ", 3)
@@ -3407,6 +3478,7 @@ func parseLogLine(line string, serverName string) contracts.LogEntry {
 		}
 	}
 
+	entry.Message = scrubUpstreamText(entry.Message)
 	return entry
 }
 
