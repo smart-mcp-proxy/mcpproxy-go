@@ -417,7 +417,11 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// server is currently isolated; the UI uses it as a hint.
 		if srv.Protocol == "stdio" && srv.Command != "" && s.config != nil && s.config.DockerIsolation != nil {
 			im := core.NewIsolationManager(s.config.DockerIsolation)
-			tmpCfg := &config.ServerConfig{Name: srv.Name, Command: srv.Command}
+			// Args are load-bearing, not decoration: the git-capable image
+			// substitution (#1143) is derived from them, so dropping them here
+			// makes the placeholder resolve a different image than the spawn
+			// path and the two surfaces disagree.
+			tmpCfg := &config.ServerConfig{Name: srv.Name, Command: srv.Command, Args: srv.Args}
 			if defaults := im.ResolveDefaults(tmpCfg); defaults != nil {
 				srv.IsolationDefaults = &contracts.IsolationDefaults{
 					RuntimeType: defaults.RuntimeType,

@@ -204,6 +204,15 @@ func classifyDockerIsolatedSpawn(err error) Code {
 	}
 
 	msg := strings.ToLower(err.Error())
+
+	// A handshake TIMEOUT means the container is still running — it simply
+	// never answered `initialize`. Whatever a startup script wrote to stderr
+	// minutes earlier (dash has no `source`, npm prints notices, …) did not
+	// kill anything, so it must not be promoted to the terminal cause and
+	// outrank MCPX_STDIO_HANDSHAKE_TIMEOUT. A missing toolchain makes the
+	// process EXIT, which is the other wrapper and is unaffected here.
+	toolchainSuppressed := isStdioHandshakeTimeout(msg)
+
 	switch {
 	// (1) docker binary unresolved: shellwrap resolution failure, or the shell
 	// / Go exec layer reporting `docker` itself missing. Cover both shell
@@ -220,50 +229,100 @@ func classifyDockerIsolatedSpawn(err error) Code {
 	// (2) a TOOL the server shells out to is missing from the image. git is
 	// the case that matters in practice: the Python default image is slim and
 	// has no git, so every `--from …git+https://…` server fails here (#1143).
-	// Must precede (3): bash reports it as "git: command not found", which
+	// Must precede (4): bash reports it as "git: command not found", which
 	// would otherwise be read as the ENTRYPOINT interpreter missing and put
 	// the wrong image advice in front of the user.
-	case isContainerGitMissing(msg):
+	case !toolchainSuppressed && isContainerGitMissing(msg):
 		return DockerMissingToolchain
-	// (3) in-container interpreter missing (image lacks uvx/node/python/…).
+	// (3) any other shell "missing command" line on the container's stderr.
+	// Anchored to a shell prefix (see shellToolNotFoundRe), so it is specific
+	// enough to sit above (4) — which would otherwise answer the bash wording
+	// of this exact failure with the ENTRYPOINT-missing code. Real OCI
+	// entrypoint errors never carry a shell prefix, so they still fall to (4).
+	case !toolchainSuppressed && shellToolNotFoundRe.MatchString(msg):
+		return DockerMissingToolchain
+	// (4) in-container interpreter missing (image lacks uvx/node/python/…).
 	case strings.Contains(msg, "executable file not found"),
 		strings.Contains(msg, "no such file or directory"),
 		strings.Contains(msg, "command not found"):
 		return DockerExecNotFound
-	// (4) other OCI runtime failures (arch mismatch, runc start failure).
+	// (5) other OCI runtime failures (arch mismatch, runc start failure).
 	case strings.Contains(msg, "oci runtime"),
 		strings.Contains(msg, "exec format error"),
 		strings.Contains(msg, "runc"):
 		return DockerOCIRuntime
-	// (5) any other `<tool>: not found` on the container's stderr — the dash /
-	// BusyBox wording, which none of the cases above match. The image simply
-	// lacks something the server calls.
-	case shellToolNotFoundRe.MatchString(msg):
-		return DockerMissingToolchain
 	}
 	return ""
 }
 
-// shellToolNotFoundRe matches the shell "missing command" line as dash, ash and
-// BusyBox write it — `sh: 1: git: not found`, `sh: make: not found` — which no
-// other classifier arm covers ("command not found" is the bash/zsh wording and
-// is handled above). Anchored on `<word>: not found` so a docker daemon message
-// such as "manifest for x:latest not found" does not match.
-var shellToolNotFoundRe = regexp.MustCompile(`(?:^|[\s:])[\w.+-]+: (?:command )?not found`)
+// isStdioHandshakeTimeout reports whether the error is the "the child is alive
+// but silent" wrapper (connection_lifecycle.go) rather than a process that
+// died. Kept in lockstep with the MCPX_STDIO_HANDSHAKE_TIMEOUT arm of
+// classifyStdio below.
+func isStdioHandshakeTimeout(msg string) bool {
+	return strings.Contains(msg, "did not respond to mcp initialize") ||
+		strings.Contains(msg, "handshake timeout")
+}
+
+// shellToolNotFoundRe matches a shell's "missing command" line, and only that.
+// It is anchored on the SHELL PREFIX the line always carries —
+//
+//	sh: 1: git: not found          (dash / ash / BusyBox)
+//	/bin/sh: 1: exec: cmake: not found
+//	bash: line 1: cmake: command not found
+//
+// — because the bare `<word>: not found` shape it used to match occurs all over
+// ordinary captured stderr (`ERROR config profile production: not found`, an
+// MCP error body, a registry lookup) and the container-toolchain arm runs
+// before every generic stdio arm. Unanchored, one such line anywhere in the
+// stderr tail claimed the whole failure and sent the user to a docs page
+// telling them to change their Docker image.
+//
+// zsh's reversed wording (`zsh:1: command not found: cmake`) is deliberately
+// NOT matched here — it has no space after the shell's colon, and the generic
+// "command not found" arm already covers it.
+var shellToolNotFoundRe = regexp.MustCompile(
+	`(?:^|\s)(?:[\w./+-]*/)?(?:sh|bash|dash|ash|ksh|zsh|busybox)(?:\[\d+\])?: (?:(?:line )?\d+: )?(?:exec: )?[\w.+-]+: (?:command )?not found`)
 
 // gitCloneFailureCauses are causes of a failed git clone that are NOT a missing
 // git binary. `uv` collapses them all into "Git operation failed", so without
 // this guard a private-repo or offline clone would be diagnosed as a
 // missing-toolchain problem and send the user changing images for nothing.
+//
+// Every entry is text only git/ssh/curl can produce, which is itself the proof
+// that git RAN. The list has to cover the wordings a private repository
+// actually produces — an incomplete one is not a near-miss, it is the wrong
+// diagnosis with a confident docs link attached.
 var gitCloneFailureCauses = []string{
+	// Credentials.
 	"authentication failed",
 	"could not read username",
 	"could not read password",
+	"terminal prompts disabled",
+	"invalid username or password",
+	"support for password authentication was removed",
 	"permission denied (publickey)",
-	"could not resolve host",
+	"no supported authentication methods available",
+	"host key verification failed",
+	"returned error: 401",
+	"returned error: 403",
+	// Repository addressing.
 	"repository not found",
+	"' not found", // git: fatal: repository 'https://…/' not found
+	"does not appear to be a git repository",
+	// Network / TLS. "unable to access" is git's own prefix for this whole
+	// family, so it catches the wordings not spelled out individually.
+	"unable to access",
+	"could not resolve host",
+	"temporary failure in name resolution",
 	"connection timed out",
+	"connection refused",
+	"network is unreachable",
+	"failed to connect to",
 	"ssl certificate problem",
+	"server certificate verification failed",
+	"the remote end hung up unexpectedly",
+	"early eof",
 }
 
 // isContainerGitMissing reports whether the container stderr says git is absent

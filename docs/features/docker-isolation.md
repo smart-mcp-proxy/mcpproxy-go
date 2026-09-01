@@ -149,9 +149,20 @@ the key to use your own mirror or a custom build:
 { "docker_isolation": { "default_images": { "uvx-git": "my-registry.example/uv-git:1" } } }
 ```
 
+`default_images` from your config file is merged **over** the built-in map, so a
+partial map like the one above only changes the keys it lists — every other
+runtime keeps its built-in image.
+
+To turn the substitution off entirely, set the key to an empty string; those
+servers then keep whatever `uvx`/`python` image you configured:
+
+```json
+{ "docker_isolation": { "default_images": { "uvx-git": "" } } }
+```
+
 A per-server `isolation.image` override always wins over this selection, so a
 pinned image must ship git itself. `node`/`npx` need no equivalent: `node:22`
-already includes git.
+already includes git, and the substitution never applies to them.
 
 ### Per-Server Configuration
 

@@ -103,10 +103,16 @@ func TestGetDockerImage_GitCapableKeyIsRetargetable(t *testing.T) {
 	}
 }
 
-// Upgrade path: configs written before this key existed still have a
-// default_images map on disk, and it is NOT re-seeded on load. Falling through
-// to the alpine fallback there would be worse than the bug we are fixing.
-func TestGetDockerImage_LegacyConfigWithoutGitKeyStillResolves(t *testing.T) {
+// Upgrade path. A config written before this key existed persists its own
+// default_images map, but that map is decoded INTO the built-in one, so the
+// key is present after load and the substitution happens
+// (config.TestDefaultImagesMergeOverBuiltInsOnLoad pins the merge).
+//
+// Here the key is genuinely absent — a hand-built or PATCH-replaced map — and
+// the operator's own entry for the runtime is the answer, not a hardcoded
+// public image. See TestGetDockerImage_AbsentGitKeyRespectsOperatorRuntimeDefault
+// for why: a mirrored host cannot pull ghcr.io at all.
+func TestGetDockerImage_MapWithoutGitKeyUsesTheConfiguredRuntimeImage(t *testing.T) {
 	legacy := map[string]string{
 		"uvx":    slimUvImage,
 		"python": slimUvImage,
@@ -124,8 +130,8 @@ func TestGetDockerImage_LegacyConfigWithoutGitKeyStillResolves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDockerImage() error: %v", err)
 	}
-	if got != gitUvImage {
-		t.Errorf("GetDockerImage() = %q, want the built-in git-capable fallback %q", got, gitUvImage)
+	if got != slimUvImage {
+		t.Errorf("GetDockerImage() = %q, want the configured runtime image %q", got, slimUvImage)
 	}
 }
 

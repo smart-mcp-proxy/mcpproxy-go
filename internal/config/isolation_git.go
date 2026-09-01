@@ -22,10 +22,14 @@ const GitCapableImageKey = "uvx-git"
 // DefaultGitCapableImage is the built-in value for GitCapableImageKey: the
 // non-slim uv image, which ships git (verified: git version 2.39.5).
 //
-// It is also the hard fallback when the key is absent from the configured
-// map — configs written before this key existed persist their own
-// default_images and are not re-seeded on load, and falling through to the
-// generic alpine fallback there would be worse than the bug being fixed.
+// A config file's `default_images` is decoded INTO this built-in map rather
+// than replacing it, so the key survives an upgrade from a config written
+// before it existed (TestDefaultImagesMergeOverBuiltInsOnLoad). The resolver
+// therefore does NOT reach for this constant whenever the key is missing —
+// doing so would pull a public ghcr.io image behind the back of a mirrored or
+// air-gapped operator whose own `uvx` entry is right there. It is used only
+// where the map has no answer at all; see
+// core.IsolationManager.resolveDefaultImage.
 const DefaultGitCapableImage = "ghcr.io/astral-sh/uv:python3.13-bookworm"
 
 // gitCapableRuntimeTypes are the runtime types whose default image is the

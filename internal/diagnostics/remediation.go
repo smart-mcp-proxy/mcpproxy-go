@@ -164,11 +164,30 @@ func missingToolchainRemediation(hints ClassifierHints) string {
 	return b.String()
 }
 
-// hintsHaveGitDependency reports whether the server installs from a git URL —
-// the `git+` marker pip/uv URLs require. Mirrors config.NeedsGitCapableImage's
-// arg scan (the runtime-type half is irrelevant here: the container already
-// told us the tool is missing).
+// gitCapableRuntimeTypes mirrors config.gitCapableRuntimeTypes — the runtime
+// types whose default image is the git-less slim uv image, and therefore the
+// only ones config.NeedsGitCapableImage substitutes an image for. Mirrored for
+// the same reason gitCapableImageKey is; TestMirroredGitRuntimeGateMatchesConfig
+// pins the two together.
+var gitCapableRuntimeTypes = map[string]bool{
+	"uvx":     true,
+	"python":  true,
+	"python3": true,
+	"pip":     true,
+	"pipx":    true,
+}
+
+// hintsHaveGitDependency reports whether mcpproxy's automatic git-capable image
+// selection applies to this server — i.e. whether config.NeedsGitCapableImage
+// would fire for it. BOTH halves of that gate matter: the `git+` marker pip/uv
+// URLs require, AND the Python-package-runner runtime type. node:22 already
+// ships git and is deliberately left alone, so a node/go/ruby server never gets
+// the substitution — claiming otherwise promises a fix that never runs and
+// points at a `default_images` key with no effect on that server.
 func hintsHaveGitDependency(hints ClassifierHints) bool {
+	if hints.DockerCommand == "" || !gitCapableRuntimeTypes[detectDockerRuntimeType(hints.DockerCommand)] {
+		return false
+	}
 	for _, arg := range hints.DockerArgs {
 		if strings.Contains(strings.ToLower(arg), "git+") {
 			return true

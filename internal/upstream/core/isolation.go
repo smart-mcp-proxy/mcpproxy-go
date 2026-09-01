@@ -286,21 +286,42 @@ func (im *IsolationManager) GetDockerImage(serverConfig *config.ServerConfig, ru
 // (#1143). Bumping the global Python default instead would cost every user a
 // ~1.5GB pull for a case many never hit, so the swap is scoped to the servers
 // whose args actually reference a git URL.
+//
+// The operator's `default_images` map is authoritative throughout. In
+// particular the substitution NEVER reaches past it to a hardcoded public
+// image while the map has an answer: a mirrored or air-gapped install
+// retargets these keys at its own registry, and pulling ghcr.io behind its back
+// is an image that host cannot fetch at all. So:
+//
+//   - key set          → use it (the operator retargeted the git image);
+//   - key set to ""    → opt out, keep the runtime default (the lever for an
+//     operator who does not want a second large image);
+//   - key absent       → the runtime's own configured image, exactly as before
+//     #1143. On the real upgrade path the key is never absent: a config file's
+//     `default_images` is decoded INTO the built-in map, so the built-in entry
+//     survives (TestDefaultImagesMergeOverBuiltInsOnLoad);
+//   - key absent AND no runtime image → the built-in git-capable image, because
+//     the only alternative there is the alpine fallback, which has neither git
+//     nor python.
 func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfig, runtimeType string) (image string, gitSubstituted bool) {
-	if serverConfig != nil && config.NeedsGitCapableImage(runtimeType, serverConfig.Args) {
-		gitImage, exists := im.globalConfig.DefaultImages[config.GitCapableImageKey]
-		if !exists || gitImage == "" {
-			// Configs written before this key existed keep their own
-			// default_images map and are not re-seeded on load, so the
-			// built-in value is the fallback rather than the alpine one.
-			gitImage = config.DefaultGitCapableImage
+	runtimeImage, runtimeExists := im.globalConfig.DefaultImages[runtimeType]
+	needsGit := serverConfig != nil && config.NeedsGitCapableImage(runtimeType, serverConfig.Args)
+
+	if needsGit {
+		gitImage, gitKeySet := im.globalConfig.DefaultImages[config.GitCapableImageKey]
+		switch {
+		case strings.TrimSpace(gitImage) != "":
+			return im.buildFullImageName(gitImage), true
+		case gitKeySet:
+			// Explicitly emptied: the operator opted out of the substitution.
+		case !runtimeExists || strings.TrimSpace(runtimeImage) == "":
+			return im.buildFullImageName(config.DefaultGitCapableImage), true
 		}
-		return im.buildFullImageName(gitImage), true
 	}
 
 	// Use default image from global config
-	if img, exists := im.globalConfig.DefaultImages[runtimeType]; exists {
-		return im.buildFullImageName(img), false
+	if runtimeExists {
+		return im.buildFullImageName(runtimeImage), false
 	}
 
 	// Fallback to alpine for unknown runtime types
@@ -409,9 +430,15 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 
 	// A git dependency silently switches the server to a much larger image, so
 	// say so once per spawn — otherwise the first pull looks like an
-	// unexplained multi-hundred-MB download (#1143).
-	if im.logger != nil && !hasImageOverride(serverConfig) &&
-		config.NeedsGitCapableImage(runtimeType, serverConfig.Args) {
+	// unexplained multi-hundred-MB download (#1143). Keyed on whether the
+	// substitution ACTUALLY happened, not merely on the server qualifying for
+	// it: an operator who emptied the key opted out, and logging a swap that
+	// did not occur would send them looking for a pull that never runs.
+	gitSubstituted := false
+	if !hasImageOverride(serverConfig) {
+		_, gitSubstituted = im.resolveDefaultImage(serverConfig, runtimeType)
+	}
+	if im.logger != nil && gitSubstituted {
 		im.logger.Info("using git-capable isolation image for a git dependency",
 			zap.String("server", serverConfig.Name),
 			zap.String("runtime", runtimeType),
