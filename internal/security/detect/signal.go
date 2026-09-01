@@ -43,6 +43,13 @@ type Signal struct {
 	Confidence float64 // 0.0–1.0; already position-discounted for soft signals
 	Evidence   string  // render-safe; for payload.decoded this is the decoded content
 	Detail     string  // short human explanation
+	// Spans locate this signal's match inside the RAW tool text, for inline
+	// highlighting in the Web UI. Empty (and legitimately so) when the check
+	// matched NormalizedText, which is lossy and non-invertible, or when the
+	// evidence is a synthesized statement about the whole description rather
+	// than a located substring. Never guessed: a span that points at the wrong
+	// characters is worse than no span.
+	Spans []Span
 }
 
 // Check inspects one tool against the whole registry snapshot and emits zero or

@@ -156,18 +156,30 @@ func (c *BundleCheck) Inspect(tool detect.ToolView, _ detect.RegistryView) []det
 		if loc == nil {
 			continue
 		}
+		checkID := "tpa." + r.id + "." + r.detector
+		// detect.CapEvidence is the render-safe contract every other check
+		// honors: it escapes control / zero-width / bidi runes to a visible
+		// \uXXXX form AND caps to MaxEvidenceLen. The bundle's dot-all regexes
+		// can match such runes from an attacker-controlled description, so the
+		// raw span must never land verbatim in Signal.Evidence — nor in the
+		// span's Snippet, which is the same value reused as the UI's staleness
+		// checksum.
+		evidence := detect.CapEvidence(tool.Description[loc[0]:loc[1]])
 		sigs = append(sigs, detect.Signal{
-			CheckID:    "tpa." + r.id + "." + r.detector,
+			CheckID:    checkID,
 			Tier:       detect.TierHard,
 			ThreatType: r.threatType,
 			Confidence: r.confidence,
-			// detect.CapEvidence is the render-safe contract every other check
-			// honors: it escapes control / zero-width / bidi runes to a visible
-			// \uXXXX form AND caps to MaxEvidenceLen. The bundle's dot-all regexes
-			// can match such runes from an attacker-controlled description, so the
-			// raw span must never land verbatim in Signal.Evidence.
-			Evidence: detect.CapEvidence(tool.Description[loc[0]:loc[1]]),
-			Detail:   fmt.Sprintf("bundle rule %s (%s, level=%s) matched tool description", r.id, r.detector, r.level),
+			Evidence:   evidence,
+			Detail:     fmt.Sprintf("bundle rule %s (%s, level=%s) matched tool description", r.id, r.detector, r.level),
+			// The regex already handed us the match location; converting it here
+			// is the whole cost of the inline highlight. Offsets that will not
+			// convert cleanly to UTF-16 yield no span rather than a wrong one,
+			// and a match longer than the snippet can pin down is CLAMPED to the
+			// verified prefix — these dot-all rules routinely match far more than
+			// MaxEvidenceLen runes, and an unverified tail is exactly how a mark
+			// ends up on prose no rule matched. See detect.DescriptionSpan.
+			Spans: detect.DescriptionSpan(checkID, detect.TierHard, tool.Description, loc[0], loc[1]),
 		})
 	}
 	return sigs

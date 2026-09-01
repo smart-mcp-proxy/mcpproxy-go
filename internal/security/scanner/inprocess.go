@@ -295,6 +295,9 @@ func detectFindingToScanFinding(f detect.Finding) ScanFinding {
 		Signals:     f.Signals,
 		Tier:        tier,
 		Sources:     []string{f.Scanner},
+		// Spans are already unioned/deduped/sorted/capped by detect.aggregate;
+		// carrying the slice through is the whole of this layer's job.
+		Spans: f.Spans,
 	}
 }
 

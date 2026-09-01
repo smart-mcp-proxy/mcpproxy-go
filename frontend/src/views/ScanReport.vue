@@ -282,7 +282,19 @@
                       </div>
                       <div v-if="finding.location">
                         <span class="text-base-content/50">Location:</span>
-                        <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
+                        <!-- A `server:tool` location links into the server's Tools
+                             tab, focused on that tool's card, where the flagged
+                             words are marked in the description. Non-tool
+                             locations (file paths, "tool:"-prefixed scanner
+                             names) parse to null and keep today's inert code. -->
+                        <router-link
+                          v-if="toolLocationLink(finding.location)"
+                          :to="toolLocationLink(finding.location)!"
+                          class="ml-1 link link-primary font-mono"
+                          data-test="finding-location-link"
+                          title="Show these words in the tool description"
+                        >{{ finding.location }}</router-link>
+                        <code v-else class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
                       <div v-if="findingSources(finding).length">
                         <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
@@ -388,7 +400,19 @@
                       </div>
                       <div v-if="finding.location">
                         <span class="text-base-content/50">Location:</span>
-                        <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
+                        <!-- A `server:tool` location links into the server's Tools
+                             tab, focused on that tool's card, where the flagged
+                             words are marked in the description. Non-tool
+                             locations (file paths, "tool:"-prefixed scanner
+                             names) parse to null and keep today's inert code. -->
+                        <router-link
+                          v-if="toolLocationLink(finding.location)"
+                          :to="toolLocationLink(finding.location)!"
+                          class="ml-1 link link-primary font-mono"
+                          data-test="finding-location-link"
+                          title="Show these words in the tool description"
+                        >{{ finding.location }}</router-link>
+                        <code v-else class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
                       <div v-if="findingSources(finding).length">
                         <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
@@ -655,6 +679,7 @@ import api from '@/services/api'
 import { formatDateTime } from '@/utils/datetime'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { parseToolLocation, toolFocusPath } from '@/utils/toolLocation'
 import type { SecurityScanFinding, ThreatType } from '@/types/api'
 
 const serversStore = useServersStore()
@@ -669,6 +694,17 @@ const rootEl = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const error = ref('')
 const report = ref<any>(null)
+
+/**
+ * Route for a finding whose `location` names a tool on this report's server, or
+ * null when it names something else (a file path, or another scanner's
+ * "tool:"/"prompt:"/"resource:" form). `report.server_name` is the strongest
+ * available guard, so the parse is anchored to it rather than to a heuristic.
+ */
+function toolLocationLink(location?: string | null): string | null {
+  const parsed = parseToolLocation(location, { expectedServer: report.value?.server_name })
+  return parsed ? toolFocusPath(parsed.server, parsed.tool) : null
+}
 const actionLoading = ref(false)
 const serverStatus = ref<'loading' | 'loaded'>('loading')
 const serverAdminState = ref('unknown')

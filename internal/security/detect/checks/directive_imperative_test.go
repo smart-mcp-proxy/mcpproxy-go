@@ -1,6 +1,7 @@
 package checks
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -248,7 +249,8 @@ func TestDirectiveImperative_Deterministic(t *testing.T) {
 	if len(a) != 1 || len(b) != 1 {
 		t.Fatalf("expected exactly one signal each run, got %d and %d", len(a), len(b))
 	}
-	if a[0] != b[0] {
+	// DeepEqual, not ==: Signal carries a []Span and is no longer comparable.
+	if !reflect.DeepEqual(a[0], b[0]) {
 		t.Errorf("non-deterministic signal: %+v vs %+v", a[0], b[0])
 	}
 }

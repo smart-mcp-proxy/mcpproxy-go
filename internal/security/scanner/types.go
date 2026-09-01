@@ -3,6 +3,8 @@ package scanner
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
 
 // Scanner status constants
@@ -318,6 +320,15 @@ type ScanFinding struct {
 	// same issue the merged finding lists both (Spec 077 FR-013). ≥1 for
 	// findings produced under Spec 077; empty for legacy findings. Additive.
 	Sources []string `json:"sources,omitempty"`
+	// Spans locate the exact words in the tool's raw text that tripped each
+	// contributing check, so the Web UI can highlight them inline in the tool
+	// list instead of stranding the operator on a scan-report page with a prose
+	// sentence. Offsets are UTF-16 code units (JavaScript string indices) —
+	// see detect.Span. Omitted entirely for findings whose checks match
+	// normalized text, and for external scanners (Docker/SARIF), which report
+	// no offsets at all; a missing key means "no highlight", never "clean".
+	// Additive, back-compat.
+	Spans []detect.Span `json:"spans,omitempty"`
 }
 
 // ScanReport represents aggregated scan results for a server

@@ -29,7 +29,43 @@ import (
 // The reference shape still requires the name to be distinctive: generic verbs
 // ("search", "get", "list") appear in prose constantly. A tool referencing its
 // OWN name is also ignored.
+//
+// TIERS — both shapes are currently HARD. A demote of shape 2 (reference) to
+// SOFT is an APPROVED but DEFERRED change (maintainer decision, 2026-09-01),
+// held back until scan reports carry a ruleset version.
+//
+// Why the demote is wanted: distinctiveName() is a bare length-and-stop-list
+// test applied to every identifier-shaped token in ordinary English prose, and
+// prose is full of them. Google Cloud SQL's create_user description says "For
+// this reason, you can't add two IAM users…"; another installed server exposes a
+// tool named "reason"; the branch auto-quarantines a Google API server over one
+// word in one sentence. Patching the heuristic (stop-list additions, a length
+// bump) is not the fix — every such patch guesses which English words happen to
+// be tool names on some other install, and the next collision moves to the next
+// word.
+//
+// Why it is deferred rather than shipped: a tier change only reaches an install
+// on RESCAN. Persisted reports store ThreatLevel and tier as data, and nothing
+// in the tree invalidates a report when the ruleset that produced it changes, so
+// shipping the demote today fixes new scans and silently leaves every existing
+// dangerous verdict standing. The stale direction is the safe one (over-flagging,
+// not under-flagging), and the measured blast radius is small — 7 of 947 findings
+// across 3 of 19 scanned servers on a 28-server install — so the demote is worth
+// strictly more once it can actually propagate. It ships with the Phase 3
+// bundle-fingerprint rescan trigger, which has to invalidate stale reports anyway.
+//
+// The span emitted below is independent of the tier and lands now: a genuine
+// steering description AND this false positive both point at the exact word,
+// which is what makes a one-second dismissal possible either way.
 type Shadowing struct{}
+
+// shadowingConfidence rates both shapes. detect.aggregate SUMS confidences
+// across a tool's signals, so an over-stated number does not just mislabel one
+// signal — it inflates the combined confidence of every tool the check touches.
+// A per-shape split (the reference shape is a token-membership test over prose
+// and cannot honestly claim 0.85) is deferred with the tier split described
+// above.
+const shadowingConfidence = 0.85
 
 // ID implements detect.Check.
 func (*Shadowing) ID() string { return "shadowing.cross_server" }
@@ -72,9 +108,16 @@ func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []det
 				CheckID:    c.ID(),
 				Tier:       detect.TierHard,
 				ThreatType: detect.ThreatToolPoisoning,
-				Confidence: 0.85,
+				Confidence: shadowingConfidence,
 				Evidence:   detect.CapEvidence(fmt.Sprintf("tool %q duplicates server %q's tool of the same name, description included", tool.Name, other.Server)),
-				Detail:     fmt.Sprintf("Tool %q clones server %q's tool — same name and near-identical description — possible impersonation.", tool.Name, other.Server),
+				// No Spans, deliberately. The clone evidence is a property of the
+				// description as a WHOLE (token-set containment against another
+				// server's description), not a located substring — cloneDescriptions
+				// never identifies an offset, and the shared tokens are scattered
+				// across both texts. Marking an arbitrary word, or the whole
+				// description, would claim a precision this check does not have; the
+				// UI's honest fallback for a span-less finding already exists.
+				Detail: fmt.Sprintf("Tool %q clones server %q's tool — same name and near-identical description — possible impersonation.", tool.Name, other.Server),
 			})
 			break // one clone signal is enough
 		}
@@ -173,10 +216,14 @@ var wordRe = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_]{5,}`)
 // referenceSignals flags a description that names a distinctive tool living on a
 // different server. A reference to the tool's own name is ignored.
 func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryView) []detect.Signal {
-	tokens := wordRe.FindAllString(tool.Description, -1)
+	// FindAllStringIndex, not FindAllString: the byte offsets are what become the
+	// UI's highlight, and recovering them afterwards with strings.Index would be
+	// a coin flip on any description that repeats the token.
+	locs := wordRe.FindAllStringIndex(tool.Description, -1)
 	seen := make(map[string]struct{})
 	var sigs []detect.Signal
-	for _, tok := range tokens {
+	for _, loc := range locs {
+		tok := tool.Description[loc[0]:loc[1]]
 		if tok == tool.Name {
 			continue // self-reference
 		}
@@ -207,14 +254,18 @@ func (c *Shadowing) referenceSignals(tool detect.ToolView, reg detect.RegistryVi
 		if !onOtherServer || onOwnServer {
 			continue
 		}
+		// Every occurrence after the first is skipped by `seen` ABOVE, and every
+		// occurrence that failed a filter was skipped before reaching here, so
+		// loc is the offset of the occurrence that actually produced this signal.
 		seen[tok] = struct{}{}
 		sigs = append(sigs, detect.Signal{
 			CheckID:    c.ID(),
 			Tier:       detect.TierHard,
 			ThreatType: detect.ThreatToolPoisoning,
-			Confidence: 0.85,
+			Confidence: shadowingConfidence,
 			Evidence:   detect.CapEvidence(fmt.Sprintf("description references cross-server tool %q", tok)),
 			Detail:     fmt.Sprintf("Tool %q description steers the agent toward another server's tool %q.", tool.Name, tok),
+			Spans:      detect.DescriptionSpan(c.ID(), detect.TierHard, tool.Description, loc[0], loc[1]),
 		})
 	}
 	return sigs

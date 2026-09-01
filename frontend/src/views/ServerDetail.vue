@@ -421,6 +421,16 @@
           </div>
 
           <div v-else class="space-y-4">
+            <!-- Flagged tool descriptions (TPA inline findings, phase 1).
+                 Reads the scan report that onMounted already loads for every
+                 tab — no extra request — and renders nothing when the server
+                 has no tool-level findings. -->
+            <FlaggedToolsPanel
+              :groups="flaggedToolGroups"
+              :present-tools="presentToolNames"
+              @show-in-description="showToolInDescription"
+            />
+
             <!-- Tool Quarantine Panel (Spec 032) -->
             <div v-if="quarantinedTools.length > 0" data-test="tool-quarantine-banner" class="alert alert-warning shadow-lg mb-4">
               <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -652,11 +662,14 @@
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <div
                 v-for="tool in filteredTools"
+                :id="toolCardId(tool.name)"
                 :key="tool.name"
-                class="card shadow-md transition-colors"
-                :class="isToolEnabled(tool.name)
-                  ? 'bg-base-100'
-                  : 'bg-base-200/70 border border-base-300'"
+                tabindex="-1"
+                class="card shadow-md transition-colors scroll-mt-24"
+                :class="[
+                  isToolEnabled(tool.name) ? 'bg-base-100' : 'bg-base-200/70 border border-base-300',
+                  focusedToolName === tool.name ? 'ring-2 ring-primary ring-offset-2 ring-offset-base-100' : '',
+                ]"
               >
                 <div class="card-body">
                   <!--
@@ -697,6 +710,13 @@
                         class="badge badge-neutral badge-sm"
                         title="Disabled by mcp_config.json (enabled_tools / disabled_tools)"
                       >🔒 locked by config</span>
+                      <!-- Scan status. Absent (renders nothing) for every tool
+                           the scan did not flag — never a "safe" badge. -->
+                      <FindingChip
+                        v-if="findingGroupForTool(tool.name)"
+                        :state="findingGroupForTool(tool.name)!.level"
+                        :count="findingGroupForTool(tool.name)!.findings.length"
+                      />
                     </div>
                     <label
                       v-if="isToolToggleAvailable(tool.name)"
@@ -724,9 +744,13 @@
                     class="transition-opacity"
                     :class="isToolEnabled(tool.name) ? '' : 'opacity-60'"
                   >
-                    <p class="text-sm text-base-content/70 mt-2">
-                      {{ tool.description || 'No description available' }}
-                    </p>
+                    <!-- Renders exactly the plain paragraph it replaced unless
+                         the scan produced spans that still verify against this
+                         description; then the flagged words are marked in place. -->
+                    <ToolDescription
+                      :description="tool.description"
+                      :findings="findingGroupForTool(tool.name)?.findings"
+                    />
                     <AnnotationBadges
                       v-if="tool.annotations"
                       :annotations="tool.annotations"
@@ -1463,6 +1487,17 @@
                 </div>
               </div>
 
+              <!-- The tab whose entire job is security used to stop at the
+                   counts and never name WHICH of the server's tools was the
+                   problem. Same panel as the Tools tab, same in-memory report —
+                   "Show in description" hands the operator straight to the
+                   marked words. -->
+              <FlaggedToolsPanel
+                :groups="flaggedToolGroups"
+                :present-tools="presentToolNames"
+                @show-in-description="showToolInDescription"
+              />
+
               <!-- Scan metadata -->
               <div class="text-sm text-base-content/60 mb-4">
                 <!-- Audit F34: a truncated id you cannot copy is unusable in a
@@ -1564,6 +1599,9 @@ import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
 import KVValueCell from '@/components/KVValueCell.vue'
 import TrustModeSelector from '@/components/TrustModeSelector.vue'
 import HoldEvidenceBadge from '@/components/HoldEvidenceBadge.vue'
+import ToolDescription from '@/components/ToolDescription.vue'
+import FindingChip from '@/components/FindingChip.vue'
+import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
@@ -1574,6 +1612,7 @@ import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
+import { groupFindingsByTool, type FlaggedToolGroup } from '@/utils/toolLocation'
 import { TRUST_MODES, type TrustMode } from '@/utils/trustMode'
 import { parseHoldEvidence } from '@/utils/holdEvidence'
 import {
@@ -2906,6 +2945,86 @@ const scanThreatCounts = computed(() => {
   }
 })
 
+// --- Inline scan findings (TPA phase 1) -------------------------------------
+//
+// The scan report is already in memory on every tab (loadScanReport runs in
+// onMounted regardless of activeTab), so naming the flagged tools next to the
+// tool list needs no new request, no new endpoint and no contract change.
+//
+// The join key is `finding.location` — `server:tool`, split on the LAST colon
+// because server names contain '.' and '/'. Findings from other scanners carry
+// file paths or "tool:"-prefixed names there and are dropped by the parser
+// rather than mis-attributed (see utils/toolLocation.ts).
+const flaggedToolGroups = computed<FlaggedToolGroup[]>(() =>
+  groupFindingsByTool(scanReport.value?.findings, [
+    scanReport.value?.server_name ?? '',
+    props.serverName,
+  ].filter(Boolean))
+)
+
+const flaggedToolIndex = computed(() => {
+  const index = new Map<string, FlaggedToolGroup>()
+  for (const group of flaggedToolGroups.value) index.set(group.tool, group)
+  return index
+})
+
+function findingGroupForTool(toolName: string): FlaggedToolGroup | undefined {
+  return flaggedToolIndex.value.get(toolName)
+}
+
+/**
+ * The tools the server currently exposes, or null while we do not yet know.
+ *
+ * The panel uses this to decide whether "Show in description" has anywhere to
+ * go. Findings outlive the tools they name — nothing rescans a `manual` server
+ * after admission — so a report can perfectly well point at a tool the server
+ * has since dropped, and scrolling to a card that does not exist is a silent
+ * dead button. `null` while the tools request is still in flight, so a slow load
+ * never mislabels a present tool as missing; an EMPTY list is a real answer (a
+ * disconnected server exposes nothing) and is passed through as such.
+ */
+const presentToolNames = computed<string[] | null>(() =>
+  toolsLoading.value ? null : serverTools.value.map((tool) => tool.name),
+)
+
+// Stable DOM id per tool card, used by the panel's "Show in description" action
+// and by the ?tool= deep link from the scan report.
+function toolCardId(toolName: string): string {
+  return `tool-card-${toolName}`
+}
+
+const focusedToolName = ref<string | null>(null)
+
+/**
+ * Bring one tool card into view and focus it.
+ *
+ * Clears the tool search first: a filter left over from an earlier interaction
+ * would otherwise silently swallow the very card we are pointing the operator
+ * at, which reads as a dead button.
+ */
+async function showToolInDescription(toolName: string) {
+  activeTab.value = 'tools'
+  if (toolSearch.value && !toolName.toLowerCase().includes(toolSearch.value.toLowerCase())) {
+    toolSearch.value = ''
+  }
+  focusedToolName.value = toolName
+  await nextTick()
+  const el = document.getElementById(toolCardId(toolName))
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.focus({ preventScroll: true })
+}
+
+// ?tool=<name> deep-links a scan finding to the card whose description carries
+// the flagged words. Runs after the tools payload has landed (loadServerDetails
+// awaits it), so the element the focus targets actually exists.
+function applyToolFocus() {
+  const toolParam = route.query.tool
+  const toolName = Array.isArray(toolParam) ? toolParam[0] : toolParam
+  if (!toolName) return
+  void showToolInDescription(String(toolName))
+}
+
 const hasCompletedScanForApprove = computed(() => {
   if (scanReport.value) return true
   return !!server.value?.security_scan?.last_scan_at
@@ -3776,6 +3895,9 @@ onMounted(() => {
     // Audit F11: honor ?focus=endpoint once the server payload is in, so the
     // Edit URL action lands on a focused, pre-filled field.
     applyEndpointFocus()
+    // ?tool=<name> (set by a scan-report location link) lands on the tool card
+    // whose description carries the flagged words.
+    applyToolFocus()
     // Pre-load scanner names if opening security tab
     if (activeTab.value === 'security') {
       loadScannerNames()
