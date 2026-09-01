@@ -40,6 +40,22 @@ type ServerStatus struct {
 	// when the server is healthy (or the last failure has not yet been classified).
 	// Spec 044.
 	Diagnostic *diagnostics.DiagnosticError
+
+	// RetryStopped reports that automatic reconnection has been given up for
+	// good: the classifier proved the failure deterministic and unrecoverable,
+	// so re-dialing cannot succeed until a human changes something (GH #1145).
+	// It is NOT the ordinary exponential backoff — that keeps retrying.
+	//
+	// The three fields exist as first-class status so the REST API, the CLI and
+	// the tray all read the same thing; without them a parked server would look
+	// like any other error and the user would wait forever for a retry that is
+	// never coming.
+	RetryStopped bool
+	// RetryStoppedCode is the stable MCPX_* code that justified stopping.
+	RetryStoppedCode string
+	// RetryStoppedReason is the human-readable cause, taken from the diagnostics
+	// catalog entry for RetryStoppedCode (falling back to the raw error).
+	RetryStoppedReason string
 }
 
 // ServerStatusSnapshot is an immutable snapshot of all server statuses.

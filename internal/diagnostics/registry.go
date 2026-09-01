@@ -33,6 +33,7 @@ func register(e CatalogEntry) {
 func seedSTDIO() {
 	register(CatalogEntry{
 		Code:        STDIOSpawnENOENT,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The configured command for this stdio server was not found on PATH.",
 		FixSteps: []FixStep{
@@ -44,6 +45,7 @@ func seedSTDIO() {
 	})
 	register(CatalogEntry{
 		Code:        STDIOSpawnEACCES,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "Permission denied executing the configured command.",
 		FixSteps: []FixStep{
@@ -54,6 +56,7 @@ func seedSTDIO() {
 	})
 	register(CatalogEntry{
 		Code:        STDIOSpawnExecFormat,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The configured command is the wrong CPU architecture or not an executable (exec format error). Install a build that matches this machine.",
 		FixSteps: []FixStep{
@@ -258,6 +261,12 @@ func seedHTTP() {
 		},
 		DocsURL: docsURL(HTTPTimeout),
 	})
+	// NOT RetryPermanent, however deterministic the name sounds: mcp-go returns
+	// its ErrLegacySSEServer sentinel for ANY 4xx on the initialize POST except
+	// 401 (client/transport/streamable_http.go). A 429 from a rate-limited
+	// upstream — or a 403/404/408 during a deploy — arrives as this exact code,
+	// and parking on it would strand a server that is merely busy (GH #1145
+	// review).
 	register(CatalogEntry{
 		Code:        HTTPLegacySSE,
 		Severity:    SeverityError,
@@ -314,6 +323,7 @@ func seedDOCKER() {
 	})
 	register(CatalogEntry{
 		Code:        DockerCLINotFound,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "Docker isolation is enabled but the `docker` command could not be found. Install Docker, or add its CLI to your PATH.",
 		FixSteps: []FixStep{
@@ -324,6 +334,7 @@ func seedDOCKER() {
 	})
 	register(CatalogEntry{
 		Code:        DockerExecNotFound,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The Docker image is missing the interpreter this server needs (e.g. the image has no `uvx`/`node`). Pick an image that includes it.",
 		FixSteps: []FixStep{
@@ -333,6 +344,7 @@ func seedDOCKER() {
 	})
 	register(CatalogEntry{
 		Code:        DockerOCIRuntime,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The Docker container failed to start (OCI runtime error). This is often an image/CPU architecture mismatch.",
 		FixSteps: []FixStep{
@@ -357,6 +369,7 @@ func seedCONFIG() {
 	})
 	register(CatalogEntry{
 		Code:        ConfigParseError,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "mcpproxy could not parse the configuration file.",
 		FixSteps: []FixStep{
@@ -367,6 +380,7 @@ func seedCONFIG() {
 	})
 	register(CatalogEntry{
 		Code:        ConfigInvalidCommand,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "This server's command has nothing to run — a package runner like npx or uvx needs the package name in \"args\".",
 		FixSteps: []FixStep{

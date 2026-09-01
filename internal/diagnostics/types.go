@@ -47,8 +47,12 @@ type CatalogEntry struct {
 	UserMessage string    `json:"user_message"`
 	FixSteps    []FixStep `json:"fix_steps"`
 	DocsURL     string    `json:"docs_url"`
-	Deprecated  bool      `json:"deprecated,omitempty"`
-	ReplacedBy  Code      `json:"replaced_by,omitempty"`
+	// Retry declares whether an automatic reconnect can ever fix a failure
+	// carrying this code. Omitted (zero value) means transient/retryable — see
+	// RetryClass. Consumed by IsPermanent.
+	Retry      RetryClass `json:"retry,omitempty"`
+	Deprecated bool       `json:"deprecated,omitempty"`
+	ReplacedBy Code       `json:"replaced_by,omitempty"`
 }
 
 // DiagnosticError is the runtime record attached to a server's stateview snapshot
@@ -122,4 +126,24 @@ const (
 const (
 	ModeDryRun  = "dry_run"
 	ModeExecute = "execute"
+)
+
+// RetryClass says whether an automatic retry of a failure carrying a given code
+// can ever succeed without a human changing something first.
+//
+// The zero value is deliberately RetryTransient: a code is retryable until it is
+// EXPLICITLY declared otherwise. An unclassified or newly added failure must
+// never be mistaken for proof of permanence (GH #1145).
+type RetryClass string
+
+const (
+	// RetryTransient (the zero value) means the condition can clear on its own —
+	// a daemon starting, a registry recovering, a secret appearing in the
+	// keyring, a network coming back. Keep retrying on the usual ladder.
+	RetryTransient RetryClass = ""
+	// RetryPermanent means the condition is a config/toolchain fact: the exact
+	// same attempt will fail identically forever until a human edits something.
+	// Retrying it burns CPU, disk and network and floods the log for no chance
+	// of success (GH #1145: 55 identical container spawns over 19 hours).
+	RetryPermanent RetryClass = "permanent"
 )

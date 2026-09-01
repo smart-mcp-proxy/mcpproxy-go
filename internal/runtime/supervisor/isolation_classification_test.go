@@ -11,7 +11,8 @@ import (
 
 func modePtr(m config.IsolationMode) *config.IsolationMode { return &m }
 
-// TestUsesDockerIsolation_MatchesResolver is the "one algorithm" invariant for
+// TestClassifierHints_DockerIsolationMatchesResolver is the "one algorithm"
+// invariant for
 // the diagnostics classifier: whether the supervisor attributes a spawn failure
 // to a DOCKER remediation code must agree with the resolver the SPAWN path uses
 // (config.ResolveIsolation), not with a hand-rolled mirror of it.
@@ -26,7 +27,7 @@ func modePtr(m config.IsolationMode) *config.IsolationMode { return &m }
 //   - a `mode: "sandbox"` server under global Docker isolation is NOT
 //     containerised, but was classified Docker-isolated and offered Docker
 //     remediation for a Landlock failure.
-func TestUsesDockerIsolation_MatchesResolver(t *testing.T) {
+func TestClassifierHints_DockerIsolationMatchesResolver(t *testing.T) {
 	optOut, optIn := false, true
 
 	tests := []struct {
@@ -121,14 +122,14 @@ func TestUsesDockerIsolation_MatchesResolver(t *testing.T) {
 					wantDocker, resolved.Mode, resolved.Source, tc.want)
 			}
 
-			if got := s.usesDockerIsolation(tc.srv); got != tc.want {
-				t.Errorf("usesDockerIsolation() = %v, want %v (resolver mode=%q source=%q)",
-					got, tc.want, resolved.Mode, resolved.Source)
-			}
-
-			hints := s.classifierHints(tc.srv, "stdio")
-			if hints.DockerIsolated != tc.want {
-				t.Errorf("classifierHints().DockerIsolated = %v, want %v", hints.DockerIsolated, tc.want)
+			// The predicate now lives in the shared builder
+			// (internal/diagnostics/hints), which the managed client uses too —
+			// so the retry decision and the remediation text cannot disagree
+			// about whether a server was containerised (GH #1145).
+			h := s.classifierHints(tc.srv, "stdio")
+			if h.DockerIsolated != tc.want {
+				t.Errorf("classifierHints().DockerIsolated = %v, want %v (resolver mode=%q source=%q)",
+					h.DockerIsolated, tc.want, resolved.Mode, resolved.Source)
 			}
 		})
 	}

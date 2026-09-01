@@ -70,6 +70,20 @@ type HealthCalculatorInput struct {
 	// Tool info
 	ToolCount int
 
+	// RetryStopped reports that automatic reconnection has been permanently
+	// given up because the classifier proved the failure deterministic (GH
+	// #1145). It is checked ahead of the generic connection-state branches: a
+	// parked server IS in "error", but reporting it as an ordinary error hides
+	// the one thing the user needs to know — that nothing will retry on its own.
+	RetryStopped bool
+	// RetryStoppedCode is the stable MCPX_* code that justified stopping.
+	RetryStoppedCode string
+	// RetryStoppedReason is the human-readable cause from the diagnostics catalog.
+	RetryStoppedReason string
+	// RetryCount is the number of consecutive failed connection attempts, used
+	// only to say how many were made before giving up.
+	RetryCount int
+
 	// Refresh state (for health status integration - Spec 023)
 	RefreshState       RefreshState // Current refresh state from RefreshManager
 	RefreshRetryCount  int          // Number of retry attempts
@@ -137,6 +151,35 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "OAuth configuration error",
 			Detail:     input.OAuthConfigErr,
 			Action:     ActionConfigure,
+		}
+	}
+
+	// 3b. Automatic reconnection permanently given up (GH #1145). Checked before
+	// the connection-state switch because a parked server sits in "error" and
+	// would otherwise render as a generic "Connection error" that looks like it
+	// is still retrying. Restart is the correct CTA: once the config is fixed it
+	// is the explicit user action that un-parks the server.
+	if input.RetryStopped {
+		summary := input.RetryStoppedReason
+		if summary == "" {
+			summary = formatErrorSummary(input.LastError)
+		}
+		detail := fmt.Sprintf("Automatic reconnection stopped after %s because this failure cannot be fixed by retrying.",
+			pluralAttempts(input.RetryCount))
+		if input.RetryStoppedCode != "" {
+			// The stable code is what the user pastes into a bug report and what
+			// docs.mcpproxy.app/errors/<CODE> is keyed on.
+			detail += " Diagnostic code: " + input.RetryStoppedCode + "."
+		}
+		if input.LastError != "" {
+			detail += " Last error: " + input.LastError
+		}
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    summary,
+			Detail:     detail,
+			Action:     ActionRestart,
 		}
 	}
 
@@ -635,4 +678,12 @@ func findChar(s string, ch byte) int {
 		}
 	}
 	return -1
+}
+
+// pluralAttempts renders the attempt count for the retry-stopped detail line.
+func pluralAttempts(n int) string {
+	if n == 1 {
+		return "1 attempt"
+	}
+	return fmt.Sprintf("%d attempts", n)
 }

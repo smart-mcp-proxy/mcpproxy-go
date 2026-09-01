@@ -2616,6 +2616,21 @@ components:
           type: boolean
         retry_count:
           type: integer
+        retry_stopped:
+          description: |-
+            RetryStopped reports that automatic reconnection has been given up for
+            good because the failure is deterministic and unrecoverable — a missing
+            binary, an image without the interpreter, an unparseable config (GH
+            #1145). It is NOT ordinary exponential backoff, which keeps retrying;
+            nothing will happen until the user fixes the config or restarts the
+            server. RetryStoppedCode is the stable MCPX_* code that proved it and
+            RetryStoppedReason the catalog message explaining how to fix it. All three
+            are omitted for servers that are healthy or still retrying.
+          type: boolean
+        retry_stopped_code:
+          type: string
+        retry_stopped_reason:
+          type: string
         security_scan:
           $ref: '#/components/schemas/contracts.SecurityScanSummary'
         should_retry:
