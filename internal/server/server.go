@@ -3420,7 +3420,15 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 	return logEntries, nil
 }
 
-// parseLogLine parses a log line into a LogEntry
+// parseLogLine parses a log line into a LogEntry.
+//
+// Issue #1148, round 4 finding 4: this is the REST twin of `tail_log`. The
+// per-server log file is written by mcpproxy AND by the child process, and both
+// put credentials in it — the connection logger records the upstream URL with
+// its `?token=…`, and an MCP server is free to print its own API key.
+// `GET /api/v1/servers/{id}/logs` served those lines verbatim while the MCP
+// door scrubbed them. Scrubbing HERE, where a raw line becomes a LogEntry,
+// covers every reader of GetServerLogs rather than one handler.
 func parseLogLine(line string, serverName string) contracts.LogEntry {
 	// Try to parse structured format: "2025-01-20 15:04:05 [LEVEL] message"
 	parts := strings.SplitN(line, " ", 3)
@@ -3453,6 +3461,7 @@ func parseLogLine(line string, serverName string) contracts.LogEntry {
 		}
 	}
 
+	entry.Message = scrubUpstreamText(entry.Message)
 	return entry
 }
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -190,37 +191,14 @@ func viewString(view map[string]interface{}, key, fallback string) string {
 }
 
 // redactedArgs masks a command-line argument vector under the given policy.
-// Returns nil for nil so JSON callers keep emitting `null`.
+// Returns nil for nil so JSON callers keep emitting `null`. The rules live in
+// oauth.Redaction.Argv so the MCP and REST doors share one implementation.
 func redactedArgs(args []string, r redactionPolicy) []string {
-	if args == nil {
-		return nil
+	masked := r.Argv(args)
+	for i, m := range masked {
+		masked[i] = r.capString(m)
 	}
-	items := make([]interface{}, len(args))
-	for i, a := range args {
-		items[i] = a
-	}
-	masked := redactArgvWith(items, r)
-	out := make([]string, len(masked))
-	for i, v := range masked {
-		s, ok := v.(string)
-		if !ok {
-			// redactArgvWith returns a string for every string input, which is
-			// all this helper ever supplies. Fail closed anyway.
-			return redactedArgsFallback(args, r)
-		}
-		out[i] = s
-	}
-	return out
-}
-
-// redactedArgsFallback masks every element wholesale. Unreachable in practice;
-// it exists so redactedArgs can never fall back to the RAW vector.
-func redactedArgsFallback(args []string, r redactionPolicy) []string {
-	out := make([]string, len(args))
-	for i, a := range args {
-		out[i] = r.mask(a)
-	}
-	return out
+	return masked
 }
 
 // Issue #1148, round 3: argv masks are NEVER reverted. They are REFUSED.
@@ -258,56 +236,20 @@ func redactedArgsFallback(args []string, r redactionPolicy) []string {
 // `args_json` REPLACES the vector, so silently ignoring it would make the write
 // look applied when it was not.
 
-// argvMaskMarkers are the substrings every masked rendering of an argv token
-// carries: oauth.MaskValue / AuditMaskValue open with the bullet run, and the
-// value-shaped detector (security.MaskValue) ends with the elision+asterisks.
-//
-// The marker check backs up the exact-echo check below so a mask still gets
-// refused when the stored vector has since changed and the byte-for-byte
-// comparison no longer matches. TestArgvMaskMarkers_MatchTheRenderings pins
-// them to the functions that produce them.
-var argvMaskMarkers = []string{"••••", "…****"}
-
-// checkArgvMaskEcho reports an error when an incoming argv vector still carries
-// a mask this proxy rendered — either the exact masking of a stored token, or
-// any token bearing a mask marker.
-//
-// Returns nil for a vector that carries no mask, which is every legitimate
-// write: a caller that changed nothing sends the real values it already has, a
-// caller that rotated a credential sends the new one.
-func checkArgvMaskEcho(incoming, stored []string) error {
-	if len(incoming) == 0 {
-		return nil
-	}
-
-	echoed := make(map[string]struct{}, len(stored))
-	if len(stored) > 0 {
-		for i, masked := range redactedArgs(stored, liveRedaction) {
-			if masked != stored[i] {
-				echoed[masked] = struct{}{}
-			}
-		}
-	}
-
-	for i, token := range incoming {
-		if _, ok := echoed[token]; !ok && !containsArgvMaskMarker(token) {
-			continue
-		}
-		return fmt.Errorf("args_json[%d] is a redaction placeholder, not an argument value: "+
-			"credential-shaped argv tokens are masked on read and are never restored on write, "+
-			"because an argv slot carries no key to bind the secret to. "+
-			"Resend the real value for that argument, or omit args_json to leave the stored arguments unchanged", i)
-	}
-	return nil
+// containsArgvMaskMarker / checkArgvMaskEcho are thin bindings onto the shared
+// implementation in internal/oauth (oauth.MaskMarkers,
+// oauth.ContainsMaskMarker, oauth.CheckArgvMaskEcho), which is where they have
+// to live: `GET /api/v1/servers` masks argv too, and internal/httpapi cannot
+// import this package (issue #1148, round 4 finding 3).
+func containsArgvMaskMarker(token string) bool {
+	return oauth.ContainsMaskMarker(token)
 }
 
-func containsArgvMaskMarker(token string) bool {
-	for _, marker := range argvMaskMarkers {
-		if strings.Contains(token, marker) {
-			return true
-		}
-	}
-	return false
+// checkArgvMaskEcho reports an error when an incoming argv vector still carries
+// a mask this proxy rendered. `args_json` is the MCP surface's spelling of the
+// parameter; REST passes `args`.
+func checkArgvMaskEcho(incoming, stored []string) error {
+	return oauth.CheckArgvMaskEcho("args_json", incoming, stored)
 }
 
 // unmaskLiveEnvValues reverts env values a client echoed back exactly as the
@@ -349,37 +291,131 @@ func unmaskLiveMap(incoming, stored map[string]string, rendered func(k, v string
 	return out
 }
 
-// unmaskLiveURL reverts a URL echoed back exactly as the live view rendered it.
-// A genuinely edited URL falls through to oauth.UnmaskURL, which restores the
-// individual masked components under its own authority safeguard.
-func unmaskLiveURL(incoming, stored string) string {
+// unmaskLiveURL reverts a masked URL on the write path, and REFUSES the write
+// when a mask it cannot bind survives.
+//
+// Three steps, widest binding first:
+//
+//  1. The whole URL echoed back byte for byte — revert to the stored URL.
+//  2. A genuine edit — oauth.UnmaskURL restores the userinfo password and the
+//     SENSITIVE query params under its own authority safeguard, then
+//     oauth.UnmaskLiveURLParams restores, PER PARAMETER, anything the
+//     value-shaped detector masked under a parameter name no matcher
+//     recognises.
+//  3. Whatever still carries a mask marker is refused.
+//
+// Round 4 finding 2 is why (2) needs the per-parameter pass and (3) exists at
+// all: for `https://host/old?opaque=ghp_…` the LIVE detector masks the value,
+// but changing `/old` to `/new` defeats the whole-URL comparison in (1) and
+// oauth.UnmaskURL ignores the unrecognised `opaque` parameter — so the mask was
+// written through as the credential. The per-parameter revert is bound to the
+// parameter name and the authority and to nothing else, so it survives an
+// unrelated edit; the refusal covers everything that binding cannot reach (a
+// URL moved to another host, a mask in the path or the fragment, a parameter
+// whose stored counterpart is gone).
+func unmaskLiveURL(incoming, stored string) (string, error) {
+	if incoming == "" {
+		return incoming, nil
+	}
+	if stored != "" {
+		if incoming == redactStringWith("url", stored, liveRedaction) {
+			return stored, nil
+		}
+		incoming = oauth.UnmaskLiveURLParams(oauth.UnmaskURL(incoming, stored), stored)
+	}
+	if oauth.ContainsMaskMarker(incoming) {
+		return "", errors.New("url is a redaction placeholder, not a URL: " +
+			"credentials inside the URL are masked on read, and this one cannot be bound back to the stored " +
+			"value (the scheme/host changed, or the credential does not sit in a query parameter). " +
+			"Resend the real URL, or omit url to leave the stored one unchanged")
+	}
+	return incoming, nil
+}
+
+// unmaskLiveOAuth reverts masked oauth fields echoed back by a client, and
+// REFUSES the write when a mask it cannot bind survives.
+//
+// `oauth_json` REPLACES the whole oauth block, and the live view masks every
+// leaf of it that looks like a credential — not just client_secret. Round 2
+// finding 6 fixed client_secret; round 4 finding 1 caught the rest:
+// `extra_params` routinely holds an RFC 8707 resource indicator with a signed
+// URL, which the URL rule masks, and any leaf can be masked by the value-shaped
+// detector. A read-modify-write through `oauth_json` therefore persisted the
+// MASK STRING over those values.
+//
+// The rule this file now applies uniformly: every field newly masked on a read
+// surface gets either a matching KEY-BOUND revert or a refusal.
+//
+//   - client_secret, client_id, redirect_uri — reverted, each bound to its own
+//     field name, using the same rendering the read path produced.
+//   - extra_params — reverted per PARAMETER NAME, exactly as env vars and
+//     headers are reverted per key.
+//   - scopes, and any field added to config.OAuthConfig in future — REFUSED. A
+//     scope's only context is its position in a caller-supplied slice, which is
+//     the same non-binding an argv token has (see checkArgvMaskEcho), and a
+//     future field has no revert at all. The residual check walks the whole
+//     block, so a new field fails CLOSED instead of silently corrupting.
+//
+// The REST API is unaffected: contracts.OAuthConfig is read-only there (there
+// is no oauth field on AddServerRequest), so no REST write can echo one back.
+func unmaskLiveOAuth(incoming, stored *config.OAuthConfig) error {
+	if incoming == nil {
+		return nil
+	}
+	if stored != nil {
+		incoming.ClientSecret = unmaskLiveField("client_secret", incoming.ClientSecret, stored.ClientSecret)
+		incoming.ClientID = unmaskLiveField("client_id", incoming.ClientID, stored.ClientID)
+		incoming.RedirectURI = unmaskLiveField("redirect_uri", incoming.RedirectURI, stored.RedirectURI)
+		incoming.ExtraParams = unmaskLiveMap(incoming.ExtraParams, stored.ExtraParams,
+			func(k, v string) string { return redactStringWith(k, v, liveRedaction) })
+	}
+	if path, ok := findMaskMarker("oauth", normalizeForRedaction(incoming)); ok {
+		return fmt.Errorf("oauth_json%s is a redaction placeholder, not a value: "+
+			"it carries no key this proxy can bind the stored secret to, so it is never restored on write. "+
+			"Resend the real value, or omit oauth_json to leave the stored oauth block unchanged",
+			strings.TrimPrefix(path, "oauth"))
+	}
+	return nil
+}
+
+// unmaskLiveField reverts one scalar field echoed back exactly as the live view
+// rendered it, bound to the field NAME the rendering was keyed on.
+func unmaskLiveField(key, incoming, stored string) string {
 	if incoming == "" || stored == "" {
 		return incoming
 	}
-	if incoming == redactStringWith("url", stored, liveRedaction) {
+	if incoming == redactStringWith(key, stored, liveRedaction) {
 		return stored
 	}
-	return oauth.UnmaskURL(incoming, stored)
+	return incoming
 }
 
-// unmaskLiveOAuth reverts a masked oauth.client_secret echoed back by a client.
+// findMaskMarker walks a generic JSON value and returns the dotted path of the
+// first string leaf still carrying a mask this proxy rendered.
 //
-// Round 2 finding 6: #1148 started masking client_secret on the MCP read
-// surface (`quarantine_security list_quarantined` renders the WHOLE config)
-// without giving the write path anything to recognise the mask by, so a
-// read-modify-write through `oauth_json` — which REPLACES the oauth block —
-// persisted `••••42 (17 chars)` as the client secret. Read and write now agree
-// on the same rendering, bound to the field it came from.
-//
-// The REST API is not affected in either direction: contracts.OAuthConfig
-// carries no client_secret, so no REST response ever renders one.
-func unmaskLiveOAuth(incoming, stored *config.OAuthConfig) {
-	if incoming == nil || stored == nil || stored.ClientSecret == "" {
-		return
+// Walking the whole value rather than checking a hand-written field list is the
+// point: it is what makes a field ADDED to the struct later fail closed instead
+// of quietly round-tripping its own mask into the config.
+func findMaskMarker(path string, v interface{}) (string, bool) {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		for k, val := range typed {
+			if p, ok := findMaskMarker(path+"."+k, val); ok {
+				return p, true
+			}
+		}
+	case []interface{}:
+		for i, val := range typed {
+			if p, ok := findMaskMarker(fmt.Sprintf("%s[%d]", path, i), val); ok {
+				return p, true
+			}
+		}
+	case string:
+		if oauth.ContainsMaskMarker(typed) {
+			return path, true
+		}
 	}
-	if incoming.ClientSecret == redactStringWith("client_secret", stored.ClientSecret, liveRedaction) {
-		incoming.ClientSecret = stored.ClientSecret
-	}
+	return "", false
 }
 
 // inspectConnectionTimeoutError renders `inspect_quarantined`'s

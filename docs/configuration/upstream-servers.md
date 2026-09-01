@@ -169,9 +169,18 @@ reverted to the stored value rather than persisted over it, and every revert is
 | Field | Bound by |
 |-------|----------|
 | `env_json` / `headers_json` | the map key |
-| `url` | the stored scheme, host:port and username |
-| `oauth_json` → `client_secret` | the field |
+| `url` | the stored scheme and host:port (per query parameter, and the userinfo username) |
+| `oauth_json` → `client_secret`, `client_id`, `redirect_uri` | the field |
+| `oauth_json` → `extra_params` | the parameter name |
+| `oauth_json` → `scopes`, and any future oauth field | *nothing — **refused**, never reverted* |
 | `args_json` | *nothing — an argv mask is **refused**, never reverted* |
+
+A mask that none of those bindings can reach is refused rather than written
+through. For `url` that covers a URL whose scheme/host changed and a credential
+that does not sit in a query parameter; for `oauth_json` it covers a scope (its
+only context is a position in a caller-supplied slice) and any field added to
+the oauth block later, which fails closed instead of silently persisting its own
+mask.
 
 **`args_json` is different: an echoed mask is rejected with an error, not
 restored.** An argv token has no key to bind a secret to — only its index and
@@ -199,9 +208,12 @@ Rejecting is deliberate rather than silently keeping the stored vector —
 `args_json` replaces the vector, so ignoring it would make the write look
 applied when it was not.
 
-The argv mask is a rendering of the **MCP** read surface. The REST API returns
-`args` unredacted and accepts it unchanged, so REST reads and writes remain
-self-consistent; only the MCP write path refuses an MCP-rendered mask.
+The same contract applies on REST. `GET /api/v1/servers` masks `args` and
+`oauth.extra_params` with the same rules (they are one shared implementation in
+`internal/oauth`, so the two doors cannot drift), and `POST`/`PATCH
+/api/v1/servers` refuse an echoed `args` mask with `400` for the same reason the
+MCP path does — `args` replaces the vector there too. The `oauth` block is
+read-only over REST, so no REST write can echo its mask back.
 
 ### How you edit them
 

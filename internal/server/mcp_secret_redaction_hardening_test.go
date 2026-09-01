@@ -102,7 +102,7 @@ func TestArgvMaskEcho_AcceptsRealValues(t *testing.T) {
 	})
 }
 
-// TestArgvMaskMarkers_MatchTheRenderings pins argvMaskMarkers to the functions
+// TestArgvMaskMarkers_MatchTheRenderings pins oauth.MaskMarkers to the functions
 // that actually produce masks, so a change to either rendering fails here
 // instead of silently letting a mask through the echo check.
 func TestArgvMaskMarkers_MatchTheRenderings(t *testing.T) {
@@ -264,7 +264,9 @@ func TestUnmaskLiveLeaves_ProtectAReadModifyWriteRoundTrip(t *testing.T) {
 	})
 
 	t.Run("url", func(t *testing.T) {
-		assert.Equal(t, stored.URL, unmaskLiveURL(viewString(view, "url", ""), stored.URL))
+		got, err := unmaskLiveURL(viewString(view, "url", ""), stored.URL)
+		require.NoError(t, err)
+		assert.Equal(t, stored.URL, got)
 	})
 }
 

@@ -1625,31 +1625,18 @@ func (s *Server) redactServerSecrets(servers []contracts.Server) {
 }
 
 // redactServerSecretFields masks the secret-bearing fields of a single server
-// in place. Shared by the REST list/get path and the SSE event stream so both
-// sit behind the same trust boundary (parity is load-bearing: the Web UI's
-// mergeServers would flicker masked-vs-plaintext otherwise).
+// in place.
+//
+// The field list lives in oauth.RedactServerSecretFields because THREE doors
+// serve this struct — the REST list/get path here, the `/events` SSE stream in
+// internal/runtime, and the clients reading either — and each used to carry its
+// own copy. That is how `args` and `oauth.extra_params` ended up masked on the
+// MCP surface and published in the clear on both of these (issue #1148, round 4
+// finding 3). Parity is load-bearing beyond the leak: the Web UI's mergeServers
+// treats each payload as authoritative, so a masked-vs-plaintext mismatch would
+// flicker on every delivery.
 func redactServerSecretFields(server *contracts.Server) {
-	if len(server.Headers) > 0 {
-		server.Headers = oauth.RedactStringHeaders(server.Headers)
-	}
-	if len(server.Env) > 0 {
-		server.Env = oauth.RedactEnvValues(server.Env)
-	}
-	if server.URL != "" {
-		server.URL = oauth.RedactURLQueryParams(server.URL)
-	}
-	if server.LastError != "" {
-		server.LastError = oauth.RedactSensitiveData(server.LastError)
-	}
-	if server.Health != nil && server.Health.Detail != "" {
-		server.Health.Detail = oauth.RedactSensitiveData(server.Health.Detail)
-	}
-	// Spec 044 diagnostic — its Cause echoes the raw connect error, which
-	// carries the full upstream URL (query secrets and all); scrub it in
-	// parity with LastError / Health.Detail.
-	if server.Diagnostic != nil && server.Diagnostic.Cause != "" {
-		server.Diagnostic.Cause = oauth.RedactSensitiveData(server.Diagnostic.Cause)
-	}
+	oauth.RedactServerSecretFields(server)
 }
 
 // enrichServersWithQuarantineStats adds quarantine metrics (pending/changed tool counts)
@@ -1996,6 +1983,14 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #1148 round 4: refuse an argv mask on create too. There is no stored
+	// vector to bind one to here, so a mask can only be a placeholder copied
+	// out of another server's read payload — never a value worth persisting.
+	if err := oauth.CheckArgvMaskEcho("args", req.Args, nil); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
 	// isolation mode BEFORE anything is persisted.
 	if err := req.Isolation.validate(); err != nil {
@@ -2254,6 +2249,19 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	}
 	if req.Args != nil {
+		// #1148 round 4: `args` REPLACES the vector, and the read path masks
+		// credential-shaped argv tokens. Unlike env/headers/url there is no
+		// unmask contract for argv — an argv slot has no key to bind a stored
+		// secret to, and the caller supplies the whole vector *and* `command`
+		// in the same request — so an echoed mask is refused, not reverted.
+		var storedArgs []string
+		if existingSrv != nil {
+			storedArgs = existingSrv.Args
+		}
+		if err := oauth.CheckArgvMaskEcho("args", req.Args, storedArgs); err != nil {
+			s.writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
 		updates.Args = req.Args
 		hasUpdates = true
 	}

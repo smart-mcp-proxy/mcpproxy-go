@@ -157,6 +157,22 @@ On the MCP channel the flag also requires an **authenticated** caller
 compatibility, and gets the masked values regardless of the flag. The REST
 API always requires an API key, so it is unaffected.
 
+Redaction is not limited to headers. The same responses — and the `/events`
+SSE `servers.changed` payloads, which go through the identical redactor — also
+mask env values, URL query credentials, `oauth.extra_params` and
+credential-shaped **argv tokens** (`--api-key sk-…`, `--endpoint=ghp_…`), using
+one shared rule set so the REST, SSE and MCP doors cannot drift. Two
+consequences for clients:
+
+- `POST` / `PATCH /api/v1/servers` **reject** an `args` array that still carries
+  a mask with `400`. An argv slot has no key to bind a stored secret to, so an
+  echoed mask is refused rather than reverted — resend the real values, or omit
+  `args` to leave the stored vector unchanged. See
+  [Upstream servers](../configuration/upstream-servers.md#how-you-edit-them).
+- `GET /api/v1/servers/{id}/logs` scrubs credentials out of the returned log
+  lines (mcpproxy logs the upstream URL with its query string, and a child MCP
+  server may print its own API key), matching the MCP `tail_log` operation.
+
 The MCP `upstream_servers` tool was the original motivator for redaction
 (see [PR #425](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/425)) —
 a prompt-injected agent could otherwise read another upstream's PAT via

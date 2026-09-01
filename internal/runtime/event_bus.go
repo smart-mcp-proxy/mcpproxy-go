@@ -316,38 +316,24 @@ func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
 	}
 }
 
-// redactServerSecrets mirrors httpapi.(*Server).redactServerSecrets. It masks
-// the secret-bearing fields (sensitive headers, env-var secrets, URL query
-// credentials, and secrets echoed into last_error / health.detail) unless the
-// loaded config opts out via reveal_secret_headers: true. Keeping SSE
-// subscribers behind the exact same trust boundary as the REST list is
-// load-bearing: the Web UI's mergeServers treats each payload as authoritative,
-// so a masked-vs-plaintext mismatch between the two would flicker on every
-// delivery.
+// redactServerSecrets masks the secret-bearing fields of every server in an SSE
+// payload unless the loaded config opts out via reveal_secret_headers: true.
+//
+// The field list is oauth.RedactServerSecretFields — the same function the REST
+// list path calls. It used to be a hand-copied MIRROR of that list, which is
+// exactly how `args` and `oauth.extra_params` came to be masked on the MCP
+// surface and published in the clear on both of these doors (issue #1148, round
+// 4 finding 3). Keeping SSE subscribers behind the exact same trust boundary as
+// the REST list is load-bearing: the Web UI's mergeServers treats each payload
+// as authoritative, so a masked-vs-plaintext mismatch between the two would
+// flicker on every delivery.
 func (r *Runtime) redactServerSecrets(servers []contracts.Server) {
 	cfg := r.Config()
 	if cfg != nil && cfg.RevealSecretHeaders {
 		return
 	}
 	for i := range servers {
-		if len(servers[i].Headers) > 0 {
-			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
-		}
-		if len(servers[i].Env) > 0 {
-			servers[i].Env = oauth.RedactEnvValues(servers[i].Env)
-		}
-		if servers[i].URL != "" {
-			servers[i].URL = oauth.RedactURLQueryParams(servers[i].URL)
-		}
-		if servers[i].LastError != "" {
-			servers[i].LastError = oauth.RedactSensitiveData(servers[i].LastError)
-		}
-		if servers[i].Health != nil && servers[i].Health.Detail != "" {
-			servers[i].Health.Detail = oauth.RedactSensitiveData(servers[i].Health.Detail)
-		}
-		if servers[i].Diagnostic != nil && servers[i].Diagnostic.Cause != "" {
-			servers[i].Diagnostic.Cause = oauth.RedactSensitiveData(servers[i].Diagnostic.Cause)
-		}
+		oauth.RedactServerSecretFields(&servers[i])
 	}
 }
 

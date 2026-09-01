@@ -5197,7 +5197,13 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		// mask is never persisted over them (parity with the REST PATCH path).
 		// #1148 round 2: unmaskLiveURL recognises THIS surface's rendering
 		// first, then defers to oauth.UnmaskURL for a genuinely edited URL.
-		patch.URL = unmaskLiveURL(url, existingServer.URL)
+		// #1148 round 4: a mask the per-parameter revert cannot bind is
+		// REFUSED rather than persisted over the credential.
+		unmaskedURL, err := unmaskLiveURL(url, existingServer.URL)
+		if err != nil {
+			return nil, opts, err
+		}
+		patch.URL = unmaskedURL
 	}
 	if protocol := request.GetString("protocol", ""); protocol != "" {
 		patch.Protocol = protocol
@@ -5367,7 +5373,9 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			// config, so client_secret is masked on the read surface — and
 			// oauth_json REPLACES the block, so an unedited echo would persist
 			// the mask over the real secret. Revert it, bound to the field.
-			unmaskLiveOAuth(&oauth, existingServer.OAuth)
+			if err := unmaskLiveOAuth(&oauth, existingServer.OAuth); err != nil {
+				return nil, opts, err
+			}
 			if err := oauth.Validate(); err != nil {
 				return nil, opts, fmt.Errorf("invalid oauth_json: %w", err)
 			}
