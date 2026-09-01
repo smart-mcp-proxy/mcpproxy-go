@@ -1127,11 +1127,30 @@ func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
 	// Both close at the publish. The three accepted residuals (T002/T003) are
 	// the schema- and annotations-only changes, which are invisible in the
 	// listing by construction.
+	// Skip a rebuild that would change nothing. SetTools notifies every client
+	// unconditionally (see mcp_surface_fingerprint.go), and servers.changed fires
+	// on ordinary connection churn, so an unguarded rebuild re-notified everyone
+	// on every reconnect attempt.
+	//
+	// BOTH fingerprints must match. The listing alone is not enough: registry and
+	// catalog are published as a pair because a handler closes over its catalog
+	// entry, and routing can move — a collision resolving to a different upstream,
+	// a changed RequiredPermission — while the listing stays byte-identical.
+	toolsFP := toolSetFingerprint(serverTools)
+	routingFP := cat.routingFingerprint()
+	if directSurfaceUnchanged(p.directSurfaceToolsFP, p.directSurfaceRoutingFP, toolsFP, routingFP) {
+		p.logger.Debug("direct mode tools unchanged; skipping rebuild",
+			zap.Int("tool_count", len(directTools)))
+		return
+	}
+
 	p.directServer.SetTools(serverTools...)
 	if p.directRebuildPause != nil {
 		p.directRebuildPause()
 	}
 	p.publishDirectCatalog(cat)
+	p.directSurfaceToolsFP = toolsFP
+	p.directSurfaceRoutingFP = routingFP
 
 	p.logger.Info("refreshed direct mode tools",
 		zap.Int("tool_count", len(directTools)),
@@ -1149,7 +1168,25 @@ func (p *MCPProxyServer) RefreshCodeExecModeTools() {
 	serverTools := make([]mcpserver.ServerTool, len(codeExecTools))
 	copy(serverTools, codeExecTools)
 
+	// This surface carries BUILT-INS ONLY — buildCodeExecModeTools never
+	// iterates upstreams — yet it was rebuilt on every servers.changed, which
+	// made every reconnect tell every client its tool list had changed. Measured
+	// 9 of 9 spurious on one ordinary 4-server startup.
+	//
+	// Guarded on content rather than by dropping the servers.changed call, so
+	// this stays correct if the surface ever does gain fleet-dependent content.
+	fp := toolSetFingerprint(serverTools)
+	p.codeExecRefreshMu.Lock()
+	defer p.codeExecRefreshMu.Unlock()
+	if p.codeExecSurfaceFP == fp {
+		p.logger.Debug("code execution mode tools unchanged; skipping rebuild",
+			zap.Int("tool_count", len(codeExecTools)))
+		return
+	}
+
 	p.codeExecServer.SetTools(serverTools...)
+	p.codeExecSurfaceFP = fp
+	p.codeExecPublishes.Add(1)
 
 	p.logger.Info("refreshed code execution mode tools",
 		zap.Int("tool_count", len(codeExecTools)))
