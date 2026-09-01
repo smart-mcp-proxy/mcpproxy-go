@@ -182,9 +182,15 @@ func TestClassifyIntents_SameRuleForBaselineAndProxyArms(t *testing.T) {
 	base := cellByID(t, block, CellBaseline)
 	proxy := cellByID(t, block, CellRetrieveFull)
 
-	if base.FirstAttemptSuccessPct != proxy.FirstAttemptSuccessPct {
-		t.Errorf("first-attempt success differs across arms for identical attempts: baseline %v, proxy %v",
+	// Compare VALUES, not pointers. The figure is optional (nil = not
+	// measured), so a bare != compares addresses and always differs.
+	if (base.FirstAttemptSuccessPct == nil) != (proxy.FirstAttemptSuccessPct == nil) {
+		t.Errorf("one arm measured first-attempt success and the other did not: baseline=%v proxy=%v",
 			base.FirstAttemptSuccessPct, proxy.FirstAttemptSuccessPct)
+	} else if base.FirstAttemptSuccessPct != nil &&
+		*base.FirstAttemptSuccessPct != *proxy.FirstAttemptSuccessPct {
+		t.Errorf("first-attempt success differs across arms for identical attempts: baseline %v, proxy %v",
+			*base.FirstAttemptSuccessPct, *proxy.FirstAttemptSuccessPct)
 	}
 	if base.RetriesCorrective != proxy.RetriesCorrective || base.RetriesInfrastructure != proxy.RetriesInfrastructure {
 		t.Errorf("retry counts differ across arms for identical attempts: baseline %d/%d, proxy %d/%d",
@@ -192,8 +198,10 @@ func TestClassifyIntents_SameRuleForBaselineAndProxyArms(t *testing.T) {
 			proxy.RetriesCorrective, proxy.RetriesInfrastructure)
 	}
 	// 2 intents, one corrected and one clean.
-	if base.FirstAttemptSuccessPct != 50 {
-		t.Errorf("FirstAttemptSuccessPct = %v, want 50 (1 of 2 intents clean)", base.FirstAttemptSuccessPct)
+	if base.FirstAttemptSuccessPct == nil {
+		t.Fatal("FirstAttemptSuccessPct must be measured here — 2 determinate intents were supplied")
+	} else if *base.FirstAttemptSuccessPct != 50 {
+		t.Errorf("FirstAttemptSuccessPct = %v, want 50 (1 of 2 intents clean)", *base.FirstAttemptSuccessPct)
 	}
 }
 
@@ -296,9 +304,12 @@ func TestAgentLoopBlockFor_RunsBelowFourIsRefusedAsHeadline(t *testing.T) {
 	if !c.Headline {
 		t.Errorf("runs=4: Headline = false, want true (%+v)", c)
 	}
-	if c.SpreadPct <= 0 {
+	if c.SpreadPct == nil {
+		t.Errorf("runs=4: SpreadPct is nil, but four runs give a DEFINED spread — FR-021 requires a " +
+			"measure of consistency beside the average")
+	} else if *c.SpreadPct <= 0 {
 		t.Errorf("runs=4: SpreadPct = %v, want > 0 — FR-021 requires a measure of consistency beside the average",
-			c.SpreadPct)
+			*c.SpreadPct)
 	}
 }
 
@@ -838,4 +849,95 @@ func mustCell(t *testing.T, id string) ModeCell {
 		t.Fatalf("no mode cell %q", id)
 	}
 	return c
+}
+
+// The never-sum rule must hold WHERE THE ADDITION HAPPENS, not only in the
+// standalone helper.
+//
+// Two reviewers independently found the same gap: AggregateTokenFigures was
+// exercised by tests but no production path called it, while aggregateCell
+// added token integers whose origin nothing checked and AgentLoopBlockFor then
+// stamped the caller's provider onto the result. A tokenizer figure mixed into
+// a provider run produced a plausible hybrid wearing a provider label.
+func TestAgentLoopBlock_MixedAccountingSourcesIsWithheld(t *testing.T) {
+	provider := AccountingSource{Kind: AccountingKindProvider, Identity: "anthropic", Model: "pinned-1"}
+	tokenizer := AccountingSource{Kind: AccountingKindTokenizer, Identity: DefaultEncoding}
+
+	rec := func(unit string, src AccountingSource, in, out int) UnitRecord {
+		cr := 0
+		return UnitRecord{
+			CellID: CellDirectFull, UnitID: unit, RunIndex: 0,
+			Completion: CompletionPass, Source: src,
+			Usage: ProviderUsage{InputTokens: in, OutputTokens: out, CacheReadTokens: &cr},
+		}
+	}
+
+	directCell, ok := CellByID(CellDirectFull)
+	if !ok {
+		t.Fatalf("cell %q must exist in the matrix", CellDirectFull)
+	}
+	block, err := AgentLoopBlockFor([]UnitRecord{
+		rec("u1", provider, 100, 10),
+		// Same cell, DIFFERENT source. Adding this to the sum above would
+		// produce a hybrid the block would then label "provider-usage".
+		rec("u2", tokenizer, 900, 90),
+	}, AgentLoopOptions{
+		Provider: "anthropic", Model: "pinned-1",
+		Cells: []ModeCell{BaselineCell(), directCell},
+	})
+	if err != nil {
+		t.Fatalf("AgentLoopBlockFor: %v", err)
+	}
+
+	var cell *AgentLoopCell
+	for i := range block.Cells {
+		if block.Cells[i].CellID == CellDirectFull {
+			cell = &block.Cells[i]
+		}
+	}
+	if cell == nil {
+		t.Fatal("the direct_full cell must appear in the block")
+	}
+	if !cell.Withheld {
+		t.Fatalf("a cell whose records mixed accounting sources must be WITHHELD, got "+
+			"input=%d output=%d", cell.InputTokens, cell.OutputTokens)
+	}
+	if !strings.Contains(cell.WithheldReason, "accounting source") {
+		t.Errorf("the reason must name the cause; got %q", cell.WithheldReason)
+	}
+	// And the partial total must not leak out as if it were the cell's cost.
+	if cell.InputTokens != 0 || cell.OutputTokens != 0 {
+		t.Errorf("a withheld mixed-source cell must not publish a partial total, got in=%d out=%d",
+			cell.InputTokens, cell.OutputTokens)
+	}
+}
+
+// SavingVsBaseline must DERIVE the regression, not trust the row's flag.
+//
+// It is documented as the only sanctioned way to turn two cells into a
+// percentage, so its guards have to hold for any block handed to it — including
+// one unmarshalled from a report.json or mutated after assembly.
+func TestSavingVsBaseline_DerivesRegressionFromCompletionRates(t *testing.T) {
+	// A hand-built block, as if loaded from disk: the cell completes half as
+	// many tasks as the baseline, but its Regression flag says otherwise.
+	block := &AgentLoopBlock{
+		AccountingSource: AccountingSource{Kind: AccountingKindProvider, Identity: "anthropic", Model: "pinned-1"},
+		Cells: []AgentLoopCell{
+			{CellID: CellBaseline, Runs: 4, CompletionRatePct: 100, TokensPerCompletedTask: 1000, Provenance: ProvenanceMeasured},
+			{CellID: CellDirectFull, Runs: 4, CompletionRatePct: 50, TokensPerCompletedTask: 100,
+				Regression: false, Provenance: ProvenanceMeasured},
+		},
+	}
+
+	v := block.SavingVsBaseline(CellDirectFull)
+	if !v.Withheld {
+		t.Fatalf("a cell completing 50%% against a 100%% baseline must not yield a saving; got %.1f%%",
+			v.SavingPct)
+	}
+	if !v.Regression {
+		t.Error("the verdict must mark the regression it derived, not echo the row's flag")
+	}
+	if v.SavingPct != 0 {
+		t.Errorf("a withheld verdict must carry no percentage, got %.1f", v.SavingPct)
+	}
 }

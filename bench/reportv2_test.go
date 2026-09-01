@@ -77,8 +77,17 @@ func sampleReportV2() *ReportV2 {
 			NaiveFullMenuTokens: 420000, ProxyMenuTokens: 4000,
 			MeanResponseTokens: 11000, BreakEvenCalls: 37.8,
 		},
-		SessionEstimates: []SessionCostEstimate{
-			{Arm: "baseline_json", CallsPerSession: 3, RetryRate: 0, EstimatedTokens: 37000},
+		SessionEstimates: []SessionCostRow{
+			{
+				SessionCostEstimate: SessionCostEstimate{
+					Arm: "baseline_json", CallsPerSession: 3, RetryRate: 0, EstimatedTokens: 37000,
+				},
+				// RetryRate 0 with an ESTIMATED source: the defaulted zero.
+				// The badge is the only thing separating it from a measured
+				// zero, which is why the row type exists.
+				Provenance:          ProvenanceEstimated,
+				RetryRateProvenance: ProvenanceEstimated,
+			},
 		},
 		Latency: &LatencyV2{
 			P50Ms: 4.2, P95Ms: 9.8, P99Ms: 15.1, MaxMs: 22.0,
@@ -369,15 +378,15 @@ func sampleAgentLoopBlock() *AgentLoopBlock {
 		FleetShape:   FleetShape{ID: "corpus_v2@2026-07-14", ToolCount: 45},
 		Cells: []AgentLoopCell{
 			{
-				CellID: "baseline", Provenance: ProvenanceMeasured, Runs: 5, SpreadPct: 8.4,
-				TokensPerCompletedTask: 41000, CompletionRatePct: 92.0, FirstAttemptSuccessPct: 71.0,
+				CellID: "baseline", Provenance: ProvenanceMeasured, Runs: 5, SpreadPct: fptr(8.4),
+				TokensPerCompletedTask: 41000, CompletionRatePct: 92.0, FirstAttemptSuccessPct: fptr(71.0),
 				RetriesCorrective: 6, RetriesInfrastructure: 1,
 				InputTokens: 180000, OutputTokens: 12000, CacheReadTokens: 60000,
 				Headline: true,
 			},
 			{
-				CellID: "retrieve_compact", Provenance: ProvenanceEstimated, Runs: 2, SpreadPct: 21.0,
-				TokensPerCompletedTask: 18000, CompletionRatePct: 74.0, FirstAttemptSuccessPct: 55.0,
+				CellID: "retrieve_compact", Provenance: ProvenanceEstimated, Runs: 2, SpreadPct: fptr(21.0),
+				TokensPerCompletedTask: 18000, CompletionRatePct: 74.0, FirstAttemptSuccessPct: fptr(55.0),
 				RetriesCorrective: 11, RetriesInfrastructure: 0, PartialRuns: 1,
 				InputTokens: 70000, OutputTokens: 9000, CacheReadTokens: 21000,
 				Headline: false, Regression: true,
@@ -1212,3 +1221,7 @@ func containsSubstring(list []string, want string) bool {
 	}
 	return false
 }
+
+// fptr makes an optional report figure. Nil means NOT MEASURED, which is a
+// different claim from a measured zero — see the field docs on AgentLoopCell.
+func fptr(f float64) *float64 { return &f }

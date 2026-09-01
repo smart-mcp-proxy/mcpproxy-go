@@ -71,6 +71,10 @@ func (r *ReportV2) WriteHTML(path string) error {
 		// n0 renders a token count at full precision without exponent
 		// notation — a headline cost printed as "4.1e+04" is unreadable.
 		"n0": func(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) },
+		// derefF unwraps an optional figure for display. The TEMPLATE must
+		// branch on nil before calling it — a nil figure means "not measured",
+		// and printing its zero is the silent-zero defect this guards against.
+		"derefF": derefF,
 		// costoutcome builds the FR-023 plot. The arithmetic lives in Go
 		// (NewCostOutcomeView) so a degenerate axis cannot emit NaN into an
 		// SVG attribute, where it would fail silently.
@@ -287,7 +291,7 @@ const dashboardV2HTML = `<!doctype html>
           fill="{{if not .Headline}}none{{else if .Regression}}#c0392b{{else}}#1a8f3c{{end}}"
           stroke="{{if .Regression}}#c0392b{{else}}#1a8f3c{{end}}" stroke-width="2"
           stroke-dasharray="{{if .Headline}}0{{else}}3 2{{end}}">
-    <title>{{.CellID}}: {{n0 .TokensPerCompletedTask}} tokens per completed task, {{f1 .CompletionRatePct}}% completed, {{.Runs}} runs, {{.Provenance}}</title>
+    <title>{{.CellID}}: {{n0 .TokensPerCompletedTask}} tokens per completed task, {{f1 .CompletionRatePct}}% completed, {{.Runs}} run(s), {{.Provenance}}</title>
   </circle>
   <text class="ptlabel" x="{{f1 .PlotX}}" y="{{f1 .PlotY}}" dx="{{f1 .LabelDX}}" dy="4" text-anchor="{{.LabelAnchor}}">{{.CellID}}</text>
   {{end}}
@@ -313,10 +317,10 @@ const dashboardV2HTML = `<!doctype html>
       <td class="hl">{{n0 .TokensPerCompletedTask}}</td>
       <td class="hl {{if .Regression}}neg{{end}}">{{f1 .CompletionRatePct}}%</td>
       {{end}}
-      <td>{{f1 .FirstAttemptSuccessPct}}%</td>
+      {{if .Withheld}}<td class="l">&mdash;</td><td class="l">&mdash;</td><td class="l">&mdash;</td>{{else}}<td>{{if .FirstAttemptSuccessPct}}{{f1 (derefF .FirstAttemptSuccessPct)}}%{{else}}<span class="small">not measured</span>{{end}}</td>
       <td>{{.RetriesCorrective}}</td>
-      <td>{{.RetriesInfrastructure}}</td>
-      <td>{{.Runs}} runs &middot; &plusmn;{{f1 .SpreadPct}}%{{if .PartialRuns}}<div class="small">{{.PartialRuns}} partial run(s) excluded</div>{{end}}</td>
+      <td>{{.RetriesInfrastructure}}</td>{{end}}
+      <td>{{.Runs}} runs &middot; {{if .SpreadPct}}&plusmn;{{f1 (derefF .SpreadPct)}}%{{else}}<span class="small">spread undefined</span>{{end}}{{if .PartialRuns}}<div class="small">{{.PartialRuns}} partial run(s) excluded</div>{{end}}</td>
       <td class="l">{{if .Withheld}}&mdash;{{else if .Regression}}<span class="warn">REGRESSION</span> &mdash; completes fewer tasks than the baseline; not a saving{{else if not .Headline}}provisional &mdash; {{.Runs}} runs, below the four-run headline bar{{else}}headline{{end}}</td>
       <td>{{if .Withheld}}&mdash;{{else}}<span class="badge badge-{{.Provenance}}">{{.Provenance}}</span>{{end}}</td>
     </tr>
@@ -416,14 +420,22 @@ const dashboardV2HTML = `<!doctype html>
 {{if .SessionEstimates}}
 <h2>Session cost estimates{{with prov .Provenance "session_estimates"}}<span class="badge badge-{{.}}">{{.}}</span>{{end}}</h2>
 <table>
-  <thead><tr><th>Arm</th><th>Calls / session</th><th>Retry rate</th><th>Estimated session tokens</th></tr></thead>
+  <thead><tr><th>Arm</th><th>Calls / session</th><th>Retry rate</th><th>Retry rate source</th><th>Runs</th><th>Estimated session tokens</th><th>Provenance</th></tr></thead>
   <tbody>
   {{range .SessionEstimates}}
-    <tr><td><code>{{.Arm}}</code></td><td>{{.CallsPerSession}}</td><td>{{.RetryRate}}</td><td>{{.EstimatedTokens}}</td></tr>
+    <tr><td><code>{{.Arm}}</code></td><td>{{.CallsPerSession}}</td><td>{{.RetryRate}}</td>
+      <td><span class="badge badge-{{.RetryRateProvenance}}">{{.RetryRateProvenance}}</span></td>
+      <td>{{if .MeasuredRuns}}{{.MeasuredRuns}}{{else}}&mdash;{{end}}</td>
+      <td>{{.EstimatedTokens}}</td>
+      <td><span class="badge badge-{{.Provenance}}">{{.Provenance}}</span></td></tr>
   {{end}}
   </tbody>
 </table>
-<p class="small">session_cost = proxy_menu + calls &times; mean_response(arm) &times; (1 + retry_rate(arm)); retry rates are literature-derived defaults (research D8), so these rows are estimates, not measurements.</p>
+<p class="small">session_cost = proxy_menu + calls &times; mean_response(arm) &times; (1 + retry_rate(arm)).
+A row badged <span class="badge badge-estimated">estimated</span> uses a literature-derived retry default
+(research D8); one badged <span class="badge badge-measured">measured</span> uses an observed rate over the
+run count shown. The per-row badge exists because a defaulted 0.0 and a measured 0.0 are the same number
+and a different claim (FR-013).</p>
 {{end}}
 
 {{if .Latency}}
@@ -617,7 +629,7 @@ func NewCostOutcomeView(b *AgentLoopBlock) CostOutcomeView {
 			Regression:             cell.Regression,
 			Provenance:             cell.Provenance,
 			Runs:                   cell.Runs,
-			SpreadPct:              cell.SpreadPct,
+			SpreadPct:              derefF(cell.SpreadPct),
 		})
 	}
 
@@ -666,4 +678,14 @@ func shortTokenLabel(v float64) string {
 	default:
 		return fmt.Sprintf("%.0f", v)
 	}
+}
+
+// derefF renders a nil "undefined" figure as zero for PLOTTING only. Callers
+// that display a number must branch on nil instead: a plotted point at zero is
+// a position, whereas a printed "0.0%" is a claim.
+func derefF(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }

@@ -330,11 +330,11 @@ deterministic figures exactly, the model-dependent ones within the stated tolera
       fleet. They are independently implemented over the same data and have never been compared;
       the spec's own Assumptions say a contradiction is a finding to investigate
 - [x] T062 [P] Verify no generated report became tracked: `git ls-files bench/results` is empty
-- [ ] T063 Full gates: `go build ./cmd/mcpproxy` and `-tags server`;
+- [x] T063 Full gates: `go build ./cmd/mcpproxy` and `-tags server`;
       `go test -race -count=1 ./internal/... ./bench/...`;
       `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...`;
       `./scripts/test-api-e2e.sh`; `make swagger` diff-clean
-- [ ] T064 Cross-model review of the full diff (opencode `gpt-5.6-sol`) staged into
+- [x] T064 Cross-model review of the full diff (opencode `gpt-5.6-sol`) staged into
       `.review-tmp/`, ≤10 rounds per the standing cap; verify each finding against the tree
       before fixing
 

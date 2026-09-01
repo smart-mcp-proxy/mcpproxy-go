@@ -215,10 +215,25 @@ type UnitRecord struct {
 	Completion string `json:"completion"`
 	// Partial marks a run record that did not finish. Partial records are
 	// excluded from every figure and counted separately (FR-032).
-	Partial   bool          `json:"partial,omitempty"`
-	Attempts  []Attempt     `json:"attempts,omitempty"`
-	Usage     ProviderUsage `json:"usage"`
-	TurnCount int           `json:"turn_count,omitempty"`
+	Partial  bool          `json:"partial,omitempty"`
+	Attempts []Attempt     `json:"attempts,omitempty"`
+	Usage    ProviderUsage `json:"usage"`
+	// Source names where THIS record's token figures came from.
+	//
+	// It lives on the record rather than only on the block because the block's
+	// source is a LABEL applied at assembly, while the sum it labels is built
+	// here, record by record. Without a per-record source, aggregateCell adds
+	// integers whose origin nothing checked and AgentLoopBlockFor then stamps
+	// the caller's provider onto the result — so a tokenizer-derived figure
+	// mixed into a provider run produces a plausible hybrid wearing a provider
+	// label. The never-sum rule has to be checkable at the point of addition,
+	// not asserted at the point of naming.
+	//
+	// Zero value means "unset", which aggregation treats as the block's own
+	// source: the common case is one driver producing every record, and
+	// requiring every fake in every test to restate it would be noise.
+	Source    AccountingSource `json:"source,omitzero"`
+	TurnCount int              `json:"turn_count,omitempty"`
 }
 
 // RunTaskFunc runs ONE unit of work under ONE mode cell and returns its raw
@@ -564,6 +579,11 @@ func validateAgentLoopOptions(opts AgentLoopOptions) error {
 // cellAggregate accumulates one cell's counted records before they become a
 // report row.
 type cellAggregate struct {
+	// source is the accounting source every summed record agreed on;
+	// mixedSources records that at least one disagreed and was excluded.
+	source       AccountingSource
+	mixedSources bool
+
 	runs                  int
 	partialRuns           int
 	completionEligible    int
@@ -682,6 +702,7 @@ func AgentLoopBlockFor(records []UnitRecord, opts AgentLoopOptions) (*AgentLoopB
 			cells[i].Regression = true
 		}
 	}
+	block.CompletionRegressionThresholdPct = threshold
 	block.Cells = cells
 	return block, nil
 }
@@ -752,6 +773,20 @@ func aggregateCell(records []UnitRecord) cellAggregate {
 			if r.Completion == CompletionNoSignal {
 				continue
 			}
+			// THE NEVER-SUM RULE, enforced where the addition happens.
+			// A record whose source differs from the one this aggregate is
+			// accumulating cannot be added to it: the result would be a
+			// hybrid, and a hybrid labelled with either source is a false
+			// claim about both. Recorded and surfaced, never silently dropped
+			// and never silently summed.
+			if !r.Source.IsZero() {
+				if agg.source.IsZero() {
+					agg.source = r.Source
+				} else if agg.source != r.Source {
+					agg.mixedSources = true
+					continue
+				}
+			}
 			total, complete := r.Usage.Total()
 			if !complete {
 				agg.cacheReadAvailable = false
@@ -785,6 +820,24 @@ func aggregateCell(records []UnitRecord) cellAggregate {
 // toRow renders one aggregate as a report row, attaching the withheld reasons
 // that keep an incomplete figure from reading as a measured one.
 func (a cellAggregate) toRow(cellID string) AgentLoopCell {
+	// A cell that mixed accounting sources is WITHHELD outright. The records
+	// that disagreed were already excluded from the sums, so what remains is a
+	// partial total — and a partial total presented as the cell's cost
+	// understates it, which is the direction of error this benchmark exists to
+	// prevent. Withhold and say why.
+	if a.mixedSources {
+		return AgentLoopCell{
+			CellID:      cellID,
+			Provenance:  ProvenanceMeasured,
+			Runs:        a.runs,
+			PartialRuns: a.partialRuns,
+			Withheld:    true,
+			WithheldReason: "withheld: this cell's records carried MORE THAN ONE accounting source. " +
+				"Provider-reported usage and tokenizer counts measure different things and are never " +
+				"summed, so the records that disagreed were excluded — leaving a partial total that " +
+				"would understate the cell's cost if published.",
+		}
+	}
 	row := AgentLoopCell{
 		CellID: cellID,
 		// Every row here is an attempted MEASUREMENT of a live run; a row that
@@ -800,7 +853,8 @@ func (a cellAggregate) toRow(cellID string) AgentLoopCell {
 		CacheReadTokens:       a.cacheReadTokens,
 	}
 	if a.determinateIntents > 0 {
-		row.FirstAttemptSuccessPct = pct(a.firstAttemptSuccesses, a.determinateIntents)
+		v := pct(a.firstAttemptSuccesses, a.determinateIntents)
+		row.FirstAttemptSuccessPct = &v
 	}
 	if a.completionEligible > 0 {
 		row.CompletionRatePct = pct(a.completed, a.completionEligible)
@@ -808,7 +862,12 @@ func (a cellAggregate) toRow(cellID string) AgentLoopCell {
 	if a.completed > 0 {
 		row.TokensPerCompletedTask = float64(a.tokensEligible) / float64(a.completed)
 	}
-	row.SpreadPct = relativeSpreadPct(a.perRunCostPerTask)
+	// Only when a spread is DEFINED. Fewer than two per-run figures leaves it
+	// nil, which renders as "spread undefined" rather than as ±0.0%.
+	if len(a.perRunCostPerTask) >= 2 {
+		sp := relativeSpreadPct(a.perRunCostPerTask)
+		row.SpreadPct = &sp
+	}
 
 	var reasons []string
 	switch {
@@ -914,7 +973,21 @@ func (b *AgentLoopBlock) SavingVsBaseline(cellID string) SavingVerdict {
 			MinHeadlineRuns, cell.Runs, baseline.Runs)
 		return verdict
 	}
-	if cell.Regression {
+	// DERIVE the regression from the completion rates rather than trusting the
+	// row's flag.
+	//
+	// This function is documented as the only sanctioned way to turn two cells
+	// into a percentage, so every publication rule has to hold for ANY block it
+	// is handed — including one unmarshalled from a report.json, assembled by a
+	// caller, or mutated after AgentLoopBlockFor set the flag. Trusting a
+	// mutable bool meant a block carrying Regression:false with a 50-point
+	// completion deficit returned a saving; the numbers needed to catch that
+	// are right here on both cells.
+	regressed := cell.Regression
+	if baseline.CompletionRatePct-cell.CompletionRatePct > CompletionRegressionThresholdPct(b) {
+		regressed = true
+	}
+	if regressed {
 		verdict.Regression = true
 		verdict.Withheld = true
 		verdict.WithheldReason = fmt.Sprintf(
@@ -1261,4 +1334,16 @@ func normalizeArguments(raw json.RawMessage) string {
 		return s
 	}
 	return string(raw)
+}
+
+// CompletionRegressionThresholdPct is the stated FR-019 threshold for a block.
+//
+// A named accessor rather than a bare constant so the value a verdict uses and
+// the value AgentLoopBlockFor applied cannot drift apart — they must be the
+// same number or a cell can be flagged by one and cleared by the other.
+func CompletionRegressionThresholdPct(b *AgentLoopBlock) float64 {
+	if b != nil && b.CompletionRegressionThresholdPct > 0 {
+		return b.CompletionRegressionThresholdPct
+	}
+	return DefaultCompletionRegressionThresholdPct
 }

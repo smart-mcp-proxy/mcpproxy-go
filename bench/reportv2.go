@@ -458,8 +458,12 @@ type AgentLoopCell struct {
 	// Runs and SpreadPct are the FR-021 consistency requirement: a
 	// model-dependent figure needs at least four runs plus a spread before
 	// it may be a headline.
-	Runs      int     `json:"runs"`
-	SpreadPct float64 `json:"spread_pct"`
+	Runs int `json:"runs"`
+	// SpreadPct is a POINTER: with fewer than two per-run figures the spread is
+	// UNDEFINED, not zero. Serialising 0 there renders "±0.0%" — a claim of
+	// perfect consistency from a single run, which is the opposite of what
+	// FR-021 asks the field to convey.
+	SpreadPct *float64 `json:"spread_pct"`
 	// PartialRuns counts runs that did not finish. They are excluded from
 	// the figures above and reported, never silently absorbed (FR-032).
 	PartialRuns int `json:"partial_runs,omitempty"`
@@ -468,7 +472,11 @@ type AgentLoopCell struct {
 	// fewer tasks is not a saving.
 	TokensPerCompletedTask float64 `json:"tokens_per_completed_task"`
 	CompletionRatePct      float64 `json:"completion_rate_pct"`
-	FirstAttemptSuccessPct float64 `json:"first_attempt_success_pct"`
+	// FirstAttemptSuccessPct is a POINTER for the same reason: with no
+	// determinate intents there is no rate, and a serialised 0 reads as "the
+	// agent never got a call right first time" rather than "nothing was
+	// measured".
+	FirstAttemptSuccessPct *float64 `json:"first_attempt_success_pct"`
 	// Corrective and infrastructure retries are counted separately: only the
 	// first kind says anything about how well the mode serves the agent.
 	RetriesCorrective     int `json:"retries_corrective"`
@@ -497,6 +505,12 @@ type AgentLoopCell struct {
 // stay separable.
 type AgentLoopBlock struct {
 	AccountingSource AccountingSource `json:"accounting_source"`
+	// CompletionRegressionThresholdPct is the stated FR-019 threshold this
+	// block was evaluated against. Serialised so a reader knows which number
+	// separated "saving" from "regression", and so a verdict recomputed from a
+	// loaded report uses the SAME threshold the run applied rather than
+	// whatever the current default happens to be.
+	CompletionRegressionThresholdPct float64 `json:"completion_regression_threshold_pct,omitempty"`
 	// Suite and SuiteVersion pin the task suite so a later run is comparable
 	// to an earlier one (FR-028).
 	Suite        string           `json:"suite,omitempty"`
@@ -653,18 +667,23 @@ func (r *ReportV2) ValidateAdditiveBlocks() error {
 // v1 report: existing consumers are unaffected (reports are never committed,
 // Spec 065 CN-003).
 type ReportV2 struct {
-	ReportVersion    int                   `json:"report_version"`
-	GeneratedAt      string                `json:"generated_at"`
-	Tokenizer        TokenizerInfo         `json:"tokenizer"`
-	Proxy            *ProxyInfo            `json:"proxy,omitempty"`
-	Corpora          []CorpusDescriptor    `json:"corpora"`
-	Arms             []ArmResult           `json:"arms"`
-	ResponseCost     *ResponseCostSummary  `json:"response_cost,omitempty"`
-	BreakEven        *BreakEvenAnalysis    `json:"break_even,omitempty"`
-	SessionEstimates []SessionCostEstimate `json:"session_estimates,omitempty"`
-	Latency          *LatencyV2            `json:"latency,omitempty"`
-	Lap              *LapVerdict           `json:"lap,omitempty"`
-	Subset           *SubsetInfo           `json:"subset,omitempty"`
+	ReportVersion int                  `json:"report_version"`
+	GeneratedAt   string               `json:"generated_at"`
+	Tokenizer     TokenizerInfo        `json:"tokenizer"`
+	Proxy         *ProxyInfo           `json:"proxy,omitempty"`
+	Corpora       []CorpusDescriptor   `json:"corpora"`
+	Arms          []ArmResult          `json:"arms"`
+	ResponseCost  *ResponseCostSummary `json:"response_cost,omitempty"`
+	BreakEven     *BreakEvenAnalysis   `json:"break_even,omitempty"`
+	// SessionEstimates carries SessionCostRow, not the bare estimate: FR-013
+	// requires a measured retry rate and a defaulted one to be
+	// distinguishable INSIDE one table, and RetryRateForArm returns 0.0 for an
+	// unknown arm — indistinguishable from a measured 0.0 without the per-row
+	// provenance the row type adds.
+	SessionEstimates []SessionCostRow `json:"session_estimates,omitempty"`
+	Latency          *LatencyV2       `json:"latency,omitempty"`
+	Lap              *LapVerdict      `json:"lap,omitempty"`
+	Subset           *SubsetInfo      `json:"subset,omitempty"`
 	// Spec 103 blocks. Additive and optional: omitted they do not appear at
 	// all, so existing offline reports and their consumers are byte-
 	// unaffected and no report_version bump is needed. Each names its own
