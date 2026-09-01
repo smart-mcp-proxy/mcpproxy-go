@@ -858,6 +858,11 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	// tokenizing text the agent never paid for.
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
 
+	// Spec 103: pre-truncation sizes, emitted for built-ins as well as upstream
+	// dispatches. 0 stays UNKNOWN rather than free.
+	internalRequestBytes := int(getInt64Payload(evt.Payload, "request_bytes"))
+	internalResponseBytes := int(getInt64Payload(evt.Payload, "response_bytes"))
+
 	metadata := map[string]interface{}{
 		"internal_tool_name": internalToolName,
 	}
@@ -898,6 +903,8 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
 		ResponseTruncated: responseTruncated,
+		RequestBytes:      internalRequestBytes,
+		ResponseBytes:     internalResponseBytes,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (server edition)

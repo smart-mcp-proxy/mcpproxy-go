@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -635,6 +637,23 @@ func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, target
 	// the same wire state here, because a consumer reading "no key" as "not
 	// truncated" is exactly the silent understatement this flag prevents.
 	payload["response_truncated"] = responseTruncated
+	// Spec 103: pre-truncation byte lengths, the same measure the upstream
+	// tool-call path carries. Every built-in call was unaccountable without
+	// these — 0 means UNKNOWN in the activity log, not free, so a cost
+	// recomputation had to withhold every internal row (bench records the gap
+	// as ReasonInternalNoByteCounts).
+	//
+	// `response` here is the FULL pre-truncation value (see the doc on
+	// MCPProxyServer.emitActivityInternalToolCallTruncated), which is exactly
+	// what response_bytes is defined to mean. When responseTruncated is set the
+	// agent consumed LESS than this, and the flag travelling beside it is what
+	// lets a consumer exclude the row rather than overstate mcpproxy's cost.
+	if n := jsonByteLen(arguments); n > 0 {
+		payload["request_bytes"] = n
+	}
+	if n := jsonByteLen(response); n > 0 {
+		payload["response_bytes"] = n
+	}
 	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
 }
 
@@ -794,4 +813,23 @@ func (r *Runtime) EmitSecurityScannerChanged(scannerID, status, errMsg string) {
 		payload["error"] = errMsg
 	}
 	r.publishEvent(newEvent(EventTypeSecurityScannerChanged, payload))
+}
+
+// jsonByteLen returns the JSON-serialized byte length of v, or 0 when there is
+// nothing to measure or it cannot be marshaled. A typed-nil pointer inside a
+// non-nil interface encodes as "null"; that is 4 bytes of nothing, so it is
+// reported as 0 rather than as a measured response.
+func jsonByteLen(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+	if rv := reflect.ValueOf(v); (rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Map ||
+		rv.Kind() == reflect.Slice || rv.Kind() == reflect.Interface) && rv.IsNil() {
+		return 0
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return len(b)
 }
