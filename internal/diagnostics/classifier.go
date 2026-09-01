@@ -211,7 +211,23 @@ func classifyDockerIsolatedSpawn(err error) Code {
 	// kill anything, so it must not be promoted to the terminal cause and
 	// outrank MCPX_STDIO_HANDSHAKE_TIMEOUT. A missing toolchain makes the
 	// process EXIT, which is the other wrapper and is unaffected here.
+	//
+	// The guard covers EVERY arm that reads the stderr tail for a missing
+	// command — (2), (3) and (4) below. Guarding only some of them is
+	// decoration: the unguarded arm claims the failure exactly as the guarded
+	// ones would have. Arms (1) and (5) are exempt on purpose: "docker: command
+	// not found" and an OCI/runc failure describe the docker layer never
+	// starting a container, which cannot be true of a container that is alive
+	// and merely silent.
 	toolchainSuppressed := isStdioHandshakeTimeout(msg)
+
+	// A shell reporting a BUILTIN missing (`sh: 1: source: not found`) is a
+	// portability bug in the server's own startup script — dash has no
+	// `source`, `shopt` or `pushd` — and says nothing about what the image
+	// contains. Treating it as evidence sends the user rebuilding a Docker
+	// image over a `#!/bin/sh` line, and hijacks the code that would have
+	// pointed at the stderr where the real cause is.
+	builtinOnly := onlyShellBuiltinsMissing(msg)
 
 	switch {
 	// (1) docker binary unresolved: shellwrap resolution failure, or the shell
@@ -239,12 +255,16 @@ func classifyDockerIsolatedSpawn(err error) Code {
 	// enough to sit above (4) — which would otherwise answer the bash wording
 	// of this exact failure with the ENTRYPOINT-missing code. Real OCI
 	// entrypoint errors never carry a shell prefix, so they still fall to (4).
-	case !toolchainSuppressed && shellToolNotFoundRe.MatchString(msg):
+	case !toolchainSuppressed && !builtinOnly && shellToolNotFoundRe.MatchString(msg):
 		return DockerMissingToolchain
 	// (4) in-container interpreter missing (image lacks uvx/node/python/…).
-	case strings.Contains(msg, "executable file not found"),
-		strings.Contains(msg, "no such file or directory"),
-		strings.Contains(msg, "command not found"):
+	// Split in two so the builtin carve-out applies only to the wording a shell
+	// builtin line can produce: an OCI "executable file not found" is never one
+	// of those, and must still classify even next to a benign `source` line.
+	case !toolchainSuppressed && (strings.Contains(msg, "executable file not found") ||
+		strings.Contains(msg, "no such file or directory")):
+		return DockerExecNotFound
+	case !toolchainSuppressed && !builtinOnly && strings.Contains(msg, "command not found"):
 		return DockerExecNotFound
 	// (5) other OCI runtime failures (arch mismatch, runc start failure).
 	case strings.Contains(msg, "oci runtime"),
@@ -257,8 +277,9 @@ func classifyDockerIsolatedSpawn(err error) Code {
 
 // isStdioHandshakeTimeout reports whether the error is the "the child is alive
 // but silent" wrapper (connection_lifecycle.go) rather than a process that
-// died. Kept in lockstep with the MCPX_STDIO_HANDSHAKE_TIMEOUT arm of
-// classifyStdio below.
+// died. It is the single source for the MCPX_STDIO_HANDSHAKE_TIMEOUT arm of
+// classifyStdio below and for the suppression guard above, so the two cannot
+// drift apart.
 func isStdioHandshakeTimeout(msg string) bool {
 	return strings.Contains(msg, "did not respond to mcp initialize") ||
 		strings.Contains(msg, "handshake timeout")
@@ -282,7 +303,39 @@ func isStdioHandshakeTimeout(msg string) bool {
 // NOT matched here — it has no space after the shell's colon, and the generic
 // "command not found" arm already covers it.
 var shellToolNotFoundRe = regexp.MustCompile(
-	`(?:^|\s)(?:[\w./+-]*/)?(?:sh|bash|dash|ash|ksh|zsh|busybox)(?:\[\d+\])?: (?:(?:line )?\d+: )?(?:exec: )?[\w.+-]+: (?:command )?not found`)
+	`(?:^|\s)(?:[\w./+-]*/)?(?:sh|bash|dash|ash|ksh|zsh|busybox)(?:\[\d+\])?: (?:(?:line )?\d+: )?(?:exec: )?([\w.+-]+): (?:command )?not found`)
+
+// shellBuiltins are names a shell resolves ITSELF, so a "<name>: not found"
+// line for one of them means the script was written for another shell (almost
+// always bash-isms run under dash/ash) — not that the image is missing a
+// binary. No normal image ships these as executables, so nothing is lost by
+// refusing to read them as a missing toolchain.
+var shellBuiltins = map[string]bool{
+	"source": true, "shopt": true, "pushd": true, "popd": true, "dirs": true,
+	"declare": true, "typeset": true, "local": true, "let": true, "alias": true,
+	"unalias": true, "bind": true, "complete": true, "compgen": true,
+	"mapfile": true, "readarray": true, "history": true, "caller": true,
+	"suspend": true, "enable": true, "builtin": true, "logout": true,
+	"disown": true, "coproc": true, "select": true, "function": true,
+}
+
+// onlyShellBuiltinsMissing reports whether a shell "missing command" line is
+// present AND every command it names is a shell builtin. It is deliberately an
+// ALL, not an ANY: a stderr tail carrying both `source: not found` and
+// `cmake: not found` really is a missing toolchain, and the benign line must
+// not cancel the real one.
+func onlyShellBuiltinsMissing(msg string) bool {
+	matches := shellToolNotFoundRe.FindAllStringSubmatch(msg, -1)
+	if len(matches) == 0 {
+		return false
+	}
+	for _, m := range matches {
+		if !shellBuiltins[strings.ToLower(m[1])] {
+			return false
+		}
+	}
+	return true
+}
 
 // gitCloneFailureCauses are causes of a failed git clone that are NOT a missing
 // git binary. `uv` collapses them all into "Git operation failed", so without
@@ -406,9 +459,28 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 		case strings.Contains(lmsg, "exec format error") &&
 			!strings.Contains(lmsg, "oci runtime") && !strings.Contains(lmsg, "runc"):
 			return STDIOSpawnExecFormat
+		// The handshake-timeout wrapper is mcpproxy's OWN phrasing and means
+		// the child is alive: it outranks every arm below, all of which read
+		// the attached stderr TAIL and would otherwise let a line the child
+		// logged and survived decide the diagnosis. Same reasoning as the
+		// toolchainSuppressed guard in classifyDockerIsolatedSpawn — and it
+		// has to sit here too, or suppressing the docker arm just hands the
+		// same stderr line to this one.
+		case isStdioHandshakeTimeout(lmsg):
+			return STDIOHandshakeTimeout
+		// A git/ssh CREDENTIAL failure during a dependency install. `git@host:
+		// Permission denied (publickey).` contains "permission denied", which
+		// the EACCES arm below reads as the server's own executable being
+		// unreadable — chmod advice for a file that is fine, while the real
+		// cause (no key for a private repo) sits in the stderr. git RAN and the
+		// child then died, so it belongs with the other git-clone failures on
+		// EXIT_BEFORE_INITIALIZE, whose remediation points at that stderr.
+		case strings.Contains(lmsg, "permission denied (publickey)"):
+			return STDIOExitBeforeInitialize
 		case strings.Contains(lmsg, "no such file or directory"),
-			strings.Contains(lmsg, "executable file not found"),
-			strings.Contains(lmsg, "command not found"):
+			strings.Contains(lmsg, "executable file not found"):
+			return STDIOSpawnENOENT
+		case strings.Contains(lmsg, "command not found") && !onlyShellBuiltinsMissing(lmsg):
 			return STDIOSpawnENOENT
 		case strings.Contains(lmsg, "permission denied"):
 			return STDIOSpawnEACCES
@@ -423,9 +495,6 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 			strings.Contains(lmsg, "exited before completing the mcp initialize"),
 			strings.Contains(lmsg, "exited before the mcp initialize"):
 			return STDIOExitBeforeInitialize
-		case strings.Contains(lmsg, "did not respond to mcp initialize"),
-			strings.Contains(lmsg, "handshake timeout"):
-			return STDIOHandshakeTimeout
 		case strings.Contains(lmsg, "invalid handshake"),
 			strings.Contains(lmsg, "malformed"):
 			return STDIOHandshakeInvalid

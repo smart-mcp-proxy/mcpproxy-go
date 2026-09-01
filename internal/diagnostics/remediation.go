@@ -120,6 +120,22 @@ func detectDockerRuntimeType(command string) string {
 // together.
 const gitCapableImageKey = "uvx-git"
 
+// builtInGitCapableImage / builtInPythonRunnerImage mirror the VALUES config
+// ships for the git-capable key and for every Python package runner.
+//
+// Values, not presence, are what say whether mcpproxy's automatic selection
+// actually ran: a config file's `default_images` is merged INTO the built-in
+// map, so both keys are populated in every install, and an operator who
+// retargeted their runtime at a mirror keeps a shipped `uvx-git` they never
+// chose. In that case core.IsolationManager.resolveDefaultImage deliberately
+// does NOT substitute — it will not pull a public image behind a mirrored host
+// — so claiming an automatic swap here would name an image the install never
+// ran. TestMirroredBuiltInImagesMatchConfig pins these to config.
+const (
+	builtInGitCapableImage   = "ghcr.io/astral-sh/uv:python3.13-bookworm"
+	builtInPythonRunnerImage = "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
+)
+
 // missingToolchainRemediation explains a DockerMissingToolchain failure: the
 // container ran, but the image lacks a tool the server calls. The git case is
 // special — mcpproxy now selects a git-capable image automatically (#1143), so
@@ -149,13 +165,27 @@ func missingToolchainRemediation(hints ClassifierHints) string {
 		return b.String()
 	}
 
-	gitImage := hints.DockerDefaultImages[gitCapableImageKey]
+	rawGitImage, gitKeySet := hints.DockerDefaultImages[gitCapableImageKey]
+	gitImage := strings.TrimSpace(rawGitImage)
+	runtimeImage := strings.TrimSpace(hints.DockerDefaultImages[runtimeType])
+	// An explicitly emptied key is the documented opt-out, not an absent one.
+	optedOut := gitKeySet && gitImage == ""
+	// The operator retargeted this runtime at their own registry and left the
+	// git key at the value mcpproxy ships: no substitution happened, and the
+	// server ran on their image. Mirrors the resolver's own rule.
+	deferredToRuntimeImage := !optedOut && runtimeImage != "" && runtimeImage != builtInPythonRunnerImage &&
+		(gitImage == "" || gitImage == builtInGitCapableImage)
+
 	b.WriteString(" It installs from a git URL, so the image must contain `git`.")
 	switch {
 	case override != "" && gitImage != "":
 		fmt.Fprintf(&b, " The per-server `isolation.image` override `%s` is the likely culprit: it opts out of the automatic git-capable image selection. Remove the override to inherit `%s`, or pin an image that ships git.", override, gitImage)
 	case override != "":
 		fmt.Fprintf(&b, " The per-server `isolation.image` override `%s` is the likely culprit: it opts out of the automatic git-capable image selection. Remove the override, or pin an image that ships git.", override)
+	case optedOut:
+		fmt.Fprintf(&b, " `docker_isolation.default_images.%s` is set to `\"\"`, which opts out of the automatic git-capable image selection, so this server runs on your `%s` image. Remove the empty value, or point that key at an image that ships git.", gitCapableImageKey, runtimeType)
+	case deferredToRuntimeImage:
+		fmt.Fprintf(&b, " No git-capable image was substituted here: your `%s` entry (`%s`) is not the image mcpproxy ships, so this install pulls from its own registry and mcpproxy kept the server on your image rather than reaching outside it for the public default. Set `docker_isolation.default_images.%s` to an image in your registry that ships git.", runtimeType, runtimeImage, gitCapableImageKey)
 	case gitImage != "":
 		fmt.Fprintf(&b, " mcpproxy selects a git-capable image (`%s`, from `docker_isolation.default_images.%s`) automatically for git dependencies — if this still fails, that key points at an image without git, or this server is running an older mcpproxy.", gitImage, gitCapableImageKey)
 	default:

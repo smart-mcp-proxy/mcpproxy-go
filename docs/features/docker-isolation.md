@@ -153,6 +153,19 @@ the key to use your own mirror or a custom build:
 partial map like the one above only changes the keys it lists — every other
 runtime keeps its built-in image.
 
+**Mirrored / air-gapped registries.** Because of that merge, `uvx-git` is
+present in every install whether or not you wrote it, so MCPProxy decides by
+*value*, not presence: if you have retargeted `uvx`/`python` at your own
+registry and left `uvx-git` at its shipped `ghcr.io` value, that shipped value
+is not treated as your choice — the server runs on **your** image instead of
+pulling a public one your host may not be able to reach, and MCPProxy logs a
+warning naming this key. Point `uvx-git` at a git-capable image in your registry
+to get the substitution back:
+
+```json
+{ "docker_isolation": { "default_images": { "uvx-git": "mirror.internal/astral/uv:python3.13-bookworm" } } }
+```
+
 To turn the substitution off entirely, set the key to an empty string; those
 servers then keep whatever `uvx`/`python` image you configured:
 

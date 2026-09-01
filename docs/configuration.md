@@ -947,7 +947,7 @@ See [Logging Documentation](logging.md) for complete details.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable Docker isolation globally |
-| `default_images` | object | See below | Map of runtime type to Docker image, merged over the built-in map (a partial map only overrides the keys it lists). The `uvx-git` entry is used instead of the Python default when a Python package runner installs from a `git+` URL (the slim uv image has no git); set it to `""` to opt out |
+| `default_images` | object | See below | Map of runtime type to Docker image, merged over the built-in map (a partial map only overrides the keys it lists). The `uvx-git` entry is used instead of the Python default when a Python package runner installs from a `git+` URL (the slim uv image has no git); set it to `""` to opt out. If you retarget `uvx`/`python` at your own registry and leave `uvx-git` at its shipped value, your image is used rather than a public pull your host may not reach |
 | `registry` | string | `"docker.io"` | Docker registry to use |
 | `network_mode` | string | `"bridge"` | Docker network mode |
 | `memory_limit` | string | `"512m"` | Memory limit for containers |

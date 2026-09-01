@@ -71,6 +71,7 @@ So if you still see this code, one of these applies:
 | The server pins `isolation.image` | The override opts out of the automatic selection. Remove it, or pin an image that ships the tool. |
 | `default_images.uvx-git` was retargeted to an image without git | Point it at an image that has git. |
 | `default_images.uvx-git` was set to `""` | That is the opt-out — the server keeps your `uvx`/`python` image. Remove the empty value, or pin an image that ships git. |
+| You retargeted `default_images.uvx`/`python` at your own registry and left `uvx-git` at its shipped `ghcr.io` value | MCPProxy will not pull a public image behind a mirrored install, so the server ran on **your** image (a warning naming this key is in the log). Point `uvx-git` at a git-capable image in your registry. |
 | The server is a `node`/`npx` (or other non-Python) runner | The selection is Python-only, because `node:22` already ships git. Pin an `isolation.image` that has the tool. |
 | The missing tool is **not** git (e.g. `make`, `gcc`, `cargo`) | There is no automatic selection for it — pin an `isolation.image` that ships it. |
 | You are running an older MCPProxy | Upgrade, or set the image explicitly. |

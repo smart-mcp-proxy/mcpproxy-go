@@ -262,7 +262,10 @@ func (im *IsolationManager) DetectRuntimeType(command string) string {
 //  1. the per-server `isolation.image` override — an explicit user choice
 //     always wins;
 //  2. the git-capable image, when the server is a Python package runner
-//     installing from a git URL (#1143 — see resolveDefaultImage);
+//     installing from a git URL AND nothing in `default_images` has been
+//     retargeted at the operator's own registry (#1143 — see
+//     resolveDefaultImage, which explains why a mirrored install keeps its own
+//     image instead);
 //  3. the runtime type's entry in `default_images`;
 //  4. alpine, for unknown runtime types.
 func (im *IsolationManager) GetDockerImage(serverConfig *config.ServerConfig, runtimeType string) (string, error) {
@@ -275,10 +278,27 @@ func (im *IsolationManager) GetDockerImage(serverConfig *config.ServerConfig, ru
 	return image, nil
 }
 
+// gitImageDecision records what the git-capable image selection did for a
+// server, so the spawn path can log the right thing — and, for the case where
+// the selection stands down, log anything at all.
+type gitImageDecision int
+
+const (
+	// gitImageNotApplicable: no git dependency, or the operator opted out by
+	// emptying the key.
+	gitImageNotApplicable gitImageDecision = iota
+	// gitImageSubstituted: a git-capable image was swapped in for this server.
+	gitImageSubstituted
+	// gitImageDeferredToRuntime: the server needs git, but the operator has
+	// retargeted this runtime at their own registry and named no git-capable
+	// image, so their image stands and they are told which key to set.
+	gitImageDeferredToRuntime
+)
+
 // resolveDefaultImage computes the image a server gets from the GLOBAL config
 // — per-server `isolation.image` overrides are handled by the caller. The
-// second return value reports whether the git-capable image was substituted,
-// so the spawn path can say why it is pulling a much larger image.
+// second return value reports what the git-capable selection did, so the spawn
+// path can say why it is pulling a much larger image, or why it is not.
 //
 // The substitution exists because the Python default is Astral's slim uv image,
 // which contains no git; a `uvx --from …git+https://…` server therefore died
@@ -287,45 +307,59 @@ func (im *IsolationManager) GetDockerImage(serverConfig *config.ServerConfig, ru
 // ~1.5GB pull for a case many never hit, so the swap is scoped to the servers
 // whose args actually reference a git URL.
 //
-// The operator's `default_images` map is authoritative throughout. In
-// particular the substitution NEVER reaches past it to a hardcoded public
-// image while the map has an answer: a mirrored or air-gapped install
-// retargets these keys at its own registry, and pulling ghcr.io behind its back
-// is an image that host cannot fetch at all. So:
+// The operator's `default_images` map is authoritative throughout: the
+// substitution never reaches past it to a PUBLIC image that a mirrored or
+// air-gapped host cannot fetch at all. Key presence cannot express that,
+// because a config file's `default_images` is decoded INTO the built-in map —
+// the key is present in every install (TestDefaultImagesMergeOverBuiltInsOnLoad)
+// — so the question asked is whose VALUE it holds (config.IsBuiltInDefaultImage):
 //
-//   - key set          → use it (the operator retargeted the git image);
-//   - key set to ""    → opt out, keep the runtime default (the lever for an
-//     operator who does not want a second large image);
-//   - key absent       → the runtime's own configured image, exactly as before
-//     #1143. On the real upgrade path the key is never absent: a config file's
-//     `default_images` is decoded INTO the built-in map, so the built-in entry
-//     survives (TestDefaultImagesMergeOverBuiltInsOnLoad);
-//   - key absent AND no runtime image → the built-in git-capable image, because
-//     the only alternative there is the alpine fallback, which has neither git
-//     nor python.
-func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfig, runtimeType string) (image string, gitSubstituted bool) {
+//   - git key holds an operator value → use it, whatever else is configured;
+//   - git key emptied                 → opt out, keep the runtime default (the
+//     lever for an operator who does not want a second large image);
+//   - git key still mcpproxy's own value, and the runtime image is too → the
+//     built-in git-capable image. Nothing here is mirrored, so a public pull is
+//     what this install already does for every other image;
+//   - git key still mcpproxy's own value, but the operator retargeted the
+//     RUNTIME at their registry → their image stands. It may or may not contain
+//     git; that is diagnosable (MCPX_DOCKER_MISSING_TOOLCHAIN names the key to
+//     set, and BuildDockerArgs warns on spawn), whereas a pull their host
+//     cannot make is a failure with no path forward.
+func (im *IsolationManager) resolveDefaultImage(serverConfig *config.ServerConfig, runtimeType string) (image string, decision gitImageDecision) {
 	runtimeImage, runtimeExists := im.globalConfig.DefaultImages[runtimeType]
+	runtimeImage = strings.TrimSpace(runtimeImage)
 	needsGit := serverConfig != nil && config.NeedsGitCapableImage(runtimeType, serverConfig.Args)
 
 	if needsGit {
 		gitImage, gitKeySet := im.globalConfig.DefaultImages[config.GitCapableImageKey]
+		gitImage = strings.TrimSpace(gitImage)
+		operatorChoseGitImage := gitImage != "" &&
+			!config.IsBuiltInDefaultImage(config.GitCapableImageKey, gitImage)
+		operatorChoseRuntimeImage := runtimeExists && runtimeImage != "" &&
+			!config.IsBuiltInDefaultImage(runtimeType, runtimeImage)
+
 		switch {
-		case strings.TrimSpace(gitImage) != "":
-			return im.buildFullImageName(gitImage), true
-		case gitKeySet:
+		case operatorChoseGitImage:
+			return im.buildFullImageName(gitImage), gitImageSubstituted
+		case gitKeySet && gitImage == "":
 			// Explicitly emptied: the operator opted out of the substitution.
-		case !runtimeExists || strings.TrimSpace(runtimeImage) == "":
-			return im.buildFullImageName(config.DefaultGitCapableImage), true
+		case operatorChoseRuntimeImage:
+			return im.buildFullImageName(runtimeImage), gitImageDeferredToRuntime
+		default:
+			// Nothing is retargeted (or there is no runtime entry at all, where
+			// the only alternative is the alpine fallback, which has neither
+			// git nor python).
+			return im.buildFullImageName(config.DefaultGitCapableImage), gitImageSubstituted
 		}
 	}
 
 	// Use default image from global config
 	if runtimeExists {
-		return im.buildFullImageName(runtimeImage), false
+		return im.buildFullImageName(runtimeImage), gitImageNotApplicable
 	}
 
 	// Fallback to alpine for unknown runtime types
-	return im.buildFullImageName("alpine:3.18"), false
+	return im.buildFullImageName("alpine:3.18"), gitImageNotApplicable
 }
 
 // ResolvedIsolationDefaults captures the per-runtime default values that
@@ -434,16 +468,30 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 	// substitution ACTUALLY happened, not merely on the server qualifying for
 	// it: an operator who emptied the key opted out, and logging a swap that
 	// did not occur would send them looking for a pull that never runs.
-	gitSubstituted := false
+	decision := gitImageNotApplicable
 	if !hasImageOverride(serverConfig) {
-		_, gitSubstituted = im.resolveDefaultImage(serverConfig, runtimeType)
+		_, decision = im.resolveDefaultImage(serverConfig, runtimeType)
 	}
-	if im.logger != nil && gitSubstituted {
-		im.logger.Info("using git-capable isolation image for a git dependency",
-			zap.String("server", serverConfig.Name),
-			zap.String("runtime", runtimeType),
-			zap.String("image", image),
-			zap.String("hint", "override docker_isolation.default_images."+config.GitCapableImageKey+" to use a different image"))
+	if im.logger != nil {
+		switch decision {
+		case gitImageSubstituted:
+			im.logger.Info("using git-capable isolation image for a git dependency",
+				zap.String("server", serverConfig.Name),
+				zap.String("runtime", runtimeType),
+				zap.String("image", image),
+				zap.String("hint", "override docker_isolation.default_images."+config.GitCapableImageKey+" to use a different image"))
+		case gitImageDeferredToRuntime:
+			// The operator's registry wins over a public image they may not be
+			// able to reach — but they get told which key makes the choice
+			// explicit, because their image may have no git either.
+			im.logger.Warn("git dependency running on the configured runtime image",
+				zap.String("server", serverConfig.Name),
+				zap.String("runtime", runtimeType),
+				zap.String("image", image),
+				zap.String("hint", "this server installs from a git URL; set docker_isolation.default_images."+
+					config.GitCapableImageKey+" to an image in your registry that ships git if it fails to resolve"))
+		case gitImageNotApplicable:
+		}
 	}
 
 	args := []string{"run", "--rm", "-i"}
