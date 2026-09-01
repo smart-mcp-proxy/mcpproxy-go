@@ -5243,12 +5243,19 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 			return nil, opts, fmt.Errorf("invalid args_json format: %v", err)
 		}
-		// #1148: the read path masks credential-shaped argv tokens; restore
-		// any the caller echoed back masked, so the mask is never persisted
-		// over the real value (parity with the env/header/url unmaskers).
-		// args_json REPLACES the vector, so an unedited echo of a masked list
-		// would otherwise wipe the credential.
-		patch.Args = unmaskArgv(args, existingServer.Args)
+		// #1148 round 3: the read path masks credential-shaped argv tokens,
+		// and unlike env/headers/url there is NO unmask contract for argv —
+		// an argv slot has no key to bind a stored secret to, and the caller
+		// controls both the whole vector and `command`, so any revert can be
+		// steered into relocating the credential (see checkArgvMaskEcho).
+		// An echoed mask is therefore refused, not reverted: the caller
+		// resends the real value, so the mask is never restored into an
+		// attacker-chosen command line and never persisted over the
+		// credential either.
+		if err := checkArgvMaskEcho(args, existingServer.Args); err != nil {
+			return nil, opts, err
+		}
+		patch.Args = args
 	}
 
 	// Handle env JSON string - maps are deep merged with RFC 7396 null-means-remove

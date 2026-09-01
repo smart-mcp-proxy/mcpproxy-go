@@ -1,6 +1,8 @@
 package core
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -45,4 +47,31 @@ func TestLogSafeURL_RedactsQueryCredentials(t *testing.T) {
 	// An empty URL (stdio servers) stays empty rather than becoming a marker.
 	empty := &Client{config: &config.ServerConfig{}}
 	assert.Equal(t, "", empty.logSafeURL())
+}
+
+// TestRedactURLCredentialsInError covers issue #1148 round 3: masking the `url`
+// log fields left the same credential travelling inside the transport error's
+// own message, which the manager logs at Error level on every failed attempt
+// and the client keeps as its last error.
+//
+// The redaction must not cost the error its identity: the connect paths
+// classify by errors.Is/As and by substring, and both have to keep working.
+func TestRedactURLCredentialsInError(t *testing.T) {
+	cause := errors.New(`Post "https://host/mcp?token=urlsecret999": dial tcp: connection refused`)
+	wrapped := fmt.Errorf("failed to connect: %w", cause)
+
+	got := redactURLCredentialsInError(wrapped)
+
+	assert.NotContains(t, got.Error(), "urlsecret999", "the URL credential must not survive in the error text")
+	assert.Contains(t, got.Error(), "connection refused", "substring classification must keep working")
+	assert.True(t, errors.Is(got, cause), "the original error must stay reachable through Unwrap")
+
+	t.Run("an error with nothing to redact is returned unchanged", func(t *testing.T) {
+		plain := errors.New("dial tcp 127.0.0.1:1: connection refused")
+		assert.Same(t, plain, redactURLCredentialsInError(plain))
+	})
+
+	t.Run("nil stays nil", func(t *testing.T) {
+		assert.NoError(t, redactURLCredentialsInError(nil))
+	})
 }

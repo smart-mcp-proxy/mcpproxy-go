@@ -102,10 +102,12 @@ func (c *Client) Close() error {
 
 // Connect establishes connection with detailed progress output
 func (c *Client) Connect(ctx context.Context) error {
+	// #1148: never log the configured URL raw — it can embed the credential
+	// in its query or userinfo, and the CLI writes this line to the same log.
 	c.logger.Info("🔗 Starting connection to upstream server",
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.getTransportType()),
-		zap.String("url", c.config.URL),
+		zap.String("url", oauth.RedactURLQueryParams(c.config.URL)),
 		zap.String("command", c.config.Command))
 
 	// Enable JSON-RPC frame logging if trace level is enabled

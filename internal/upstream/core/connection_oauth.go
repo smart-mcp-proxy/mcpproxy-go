@@ -445,7 +445,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			}
 			c.logger.Error("⚠️ ENDPOINT DEPRECATED: Server has migrated to a new URL",
 				zap.String("server", c.config.Name),
-				zap.String("current_url", c.config.URL),
+				zap.String("current_url", c.logSafeURL()), // #1148: query/userinfo credentials
 				zap.String("correlation_id", correlationID),
 				zap.String("action", "Update the server URL in your configuration"),
 				zap.String("hint", "Check the server's documentation or try removing /sse from the URL"),

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -48,4 +49,17 @@ func TestCreateHTTPClient_DoesNotLogRawURL(t *testing.T) {
 	}
 	assert.NotEmpty(t, b.String(), "precondition: client creation logs something")
 	assert.NotContains(t, b.String(), "urlsecret999")
+}
+
+// TestLogSafeErrorField_RedactsURLCredentials covers issue #1148 round 3: the
+// `url` log fields were masked, but a net/http error quotes the request URL
+// inside its own message, so the credential kept reaching the log through
+// zap.Error on the request-failure path.
+func TestLogSafeErrorField_RedactsURLCredentials(t *testing.T) {
+	err := errors.New(`Post "https://host/mcp?token=urlsecret999": dial tcp: connection refused`)
+	field := logSafeErrorField(err)
+
+	assert.NotContains(t, field.String, "urlsecret999", "the error text must not carry the URL credential")
+	assert.Contains(t, field.String, "connection refused", "the diagnostic part must survive")
+	assert.Equal(t, zapcore.SkipType, logSafeErrorField(nil).Type, "a nil error contributes no field")
 }

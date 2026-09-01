@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -222,92 +223,91 @@ func redactedArgsFallback(args []string, r redactionPolicy) []string {
 	return out
 }
 
-// unmaskArgv reverts argv tokens that a client echoed back still masked
-// (issue #1148).
+// Issue #1148, round 3: argv masks are NEVER reverted. They are REFUSED.
 //
-// `args_json` REPLACES the vector entirely and internal/oauth owns no unmask
-// contract for argv, so masking argv on the read path without this would let a
-// read-modify-write client persist the mask over the real credential — the
-// exact failure mode oauth.UnmaskEnvValues / UnmaskHeaders exist to prevent for
-// env and headers.
+// The write path used to restore a masked argv token from the stored vector
+// (`unmaskArgv`), first by VALUE (round 2 finding 1) and then bound to the
+// index plus the preceding flag (round 3 finding 1). Both leaked, and the
+// second one leaked for a reason no tightening of the argv-internal context can
+// remove:
 //
-// The mapping is built from the STORED vector through redactedArgs, i.e. the
-// same function the read path used, so the two cannot drift.
+//   - An argv token has NO KEY. env values bind to the variable name, headers
+//     to the header name, a URL secret to its scheme+host — each is a piece of
+//     context the caller cannot restate without also restating what the secret
+//     is FOR. An argv slot has only its index and its neighbours.
+//   - The caller supplies the WHOLE vector *and* `command` in the same patch.
+//     So every candidate binding is caller-controlled: an index is chosen, a
+//     preceding flag is copied verbatim, and even a byte-identical argv means
+//     nothing once `command` moves from `mcp-foo` to `curl`. There is no
+//     surrounding context that proves the slot still means what it meant when
+//     the value was masked.
+//   - The index-plus-flag binding also missed every mask the VALUE-shaped
+//     detector produced (`ghp_…****`) and every mask at index 0, because
+//     nothing but the index bound those at all:
+//         stored   = ["mcp-foo", "run", "ghp_…"]
+//         incoming = ["--silent", "--data", "ghp_…****"]
+//     restored the live token into an attacker-chosen command line.
 //
-// The revert is BOUND to the slot the mask came from — round 2 finding 1. The
-// first cut matched by VALUE anywhere in the vector, which made this far worse
-// than the disclosure it was added to prevent:
+// So the revert is gone. A client that echoes a mask back is told to resend the
+// real value instead, which is the one answer that is safe in both directions:
+// the secret never moves (no relocation), and the mask is never written over
+// the credential either (no read-modify-write corruption — the #1142/#1146
+// failure the revert was added to prevent).
 //
-//   - RELOCATION. `args_json` replaces the whole vector and the caller also
-//     controls `command`, so `{"command":"sh","args_json":"[\"-c\",\"<mask>\"]"}`
-//     had mcpproxy substitute the real credential into an attacker-chosen
-//     command line.
-//   - RE-DISCLOSURE, which is the sharper one. A credential masked because of
-//     the FLAG in front of it (`--api-key <secret>`) has no credential shape of
-//     its own. Move it into a bare positional slot and the read path no longer
-//     recognises it, so the very next `upstream_servers list` hands it back in
-//     the clear — a masked-read → relocate-write → read-back chain that undoes
-//     all of #1148, over an endpoint that is unauthenticated by default.
+// Refusing rather than silently keeping the stored vector is deliberate:
+// `args_json` REPLACES the vector, so silently ignoring it would make the write
+// look applied when it was not.
+
+// argvMaskMarkers are the substrings every masked rendering of an argv token
+// carries: oauth.MaskValue / AuditMaskValue open with the bullet run, and the
+// value-shaped detector (security.MaskValue) ends with the elision+asterisks.
 //
-// So a stored token is restored ONLY to the index it was masked at, and only
-// when the token that BOUND the mask is unchanged:
+// The marker check backs up the exact-echo check below so a mask still gets
+// refused when the stored vector has since changed and the byte-for-byte
+// comparison no longer matches. TestArgvMaskMarkers_MatchTheRenderings pins
+// them to the functions that produce them.
+var argvMaskMarkers = []string{"••••", "…****"}
+
+// checkArgvMaskEcho reports an error when an incoming argv vector still carries
+// a mask this proxy rendered — either the exact masking of a stored token, or
+// any token bearing a mask marker.
 //
-//   - a value masked because of the preceding flag requires that same flag
-//     still to precede it (`--api-key` cannot become `--exfil-to`);
-//   - an inline `--flag=<mask>` carries its own flag inside the token, so token
-//     equality already binds it;
-//   - a detector-recognised token (`ghp_…`) is masked by its own shape, so it
-//     is still masked wherever it ends up and re-disclosure is impossible.
-//
-// This is the same shape as the safeguards the sibling contracts already carry:
-// oauth.UnmaskEnvValues / UnmaskHeaders bind to the map KEY, and UnmaskURL
-// refuses to move a stored secret onto a different scheme/host. A vector that
-// was reordered or resized simply does not round-trip its masks; the caller
-// resends the real values, which is the safe direction.
-func unmaskArgv(incoming, stored []string) []string {
-	if incoming == nil || len(stored) == 0 {
-		return incoming
+// Returns nil for a vector that carries no mask, which is every legitimate
+// write: a caller that changed nothing sends the real values it already has, a
+// caller that rotated a credential sends the new one.
+func checkArgvMaskEcho(incoming, stored []string) error {
+	if len(incoming) == 0 {
+		return nil
 	}
 
-	maskedStored := redactedArgs(stored, liveRedaction)
-	flagBound := argvFlagBoundMasks(stored)
+	echoed := make(map[string]struct{}, len(stored))
+	if len(stored) > 0 {
+		for i, masked := range redactedArgs(stored, liveRedaction) {
+			if masked != stored[i] {
+				echoed[masked] = struct{}{}
+			}
+		}
+	}
 
-	out := make([]string, len(incoming))
 	for i, token := range incoming {
-		out[i] = token
-		if i >= len(stored) || maskedStored[i] == stored[i] || token != maskedStored[i] {
-			// Out of range, not a mask at all, or a genuine edit.
+		if _, ok := echoed[token]; !ok && !containsArgvMaskMarker(token) {
 			continue
 		}
-		// argvFlagBoundMasks never marks index 0, so i >= 1 here.
-		if flagBound[i] && incoming[i-1] != stored[i-1] {
-			// The flag that made this value a secret is gone or different;
-			// restoring here would move the credential to a flag the caller
-			// chose. Leave the mask literal — the write then carries a value
-			// that is obviously not a credential rather than the real one.
-			continue
-		}
-		out[i] = stored[i]
+		return fmt.Errorf("args_json[%d] is a redaction placeholder, not an argument value: "+
+			"credential-shaped argv tokens are masked on read and are never restored on write, "+
+			"because an argv slot carries no key to bind the secret to. "+
+			"Resend the real value for that argument, or omit args_json to leave the stored arguments unchanged", i)
 	}
-	return out
+	return nil
 }
 
-// argvFlagBoundMasks reports, per index of the stored vector, whether that
-// token would be masked BECAUSE OF the flag in front of it rather than because
-// of its own shape. Mirrors the `maskNext` rule in redactArgvWith.
-//
-// It deliberately over-reports rather than under-reports: after a masked value
-// is consumed, redactArgvWith resets the pairing, so a run of sensitive-looking
-// flags marks one index here that the masker did not pair. An extra index only
-// makes unmaskArgv stricter (it also demands the preceding token be unchanged),
-// which is the safe direction; a missed index would drop a binding.
-func argvFlagBoundMasks(stored []string) []bool {
-	bound := make([]bool, len(stored))
-	for i := 1; i < len(stored); i++ {
-		prev := stored[i-1]
-		bound[i] = isArgvFlag(prev) && oauth.IsSensitiveKeyName(argvFlagKey(prev))
+func containsArgvMaskMarker(token string) bool {
+	for _, marker := range argvMaskMarkers {
+		if strings.Contains(token, marker) {
+			return true
+		}
 	}
-	return bound
+	return false
 }
 
 // unmaskLiveEnvValues reverts env values a client echoed back exactly as the

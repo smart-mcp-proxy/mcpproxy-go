@@ -480,3 +480,17 @@ func (c *HTTPTransportConfig) logSafeURL() string {
 	}
 	return oauth.RedactURLQueryParams(c.URL)
 }
+
+// logSafeErrorField renders an error as a log field with any URL-embedded
+// credential removed.
+//
+// Issue #1148, round 3: masking the `url` FIELDS was only half of it — a
+// net/http error quotes the request URL inside its own message
+// (`Post "https://host/mcp?token=…": dial tcp …`), so the credential kept
+// reaching the log through zap.Error on the request-failure paths.
+func logSafeErrorField(err error) zap.Field {
+	if err == nil {
+		return zap.Skip()
+	}
+	return zap.String("error", oauth.RedactSensitiveData(err.Error()))
+}

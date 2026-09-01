@@ -1528,10 +1528,15 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			continue
 		}
 
+		// #1148: the configured upstream URL can carry its credential in the
+		// query (`?token=…`) or the userinfo (`user:pass@`), and this line runs
+		// on every connect attempt, so the raw form would be written to
+		// main.log on a loop. Redacted through the same helper the core client
+		// and the HTTP transport use.
 		m.logger.Info("Attempting to connect client",
 			zap.String("id", id),
 			zap.String("name", client.GetConfig().Name),
-			zap.String("url", client.GetConfig().URL),
+			zap.String("url", oauth.RedactURLQueryParams(client.GetConfig().URL)),
 			zap.String("command", client.GetConfig().Command),
 			zap.String("protocol", client.GetConfig().Protocol))
 

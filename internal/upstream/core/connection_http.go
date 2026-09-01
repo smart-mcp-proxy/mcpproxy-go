@@ -63,7 +63,9 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 			c.logger.Debug("🚫 Auth strategy failed",
 				zap.Int("strategy_index", i),
 				zap.String("strategy", strategy.name),
-				zap.Error(err))
+				// #1148: the transport error quotes the request URL with its
+				// query credential; this fires on every failed attempt.
+				logSafeErrorField(err))
 
 			// For configuration errors (like no headers), always try next strategy
 			if c.isConfigError(err) {
@@ -112,7 +114,8 @@ func (c *Client) connectSSE(ctx context.Context) error {
 			c.logger.Debug("🚫 SSE auth strategy failed",
 				zap.Int("strategy_index", i),
 				zap.String("strategy", strategyName),
-				zap.Error(err))
+				// #1148: see the HTTP strategy loop above.
+				logSafeErrorField(err))
 
 			// For configuration errors (like no headers), always try next strategy
 			if c.isConfigError(err) {
@@ -241,7 +244,8 @@ func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
 	c.client.OnConnectionLost(func(err error) {
 		c.logger.Warn("⚠️ SSE connection lost detected",
 			zap.String("server", c.config.Name),
-			zap.Error(err),
+			// #1148: a dropped-stream error quotes the stream URL.
+			logSafeErrorField(err),
 			zap.String("transport", "sse"),
 			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
 	})
@@ -282,7 +286,8 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	c.client.OnConnectionLost(func(err error) {
 		c.logger.Warn("⚠️ SSE connection lost detected",
 			zap.String("server", c.config.Name),
-			zap.Error(err),
+			// #1148: a dropped-stream error quotes the stream URL.
+			logSafeErrorField(err),
 			zap.String("transport", "sse"),
 			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
 	})
