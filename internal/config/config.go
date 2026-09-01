@@ -828,13 +828,35 @@ func (dic *DockerIsolationConfig) ResolvedMode() IsolationMode {
 	return IsolationModeNone
 }
 
-// IsEnabled returns true if isolation is explicitly enabled, false otherwise.
-// Returns false if Enabled is nil (not set).
-func (ic *IsolationConfig) IsEnabled() bool {
-	if ic == nil || ic.Enabled == nil {
-		return false
-	}
-	return *ic.Enabled
+// HasEnabledOverride reports whether this server sets the legacy `enabled`
+// bool at all. False means "inherit the global isolation setting" (GH #1142).
+func (ic *IsolationConfig) HasEnabledOverride() bool {
+	return ic != nil && ic.Enabled != nil
+}
+
+// HasModeOverride reports whether this server sets a per-server
+// `isolation.mode` override. A nil pointer AND a pointer to the empty string
+// both mean "unset" — the empty string is documented as the unset mode, and
+// treating it as an override resolved servers to a mode the spawn path does not
+// implement while reporting them isolated (GH #1142).
+func (ic *IsolationConfig) HasModeOverride() bool {
+	return ic != nil && ic.Mode != nil && *ic.Mode != ""
+}
+
+// IsExplicitlyEnabled reports whether this server opts IN to isolation via the
+// legacy `enabled` bool. A nil Enabled is "inherit", never an opt-in.
+//
+// This is NOT the answer to "is this server isolated" — that question has
+// exactly one answer, upstream/core.IsolationManager.ResolveIsolation, which
+// also accounts for the global mode and the structural gates.
+func (ic *IsolationConfig) IsExplicitlyEnabled() bool {
+	return ic != nil && ic.Enabled != nil && *ic.Enabled
+}
+
+// IsExplicitlyDisabled reports whether this server opts OUT of isolation via
+// the legacy `enabled` bool. A nil Enabled is "inherit", never an opt-out.
+func (ic *IsolationConfig) IsExplicitlyDisabled() bool {
+	return ic != nil && ic.Enabled != nil && !*ic.Enabled
 }
 
 // BoolPtr returns a pointer to the given bool value.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1016,4 +1017,140 @@ func TestHandlePatchServer_ExposePrompts(t *testing.T) {
 			"omitted expose_prompts must preserve the existing pointer")
 		assert.True(t, *mockCtrl.capturedUpdates.ExposePrompts)
 	})
+}
+
+// TestHandlePatchServer_ImageOnlyDoesNotWriteEnabled is THE corruption
+// regression test for GH #1142. The macOS tray seeded its isolation toggle
+// from the flattened `enabled:false` the API reported for an INHERITING
+// server, then force-added `enabled` to every isolation PATCH. Editing an
+// unrelated field (the image) therefore persisted an explicit opt-out and
+// silently un-containerised a server the user never meant to expose.
+//
+// The handler must leave a nil override nil when the request does not mention
+// `enabled` at all.
+func TestHandlePatchServer_ImageOnlyDoesNotWriteEnabled(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		existingServer: &config.ServerConfig{
+			Name:     "python-mcp",
+			Protocol: "stdio",
+			Command:  "uvx",
+			Enabled:  true,
+			// Enabled override deliberately nil: "inherit the global setting".
+			Isolation: &config.IsolationConfig{Image: "python:3.11"},
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	body := []byte(`{"isolation":{"image":"python:3.12"}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/python-mcp", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NotNil(t, mockCtrl.capturedUpdates)
+	require.NotNil(t, mockCtrl.capturedUpdates.Isolation)
+
+	assert.Equal(t, "python:3.12", mockCtrl.capturedUpdates.Isolation.Image)
+	assert.Nil(t, mockCtrl.capturedUpdates.Isolation.Enabled,
+		"a PATCH that never mentions `enabled` must not write an explicit opt-out")
+}
+
+// TestHandlePatchServer_ExplicitNullClearsIsolationOverride pins the "go back
+// to inheriting the global setting" path — previously inexpressible, because
+// an omitted field and a cleared field were the same wire shape.
+func TestHandlePatchServer_ExplicitNullClearsIsolationOverride(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		existingServer: &config.ServerConfig{
+			Name: "python-mcp", Protocol: "stdio", Command: "uvx", Enabled: true,
+			Isolation: &config.IsolationConfig{Enabled: config.BoolPtr(false)},
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	body := []byte(`{"isolation":{"enabled_override":null}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/python-mcp", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NotNil(t, mockCtrl.capturedUpdates)
+	require.NotNil(t, mockCtrl.capturedUpdates.Isolation)
+	assert.Nil(t, mockCtrl.capturedUpdates.Isolation.Enabled,
+		"an explicit null must clear the override back to inherit")
+}
+
+// TestHandlePatchServer_ExplicitIsolationEnabledStillApplies guards against
+// over-correcting: a caller that really does want an explicit opt-out must
+// still get one.
+func TestHandlePatchServer_ExplicitIsolationEnabledStillApplies(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	for _, want := range []bool{true, false} {
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name: "python-mcp", Protocol: "stdio", Command: "uvx", Enabled: true,
+			},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		body := []byte(`{"isolation":{"enabled_override":` + strconv.FormatBool(want) + `}}`)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/python-mcp", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates.Isolation)
+		require.NotNil(t, mockCtrl.capturedUpdates.Isolation.Enabled)
+		assert.Equal(t, want, *mockCtrl.capturedUpdates.Isolation.Enabled)
+	}
+}
+
+// TestHandlePatchServer_IsolationPreservesUnexposedFields pins the contract
+// that lets Server.UpdateServer replace the isolation block wholesale: the
+// handler resolves the patch against the persisted overrides, so fields the
+// REST request cannot express (mode, log driver) survive.
+func TestHandlePatchServer_IsolationPreservesUnexposedFields(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	sandbox := config.IsolationModeSandbox
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		existingServer: &config.ServerConfig{
+			Name: "python-mcp", Protocol: "stdio", Command: "uvx", Enabled: true,
+			Isolation: &config.IsolationConfig{
+				Mode:      &sandbox,
+				LogDriver: "local",
+				Image:     "old",
+			},
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	body := []byte(`{"isolation":{"image":"new"}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/python-mcp", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	iso := mockCtrl.capturedUpdates.Isolation
+	require.NotNil(t, iso)
+	assert.Equal(t, "new", iso.Image)
+	require.NotNil(t, iso.Mode, "isolation.mode is not exposed by the REST request and must survive")
+	assert.Equal(t, sandbox, *iso.Mode)
+	assert.Equal(t, "local", iso.LogDriver)
 }

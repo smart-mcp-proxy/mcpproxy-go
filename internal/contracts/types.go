@@ -44,17 +44,21 @@ type Server struct {
 	// would apply when no per-server override is set. Populated on
 	// list/get responses; never consumed on PATCH requests.
 	IsolationDefaults *IsolationDefaults `json:"isolation_defaults,omitempty"`
-	Authenticated     bool               `json:"authenticated"`                  // OAuth authentication status
-	OAuthStatus       string             `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
-	TokenExpiresAt    *time.Time         `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
-	ToolListTokenSize int                `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
-	ShouldRetry       bool               `json:"should_retry,omitempty"`
-	RetryCount        int                `json:"retry_count,omitempty"`
-	LastRetryTime     *time.Time         `json:"last_retry_time,omitempty"`
-	UserLoggedOut     bool               `json:"user_logged_out,omitempty"`  // True if user explicitly logged out (prevents auto-reconnection)
-	Health            *HealthStatus      `json:"health,omitempty"`           // Unified health status calculated by the backend
-	Quarantine        *QuarantineStats   `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
-	ReconnectOnUse    bool               `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
+	// IsolationEffective exposes the resolved isolation state (and the rule
+	// that decided it) so clients can distinguish "inherits global" from an
+	// explicit per-server choice. Read-only; never consumed on PATCH.
+	IsolationEffective *IsolationEffective `json:"isolation_effective,omitempty"`
+	Authenticated      bool                `json:"authenticated"`                  // OAuth authentication status
+	OAuthStatus        string              `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
+	TokenExpiresAt     *time.Time          `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
+	ToolListTokenSize  int                 `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
+	ShouldRetry        bool                `json:"should_retry,omitempty"`
+	RetryCount         int                 `json:"retry_count,omitempty"`
+	LastRetryTime      *time.Time          `json:"last_retry_time,omitempty"`
+	UserLoggedOut      bool                `json:"user_logged_out,omitempty"`  // True if user explicitly logged out (prevents auto-reconnection)
+	Health             *HealthStatus       `json:"health,omitempty"`           // Unified health status calculated by the backend
+	Quarantine         *QuarantineStats    `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
+	ReconnectOnUse     bool                `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
 	// AutoApproveToolChanges mirrors config.ServerConfig.AutoApproveToolChanges
 	// (MCP-2930): the per-server intent to auto-approve new/changed tools past
 	// the trust baseline. Tri-state *bool — nil means "never set" (omitted from
@@ -207,14 +211,61 @@ type OAuthConfig struct {
 // config.IsolationConfig so the web UI and native tray can both edit
 // these fields without reaching into config-file internals.
 type IsolationConfig struct {
-	Enabled     bool     `json:"enabled"`
-	Image       string   `json:"image,omitempty"`
-	NetworkMode string   `json:"network_mode,omitempty"`
-	ExtraArgs   []string `json:"extra_args,omitempty"`
-	MemoryLimit string   `json:"memory_limit,omitempty"`
-	CPULimit    string   `json:"cpu_limit,omitempty"`
-	WorkingDir  string   `json:"working_dir,omitempty"`
-	Timeout     string   `json:"timeout,omitempty"`
+	// Enabled is the EFFECTIVE isolation state for this server: whether its
+	// process is actually CONFINED, after the global setting, the per-server
+	// override, the structural gates and the host's capabilities. It is NOT the
+	// raw per-server override — read EnabledOverride for that (GH #1142).
+	//
+	// READ-ONLY. The write surfaces reject an `enabled` key precisely because
+	// it is derived: echoing it back would convert "inherits the global
+	// setting" into a permanent explicit override. Write EnabledOverride.
+	//
+	// It stays a non-pointer bool that is always present on the wire: the macOS
+	// tray decodes it as a non-optional Swift Bool, so omitting or nulling the
+	// key would fail Codable for the whole server payload. Older clients that
+	// read this field now simply get a true answer.
+	Enabled bool `json:"enabled"`
+	// EnabledOverride is the RAW per-server `isolation.enabled` override, as
+	// persisted. Absent means "inherit the global setting" — which is a
+	// distinct state from an explicit false, and the distinction the reporting
+	// bug used to destroy.
+	EnabledOverride *bool `json:"enabled_override,omitempty"`
+	// ModeOverride is the RAW per-server `isolation.mode` override
+	// ("docker" | "sandbox" | "none"). Absent means "inherit".
+	ModeOverride string   `json:"mode_override,omitempty"`
+	Image        string   `json:"image,omitempty"`
+	NetworkMode  string   `json:"network_mode,omitempty"`
+	ExtraArgs    []string `json:"extra_args,omitempty"`
+	MemoryLimit  string   `json:"memory_limit,omitempty"`
+	CPULimit     string   `json:"cpu_limit,omitempty"`
+	WorkingDir   string   `json:"working_dir,omitempty"`
+	Timeout      string   `json:"timeout,omitempty"`
+}
+
+// IsolationEffective reports the resolved isolation state of a server together
+// with the rule that produced it, so a UI can say WHY a server is (or is not)
+// isolated instead of rendering a bare toggle whose meaning is ambiguous.
+//
+// Read-only output; clients must not echo it back on PATCH requests.
+type IsolationEffective struct {
+	// Mode is the effective isolation mode: "docker" | "sandbox" | "none" —
+	// exactly what the spawn path branches on.
+	Mode string `json:"mode"`
+	// Isolated reports whether the process is actually CONFINED. It is NOT
+	// simply Mode != "none": "sandbox" on a host that cannot enforce Landlock
+	// (any non-Linux OS, or a kernel without the LSM) runs the server
+	// unconfined, and Source then says "sandbox-unavailable" (GH #1142).
+	Isolated bool `json:"isolated"`
+	// GlobalMode is what "inherit" resolves to right now.
+	GlobalMode string `json:"global_mode,omitempty"`
+	// Inherited is true when the server sets neither `isolation.enabled` nor
+	// `isolation.mode`, so its state tracks the global setting.
+	Inherited bool `json:"inherited"`
+	// Source names the deciding rule: "global", "server-mode",
+	// "server-opt-out", "server-opt-in-ignored", "not-stdio",
+	// "already-docker", "sandbox-unavailable" or "unsupported-mode".
+	// Treat an unrecognized value as "global".
+	Source string `json:"source,omitempty"`
 }
 
 // IsolationDefaults reports the resolved baseline Docker isolation

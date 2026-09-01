@@ -173,6 +173,39 @@ Per-server `isolation.enabled: true` only takes effect when the global `docker_i
 
 Starting in this release, MCPProxy emits a one-time warning in the main log when it detects this configuration (look for `per-server docker isolation opt-in ignored` in `~/.mcpproxy/logs/main.log`). To actually isolate those servers, flip the global flag on.
 
+## Reading isolation state over the API
+
+Per-server `isolation.enabled` is a **tri-state** in the config file: `true`, `false`, or **absent** — and absent means *inherit the global setting*, not *off*.
+
+The API surfaces both halves of that, so a client never has to guess:
+
+| Field | Meaning |
+|-------|---------|
+| `isolation.enabled` | The **effective** state — is this server actually CONFINED right now, after the global setting, the per-server override, the structural gates and the host's capabilities. Always present for stdio servers. **Read-only** — see below. |
+| `isolation.enabled_override` | The **raw** per-server override, exactly as persisted. **Absent = inherit.** |
+| `isolation.mode_override` | The raw per-server `isolation.mode` override. Absent = inherit. |
+| `isolation_effective` | `{mode, isolated, global_mode, inherited, source}` — the resolved state plus *why*. |
+
+`isolation_effective.source` is a small, extensible vocabulary: `global`, `server-mode`, `server-opt-out`, `server-opt-in-ignored`, `not-stdio`, `already-docker`, `sandbox-unavailable`, `unsupported-mode`. **Treat an unrecognized value as `global`.**
+
+`isolated` is deliberately NOT just `mode != none`. The `sandbox` mode is enforced by Landlock, which is Linux-only and absent from some kernels; where it cannot be enforced the launcher runs the server **unconfined**, so `isolated` is `false` and `source` is `sandbox-unavailable` even though `mode` stays `sandbox` (the wrapper still applies its rlimits on Linux). A mode no version implements reports `unsupported-mode`. The read surface never claims isolation the spawn path will not deliver.
+
+> **Changed in this release (GH #1142):** `isolation.enabled` previously carried the raw override flattened to a bool, so a server that inherited global isolation — and was genuinely running in a container — was reported as `enabled: false` and displayed as unisolated everywhere. It now reports the effective state; read `enabled_override` for the raw value.
+
+### Writing the override
+
+Reads and writes use **different key names on purpose**. `isolation.enabled` is a derived, read-only value; the writable key is `isolation.enabled_override`, the same key reads return the raw override under. `POST /api/v1/servers` and `PATCH /api/v1/servers/{id}` accept the tri-state there:
+
+- **omit the key** → leave the persisted override alone;
+- **`null`** → clear the override, back to inheriting the global setting;
+- **`true` / `false`** → set an explicit opt-in / opt-out.
+
+Sending `isolation.enabled` on either verb returns **400**. That is deliberate: it is the effective state on the way out, so a read-modify-write client that echoed the whole isolation object back would silently convert "inherits the global setting" into a permanent explicit override — the same corruption the effective-state reporting exists to prevent. An unrecognized `mode_override` is likewise rejected with a 400 naming the accepted vocabulary, instead of being persisted and failing the next daemon start's config validation.
+
+Only send `enabled_override` when the user actually changed it. Fields the request omits (including `log_driver`, `log_max_size`, `log_max_files`) are preserved.
+
+> The MCP `upstream_servers` tool's `isolation_json` argument is the raw config object, so its `enabled` field is the raw tri-state there, matching the config file. Its `mode` is validated the same way.
+
 ## Telemetry
 
 When anonymous telemetry is enabled, MCPProxy reports two Docker-related counters at daily cadence:

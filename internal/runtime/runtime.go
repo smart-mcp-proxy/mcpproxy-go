@@ -2234,6 +2234,13 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	snapshot := stateView.Snapshot()
 	r.logger.Debug("StateView snapshot retrieved", zap.Int("count", len(snapshot.Servers)))
 
+	// Read the global isolation block ONCE, outside the loop: every server's
+	// projection needs it to resolve the effective isolation state (GH #1142).
+	var globalIsolation *config.DockerIsolationConfig
+	if cfg, err := r.GetConfig(); err == nil && cfg != nil {
+		globalIsolation = cfg.DockerIsolation
+	}
+
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
 	for _, serverStatus := range snapshot.Servers {
 		// Convert StateView ServerStatus to API response format
@@ -2429,23 +2436,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			if len(serverStatus.Config.Env) > 0 {
 				serverMap["env"] = serverStatus.Config.Env
 			}
-			if iso := serverStatus.Config.Isolation; iso != nil {
-				isoMap := map[string]interface{}{
-					"enabled": iso.IsEnabled(),
-				}
-				if iso.Image != "" {
-					isoMap["image"] = iso.Image
-				}
-				if iso.NetworkMode != "" {
-					isoMap["network_mode"] = iso.NetworkMode
-				}
-				if len(iso.ExtraArgs) > 0 {
-					isoMap["extra_args"] = iso.ExtraArgs
-				}
-				if iso.WorkingDir != "" {
-					isoMap["working_dir"] = iso.WorkingDir
-				}
+			if isoMap, effMap := buildIsolationMaps(globalIsolation, serverStatus.Config); isoMap != nil {
 				serverMap["isolation"] = isoMap
+				serverMap["isolation_effective"] = effMap
 			}
 		}
 

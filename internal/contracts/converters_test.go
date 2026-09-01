@@ -189,13 +189,13 @@ func TestConvertServerConfig_SourceRegistry(t *testing.T) {
 		SourceRegistryProvenance: config.RegistryProvenanceCustom,
 	}
 
-	server := ConvertServerConfig(cfg, "ready", true, 3, false)
+	server := ConvertServerConfig(cfg, nil, "ready", true, 3, false)
 	require.NotNil(t, server)
 	assert.Equal(t, "modelcontextprotocol", server.SourceRegistryID)
 	assert.Equal(t, config.RegistryProvenanceCustom, server.SourceRegistryProvenance)
 
 	// Manual server (no source registry) leaves both empty.
-	manual := ConvertServerConfig(&config.ServerConfig{Name: "manual", Enabled: true}, "ready", true, 0, false)
+	manual := ConvertServerConfig(&config.ServerConfig{Name: "manual", Enabled: true}, nil, "ready", true, 0, false)
 	assert.Empty(t, manual.SourceRegistryID)
 	assert.Empty(t, manual.SourceRegistryProvenance)
 }
@@ -229,11 +229,11 @@ func TestConvertGenericServersToTyped_AutoApproveToolChanges(t *testing.T) {
 func TestConvertServerConfig_AutoApproveToolChanges(t *testing.T) {
 	on := true
 	cfg := &config.ServerConfig{Name: "on", Enabled: true, AutoApproveToolChanges: &on}
-	server := ConvertServerConfig(cfg, "ready", true, 0, false)
+	server := ConvertServerConfig(cfg, nil, "ready", true, 0, false)
 	require.NotNil(t, server.AutoApproveToolChanges)
 	assert.True(t, *server.AutoApproveToolChanges)
 
-	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, "ready", true, 0, false)
+	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, nil, "ready", true, 0, false)
 	assert.Nil(t, unset.AutoApproveToolChanges)
 }
 
@@ -243,11 +243,11 @@ func TestConvertServerConfig_AutoApproveToolChanges(t *testing.T) {
 func TestConvertServerConfig_InitTimeout(t *testing.T) {
 	it := config.Duration(120 * time.Second)
 	cfg := &config.ServerConfig{Name: "slack", Enabled: true, InitTimeout: &it}
-	server := ConvertServerConfig(cfg, "ready", true, 0, false)
+	server := ConvertServerConfig(cfg, nil, "ready", true, 0, false)
 	require.NotNil(t, server.InitTimeout)
 	assert.Equal(t, 120*time.Second, server.InitTimeout.Duration())
 
-	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, "ready", true, 0, false)
+	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, nil, "ready", true, 0, false)
 	assert.Nil(t, unset.InitTimeout, "unset init_timeout must stay nil")
 
 	generic := ConvertGenericServersToTyped([]map[string]interface{}{
@@ -337,7 +337,7 @@ func TestConvertServerConfig_ConcurrencyOverrides(t *testing.T) {
 		QueueSize:             &queueSize,
 		QueueTimeout:          &qt,
 	}
-	server := ConvertServerConfig(cfg, "ready", true, 0, false)
+	server := ConvertServerConfig(cfg, nil, "ready", true, 0, false)
 	require.NotNil(t, server.MaxConcurrentRequests)
 	assert.Equal(t, 5, *server.MaxConcurrentRequests)
 	require.NotNil(t, server.QueueSize)
@@ -345,13 +345,13 @@ func TestConvertServerConfig_ConcurrencyOverrides(t *testing.T) {
 	require.NotNil(t, server.QueueTimeout)
 	assert.Equal(t, 45*time.Second, server.QueueTimeout.Duration())
 
-	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, "ready", true, 0, false)
+	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, nil, "ready", true, 0, false)
 	assert.Nil(t, unset.MaxConcurrentRequests, "absent must stay nil so the server inherits the default set")
 	assert.Nil(t, unset.QueueSize)
 	assert.Nil(t, unset.QueueTimeout)
 
 	optOut := 0
-	disabled := ConvertServerConfig(&config.ServerConfig{Name: "off", Enabled: true, MaxConcurrentRequests: &optOut}, "ready", true, 0, false)
+	disabled := ConvertServerConfig(&config.ServerConfig{Name: "off", Enabled: true, MaxConcurrentRequests: &optOut}, nil, "ready", true, 0, false)
 	require.NotNil(t, disabled.MaxConcurrentRequests, "an explicit 0 opt-out must survive the conversion")
 	assert.Equal(t, 0, *disabled.MaxConcurrentRequests)
 
@@ -370,4 +370,65 @@ func TestConvertServerConfig_ConcurrencyOverrides(t *testing.T) {
 	assert.Nil(t, generic[1].MaxConcurrentRequests)
 	assert.Nil(t, generic[1].QueueSize)
 	assert.Nil(t, generic[1].QueueTimeout)
+}
+
+// TestBuildIsolationView_TriState pins the wire projection at the contracts
+// boundary (GH #1142): `enabled` reports the EFFECTIVE state, the raw
+// per-server override travels alongside as a tri-state, and every stdio server
+// gets a block even with no override configured.
+func TestBuildIsolationView_TriState(t *testing.T) {
+	global := &config.DockerIsolationConfig{Enabled: true}
+	stdio := func(iso *config.IsolationConfig) *config.ServerConfig {
+		return &config.ServerConfig{Name: "srv", Protocol: "stdio", Command: "uvx", Isolation: iso}
+	}
+
+	t.Run("inherit reports isolated with no raw override", func(t *testing.T) {
+		iso, eff := BuildIsolationView(global, stdio(&config.IsolationConfig{Image: "python:3.12"}))
+		require.NotNil(t, iso)
+		assert.True(t, iso.Enabled)
+		assert.Nil(t, iso.EnabledOverride)
+		require.NotNil(t, eff)
+		assert.True(t, eff.Inherited)
+		assert.Equal(t, "docker", eff.Mode)
+	})
+
+	t.Run("no isolation block still yields a view", func(t *testing.T) {
+		iso, eff := BuildIsolationView(global, stdio(nil))
+		require.NotNil(t, iso)
+		assert.True(t, iso.Enabled)
+		require.NotNil(t, eff)
+		assert.True(t, eff.Inherited)
+	})
+
+	t.Run("explicit opt-out is readable and effective", func(t *testing.T) {
+		iso, eff := BuildIsolationView(global, stdio(&config.IsolationConfig{Enabled: config.BoolPtr(false)}))
+		require.NotNil(t, iso)
+		assert.False(t, iso.Enabled)
+		require.NotNil(t, iso.EnabledOverride)
+		assert.False(t, *iso.EnabledOverride)
+		assert.False(t, eff.Inherited)
+		assert.Equal(t, config.IsolationSourceServerOptOut, eff.Source)
+	})
+
+	t.Run("override pointer does not alias the config", func(t *testing.T) {
+		src := &config.IsolationConfig{Enabled: config.BoolPtr(true)}
+		iso, _ := BuildIsolationView(global, stdio(src))
+		require.NotNil(t, iso.EnabledOverride)
+		assert.NotSame(t, src.Enabled, iso.EnabledOverride)
+	})
+
+	t.Run("http server has no isolation block", func(t *testing.T) {
+		iso, eff := BuildIsolationView(global, &config.ServerConfig{
+			Name: "remote", Protocol: "http", URL: "https://example.com/mcp",
+		})
+		assert.Nil(t, iso)
+		assert.Nil(t, eff)
+	})
+
+	t.Run("nil global resolves to unisolated", func(t *testing.T) {
+		iso, eff := BuildIsolationView(nil, stdio(nil))
+		require.NotNil(t, iso)
+		assert.False(t, iso.Enabled)
+		assert.Equal(t, "none", eff.Mode)
+	})
 }

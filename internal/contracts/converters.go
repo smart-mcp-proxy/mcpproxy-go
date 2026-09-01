@@ -8,8 +8,13 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
-// ConvertServerConfig converts a config.ServerConfig to a contracts.Server
-func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool, toolCount int, authenticated bool) *Server {
+// ConvertServerConfig converts a config.ServerConfig to a contracts.Server.
+//
+// globalIsolation is the global docker_isolation block; it is required to
+// resolve the EFFECTIVE isolation state, which is what `isolation.enabled`
+// reports on the wire (GH #1142). Pass nil only when no global config exists —
+// that resolves to "no isolation", the same answer the spawn path gives.
+func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.DockerIsolationConfig, status string, connected bool, toolCount int, authenticated bool) *Server {
 	server := &Server{
 		ID:             cfg.Name,
 		Name:           cfg.Name,
@@ -63,22 +68,65 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		}
 	}
 
-	// Convert isolation config if present. The per-server overrides that
-	// actually live on config.IsolationConfig are Image/NetworkMode/
-	// ExtraArgs/WorkingDir; MemoryLimit/CPULimit/Timeout are still only
-	// available at the global DockerIsolationConfig level, so they stay
-	// empty here until that refactor lands.
-	if cfg.Isolation != nil {
-		server.Isolation = &IsolationConfig{
-			Enabled:     cfg.Isolation.IsEnabled(),
-			Image:       cfg.Isolation.Image,
-			NetworkMode: cfg.Isolation.NetworkMode,
-			ExtraArgs:   append([]string(nil), cfg.Isolation.ExtraArgs...),
-			WorkingDir:  cfg.Isolation.WorkingDir,
-		}
-	}
+	// Convert isolation config. The per-server overrides that actually live on
+	// config.IsolationConfig are Enabled/Mode/Image/NetworkMode/ExtraArgs/
+	// WorkingDir; MemoryLimit/CPULimit/Timeout are still only available at the
+	// global DockerIsolationConfig level, so they stay empty here until that
+	// refactor lands.
+	//
+	// `Enabled` on the wire is the EFFECTIVE state, so it needs the global
+	// config to resolve; the raw tri-state override travels alongside it.
+	server.Isolation, server.IsolationEffective = BuildIsolationView(globalIsolation, cfg)
 
 	return server
+}
+
+// BuildIsolationView projects a server's isolation configuration onto the wire
+// types: the override block (raw tri-state preserved) and the resolved
+// effective state.
+//
+// Both are emitted for every stdio server, even one with no `isolation` block
+// at all — a client that reads `isolation?.enabled` must get a real answer for
+// an inheriting server rather than the absence that used to read as "off"
+// (GH #1142). Servers with no local command carry neither.
+func BuildIsolationView(globalIsolation *config.DockerIsolationConfig, cfg *config.ServerConfig) (*IsolationConfig, *IsolationEffective) {
+	if cfg == nil {
+		return nil, nil
+	}
+	// A server with no local command has no child process to isolate, so the
+	// block is meaningless — unless it carries a stale override the operator
+	// should still be able to see and clear.
+	if cfg.Command == "" && cfg.Isolation == nil {
+		return nil, nil
+	}
+
+	resolved := config.ResolveIsolation(globalIsolation, cfg)
+
+	iso := &IsolationConfig{Enabled: resolved.Isolated}
+	if src := cfg.Isolation; src != nil {
+		if src.Enabled != nil {
+			// Copy the value: the wire type must not alias the config pointer.
+			iso.EnabledOverride = config.BoolPtr(*src.Enabled)
+		}
+		if src.Mode != nil {
+			iso.ModeOverride = string(*src.Mode)
+		}
+		iso.Image = src.Image
+		iso.NetworkMode = src.NetworkMode
+		if len(src.ExtraArgs) > 0 {
+			iso.ExtraArgs = append([]string(nil), src.ExtraArgs...)
+		}
+		iso.WorkingDir = src.WorkingDir
+	}
+
+	eff := &IsolationEffective{
+		Mode:       string(resolved.Mode),
+		Isolated:   resolved.Isolated,
+		GlobalMode: string(resolved.GlobalMode),
+		Inherited:  resolved.Inherited,
+		Source:     resolved.Source,
+	}
+	return iso, eff
 }
 
 // ConvertToolMetadata converts a config.ToolMetadata to a contracts.Tool

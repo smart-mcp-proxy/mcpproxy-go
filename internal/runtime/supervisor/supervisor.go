@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,29 +82,30 @@ func (s *Supervisor) classifierHints(srv *config.ServerConfig, transport string)
 // usesDockerIsolation reports whether the given server would be launched
 // through Docker isolation, so the classifier can attribute spawn/exec failures
 // to DOCKER codes (#696 CLI missing, in-container interpreter missing) rather
-// than a generic stdio ENOENT. This is a side-effect-free mirror of
-// core.IsolationManager.ShouldIsolate (internal/upstream/core/isolation.go) —
-// it is only a classifier hint, so faithfulness matters more than sharing the
-// (logging) implementation.
+// than a generic stdio ENOENT.
+//
+// It delegates to config.ResolveIsolation — the SAME resolver the spawn path
+// branches on (core.IsolationManager.ShouldIsolate wraps it) — so the hint
+// cannot drift from the launch decision. It previously mirrored the rules by
+// hand and only read the two LEGACY booleans, which pre-date isolation modes:
+// a per-server `mode: "docker"` override wins outright in the resolver, so such
+// a server was Docker-spawned but classified non-Docker (generic ENOENT
+// remediation, no image enrichment); and a `mode: "sandbox"` server under
+// global Docker isolation was classified Docker-isolated and offered Docker
+// remediation for a Landlock failure (GH #1142).
+//
+// The predicate is Mode == docker, not ResolvedIsolation.Isolated: the DOCKER
+// remediation codes describe the container LAUNCH path, which runs whenever the
+// mode is docker.
 func (s *Supervisor) usesDockerIsolation(srv *config.ServerConfig) bool {
-	if srv == nil || srv.Command == "" {
+	if srv == nil {
 		return false
 	}
-	snap := s.configSvc.Current()
-	if snap == nil || snap.Config == nil || snap.Config.DockerIsolation == nil ||
-		!snap.Config.DockerIsolation.Enabled {
-		return false
+	var global *config.DockerIsolationConfig
+	if snap := s.configSvc.Current(); snap != nil && snap.Config != nil {
+		global = snap.Config.DockerIsolation
 	}
-	// Per-server explicit opt-out wins over the global enable.
-	if srv.Isolation != nil && srv.Isolation.Enabled != nil && !*srv.Isolation.Enabled {
-		return false
-	}
-	// Servers already running docker themselves are not double-isolated.
-	cmdBase := filepath.Base(srv.Command)
-	if cmdBase == "docker" || strings.Contains(srv.Command, "docker") {
-		return false
-	}
-	return true
+	return config.ResolveIsolation(global, srv).Mode == config.IsolationModeDocker
 }
 
 // Supervisor manages the desired vs actual state reconciliation for upstream servers.

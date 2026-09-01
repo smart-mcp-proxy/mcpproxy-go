@@ -22,6 +22,46 @@ enum ServerDetailTab: String, CaseIterable {
     }
 }
 
+// MARK: - Isolation Override (GH #1142)
+
+/// The three states of the per-server `isolation.enabled` override.
+///
+/// A two-state toggle cannot express this: `nil` on the wire means "inherit the
+/// global setting", which is NOT the same as an explicit `false`. Collapsing
+/// them is what let an ordinary image edit silently un-containerise a server.
+enum IsolationOverride: Equatable {
+    case inherit
+    case forceOn
+    case forceOff
+
+    /// Seeded from the RAW override — never from the effective state.
+    init(rawOverride: Bool?) {
+        switch rawOverride {
+        case .none: self = .inherit
+        case .some(true): self = .forceOn
+        case .some(false): self = .forceOff
+        }
+    }
+
+    /// The value to send for `isolation.enabled_override`: a bool, or NSNull to
+    /// clear the override back to inherit (an omitted key means "leave alone").
+    var patchValue: Any {
+        switch self {
+        case .inherit: return NSNull()
+        case .forceOn: return true
+        case .forceOff: return false
+        }
+    }
+}
+
+/// The editable per-server isolation override fields, as text.
+struct IsolationEditState: Equatable {
+    var image: String
+    var networkMode: String
+    var extraArgs: [String]
+    var workingDir: String
+}
+
 // MARK: - Server Detail View
 
 struct ServerDetailView: View {
@@ -65,7 +105,8 @@ struct ServerDetailView: View {
     @State private var editHeaders = ""
     @State private var editEnabled = true
     @State private var editQuarantined = false
-    @State private var editDockerIsolation = false
+    @State private var editIsolationOverride: IsolationOverride = .inherit
+    @State private var originalIsolationOverride: IsolationOverride = .inherit
     @State private var editSkipQuarantine = false
     // Per-server Docker isolation overrides.
     @State private var editIsolationImage = ""
@@ -551,13 +592,20 @@ struct ServerDetailView: View {
                                 hint: "When disabled, the server will not connect or be available to AI agents.")
                             configToggleRow(label: "Quarantined", isOn: $editQuarantined,
                                 hint: "New tools must be reviewed and approved before AI agents can use them. Protects against tool poisoning attacks.")
-                            configToggleRow(label: "Docker Isolation", isOn: $editDockerIsolation,
-                                hint: "Runs the server in an isolated Docker container. Prevents access to your filesystem, network, and other system resources. Recommended for untrusted servers.")
+                            // Three-state, because "inherit the global setting"
+                            // is a real state a toggle cannot express (GH #1142).
+                            isolationOverridePicker()
                             configToggleRow(label: "Skip Quarantine", isOn: $editSkipQuarantine)
                         } else {
                             configRow(label: "Enabled", value: server.enabled ? "Yes" : "No")
                             if server.quarantined {
                                 configRow(label: "Quarantined", value: "Yes")
+                            }
+                            // Report the EFFECTIVE isolation state and why —
+                            // the raw flag alone cannot say whether a server is
+                            // inheriting or explicitly opted out.
+                            if let eff = server.isolationEffective {
+                                configRow(label: "Isolation", value: "\(eff.label) — \(eff.explanation)")
                             }
                         }
                     }
@@ -622,11 +670,17 @@ struct ServerDetailView: View {
                     }
 
                     // Docker isolation overrides (only relevant for stdio servers).
-                    // The global "Docker Isolation" toggle in the General section
-                    // enables isolation for this server; these fields customize how
-                    // that isolation is provisioned.
+                    // The override picker in the General section decides WHETHER
+                    // this server is isolated; these fields customize how that
+                    // isolation is provisioned.
                     if server.protocol == "stdio" {
                         configSection(title: "Docker Isolation Overrides") {
+                            // Effective state first: the raw override alone
+                            // cannot say whether the server inherits or was
+                            // explicitly opted out (GH #1142).
+                            if let eff = server.isolationEffective {
+                                configRow(label: "Effective", value: "\(eff.label) — \(eff.explanation)")
+                            }
                             if isEditing {
                                 let defaults = server.isolationDefaults
                                 let imagePlaceholder = isolationPlaceholder(
@@ -859,6 +913,82 @@ struct ServerDetailView: View {
         }
     }
 
+    /// Builds the `isolation` PATCH body from the edit form, or nil when
+    /// nothing changed.
+    ///
+    /// Pure and static so the rule that matters can be unit-tested without a
+    /// running app: **`enabled_override` is emitted only when the override
+    /// picker actually moved.** The previous code force-added it to every
+    /// isolation patch, so editing an unrelated sub-field on a server that
+    /// merely INHERITED global isolation persisted an explicit opt-out and
+    /// silently un-containerised it (GH #1142). A move back to `.inherit` sends
+    /// JSON null, because an omitted key means "leave the persisted value alone".
+    ///
+    /// The key is `enabled_override`, never `enabled`: on a READ, `enabled` is
+    /// the EFFECTIVE state (global setting + override + structural gates), so
+    /// writing that key back is how a read-modify-write turns "inherits the
+    /// global setting" into a permanent override. The backend rejects it.
+    static func buildIsolationPatch(
+        override: IsolationOverride,
+        originalOverride: IsolationOverride,
+        edited: IsolationEditState,
+        original: IsolationEditState
+    ) -> [String: Any]? {
+        var iso: [String: Any] = [:]
+
+        if override != originalOverride {
+            iso["enabled_override"] = override.patchValue
+        }
+        if edited.image != original.image {
+            iso["image"] = edited.image
+        }
+        if edited.networkMode != original.networkMode {
+            iso["network_mode"] = edited.networkMode
+        }
+        if edited.extraArgs != original.extraArgs {
+            iso["extra_args"] = edited.extraArgs
+        }
+        if edited.workingDir != original.workingDir {
+            iso["working_dir"] = edited.workingDir
+        }
+
+        return iso.isEmpty ? nil : iso
+    }
+
+    /// Three-state override control. The "Inherit" option names what the
+    /// global setting currently resolves to, so the user can see the
+    /// consequence of leaving it alone.
+    @ViewBuilder
+    private func isolationOverridePicker() -> some View {
+        let inheritLabel: String = {
+            if let g = server.isolationEffective?.globalMode, !g.isEmpty {
+                return "Inherit global (\(g))"
+            }
+            return "Inherit global"
+        }()
+
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Docker Isolation")
+                    .font(.scaled(.subheadline, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 140, alignment: .trailing)
+                Picker("", selection: $editIsolationOverride) {
+                    Text(inheritLabel).tag(IsolationOverride.inherit)
+                    Text("Always isolate").tag(IsolationOverride.forceOn)
+                    Text("Never isolate").tag(IsolationOverride.forceOff)
+                }
+                .labelsHidden()
+                .frame(maxWidth: 220, alignment: .leading)
+                Spacer()
+            }
+            Text("Runs the server in an isolated Docker container, preventing access to your filesystem, network, and other system resources. \"Inherit global\" follows the app-wide setting.")
+                .font(.scaled(.caption2, scale: fontScale))
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 148)
+        }
+    }
+
     @ViewBuilder
     private func configToggleRow(label: String, isOn: Binding<Bool>, hint: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -998,7 +1128,10 @@ struct ServerDetailView: View {
             .joined(separator: "\n")
         editEnabled = server.enabled
         editQuarantined = server.quarantined
-        editDockerIsolation = server.isolation?.enabled ?? false
+        // Seed from the RAW override, NOT from `enabled` (which is now the
+        // effective state, and was always the wrong thing to edit) — GH #1142.
+        editIsolationOverride = IsolationOverride(rawOverride: server.isolation?.enabledOverride)
+        originalIsolationOverride = editIsolationOverride
         editSkipQuarantine = false  // read from config if available
         let iso = server.isolation
         editIsolationImage = iso?.image ?? ""
@@ -1066,11 +1199,9 @@ struct ServerDetailView: View {
         if editEnabled != server.enabled { updates["enabled"] = editEnabled }
         if editQuarantined != server.quarantined { updates["quarantined"] = editQuarantined }
 
-        // Docker isolation (stdio only). Send any field that changed —
-        // we always include `enabled` because the handler tracks the
-        // boolean explicitly, and sending just the sub-fields without
-        // it would leave the isolation off on a server that never had
-        // it enabled before.
+        // Docker isolation (stdio only). Only genuinely-changed fields are
+        // sent; `enabled_override` appears ONLY when the user actually moved
+        // the override picker (GH #1142).
         if server.protocol == "stdio" {
             let existing = server.isolation
             let newExtra = editIsolationExtraArgs
@@ -1081,36 +1212,22 @@ struct ServerDetailView: View {
             let newNetwork = editIsolationNetworkMode.trimmingCharacters(in: .whitespaces)
             let newWorkDir = editIsolationWorkingDir.trimmingCharacters(in: .whitespaces)
 
-            var iso: [String: Any] = [:]
-            var isoChanged = false
-
-            if editDockerIsolation != (existing?.enabled ?? false) {
-                iso["enabled"] = editDockerIsolation
-                isoChanged = true
-            }
-            if newImage != (existing?.image ?? "") {
-                iso["image"] = newImage
-                isoChanged = true
-            }
-            if newNetwork != (existing?.networkMode ?? "") {
-                iso["network_mode"] = newNetwork
-                isoChanged = true
-            }
-            if newExtra != (existing?.extraArgs ?? []) {
-                iso["extra_args"] = newExtra
-                isoChanged = true
-            }
-            if newWorkDir != (existing?.workingDir ?? "") {
-                iso["working_dir"] = newWorkDir
-                isoChanged = true
-            }
-
-            if isoChanged {
-                // Always include `enabled` alongside any sub-field change so
-                // the backend applies the full intended isolation state.
-                if iso["enabled"] == nil {
-                    iso["enabled"] = editDockerIsolation
-                }
+            if let iso = Self.buildIsolationPatch(
+                override: editIsolationOverride,
+                originalOverride: originalIsolationOverride,
+                edited: IsolationEditState(
+                    image: newImage,
+                    networkMode: newNetwork,
+                    extraArgs: newExtra,
+                    workingDir: newWorkDir
+                ),
+                original: IsolationEditState(
+                    image: existing?.image ?? "",
+                    networkMode: existing?.networkMode ?? "",
+                    extraArgs: existing?.extraArgs ?? [],
+                    workingDir: existing?.workingDir ?? ""
+                )
+            ) {
                 updates["isolation"] = iso
             }
         }

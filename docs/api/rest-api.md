@@ -242,7 +242,7 @@ mask string.
   "enabled": true,
   "quarantined": false,
   "auto_approve_tool_changes": true,
-  "isolation": {"enabled": true, "image": "node:20"}
+  "isolation": {"enabled_override": true, "image": "node:20"}
 }
 ```
 

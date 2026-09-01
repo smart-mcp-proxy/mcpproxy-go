@@ -237,7 +237,20 @@ struct DiagnosticPayload: Codable, Equatable {
 /// tray can both display and edit them. Mirrors the
 /// `contracts.IsolationConfig` struct on the Go side.
 struct IsolationConfigStatus: Codable, Equatable {
+    /// EFFECTIVE isolation state: what actually happens when the server spawns,
+    /// after the global setting, the per-server override and the structural
+    /// gates. NOT the raw override — read `enabledOverride` for that.
+    ///
+    /// Reading this as the override is exactly what corrupted configs before
+    /// GH #1142: an inheriting server reported `false`, the edit form seeded a
+    /// toggle from it, and saving any isolation field persisted an explicit
+    /// opt-out that silently un-containerised the server.
     let enabled: Bool
+    /// RAW per-server override. `nil` means "inherit the global setting" — a
+    /// distinct state from an explicit `false`.
+    let enabledOverride: Bool?
+    /// RAW per-server mode override ("docker" | "sandbox" | "none").
+    let modeOverride: String?
     let image: String?
     let networkMode: String?
     let extraArgs: [String]?
@@ -245,9 +258,59 @@ struct IsolationConfigStatus: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case enabled, image
+        case enabledOverride = "enabled_override"
+        case modeOverride = "mode_override"
         case networkMode = "network_mode"
         case extraArgs = "extra_args"
         case workingDir = "working_dir"
+    }
+}
+
+/// Resolved isolation state plus the rule that produced it, so the tray can say
+/// WHY a server is (or is not) isolated instead of showing an ambiguous flag.
+/// Mirrors `contracts.IsolationEffective` on the Go side.
+struct IsolationEffectiveStatus: Codable, Equatable {
+    let mode: String            // "docker" | "sandbox" | "none"
+    let isolated: Bool
+    let globalMode: String?
+    let inherited: Bool
+    /// "global" | "server-mode" | "server-opt-out" | "server-opt-in-ignored" |
+    /// "not-stdio" | "already-docker" | "sandbox-unavailable" |
+    /// "unsupported-mode". Treat anything else as "global".
+    let source: String?
+
+    enum CodingKeys: String, CodingKey {
+        case mode, isolated, inherited, source
+        case globalMode = "global_mode"
+    }
+
+    /// One-line explanation for the read-only Config tab.
+    var explanation: String {
+        let global = (globalMode?.isEmpty == false) ? globalMode! : "none"
+        switch source {
+        case "server-mode":
+            return "Mode set for this server: \(mode)"
+        case "server-opt-out":
+            return "Turned off for this server (global setting is \(global))"
+        case "server-opt-in-ignored":
+            return "Turned on for this server, but global isolation is off — the setting is ignored"
+        case "not-stdio":
+            return "No local process to isolate"
+        case "already-docker":
+            return "This server already runs Docker itself"
+        case "sandbox-unavailable":
+            // The mode is set, but the spawn path degrades to unconfined here:
+            // Landlock is Linux-only, so a Mac never enforces it.
+            return "Sandbox mode is set, but this system cannot enforce it — the server runs unconfined"
+        case "unsupported-mode":
+            return "Isolation mode \(mode) is not one this version implements — the server runs unconfined"
+        default:
+            return inherited ? "Inherits the global setting (\(global))" : "Turned on for this server"
+        }
+    }
+
+    var label: String {
+        isolated ? "Isolated (\(mode))" : "Not isolated"
     }
 }
 
@@ -313,6 +376,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     let quarantine: QuarantineStats?
     let isolation: IsolationConfigStatus?
     let isolationDefaults: IsolationDefaultsStatus?
+    let isolationEffective: IsolationEffectiveStatus?
     let error: String?
     /// Spec 044 — stable error code (e.g. MCPX_STDIO_SPAWN_ENOENT) and the
     /// structured diagnostic payload. Present only when the server has an
@@ -342,6 +406,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         case quarantine
         case isolation
         case isolationDefaults = "isolation_defaults"
+        case isolationEffective = "isolation_effective"
         case error
         case errorCode = "error_code"
         case diagnostic

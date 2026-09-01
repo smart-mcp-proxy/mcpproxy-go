@@ -700,7 +700,9 @@ extension ManualServerForm {
     /// Extracted as a pure function so the field-gating rules (isolation is
     /// stdio-only; url vs command by transport) are unit-testable without a
     /// running app or API client. The `isolation` override is emitted ONLY for
-    /// stdio transports so a URL-based server can never carry an isolation flag.
+    /// stdio transports (so a URL-based server can never carry an isolation
+    /// flag) and ONLY when the toggle is on (so an untouched form leaves the
+    /// server inheriting the global setting).
     static func makeServerConfig(
         name: String,
         selectedProtocol: String,
@@ -730,10 +732,23 @@ extension ManualServerForm {
                 config["args"] = args
             }
             // The backend server-create payload takes an `isolation` object
-            // ({"enabled": …}); the old top-level `docker_isolation` bool it
-            // never read, so the toggle silently did nothing. Emit the real
-            // field so an stdio server actually records its isolation choice.
-            config["isolation"] = ["enabled": dockerIsolation]
+            // ({"enabled_override": …}); the old top-level `docker_isolation`
+            // bool it never read, so the toggle silently did nothing.
+            //
+            // The key is `enabled_override`, not `enabled`: `enabled` is the
+            // read-only EFFECTIVE state on the read surface and the backend
+            // rejects it on writes, so that reading a server and writing the
+            // object back cannot rewrite the override (GH #1142).
+            //
+            // Emit the object ONLY when the box is ticked. An unticked box
+            // means "inherit the global setting", NOT "never isolate" — sending
+            // a `false` unconditionally stamped a permanent explicit opt-out on
+            // every stdio server added here, so it would ignore global Docker
+            // isolation forever. Matches AddServerModal.vue, which only writes
+            // isolation_json when on.
+            if dockerIsolation {
+                config["isolation"] = ["enabled_override": true]
+            }
         } else {
             // URL transports carry no command and no isolation flag.
             config["url"] = url.trimmingCharacters(in: .whitespaces)

@@ -355,8 +355,16 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// or goes through a json round-trip first.
 		if isoRaw, ok := srvRaw["isolation"].(map[string]interface{}); ok && isoRaw != nil {
 			iso := &contracts.IsolationConfig{}
+			// `enabled` is the EFFECTIVE state; `enabled_override` is the raw
+			// tri-state and is absent when the server inherits (GH #1142).
 			if enabled, ok := isoRaw["enabled"].(bool); ok {
 				iso.Enabled = enabled
+			}
+			if override, ok := isoRaw["enabled_override"].(bool); ok {
+				iso.EnabledOverride = config.BoolPtr(override)
+			}
+			if modeOverride, ok := isoRaw["mode_override"].(string); ok {
+				iso.ModeOverride = modeOverride
 			}
 			if img, ok := isoRaw["image"].(string); ok {
 				iso.Image = img
@@ -378,6 +386,28 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 				iso.WorkingDir = wd
 			}
 			srv.Isolation = iso
+		}
+
+		// Resolution block: explains WHY the server is (or is not) isolated so a
+		// UI can render "inherits global: docker" instead of a bare toggle.
+		if effRaw, ok := srvRaw["isolation_effective"].(map[string]interface{}); ok && effRaw != nil {
+			eff := &contracts.IsolationEffective{}
+			if mode, ok := effRaw["mode"].(string); ok {
+				eff.Mode = mode
+			}
+			if isolated, ok := effRaw["isolated"].(bool); ok {
+				eff.Isolated = isolated
+			}
+			if globalMode, ok := effRaw["global_mode"].(string); ok {
+				eff.GlobalMode = globalMode
+			}
+			if inherited, ok := effRaw["inherited"].(bool); ok {
+				eff.Inherited = inherited
+			}
+			if source, ok := effRaw["source"].(string); ok {
+				eff.Source = source
+			}
+			srv.IsolationEffective = eff
 		}
 
 		// Populate resolved isolation defaults so UI clients (macOS tray,

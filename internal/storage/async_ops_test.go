@@ -118,8 +118,11 @@ func TestSaveServerSyncPreservesAllFields(t *testing.T) {
 	if record.Isolation == nil {
 		t.Fatal("Isolation config is nil - data loss detected!")
 	}
-	if record.Isolation.IsEnabled() != serverConfig.Isolation.IsEnabled() {
-		t.Errorf("Isolation.Enabled mismatch: got %v, want %v", record.Isolation.IsEnabled(), serverConfig.Isolation.IsEnabled())
+	// GH #1142: assert the tri-state POINTER, not a flattened bool — a nil
+	// (inherit) override that came back as an explicit false would otherwise
+	// pass unnoticed.
+	if !reflect.DeepEqual(record.Isolation.Enabled, serverConfig.Isolation.Enabled) {
+		t.Errorf("Isolation.Enabled mismatch: got %v, want %v", record.Isolation.Enabled, serverConfig.Isolation.Enabled)
 	}
 	// MCP-34.2: per-server isolation.mode must survive the BBolt round-trip.
 	if !reflect.DeepEqual(record.Isolation.Mode, serverConfig.Isolation.Mode) {

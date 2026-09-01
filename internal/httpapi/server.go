@@ -1757,10 +1757,12 @@ type AddServerRequest struct {
 	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
 	QueueSize             *int             `json:"queue_size,omitempty"`
 	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty" swaggertype:"string"`
-	// Isolation carries per-server Docker isolation overrides (image,
-	// network_mode, extra_args, working_dir, enabled). A nil pointer
-	// means "do not touch isolation config"; an empty-but-present
-	// object on PATCH intentionally clears the overrides.
+	// Isolation carries per-server Docker isolation overrides (enabled,
+	// mode_override, image, network_mode, extra_args, working_dir). A nil
+	// pointer means "do not touch isolation config". A present object is
+	// applied field-by-field ON TOP of the persisted overrides, so omitting a
+	// field leaves it alone; clear an individual override by sending it
+	// explicitly (`"enabled": null`, `"image": ""`).
 	Isolation *IsolationRequest `json:"isolation,omitempty"`
 }
 
@@ -1768,25 +1770,165 @@ type AddServerRequest struct {
 // config.IsolationConfig, using pointer fields for PATCH semantics:
 // a nil pointer means "leave this field alone", a present value
 // (including empty string or empty slice) means "set it".
+//
+// Read and write use DISJOINT key names for the isolation flag, deliberately:
+// on a read, `isolation.enabled` is the EFFECTIVE state (see
+// contracts.IsolationConfig), so a client that GETs a server and PATCHes the
+// isolation object back would otherwise convert "inherits the global setting"
+// into a permanent explicit override — the original bug arriving from the other
+// direction (GH #1142). `enabled` is therefore refused on writes, loudly,
+// rather than being silently applied or silently dropped; the writable key is
+// `enabled_override`, which is also the key reads emit the raw value under.
 type IsolationRequest struct {
-	Enabled     *bool     `json:"enabled,omitempty"`
-	Image       *string   `json:"image,omitempty"`
-	NetworkMode *string   `json:"network_mode,omitempty"`
-	ExtraArgs   *[]string `json:"extra_args,omitempty"`
-	WorkingDir  *string   `json:"working_dir,omitempty"`
+	// EnabledOverride is the tri-state per-server override — the RAW value, the
+	// same one reads return as `enabled_override`. It has THREE meaningful wire
+	// states, and collapsing them is what silently un-isolated servers
+	// (GH #1142):
+	//   - absent          → leave the persisted override untouched
+	//   - null            → clear the override, back to inheriting the global
+	//   - true / false    → set an explicit opt-in / opt-out
+	EnabledOverride NullableBool `json:"enabled_override,omitempty" swaggertype:"boolean"`
+	// Enabled exists ONLY to detect and reject an echoed-back read. It is the
+	// effective state on the read surface and is never writable; see validate().
+	Enabled NullableBool `json:"enabled,omitempty" swaggertype:"boolean"`
+	// ModeOverride sets `isolation.mode` ("docker" | "sandbox" | "none").
+	// nil leaves the persisted value alone; an empty string clears it. An
+	// unrecognized value is rejected with a 400 rather than persisted.
+	ModeOverride *string   `json:"mode_override,omitempty"`
+	Image        *string   `json:"image,omitempty"`
+	NetworkMode  *string   `json:"network_mode,omitempty"`
+	ExtraArgs    *[]string `json:"extra_args,omitempty"`
+	WorkingDir   *string   `json:"working_dir,omitempty"`
 }
 
-// toConfig materializes the request into a config.IsolationConfig.
-// Fields left nil on the request do not appear on the resulting struct
-// so UpdateServer's merge logic (in Controller) can distinguish them
-// from explicit clears.
-func (r *IsolationRequest) toConfig() *config.IsolationConfig {
+// isolationEnabledReadOnlyMessage is the operator-facing 400 body for a write
+// that carries the read-only `isolation.enabled`. Like invalidTrustModeMessage
+// it names the field to use instead, so the mistake is self-diagnosing from the
+// response alone.
+const isolationEnabledReadOnlyMessage = "isolation.enabled is read-only: on reads it reports the EFFECTIVE isolation state " +
+	"(global setting + per-server override + structural gates), so echoing it back would turn a server that merely " +
+	"inherits the global setting into an explicit override. Use isolation.enabled_override instead: " +
+	"true = always isolate, false = never isolate, null = clear the override and inherit the global setting; " +
+	"omit the key to leave it unchanged"
+
+// validate rejects the write-time errors that would otherwise be persisted:
+// an echoed-back read-only field, and an isolation mode the spawn path does not
+// implement (which would be written to BBolt and the config file, then fail the
+// NEXT daemon start's config validation).
+func (r *IsolationRequest) validate() error {
 	if r == nil {
 		return nil
 	}
-	out := &config.IsolationConfig{}
-	if r.Enabled != nil {
-		out.Enabled = config.BoolPtr(*r.Enabled)
+	if r.Enabled.Set {
+		return errors.New(isolationEnabledReadOnlyMessage)
+	}
+	if r.ModeOverride != nil {
+		mode := config.IsolationMode(*r.ModeOverride)
+		if err := config.ValidateIsolationModeOverride(&mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// NullableBool distinguishes an absent JSON key from an explicit `null` and
+// from a real boolean, which a plain *bool cannot do. Used for tri-state PATCH
+// fields where "clear this back to the default" has to be expressible.
+type NullableBool struct {
+	// Set is true when the key was present in the request body at all.
+	Set bool
+	// Value is the decoded boolean, or nil when the key was present as `null`.
+	Value *bool
+}
+
+// UnmarshalJSON records that the key was present, and decodes its value unless
+// it was the literal `null`.
+func (n *NullableBool) UnmarshalJSON(data []byte) error {
+	n.Set = true
+	if string(data) == "null" {
+		n.Value = nil
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err != nil {
+		return err
+	}
+	n.Value = &b
+	return nil
+}
+
+// MarshalJSON encodes the decoded value; an unset or explicitly-null field
+// encodes as `null`. NOTE that `null` is the CLEAR-the-override shape on the
+// way in, so an unset field must not survive a re-marshal — that is what
+// IsolationRequest.MarshalJSON deletes.
+func (n NullableBool) MarshalJSON() ([]byte, error) {
+	if !n.Set || n.Value == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(*n.Value)
+}
+
+// MarshalJSON drops the tri-state fields the request never set.
+//
+// NullableBool's own "unset" encoding is `null`, and `null` on the way IN is
+// the clear-the-override shape — so encoding an untouched request with the
+// default marshaller would produce a body that wipes the persisted override
+// (and one that trips the read-only `enabled` check). Deleting the keys keeps
+// "absent" absent, which is the whole point of the tri-state.
+//
+// It re-encodes through the struct rather than listing the fields again, so a
+// new field cannot silently miss this treatment.
+func (r IsolationRequest) MarshalJSON() ([]byte, error) {
+	type plain IsolationRequest // shed the method set to avoid recursion
+	raw, err := json.Marshal(plain(r))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	if !r.EnabledOverride.Set {
+		delete(fields, "enabled_override")
+	}
+	if !r.Enabled.Set {
+		delete(fields, "enabled")
+	}
+	return json.Marshal(fields)
+}
+
+// resolve materializes the request into a complete config.IsolationConfig,
+// starting from the server's PERSISTED overrides and applying only the fields
+// the request actually carried.
+//
+// Resolving here (rather than in the controller's field-by-field merge) is what
+// makes three things work at once: an omitted `enabled` cannot become an
+// explicit opt-out, an explicit null CAN clear the override, and the fields this
+// request type does not expose (mode, log driver/size/files) survive untouched
+// — which in turn lets UpdateServer replace the block wholesale.
+func (r *IsolationRequest) resolve(existing *config.IsolationConfig) *config.IsolationConfig {
+	if r == nil {
+		return nil
+	}
+	out := config.CopyIsolationConfig(existing)
+	if out == nil {
+		out = &config.IsolationConfig{}
+	}
+
+	if r.EnabledOverride.Set {
+		if r.EnabledOverride.Value == nil {
+			out.Enabled = nil // back to "inherit global"
+		} else {
+			out.Enabled = config.BoolPtr(*r.EnabledOverride.Value)
+		}
+	}
+	if r.ModeOverride != nil {
+		if *r.ModeOverride == "" {
+			out.Mode = nil
+		} else {
+			mode := config.IsolationMode(*r.ModeOverride)
+			out.Mode = &mode
+		}
 	}
 	if r.Image != nil {
 		out.Image = *r.Image
@@ -1805,7 +1947,7 @@ func (r *IsolationRequest) toConfig() *config.IsolationConfig {
 
 // handleAddServer godoc
 // @Summary Add a new upstream server
-// @Description Add a new MCP upstream server to the configuration. New servers are quarantined by default for security.
+// @Description Add a new MCP upstream server to the configuration. New servers are quarantined by default for security. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
 // @Tags servers
 // @Accept json
 // @Produce json
@@ -1851,6 +1993,13 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// while the runtime silently behaved as manual.
 	if !config.IsValidTrustMode(req.TrustMode) {
 		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
+		return
+	}
+
+	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
+	// isolation mode BEFORE anything is persisted.
+	if err := req.Isolation.validate(); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1953,10 +2102,10 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// silently dropped, so a caller could not, for example, opt a host-run
 	// stdio server OUT of isolation when global docker_isolation.enabled=true
 	// (the server would be forced into a container and fail to start). Mirror
-	// the update path's toConfig() mapping so the field means the same thing
-	// on both verbs.
+	// the update path's mapping so the field means the same thing on both
+	// verbs. There is nothing persisted yet, so the patch resolves against nil.
 	if req.Isolation != nil {
-		serverConfig.Isolation = req.Isolation.toConfig()
+		serverConfig.Isolation = req.Isolation.resolve(nil)
 	}
 
 	// Add server via controller
@@ -2025,7 +2174,7 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 
 // handlePatchServer godoc
 // @Summary Partially update an upstream server
-// @Description Update specific fields of an existing upstream MCP server configuration.
+// @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
 // @Tags servers
 // @Accept json
 // @Produce json
@@ -2057,6 +2206,13 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// unchanged); only a present-but-bogus value is refused.
 	if !config.IsValidTrustMode(req.TrustMode) {
 		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
+		return
+	}
+
+	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
+	// isolation mode BEFORE anything is persisted.
+	if err := req.Isolation.validate(); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -2236,8 +2392,16 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	} else if existingSrv != nil {
 		updates.QueueTimeout = existingSrv.QueueTimeout
 	}
+	// Isolation is resolved against the PERSISTED overrides, so an omitted
+	// `enabled` cannot become an explicit opt-out and the fields the request
+	// does not expose (mode, log driver) survive (GH #1142). The controller
+	// then replaces the block wholesale.
 	if req.Isolation != nil {
-		updates.Isolation = req.Isolation.toConfig()
+		var existingIso *config.IsolationConfig
+		if existingSrv != nil {
+			existingIso = existingSrv.Isolation
+		}
+		updates.Isolation = req.Isolation.resolve(existingIso)
 		hasUpdates = true
 	}
 

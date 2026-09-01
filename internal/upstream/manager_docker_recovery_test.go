@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -151,4 +152,83 @@ func TestFreshenLoadedDockerRecoveryState_NilSafe(t *testing.T) {
 		}
 	}()
 	freshenLoadedDockerRecoveryState(nil)
+}
+
+// TestShouldEnableDockerRecovery_PerServerTriState pins the behaviour of the
+// per-server isolation clause in shouldEnableDockerRecovery across the legacy
+// `enabled` *bool tri-state, now that the clause routes through
+// config.ServerDependsOnDocker instead of reading the bool by hand (GH #1142).
+// With global isolation off, NO value of the legacy bool containerises the
+// server: nil is "inherit" (which the global answer already covers), false is
+// an opt-out, and true is an opt-in the resolver deliberately IGNORES under a
+// none global mode. Isolation MODES are covered by
+// TestShouldEnableDockerRecovery_HonorsIsolationModes.
+func TestShouldEnableDockerRecovery_PerServerTriState(t *testing.T) {
+	newManager := func(servers ...*config.ServerConfig) *Manager {
+		m := &Manager{logger: zap.NewNop()}
+		m.globalConfig.Store(&config.Config{
+			DockerIsolation: &config.DockerIsolationConfig{Enabled: false},
+			Servers:         servers,
+		})
+		return m
+	}
+
+	t.Run("global off and per-server nil stays off", func(t *testing.T) {
+		m := newManager(&config.ServerConfig{
+			Name:      "npx-server",
+			Command:   "npx",
+			Isolation: &config.IsolationConfig{Image: "node:22"},
+		})
+		if m.shouldEnableDockerRecovery() {
+			t.Error("an inheriting (nil) per-server override must not enable Docker recovery when global isolation is off")
+		}
+	})
+
+	t.Run("global off and per-server explicit false stays off", func(t *testing.T) {
+		m := newManager(&config.ServerConfig{
+			Name:      "npx-server",
+			Command:   "npx",
+			Isolation: &config.IsolationConfig{Enabled: config.BoolPtr(false)},
+		})
+		if m.shouldEnableDockerRecovery() {
+			t.Error("an explicit opt-out must not enable Docker recovery")
+		}
+	})
+
+	t.Run("global off and per-server explicit true stays off", func(t *testing.T) {
+		// The resolver reports IsolationSourceServerOptInIgnored here: a legacy
+		// bool opt-in cannot revive isolation while the global mode is none, so
+		// the server is NOT containerised and there are no containers to
+		// monitor or clean up. The old hand-rolled clause started the monitor
+		// anyway.
+		m := newManager(&config.ServerConfig{
+			Name:      "npx-server",
+			Command:   "npx",
+			Isolation: &config.IsolationConfig{Enabled: config.BoolPtr(true)},
+		})
+		if m.shouldEnableDockerRecovery() {
+			t.Error("a bool opt-in the resolver ignores must not enable Docker recovery")
+		}
+	})
+
+	t.Run("a server whose own command is docker enables recovery", func(t *testing.T) {
+		m := newManager(&config.ServerConfig{
+			Name:    "already-dockerised",
+			Command: "docker",
+			Args:    []string{"run", "-i", "--rm", "mcp/foo"},
+		})
+		if !m.shouldEnableDockerRecovery() {
+			t.Error("a server that shells out to docker itself needs the daemon, and its containers need cleanup")
+		}
+	})
+
+	t.Run("global isolation on enables recovery regardless", func(t *testing.T) {
+		m := &Manager{logger: zap.NewNop()}
+		m.globalConfig.Store(&config.Config{
+			DockerIsolation: &config.DockerIsolationConfig{Enabled: true},
+		})
+		if !m.shouldEnableDockerRecovery() {
+			t.Error("global isolation on must enable Docker recovery")
+		}
+	})
 }

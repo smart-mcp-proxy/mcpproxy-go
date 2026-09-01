@@ -1235,3 +1235,76 @@ func TestMergeServerConfig_PreservesDisabledToolsOnUnrelatedPatch(t *testing.T) 
 		t.Errorf("DisabledTools dropped on unrelated patch: got %v, want [danger]", merged.DisabledTools)
 	}
 }
+
+// TestMergeIsolationConfig_PreservesMode is a regression test for GH #1142:
+// copyIsolationConfig and MergeIsolationConfig both ignored IsolationConfig.Mode,
+// so patching any unrelated isolation field silently dropped the per-server
+// isolation mode — the primary MCP-34.2 override.
+func TestMergeIsolationConfig_PreservesMode(t *testing.T) {
+	sandbox := IsolationModeSandbox
+	base := &IsolationConfig{Mode: &sandbox, Image: "old"}
+	patch := &IsolationConfig{Image: "new"}
+
+	merged := MergeIsolationConfig(base, patch, false)
+	if merged == nil {
+		t.Fatal("MergeIsolationConfig returned nil")
+	}
+	if merged.Mode == nil {
+		t.Fatalf("Mode was dropped by the merge (got nil, want %q)", sandbox)
+	}
+	if *merged.Mode != sandbox {
+		t.Errorf("Mode = %q, want %q", *merged.Mode, sandbox)
+	}
+	if merged.Image != "new" {
+		t.Errorf("Image = %q, want %q", merged.Image, "new")
+	}
+	// The copy must not alias the base pointer.
+	if merged.Mode == base.Mode {
+		t.Error("Mode pointer is aliased with base; copyIsolationConfig must deep-copy it")
+	}
+}
+
+// TestMergeIsolationConfig_PatchModeWins pins the override direction: an
+// explicit Mode on the patch replaces the base, and a nil Mode leaves it alone.
+func TestMergeIsolationConfig_PatchModeWins(t *testing.T) {
+	sandbox := IsolationModeSandbox
+	docker := IsolationModeDocker
+
+	base := &IsolationConfig{Mode: &sandbox}
+	merged := MergeIsolationConfig(base, &IsolationConfig{Mode: &docker}, false)
+	if merged.Mode == nil || *merged.Mode != docker {
+		t.Errorf("patch Mode should win: got %v, want %q", merged.Mode, docker)
+	}
+
+	// base-only copy path (patch == nil, removeIfNil false)
+	copied := MergeIsolationConfig(base, nil, false)
+	if copied.Mode == nil || *copied.Mode != sandbox {
+		t.Errorf("copy path dropped Mode: got %v, want %q", copied.Mode, sandbox)
+	}
+
+	// patch-only copy path (base == nil)
+	fromPatch := MergeIsolationConfig(nil, &IsolationConfig{Mode: &docker}, false)
+	if fromPatch.Mode == nil || *fromPatch.Mode != docker {
+		t.Errorf("patch-only path dropped Mode: got %v, want %q", fromPatch.Mode, docker)
+	}
+}
+
+// TestMergeServerConfig_PreservesIsolationMode is the end-to-end version of the
+// above through the ServerConfig merge that the MCP `upstream_servers patch`
+// path uses.
+func TestMergeServerConfig_PreservesIsolationMode(t *testing.T) {
+	sandbox := IsolationModeSandbox
+	base := &ServerConfig{Name: "srv", Isolation: &IsolationConfig{Mode: &sandbox}}
+	patch := &ServerConfig{Isolation: &IsolationConfig{Image: "python:3.12"}}
+
+	merged, _, err := MergeServerConfig(base, patch, DefaultMergeOptions())
+	if err != nil {
+		t.Fatalf("MergeServerConfig: %v", err)
+	}
+	if merged.Isolation == nil || merged.Isolation.Mode == nil {
+		t.Fatalf("isolation.mode dropped by an unrelated patch: %+v", merged.Isolation)
+	}
+	if *merged.Isolation.Mode != sandbox {
+		t.Errorf("isolation.mode = %q, want %q", *merged.Isolation.Mode, sandbox)
+	}
+}

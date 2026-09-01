@@ -298,6 +298,29 @@ type quarantineFlowDeps struct {
 	ConnectTimeout time.Duration
 }
 
+// quarantineFixtureAddRequest builds the POST /api/v1/servers body for the
+// quarantine-flow fixture.
+//
+// Isolation is opted out PER SERVER: this fixture runs a host binary and the
+// matrix run may have global docker isolation enabled for the docker cell, so
+// without the opt-out the docker cell would wrap the host path in a container
+// and the fixture would never start.
+//
+// Extracted so the wire shape is unit-testable: `isolation.enabled` is
+// read-only on writes (GH #1142) and a body carrying it is answered with 400,
+// which would fail add-server and every invariant downstream of it.
+func quarantineFixtureAddRequest(serverName, binPath string) addServerRequest {
+	enabled, isolate := true, false
+	return addServerRequest{
+		Name:      serverName,
+		Command:   binPath,
+		Args:      []string{"--transport", "stdio"},
+		Protocol:  "stdio",
+		Enabled:   &enabled,
+		Isolation: &isolationRequest{EnabledOverride: &isolate},
+	}
+}
+
 // checkQuarantineFlow adds a fresh stdio fixture server mid-run via the
 // management API and asserts the full Spec 032 lifecycle:
 //
@@ -344,19 +367,9 @@ func checkQuarantineFlow(ctx context.Context, c *Client, deps quarantineFlowDeps
 	}
 
 	// Add WITHOUT an explicit quarantined value: the default path must land
-	// the server in quarantine (issue #370 semantics). Isolation is opted
-	// out per-server: this fixture runs a host binary and the matrix run may
-	// have global docker isolation enabled for the docker cell.
+	// the server in quarantine (issue #370 semantics).
 	if err := step("add-server", func() error {
-		t, f := true, false
-		return c.addServer(ctx, addServerRequest{
-			Name:      deps.ServerName,
-			Command:   binPath,
-			Args:      []string{"--transport", "stdio"},
-			Protocol:  "stdio",
-			Enabled:   &t,
-			Isolation: &isolationRequest{Enabled: &f},
-		})
+		return c.addServer(ctx, quarantineFixtureAddRequest(deps.ServerName, binPath))
 	}); err != nil {
 		return steps, cleanup, err
 	}

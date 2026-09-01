@@ -51,8 +51,39 @@ final class AddServerIsolationFieldTests: XCTestCase {
         XCTAssertNil(config["url"], "a stdio server must not carry a url")
         let isolation = config["isolation"] as? [String: Any]
         XCTAssertEqual(
-            isolation?["enabled"] as? Bool, true,
+            isolation?["enabled_override"] as? Bool, true,
             "a stdio server records its isolation choice via the backend `isolation` object"
+        )
+        XCTAssertNil(
+            isolation?["enabled"] as Any?,
+            "`enabled` is the read-only EFFECTIVE state — the writable key is `enabled_override` (GH #1142)"
+        )
+    }
+
+    // (c-1b) The toggle OFF must emit NO isolation key at all (GH #1142).
+    // Emitting `["enabled": false]` unconditionally wrote a permanent explicit
+    // opt-out onto every stdio server added from the tray, so the server would
+    // ignore global Docker isolation forever — a silent security downgrade the
+    // user never asked for. "Off" here means "inherit the global setting",
+    // matching AddServerModal.vue, which only writes isolation_json when the
+    // box is ticked.
+    func testStdioToggleOffOmitsIsolation() {
+        let config = ManualServerForm.makeServerConfig(
+            name: "local-fs",
+            selectedProtocol: "stdio",
+            enabled: true,
+            dockerIsolation: false,
+            quarantined: false,
+            url: "",
+            command: "npx",
+            argsText: "@modelcontextprotocol/server-filesystem",
+            workingDir: "",
+            envText: ""
+        )
+        XCTAssertEqual(config["command"] as? String, "npx")
+        XCTAssertNil(
+            config["isolation"],
+            "an unticked isolation box means \"inherit the global setting\" — it must not persist an explicit opt-out"
         )
     }
 
