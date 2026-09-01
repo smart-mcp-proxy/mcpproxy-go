@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sync"
 	"time"
 
@@ -811,10 +812,40 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName string, ar
 	status, errMsg, responseText, truncated := subCallActivityOutcome(result, callErr)
 
 	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
+	requestBytes, responseBytes := subCallByteSizes(args, result)
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		status, errMsg, duration.Milliseconds(), args, responseText, truncated,
-		"", nil, "", "", 0, 0, "", nil, u.parentCallID)
+		"", nil, "", "", requestBytes, responseBytes, "", nil, u.parentCallID)
+}
+
+// subCallByteSizes returns the pre-truncation JSON byte lengths of a sandbox
+// sub-call's arguments and result, the same way the top-level dispatch computes
+// them (mcp.go, spec 069 A1).
+//
+// These were hardcoded to 0 until now, and that zero was not harmless: the
+// convention throughout the activity log is that 0 bytes means UNKNOWN, not
+// free. Every code-execution sub-call therefore had an unaccountable cost with
+// bodies off, which is the gap bench records as ReasonSubCallZeroBytes — and it
+// is exactly the population needed to measure what code execution actually
+// saves, since the sub-call responses are the ones that never reach the model's
+// context. Without these lengths that saving cannot be computed at all with
+// bodies off.
+//
+// A nil result yields 0 response bytes. That is a TRUE zero rather than an
+// unknown: the caller only reaches this with a nil result when the upstream
+// never answered, and a call that produced no response contributed no response
+// tokens.
+// result is the untyped dispatch result, so a typed-nil pointer can arrive
+// inside a non-nil interface; that marshals to "null" rather than nothing, and
+// reflect is what tells the two apart.
+func subCallByteSizes(args map[string]interface{}, result interface{}) (requestBytes, responseBytes int) {
+	if result != nil {
+		if rv := reflect.ValueOf(result); rv.Kind() == reflect.Ptr && rv.IsNil() {
+			result = nil
+		}
+	}
+	return rawByteSize(args), rawByteSize(result)
 }
 
 // emitSubCallRefused records a sandbox sub-call that the policy gate refused
@@ -831,7 +862,10 @@ func (u *upstreamToolCaller) emitSubCallRefused(serverName, toolName string, arg
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,
-		"", nil, "", "", 0, 0, "", nil, u.parentCallID)
+		// The policy gate refused this before dispatch, so there IS no response
+		// and 0 response bytes is a true zero, not an unmeasured one. The
+		// request was still formed and is measured like any other.
+		"", nil, "", "", rawByteSize(args), 0, "", nil, u.parentCallID)
 }
 
 // shedHasCanonicalRecord reports whether callErr is a limiter shed the

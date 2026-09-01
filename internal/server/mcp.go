@@ -200,7 +200,23 @@ type MCPProxyServer struct {
 	// tools/list, describe_tool and dispatch, and it never mutates after
 	// publication. This is the same read-mostly trade Spec 085 accepted for the
 	// signature cache, and it reduces the read path's lock scope to zero.
-	directCatalogPtr        atomic.Pointer[directCatalog]
+	directCatalogPtr atomic.Pointer[directCatalog]
+
+	// Surface fingerprints: the content last actually registered on each tool
+	// surface, so a rebuild that would change nothing can be skipped instead of
+	// notifying every client. See mcp_surface_fingerprint.go.
+	//
+	// The direct pair is guarded by directRefreshMu, which every caller of
+	// refreshDirectModeToolsLocked already holds; the code-exec surface gets its
+	// own mutex because it has no such lock today.
+	directSurfaceToolsFP   string
+	directSurfaceRoutingFP string
+
+	codeExecRefreshMu sync.Mutex
+	codeExecSurfaceFP string
+	// codeExecPublishes counts rebuilds that actually re-registered, so the
+	// guard's effect is observable rather than only visible in the log.
+	codeExecPublishes       atomic.Uint64
 	directCatalogGeneration atomic.Uint64
 
 	// directRefreshMu serializes whole rebuilds so SetTools and the matching

@@ -8,6 +8,36 @@ Spec 103's own Assumptions say a contradiction between two measurements over the
 data is *a finding to investigate*. This is that contradiction, and it is not a rounding
 difference.
 
+## CORRECTION (2026-09-01): both figures were wrong, and one of them was mine
+
+A follow-up investigation (`honest-savings-design.md`) established two things
+that this document got wrong when first written. The DIRECTION of the finding
+survives; the framing and the magnitudes do not.
+
+**1. The Web-UI figure is non-deterministic, not merely optimistic.** Twenty-five
+consecutive calls to `/api/v1/stats/tokens` over an unchanging fleet returned six
+distinct values spanning **52.35%–78.80%**. `Manager.GetAllServerNames`
+(`internal/upstream/manager.go:945-954`) ranges over a Go map, and
+`estimateQueryResultSize` takes a PREFIX of that ordering
+(`internal/server/tokens/savings.go:139`) — so the "typical query" is re-drawn on
+every HTTP request. The +68.4% quoted below was one sample from that spread.
+This also contradicts the shipped tooltip, which tells users the figure changes
+when servers change and "not with each call".
+
+**2. The bench figure quoted below is ALSO wrong.** `ProxyModeToolDefs`
+hardcodes `EnableCodeExecution: true` (`internal/server/bench_export.go:47`)
+while the shipped default serves a disabled stub, so bench's 5783-token proxy
+menu overstates what a default deployment actually carries. The live menu is
+**4712**. Treating bench as the correct side of the comparison, as this document
+originally did, was wrong: both instruments were miscounting, in opposite
+directions.
+
+**What survives.** With the corrected menu, the reference fleet still costs more
+than it saves before a single call: 4368 − 4712 = **−344 tokens**. A measured
+3-call session cost 9825 against a 4368 baseline — **−5457 tokens** — while the
+dashboard simultaneously read somewhere between +52% and +79%. The sign of the
+original finding holds; its magnitude and its attribution of correctness do not.
+
 ## What was measured
 
 One isolated mcpproxy instance, the committed 7-server reference config, 45 upstream

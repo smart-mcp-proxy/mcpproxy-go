@@ -95,6 +95,28 @@ const (
 	// counting; that needs a limit the export does not carry, so exclusion is
 	// what is implementable here.
 	ReasonTruncatedRetrieveOverstates ExclusionReason = "truncated_retrieve_tools_overstates"
+
+	// ReasonMixedCostBasis marks a figure withheld because its components did
+	// not share an accounting basis. A measured cost is a TOKEN count and an
+	// estimated one is a BYTE length; adding them yields a number in no unit at
+	// all, and it would look entirely plausible. This is the never-sum rule
+	// applied at the point of addition rather than at publication.
+	ReasonMixedCostBasis ExclusionReason = "mixed_cost_basis"
+
+	// ReasonTruncatedSubCallOverstates marks a code-execution saving withheld
+	// because one of the sandbox's sub-calls was truncated. response_bytes is
+	// the FULL pre-truncation size, but the baseline it feeds means "what an
+	// agent would have paid making this call itself" — and that agent receives
+	// a response cut to ToolResponseLimit. Charging the baseline the full size
+	// overstates it, and an overstated baseline INFLATES the saving, which is
+	// the one direction of error a savings figure must never make.
+	//
+	// Withholding, rather than substituting the cut length, follows the policy
+	// ReasonTruncatedRetrieveOverstates already sets. The alternative worth
+	// considering later is to count the truncated component at its STORED
+	// length and publish the result as a lower bound — more informative, and it
+	// needs a saving type that can express "at least".
+	ReasonTruncatedSubCallOverstates ExclusionReason = "truncated_sub_call_overstates_saving"
 )
 
 // ExclusionRow is one line of an exclusion report: a reason and how many times
@@ -378,11 +400,35 @@ func requestCost(rec *decodedRecord, isSubCall bool, opts *Options, count func(s
 	if bodiesOn && rec.arguments != "" {
 		return Cost{Basis: CostMeasured, Tokens: count(rec.arguments), Bytes: len(rec.arguments)}
 	}
+	// A PARAMETERLESS call records no arguments at all, and with bodies on that
+	// is not a recording gap: the record is present and its byte length is the
+	// serialized empty object, so the cost is known exactly rather than
+	// estimated. Falling through to the byte estimate gave such a call a
+	// different BASIS from its siblings, and since measured figures are tokens
+	// while estimated ones are bytes, any aggregate holding both is withheld —
+	// so a single parameterless tool poisoned a whole script. Most fleets have
+	// several (list_allowed_directories, read_graph, get_current_time).
+	//
+	// Bounded by emptyArgsMaxBytes so it cannot swallow a real gap: empty
+	// arguments beside a LARGE byte length means content genuinely is missing,
+	// and that must stay an estimate.
+	if bodiesOn && rec.arguments == "" && rec.requestBytes > 0 && rec.requestBytes <= emptyArgsMaxBytes {
+		return Cost{Basis: CostMeasured, Tokens: count(emptyArgsJSON), Bytes: rec.requestBytes}
+	}
 	if rec.requestBytes > 0 {
 		return Cost{Basis: CostEstimated, Bytes: rec.requestBytes}
 	}
 	return Cost{Basis: CostUnavailable, Reason: byteGapReason(rec, isSubCall)}
 }
+
+// emptyArgsJSON is what an argument-less call serializes to on the wire, and
+// emptyArgsMaxBytes is the largest request that can still BE one. "{}" is two
+// bytes and "null" is four; anything larger had content that is not in the
+// record, which is a gap rather than a parameterless call.
+const (
+	emptyArgsJSON     = "{}"
+	emptyArgsMaxBytes = 4
+)
 
 // byteGapReason names WHICH known gap left this record without a byte length.
 // The two systematic gaps get their own names so an operator reading the

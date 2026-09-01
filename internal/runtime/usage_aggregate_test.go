@@ -327,3 +327,58 @@ func BenchmarkUsageStore_Apply(b *testing.B) {
 		store.Apply(toolCall("s", "t", "success", 10, 0, 100, ts))
 	}
 }
+
+// A truncated BUILT-IN response must not contribute its pre-truncation size to
+// delivered traffic.
+//
+// The asymmetry (spec 103): for an ordinary upstream tool_call, truncation cuts
+// the STORED text while the agent consumed the whole thing, so the pre-truncation
+// length is honest. For an internal built-in — retrieve_tools above all — it is
+// the other way round: the log keeps the FULL response while the agent consumed
+// the CUT text, so counting the full length overstates what was delivered.
+//
+// This became reachable only when internal calls started carrying byte counts at
+// all; before that they contributed 0 and the question could not arise. Found by
+// cross-model review of that change.
+func TestUsageAggregate_TruncatedBuiltinDoesNotInflateDeliveredBytes(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	internal := func(truncated bool, respBytes int) *storage.ActivityRecord {
+		return &storage.ActivityRecord{
+			Type:              storage.ActivityTypeInternalToolCall,
+			ToolName:          "retrieve_tools",
+			Status:            "success",
+			ResponseBytes:     respBytes,
+			ResponseTruncated: truncated,
+			Timestamp:         base,
+		}
+	}
+
+	agg := newUsageAggregate()
+	agg.Apply(internal(false, 4_000))
+	var delivered int64
+	for _, b := range agg.Buckets {
+		delivered += b.RespBytesSum
+	}
+	require.EqualValues(t, 4_000, delivered, "an untruncated built-in is delivered in full")
+
+	agg2 := newUsageAggregate()
+	agg2.Apply(internal(true, 1_000_000)) // stored 1MB, agent consumed the cut text
+	var inflated int64
+	for _, b := range agg2.Buckets {
+		inflated += b.RespBytesSum
+	}
+	assert.Zero(t, inflated,
+		"the stored size describes more than the agent consumed; counting it overstates traffic")
+
+	// An upstream tool_call is the OPPOSITE case and must still count.
+	agg3 := newUsageAggregate()
+	up := toolCall("github", "search", "success", 10, 100, 50_000, base)
+	up.ResponseTruncated = true
+	agg3.Apply(up)
+	var upstream int64
+	for _, b := range agg3.Buckets {
+		upstream += b.RespBytesSum
+	}
+	assert.EqualValues(t, 50_000, upstream,
+		"an upstream response was consumed whole; only the STORED copy was cut")
+}

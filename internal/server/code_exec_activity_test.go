@@ -147,3 +147,39 @@ func TestEmitSubCallActivity_SkipsOnlyObservedSheds(t *testing.T) {
 		"server_unavailable has NO canonical record — the sandbox emit is its only witness")
 	require.False(t, detect(errors.New("plain failure")))
 }
+
+// Sandbox sub-calls hardcoded 0/0 byte lengths, and 0 means UNKNOWN in the
+// activity log rather than free — so every sub-call was unaccountable with
+// bodies off, and the one population that shows what code execution saves (the
+// sub-call responses that never reach the model) could not be measured at all.
+func TestSubCallByteSizes_MeasuresBothSides(t *testing.T) {
+	args := map[string]interface{}{"path": "/tmp/x", "limit": 10}
+	result := mcp.NewToolResultText(strings.Repeat("payload ", 32))
+
+	reqBytes, respBytes := subCallByteSizes(args, result)
+
+	require.Greater(t, reqBytes, 0, "arguments were formed and must be measured")
+	require.Greater(t, respBytes, 0, "the sub-call response is the whole point of the measurement")
+	assert.Equal(t, rawByteSize(args), reqBytes, "must agree with the top-level dispatch's accounting")
+	assert.Equal(t, rawByteSize(result), respBytes)
+	assert.Greater(t, respBytes, len("payload ")*32,
+		"a JSON-serialized result is at least its own text")
+}
+
+// A nil result must report 0 response bytes rather than the 4 bytes of "null".
+// The dispatch result is an interface{}, so a typed-nil pointer arrives inside a
+// NON-nil interface and json.Marshal happily encodes it as "null" — which would
+// book 4 bytes of response for a call that never answered.
+func TestSubCallByteSizes_TypedNilResultIsZeroNotNull(t *testing.T) {
+	args := map[string]interface{}{"q": "x"}
+
+	var typedNil *mcp.CallToolResult
+	_, respBytes := subCallByteSizes(args, typedNil)
+	assert.Equal(t, 0, respBytes, "a typed-nil result answered nothing")
+
+	_, untypedNil := subCallByteSizes(args, nil)
+	assert.Equal(t, 0, untypedNil)
+
+	require.Equal(t, 4, rawByteSize(typedNil),
+		"guard the premise: rawByteSize alone would book \"null\" as 4 bytes")
+}

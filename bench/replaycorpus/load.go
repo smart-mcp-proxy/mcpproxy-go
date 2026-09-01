@@ -244,7 +244,12 @@ type decodedRecord struct {
 	// arguments and response are the only fields holding recorded content.
 	// Nothing copies them onward.
 	arguments string
-	response  string
+
+	// serverResolvedRequest marks a request whose RECORDED arguments contain
+	// content the server substituted rather than the model generating it — a
+	// stored code-execution script (spec 097). See billableArguments.
+	serverResolvedRequest bool
+	response              string
 }
 
 // admit decides whether a record is a call this loader can account for, and
@@ -283,9 +288,11 @@ func admit(rec *contracts.ActivityRecord, report *ExclusionReport) (*decodedReco
 		// Marshalled here, not carried as a map: a map would keep the recorded
 		// values alive on a struct, and Go's map marshalling sorts keys, so the
 		// counted text is also deterministic across runs (SC-002).
-		if encoded, err := json.Marshal(rec.Arguments); err == nil {
+		billable, resolved := billableArguments(rec.Arguments)
+		if encoded, err := json.Marshal(billable); err == nil {
 			decoded.arguments = string(encoded)
 		}
+		decoded.serverResolvedRequest = resolved
 	}
 	return decoded, true
 }
@@ -314,4 +321,36 @@ func newCall(rec *decodedRecord, opts *Options, counter tokenCounter, report *Ex
 	call.RequestCost = requestCost(rec, isSubCall, opts, counter.Count)
 	call.ResponseCost = responseCost(rec, isSubCall, opts, counter.Count, report)
 	return call
+}
+
+// billableArguments returns the arguments as the MODEL actually sent them, and
+// whether the record contained server-resolved content that had to be removed.
+//
+// A stored-script code_execution invocation is the case that matters. The model
+// sends `{"script": "<name>", "input": {...}}` — a few dozen tokens — but
+// mcpproxy records the RESOLVED source under "code" as well, so the audit trail
+// shows what actually ran. Counting that source as request cost charges the
+// model for output it never generated: a 20KB stored script bills as ~5,200
+// output tokens per invocation, at roughly 5x the input rate, on every run.
+// That is the exact configuration stored scripts exist to make cheap, so
+// getting it wrong understates code execution by the whole size of the script.
+//
+// Only the "code" key is dropped, and only when a non-empty "script" name is
+// present — an INLINE call genuinely did send its source and must keep it.
+func billableArguments(args map[string]interface{}) (map[string]interface{}, bool) {
+	name, ok := args["script"].(string)
+	if !ok || name == "" {
+		return args, false
+	}
+	if _, hasCode := args["code"]; !hasCode {
+		return args, false
+	}
+	billable := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		if k == "code" {
+			continue
+		}
+		billable[k] = v
+	}
+	return billable, true
 }
