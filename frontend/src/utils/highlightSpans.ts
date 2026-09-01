@@ -19,7 +19,7 @@
 // holds for every input and is asserted by tests/unit/highlight-spans.spec.ts.
 
 import type { FindingSpan } from '@/types/api'
-import { capEvidence, isEscapedRune, EVIDENCE_ELLIPSIS } from '@/utils/capEvidence'
+import { capSpanSnippet, isEscapedRune, MAX_EVIDENCE_LEN } from '@/utils/spanSnippet'
 
 /** One verified span, plus the presentation metadata a mark needs. */
 export interface SpanSource {
@@ -61,24 +61,47 @@ export const MAX_RENDERED_SPANS = 20
  * description text would point at arbitrary prose.
  *
  * When `snippet` is present it is a checksum, not a locator: the backend shipped
- * `CapEvidence(raw[byteStart:byteEnd])`, so the SAME escaping must be applied to
- * the live slice before comparing — otherwise any description carrying a control
- * or zero-width rune (exactly the descriptions this feature exists for) would
- * fail the comparison and lose its highlights. A snippet the backend truncated
- * ends with '…' and can only be compared as a prefix.
+ * `CapSpanSnippet(raw[byteStart:byteEnd])`, so the SAME escaping must be applied
+ * to the live slice before comparing — otherwise any description carrying a
+ * control or zero-width rune (exactly the descriptions this feature exists for)
+ * would fail the comparison and lose its highlights.
+ *
+ * The comparison is EXACT unless the backend declared `truncated`, and the
+ * declaration is a field, never a guess about the snippet's last character: a
+ * tool description can end a matched passage with an ellipsis of its own, and
+ * prefix-comparing such a snippet would accept any later description that merely
+ * shares the prefix. Producers clamp the span to the bytes the snippet actually
+ * covers (see detect.DescriptionSpan), so even the prefix branch is comparing
+ * against the whole marked range and not a leading fragment of it.
  */
 export function isSpanUsable(text: string, span: FindingSpan | null | undefined): boolean {
   if (!span) return false
   if (span.field !== 'description') return false
   if (!Number.isInteger(span.start) || !Number.isInteger(span.end)) return false
   if (span.start < 0 || span.end > text.length || span.start >= span.end) return false
-  if (!span.snippet) return true
 
-  const actual = capEvidence(text.slice(span.start, span.end))
-  if (span.snippet.endsWith(EVIDENCE_ELLIPSIS)) {
-    return actual.startsWith(span.snippet.slice(0, -EVIDENCE_ELLIPSIS.length))
-  }
-  return actual === span.snippet
+  // An unverifiable span is NOT a usable span. There is deliberately no free
+  // pass for a missing snippet, and the reason is that spans do not only come
+  // from detect.DescriptionSpan: scanner.ScanFinding carries `spans` with an
+  // `omitempty` tag, and engine.parseResults unmarshals a THIRD-PARTY scanner's
+  // report straight into []ScanFinding. Absent is therefore the natural wire
+  // shape for a span this proxy never computed, and trusting it would mark
+  // attacker-influenceable offsets as `dangerous` over prose no rule matched —
+  // the precise failure the rest of this module exists to prevent. The backend
+  // drops such spans too (engine.parseResults); this is the renderer's own
+  // guarantee, held independently of it.
+  if (!span.snippet) return false
+
+  const { snippet: actual } = capSpanSnippet(text.slice(span.start, span.end))
+  if (!span.truncated) return actual === span.snippet
+
+  // A truncated snippet is only a prefix, so it pins less than a whole one. It
+  // is accepted ONLY when it is as long as truncation actually makes it: the
+  // producer emits exactly MAX_EVIDENCE_LEN code points before giving up, so a
+  // shorter one did not come from that producer and would buy an unbounded
+  // prefix acceptance — one matching character licensing a mark of any length.
+  if ([...span.snippet].length !== MAX_EVIDENCE_LEN) return false
+  return actual.startsWith(span.snippet)
 }
 
 /**

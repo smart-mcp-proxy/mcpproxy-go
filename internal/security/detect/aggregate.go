@@ -141,6 +141,14 @@ func aggregate(tool ToolView, signals []Signal, scannerID string) (Finding, bool
 // tpa.bundle and shadowing.cross_server would mark one rule's words and
 // silently swallow the other's.
 //
+// Structurally impossible spans are dropped here rather than forwarded. Today
+// every span in the tree comes from DescriptionSpan, which already refuses to
+// build one; this is the backstop at the one seam every span crosses on its way
+// into JSON, because Span is exported and checks live in a sibling package where
+// a hand-built literal would otherwise reach the frontend unchecked. It can only
+// judge structure — the field name and the range's own shape — since the tool
+// text is not available here. See Span.valid.
+//
 // Duplicates are keyed on (Field, Start, End, CheckID) — deliberately NOT on
 // Tier/Snippet — and the FIRST occurrence keeps its metadata, so which
 // duplicate survives does not depend on signal ordering. The result is then
@@ -159,6 +167,9 @@ func unionSpans(signals []Signal) []Span {
 	seen := make(map[spanKey]struct{})
 	for _, s := range signals {
 		for _, sp := range s.Spans {
+			if !sp.valid() {
+				continue
+			}
 			k := spanKey{field: sp.Field, start: sp.Start, end: sp.End, checkID: sp.CheckID}
 			if _, dup := seen[k]; dup {
 				continue

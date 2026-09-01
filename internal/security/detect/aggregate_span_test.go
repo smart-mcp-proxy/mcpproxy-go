@@ -133,3 +133,40 @@ func TestAggregateNoSpansStaysNil(t *testing.T) {
 		t.Errorf("Spans = %+v, want nil for a span-less finding", f.Spans)
 	}
 }
+
+// TestAggregateDropsStructurallyInvalidSpans covers O1: unionSpans forwarded
+// whatever a signal handed it, so a hand-built Span literal with an inverted
+// range or an unknown field reached the JSON payload unchallenged. No check in
+// the tree can produce one today — DescriptionSpan is the only constructor and
+// it refuses — but Span is exported and the checks live in a sibling package,
+// so the backstop belongs at the seam every span crosses on its way out.
+func TestAggregateDropsStructurallyInvalidSpans(t *testing.T) {
+	good := span("ok.check", 5, 11, TierHard)
+	bad := []Span{
+		{Field: SpanFieldDescription, Start: 100, End: 1, CheckID: "inverted", Tier: "hard"},
+		{Field: SpanFieldDescription, Start: -5, End: 4, CheckID: "negative", Tier: "hard"},
+		{Field: SpanFieldDescription, Start: 3, End: 3, CheckID: "empty", Tier: "hard"},
+		{Field: "not_a_field", Start: 0, End: 4, CheckID: "unknown-field", Tier: "hard"},
+	}
+	sig := sigWithSpans("ok.check", TierHard, append([]Span{good}, bad...)...)
+
+	f, ok := aggregate(ToolView{Server: "s", Name: "t"}, []Signal{sig}, "s")
+	if !ok {
+		t.Fatal("aggregate returned ok = false")
+	}
+	if !reflect.DeepEqual(f.Spans, []Span{good}) {
+		t.Errorf("Spans = %+v, want only the well-formed span %+v", f.Spans, good)
+	}
+}
+
+// TestAggregateAllInvalidSpansStayNil keeps the JSON contract: dropping every
+// span must leave an absent key, not an empty array that reads as "scanned,
+// nothing to show".
+func TestAggregateAllInvalidSpansStayNil(t *testing.T) {
+	sig := sigWithSpans("bad.check", TierHard,
+		Span{Field: SpanFieldDescription, Start: 9, End: 2, CheckID: "bad.check", Tier: "hard"})
+	f, _ := aggregate(ToolView{Server: "s", Name: "t"}, []Signal{sig}, "s")
+	if f.Spans != nil {
+		t.Errorf("Spans = %+v, want nil", f.Spans)
+	}
+}

@@ -37,25 +37,56 @@ const MaxSpansPerFinding = 32
 // location of the text the check matched, and one that does not is dropped
 // rather than approximated (a mark on the wrong words is worse than no mark).
 //
-// Snippet is CapEvidence(raw[byteStart:byteEnd]): render-SAFE (control and Cf
-// runes escaped to a visible \uXXXX form, capped at MaxEvidenceLen). It is NOT
-// the render source — the UI renders the tool's own LIVE description sliced by
-// the offsets, so a description edited since the scan cannot smuggle stale text
-// back onto the page. Snippet exists solely as a staleness checksum, and it is
-// escaped for the reason tpa_bundle.go already documents: a dot-all bundle regex
-// can match bidi/zero-width runes from an attacker-controlled description, and
-// the raw span must never land verbatim in a JSON payload.
+// Snippet is CapSpanSnippet(raw[byteStart:byteEnd]): render-SAFE (control, Cf
+// and bidi runes escaped to a visible \uXXXX form, capped at MaxEvidenceLen).
+// It is NOT the render source — the UI renders the tool's own LIVE description
+// sliced by the offsets, so a description edited since the scan cannot smuggle
+// stale text back onto the page. Snippet exists solely as a staleness checksum,
+// and it is escaped for the reason tpa_bundle.go already documents: a dot-all
+// bundle regex can match bidi/zero-width runes from an attacker-controlled
+// description, and the raw span must never land verbatim in a JSON payload.
+//
+// Being a checksum is exactly why Snippet is NOT CapEvidence: see CapSpanSnippet
+// for why that function's escaping is ambiguous and what an ambiguous checksum
+// costs here.
+//
+// Truncated says, explicitly, that Snippet stopped short of the matched text —
+// it is never inferred from the snippet's last character. An ordinary tool
+// description can legitimately end a matched passage with an ellipsis, so a
+// consumer sniffing for one would prefix-compare a snippet that was never
+// truncated and accept any later description sharing the prefix. The flag is
+// the declaration; the snippet carries no marker at all.
 //
 // CheckID and Tier are carried PER SPAN because aggregate() emits exactly one
 // Finding per tool: the finding-level RuleID/ThreatLevel describe the primary
 // signal only, so per-mark labelling has to come from the span itself.
 type Span struct {
-	Field   SpanField `json:"field"`
-	Start   int       `json:"start"`
-	End     int       `json:"end"`
-	CheckID string    `json:"check_id"`
-	Tier    string    `json:"tier"` // "hard" | "soft" — per-span severity
-	Snippet string    `json:"snippet,omitempty"`
+	Field     SpanField `json:"field"`
+	Start     int       `json:"start"`
+	End       int       `json:"end"`
+	CheckID   string    `json:"check_id"`
+	Tier      string    `json:"tier"` // "hard" | "soft" — per-span severity
+	Snippet   string    `json:"snippet,omitempty"`
+	Truncated bool      `json:"truncated,omitempty"`
+}
+
+// valid reports whether a span is structurally well-formed: a field the render
+// side knows, and a non-empty, non-negative, non-inverted range.
+//
+// It deliberately does NOT check the offsets against the text, because the text
+// is long gone at the one seam that enforces this — unionSpans merges spans out
+// of every signal, with no ToolView in hand. DescriptionSpan remains where the
+// real guarantee is made (bounds, rune alignment, snippet coverage); this is the
+// cheap structural backstop at the single choke point every span passes through
+// on its way into a JSON payload, and it exists because Span is an exported
+// struct that any future check in a sibling package can fill in by hand.
+func (s Span) valid() bool {
+	switch s.Field {
+	case SpanFieldDescription, SpanFieldInputSchema, SpanFieldOutputSchema:
+	default:
+		return false
+	}
+	return s.Start >= 0 && s.Start < s.End
 }
 
 // UTF16Offsets converts a byte range in s to UTF-16 code-unit offsets.
@@ -100,41 +131,84 @@ func utf16Len(s string) int {
 	return n
 }
 
-// CapEvidenceSpan is CapEvidence with the extra return value a Span needs: the
-// number of BYTES of s that the returned snippet actually covers.
+// CapSpanSnippet encodes s for use as Span.Snippet, and reports how much of s
+// the result covers and whether it stopped short.
 //
-// This exists because Snippet is the UI's ONLY staleness check. CapEvidence caps
-// at MaxEvidenceLen runes, so a long match (the bundle's dot-all `<important>…`
-// rules routinely produce one) yields a snippet that verifies a 200-rune PREFIX
-// and says nothing whatsoever about the rest of the range. A description edited
-// after the scan so that only its tail changed would then still verify, and the
-// UI would draw a "dangerous" mark across prose no rule ever matched — precisely
-// the "a mark on the wrong words is worse than no mark" failure this package
-// exists to avoid. Producers therefore CLAMP the span to coveredBytes, so a mark
-// can never extend past text the snippet actually pins down.
+// It is NOT CapEvidence, and the difference is the whole point. CapEvidence
+// escapes a control or Cf rune to a six-character `\uXXXX` form but does NOT
+// escape a backslash the text already contained, so an escaped rune and the six
+// literal characters spelling that same escape, typed into a description by
+// hand, encode identically. That ambiguity is harmless for Signal.Evidence,
+// which a human reads in a report, and fatal here, because Snippet is the ONLY
+// staleness check the frontend has: a description edited from one form to the
+// other keeps its checksum, the span still "verifies", and the UI confidently
+// marks characters no rule matched — the "a mark on the wrong words is worse
+// than no mark" failure this package exists to avoid. CapEvidence itself is
+// deliberately untouched: it feeds user-facing evidence throughout the package
+// and its exact output is pinned by existing tests.
+//
+// The encoding here is injective because it is PREFIX-FREE per rune: a literal
+// backslash always doubles, so a `\u` or `\U` in the output can only have come
+// from an escape, and the fixed digit count (4 below U+10000, 8 above it) says
+// where that escape ends. Equal snippets therefore imply equal inputs — no
+// argument about which code points happen to be escapable is needed, which
+// matters because that set grows with each Unicode revision. CapEvidence's
+// minimum-width `%04x` is not fixed-width and cannot make that promise.
+//
+// The render-safety property CapEvidence was originally chosen for is kept
+// intact: control, zero-width and bidi runes still never land verbatim in the
+// JSON payload. Doubling a backslash costs nothing there — it is printable
+// ASCII either way.
+//
+// coveredBytes exists because a snippet is a checksum, not a quote. The cap is
+// MaxEvidenceLen runes, and the bundle's dot-all `<important>…` rules routinely
+// match far more, so a snippet that verified only a 200-rune PREFIX would say
+// nothing whatsoever about the rest of the range: edit only the tail of such a
+// description after the scan and the span still verifies. Producers therefore
+// CLAMP the span to coveredBytes, so a mark can never extend past text the
+// snippet actually pins down.
 //
 // The truncation point is rune-aligned, unlike CapEvidence's, which slices the
 // escaped string and can cut through a `\uXXXX` escape. Alignment is required
 // here and not there: the frontend re-escapes the LIVE slice of the clamped
-// range and prefix-compares, so a snippet ending in half an escape sequence
-// would never match and would silently lose the highlight.
-func CapEvidenceSpan(s string) (snippet string, coveredBytes int) {
+// range and compares, so a snippet ending in half an escape sequence would never
+// match and would silently lose the highlight.
+//
+// truncated is RETURNED rather than written into the snippet as a trailing
+// ellipsis. See Span.Truncated for why sniffing for one is unsound.
+func CapSpanSnippet(s string) (snippet string, coveredBytes int, truncated bool) {
 	var b strings.Builder
 	b.Grow(len(s))
 	emitted := 0 // escaped-rune count, mirroring CapEvidence's cap unit
 	for i, r := range s {
-		piece := string(r)
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			piece = fmt.Sprintf("\\u%04x", r)
-		}
+		piece := spanEscapeRune(r)
 		n := utf8.RuneCountInString(piece)
 		if emitted+n > MaxEvidenceLen {
-			return b.String() + "…", i
+			return b.String(), i, true
 		}
 		b.WriteString(piece)
 		emitted += n
 	}
-	return b.String(), len(s)
+	return b.String(), len(s), false
+}
+
+// spanEscapeRune is the per-rune half of CapSpanSnippet's encoding, and the
+// mirror of escapeRune() in frontend/src/utils/spanSnippet.ts. The two are a
+// pair: any divergence turns every highlight off on exactly the descriptions
+// this feature exists for, so both sides are pinned by the same vectors
+// (TestCapSpanSnippetParityVectors / span-snippet.spec.ts).
+func spanEscapeRune(r rune) string {
+	switch {
+	case r == '\\':
+		return `\\`
+	case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+		if r > 0xFFFF {
+			return fmt.Sprintf(`\U%08x`, r)
+		}
+		return fmt.Sprintf(`\u%04x`, r)
+	default:
+		return string(r)
+	}
 }
 
 // DescriptionSpan builds the highlight span for a check that matched
@@ -149,7 +223,7 @@ func DescriptionSpan(checkID string, tier Tier, description string, byteStart, b
 	if byteStart < 0 || byteEnd > len(description) || byteStart >= byteEnd {
 		return nil
 	}
-	snippet, covered := CapEvidenceSpan(description[byteStart:byteEnd])
+	snippet, covered, truncated := CapSpanSnippet(description[byteStart:byteEnd])
 	if covered <= 0 {
 		return nil
 	}
@@ -158,11 +232,12 @@ func DescriptionSpan(checkID string, tier Tier, description string, byteStart, b
 		return nil
 	}
 	return []Span{{
-		Field:   SpanFieldDescription,
-		Start:   start,
-		End:     end,
-		CheckID: checkID,
-		Tier:    tier.String(),
-		Snippet: snippet,
+		Field:     SpanFieldDescription,
+		Start:     start,
+		End:       end,
+		CheckID:   checkID,
+		Tier:      tier.String(),
+		Snippet:   snippet,
+		Truncated: truncated,
 	}}
 }

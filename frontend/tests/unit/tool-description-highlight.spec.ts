@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import ToolDescription from '@/components/ToolDescription.vue'
-import { capEvidence } from '@/utils/capEvidence'
+import { capSpanSnippet } from '@/utils/spanSnippet'
 import { MAX_RENDERED_SPANS, LONG_DESCRIPTION_CHARS } from '@/utils/highlightSpans'
 import type { FindingSpan, SecurityScanFinding } from '@/types/api'
 
@@ -19,8 +19,13 @@ import type { FindingSpan, SecurityScanFinding } from '@/types/api'
 // before this feature, plus a note explaining why it is not annotated. The
 // description text itself never disappears behind a scan state.
 
-function span(overrides: Partial<FindingSpan> = {}): FindingSpan {
-  return {
+// Pass `text` and the span carries the checksum the backend would really have
+// shipped for that range. isSpanUsable refuses a span it cannot verify, so a
+// helper defaulting to NO snippet would make these tests assert against the
+// rejection path while reading as though they covered the rendered one. An
+// explicit `snippet` always wins, so the staleness tests still say what they mean.
+function span(overrides: Partial<FindingSpan> = {}, text?: string): FindingSpan {
+  const base: FindingSpan = {
     field: 'description',
     start: 0,
     end: 1,
@@ -28,6 +33,11 @@ function span(overrides: Partial<FindingSpan> = {}): FindingSpan {
     tier: 'hard',
     ...overrides,
   }
+  if (base.snippet === undefined && text !== undefined) {
+    const { snippet, truncated } = capSpanSnippet(text.slice(base.start, base.end))
+    return { ...base, snippet, truncated }
+  }
+  return base
 }
 
 function finding(spans: FindingSpan[], overrides: Partial<SecurityScanFinding> = {}): SecurityScanFinding {
@@ -103,7 +113,7 @@ describe('ToolDescription — attacker-authored text never becomes markup', () =
 
   it('creates no anchor for a javascript: URL inside a mark', () => {
     const start = MARKUP.indexOf('javascript:')
-    const s = span({ start, end: start + 'javascript:alert(2)'.length })
+    const s = span({ start, end: start + 'javascript:alert(2)'.length }, MARKUP)
     const wrapper = mountDescription(MARKUP, [finding([s])])
     const el = paragraph(wrapper)
     expect(el.querySelector('a')).toBeNull()
@@ -152,8 +162,8 @@ describe('ToolDescription — marks', () => {
 
   it('renumbers marks in reading order regardless of finding order', () => {
     const wrapper = mountDescription(text, [
-      finding([span({ start: text.indexOf('users'), end: text.indexOf('users') + 5, check_id: 'late' })]),
-      finding([span({ start: text.indexOf('reason'), end: text.indexOf('reason') + 6, check_id: 'early' })], {
+      finding([span({ start: text.indexOf('users'), end: text.indexOf('users') + 5, check_id: 'late' }, text)]),
+      finding([span({ start: text.indexOf('reason'), end: text.indexOf('reason') + 6, check_id: 'early' }, text)], {
         rule_id: 'detect.early',
       }),
     ])
@@ -165,8 +175,8 @@ describe('ToolDescription — marks', () => {
 
   it('distinguishes severity by decoration and glyph, not colour alone', () => {
     const wrapper = mountDescription(text, [
-      finding([span({ start: text.indexOf('reason'), end: text.indexOf('reason') + 6, tier: 'hard', check_id: 'hard' })]),
-      finding([span({ start: text.indexOf('users'), end: text.indexOf('users') + 5, tier: 'soft', check_id: 'soft' })], {
+      finding([span({ start: text.indexOf('reason'), end: text.indexOf('reason') + 6, tier: 'hard', check_id: 'hard' }, text)]),
+      finding([span({ start: text.indexOf('users'), end: text.indexOf('users') + 5, tier: 'soft', check_id: 'soft' }, text)], {
         threat_level: 'warning',
       }),
     ])
@@ -190,7 +200,7 @@ describe('ToolDescription — marks', () => {
   // words, truncating a 145-char exfiltration payload at 60 characters with no
   // other way to reach the rest.
   it('is emphasis, not a control: no role, no tab stop, no dead activation', () => {
-    const wrapper = mountDescription(text, [finding([span({ start: 9, end: 15 })])])
+    const wrapper = mountDescription(text, [finding([span({ start: 9, end: 15 }, text)])])
     const mark = wrapper.get('mark')
     expect(mark.attributes('role')).toBeUndefined()
     expect(mark.attributes('tabindex')).toBeUndefined()
@@ -201,7 +211,7 @@ describe('ToolDescription — marks', () => {
   it('announces severity and rule WITHOUT hiding or truncating the flagged words', () => {
     const long = 'x'.repeat(20) + 'A'.repeat(140) + 'y'.repeat(20)
     const wrapper = mountDescription(long, [
-      finding([span({ start: 20, end: 160, check_id: 'tpa.TPA-2026-0003.hidden_tag' })]),
+      finding([span({ start: 20, end: 160, check_id: 'tpa.TPA-2026-0003.hidden_tag' }, long)]),
     ])
     const mark = wrapper.get('mark')
     // No aria-label at all: the accessible name comes from the content, so every
@@ -214,8 +224,8 @@ describe('ToolDescription — marks', () => {
   it('renders an overlap as ONE mark carrying both rules, never nested marks', () => {
     const wrapper = mountDescription(text, [
       finding([
-        span({ start: 9, end: 15, check_id: 'a' }),
-        span({ start: 12, end: 20, check_id: 'b' }),
+        span({ start: 9, end: 15, check_id: 'a' }, text),
+        span({ start: 12, end: 20, check_id: 'b' }, text),
       ]),
     ])
     expect(wrapper.findAll('mark mark')).toHaveLength(0)
@@ -226,7 +236,7 @@ describe('ToolDescription — marks', () => {
   it('reveals a smuggled zero-width rune inside a mark as a visible chip', () => {
     const smuggled = 'call \u200btool now'
     const wrapper = mountDescription(smuggled, [
-      finding([span({ start: 5, end: 10, check_id: 'unicode.hidden', snippet: capEvidence('\u200btool') })]),
+      finding([span({ start: 5, end: 10, check_id: 'unicode.hidden', snippet: capSpanSnippet('\u200btool').snippet })]),
     ])
     const chip = wrapper.get('[data-test="tool-description-invisible-rune"]')
     expect(chip.text()).toBe('U+200B')
@@ -238,7 +248,7 @@ describe('ToolDescription — marks', () => {
   it('caps rendered spans and reports the remainder instead of dropping it silently', () => {
     const long = 'abcdefghij'.repeat(20)
     const spans = Array.from({ length: MAX_RENDERED_SPANS + 3 }, (_, i) =>
-      span({ start: i * 5, end: i * 5 + 3, check_id: `c${i}` }),
+      span({ start: i * 5, end: i * 5 + 3, check_id: `c${i}` }, long),
     )
     const wrapper = mountDescription(long, [finding(spans)])
     // Non-overlapping spans render one mark each, so the two counts coincide
@@ -289,7 +299,7 @@ describe('ToolDescription — the fallback ladder', () => {
 
   it('shows no stale note when the only spans target a schema field', () => {
     const wrapper = mountDescription(text, [
-      finding([span({ field: 'input_schema', start: 0, end: 4 })]),
+      finding([span({ field: 'input_schema', start: 0, end: 4 }, text)]),
     ])
     expect(wrapper.find('[data-test="tool-description-stale-note"]').exists()).toBe(false)
     expect(wrapper.findAll('mark')).toHaveLength(0)
@@ -302,7 +312,7 @@ describe('ToolDescription — the fallback ladder', () => {
   // vanished with no mark, no count and no note — and the flagged list still
   // offered "Show in description" for it.
   it('announces PARTIAL staleness, not only the all-spans-failed case', () => {
-    const good = span({ start: 9, end: 15, snippet: capEvidence('reason'), check_id: 'good' })
+    const good = span({ start: 9, end: 15, snippet: capSpanSnippet('reason').snippet, check_id: 'good' })
     const moved = span({ start: 0, end: 6, snippet: 'reason', check_id: 'moved' })
     const wrapper = mountDescription(text, [finding([good]), finding([moved], { rule_id: 'detect.moved' })])
 
@@ -315,7 +325,7 @@ describe('ToolDescription — the fallback ladder', () => {
   })
 
   it('pluralises the partial-staleness count', () => {
-    const good = span({ start: 9, end: 15, snippet: capEvidence('reason'), check_id: 'good' })
+    const good = span({ start: 9, end: 15, snippet: capSpanSnippet('reason').snippet, check_id: 'good' })
     const movedA = span({ start: 0, end: 6, snippet: 'reason', check_id: 'a' })
     const movedB = span({ start: 1, end: 7, snippet: 'reason', check_id: 'b' })
     const wrapper = mountDescription(text, [finding([good, movedA, movedB])])

@@ -791,6 +791,17 @@ func (e *Engine) parseResults(data []byte, scannerID string) (*ScanReport, error
 				if report.Findings[i].Scanner == "" {
 					report.Findings[i].Scanner = scannerID
 				}
+				// Text spans are an IN-PROCESS detect concept and are never
+				// accepted off the wire. This decodes a third-party scanner's
+				// own report file, so `spans` here is data that tool chose to
+				// emit — and a span is a claim about WHICH CHARACTERS of an
+				// attacker-authored tool description the Web UI should mark as
+				// dangerous. No bundled external scanner produces them (SARIF
+				// and the Cisco/Ramparts/Snyk parsers all set none), so this
+				// drops nothing real; it stops an offset this proxy did not
+				// compute, against text it cannot check here, from reaching the
+				// renderer. detect.DescriptionSpan remains the only producer.
+				report.Findings[i].Spans = nil
 			}
 			report.RiskScore = CalculateRiskScore(report.Findings)
 			return report, nil

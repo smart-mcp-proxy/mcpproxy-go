@@ -65,10 +65,16 @@ export type ThreatLevel = 'dangerous' | 'warning' | 'info'
 // the matched text including across surrogate pairs. The backend converts its
 // byte offsets before emitting them.
 //
-// `snippet` is the backend's CapEvidence() of the matched text (control and Cf
-// runes escaped to a visible \uXXXX form, capped at 200 runes + '…'). It is a
-// STALENESS CHECKSUM only: the UI renders the tool's own LIVE description sliced
-// by the offsets and never renders `snippet` itself. See utils/highlightSpans.ts.
+// `snippet` is the backend's CapSpanSnippet() of the matched text (control and
+// Cf runes escaped to a visible \uXXXX form, a literal backslash doubled, capped
+// at 200 runes). It is a STALENESS CHECKSUM only: the UI renders the tool's own
+// LIVE description sliced by the offsets and never renders `snippet` itself. The
+// escaping is injective on purpose — see utils/spanSnippet.ts.
+//
+// `truncated` says the snippet stopped short of the matched text, so it is
+// compared as a prefix rather than exactly. It is a declared field and not an
+// inference from a trailing ellipsis, because a description can legitimately end
+// a matched passage with one. See utils/highlightSpans.ts.
 //
 // `check_id`/`tier` are per-span because `aggregate()` emits exactly one Finding
 // per tool with the PRIMARY signal's rule_id/threat_level — a mark must be
@@ -80,6 +86,7 @@ export interface FindingSpan {
   check_id: string
   tier: 'hard' | 'soft'
   snippet?: string
+  truncated?: boolean
 }
 
 export interface SecurityScanFinding {

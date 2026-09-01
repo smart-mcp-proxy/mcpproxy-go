@@ -89,20 +89,25 @@ const MaxSpansPerFinding = 32
 // Web UI, where description.slice(start, end) is then exactly correct including
 // surrogate pairs. Producers convert byte offsets with UTF16Offsets.
 //
-// Snippet is CapEvidence(raw[byteStart:byteEnd]): render-SAFE (control and Cf
+// Snippet is CapSpanSnippet(raw[byteStart:byteEnd]): render-SAFE (control and Cf
 // runes escaped to literal \uXXXX, capped at MaxEvidenceLen). It is NOT the
 // render source — the UI renders the tool's own LIVE description sliced by the
 // offsets. Snippet exists solely as the staleness checksum, and it is escaped for
 // the reason tpa_bundle.go already documents: a dot-all bundle regex can match
 // bidi/zero-width runes from an attacker-controlled description, and the raw span
 // must never land verbatim in a JSON payload.
+//
+// Truncated says the snippet stopped short. It is a declared field, never an
+// inference from the snippet's last character. See "the checksum has to
+// determine its input" below.
 type Span struct {
-	Field   SpanField `json:"field"`
-	Start   int       `json:"start"`
-	End     int       `json:"end"`
-	CheckID string    `json:"check_id"`
-	Tier    string    `json:"tier"`    // "hard" | "soft" — per-span severity
-	Snippet string    `json:"snippet,omitempty"`
+	Field     SpanField `json:"field"`
+	Start     int       `json:"start"`
+	End       int       `json:"end"`
+	CheckID   string    `json:"check_id"`
+	Tier      string    `json:"tier"` // "hard" | "soft" — per-span severity
+	Snippet   string    `json:"snippet,omitempty"`
+	Truncated bool      `json:"truncated,omitempty"`
 }
 
 // UTF16Offsets converts a byte range in s to UTF-16 code-unit offsets.
@@ -143,6 +148,8 @@ Phase 1 needs **no new endpoint and no contract change**. `GET /api/v1/servers/{
   "spans": [
     { "field": "description", "start": 1893, "end": 1899,
       "check_id": "shadowing.cross_server", "tier": "hard", "snippet": "reason" }
+    // "truncated": true would appear only when the snippet stopped short of the
+    // matched text; it is omitted, not false, in the common case.
   ]
 }
 ```
@@ -155,7 +162,7 @@ Phase 2 (global Tools list) adds `contracts.Tool.Scan *ToolScanSummary` populate
 
 Two pure modules, unit-tested standalone (house pattern: `views/security/deepScanState.ts`, `utils/toolDiff.ts`).
 
-`frontend/src/utils/capEvidence.ts` — a ~15-line TS mirror of `detect.CapEvidence` (`signal.go:126-141`), used only for verification.
+`frontend/src/utils/spanSnippet.ts` — a ~20-line TS mirror of `detect.CapSpanSnippet` (`span.go`), used only for verification. It deliberately does **not** mirror `detect.CapEvidence`: that function stays as it is on the Go side, where it feeds human-read report evidence, and shipping a second near-identical escaper one autocomplete away from the verification path is how the collision below gets reopened.
 
 `frontend/src/utils/highlightSpans.ts`:
 
@@ -170,18 +177,33 @@ export function isSpanUsable(text: string, span: FindingSpan): boolean {
   if (span.field !== 'description') return false
   if (span.start < 0 || span.end > text.length || span.start >= span.end) return false
   if (!span.snippet) return true
-  const actual = capEvidence(text.slice(span.start, span.end))   // escape BOTH sides
-  return span.snippet.endsWith('…')
-    ? actual.startsWith(span.snippet.slice(0, -1))
-    : actual === span.snippet
+  // Escape BOTH sides, then compare exactly — as a prefix only when the backend
+  // DECLARED it truncated. Never sniff the snippet for a marker.
+  const { snippet: actual } = capSpanSnippet(text.slice(span.start, span.end))
+  return span.truncated ? actual.startsWith(span.snippet) : actual === span.snippet
 }
 ```
 
 Sweep, not interval nesting: collect all starts/ends into a sorted unique boundary set, emit one segment per interval carrying every covering span. Overlaps become one segment with two `sources` — no nested DOM, no lost or invented text.
 
-**Snippet truncation must clamp the SPAN, not just the checksum.** `CapEvidence` caps at 200 runes, and the bundle's dot-all rules routinely match far more, so a prefix-only comparison verified the first 200 characters of a span and said nothing about the rest — edit only the tail of such a description after the scan and the span still "verifies", drawing a `dangerous` mark across prose no rule ever matched. `detect.DescriptionSpan` therefore clamps `End` to the byte extent `CapEvidenceSpan` actually covers, so a mark can never extend past verified text.
+**Snippet truncation must clamp the SPAN, not just the checksum.** `CapEvidence` caps at 200 runes, and the bundle's dot-all rules routinely match far more, so a prefix-only comparison verified the first 200 characters of a span and said nothing about the rest — edit only the tail of such a description after the scan and the span still "verifies", drawing a `dangerous` mark across prose no rule ever matched. `detect.DescriptionSpan` therefore clamps `End` to the byte extent `CapSpanSnippet` actually covers, so a mark can never extend past verified text.
 
-**Excerpt windows are surrogate-safe.** `start - EXCERPT_CONTEXT_CHARS` is arithmetic that knows nothing about code points and can land between the halves of an astral character; the edges are snapped outward before slicing (`snapOffSurrogate`), or the excerpt opens with a lone surrogate the browser paints as U+FFFD.
+**The checksum has to determine its input.** *(Cross-review round 1; both cases were reproduced before being fixed.)* `Snippet` is the only thing standing between a stale span and a confident `dangerous` mark on innocent prose, so two different texts must never produce the same snippet, and a snippet must never be *interpreted*. As first shipped it failed both.
+
+*It was not injective.* `CapEvidence` escapes a control or Cf rune to a six-character `\uXXXX` form but leaves a backslash the description already contained alone, so an escaped rune and the literal characters spelling that escape encode identically. A real newline followed by the six literal characters `\u000b`, and the six literal characters `\u000a` followed by a real vertical tab, are different texts of the same UTF-16 length that both encode to `\u000a\u000b`. Change a description from one to the other after a scan and the span verifies at the same offsets against words no rule matched.
+
+*The truncation marker was sniffed, not declared.* A snippet ending in `…` was treated as a prefix. But `CapEvidence` only appends one past 200 runes, and an ordinary tool description can end a matched passage with an ellipsis of its own: `read the docs…` is 14 runes, untruncated, and ends in the marker. Every later description sharing the prefix `read the docs` then verified.
+
+**Both are fixed at the source rather than in the comparison**, because a comparison patched to work around an ambiguous value stays one edit away from the next collision:
+
+* `detect.CapSpanSnippet` replaces `CapEvidence` **for `Span.Snippet` only**. It doubles a literal backslash and uses a *fixed* width per plane (`\uXXXX` below U+10000, `\UXXXXXXXX` above), which makes the per-rune encoding prefix-free and therefore the whole encoding injective — no argument about which code points happen to be escapable, a set that grows with each Unicode revision. `CapEvidence` itself is untouched: it feeds user-facing evidence throughout `detect`, its exact output is pinned by existing tests, and changing it is a far larger blast radius than this needs.
+* `Span.Truncated bool` carries truncation explicitly; the snippet holds no marker at all. The frontend prefix-compares **only** when the flag is set.
+* Verification stays **synchronous**. A digest (`crypto.subtle`) would make the render path async and buys nothing once the escaping is injective.
+* The Go and TS halves are a mirror pair, pinned by one vector list asserted on both sides (`TestCapSpanSnippetParityVectors` / `span-snippet.spec.ts`), including both collision cases above.
+
+**Structurally impossible spans are dropped at the union.** `unionSpans` forwarded whatever a signal handed it, so a hand-built `Span` literal with an inverted range or an unknown field would have reached the payload; the frontend drops it, so this was latent, not live — `DescriptionSpan` is the only span constructor in the tree and it refuses to build one. The backstop lives at the union anyway, because that is the single seam every span crosses on its way into JSON and `Span` is an exported struct that a future check in a sibling package can fill in by hand. It judges structure only: the tool text is long gone by then, so bounds remain `DescriptionSpan`'s job.
+
+**Excerpt windows are surrogate-safe.** `start - EXCERPT_CONTEXT_CHARS` is arithmetic that knows nothing about code points and can land between the halves of an astral character; the edges are snapped outward before slicing (`snapOffSurrogate`), or the excerpt opens with a lone surrogate the browser paints as U+FFFD. The mirror-image worry — two adjacent unmarked segments snapping *towards* each other across one pair and each emitting the same emoji — was raised in cross-review and does not occur, for two independent reasons now pinned by tests: the sweep cannot produce two adjacent unmarked segments at all (every interior boundary is some span's start or end, and so covers one side), and a clip landing exactly on a segment's own boundary is left unsnapped.
 
 **No `indexOf` fallback.** A 6-char token appearing four times in a 4,500-char description makes it a coin flip that confidently marks innocuous prose. Verify, or degrade honestly.
 
@@ -342,7 +364,7 @@ Two invariants: **an unscanned tool is never styled as a safe tool**, and **a fa
 **API changed fields:** `ScanFinding.spans[]` on the existing `GET /servers/{id}/scan/report` and `GET /security/scans/{jobId}/report`. Nothing else.
 
 **Frontend**
-- `frontend/src/utils/capEvidence.ts`, `frontend/src/utils/highlightSpans.ts`, `frontend/src/utils/toolLocation.ts` **(new)**.
+- `frontend/src/utils/spanSnippet.ts`, `frontend/src/utils/highlightSpans.ts`, `frontend/src/utils/toolLocation.ts` **(new)**.
 - `frontend/src/components/ToolDescription.vue`, `FindingChip.vue`, `FlaggedToolsPanel.vue` **(new)**.
 - `frontend/src/views/ServerDetail.vue` — mount panel at `:424`; `<ToolDescription>` at `:727-729`; `<FindingChip>` at `:687-699`; group `scanReport.value.findings` by `location`; honour `?tool=` deep link near `:3785`.
 - `frontend/src/views/ScanReport.vue:283-286`, `:389-392` — location → `router-link`.
