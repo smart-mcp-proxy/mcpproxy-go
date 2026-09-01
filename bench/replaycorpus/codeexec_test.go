@@ -292,3 +292,61 @@ func TestCodeExecSavingsFor_TruncatedSubCallNeverReachesTheTotal(t *testing.T) {
 		"only the clean call contributes; 250k must not appear in the total")
 	assert.Equal(t, 1, rep.Withheld[ReasonTruncatedSubCallOverstates])
 }
+
+// Tool-call ARGUMENTS are tokens the model generated (output, billed ~5x) and
+// RESPONSES are tokens it reads (input, billed 1x, or 0.1x cached). Summing them
+// into one "tokens saved" figure prices a 5x asymmetry at 1x.
+//
+// This is the case that proves it matters, taken from measured traffic: at three
+// sub-calls the token count says +262 saved while the money says LOSS, because
+// code execution trades cheap input for expensive output — the script is a fixed
+// cost regardless of how many calls it replaces.
+func TestCodeExecSaving_SplitsByBillingDirection(t *testing.T) {
+	parent := codeExecCall(measured(78), measured(11), // script out, result in
+		subCall(measured(12), measured(105)),
+		subCall(measured(12), measured(105)),
+		subCall(measured(12), measured(105)),
+	)
+
+	got := CodeExecSavingFor(parent)
+
+	require.Equal(t, CostMeasured, got.Basis)
+	assert.Equal(t, 36, got.BaselineOutput, "three calls of arguments the model would have written")
+	assert.Equal(t, 315, got.BaselineInput, "three responses it would have read")
+	assert.Equal(t, 78, got.ProxyOutput, "the script it wrote instead")
+	assert.Equal(t, 11, got.ProxyInput)
+
+	assert.Equal(t, got.BaselineOutput+got.BaselineInput, got.Baseline, "the totals must stay consistent")
+	assert.Equal(t, got.ProxyOutput+got.ProxyInput, got.Proxy)
+	assert.Equal(t, 262, got.Saving, "the raw token count is positive...")
+
+	// ...and the money is negative once output is priced at 5x and input is cached.
+	priced, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
+	require.True(t, ok)
+	assert.Negative(t, priced,
+		"+262 tokens is a LOSS in money: 42 extra output tokens outweigh 304 cached input tokens")
+
+	uncached, _ := got.PricedSavingUSD(3.0, 15.0, 1.0)
+	assert.Positive(t, uncached, "without caching the same call is a small win — caching moves break-even right")
+}
+
+// A withheld saving has no numbers to price, and must not return a confident 0.
+func TestCodeExecSaving_PricedSavingRefusesWithheldFigures(t *testing.T) {
+	parent := codeExecCall(measured(100), measured(50), subCall(measured(10), unavailable()))
+	got := CodeExecSavingFor(parent)
+	require.Equal(t, CostUnavailable, got.Basis)
+
+	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
+	assert.False(t, ok, "no measurement means no price, not a free call")
+}
+
+// An ESTIMATED saving is bytes, not tokens. Pricing bytes per-token would be
+// wrong by roughly the bytes-per-token ratio and would look entirely plausible.
+func TestCodeExecSaving_PricedSavingRefusesByteEstimates(t *testing.T) {
+	parent := codeExecCall(estimated(400), estimated(200), subCall(estimated(100), estimated(5000)))
+	got := CodeExecSavingFor(parent)
+	require.Equal(t, CostEstimated, got.Basis)
+
+	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
+	assert.False(t, ok, "byte lengths cannot be priced as tokens")
+}

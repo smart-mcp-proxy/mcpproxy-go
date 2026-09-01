@@ -16,6 +16,9 @@ import (
 
 func main() {
 	in := flag.String("in", "", "activity export JSONL (must live outside the repository)")
+	inPrice := flag.Float64("in-price", 3.0, "USD per Mtok, input")
+	outPrice := flag.Float64("out-price", 15.0, "USD per Mtok, output")
+	cacheMult := flag.Float64("cache-mult", 0.1, "input multiplier for a cached prefix (1.0 = uncached)")
 	// Default OFF, matching replaycorpus's zero value: bodies-on reads recorded
 	// request and response CONTENT unmasked. With the sub-call byte counts now
 	// emitted, bodies-off still yields a byte-basis figure.
@@ -64,6 +67,31 @@ func main() {
 		}
 		fmt.Println()
 	}
+	// Money, not just tokens: a call's ARGUMENTS are output (billed ~5x) and its
+	// RESPONSE is input, so the token total is not proportional to cost. Priced
+	// per-call and summed, since only measured calls can be priced at all.
+	pricedTotal, priced, unpriceable := 0.0, 0, 0
+	for _, sv := range rep.Savings {
+		if usd, ok := sv.PricedSavingUSD(*inPrice, *outPrice, *cacheMult); ok {
+			pricedTotal += usd
+			priced++
+		} else {
+			unpriceable++
+		}
+	}
+	if priced > 0 {
+		fmt.Printf("\npriced over %d measured call(s) at $%.2f/$%.2f per Mtok, input x%.2f:\n",
+			priced, *inPrice, *outPrice, *cacheMult)
+		fmt.Printf("  net saving: %+.6f USD\n", pricedTotal)
+		if pricedTotal < 0 {
+			fmt.Println("  NOTE: negative in money. Code execution trades cheap input for expensive")
+			fmt.Println("        output — the script is a fixed cost however few calls it replaces.")
+		}
+	}
+	if unpriceable > 0 {
+		fmt.Printf("  %d call(s) could not be priced (withheld, or byte estimates rather than tokens)\n", unpriceable)
+	}
+
 	for reason, n := range rep.Withheld {
 		fmt.Printf("\nwithheld: %d call(s) — %s\n", n, reason)
 	}

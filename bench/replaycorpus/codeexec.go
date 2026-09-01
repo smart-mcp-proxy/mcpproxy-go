@@ -44,6 +44,21 @@ type CodeExecSaving struct {
 	Baseline int `json:"baseline,omitempty"`
 	Proxy    int `json:"proxy,omitempty"`
 	Saving   int `json:"saving,omitempty"`
+
+	// Split by BILLING DIRECTION, because Saving above is not proportional to
+	// cost. A tool call's ARGUMENTS are tokens the model generated (output,
+	// billed around 5x input) and its RESPONSE is tokens it reads (input, billed
+	// 1x, or 0.1x when the prefix is cached). Code execution trades the cheap
+	// direction for the expensive one: it replaces N argument-writings with ONE
+	// script, whose cost is fixed regardless of N.
+	//
+	// Measured consequence, on real traffic at three sub-calls: +262 tokens
+	// "saved" and a NET LOSS in money. Anything that quotes the token figure as
+	// a saving has to carry this split beside it.
+	BaselineOutput int `json:"baseline_output,omitempty"`
+	BaselineInput  int `json:"baseline_input,omitempty"`
+	ProxyOutput    int `json:"proxy_output,omitempty"`
+	ProxyInput     int `json:"proxy_input,omitempty"`
 }
 
 // amount returns the cost in the unit its basis implies, and whether a figure
@@ -88,16 +103,23 @@ func CodeExecSavingFor(parent *ReplayCall) CodeExecSaving {
 	// The parent's own request is the script source and its response is the
 	// value the model received; both are costs code execution really incurred.
 	type component struct {
-		cost  Cost
-		child bool
+		cost      Cost
+		child     bool
+		generated bool
 	}
-	comps := []component{{parent.RequestCost, false}, {parent.ResponseCost, false}}
+	// generated marks a component the MODEL WROTE — a call's arguments — as
+	// opposed to one it read. The distinction is the billing direction.
+	comps := []component{
+		{parent.RequestCost, false, true},
+		{parent.ResponseCost, false, false},
+	}
 	for _, sub := range parent.SubCalls {
-		comps = append(comps, component{sub.RequestCost, true}, component{sub.ResponseCost, true})
+		comps = append(comps, component{sub.RequestCost, true, true},
+			component{sub.ResponseCost, true, false})
 	}
 
 	basis := CostBasis("")
-	baseline, proxy := 0, 0
+	baselineOut, baselineIn, proxyOut, proxyIn := 0, 0, 0, 0
 	// Any truncation anywhere in the call withholds it — see
 	// ReasonTruncatedSubCallOverstates. Checked before the components are
 	// summed so no partial total is ever built.
@@ -137,17 +159,24 @@ func CodeExecSavingFor(parent *ReplayCall) CodeExecSaving {
 			return CodeExecSaving{ParentID: out.ParentID, SubCalls: out.SubCalls,
 				Basis: CostUnavailable, Reason: ReasonTruncatedSubCallOverstates}
 		}
-		if c.child {
-			baseline += amount
-		} else {
-			proxy += amount
+		switch {
+		case c.child && c.generated:
+			baselineOut += amount
+		case c.child:
+			baselineIn += amount
+		case c.generated:
+			proxyOut += amount
+		default:
+			proxyIn += amount
 		}
 	}
 
 	out.Basis = basis
-	out.Baseline = baseline
-	out.Proxy = proxy
-	out.Saving = baseline - proxy
+	out.BaselineOutput, out.BaselineInput = baselineOut, baselineIn
+	out.ProxyOutput, out.ProxyInput = proxyOut, proxyIn
+	out.Baseline = baselineOut + baselineIn
+	out.Proxy = proxyOut + proxyIn
+	out.Saving = out.Baseline - out.Proxy
 	return out
 }
 
@@ -210,4 +239,26 @@ func CodeExecSavingsFor(sessions []*ReplaySession) *CodeExecReport {
 		}
 	}
 	return rep
+}
+
+// PricedSavingUSD converts the saving to money, which is the only form in which
+// the input/output asymmetry is visible.
+//
+// inPerMTok and outPerMTok are USD per million tokens; cacheMult scales the
+// INPUT side only (0.1 for a cached prefix, 1.0 for uncached). It returns
+// ok=false rather than a number whenever pricing would be dishonest:
+//
+//   - a withheld saving has no figures at all, and 0.0 would read as "code
+//     execution was free" instead of "nothing was measurable";
+//   - an ESTIMATED saving is BYTE lengths, not tokens, so pricing it per-token
+//     would be wrong by roughly the bytes-per-token ratio and would look
+//     entirely plausible.
+func (s CodeExecSaving) PricedSavingUSD(inPerMTok, outPerMTok, cacheMult float64) (float64, bool) {
+	if s.Basis != CostMeasured {
+		return 0, false
+	}
+	cost := func(outTok, inTok int) float64 {
+		return (float64(outTok)*outPerMTok + float64(inTok)*inPerMTok*cacheMult) / 1e6
+	}
+	return cost(s.BaselineOutput, s.BaselineInput) - cost(s.ProxyOutput, s.ProxyInput), true
 }
