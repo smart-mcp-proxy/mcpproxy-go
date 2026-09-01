@@ -157,6 +157,19 @@ func viewString(view map[string]interface{}, key, fallback string) string {
 // than persisting it over the credential, which is the same bind-or-refuse
 // answer the server write path gives.
 func redactedRegistrySummary(entry *config.RegistryEntry) contracts.RegistrySummary {
+	// Nil-tolerant on purpose. This renders the SUCCESS payload for three
+	// registry handlers, each of which reaches it whenever the controller
+	// returned no error — and a controller may legitimately report success
+	// without an entry. Dereferencing there panicked inside the handler, which
+	// chi's recoverer turned into a bare 500 with an EMPTY body: the caller saw
+	// an unexplained server error on a request that had in fact succeeded, and
+	// the real cause only appeared as a stack in the log.
+	//
+	// The guard lives here rather than at the three call sites so a fourth
+	// caller cannot reintroduce it.
+	if entry == nil {
+		return contracts.RegistrySummary{}
+	}
 	return contracts.RegistrySummary{
 		ID:         entry.ID,
 		Name:       entry.Name,
