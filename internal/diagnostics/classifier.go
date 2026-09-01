@@ -106,22 +106,10 @@ func classifyOAuth(err error, _ ClassifierHints) Code {
 // preferred; these string matches are the last-resort fallback.
 func classifyDocker(err error, _ ClassifierHints) Code {
 	msg := strings.ToLower(err.Error())
+	if c := dockerLayerCode(msg); c != "" {
+		return c
+	}
 	switch {
-	case strings.Contains(msg, "cannot connect to the docker daemon"),
-		strings.Contains(msg, "is the docker daemon running"),
-		strings.Contains(msg, "docker daemon is not reachable"),
-		strings.Contains(msg, "docker.sock: connect: no such file"):
-		return DockerDaemonDown
-	case strings.Contains(msg, "snap") && strings.Contains(msg, "apparmor"),
-		strings.Contains(msg, "no-new-privileges") && strings.Contains(msg, "apparmor"):
-		return DockerSnapAppArmor
-	case strings.Contains(msg, "permission denied") && strings.Contains(msg, "docker"),
-		strings.Contains(msg, "got permission denied while trying to connect to the docker"):
-		return DockerNoPermission
-	case strings.Contains(msg, "pull access denied"),
-		strings.Contains(msg, "docker") && strings.Contains(msg, "image") && strings.Contains(msg, "pull") && strings.Contains(msg, "fail"),
-		strings.Contains(msg, "manifest unknown"):
-		return DockerImagePullFailed
 	// docker CLI unresolved (#696). These shapes are unambiguous about the
 	// docker BINARY being missing, so they classify even without the
 	// DockerIsolated hint (e.g. shellwrap's resolution-failure error).
@@ -142,6 +130,63 @@ func classifyDocker(err error, _ ClassifierHints) Code {
 		return DockerOCIRuntime
 	}
 	return ""
+}
+
+// dockerLayerCode maps a failure of the DOCKER LAYER ITSELF — the daemon
+// refusing us, not running, or unable to fetch the image — to a DOCKER code.
+// It is shared by classifyDocker and the docker-isolated stdio path so the two
+// cannot drift, and so a real daemon failure is not claimed first by a generic
+// stdio arm (a socket refusal used to land on MCPX_STDIO_SPAWN_EACCES, i.e.
+// chmod advice for a server binary that is fine).
+//
+// Every arm requires evidence the daemon or its socket actually spoke. See
+// dockerDaemonEvidence for why the bare substring "docker" is not evidence.
+func dockerLayerCode(msg string) Code {
+	switch {
+	case strings.Contains(msg, "cannot connect to the docker daemon"),
+		strings.Contains(msg, "is the docker daemon running"),
+		strings.Contains(msg, "docker daemon is not reachable"),
+		strings.Contains(msg, "docker.sock: connect: no such file"):
+		return DockerDaemonDown
+	case strings.Contains(msg, "snap") && strings.Contains(msg, "apparmor"),
+		strings.Contains(msg, "no-new-privileges") && strings.Contains(msg, "apparmor"):
+		return DockerSnapAppArmor
+	case (strings.Contains(msg, "permission denied") || strings.Contains(msg, "access is denied")) &&
+		dockerDaemonEvidence(msg):
+		return DockerNoPermission
+	case strings.Contains(msg, "pull access denied"),
+		strings.Contains(msg, "manifest unknown"),
+		dockerDaemonEvidence(msg) && strings.Contains(msg, "image") &&
+			strings.Contains(msg, "pull") && strings.Contains(msg, "fail"):
+		return DockerImagePullFailed
+	}
+	return ""
+}
+
+// dockerDaemonEvidence reports whether the message carries evidence that the
+// docker DAEMON or its SOCKET is what spoke — as opposed to the bare substring
+// "docker", which is worthless here: mcpproxy's own stdio wrapper injects it
+// into EVERY isolated error it formats
+//
+//	stdio transport (command="/usr/local/bin/docker", docker_isolation=true): …
+//
+// so `permission denied && docker` was near-unfalsifiable under isolation. Any
+// "permission denied" anywhere in the captured container stderr — a git deploy
+// key rejected, a non-executable entrypoint — was diagnosed as a Docker socket
+// permission problem and sent the user to fix socket permissions that were
+// never broken (#1144).
+//
+// Everything listed here is text only the docker CLI, the daemon or a socket
+// dial can produce; none of it appears in mcpproxy's wrapper.
+func dockerDaemonEvidence(msg string) bool {
+	return strings.Contains(msg, "docker daemon") ||
+		strings.Contains(msg, "docker.sock") ||
+		strings.Contains(msg, "docker%2esock") || // URL-escaped in Post "http://%2Fvar%2Frun%2Fdocker.sock/…"
+		strings.Contains(msg, "pipe/docker_engine") ||
+		strings.Contains(msg, `pipe\docker_engine`) ||
+		strings.Contains(msg, "pipe%2fdocker_engine") ||
+		strings.Contains(msg, "dockerd") ||
+		strings.Contains(msg, "error response from daemon")
 }
 
 // classifyConfig recognises configuration parsing / secret resolution failures.
@@ -229,6 +274,13 @@ func classifyDockerIsolatedSpawn(err error) Code {
 	// pointed at the stderr where the real cause is.
 	builtinOnly := onlyShellBuiltinsMissing(msg)
 
+	// The docker LAYER failing — daemon refusing, absent, or unable to fetch
+	// the image — is decided before any stderr-tail reading, and is exempt from
+	// toolchainSuppressed for the same reason arms (1) and (5) are: it means no
+	// container ever started, which cannot be true of one that is alive and
+	// merely silent.
+	layerCode := dockerLayerCode(msg)
+
 	switch {
 	// (1) docker binary unresolved: shellwrap resolution failure, or the shell
 	// / Go exec layer reporting `docker` itself missing. Cover both shell
@@ -242,6 +294,13 @@ func classifyDockerIsolatedSpawn(err error) Code {
 		strings.Contains(msg, "docker not found in path"),
 		strings.Contains(msg, "docker not found in login shell"):
 		return DockerCLINotFound
+	// (1b) the docker daemon/socket refused us, is down, or could not pull the
+	// image. Must precede every stderr-tail arm below: `docker: permission
+	// denied while trying to connect to the Docker daemon socket …` otherwise
+	// fell through to the generic stdio "permission denied" arm and came back
+	// as MCPX_STDIO_SPAWN_EACCES.
+	case layerCode != "":
+		return layerCode
 	// (2) a TOOL the server shells out to is missing from the image. git is
 	// the case that matters in practice: the Python default image is slim and
 	// has no git, so every `--from …git+https://…` server fails here (#1143).
@@ -448,7 +507,15 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 	// exec.Error being present. These matches are intentionally broad and
 	// err toward MCPX_STDIO_SPAWN_ENOENT / MCPX_STDIO_HANDSHAKE_TIMEOUT —
 	// both are strictly better than MCPX_UNKNOWN_UNCLASSIFIED for the user.
-	if hints.Transport == "stdio" {
+	// DockerIsolated implies stdio: config.ResolveIsolation only resolves to
+	// mode=docker for a server that HAS a Command, i.e. a stdio server, and the
+	// isolated launch is `docker run …` over the stdio transport. Accepting the
+	// hint on its own keeps a caller that filled only DockerIsolated from
+	// skipping every arm below — which left mcpproxy's own wrappers ("exited
+	// before completing the MCP initialize handshake", "did not respond to MCP
+	// initialize") on MCPX_UNKNOWN_UNCLASSIFIED and its "file a bug report"
+	// CTA, with the loose docker arms as the only thing that could fire.
+	if hints.Transport == "stdio" || hints.DockerIsolated {
 		msg := err.Error()
 		lmsg := strings.ToLower(msg)
 		switch {
