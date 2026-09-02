@@ -7,7 +7,7 @@
 # fully-offline scanner with no API key requirement.
 #
 # Published as: ghcr.io/smart-mcp-proxy/scanner-proximity:latest
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 LABEL org.opencontainers.image.source="https://github.com/smart-mcp-proxy/mcpproxy-go"
 LABEL org.opencontainers.image.description="Nova Proximity (keyword MCP scanner) packaged for MCPProxy"
