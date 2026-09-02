@@ -845,7 +845,18 @@ export interface ActivityRecord {
   tool_name?: string
   arguments?: Record<string, any>
   response?: string
+  /**
+   * Spec 103: the RECORDED response is larger than the one the agent received —
+   * the log kept the full text while the agent got a cut version.
+   */
   response_truncated?: boolean
+  /**
+   * The opposite direction (issue #1173): the RECORDED response is smaller than
+   * the one the agent received, because `activity_max_response_size` cut it on
+   * the way into the database. `response_bytes` is measured pre-truncation and
+   * stays honest. Independent of `response_truncated`; both can be true.
+   */
+  response_storage_truncated?: boolean
   status: ActivityStatus
   error_message?: string
   duration_ms?: number

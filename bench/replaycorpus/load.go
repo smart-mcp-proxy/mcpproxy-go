@@ -228,18 +228,23 @@ func rejectCSVContent(r *bufio.Reader) error {
 // stored on a ReplayCall, never returned, and goes out of scope as soon as the
 // call's costs are computed.
 type decodedRecord struct {
-	id            string
-	requestID     string
-	parentID      string
-	serverName    string
-	toolName      string
-	status        string
-	timestamp     time.Time
-	internal      bool
-	truncated     bool
-	sensitive     bool
-	requestBytes  int
-	responseBytes int
+	id         string
+	requestID  string
+	parentID   string
+	serverName string
+	toolName   string
+	status     string
+	timestamp  time.Time
+	internal   bool
+	truncated  bool
+	// storageTruncated is the OPPOSITE of truncated: the activity log stored
+	// LESS than the agent received, because activity_max_response_size cut it.
+	// responseBytes is still the pre-truncation size, so this only matters to a
+	// consumer that reads the body text.
+	storageTruncated bool
+	sensitive        bool
+	requestBytes     int
+	responseBytes    int
 
 	// arguments and response are the only fields holding recorded content.
 	// Nothing copies them onward.
@@ -270,19 +275,20 @@ func admit(rec *contracts.ActivityRecord, report *ExclusionReport) (*decodedReco
 	}
 
 	decoded := &decodedRecord{
-		id:            rec.ID,
-		requestID:     rec.RequestID,
-		parentID:      rec.ParentID,
-		serverName:    rec.ServerName,
-		toolName:      rec.ToolName,
-		status:        rec.Status,
-		timestamp:     rec.Timestamp,
-		internal:      string(rec.Type) == "internal_tool_call",
-		truncated:     rec.ResponseTruncated,
-		sensitive:     rec.HasSensitiveData,
-		requestBytes:  rec.RequestBytes,
-		responseBytes: rec.ResponseBytes,
-		response:      rec.Response,
+		id:               rec.ID,
+		requestID:        rec.RequestID,
+		parentID:         rec.ParentID,
+		serverName:       rec.ServerName,
+		toolName:         rec.ToolName,
+		status:           rec.Status,
+		timestamp:        rec.Timestamp,
+		internal:         string(rec.Type) == "internal_tool_call",
+		truncated:        rec.ResponseTruncated,
+		storageTruncated: rec.ResponseStorageTruncated,
+		sensitive:        rec.HasSensitiveData,
+		requestBytes:     rec.RequestBytes,
+		responseBytes:    rec.ResponseBytes,
+		response:         rec.Response,
 	}
 	if len(rec.Arguments) > 0 {
 		// Marshalled here, not carried as a map: a map would keep the recorded

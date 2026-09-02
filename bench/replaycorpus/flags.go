@@ -103,6 +103,31 @@ const (
 	// applied at the point of addition rather than at publication.
 	ReasonMixedCostBasis ExclusionReason = "mixed_cost_basis"
 
+	// ReasonStorageTruncatedBodyUnmeasurable marks a response cost withheld
+	// under bodies-on because activity_max_response_size cut the STORED body on
+	// the way into the activity log (issue #1173). It is the mirror of
+	// ReasonTruncatedRetrieveOverstates: there the log holds MORE than the
+	// agent received, here it holds LESS.
+	//
+	// Why withheld rather than estimated. The record's response_bytes is
+	// measured pre-truncation and is perfectly honest, so with bodies OFF a
+	// storage-truncated record needs no special handling at all — it is
+	// estimated from bytes like every other record and nothing is lost. With
+	// bodies ON it cannot simply fall through to that estimate: the siblings it
+	// is summed with are MEASURED (tokens), the fallback is ESTIMATED (bytes),
+	// and computeSaving withholds any aggregate mixing the two. It would still
+	// be withheld — just reported as mixed_cost_basis, which names the symptom
+	// and hides the cause, on exactly the >64KB payloads where a code-execution
+	// saving is largest. Naming the cause here is the difference between a
+	// benchmark that says "one of your records was cut in storage" and one that
+	// says "your bases disagreed".
+	//
+	// The remedy is a capture-time setting, not a loader heuristic: record the
+	// corpus with "activity_max_response_size": 0 so bodies reach the log
+	// whole. That is what makes the off switch a requirement rather than a
+	// nicety for a --bodies=on-unmasked run.
+	ReasonStorageTruncatedBodyUnmeasurable ExclusionReason = "storage_truncated_body_unmeasurable"
+
 	// ReasonTruncatedSubCallOverstates marks a code-execution saving withheld
 	// because one of the sandbox's sub-calls was truncated. response_bytes is
 	// the FULL pre-truncation size, but the baseline it feeds means "what an
@@ -358,10 +383,15 @@ func (c *ReplayCall) classify(rec *decodedRecord, opts *Options, rep *ExclusionR
 //  1. A flagged-sensitive body is never tokenized, whatever the body policy.
 //  2. A truncated built-in response is excluded outright — both its stored text
 //     and its byte length describe more than the agent consumed.
-//  3. An untruncated body, with bodies on, is measured.
-//  4. Anything else falls back to the pre-truncation byte length as an
+//  3. With bodies on, a body the activity log itself cut is excluded: it is a
+//     PREFIX, so tokenizing it understates, and the byte estimate that would
+//     otherwise stand in has a different basis from its measured siblings. With
+//     bodies off this does not apply — nothing is tokenized and the
+//     pre-truncation byte length is honest — so the branch is bodies-gated.
+//  4. An untruncated body, with bodies on, is measured.
+//  5. Anything else falls back to the pre-truncation byte length as an
 //     explicitly annotated estimate.
-//  5. With no byte length there is no honest figure: unavailable, and counted
+//  6. With no byte length there is no honest figure: unavailable, and counted
 //     under the specific gap that caused it.
 func responseCost(rec *decodedRecord, isSubCall bool, opts *Options, count func(string) int, rep *ExclusionReport) Cost {
 	bodiesOn := opts.Bodies == BodiesOnUnmasked
@@ -373,6 +403,10 @@ func responseCost(rec *decodedRecord, isSubCall bool, opts *Options, count func(
 	if rec.truncated && rec.internal {
 		rep.withhold(ReasonTruncatedRetrieveOverstates)
 		return Cost{Basis: CostUnavailable, Reason: ReasonTruncatedRetrieveOverstates}
+	}
+	if bodiesOn && rec.storageTruncated {
+		rep.withhold(ReasonStorageTruncatedBodyUnmeasurable)
+		return Cost{Basis: CostUnavailable, Reason: ReasonStorageTruncatedBodyUnmeasurable}
 	}
 	if bodiesOn && !rec.truncated && rec.response != "" {
 		return Cost{Basis: CostMeasured, Tokens: count(rec.response), Bytes: len(rec.response)}

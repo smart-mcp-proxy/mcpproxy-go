@@ -39,7 +39,7 @@ type ActivityRecord struct {
 	ToolName          string                 `json:"tool_name,omitempty"`                      // Name of tool called
 	Arguments         map[string]interface{} `json:"arguments,omitempty" swaggertype:"object"` // Tool call arguments
 	Response          string                 `json:"response,omitempty"`                       // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // True if response was truncated
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // Spec 103: recorded response is LARGER than the one the agent received
 	Status            string                 `json:"status"`                                   // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`                  // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`                    // Execution duration in milliseconds
@@ -48,7 +48,18 @@ type ActivityRecord struct {
 	WorkSessionID     string                 `json:"work_session_id,omitempty"`                // Spec 082: one client, one project, across reconnects
 	RequestID         string                 `json:"request_id,omitempty"`                     // HTTP request ID for correlation
 	ParentID          string                 `json:"parent_id,omitempty"`                      // Correlation id of the parent call (the code_execution whose sandbox issued this sub-call)
-	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`  // Additional context-specific data
+
+	// ResponseStorageTruncated is the OPPOSITE direction to ResponseTruncated:
+	// the recorded response is SMALLER than the one the agent received, because
+	// activity_max_response_size cut it on the way into BBolt (issue #1173).
+	// The two are independent and can both be true.
+	//
+	// It must not be folded into ResponseTruncated. ResponseBytes is measured
+	// pre-truncation, so a storage-truncated record's byte accounting stays
+	// honest and its cost must still be counted; only a consumer that TOKENIZES
+	// the stored body needs to know the body is a prefix.
+	ResponseStorageTruncated bool                   `json:"response_storage_truncated,omitempty"`
+	Metadata                 map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"` // Additional context-specific data
 
 	// Byte sizes measured pre-truncation, mirroring storage.ActivityRecord
 	// (Spec 069 A1). They are the only cost signal a bodies-off export carries:

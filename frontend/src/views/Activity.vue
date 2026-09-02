@@ -1232,7 +1232,17 @@
               <h4 class="font-semibold mb-2 flex items-center gap-2">
                 Response Body
                 <span class="badge badge-sm badge-info">JSON</span>
-                <span v-if="selectedActivity.response_truncated" class="badge badge-sm badge-warning">Truncated</span>
+                <span
+                  v-if="selectedActivity.response_truncated"
+                  class="badge badge-sm badge-warning"
+                  title="The agent received less than this: the log kept the full response"
+                >Truncated</span>
+                <span
+                  v-if="selectedActivity.response_storage_truncated"
+                  class="badge badge-sm badge-warning"
+                  title="The agent received more than this: the response was shortened to fit activity_max_response_size before being stored"
+                  data-test="response-storage-truncated-badge"
+                >Shortened for storage</span>
                 <span
                   v-if="selectedActivity.has_sensitive_data"
                   class="badge badge-sm badge-warning"

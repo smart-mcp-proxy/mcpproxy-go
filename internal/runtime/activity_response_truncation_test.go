@@ -55,7 +55,7 @@ func TestToolCallResponseTruncatedForStorage(t *testing.T) {
 		"a 50KB response must not be persisted whole under a 1KB cap")
 	assert.True(t, strings.HasSuffix(records[0].Response, "...[truncated]"),
 		"truncation must be visible in the stored text")
-	assert.True(t, records[0].ResponseTruncated,
+	assert.True(t, records[0].ResponseStorageTruncated,
 		"a record shortened on the write path must say so")
 }
 
@@ -83,12 +83,13 @@ func TestInternalToolCallResponseTruncatedForStorage(t *testing.T) {
 
 	assert.Less(t, len(records[0].Response), 50_000,
 		"internal tool calls take the same cap as upstream calls")
-	assert.True(t, records[0].ResponseTruncated)
+	assert.True(t, records[0].ResponseStorageTruncated)
 }
 
 // An emitter-set response_truncated flag (Spec 103: recorded response larger
 // than the one the agent received) must survive a record that storage does NOT
-// shorten. The two meanings are OR-ed, so neither may clear the other.
+// shorten. The two meanings live on SEPARATE fields, so neither may clear the
+// other — see activity_storage_truncation_field_test.go for the other half.
 func TestEmitterTruncationFlagSurvivesUntruncatedRecord(t *testing.T) {
 	store, cleanup := setupTestStorage(t)
 	defer cleanup()
@@ -141,7 +142,7 @@ func TestDefaultResponseCapAppliesWithoutConfig(t *testing.T) {
 	assert.LessOrEqual(t, len(records[0].Response),
 		DefaultActivityMaxResponseSize+len("...[truncated]"),
 		"the 64KB default must bound a record with no explicit config")
-	assert.True(t, records[0].ResponseTruncated)
+	assert.True(t, records[0].ResponseStorageTruncated)
 }
 
 // SetMaxResponseSize takes the same "ignore non-positive" shape as the other

@@ -195,7 +195,7 @@ type ActivityRecord struct {
 	ToolName          string                 `json:"tool_name,omitempty"`          // Name of tool called
 	Arguments         map[string]interface{} `json:"arguments,omitempty"`          // Tool call arguments
 	Response          string                 `json:"response,omitempty"`           // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // True if response was truncated
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // Spec 103: RECORDED > DELIVERED — see below
 	Status            string                 `json:"status"`                       // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`      // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`        // Execution duration in milliseconds
@@ -215,6 +215,30 @@ type ActivityRecord struct {
 	// Metadata would be stored but not filterable. Empty for every top-level
 	// call and for every record written before this field existed.
 	ParentID string `json:"parent_id,omitempty"`
+
+	// The two truncation flags point in OPPOSITE directions and are
+	// independent — both can be true on one record.
+	//
+	// ResponseTruncated (above, Spec 103) means the RECORDED response is LARGER
+	// than the one the agent received: retrieve_tools stores its full
+	// pre-truncation text while the agent consumed the cut version, and a
+	// direct call_tool_* dispatch records the upstream result while the agent
+	// received it cut to ToolResponseLimit. Consumers act on it by REFUSING to
+	// count the record: internal/runtime/usage_aggregate.go excludes its
+	// ResponseBytes from delivered traffic, and the token benchmark withholds
+	// its response cost rather than tokenizing text nobody paid for.
+	//
+	// ResponseStorageTruncated means the RECORDED response is SMALLER than the
+	// one the agent received: activity_max_response_size cut the text on the
+	// way into BBolt so a single multi-megabyte payload cannot outweigh the
+	// whole log (issue #1173). ResponseBytes is measured PRE-truncation by the
+	// emitter and is therefore still honest, so this flag must never reach the
+	// Spec 103 consumers — OR-ing the two would make them discard exactly the
+	// oversized records the cap exists to bound, under an inverted
+	// justification. What it does mean is that record.Response is no longer the
+	// whole text: anything that MEASURES the stored body (as opposed to its
+	// recorded byte length) must not treat it as complete.
+	ResponseStorageTruncated bool `json:"response_storage_truncated,omitempty"`
 
 	// WorkSessionID groups records into one unit of USER WORK (Spec 082): one
 	// client, in one project, under one principal, across reconnects. Unlike

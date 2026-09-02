@@ -196,6 +196,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
 			contractActivities[i].ResponseTruncated = false
+			contractActivities[i].ResponseStorageTruncated = false
 			contractActivities[i].Metadata = projectContextualMetadata(contractActivities[i].Metadata)
 		}
 	}
@@ -365,15 +366,19 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		Arguments:         a.Arguments,
 		Response:          a.Response,
 		ResponseTruncated: a.ResponseTruncated,
-		Status:            a.Status,
-		ErrorMessage:      a.ErrorMessage,
-		DurationMs:        a.DurationMs,
-		Timestamp:         a.Timestamp,
-		SessionID:         a.SessionID,
-		WorkSessionID:     a.WorkSessionID,
-		RequestID:         a.RequestID,
-		ParentID:          a.ParentID,
-		Metadata:          a.Metadata,
+		// Opposite direction to ResponseTruncated (issue #1173): the stored
+		// body is a PREFIX of what the agent received. Carried separately so a
+		// consumer of either flag cannot be misled by the other.
+		ResponseStorageTruncated: a.ResponseStorageTruncated,
+		Status:                   a.Status,
+		ErrorMessage:             a.ErrorMessage,
+		DurationMs:               a.DurationMs,
+		Timestamp:                a.Timestamp,
+		SessionID:                a.SessionID,
+		WorkSessionID:            a.WorkSessionID,
+		RequestID:                a.RequestID,
+		ParentID:                 a.ParentID,
+		Metadata:                 a.Metadata,
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
 		DetectionTypes:   detectionTypes,
@@ -462,15 +467,19 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		ServerName:        a.ServerName,
 		ToolName:          a.ToolName,
 		ResponseTruncated: a.ResponseTruncated,
-		Status:            a.Status,
-		ErrorMessage:      a.ErrorMessage,
-		DurationMs:        a.DurationMs,
-		Timestamp:         a.Timestamp,
-		SessionID:         a.SessionID,
-		WorkSessionID:     a.WorkSessionID,
-		RequestID:         a.RequestID,
-		ParentID:          a.ParentID,
-		Metadata:          a.Metadata,
+		// Copied unconditionally, like the byte counts below and unlike the
+		// bodies: it describes the record, not its content, and a bodies-on
+		// consumer that tokenizes Response has to know the text is a prefix.
+		ResponseStorageTruncated: a.ResponseStorageTruncated,
+		Status:                   a.Status,
+		ErrorMessage:             a.ErrorMessage,
+		DurationMs:               a.DurationMs,
+		Timestamp:                a.Timestamp,
+		SessionID:                a.SessionID,
+		WorkSessionID:            a.WorkSessionID,
+		RequestID:                a.RequestID,
+		ParentID:                 a.ParentID,
+		Metadata:                 a.Metadata,
 		// Pre-truncation byte lengths (Spec 069 A1). Copied unconditionally,
 		// NOT under includeBodies: they are sizes, not content, and the
 		// bodies-off export is exactly the case where they are the only cost
@@ -570,7 +579,10 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 	if format == "csv" {
 		// parent_id is APPENDED, never inserted: existing CSV consumers index by
 		// column position, so a new column has to land after the last one.
-		csvHeader := "id,type,source,server_name,tool_name,status,error_message,duration_ms,timestamp,session_id,request_id,response_truncated,parent_id\n"
+		// response_storage_truncated obeys the same rule — it belongs BESIDE
+		// response_truncated semantically, and appending it anyway is exactly
+		// what the rule is for.
+		csvHeader := "id,type,source,server_name,tool_name,status,error_message,duration_ms,timestamp,session_id,request_id,response_truncated,parent_id,response_storage_truncated\n"
 		if _, err := w.Write([]byte(csvHeader)); err != nil {
 			s.logger.Errorw("Failed to write CSV header", "error", err)
 			return
@@ -644,6 +656,7 @@ func activityToCSVRow(a *storage.ActivityRecord) string {
 		escapeCSV(a.RequestID),
 		strconv.FormatBool(a.ResponseTruncated),
 		escapeCSV(a.ParentID),
+		strconv.FormatBool(a.ResponseStorageTruncated),
 	}, ",") + "\n"
 }
 

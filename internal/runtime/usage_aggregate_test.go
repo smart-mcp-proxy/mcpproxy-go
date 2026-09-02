@@ -382,3 +382,57 @@ func TestUsageAggregate_TruncatedBuiltinDoesNotInflateDeliveredBytes(t *testing.
 	assert.EqualValues(t, 50_000, upstream,
 		"an upstream response was consumed whole; only the STORED copy was cut")
 }
+
+// The mirror of the test above, and the guard on the field split.
+//
+// A STORAGE-truncated built-in is the opposite direction: the log holds LESS
+// than the agent consumed, because activity_max_response_size cut the text on
+// the way into BBolt. ResponseBytes is measured pre-truncation by the emitter,
+// so it is still exactly what was delivered and must still be counted. Folding
+// storage truncation into ResponseTruncated would send this record through
+// truncatedBuiltinOverstatesDelivery and silently under-report delivered
+// traffic — in the flattering direction, on the very records the cap creates.
+//
+// ToolName must be retrieve_tools (or describe_tool): storage.CountsAsCall
+// admits a SUCCESSFUL internal_tool_call into the timeline only for those two
+// discovery built-ins, so any other name creates no bucket and the assertion
+// would be unreachable in both directions.
+func TestUsageAggregate_StorageTruncatedBuiltinStillCountsDeliveredBytes(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	builtin := func(mutate func(*storage.ActivityRecord)) *storage.ActivityRecord {
+		rec := &storage.ActivityRecord{
+			Type:          storage.ActivityTypeInternalToolCall,
+			ToolName:      "retrieve_tools",
+			Status:        storage.ActivityStatusSuccess,
+			ResponseBytes: 200_000,
+			Timestamp:     base,
+		}
+		mutate(rec)
+		return rec
+	}
+	sum := func(rec *storage.ActivityRecord) int64 {
+		agg := newUsageAggregate()
+		agg.Apply(rec)
+		var total int64
+		for _, b := range agg.Buckets {
+			total += b.RespBytesSum
+		}
+		return total
+	}
+
+	// Premise: an untruncated record of this shape DOES reach a bucket, so a
+	// zero below means the predicate excluded it rather than that nothing was
+	// ever counted.
+	require.EqualValues(t, 200_000, sum(builtin(func(*storage.ActivityRecord) {})),
+		"fixture must be admissible to the timeline, or both halves prove nothing")
+
+	assert.EqualValues(t, 200_000, sum(builtin(func(r *storage.ActivityRecord) {
+		r.ResponseStorageTruncated = true
+	})), "the agent received all 200000 bytes; only the stored copy was cut")
+
+	// The negative half: the Spec 103 direction must STILL be excluded, so this
+	// cannot pass by the predicate having been deleted outright.
+	assert.Zero(t, sum(builtin(func(r *storage.ActivityRecord) {
+		r.ResponseTruncated = true
+	})), "a Spec 103 truncated built-in still overstates delivered traffic")
+}

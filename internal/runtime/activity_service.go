@@ -245,11 +245,14 @@ func (s *ActivityService) SetMaxResponseSize(maxResponseSize int) {
 // log by age, count and total bytes, but nothing else limits one record, so a
 // multi-megabyte upstream response was previously stored whole.
 //
-// The returned bool is OR-ed into ActivityRecord.ResponseTruncated. That field
-// already carries the Spec 103 meaning "the recorded response is larger than the
-// one the agent received"; storage truncation is the other direction, but the
-// field documents itself as "true if response was truncated" and a consumer
-// wanting the untruncated text cannot get it in either case.
+// The returned bool becomes ActivityRecord.ResponseStorageTruncated and NEVER
+// ActivityRecord.ResponseTruncated. The two point opposite ways: the Spec 103
+// flag says the record holds MORE than the agent received, and its consumers
+// react by discarding the record's byte cost; this one says the record holds
+// LESS, while ResponseBytes — measured pre-truncation by the emitter — stays
+// honest. Folding them together would make the usage aggregate and the token
+// benchmark drop exactly the oversized records this cap exists to bound, and
+// do it under an inverted justification.
 func (s *ActivityService) truncateForStorage(response string) (string, bool) {
 	return storage.TruncateActivityResponse(response, s.maxResponseSize)
 }
@@ -595,7 +598,6 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	// (default 64KB) — a 16x coverage loss that silently overrides an explicit
 	// operator setting, with a secret past byte 65536 going unreported.
 	storedResponse, storageTruncated := s.truncateForStorage(response)
-	responseTruncated = responseTruncated || storageTruncated
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
 
 	// Extract intent metadata if present (Spec 018)
@@ -659,17 +661,19 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		Arguments:         arguments,
 		Response:          storedResponse,
 		ResponseTruncated: responseTruncated,
-		Status:            status,
-		ErrorMessage:      errorMsg,
-		DurationMs:        durationMs,
-		Timestamp:         evt.Timestamp,
-		SessionID:         sessionID,
-		WorkSessionID:     s.resolveWorkSession(sessionID),
-		RequestID:         requestID,
-		ParentID:          parentID,
-		Metadata:          metadata,
-		RequestBytes:      requestBytes,
-		ResponseBytes:     responseBytes,
+		// Deliberately NOT OR-ed into ResponseTruncated: opposite directions.
+		ResponseStorageTruncated: storageTruncated,
+		Status:                   status,
+		ErrorMessage:             errorMsg,
+		DurationMs:               durationMs,
+		Timestamp:                evt.Timestamp,
+		SessionID:                sessionID,
+		WorkSessionID:            s.resolveWorkSession(sessionID),
+		RequestID:                requestID,
+		ParentID:                 parentID,
+		Metadata:                 metadata,
+		RequestBytes:             requestBytes,
+		ResponseBytes:            responseBytes,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (server edition)
@@ -904,7 +908,6 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	// handler runs no detector today, but a future one must not silently
 	// inherit a 64KB scan window from a storage decision.
 	storedResponse, storageTruncated := s.truncateForStorage(responseStr)
-	responseTruncated = responseTruncated || storageTruncated
 
 	// Spec 103: pre-truncation sizes, emitted for built-ins as well as upstream
 	// dispatches. 0 stays UNKNOWN rather than free.
@@ -951,8 +954,10 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
 		ResponseTruncated: responseTruncated,
-		RequestBytes:      internalRequestBytes,
-		ResponseBytes:     internalResponseBytes,
+		// Deliberately NOT OR-ed into ResponseTruncated: opposite directions.
+		ResponseStorageTruncated: storageTruncated,
+		RequestBytes:             internalRequestBytes,
+		ResponseBytes:            internalResponseBytes,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (server edition)
@@ -1024,24 +1029,24 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 	// full length. Prompt content is upstream-controlled and carries the same
 	// injection/secret risk a tool response does, so its scan window must stay
 	// the detector's max_payload_size_kb rather than the storage cap.
-	storedResponse, promptTruncated := s.truncateForStorage(responseStr)
+	storedResponse, storageTruncated := s.truncateForStorage(responseStr)
 
 	record := &storage.ActivityRecord{
-		Type:              storage.ActivityTypePromptGet,
-		Source:            storage.ActivitySourceMCP,
-		ServerName:        serverName,
-		ToolName:          promptName,
-		Arguments:         arguments,
-		Response:          storedResponse,
-		ResponseTruncated: promptTruncated,
-		Status:            status,
-		ErrorMessage:      errorMsg,
-		DurationMs:        durationMs,
-		Timestamp:         evt.Timestamp,
-		SessionID:         sessionID,
-		WorkSessionID:     s.resolveWorkSession(sessionID),
-		RequestID:         requestID,
-		Metadata:          metadata,
+		Type:                     storage.ActivityTypePromptGet,
+		Source:                   storage.ActivitySourceMCP,
+		ServerName:               serverName,
+		ToolName:                 promptName,
+		Arguments:                arguments,
+		Response:                 storedResponse,
+		ResponseStorageTruncated: storageTruncated,
+		Status:                   status,
+		ErrorMessage:             errorMsg,
+		DurationMs:               durationMs,
+		Timestamp:                evt.Timestamp,
+		SessionID:                sessionID,
+		WorkSessionID:            s.resolveWorkSession(sessionID),
+		RequestID:                requestID,
+		Metadata:                 metadata,
 	}
 
 	// Server-edition identity, mirroring the tool path.

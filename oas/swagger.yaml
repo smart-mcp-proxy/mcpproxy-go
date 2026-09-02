@@ -1312,8 +1312,21 @@ components:
         response_bytes:
           description: Raw upstream response size in bytes before truncation
           type: integer
+        response_storage_truncated:
+          description: |-
+            ResponseStorageTruncated is the OPPOSITE direction to ResponseTruncated:
+            the recorded response is SMALLER than the one the agent received, because
+            activity_max_response_size cut it on the way into BBolt (issue #1173).
+            The two are independent and can both be true.
+
+            It must not be folded into ResponseTruncated. ResponseBytes is measured
+            pre-truncation, so a storage-truncated record's byte accounting stays
+            honest and its cost must still be counted; only a consumer that TOKENIZES
+            the stored body needs to know the body is a prefix.
+          type: boolean
         response_truncated:
-          description: True if response was truncated
+          description: 'Spec 103: recorded response is LARGER than the one the agent
+            received'
           type: boolean
         server_name:
           description: Name of upstream MCP server
