@@ -187,6 +187,26 @@ Server scoping is enforced at three levels:
    probe for hidden servers. `GET /api/v1/config` is an admin document and is
    denied to agent tokens outright (`403`).
 
+   On the `/events` stream, scoping applies **per event**, not only to the
+   `servers.changed` server list:
+
+   - An event that names a server the token may not enumerate — through
+     `server_name`, `server`, `target_server` or `affected_entity`, which is
+     every activity, OAuth and security event — is **not delivered** to that
+     subscriber at all. It is dropped rather than blanked, because a frame with
+     the name removed still discloses the mutation, its timing and the number
+     of servers being hidden.
+   - `servers.changed` is the exception and is always delivered, because it is
+     coalesced last-write-wins and carries the state a client renders. Its
+     server list is narrowed, its `stats` recomputed, and any coalescer extra
+     that names an out-of-scope server (`"server": "beta"`) is removed.
+   - `config.reloaded`, `config.saved` and `secrets.changed` announce mutations
+     of the admin config document and are dropped, matching the `403` on
+     `GET /api/v1/config`.
+
+   Admin subscribers — the API key, the Web UI, the tray over the unix socket —
+   receive every event unchanged; the stream is rendered per connection.
+
 ## Administrative Operations Are Admin-Only
 
 Agent tokens can **discover and call** tools (within their scope and permission tier) but can **never administer servers**. Server-mutating operations require the admin API key (or a local tray/socket connection, which is admin by OS-level auth) on **every** surface — the MCP tools and the REST API share one policy (`internal/auth`), so an agent cannot do over HTTP what it is blocked from doing over MCP.

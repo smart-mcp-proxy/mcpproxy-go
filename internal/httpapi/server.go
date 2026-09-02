@@ -3880,6 +3880,15 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			// #1166 — most event types name a server in a scalar field
+			// rather than in the servers.changed embed, so a scoped caller
+			// learned about servers it cannot see through activity, oauth and
+			// security frames. Decided per subscriber, before rendering:
+			// nothing is written back to the shared event.
+			if !eventVisibleToCaller(r.Context(), evt) {
+				continue
+			}
+
 			eventPayload := map[string]interface{}{
 				"payload":   s.maskEventPayload(s.renderEventPayloadForCaller(r.Context(), evt)),
 				"timestamp": evt.Timestamp.Unix(),
@@ -3907,8 +3916,15 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 // fields, and (b) be an unsynchronised concurrent map write, which Go turns
 // into a fatal error that takes the whole core down for every client.
 //
-// Two narrowings, both only for servers.changed:
+// Three narrowings, all only for servers.changed — every OTHER event type that
+// names a server is dropped for a scoped caller before it reaches this
+// function, by eventVisibleToCaller (sse_scope.go), which also explains why
+// this one type is rendered instead of dropped:
 //
+//   - #1166 - the coalescer extras that NAME a server ("server": "beta") are
+//     removed when the caller may not enumerate it. That extra survived the
+//     original embed filter, and on the notify-only path it was the entire
+//     payload.
 //   - #1166 - a scoped caller gets only the servers it may enumerate, with
 //     `stats` recomputed so total_servers is not a count oracle for the rest.
 //   - #1167 - a caller who MAY see raw values gets the embed dropped entirely
@@ -3942,16 +3958,27 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 		return payload
 	}
 
-	servers, ok := payload["servers"].([]contracts.Server)
-	if !ok {
-		// Notify-only payload (ListServers failed upstream) - nothing to scope.
-		return payload
-	}
-	scoped := visibleServers(ctx, servers)
+	// The coalescer's extras name the server whose change won the window
+	// ("server": "beta"), so narrowing the embed alone left the name on the
+	// wire beside it — and on the notify-only path (ListServers failed
+	// upstream, so there is no embed) that extra was the WHOLE payload. The
+	// copy is unconditional now for that reason: there is always something to
+	// scope, embed or not.
 	out := make(map[string]interface{}, len(payload))
 	for k, v := range payload {
+		if isOutOfScopeIdentityField(ctx, k, v) {
+			continue
+		}
 		out[k] = v
 	}
+
+	servers, ok := payload["servers"].([]contracts.Server)
+	if !ok {
+		// Notify-only payload (ListServers failed upstream) - no embed to
+		// narrow, but the extras above still were.
+		return out
+	}
+	scoped := visibleServers(ctx, servers)
 	out["servers"] = scoped
 	if stats, ok := payload["stats"].(*contracts.ServerStats); ok && stats != nil {
 		recomputed := recomputeServerStats(ctx, scoped, *stats)

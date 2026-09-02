@@ -255,7 +255,11 @@ func (c *scopeController) StatusChannel() <-chan interface{} {
 }
 
 func (c *scopeController) SubscribeEvents() chan internalRuntime.Event {
-	ch := make(chan internalRuntime.Event, 16)
+	// Buffered well past the largest burst any test publishes (the whole
+	// server-identity event class in one go). publishToAll gives up on a full
+	// channel after 2s exactly as publishEvent drops immediately, so an
+	// undersized buffer would silently turn a leak into a pass.
+	ch := make(chan internalRuntime.Event, 128)
 	c.mu.Lock()
 	c.subs = append(c.subs, ch)
 	c.mu.Unlock()

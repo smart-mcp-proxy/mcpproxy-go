@@ -1074,6 +1074,17 @@ Events include:
 - `activity.tool_call.completed` - Tool call finished
 - `activity.policy_decision` - Tool call blocked by policy
 
+The stream is rendered **per connection**. An admin subscriber (API key, Web UI,
+tray over the unix socket) receives every event exactly as the event bus
+published it. For an agent token limited by `allowed_servers` (issue #1166):
+
+| Event | Delivered to a scoped subscriber |
+|-------|----------------------------------|
+| Names a server outside the scope, through `server_name`, `server`, `target_server` or `affected_entity` — every `activity.*`, `oauth.*` and `security.*` event | **No.** The whole frame is dropped: blanking the name still discloses the mutation, its timing, and how many servers are hidden. |
+| `servers.changed` | **Yes, always** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed. |
+| `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
+| Everything else (`active_profile.changed`, `activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
+
 ## Error Responses
 
 ```json
