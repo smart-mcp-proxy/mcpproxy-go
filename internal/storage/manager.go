@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -25,6 +26,12 @@ type Manager struct {
 	mu       sync.RWMutex
 	logger   *zap.SugaredLogger
 	asyncMgr *AsyncManager
+
+	// ownerGate is consulted by ValidateAgentToken for every OWNED token.
+	// Installed by the server edition; nil (and therefore inert) in the
+	// personal edition, where every token is ownerless. See
+	// SetAgentTokenOwnerGate.
+	ownerGate atomic.Value // agentTokenOwnerGate
 }
 
 // NewManager creates a new storage manager

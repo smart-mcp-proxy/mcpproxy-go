@@ -95,7 +95,26 @@ Once the edited config is loaded, on both auth paths:
   back in front: it opens a TOCTOU window on delete-then-recreate, and its
   fall-through 500 used to interpolate the storage sentinel into the body.
 - The token cap answers **409** on both editions' surfaces
-  (`ErrAgentTokenLimitReached`). One storage condition, one status.
+  (`ErrAgentTokenLimitReached`). One storage condition, one status. The **body
+  differs by edition on purpose**: `auth.MaxTokens` is counted across the whole
+  `agent_tokens` bucket, so in the server edition it is a *deployment-wide* cap
+  a tenant may be unable to clear, and the message says so and points at an
+  administrator. Do not copy the personal edition's "you have reached the
+  maximum" wording here. A per-owner quota is issue #1177.
+- **A token is only as live as its owner.** `storage.Manager.SetAgentTokenOwnerGate`
+  is installed in `setup.go` over the user store, and `ValidateAgentToken`
+  consults it for every *owned* token (ownerless personal-edition tokens are
+  never gated). A disabled — or deleted — owner's tokens stop authenticating
+  immediately, and the gate **fails closed**: a user store that cannot answer
+  denies. `POST /api/v1/admin/users/{id}/disable` additionally **revokes** that
+  user's tokens, so re-enabling the account does not resurrect a credential that
+  may be why it was disabled; `enable` deliberately does not un-revoke. An
+  admin-facing surface for revoking a *specific* tenant's token is issue #1179.
+- `RegenerateAgentTokenForOwner`'s `narrowScope` hook can only ever narrow, and
+  storage **enforces** that: the hook's return is intersected with the token's
+  stored `AllowedServers` before it is persisted (a stored `"*"` counts as
+  granting everything, so materialising it into a concrete list still works).
+  The contract is not a comment a future caller can violate.
 - An agent token's `AuthContext` carries its owner's `UserID` (so its activity
   is attributable) but stays at `AuthTypeAgent`. Per-user surfaces must gate on
   `IsUser()`, never on a non-empty `UserID`.
@@ -113,9 +132,18 @@ themselves a token over the admin's whole inventory.
 
 - **Entitlement is the per-user door's own predicate**: the caller's personal
   servers plus the admin servers flagged `shared`. `NewUserHandlers` receives
-  the *whole* configuration (`deps.Config.Servers`), so the `Shared` filter is
-  what keeps the admin's private servers out. Reuse
-  `entitledServerNames`; do not write a second definition of entitlement.
+  the *whole* configuration, so the `Shared` filter is what keeps the admin's
+  private servers out. Reuse `entitledServerNames`; do not write a second
+  definition of entitlement.
+- **Read the configuration LIVE, never a boot-time slice.** `NewUserHandlers`
+  takes an `AdminServersProvider` (a function), wired in `setup.go` to
+  `Dependencies.ConfigProvider` over the runtime's current config snapshot. The
+  config is hot-reloadable: a handler built on `deps.Config.Servers` as captured
+  at process start is blind to every server added afterwards, and a tenant could
+  pre-create a personal server named like an admin server that only appears
+  later and walk straight through the collision control below. Any new
+  server-edition surface that makes an authorisation decision from configuration
+  must read it through the provider.
 - **An unentitled name is rejected (400), not silently dropped** — a token that
   quietly sees less than asked is worse than a refusal. The message is
   identical for "another tenant's server", "the admin's unshared server" and
@@ -137,8 +165,14 @@ themselves a token over the admin's whole inventory.
   admin-private upstream was a way to mint a token over it.
   `entitledServerNames` also drops such a collision for a non-admin, so a row
   that predates the refusal (or an admin who later adds a colliding name) cannot
-  resurrect the escalation. The refusal message is identical for a shared and a
-  private collision: naming which would be a server-name existence oracle.
+  resurrect the escalation. **`createServer` answers every unavailable name with
+  one body** — `Server name %q is not available` — whether the holder is a
+  shared admin server, a private admin server, or the caller's own existing
+  server. Two different wordings let a tenant read, from one request, that a
+  name they do not own is in the admin's configuration, and enumerate a private
+  inventory they cannot list. The residual bit (a tenant can subtract their own
+  inventory) closes only when enforcement resolves a server name against an
+  owner rather than as a bare string.
 
 #### Scope is a snapshot, not a live check
 
@@ -177,7 +211,7 @@ carry into the cross-tenant token administration feature.
 | `internal/serveredition/auth/` | OAuth, sessions, JWT tokens, middleware |
 | `internal/serveredition/users/` | User/session models, BBolt store |
 | `internal/serveredition/workspace/` | Per-user workspace for personal upstreams |
-| `internal/serveredition/multiuser/` | Multi-user router, tool filtering, activity isolation |
+| `internal/serveredition/multiuser/` | Multi-user router (**not yet wired** — `NewRouter` has no production caller), tool filtering, activity isolation |
 | `internal/serveredition/api/` | Server REST API endpoints (user, admin, auth) |
 
 ## Server Testing

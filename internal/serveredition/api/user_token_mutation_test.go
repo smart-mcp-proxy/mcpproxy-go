@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -122,8 +123,61 @@ func TestCreateUserToken_CapExhaustionIsConflict(t *testing.T) {
 	over := rig.createToken(t, "one-too-many", nil)
 	require.Equal(t, http.StatusConflict, over.Code,
 		"the token cap must answer 409, matching the personal edition (%s)", over.Body.String())
-	assert.Contains(t, errorMessage(t, over), "Maximum number of agent tokens",
-		"the cap message must say what the conflict is")
+
+	msg := errorMessage(t, over)
+	assert.Contains(t, msg, fmt.Sprintf("%d", auth.MaxTokens),
+		"the cap message must say what the limit is")
+
+	// The cap is DEPLOYMENT-wide (auth.MaxTokens is counted across the whole
+	// agent_tokens bucket, all owners together), and there is no per-owner
+	// quota — that is issue #1177. So the body must not read as the caller's
+	// own quota: a tenant who holds none of the tokens filling it would go
+	// hunting for tokens of theirs to delete, and deleting every one of them
+	// need not free a slot. It has to say whose limit it is and who can act.
+	assert.Contains(t, strings.ToLower(msg), "administrator",
+		"the cap body must point the caller at someone who can actually act on it")
+	assert.NotRegexp(t, `(?i)\byou(r)? have reached|delete (one of )?your`, msg,
+		"the cap body must not instruct the caller to free a slot they may not control")
+}
+
+// TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller is the Q3 property on
+// its own, with the victim being someone who holds NO tokens at all: the cap is
+// filled entirely by another tenant.
+//
+// Oracle discipline: user B mints successfully at the start (positive control on
+// the same router), so the 409 that follows is the deployment cap and not an
+// unwired store; and the message is asserted for what it must NOT claim, since
+// the defect is a true statement about the wrong subject.
+//
+// BITES: with the old body this fails on "administrator", because the message
+// read "Maximum number of agent tokens (100) reached" — the personal edition's
+// wording, where the caller does own every token.
+func TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller(t *testing.T) {
+	rig := newTokenTestRig(t)
+
+	// Positive control: user B can mint before the cap is filled.
+	rig.actAs(userBCtx())
+	ctrl := rig.createToken(t, "b-first", nil)
+	require.Equal(t, http.StatusCreated, ctrl.Code,
+		"positive control: user B must be able to mint before the cap fills (%s)", ctrl.Body.String())
+
+	// User A fills the rest of the DEPLOYMENT-wide cap.
+	for i := 0; i < auth.MaxTokens-1; i++ {
+		rig.seedToken(t, tokenUserA, fmt.Sprintf("a-filler-%03d", i))
+	}
+
+	over := rig.createToken(t, "b-second", nil)
+	require.Equal(t, http.StatusConflict, over.Code,
+		"the cap must be reported to the blocked tenant (%s)", over.Body.String())
+
+	// User B holds exactly one token. Deleting it frees one slot out of a cap
+	// filled by someone else's 99 — which is precisely why the body must not
+	// tell them to.
+	msg := errorMessage(t, over)
+	assert.Contains(t, strings.ToLower(msg), "shared by all users",
+		"the body must say the limit is not the caller's own")
+	assert.Contains(t, strings.ToLower(msg), "administrator",
+		"the body must name who can act on a deployment-wide limit")
 }
 
 // TestRegenerateUserToken_ReNarrowsScopeToCurrentEntitlement pins the one

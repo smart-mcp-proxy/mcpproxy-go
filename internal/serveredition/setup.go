@@ -80,12 +80,52 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// Shared servers are the main config servers (admin-configured).
 	sharedServers := deps.Config.Servers
 
+	// The LIVE view of the same thing. The configuration is hot-reloadable, so
+	// the slice above is only true of the process's first moment: a server the
+	// admin adds afterwards is absent from it forever. Every check that decides
+	// what a tenant may name or reach — the personal-server name collision and
+	// the token-scope entitlement set in api.UserHandlers — must read through
+	// this instead, or a tenant can pre-empt a name the admin has not created
+	// yet and walk through the entitlement control on a stale snapshot.
+	//
+	// Falls back to the boot slice when no provider was supplied (tests, and
+	// any embedder that has no config service), which is the previous behaviour.
+	adminServers := teamsapi.AdminServersProvider(func() []*config.ServerConfig {
+		if deps.ConfigProvider != nil {
+			if live := deps.ConfigProvider(); live != nil {
+				return live.Servers
+			}
+		}
+		return sharedServers
+	})
+
+	// Agent tokens outlive the sessions of the user who minted them, and nothing
+	// re-checked that user afterwards: a disabled account's tokens kept
+	// authenticating, carrying its UserID into every downstream authorisation.
+	// Gate them on the owner's current state. The gate is on the authentication
+	// hot path, so it is a single keyed store read and no more; it fails closed.
+	if deps.StorageManager != nil {
+		deps.StorageManager.SetAgentTokenOwnerGate(func(userID string) (bool, error) {
+			user, err := userStore.GetUser(userID)
+			if err != nil {
+				return false, err
+			}
+			if user == nil {
+				// The owner is gone from the store entirely. A token for an
+				// identity that no longer exists must not authenticate.
+				return false, nil
+			}
+			return !user.Disabled, nil
+		})
+	}
+
 	// All server edition endpoints that require session cookie or JWT authentication.
 	// Mounted outside the API key group so session cookies work.
 	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 	configPath := config.GetConfigPath(deps.Config.DataDir)
 	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Config, configPath, deps.ManagementService, deps.Logger)
-	userHandlers := teamsapi.NewUserHandlers(userStore, sharedServers, deps.StorageManager, hmacKey, deps.Logger)
+	adminHandlers.SetTokenRevoker(deps.StorageManager)
+	userHandlers := teamsapi.NewUserHandlers(userStore, adminServers, deps.StorageManager, hmacKey, deps.Logger)
 	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
 	// Per-user brokered-credential surfaces (spec 074 T8): list connection
 	// status, disconnect, and the Path B connect/callback flow. Reuses the same

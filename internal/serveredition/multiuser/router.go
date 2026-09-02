@@ -38,6 +38,23 @@ type ServerInfo struct {
 // Router routes MCP operations to the correct upstream based on user identity.
 // It merges shared servers (from the config file) with personal servers (from
 // the user's workspace) to provide a unified view of accessible servers.
+//
+// NOT YET WIRED. NewRouter has no production caller: internal/serveredition/setup.go
+// constructs the REST surfaces and the auth middleware, and nothing constructs
+// this. Personal servers are consequently reachable through
+// /api/v1/user/servers and nowhere else — no MCP request is routed through here
+// today.
+//
+// That matters when reasoning about security properties. The guards below
+// (brokerPoolIdentity's IsUser() namespacing, the shared-before-personal
+// precedence in GetServerForUser) are correct and are kept for when the router
+// IS wired, but they are LATENT: no argument about a live exposure may rest on
+// them, in either direction. In particular, the personal-server/admin-server
+// name collision that internal/serveredition/api/user_handlers.go refuses is a
+// real escalation today because of TOKEN SCOPE — a bare name is the whole of
+// what auth.AuthContext.CanAccessServer compares — and not because of any
+// routing this file performs. Anyone wiring this router should re-derive those
+// properties rather than inherit them from these comments.
 type Router struct {
 	sharedServers    []*config.ServerConfig
 	workspaceManager *workspace.Manager
@@ -160,6 +177,12 @@ func (r *Router) GetServerForUser(ctx context.Context, serverName string) (*Serv
 // It errors if there is no auth context or the server is not accessible to the
 // user; it does not require the server to actually declare an auth_broker block,
 // so callers can key uniformly and decide per server whether to broker.
+//
+// LATENT, like everything else on this type: nothing constructs the Router
+// (see its doc comment), and broker.ConnectionKey has no other caller, so no
+// brokered connection is pooled by this key in production today. The rule below
+// is correct and must survive to the moment the router IS wired; it is not
+// evidence that a live pooling hazard is currently closed.
 //
 // Only a USER-tier context keys as its own user id. Since issue #1168 an agent
 // token's AuthContext carries its OWNER's UserID (so its activity is

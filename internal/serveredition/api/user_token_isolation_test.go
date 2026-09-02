@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -41,6 +42,27 @@ type tokenTestRig struct {
 	store  *storage.Manager
 	users  *users.UserStore
 	as     *auth.AuthContext
+
+	// adminMu guards adminServers, which stands in for the hot-reloadable
+	// admin configuration: the handlers read it through a provider on every
+	// request, exactly as production reads the current config snapshot, so a
+	// test can add a server AFTER the handlers were constructed.
+	adminMu      sync.RWMutex
+	adminServers []*config.ServerConfig
+}
+
+// addAdminServer appends one server to the live admin configuration, standing
+// in for a config hot reload.
+func (rig *tokenTestRig) addAdminServer(sc *config.ServerConfig) {
+	rig.adminMu.Lock()
+	defer rig.adminMu.Unlock()
+	rig.adminServers = append(append([]*config.ServerConfig(nil), rig.adminServers...), sc)
+}
+
+func (rig *tokenTestRig) currentAdminServers() []*config.ServerConfig {
+	rig.adminMu.RLock()
+	defer rig.adminMu.RUnlock()
+	return rig.adminServers
 }
 
 func newTokenTestRig(t *testing.T) *tokenTestRig {
@@ -68,8 +90,10 @@ func newTokenTestRigWithServers(t *testing.T, sharedServers []*config.ServerConf
 	require.NoError(t, err)
 	t.Cleanup(func() { mgr.Close() })
 
-	rig := &tokenTestRig{store: mgr, users: userStore}
-	handlers := NewUserHandlers(userStore, sharedServers, mgr, tokenTestHMACKey, logger)
+	rig := &tokenTestRig{store: mgr, users: userStore, adminServers: sharedServers}
+	// A LIVE provider, as setup.go wires: the handlers must observe a change to
+	// the admin configuration made after this point.
+	handlers := NewUserHandlers(userStore, rig.currentAdminServers, mgr, tokenTestHMACKey, logger)
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {

@@ -50,6 +50,12 @@ var (
 	// is reached.
 	ErrAgentTokenLimitReached = errors.New("maximum number of agent tokens reached")
 
+	// ErrAgentTokenOwnerInactive is returned by ValidateAgentToken when a
+	// token's OWNER is no longer allowed to authenticate — disabled, or gone
+	// from the user store entirely. The token record itself may be perfectly
+	// valid; the identity it speaks for is not.
+	ErrAgentTokenOwnerInactive = errors.New("token owner is not active")
+
 	// ErrAgentTokenNotFound is returned by the owner-scoped mutators when the
 	// (owner, name) pair resolves to nothing. Callers MUST NOT distinguish
 	// "absent" from "owned by someone else" in their response: the lookup is
@@ -304,6 +310,15 @@ func (m *Manager) GetAgentTokenByHash(hash string) (*auth.AgentToken, error) {
 }
 
 // ListAgentTokens returns all stored agent tokens.
+//
+// A record that fails to unmarshal is SKIPPED, not fatal, for the same reason
+// findAgentTokenHashLocked skips one: this walks the whole bucket, so aborting
+// on the first bad row lets a single unparseable entry — a truncated write, a
+// hand-edited DB, a record from a future schema — turn every listing into a
+// 500 for EVERY tenant of the deployment, and for the operator's own
+// `mcpproxy token list` with it. Skipping degrades the blast radius to "that
+// one token is not listed". The skip is logged at WARN with the bucket key so
+// an operator can find the row; that key is an HMAC hash, not a credential.
 func (m *Manager) ListAgentTokens() ([]auth.AgentToken, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -319,7 +334,11 @@ func (m *Manager) ListAgentTokens() ([]auth.AgentToken, error) {
 		return tokenBucket.ForEach(func(k, v []byte) error {
 			var token auth.AgentToken
 			if err := json.Unmarshal(v, &token); err != nil {
-				return fmt.Errorf("failed to unmarshal agent token: %w", err)
+				if m.logger != nil {
+					m.logger.Warnw("skipping unparseable agent token record",
+						"bucket", AgentTokensBucket, "key", string(k), "error", err)
+				}
+				return nil
 			}
 			tokens = append(tokens, token)
 			return nil
@@ -370,6 +389,87 @@ func (m *Manager) RevokeAgentTokenForOwner(userID, name string) error {
 
 		return tokenBucket.Put(hash, updatedData)
 	})
+}
+
+// RevokeAgentTokensForOwner marks every token owned by userID as revoked and
+// returns how many it changed. An owner with no tokens is not an error.
+//
+// It is the credential half of disabling a user. The owner gate
+// (SetAgentTokenOwnerGate) already stops a disabled user's tokens the moment
+// they are disabled, but the gate is a live check: RE-ENABLING the account
+// would hand every previously minted token straight back, including the one
+// that caused the disable. Since disabling is the documented remediation for a
+// compromised account, the credentials minted under it are burned outright.
+// Revoked is a soft delete — the records stay, so the operator can still see
+// what existed — and the owner mints new tokens after being re-enabled.
+//
+// userID must not be empty: "" is the OWNERLESS namespace, i.e. every
+// personal-edition token, and a bulk revoke of it would be an outage rather
+// than a remediation.
+func (m *Manager) RevokeAgentTokensForOwner(userID string) (int, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("agent token owner cannot be empty")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	revoked := 0
+
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+		if tokenBucket == nil {
+			return nil
+		}
+
+		// Collect first: bbolt forbids mutating a bucket while iterating it.
+		type pending struct {
+			hash  []byte
+			token auth.AgentToken
+		}
+		var todo []pending
+
+		err := tokenBucket.ForEach(func(k, v []byte) error {
+			var token auth.AgentToken
+			if err := json.Unmarshal(v, &token); err != nil {
+				// Same tolerance as every other full-bucket walk here: one
+				// corrupt row must not abort a security remediation for the
+				// rows that ARE parseable.
+				if m.logger != nil {
+					m.logger.Warnw("skipping unparseable agent token record",
+						"bucket", AgentTokensBucket, "key", string(k), "error", err)
+				}
+				return nil
+			}
+			if token.UserID != userID || token.Revoked {
+				return nil
+			}
+			todo = append(todo, pending{hash: append([]byte(nil), k...), token: token})
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		for i := range todo {
+			todo[i].token.Revoked = true
+			data, err := json.Marshal(todo[i].token)
+			if err != nil {
+				return fmt.Errorf("failed to marshal agent token: %w", err)
+			}
+			if err := tokenBucket.Put(todo[i].hash, data); err != nil {
+				return fmt.Errorf("failed to revoke agent token: %w", err)
+			}
+			revoked++
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return revoked, nil
 }
 
 // DeleteAgentToken permanently removes an agent token, deleting both the record
@@ -443,11 +543,20 @@ func (m *Manager) RegenerateAgentToken(name string, newRawToken string, hmacKey 
 // re-checks it afterwards: un-sharing a server does not revoke the grants
 // already written into live tokens. Rotation is the one moment the owner's
 // current entitlement is known, so the server edition passes a filter that drops
-// anything they may no longer reach (see resolveTokenServerScope). It MUST only
-// ever narrow — a hook that widened would hand the caller a privilege escalation
-// through the one operation that is supposed to be neutral — and it MUST NOT do
-// I/O: it runs inside a write transaction while m.mu is held, so the caller
-// computes the entitled set before the call and passes a pure filter.
+// anything they may no longer reach (see resolveTokenServerScope).
+//
+// The hook can only ever NARROW, and that is ENFORCED here rather than merely
+// documented: whatever it returns is intersected with the token's stored
+// AllowedServers by intersectAllowedServers before anything is persisted. A
+// future caller that returned a wider list — or a constant, or the entitled set
+// itself — therefore cannot turn rotation, the one operation that is supposed to
+// be scope-neutral, into a privilege escalation. Hooks are still expected to
+// behave; the intersection is what makes misbehaving harmless instead of
+// load-bearing on a comment.
+//
+// The hook MUST NOT do I/O: it runs inside a write transaction while m.mu is
+// held, so the caller computes the entitled set before the call and passes a
+// pure filter.
 func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (*auth.AgentToken, error) {
 	if name == "" {
 		return nil, fmt.Errorf("agent token name cannot be empty")
@@ -487,9 +596,10 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 		token.Revoked = false
 
 		// Re-apply the caller's current server entitlement, if they supplied
-		// one. Narrowing only; see the doc comment.
+		// one. Narrowing only, enforced by the intersection below rather than
+		// trusted from the hook; see the doc comment.
 		if narrowScope != nil {
-			token.AllowedServers = narrowScope(token.AllowedServers)
+			token.AllowedServers = intersectAllowedServers(token.AllowedServers, narrowScope(token.AllowedServers))
 		}
 
 		updatedData, err := json.Marshal(token)
@@ -520,6 +630,56 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 	})
 
 	return updated, err
+}
+
+// intersectAllowedServers returns the entries of proposed that the token's
+// current scope already granted. It is the storage-side enforcement of the
+// narrow-only contract on RegenerateAgentTokenForOwner's hook: the result can
+// never grant a server the token could not already reach, whatever the hook
+// returns.
+//
+// A stored "*" is treated as granting everything, so replacing it with a
+// concrete list is a narrowing and survives the intersection intact. That case
+// is not hypothetical: it is exactly how a token minted before per-owner
+// scoping existed — carrying a bare "*" — gets its unbounded grant converted
+// into a bounded one on its first rotation. Without the wildcard rule the
+// intersection would empty such a token instead, quietly bricking it.
+//
+// Order and duplicates follow proposed, so the hook still decides the shape of
+// the list it is allowed to produce.
+func intersectAllowedServers(current, proposed []string) []string {
+	if len(proposed) == 0 {
+		return nil
+	}
+
+	granted := make(map[string]struct{}, len(current))
+	wildcard := false
+	for _, name := range current {
+		if name == "*" {
+			wildcard = true
+		}
+		granted[name] = struct{}{}
+	}
+
+	out := make([]string, 0, len(proposed))
+	seen := make(map[string]struct{}, len(proposed))
+	for _, name := range proposed {
+		if !wildcard {
+			if _, ok := granted[name]; !ok {
+				continue
+			}
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // UpdateAgentTokenLastUsed updates the LastUsedAt timestamp for an OWNERLESS
@@ -614,8 +774,54 @@ func (m *Manager) GetAgentTokenCount() (int, error) {
 	return count, err
 }
 
+// agentTokenOwnerGate reports whether the user a token belongs to may still
+// authenticate. It is consulted on the authentication hot path, so it must be
+// cheap and must not block; a store lookup keyed by user id is what the server
+// edition installs.
+//
+// It is called ONLY for owned tokens (UserID != ""), never for the personal
+// edition's ownerless ones.
+type agentTokenOwnerGate func(userID string) (active bool, err error)
+
+// SetAgentTokenOwnerGate installs the predicate ValidateAgentToken consults for
+// every OWNED agent token. Passing nil removes it. Safe to call at any time.
+//
+// It exists because a token's authorisation is decided once, when the token is
+// minted, and nothing re-checks the identity behind it afterwards. Disabling a
+// user is the documented remediation for a compromised account — it revokes
+// their sessions and stops their JWTs — but the agent tokens they minted are
+// separate records that kept authenticating, still carrying that user's UserID
+// into every downstream authorisation and activity decision. The gate closes
+// that: the token is only as live as its owner.
+//
+// It FAILS CLOSED. A gate that errors denies the token rather than falling back
+// to "valid", because the failure mode of the alternative is precisely the hole
+// this closes. The personal edition installs no gate and is unaffected — its
+// tokens are all ownerless.
+func (m *Manager) SetAgentTokenOwnerGate(gate agentTokenOwnerGate) {
+	m.ownerGate.Store(gate)
+}
+
+// agentTokenOwnerActive applies the installed gate, if any. Reports true when
+// no gate is installed or the token is ownerless.
+func (m *Manager) agentTokenOwnerActive(userID string) (bool, error) {
+	if userID == "" {
+		return true, nil
+	}
+	v := m.ownerGate.Load()
+	if v == nil {
+		return true, nil
+	}
+	gate, _ := v.(agentTokenOwnerGate)
+	if gate == nil {
+		return true, nil
+	}
+	return gate(userID)
+}
+
 // ValidateAgentToken hashes the raw token and looks it up in storage.
-// Returns the token if found and valid (not expired, not revoked).
+// Returns the token if found and valid (not expired, not revoked) and its owner
+// is still allowed to authenticate.
 // Returns an error describing why validation failed.
 func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.AgentToken, error) {
 	if !auth.ValidateTokenFormat(rawToken) {
@@ -638,6 +844,23 @@ func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.Age
 
 	if token.IsExpired() {
 		return nil, fmt.Errorf("token has expired")
+	}
+
+	// The identity behind the token must still be live. Checked LAST so a
+	// revoked or expired token keeps its own, more specific answer, and so the
+	// gate is not consulted for credentials that were going to be refused
+	// anyway.
+	active, err := m.agentTokenOwnerActive(token.UserID)
+	if err != nil {
+		// Fail closed: a user store that cannot answer must not mean "yes".
+		if m.logger != nil {
+			m.logger.Warnw("denying agent token: owner status could not be determined",
+				"user_id", token.UserID, "token_prefix", token.TokenPrefix, "error", err)
+		}
+		return nil, ErrAgentTokenOwnerInactive
+	}
+	if !active {
+		return nil, ErrAgentTokenOwnerInactive
 	}
 
 	return token, nil

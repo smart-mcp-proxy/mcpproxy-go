@@ -21,13 +21,33 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
+// AdminServersProvider returns the admin configuration's servers — the WHOLE
+// list, shared and private alike — as of NOW.
+//
+// It is a function, not a slice, on purpose. The slice this replaced was
+// captured once, when the handlers were constructed at process start, and the
+// configuration is hot-reloadable: a server the admin added afterwards was
+// invisible to every check built on it. That is not cosmetic. collidesWithAdminConfig
+// is the control that stops a tenant's personal server from lending its name to
+// a token scope (see entitledServerNames); against a boot-time snapshot a tenant
+// could pre-create a personal server named like an admin server that only
+// EXISTS later, and walk through the entitlement check exactly as they did
+// before that control was added. Every collision and entitlement decision must
+// therefore read the live configuration.
+//
+// The returned slice and the ServerConfigs in it are treated as READ-ONLY by
+// every caller here (the shared-server response is a masked copy — see
+// sharedServerResponse). Implementations are expected to hand back the current
+// snapshot rather than a defensive deep copy, so nothing may write through it.
+type AdminServersProvider func() []*config.ServerConfig
+
 // UserHandlers provides REST endpoints for user server management.
 type UserHandlers struct {
-	userStore     *users.UserStore
-	logger        *zap.SugaredLogger
-	sharedServers []*config.ServerConfig
-	tokenStore    tokenStore
-	hmacKey       []byte
+	userStore    *users.UserStore
+	logger       *zap.SugaredLogger
+	adminServers AdminServersProvider
+	tokenStore   tokenStore
+	hmacKey      []byte
 }
 
 // tokenStore defines the interface for agent token storage operations.
@@ -55,14 +75,35 @@ type tokenStore interface {
 }
 
 // NewUserHandlers creates a new UserHandlers instance.
-func NewUserHandlers(userStore *users.UserStore, sharedServers []*config.ServerConfig, tokenStore tokenStore, hmacKey []byte, logger *zap.SugaredLogger) *UserHandlers {
+//
+// adminServers must read the LIVE admin configuration on every call; see
+// AdminServersProvider for why a captured slice is a security defect here. A
+// nil provider is tolerated and means "no admin servers", which is the
+// conservative reading: nothing is shared, and no name collides.
+func NewUserHandlers(userStore *users.UserStore, adminServers AdminServersProvider, tokenStore tokenStore, hmacKey []byte, logger *zap.SugaredLogger) *UserHandlers {
 	return &UserHandlers{
-		userStore:     userStore,
-		logger:        logger,
-		sharedServers: sharedServers,
-		tokenStore:    tokenStore,
-		hmacKey:       hmacKey,
+		userStore:    userStore,
+		logger:       logger,
+		adminServers: adminServers,
+		tokenStore:   tokenStore,
+		hmacKey:      hmacKey,
 	}
+}
+
+// StaticAdminServers adapts a fixed slice to AdminServersProvider. It is for
+// callers that genuinely have no live configuration to read — never for
+// production wiring, which must pass a provider over the current snapshot.
+func StaticAdminServers(servers []*config.ServerConfig) AdminServersProvider {
+	return func() []*config.ServerConfig { return servers }
+}
+
+// adminConfigServers reads the live admin configuration once for the current
+// check. Callers must not hold the result across a request boundary.
+func (h *UserHandlers) adminConfigServers() []*config.ServerConfig {
+	if h.adminServers == nil {
+		return nil
+	}
+	return h.adminServers()
 }
 
 // RegisterRoutes registers all user server management routes on the provided router.
@@ -300,7 +341,7 @@ func (h *UserHandlers) listServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	shared := make([]*ServerResponse, 0)
-	for _, sc := range h.sharedServers {
+	for _, sc := range h.adminConfigServers() {
 		if sc.Shared {
 			var userEnabled *bool
 			// Apply user preference if set
@@ -338,28 +379,39 @@ func (h *UserHandlers) createServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Refuse a name already taken by ANY server in the admin configuration,
-	// shared or not.
+	// shared or not — read LIVE, so a server the admin adds after boot is
+	// covered (see AdminServersProvider).
 	//
 	// The `Shared` qualifier that used to be here made the whole entitlement
 	// check on token scope bypassable: a tenant created a personal server named
 	// exactly like one of the admin's PRIVATE upstreams, entitledServerNames
 	// then added that name because they now owned a server called that, and the
 	// token they minted named a server auth.AuthContext.CanAccessServer compares
-	// by bare string — so it reached the admin's server. The same collision is a
-	// routing hazard independent of tokens: multiuser.Router.GetServerForUser
-	// matches the whole configuration BEFORE the caller's workspace, so the name
-	// resolves to the ADMIN's config, credentials and all.
+	// by bare string — so it reached the admin's server. entitledServerNames
+	// excludes such a collision on its own, so this refusal is defence in depth
+	// rather than the only control; it also keeps a tenant from creating a
+	// personal server they could never scope a token to.
 	//
-	// The message is IDENTICAL for a shared and an unshared collision. It has to
-	// be: a distinguishing message would name the admin's private inventory to a
-	// tenant who cannot list it, which is the existence oracle this branch just
-	// closed on token names, reopened one shape over. A refusal necessarily
-	// signals that the name is unavailable — there is no way to reject without
-	// that — but it signals nothing else: not whether the holder is shared,
-	// private or another tenant's, and not one byte of the server's config.
-	for _, existing := range h.sharedServers {
+	// ONE body, for every reason a name can be unavailable: an admin server
+	// (shared or private), or one the caller already owns. The wording used to
+	// differ between those, and the difference was itself the oracle — "is not
+	// available" versus "already exists" told a tenant, in one request, that a
+	// name they do not own is in the admin's configuration, letting them
+	// enumerate a private inventory they cannot list. Refusing at all
+	// necessarily leaks that the name is taken; nothing beyond that leaks now,
+	// and in particular nothing distinguishes the holder.
+	//
+	// What remains, and cannot be closed here: a tenant who knows their own
+	// inventory can subtract it, so a refusal on a name they do not hold still
+	// resolves to "the admin holds it". Removing that last bit means letting the
+	// create succeed, which requires enforcement (auth.AuthContext.CanAccessServer)
+	// to resolve a server name against an OWNER rather than as a bare string.
+	// That is the real fix and it is a larger change than this door.
+	const nameUnavailable = "Server name %q is not available"
+
+	for _, existing := range h.adminConfigServers() {
 		if existing != nil && strings.EqualFold(existing.Name, req.Name) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("Server name %q is not available", req.Name))
+			writeError(w, http.StatusConflict, fmt.Sprintf(nameUnavailable, req.Name))
 			return
 		}
 	}
@@ -372,7 +424,7 @@ func (h *UserHandlers) createServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		writeError(w, http.StatusConflict, fmt.Sprintf("Server %q already exists", req.Name))
+		writeError(w, http.StatusConflict, fmt.Sprintf(nameUnavailable, req.Name))
 		return
 	}
 
@@ -432,7 +484,7 @@ func (h *UserHandlers) getServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check shared servers.
-	for _, shared := range h.sharedServers {
+	for _, shared := range h.adminConfigServers() {
 		if shared.Shared && strings.EqualFold(shared.Name, name) {
 			// The caller's own preference belongs on the DETAIL read too.
 			// Rendering it as unset made this route disagree with listServers
@@ -473,7 +525,7 @@ func (h *UserHandlers) updateServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject updates to shared servers.
-	for _, shared := range h.sharedServers {
+	for _, shared := range h.adminConfigServers() {
 		if shared.Shared && strings.EqualFold(shared.Name, name) {
 			writeError(w, http.StatusForbidden, "Cannot update a shared server")
 			return
@@ -547,7 +599,7 @@ func (h *UserHandlers) deleteServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject deletion of shared servers.
-	for _, shared := range h.sharedServers {
+	for _, shared := range h.adminConfigServers() {
 		if shared.Shared && strings.EqualFold(shared.Name, name) {
 			writeError(w, http.StatusForbidden, "Cannot delete a shared server")
 			return
@@ -598,7 +650,7 @@ func (h *UserHandlers) enableServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if this is a shared server
-	for _, shared := range h.sharedServers {
+	for _, shared := range h.adminConfigServers() {
 		if shared.Shared && strings.EqualFold(shared.Name, name) {
 			// Store per-user preference for the shared server
 			if err := h.userStore.SetSharedServerPref(userID, shared.Name, req.Enabled); err != nil {
@@ -726,11 +778,16 @@ var errServerScopeLookup = errors.New("failed to load server scope")
 // cannot see the server through /api/v1/user/servers, and a token they mint
 // must not reach it either.
 //
-// h.sharedServers is `deps.Config.Servers`: the WHOLE admin configuration, not
-// just the shared subset (see internal/serveredition/setup.go). The `sc.Shared`
-// filter is therefore load-bearing — dropping it would hand every tenant the
-// admin's private inventory, which is the exact leak this function exists to
-// prevent.
+// h.adminConfigServers() is the live `Config.Servers`: the WHOLE admin
+// configuration, not just the shared subset (see
+// internal/serveredition/setup.go). The `sc.Shared` filter is therefore
+// load-bearing — dropping it would hand every tenant the admin's private
+// inventory, which is the exact leak this function exists to prevent.
+//
+// The configuration is read ONCE here and threaded through the collision check,
+// so every decision in one call is made against a single version of it. Calling
+// the provider per personal server would let a hot reload land mid-loop and
+// produce a set that was never true of any actual configuration.
 //
 // An admin_user administers the deployment, so for them the candidate set is
 // the whole configuration; the check degrades to the personal edition's
@@ -742,19 +799,22 @@ var errServerScopeLookup = errors.New("failed to load server scope")
 // entitlement derived from "I own a server called X" is indistinguishable, at
 // enforcement time, from "I may reach the admin's X" — which is how a personal
 // server named after an admin-private upstream turned into a grant over it.
-// createServer now refuses to mint such a collision, but this set must not
+// createServer also refuses to mint such a collision, but this set must not
 // depend on that: a row created before the refusal existed, or an admin who
-// later adds a server whose name a tenant already used, both produce one.
-// Excluding it costs the tenant only a token scope, never their server, which
-// multiuser.Router would in any case resolve to the admin's config.
+// later adds a server whose name a tenant already used, both produce one — and
+// the second of those is only caught at all because the configuration is read
+// live rather than snapshotted at boot. Excluding it costs the tenant only a
+// token scope, never their server.
 func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]string, error) {
 	personal, err := h.userStore.ListUserServers(userID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
 	}
 
-	names := make([]string, 0, len(personal)+len(h.sharedServers))
-	seen := make(map[string]struct{}, len(personal)+len(h.sharedServers))
+	adminServers := h.adminConfigServers()
+
+	names := make([]string, 0, len(personal)+len(adminServers))
+	seen := make(map[string]struct{}, len(personal)+len(adminServers))
 	add := func(name string) {
 		if name == "" {
 			return
@@ -770,12 +830,12 @@ func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]strin
 		if sc == nil {
 			continue
 		}
-		if !isAdmin && h.collidesWithAdminConfig(sc.Name) {
+		if !isAdmin && collidesWithAdminConfig(adminServers, sc.Name) {
 			continue
 		}
 		add(sc.Name)
 	}
-	for _, sc := range h.sharedServers {
+	for _, sc := range adminServers {
 		if sc == nil {
 			continue
 		}
@@ -788,14 +848,18 @@ func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]strin
 }
 
 // collidesWithAdminConfig reports whether name is taken by any server in the
-// admin configuration, shared or private.
+// given admin configuration, shared or private.
+//
+// It takes the configuration rather than reading it, so a caller that makes
+// several decisions makes them all against the same version of a
+// hot-reloadable file.
 //
 // Case-insensitive, matching createServer's refusal, so a case-variant personal
 // server cannot be used to smuggle the name past this check and then be lined up
 // against a case-variant request. It is deliberately BROADER than the exact
 // comparison the enforcement layer performs.
-func (h *UserHandlers) collidesWithAdminConfig(name string) bool {
-	for _, sc := range h.sharedServers {
+func collidesWithAdminConfig(adminServers []*config.ServerConfig, name string) bool {
+	for _, sc := range adminServers {
 		if sc != nil && strings.EqualFold(sc.Name, name) {
 			return true
 		}
@@ -1073,12 +1137,22 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 			// 409, matching the personal edition's twin
 			// (internal/httpapi/tokens.go). One storage condition must not
 			// present as two different statuses depending on which door the
-			// caller knocked on. 409 is also the honest one: the cap is a
-			// permanent conflict with the deployment's state that the caller
-			// resolves by deleting a token, not a transient outage a client
-			// should sit and retry the way a 503 invites.
+			// caller knocked on. 409 is the honest status: the cap is a
+			// standing conflict with the deployment's state, not a transient
+			// outage a client should sit and retry the way a 503 invites.
+			//
+			// The WORDING, though, cannot be the personal edition's. There, the
+			// caller owns every token and "you have reached the maximum" is
+			// both true and actionable. auth.MaxTokens is a DEPLOYMENT-wide cap
+			// counted across all tenants (internal/storage/agent_tokens.go), so
+			// here the caller may hold none of the tokens filling it, and a
+			// message that reads as their own quota sends them to delete tokens
+			// that will not free a slot — or to look for tokens they are not
+			// allowed to see. Say whose limit it is and who can act on it.
+			// A per-owner quota, which would make this the caller's own
+			// problem to fix, is issue #1177.
 			writeError(w, http.StatusConflict,
-				fmt.Sprintf("Maximum number of agent tokens (%d) reached", auth.MaxTokens))
+				fmt.Sprintf("This deployment has reached its limit of %d agent tokens. The limit is shared by all users, so deleting your own tokens may not free a slot; ask an administrator.", auth.MaxTokens))
 		default:
 			writeError(w, http.StatusInternalServerError, "Failed to create token")
 		}
