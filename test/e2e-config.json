@@ -69,7 +69,7 @@
     "compress": true,
     "json_format": false
   },
-  "api_key": "b255c7a2740f579778244f9fc0c871e5f5af02b46382dbfd47476563e3bd9958",
+  "api_key": "e2e-test-api-key-fixture",
   "require_mcp_auth": false,
   "read_only_mode": false,
   "disable_management": false,
