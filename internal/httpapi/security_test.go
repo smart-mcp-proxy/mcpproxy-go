@@ -269,7 +269,7 @@ func (m *baseController) GetLogDir() string                                     
 func (m *baseController) TriggerOAuthLogin(serverName string) error                       { return nil }
 func (m *baseController) GetSecretResolver() *secret.Resolver                             { return nil }
 func (m *baseController) NotifySecretsChanged(ctx context.Context, op, name string) error { return nil }
-func (m *baseController) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+func (m *baseController) GetToolCalls(limit, offset int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	return nil, 0, nil
 }
 func (m *baseController) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) {
@@ -317,7 +317,7 @@ func (m *baseController) GetSessionByID(id string) (*contracts.MCPSession, error
 func (m *baseController) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
 	return nil, 0, nil
 }
-func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	return nil, 0, nil
 }
 func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo     { return nil }

@@ -82,11 +82,14 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 	}
 	// #1166: a server the caller may not enumerate takes the SAME exit as one
 	// that does not exist — same status, same message — so the response cannot
-	// be used to probe for hidden servers. This route already 404s on absent,
-	// which is why the parity is reachable here and why the rest of the
-	// /servers/{id} read subtree is a follow-up (those handlers return 200 for
-	// a name that does not exist, so there is no 404 to be at parity WITH
-	// until each grows an existence check).
+	// be used to probe for hidden servers.
+	//
+	// The scopedServerSubtree middleware now applies exactly this rule to the
+	// whole /servers/{id} subtree, so for a scoped caller the request no longer
+	// reaches this line. Kept anyway: it is the route's own absent-server exit
+	// (hit == nil, which still fires for an admin), and the redundant scope
+	// term costs one predicate call while making this handler correct on its
+	// own if it is ever remounted somewhere without that middleware.
 	if hit == nil || !canSeeServer(r.Context(), serverID) {
 		s.writeError(w, r, http.StatusNotFound, "Server not found: "+serverID)
 		return

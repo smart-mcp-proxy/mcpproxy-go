@@ -91,14 +91,20 @@ func (s *Server) requireAdminAuth(w http.ResponseWriter, r *http.Request) bool {
 // so a route outside token management does not 403 with "Agent tokens cannot
 // manage tokens" (#1166 — GET /api/v1/config reuses this gate).
 //
-// It keys on AuthTypeAgent rather than !IsAdmin() deliberately: only admin and
-// agent contexts are ever installed on this mux (apiKeyAuthMiddleware), and a
-// request with NO AuthContext is the middleware's testing/bootstrap
-// passthrough, which must stay as permissive as it is today. If server-edition
-// OAuth user contexts ever reach this mux, tighten it to !IsAdmin().
+// It keys on !IsAdmin(), the SAME test auth.IsScopedCaller and
+// (*Server).revealSecrets use. It used to key on Type == AuthTypeAgent, which
+// is identical today — agent is the only non-admin type apiKeyAuthMiddleware
+// installs on this mux — but would fail OPEN the moment a server-edition
+// AuthTypeUser context reached it: a plain OAuth user is not an admin, yet
+// would have passed an AuthTypeAgent-only test and read GET /api/v1/config.
+// One mux must not carry two different definitions of "not admin".
+//
+// A request with NO AuthContext is still allowed through: that is the
+// middleware's testing/bootstrap passthrough, and it must stay exactly as
+// permissive as it is today (same rule as auth.CanEnumerateServer).
 func (s *Server) requireAdminRead(w http.ResponseWriter, r *http.Request, message string) bool {
 	ac := auth.AuthContextFromContext(r.Context())
-	if ac != nil && ac.Type == auth.AuthTypeAgent {
+	if ac != nil && !ac.IsAdmin() {
 		s.writeError(w, r, http.StatusForbidden, message)
 		return false
 	}

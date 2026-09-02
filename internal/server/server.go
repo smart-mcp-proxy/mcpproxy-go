@@ -33,6 +33,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
@@ -1192,6 +1193,142 @@ func (s *Server) SuggestAlternateListen(baseAddr string) (string, error) {
 	return findAvailableListenAddress(baseAddr, defaultPortSuggestionAttempts)
 }
 
+// upstreamStatsFromSnapshot builds the `upstream_stats` payload from a
+// StateView snapshot.
+//
+// Split out of GetUpstreamStats so the entry shape both #1064 (tool_count
+// zeroing) and #1166 (the per-entry `quarantined` bit every consumer recomputes
+// the sibling scalar from) depend on is reachable from a test without standing
+// up a supervisor. The caller supplies `reveal`; see GetUpstreamStats for why it
+// is unconditionally false there.
+func upstreamStatsFromSnapshot(snapshot *stateview.ServerStatusSnapshot, reveal bool) map[string]interface{} {
+	connectedCount := 0
+	connectingCount := 0
+	quarantinedCount := 0
+	totalTools := 0
+
+	serverStats := make(map[string]interface{}, len(snapshot.Servers))
+
+	for name, status := range snapshot.Servers {
+		if status == nil {
+			continue
+		}
+
+		var connInfo *types.ConnectionInfo
+		if meta, ok := status.Metadata["connection_info"]; ok {
+			if info, ok := meta.(*types.ConnectionInfo); ok {
+				connInfo = info
+			}
+		}
+
+		state := status.State
+		if connInfo != nil {
+			state = connInfo.State.String()
+		}
+		if state == "" {
+			if status.Enabled {
+				if status.Connected {
+					state = "Ready"
+				} else {
+					state = "Disconnected"
+				}
+			} else {
+				state = "Disabled"
+			}
+		}
+
+		connecting := strings.EqualFold(state, "connecting")
+
+		// #1064: a quarantined server contributes no available tools.
+		// tool_count is therefore ALREADY zeroed here rather than left
+		// for a consumer to gate — `quarantined` below says why it is
+		// zero, it does not license a second subtraction.
+		availableToolCount := status.ToolCount
+		if status.Quarantined {
+			availableToolCount = 0
+		}
+
+		entry := map[string]interface{}{
+			"state":        state,
+			"connected":    status.Connected,
+			"connecting":   connecting,
+			"retry_count":  status.RetryCount,
+			"should_retry": false,
+			"name":         status.Name,
+			"tool_count":   availableToolCount,
+			// Per-entry quarantine bit. Every consumer that recomputes
+			// the sibling `quarantined_servers` scalar from the entries
+			// — httpapi.filterUpstreamStatsServers on the scoped-caller
+			// path, contracts.ConvertUpstreamStatsToServerStats — reads
+			// exactly this key. Neither producer emitted it, so both
+			// counted 0 unconditionally and a scoped caller's security
+			// surface read falsely clean even when one of its OWN
+			// allowed servers was quarantined.
+			"quarantined": status.Quarantined,
+		}
+
+		if entry["name"] == "" {
+			entry["name"] = name
+		}
+
+		if status.Config != nil {
+			if status.Config.URL != "" {
+				entry["url"] = status.Config.URL
+			}
+			if status.Config.Protocol != "" {
+				entry["protocol"] = status.Config.Protocol
+			}
+		}
+
+		if connInfo != nil {
+			entry["retry_count"] = connInfo.RetryCount
+			if connInfo.LastError != nil {
+				entry["last_error"] = connInfo.LastError.Error()
+			}
+			if !connInfo.LastRetryTime.IsZero() {
+				entry["last_retry_time"] = connInfo.LastRetryTime
+			}
+			if connInfo.ServerName != "" {
+				entry["server_name"] = connInfo.ServerName
+			}
+			if connInfo.ServerVersion != "" {
+				entry["server_version"] = connInfo.ServerVersion
+			}
+		} else {
+			if status.LastError != "" {
+				entry["last_error"] = status.LastError
+			}
+			if status.LastErrorTime != nil {
+				entry["last_retry_time"] = *status.LastErrorTime
+			}
+		}
+
+		if status.Connected {
+			connectedCount++
+		}
+		if connecting {
+			connectingCount++
+		}
+		if status.Quarantined {
+			quarantinedCount++
+		}
+		if config.ServerContributesTools(status.Enabled, status.Quarantined) {
+			totalTools += status.ToolCount
+		}
+
+		serverStats[name] = entry
+	}
+
+	return oauth.RedactUpstreamStats(map[string]interface{}{
+		"connected_servers":   connectedCount,
+		"connecting_servers":  connectingCount,
+		"quarantined_servers": quarantinedCount,
+		"total_servers":       len(snapshot.Servers),
+		"servers":             serverStats,
+		"total_tools":         totalTools,
+	}, reveal)
+}
+
 // GetUpstreamStats returns statistics about upstream servers
 func (s *Server) GetUpstreamStats() map[string]interface{} {
 	// Issue #1148, round 8. This is the SECOND implementation of
@@ -1214,124 +1351,7 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 
 	if supervisor := s.runtime.Supervisor(); supervisor != nil {
 		if view := supervisor.StateView(); view != nil {
-			snapshot := view.Snapshot()
-
-			connectedCount := 0
-			connectingCount := 0
-			quarantinedCount := 0
-			totalTools := 0
-
-			serverStats := make(map[string]interface{}, len(snapshot.Servers))
-
-			for name, status := range snapshot.Servers {
-				if status == nil {
-					continue
-				}
-
-				var connInfo *types.ConnectionInfo
-				if meta, ok := status.Metadata["connection_info"]; ok {
-					if info, ok := meta.(*types.ConnectionInfo); ok {
-						connInfo = info
-					}
-				}
-
-				state := status.State
-				if connInfo != nil {
-					state = connInfo.State.String()
-				}
-				if state == "" {
-					if status.Enabled {
-						if status.Connected {
-							state = "Ready"
-						} else {
-							state = "Disconnected"
-						}
-					} else {
-						state = "Disabled"
-					}
-				}
-
-				connecting := strings.EqualFold(state, "connecting")
-
-				// #1064: a quarantined server contributes no available tools.
-				// This entry map carries no enabled/quarantined key, so
-				// downstream consumers (contracts.ConvertUpstreamStatsToServerStats)
-				// cannot gate on it -- the value has to be zeroed here.
-				availableToolCount := status.ToolCount
-				if status.Quarantined {
-					availableToolCount = 0
-				}
-
-				entry := map[string]interface{}{
-					"state":        state,
-					"connected":    status.Connected,
-					"connecting":   connecting,
-					"retry_count":  status.RetryCount,
-					"should_retry": false,
-					"name":         status.Name,
-					"tool_count":   availableToolCount,
-				}
-
-				if entry["name"] == "" {
-					entry["name"] = name
-				}
-
-				if status.Config != nil {
-					if status.Config.URL != "" {
-						entry["url"] = status.Config.URL
-					}
-					if status.Config.Protocol != "" {
-						entry["protocol"] = status.Config.Protocol
-					}
-				}
-
-				if connInfo != nil {
-					entry["retry_count"] = connInfo.RetryCount
-					if connInfo.LastError != nil {
-						entry["last_error"] = connInfo.LastError.Error()
-					}
-					if !connInfo.LastRetryTime.IsZero() {
-						entry["last_retry_time"] = connInfo.LastRetryTime
-					}
-					if connInfo.ServerName != "" {
-						entry["server_name"] = connInfo.ServerName
-					}
-					if connInfo.ServerVersion != "" {
-						entry["server_version"] = connInfo.ServerVersion
-					}
-				} else {
-					if status.LastError != "" {
-						entry["last_error"] = status.LastError
-					}
-					if status.LastErrorTime != nil {
-						entry["last_retry_time"] = *status.LastErrorTime
-					}
-				}
-
-				if status.Connected {
-					connectedCount++
-				}
-				if connecting {
-					connectingCount++
-				}
-				if status.Quarantined {
-					quarantinedCount++
-				}
-				if config.ServerContributesTools(status.Enabled, status.Quarantined) {
-					totalTools += status.ToolCount
-				}
-
-				serverStats[name] = entry
-			}
-
-			return oauth.RedactUpstreamStats(map[string]interface{}{
-				"connected_servers":   connectedCount,
-				"connecting_servers":  connectingCount,
-				"quarantined_servers": quarantinedCount,
-				"total_servers":       len(snapshot.Servers),
-				"servers":             serverStats,
-				"total_tools":         totalTools,
-			}, reveal)
+			return upstreamStatsFromSnapshot(view.Snapshot(), reveal)
 		}
 	}
 
@@ -3528,9 +3548,10 @@ func (s *Server) GetCurrentConfig() interface{} {
 	return s.runtime.GetCurrentConfig()
 }
 
-// GetToolCalls retrieves tool call history with pagination
-func (s *Server) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
-	return s.runtime.GetToolCalls(limit, offset)
+// GetToolCalls retrieves tool call history with pagination. scope restricts the
+// result to a set of server names (nil = unrestricted).
+func (s *Server) GetToolCalls(limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
+	return s.runtime.GetToolCalls(limit, offset, scope)
 }
 
 // GetToolCallByID retrieves a single tool call by ID
@@ -3550,9 +3571,10 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	return s.runtime.ReplayToolCall(ctx, id, arguments)
 }
 
-// GetToolCallsBySession retrieves tool calls filtered by session ID
-func (s *Server) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
-	return s.runtime.GetToolCallsBySession(sessionID, limit, offset)
+// GetToolCallsBySession retrieves tool calls filtered by session ID. scope
+// restricts the result to a set of server names (nil = unrestricted).
+func (s *Server) GetToolCallsBySession(sessionID string, limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
+	return s.runtime.GetToolCallsBySession(sessionID, limit, offset, scope)
 }
 
 // GetRecentSessions retrieves recent MCP sessions, optionally filtered by

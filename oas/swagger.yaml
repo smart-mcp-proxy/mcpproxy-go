@@ -6830,6 +6830,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read MCP session history
         "405":
           content:
             application/json:
@@ -6879,6 +6885,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read MCP session history
         "404":
           content:
             application/json:
@@ -6907,6 +6919,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.SuccessResponse'
           description: Token statistics
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read deployment-wide token statistics
         "500":
           content:
             application/json:

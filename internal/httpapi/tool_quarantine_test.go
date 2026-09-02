@@ -52,6 +52,15 @@ func (m *mockToolQuarantineController) GetCurrentConfig() any {
 	}
 }
 
+// GetAllServers must report the server these tests address. The /servers/{id}
+// subtree gate answers 404 to a scoped caller for a server that does not exist
+// (#1166 follow-up), and baseController's default reports none — so without
+// this the agent-token cases below would assert the tool-toggle gate's 403
+// against a request that never reached that gate.
+func (m *mockToolQuarantineController) GetAllServers() ([]map[string]interface{}, error) {
+	return []map[string]interface{}{{"name": "github", "id": "github"}}, nil
+}
+
 func (m *mockToolQuarantineController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
 	var result []*storage.ToolApprovalRecord
 	for _, a := range m.approvals {

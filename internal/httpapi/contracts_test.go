@@ -176,7 +176,7 @@ func (m *MockServerController) GetRecentSessions(_ int, _ string) ([]*contracts.
 func (m *MockServerController) GetSessionByID(_ string) (*contracts.MCPSession, error) {
 	return nil, nil
 }
-func (m *MockServerController) GetToolCallsBySession(_ string, _ int, _ int) ([]*contracts.ToolCallRecord, int, error) {
+func (m *MockServerController) GetToolCallsBySession(_ string, _ int, _ int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	return []*contracts.ToolCallRecord{}, 0, nil
 }
 
@@ -235,7 +235,7 @@ func (m *MockServerController) NotifySecretsChanged(_ context.Context, _, _ stri
 func (m *MockServerController) GetCurrentConfig() interface{} { return map[string]interface{}{} }
 
 // Tool call history methods
-func (m *MockServerController) GetToolCalls(_ int, _ int) ([]*contracts.ToolCallRecord, int, error) {
+func (m *MockServerController) GetToolCalls(_ int, _ int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	return []*contracts.ToolCallRecord{}, 0, nil
 }
 func (m *MockServerController) GetToolCallByID(_ string) (*contracts.ToolCallRecord, error) {

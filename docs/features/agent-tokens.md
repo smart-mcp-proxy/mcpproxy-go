@@ -181,11 +181,37 @@ Server scoping is enforced at three levels:
    `stats` counters), `GET /api/v1/status` (`upstream_stats`), the `/events`
    SSE stream, `GET /api/v1/tools`, `GET /api/v1/index/search`,
    `GET /api/v1/diagnostics` / `doctor`, `GET /api/v1/profiles`,
-   `GET /api/v1/annotations/coverage` and `GET /api/v1/security/scans`. A
-   server outside the scope returns the same `404` as one that does not exist
-   on `GET /api/v1/servers/{id}/diagnostics`, so the response cannot be used to
-   probe for hidden servers. `GET /api/v1/config` is an admin document and is
-   denied to agent tokens outright (`403`).
+   `GET /api/v1/annotations/coverage` and `GET /api/v1/security/scans`.
+
+   **The whole `/api/v1/servers/{id}` subtree** answers `404 Server not found`
+   for a server outside the scope — `tools`, `logs`, `tool-calls`,
+   `diagnostics`, `scan/status`, `scan/report`, `scan/files`, `integrity`,
+   `tools/export`, `tools/{tool}/diff` and every sub-resource added later, since
+   the gate is a middleware on the subtree. It is the *same* `404` a server that
+   does not exist returns — byte for byte, once the echoed name is normalised —
+   so the response cannot be used to probe for hidden servers. `logs` matters
+   most: upstream stderr routinely echoes the argv and env the server process
+   was launched with.
+
+   **The activity, tool-call and usage doors** are scoped to records
+   attributable to an allowed server: `GET /api/v1/activity`,
+   `/activity/summary`, `/activity/usage`, `/activity/export`, `/activity/{id}`,
+   `GET /api/v1/tool-calls` and `/tool-calls/{id}` (plus its `/replay`). The
+   entitlement is applied inside the query, so `total` and the page always
+   describe the same record set, and a `?server=` filter narrows *within* the
+   scope rather than escaping it. Records with no server attribution
+   (`system_start`, `config_change`, …) are operator-plane events and are not
+   shown. On `/activity/usage`, aggregates that cannot be re-derived per server
+   — the tokens-saved headline and the global timeline — are omitted rather than
+   reported fleet-wide.
+
+   **Denied outright (`403`)** to agent tokens, because there is nothing
+   per-server to project:
+   - `GET /api/v1/config` — an admin document, and it carries the admin API key.
+   - `GET /api/v1/stats/tokens` — `per_server_tool_list_sizes` is keyed by every
+     configured server, and the scalars beside it are fleet-wide.
+   - `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}` — an MCP session
+     describes a *client* and the user's workspace, with no server attribution.
 
    On the `/events` stream, scoping applies **per event**, not only to the
    `servers.changed` server list:

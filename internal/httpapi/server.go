@@ -156,12 +156,16 @@ type ServerController interface {
 	GetCurrentConfig() interface{}
 	NotifySecretsChanged(ctx context.Context, operation, secretName string) error
 
-	// Tool call history
-	GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error)
+	// Tool call history. The ToolCallScope argument is the caller's server
+	// entitlement (nil = unrestricted, #1166 follow-up); it is passed DOWN
+	// rather than applied to the result because these reads also report a
+	// `total`, and a post-filter would leave the total counting records the
+	// page no longer contains.
+	GetToolCalls(limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error)
 	GetToolCallByID(id string) (*contracts.ToolCallRecord, error)
 	GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error)
 	ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error)
-	GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error)
+	GetToolCallsBySession(sessionID string, limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error)
 
 	// Session management. status filters on session status ("active" /
 	// "closed"); an empty string means no filter.
@@ -561,9 +565,18 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 
 	// Built through the shared constructor so every field the MCP path carries
 	// reaches the REST path too — notably ProfilePin, which this path dropped
-	// before Spec 098. Evaluation scope is token scope ∩ token pin ∩ requested
-	// profile (preflight.ResolveScope), so a dropped pin silently widened what
-	// a pinned token could see.
+	// before Spec 098. PREFLIGHT's evaluation scope is token scope ∩ token pin ∩
+	// requested profile (preflight.ResolveScope), so a dropped pin silently
+	// widened what a pinned token could resolve there.
+	//
+	// That intersection is preflight's, not this package's ENUMERATION
+	// boundary. Every read door under /api/v1 answers from
+	// auth.CanEnumerateServer — token scope alone. The profile terms are
+	// ergonomic filters and one of them (the requested profile) is
+	// caller-selectable, so folding them into the enumeration boundary would
+	// let a caller change what it is authorized to see by switching profiles.
+	// The three notions of scope, and why only one of them is a boundary, are
+	// laid out at the top of scope_subtree.go.
 	authCtx := agentToken.AuthContext()
 	ctx := auth.WithAuthContext(r.Context(), authCtx)
 
@@ -784,6 +797,12 @@ func (s *Server) setupRoutes() {
 			// MCP-1056). Centralising the decode also prevents new sub-resource
 			// routes from silently reintroducing the gap.
 			r.Use(decodeServerIDParam)
+			// #1166 follow-up: ONE scope gate for the whole subtree, so a new
+			// sub-resource inherits it instead of shipping open. Registered
+			// after decodeServerIDParam so it sees the decoded name. For a
+			// scoped caller an unentitled server and an absent one are the same
+			// 404; admins are unaffected. See scopedServerSubtree.
+			r.Use(s.scopedServerSubtree)
 			// Mutating per-server routes carry the shared agent-token gate
 			// (issues #877/#878).
 			r.Patch("/", s.requireServerOp(auth.ServerOpPatch, s.handlePatchServer))                                   // Partial update server config
@@ -1150,7 +1169,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": liveUpstreamStats,
-		"status":         withLiveUpstreamStats(s.controller.GetStatus(), liveUpstreamStats),
+		"status":         withLiveUpstreamStats(r.Context(), s.controller.GetStatus(), liveUpstreamStats),
 		"routing_mode":   routingMode,
 		"timestamp":      time.Now().Unix(),
 		// Unix seconds at which this core process started, so a UI can render a
@@ -3826,7 +3845,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"running":        s.controller.IsRunning(),
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": initialLiveStats,
-		"status":         withLiveUpstreamStats(s.controller.GetStatus(), initialLiveStats),
+		"status":         withLiveUpstreamStats(r.Context(), s.controller.GetStatus(), initialLiveStats),
 		"timestamp":      time.Now().Unix(),
 		"started_at":     processStart.Unix(),
 	}
@@ -3865,7 +3884,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				"running":        s.controller.IsRunning(),
 				"listen_addr":    s.controller.GetListenAddress(),
 				"upstream_stats": eventLiveStats,
-				"status":         withLiveUpstreamStats(status, eventLiveStats),
+				"status":         withLiveUpstreamStats(r.Context(), status, eventLiveStats),
 				"timestamp":      time.Now().Unix(),
 				"started_at":     processStart.Unix(),
 			}
@@ -4484,11 +4503,29 @@ func (s *Server) handleGetTelemetryPayload(w http.ResponseWriter, r *http.Reques
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Token statistics"
+// @Failure 403 {object} contracts.ErrorResponse "Agent tokens cannot read deployment-wide token statistics"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/stats/tokens [get]
 func (s *Server) handleGetTokenStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// #1166 follow-up (G3): DENIED to a non-admin caller, not filtered.
+	//
+	// contracts.ServerTokenMetrics.PerServerToolListSizes is a map keyed by
+	// EVERY configured server name — a complete inventory enumeration, which is
+	// the exact thing GET /api/v1/servers now withholds. Projecting the map
+	// through canSeeServer would not be enough: the scalars beside it
+	// (SavedTokens, SavedTokensPercentage, the baseline sizes) are computed over
+	// the whole fleet and cannot be re-derived per server, so a scoped caller
+	// would still hold a cross-tenant oracle in numbers that merely LOOKED
+	// filtered. recomputeServerStats already takes the same position on the same
+	// struct — it DROPS TokenMetrics from GET /api/v1/servers rather than report
+	// it wrongly — and this route is nothing but that struct, so the consistent
+	// answer for the whole document is the one /api/v1/config gets: 403.
+	if !s.requireAdminRead(w, r, "Agent tokens cannot read deployment-wide token statistics") {
 		return
 	}
 
@@ -4624,11 +4661,22 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	var total int
 	var err error
 
+	// #1166 follow-up (G2): the caller's entitlement goes DOWN into the read,
+	// not over its result. These records carry the arguments and responses of
+	// every tool call on every server; a scoped token had no gate here at all.
+	// Filtering the returned page instead would leave `total` counting the
+	// records the page no longer contains — a broken pager, and a count oracle
+	// for exactly what was hidden.
+	var scope storage.ToolCallScope
+	if allowed, scoped := scopeAllowedServers(r.Context()); scoped {
+		scope = allowed
+	}
+
 	// Get tool calls - either filtered by session or all
 	if sessionID != "" {
-		toolCalls, total, err = s.controller.GetToolCallsBySession(sessionID, limit, offset)
+		toolCalls, total, err = s.controller.GetToolCallsBySession(sessionID, limit, offset, scope)
 	} else {
-		toolCalls, total, err = s.controller.GetToolCalls(limit, offset)
+		toolCalls, total, err = s.controller.GetToolCalls(limit, offset, scope)
 	}
 
 	if err != nil {
@@ -4677,6 +4725,15 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 	toolCall, err := s.controller.GetToolCallByID(id)
 	if err != nil {
 		s.logger.Errorw("Failed to get tool call detail", "id", id, "error", err)
+		s.writeError(w, r, http.StatusNotFound, "Tool call not found")
+		return
+	}
+
+	// #1166 follow-up (G2): a record on a server the caller may not see takes
+	// the SAME exit as an id that does not exist — same status, same message.
+	// The oracle for this is status parity with an unknown id, not "the body
+	// omits the server name": this 404 body echoes nothing of the request.
+	if toolCall == nil || !canSeeServer(r.Context(), toolCall.ServerName) {
 		s.writeError(w, r, http.StatusNotFound, "Tool call not found")
 		return
 	}
@@ -4818,6 +4875,19 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
+	}
+
+	// #1166 follow-up (G2): replay dispatches a real call to the recorded
+	// server, so it must answer the same entitlement question the read door
+	// does — and with the same 404, so it cannot be used to probe for ids the
+	// caller may not read. Same shape as the /servers/{id} subtree gate: an
+	// out-of-scope record and an unknown id are one response.
+	if auth.IsScopedCaller(r.Context()) {
+		recorded, lookupErr := s.controller.GetToolCallByID(id)
+		if lookupErr != nil || recorded == nil || !canSeeServer(r.Context(), recorded.ServerName) {
+			s.writeError(w, r, http.StatusNotFound, "Tool call not found")
+			return
+		}
 	}
 
 	// Replay the tool call with modified arguments. The request context travels
@@ -5311,7 +5381,14 @@ func (s *Server) writeApplyConfigError(w http.ResponseWriter, r *http.Request, m
 // Copies rather than mutates: the SSE value is a map owned by the publisher,
 // and refreshing it in place would edit something another goroutine may hold.
 // Keys are preserved rather than dropped — clients read data.status.*.
-func withLiveUpstreamStats(status interface{}, live map[string]interface{}) interface{} {
+//
+// ctx carries the caller so `message` can be scoped. That string is written by
+// runtime.UpdatePhaseMessage as "Connected to %d/%d servers, retrying..." — a
+// verbatim count of the WHOLE inventory, sitting one key away from the
+// total_servers that #1166 recomputed precisely so it would stop being a count
+// oracle. A scoped caller gets it blanked; `phase` (Ready/Loading/…) survives,
+// carries no counts, and is what clients switch on.
+func withLiveUpstreamStats(ctx context.Context, status interface{}, live map[string]interface{}) interface{} {
 	snapshot, ok := status.(map[string]interface{})
 	if !ok || live == nil {
 		return status
@@ -5323,6 +5400,9 @@ func withLiveUpstreamStats(status interface{}, live map[string]interface{}) inte
 	refreshed["upstream_stats"] = live
 	if totalTools, ok := live["total_tools"].(int); ok {
 		refreshed["tools_indexed"] = totalTools
+	}
+	if _, present := refreshed["message"]; present && auth.IsScopedCaller(ctx) {
+		refreshed["message"] = ""
 	}
 	return refreshed
 }
@@ -5900,6 +5980,7 @@ func getBool(m map[string]interface{}, key string) bool {
 // @Success      200     {object}  contracts.GetSessionsResponse     "Sessions retrieved successfully"
 // @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter"
 // @Failure      401     {object}  contracts.ErrorResponse           "Unauthorized - missing or invalid API key"
+// @Failure      403     {object}  contracts.ErrorResponse           "Agent tokens cannot read MCP session history"
 // @Failure      405     {object}  contracts.ErrorResponse           "Method not allowed"
 // @Failure      500     {object}  contracts.ErrorResponse           "Failed to get sessions"
 // @Security     ApiKeyAuth
@@ -5908,6 +5989,10 @@ func getBool(m map[string]interface{}, key string) bool {
 func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
 		return
 	}
 
@@ -5973,6 +6058,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 // @Success      200  {object}  contracts.GetSessionDetailResponse      "Session details retrieved successfully"
 // @Failure      400  {object}  contracts.ErrorResponse                 "Session ID required"
 // @Failure      401  {object}  contracts.ErrorResponse                 "Unauthorized - missing or invalid API key"
+// @Failure      403  {object}  contracts.ErrorResponse                 "Agent tokens cannot read MCP session history"
 // @Failure      404  {object}  contracts.ErrorResponse                 "Session not found"
 // @Failure      405  {object}  contracts.ErrorResponse                 "Method not allowed"
 // @Security     ApiKeyAuth
@@ -5981,6 +6067,10 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
 		return
 	}
 

@@ -1736,8 +1736,10 @@ func (m *Manager) GetStats() map[string]interface{} {
 		// Read config through the thread-safe accessor to avoid racing with
 		// SetConfig on the reconcile add path (MCP-770).
 		name, url, protocol := "", "", ""
+		quarantined := false
 		if cfg := client.GetConfig(); cfg != nil {
 			name, url, protocol = cfg.Name, cfg.URL, cfg.Protocol
+			quarantined = cfg.Quarantined
 			if cfg.Quarantined {
 				quarantinedCount++
 			}
@@ -1752,6 +1754,12 @@ func (m *Manager) GetStats() map[string]interface{} {
 			"name":         name,
 			"url":          url,
 			"protocol":     protocol,
+			// Emitted by BOTH upstream_stats producers (see the twin in
+			// internal/server.Server.GetUpstreamStats): every consumer that
+			// recomputes `quarantined_servers` from the entries — the
+			// scoped-caller filter and contracts.ConvertUpstreamStatsToServerStats
+			// — keys on it, and neither producer used to write it.
+			"quarantined": quarantined,
 		}
 
 		if connectionInfo.State == types.StateReady {
