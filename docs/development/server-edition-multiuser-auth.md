@@ -90,6 +90,33 @@ trusted for authorization. Consequences:
   tokens by name. Cross-tenant token administration belongs in
   `admin_handlers` as its own feature.
 
+### Token server scope (`allowed_servers`)
+
+`POST /api/v1/user/tokens` constrains the requested `allowed_servers` to what
+the caller may actually reach. `AllowedServers` is the sole input to
+`auth.AuthContext.CanAccessServer`, so persisting it verbatim let a tenant mint
+themselves a token over the admin's whole inventory.
+
+- **Entitlement is the per-user door's own predicate**: the caller's personal
+  servers plus the admin servers flagged `shared`. `NewUserHandlers` receives
+  the *whole* configuration (`deps.Config.Servers`), so the `Shared` filter is
+  what keeps the admin's private servers out. Reuse
+  `entitledServerNames`; do not write a second definition of entitlement.
+- **An unentitled name is rejected (400), not silently dropped** — a token that
+  quietly sees less than asked is worse than a refusal. The message is
+  identical for "another tenant's server", "the admin's unshared server" and
+  "no such server anywhere": a distinguishing message would be a server-name
+  existence oracle, the same defect class as the token-name one above.
+- **`"*"`** is the only wildcard the enforcement layer honours (`s == "*" ||
+  s == name`, in both `auth` and `jsruntime`), so there are no globs to expand.
+  For an admin it stays literal; for a tenant it is materialised into their
+  entitled set at mint time, and refused outright when that set is empty. The
+  expansion is a snapshot — a server added later needs a new token — and the
+  create response echoes the effective list back.
+- **An omitted `allowed_servers` stays empty**, which denies every server at the
+  agent tier. Do not copy the personal edition's "empty means `["*"]`" default:
+  there the only caller is the operator.
+
 ## Key Directories
 
 | Directory | Purpose |

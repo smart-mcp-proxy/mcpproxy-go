@@ -684,6 +684,160 @@ func (h *UserHandlers) listUserTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"tokens": userTokens})
 }
 
+// errServerScopeLookup marks a server-scope failure that is the SERVER's fault
+// (the per-user store could not be read), so createUserToken can answer 500
+// instead of blaming the caller's request body for it.
+var errServerScopeLookup = errors.New("failed to load server scope")
+
+// entitledServerNames returns the servers the caller may legitimately scope an
+// agent token to.
+//
+// This is deliberately the SAME predicate the per-user door renders through
+// listServers — the user's own personal servers, plus the admin-configured
+// servers flagged Shared — rather than a second, parallel definition of
+// entitlement that could drift from it. If a name is not in this set, the user
+// cannot see the server through /api/v1/user/servers, and a token they mint
+// must not reach it either.
+//
+// h.sharedServers is `deps.Config.Servers`: the WHOLE admin configuration, not
+// just the shared subset (see internal/serveredition/setup.go). The `sc.Shared`
+// filter is therefore load-bearing — dropping it would hand every tenant the
+// admin's private inventory, which is the exact leak this function exists to
+// prevent.
+//
+// An admin_user administers the deployment, so for them the candidate set is
+// the whole configuration; the check degrades to the personal edition's
+// "is this a known server?" validation (internal/httpapi/tokens.go).
+func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]string, error) {
+	personal, err := h.userStore.ListUserServers(userID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+
+	names := make([]string, 0, len(personal)+len(h.sharedServers))
+	seen := make(map[string]struct{}, len(personal)+len(h.sharedServers))
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	for _, sc := range personal {
+		if sc != nil {
+			add(sc.Name)
+		}
+	}
+	for _, sc := range h.sharedServers {
+		if sc == nil {
+			continue
+		}
+		if sc.Shared || isAdmin {
+			add(sc.Name)
+		}
+	}
+
+	return names, nil
+}
+
+// resolveTokenServerScope turns the requested allowed_servers into the list
+// that will actually be persisted, rejecting anything the caller is not
+// entitled to.
+//
+// Rules:
+//
+//   - An OMITTED or empty list is left empty, exactly as before this check
+//     existed. At the agent tier an empty AllowedServers denies every server
+//     (auth.AuthContext.CanAccessServer iterates the list and finds nothing),
+//     so the safe default needs no widening — and note this differs from the
+//     personal edition, where an empty list is rewritten to ["*"] because the
+//     only caller there IS the operator.
+//
+//   - "*" is the only wildcard the enforcement layer understands (both
+//     auth.AuthContext.CanAccessServer and jsruntime.AuthInfo.CanAccessServer
+//     compare `s == "*" || s == name`), so there is no glob to expand: a
+//     pattern like "git*" is just an unentitled name and is rejected below.
+//
+//   - For an ADMIN, "*" keeps its literal meaning: they administer every
+//     server, and freezing the list would silently drop servers added later.
+//
+//   - For a regular tenant, "*" means "every server I can reach", and is
+//     MATERIALISED into that set. Persisting the star itself would leave a
+//     standing grant over the whole deployment that only a downstream filter
+//     stands between; and the enforcement comparison has no notion of an
+//     owner, so the star cannot be re-scoped at use time. The expansion is a
+//     snapshot: a server added to the account afterwards is not in the token
+//     and needs a new one. That is deliberate — a token is a capability, and
+//     the conservative reading of "*" is the set that existed when it was
+//     signed. It is not silent, either: the create response echoes the
+//     effective allowed_servers back to the caller.
+//
+//   - Any other name must be in the entitled set. The rejection message is the
+//     SAME whether the name belongs to another tenant, is one of the admin's
+//     non-shared servers, or does not exist anywhere: distinguishing them would
+//     re-open, on server names, precisely the existence oracle this branch just
+//     closed on token names.
+func (h *UserHandlers) resolveTokenServerScope(r *http.Request, userID string, requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		return requested, nil
+	}
+
+	ac := auth.AuthContextFromContext(r.Context())
+	isAdmin := ac != nil && ac.IsAdmin()
+
+	entitled, err := h.entitledServerNames(userID, isAdmin)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]struct{}, len(entitled))
+	for _, name := range entitled {
+		allowed[name] = struct{}{}
+	}
+
+	resolved := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	appendOnce := func(name string) {
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		resolved = append(resolved, name)
+	}
+
+	for _, raw := range requested {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, errors.New("allowed_servers entries must not be empty")
+		}
+
+		if name == "*" {
+			if isAdmin {
+				// A literal star already subsumes every other entry.
+				return []string{"*"}, nil
+			}
+			if len(entitled) == 0 {
+				return nil, errors.New("no servers are available to scope this token to")
+			}
+			for _, n := range entitled {
+				appendOnce(n)
+			}
+			continue
+		}
+
+		if _, ok := allowed[name]; !ok {
+			// Uniform for "not yours", "not shared" and "does not exist".
+			return nil, fmt.Errorf("server %q is not available to you", name)
+		}
+		appendOnce(name)
+	}
+
+	return resolved, nil
+}
+
 // createUserToken creates a new agent token owned by the authenticated user.
 func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserID(r)
@@ -714,6 +868,23 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Constrain the requested server scope to what this caller may actually
+	// reach. Without this the field was persisted VERBATIM, and AllowedServers
+	// is the sole input to auth.AuthContext.CanAccessServer — so a tenant could
+	// mint themselves a token scoped to `["*"]`, or to a server name they have
+	// never been shown, and read the admin's entire inventory through it. See
+	// resolveTokenServerScope.
+	effectiveServers, scopeErr := h.resolveTokenServerScope(r, userID, req.AllowedServers)
+	if scopeErr != nil {
+		if errors.Is(scopeErr, errServerScopeLookup) {
+			h.logger.Errorw("failed to resolve token server scope", "user_id", userID, "error", scopeErr)
+			writeError(w, http.StatusInternalServerError, "Failed to resolve server scope")
+			return
+		}
+		writeError(w, http.StatusBadRequest, scopeErr.Error())
+		return
+	}
+
 	// Parse expiry duration (default 30 days).
 	var expiresAt time.Time
 	if req.ExpiresIn != "" {
@@ -736,7 +907,7 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 
 	token := auth.AgentToken{
 		Name:           req.Name,
-		AllowedServers: req.AllowedServers,
+		AllowedServers: effectiveServers,
 		Permissions:    req.Permissions,
 		ExpiresAt:      expiresAt,
 		CreatedAt:      time.Now().UTC(),

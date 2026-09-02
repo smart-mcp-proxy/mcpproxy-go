@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -38,10 +39,20 @@ var tokenTestHMACKey = []byte("test-hmac-key-32-bytes-long!!!!!")
 type tokenTestRig struct {
 	router *chi.Mux
 	store  *storage.Manager
+	users  *users.UserStore
 	as     *auth.AuthContext
 }
 
 func newTokenTestRig(t *testing.T) *tokenTestRig {
+	t.Helper()
+	return newTokenTestRigWithServers(t, nil)
+}
+
+// newTokenTestRigWithServers is newTokenTestRig with an admin server
+// configuration, so a test can exercise the entitlement predicate (personal +
+// Shared) that createUserToken constrains a token's allowed_servers to. The
+// slice is what setup.go passes: the WHOLE config, shared and unshared alike.
+func newTokenTestRigWithServers(t *testing.T, sharedServers []*config.ServerConfig) *tokenTestRig {
 	t.Helper()
 
 	logger := zap.NewNop().Sugar()
@@ -57,8 +68,8 @@ func newTokenTestRig(t *testing.T) *tokenTestRig {
 	require.NoError(t, err)
 	t.Cleanup(func() { mgr.Close() })
 
-	rig := &tokenTestRig{store: mgr}
-	handlers := NewUserHandlers(userStore, nil, mgr, tokenTestHMACKey, logger)
+	rig := &tokenTestRig{store: mgr, users: userStore}
+	handlers := NewUserHandlers(userStore, sharedServers, mgr, tokenTestHMACKey, logger)
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
