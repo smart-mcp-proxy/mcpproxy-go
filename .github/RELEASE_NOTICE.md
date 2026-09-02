@@ -26,20 +26,12 @@ By severity of exposure, and by the log level required:
 
 **No non-default configuration was required for the `info` row.** Anyone who has connected an OAuth upstream has authorization codes in `main.log` and in terminal scrollback. Authorization codes are single-use and short-lived, so the durable risk is the authorization-URL line: if an upstream URL carries a static token, that token is in the log of every OAuth-enabled install.
 
-### Server edition
-
-- **Admin demotion did not take effect** ([#1169](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1169)) — removing an address from `admin_emails` left the user with full administrator access, including secret reveal, until their session token expired (default 24 hours). Disabling the account did work; demotion alone did not.
-- **Agent-token names were a global namespace** ([#1168](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1168)) — two tenants could not both use the same token name, and the differing responses let any user probe for other users' token names. Agent tokens also carried no tenant identity.
-- **A disabled user's agent tokens kept working.** Disabling an account is the documented remediation for a compromised user, and it did not revoke that user's minted tokens.
-- **Requested `allowed_servers` was not checked against entitlement**, so a tenant could mint a token scoped to servers they were not entitled to see.
-
 ### What you should do
 
 1. **Rotate your MCPProxy API key.** Remove `api_key` from `~/.mcpproxy/mcp_config.json` and restart to have a new one generated, or set a new value directly.
 2. **Revoke and re-mint every agent token** (`mcpproxy token list`, then `mcpproxy token revoke <name>`). Any token issued before this release should be assumed to have had administrator-equivalent reach.
 3. **Rotate upstream credentials that appeared in logs.** In order of likelihood: any credential embedded in an upstream server URL; any credential passed as a command-line argument; and, if you ran with Docker isolation at `debug`, upstream environment secrets.
 4. **Treat existing log files as secret-bearing.** `~/.mcpproxy/logs/*.log` on Linux, `~/Library/Logs/mcpproxy/*.log` on macOS, `%LOCALAPPDATA%\mcpproxy\logs\*.log` on Windows. Delete them or restrict access; note they may also exist in backups.
-5. **Server edition only:** re-check `admin_emails` against who should actually hold admin, and revoke tokens belonging to any disabled account.
 
 Redaction preserves diagnostics — flag names, hosts, paths and parameter names still appear in logs, so debugging a connection is unaffected. Only the credential values are masked.
 
