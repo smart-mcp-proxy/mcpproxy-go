@@ -23,7 +23,9 @@ components:
           description: 'Max records before pruning (default: 100000)'
           type: integer
         activity_max_response_size:
-          description: 'Response truncation limit in bytes (default: 65536)'
+          description: 'Response text stored on ONE record, in bytes (default: 65536,
+            0 disables the cap; a 14-byte ...[truncated] marker is appended on top
+            when a cut happens).'
           type: integer
         activity_max_size_mb:
           description: 'Max total activity-log size in MB before pruning oldest (default:

@@ -319,6 +319,19 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		activityService.SetUsagePersistInterval(cfg.Observability.UsagePersistInterval.Duration())
 	}
 
+	// Wire the per-record response cap UNCONDITIONALLY, outside the retention
+	// guard below. EffectiveActivityMaxResponseSize resolves absent (nil) to
+	// the 64KB default and an explicit 0 to "disabled", so there is no config
+	// shape for which skipping it is right — and leaving it inside the guard
+	// made the documented off switch depend on an unrelated retention key
+	// happening to be set.
+	maxResponseSize := cfg.EffectiveActivityMaxResponseSize()
+	activityService.SetMaxResponseSize(maxResponseSize)
+	if maxResponseSize == 0 {
+		logger.Warn("Per-record activity response cap DISABLED (activity_max_response_size: 0) — " +
+			"responses are stored whole and config.db can grow quickly")
+	}
+
 	// Wire activity retention config from config file
 	if cfg.ActivityRetentionDays > 0 || cfg.ActivityMaxRecords > 0 || cfg.ActivityCleanupIntervalMin > 0 || cfg.ActivityMaxSizeMB >= 0 {
 		maxAge := time.Duration(cfg.ActivityRetentionDays) * 24 * time.Hour
@@ -327,9 +340,8 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		// value (>= 0 is applied; -1 would mean "unchanged").
 		maxSizeBytes := int64(cfg.ActivityMaxSizeMB) * 1024 * 1024
 		activityService.SetRetentionConfig(maxAge, cfg.ActivityMaxRecords, checkInterval, maxSizeBytes)
-		activityService.SetMaxResponseSize(cfg.ActivityMaxResponseSize)
 		logger.Info("Activity retention config applied",
-			zap.Int("max_response_size", cfg.ActivityMaxResponseSize),
+			zap.Int("max_response_size", maxResponseSize),
 			zap.Int("retention_days", cfg.ActivityRetentionDays),
 			zap.Int("max_records", cfg.ActivityMaxRecords),
 			zap.Int("max_size_mb", cfg.ActivityMaxSizeMB),

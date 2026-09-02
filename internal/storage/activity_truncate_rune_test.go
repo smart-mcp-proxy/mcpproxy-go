@@ -65,3 +65,30 @@ func TestTruncatedRecordSurvivesMarshalRoundTripWithinCap(t *testing.T) {
 	assert.LessOrEqual(t, len(round.Response), maxSize+len(truncationSuffix),
 		"a record must not exceed its own advertised cap after marshalling")
 }
+
+// TestTruncatedRecordSizeMatchesDocumentedArithmetic pins the exact number
+// docs/configuration.md now states, because the docs and the code disagreed:
+// the table called the setting the "Maximum response text stored on ONE record,
+// in bytes" while truncateResponse appends the marker AFTER the cut, so a
+// record under the 65536 default measured 65550 on a live instance.
+//
+// The docs were corrected rather than the arithmetic — 14 bytes against a 64KB
+// cap is not worth eating into the operator's budget, and a cap that swallowed
+// its own "this is a prefix" marker would be worse value. This test is what
+// keeps the corrected wording true: making the cap inclusive later, or changing
+// the marker, fails here and sends the author back to the table.
+func TestTruncatedRecordSizeMatchesDocumentedArithmetic(t *testing.T) {
+	const maxSize = DefaultMaxResponseSize // 65536, the documented default
+
+	stored, truncated := truncateResponse(strings.Repeat("z", 200_000), maxSize)
+	require.True(t, truncated)
+
+	assert.Equal(t, maxSize+len(truncationSuffix), len(stored),
+		"docs/configuration.md states a capped record holds at most 65550 bytes: "+
+			"%d budget bytes of text plus the %d-byte %q marker",
+		maxSize, len(truncationSuffix), truncationSuffix)
+	assert.Equal(t, 65550, len(stored),
+		"the literal figure quoted in docs/configuration.md")
+	assert.Equal(t, maxSize, len(strings.TrimSuffix(stored, truncationSuffix)),
+		"the full byte budget goes to the text; the marker is on top of it")
+}

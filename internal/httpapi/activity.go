@@ -379,6 +379,16 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		RequestID:                a.RequestID,
 		ParentID:                 a.ParentID,
 		Metadata:                 a.Metadata,
+		// Pre-truncation byte lengths (Spec 069 A1), carried here for the same
+		// reason the export converter carries them — and, until this was fixed,
+		// the ONE place they were missing. GET /api/v1/activity and
+		// GET /api/v1/activity/{id} answered response_storage_truncated:true
+		// with no response_bytes, so a client told the body was a prefix had no
+		// way to learn how much had been cut, while an NDJSON export of the very
+		// same record reported it. They are sizes, not content, so nothing about
+		// masking or body suppression applies to them.
+		RequestBytes:  a.RequestBytes,
+		ResponseBytes: a.ResponseBytes,
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
 		DetectionTypes:   detectionTypes,

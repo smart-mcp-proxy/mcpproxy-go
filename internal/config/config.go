@@ -462,11 +462,12 @@ type Config struct {
 	OAuthExpiryWarningHours float64 `json:"oauth_expiry_warning_hours,omitempty" mapstructure:"oauth-expiry-warning-hours"` // Hours before token expiry to show degraded status (default: 1.0)
 
 	// Activity logging settings (RFC-003)
-	ActivityRetentionDays      int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"`             // Max age before pruning (default: 90)
-	ActivityMaxRecords         int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`                   // Max records before pruning (default: 100000)
-	ActivityMaxSizeMB          int `json:"activity_max_size_mb,omitempty" mapstructure:"activity-max-size-mb"`                   // Max total activity-log size in MB before pruning oldest (default: 256, 0=disabled)
-	ActivityMaxResponseSize    int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
-	ActivityCleanupIntervalMin int `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
+	ActivityRetentionDays int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"` // Max age before pruning (default: 90)
+	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 100000)
+	ActivityMaxSizeMB     int `json:"activity_max_size_mb,omitempty" mapstructure:"activity-max-size-mb"`       // Max total activity-log size in MB before pruning oldest (default: 256, 0=disabled)
+	// Response text stored on ONE record, in bytes (default: 65536, 0 disables the cap; a 14-byte ...[truncated] marker is appended on top when a cut happens).
+	ActivityMaxResponseSize    *int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`
+	ActivityCleanupIntervalMin int  `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
 
 	// Intent declaration settings (Spec 018)
 	IntentDeclaration *IntentDeclarationConfig `json:"intent_declaration,omitempty" mapstructure:"intent-declaration"`
@@ -1795,11 +1796,11 @@ func DefaultConfig() *Config {
 		ToolResponseSessionRiskWarning: false,
 
 		// Activity logging defaults (RFC-003)
-		ActivityRetentionDays:      90,     // 90 days retention
-		ActivityMaxRecords:         100000, // 100K records max
-		ActivityMaxSizeMB:          256,    // 256MB total activity-log size cap (0 = disabled)
-		ActivityMaxResponseSize:    65536,  // 64KB response truncation
-		ActivityCleanupIntervalMin: 60,     // 1 hour cleanup interval
+		ActivityRetentionDays:      90,                                  // 90 days retention
+		ActivityMaxRecords:         100000,                              // 100K records max
+		ActivityMaxSizeMB:          256,                                 // 256MB total activity-log size cap (0 = disabled)
+		ActivityMaxResponseSize:    activityMaxResponseSizeDefaultPtr(), // 64KB response truncation (0 disables the cap)
+		ActivityCleanupIntervalMin: 60,                                  // 1 hour cleanup interval
 
 		// Intent declaration defaults (Spec 018) - strict validation by default for security
 		IntentDeclaration: DefaultIntentDeclarationConfig(),
@@ -1807,6 +1808,54 @@ func DefaultConfig() *Config {
 		// Observability defaults (Spec 069)
 		Observability: DefaultObservabilityConfig(),
 	}
+}
+
+// DefaultActivityMaxResponseSizeBytes is the per-record activity response cap
+// applied when activity_max_response_size is absent from the config (64KB).
+const DefaultActivityMaxResponseSizeBytes = 65536
+
+// activityMaxResponseSizeDefaultPtr builds the DefaultConfig() value. It is a
+// function, not a package-level pointer variable, so that two configs can never
+// alias one int and a mutation through one silently change the other.
+func activityMaxResponseSizeDefaultPtr() *int {
+	v := DefaultActivityMaxResponseSizeBytes
+	return &v
+}
+
+// EffectiveActivityMaxResponseSize resolves activity_max_response_size for the
+// write path.
+//
+// The field is a *int, not an int, because 0 is a MEANINGFUL value here — it
+// disables the cap — and `omitempty` on a plain int omits zero. With a plain
+// int, an operator who set 0 lost the key on the next SaveConfig
+// (json.MarshalIndent) and the cap silently returned to 65536 after a restart:
+// a plain GET /api/v1/config -> POST /api/v1/config/apply round trip was enough
+// to erase it, since that path decodes into a ZERO-valued Config
+// (oauth.UnmaskLiveConfigDocument) and re-marshals.
+//
+// Dropping `omitempty` instead would have INVERTED the failure: the same
+// zero-valued decode makes an absent key indistinguishable from 0, so every
+// apply whose body omitted the key would have written an explicit 0 and turned
+// the cap off for everyone. Only the pointer separates "absent" from
+// "explicitly disabled", and only it round-trips both without loss.
+//
+//	nil (key absent) -> DefaultActivityMaxResponseSizeBytes
+//	0                -> 0, the documented off switch: responses are stored whole
+//	>0               -> that many bytes
+//	<0               -> the default; a negative budget is meaningless, and
+//	                    treating it as "disabled" would turn a typo into
+//	                    unbounded record growth
+//
+// Every reader must go through this. Reading the pointer directly reintroduces
+// exactly the absent-vs-zero confusion the pointer exists to remove.
+func (c *Config) EffectiveActivityMaxResponseSize() int {
+	if c == nil || c.ActivityMaxResponseSize == nil {
+		return DefaultActivityMaxResponseSizeBytes
+	}
+	if *c.ActivityMaxResponseSize < 0 {
+		return DefaultActivityMaxResponseSizeBytes
+	}
+	return *c.ActivityMaxResponseSize
 }
 
 // generateAPIKey creates a cryptographically secure random API key

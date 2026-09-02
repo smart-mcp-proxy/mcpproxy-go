@@ -1721,13 +1721,53 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 			fmt.Println("Response:")
 			fmt.Printf("  %s\n", response)
 
-			if truncated, ok := activity["response_truncated"].(bool); ok && truncated {
-				fmt.Println("  (response was truncated)")
+			for _, notice := range activityTruncationNotices(activity) {
+				fmt.Printf("  %s\n", notice)
 			}
 		}
 	}
 
 	return nil
+}
+
+// activityTruncationNotices explains a truncation marker in the printed body.
+//
+// There are TWO truncations and they point in OPPOSITE directions, so one
+// "(response was truncated)" line cannot serve both. The CLI printed that line
+// for response_truncated only, which left a storage-truncated body ending in
+// `...[truncated]` with nothing at all to say why — the reader saw a cut
+// response and no explanation, in the one surface (`mcpproxy activity show`)
+// whose entire job is the record's detail. The REST converters, the CSV export
+// and the Web UI drawer all distinguish the two; this was the seam that did not.
+//
+// Both flags can be true on one record, so this returns a slice rather than
+// picking a winner: a direct call_tool_* dispatch records the full upstream
+// text while the agent got it cut to tool_response_limit (response_truncated),
+// and that same full text can then be cut AGAIN by activity_max_response_size
+// on the way into the database (response_storage_truncated).
+func activityTruncationNotices(activity map[string]interface{}) []string {
+	var notices []string
+
+	if getBoolField(activity, "response_truncated") {
+		notices = append(notices,
+			"(the agent received LESS than this: the response was cut to tool_response_limit before being forwarded)")
+	}
+
+	if getBoolField(activity, "response_storage_truncated") {
+		notice := "(the agent received MORE than this: the stored text was shortened to fit activity_max_response_size)"
+		// response_bytes is measured PRE-truncation, so it is exactly how much
+		// text existed before the cut. Printed only when the API supplied it —
+		// omitempty means a legacy record carries no size at all, and printing
+		// "0 bytes" would read as an empty response.
+		if full := getIntField(activity, "response_bytes"); full > 0 {
+			notice = fmt.Sprintf(
+				"(the agent received MORE than this: %d bytes, shortened to fit activity_max_response_size before being stored)",
+				full)
+		}
+		notices = append(notices, notice)
+	}
+
+	return notices
 }
 
 // runActivitySummary implements the activity summary command

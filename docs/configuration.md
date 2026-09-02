@@ -18,8 +18,9 @@ Complete reference for MCPProxy configuration file (`mcp_config.json`). This doc
 12. [Feature Flags](#feature-flags)
 13. [Registries](#registries)
 14. [Activity Log Retention](#activity-log-retention)
-15. [Update Check](#update-check)
-15. [Complete Example](#complete-example)
+15. [Observability](#observability)
+16. [Update Check](#update-check)
+17. [Complete Example](#complete-example)
 
 ---
 
@@ -1413,7 +1414,7 @@ can outweigh the entire rest of the log.
 | `activity_retention_days` | int | `90` | Days to retain activity records. |
 | `activity_max_records` | int | `100000` | Maximum records before the oldest are pruned. |
 | `activity_max_size_mb` | int | `256` | Maximum TOTAL activity-log size in MB before the oldest are pruned (`0` disables). |
-| `activity_max_response_size` | int | `65536` | Maximum response text stored on ONE record, in bytes. `0` stores responses whole. |
+| `activity_max_response_size` | int | `65536` | Byte budget for the response text stored on ONE record. A cut response is stored as the first `activity_max_response_size` bytes (backed up to a UTF-8 rune boundary) PLUS a 14-byte `...[truncated]` marker, so a capped record's `response` field is up to 14 bytes longer than the budget. `0` stores responses whole. |
 | `activity_cleanup_interval_min` | int | `60` | Background cleanup interval, in minutes. |
 
 ### `activity_max_response_size: 0` — store responses whole
@@ -1441,9 +1442,20 @@ Two operational notes:
   need the space back.
 
 A record whose response was cut on the way into the database is marked
-`response_storage_truncated` in the API and the CSV export. That is the
-opposite of `response_truncated`, which means the log holds MORE than the agent
-received; `response_bytes` is measured before either cut and stays accurate.
+`response_storage_truncated` — in the REST list and detail responses, the
+NDJSON/CSV export, `mcpproxy activity show --include-response`, and the Web UI
+drawer. That is the opposite of `response_truncated`, which means the log holds
+MORE than the agent received; `response_bytes` is measured before either cut and
+stays accurate, so it is how a reader learns how much was removed.
+
+The budget is a budget for the TEXT, not for the stored field: when the cut
+happens the record keeps the first `activity_max_response_size` bytes (backed up
+to a UTF-8 rune boundary so the tail is not corrupted) and appends the 14-byte
+marker `...[truncated]`, which is what tells a reader the body is a prefix. A
+record stored under the 65536 default therefore holds at most 65550 bytes of
+`response`. The marker is deliberately outside the budget rather than eating
+into it: it is 14 bytes against a 64KB cap, and a cap that silently swallowed
+its own explanation would be worse value.
 
 ---
 

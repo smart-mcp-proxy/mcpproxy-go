@@ -84,10 +84,12 @@ func TestNonZeroCapStillTruncates(t *testing.T) {
 // silently lose its per-record bound.
 func TestDefaultConfigKeepsTheCapOn(t *testing.T) {
 	cfg := config.DefaultConfig()
-	require.Equal(t, DefaultActivityMaxResponseSize, cfg.ActivityMaxResponseSize,
+	require.NotNil(t, cfg.ActivityMaxResponseSize,
+		"absence must arrive as the documented 64KB default, not as nil")
+	require.Equal(t, DefaultActivityMaxResponseSize, *cfg.ActivityMaxResponseSize,
 		"absence must arrive as the documented 64KB default, not as 0")
 
 	svc := NewActivityService(nil, zap.NewNop())
-	svc.SetMaxResponseSize(cfg.ActivityMaxResponseSize)
+	svc.SetMaxResponseSize(cfg.EffectiveActivityMaxResponseSize())
 	assert.Equal(t, DefaultActivityMaxResponseSize, svc.maxResponseSize)
 }

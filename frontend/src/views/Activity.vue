@@ -1236,6 +1236,7 @@
                   v-if="selectedActivity.response_truncated"
                   class="badge badge-sm badge-warning"
                   title="The agent received less than this: the log kept the full response"
+                  data-test="response-truncated-badge"
                 >Truncated</span>
                 <span
                   v-if="selectedActivity.response_storage_truncated"

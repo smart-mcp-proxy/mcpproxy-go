@@ -474,7 +474,7 @@ Activity logging is enabled by default. Configure via `mcp_config.json`:
 | `activity_retention_days` | 90 | Days to retain activity records |
 | `activity_max_records` | 100000 | Maximum records before pruning oldest |
 | `activity_max_size_mb` | 256 | Maximum total activity-log size in MB before pruning oldest (`0` disables). Runs alongside the age and count caps to bound `config.db` growth when records carry large payloads. |
-| `activity_max_response_size` | 65536 | Max response text stored on a SINGLE record (bytes). `0` stores responses whole — see below. |
+| `activity_max_response_size` | 65536 | Byte budget for the response text stored on a SINGLE record. A cut response keeps the first `activity_max_response_size` bytes plus a 14-byte `...[truncated]` marker, so a capped record's `response` is up to 14 bytes longer than the budget. `0` stores responses whole — see below. |
 | `activity_cleanup_interval_min` | 60 | Background cleanup interval (minutes) |
 
 > **Why the per-record cap?** The age, count and total-size caps all prune the log as a WHOLE; none of them bounds one record. A proxied upstream response can be many megabytes, so a handful of large `call_tool_*` calls could add hundreds of MB to `config.db` with nothing logged to suggest a problem. `activity_max_response_size` cuts the stored text on the write path and marks the record `response_storage_truncated` (the opposite direction to `response_truncated`, which means the log holds MORE than the agent received; `response_bytes` is measured before either cut and stays accurate). Setting it to `0` stores responses whole — required for the token benchmark's `--bodies=on-unmasked` measured basis above 64KB, and worth turning off again afterwards. The value is read at startup only.
