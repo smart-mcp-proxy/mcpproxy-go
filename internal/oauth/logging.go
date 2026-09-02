@@ -3,9 +3,12 @@
 package oauth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -966,6 +969,21 @@ func LogOAuthFlowEnd(logger *zap.Logger, serverName string, correlationID string
 // url.URL.Redacted() is deliberately NOT used anywhere: it masks the userinfo
 // password only and leaves `?token=` intact.
 func logSafeURL(rawURL string) string {
+	return LogSafeURL(rawURL)
+}
+
+// LogSafeURL is logSafeURL for callers OUTSIDE this package (issue #1158,
+// review round 2 finding B6).
+//
+// internal/upstream/core.Client.logSafeURL, managed.Client.logSafeURL,
+// transport.HTTPTransportConfig.logSafeURL, the CLI client and the registry
+// routes each rendered their URL log fields with RedactURLQueryParams — the
+// NAME rule only. This package's own new renderer deliberately does not, and
+// says why in so many words: a credential under an unrecognised or opaque
+// parameter name (`?opaque=ghp_…`, `?resource=<url-encoded url with a token>`)
+// is invisible to the name rule and still reached the log. Two renderers for
+// the same class of field is how the gap re-opens, so there is one.
+func LogSafeURL(rawURL string) string {
 	return AuditRedaction.URLValueDeep(rawURL)
 }
 
@@ -981,4 +999,129 @@ func logSafeURLs(urls []string) []string {
 		out[i] = logSafeURL(u)
 	}
 	return out
+}
+
+// logSafeErrorField renders an error as a LOG FIELD with any credential its
+// text carries removed (issue #1158, review round 2 finding B3).
+//
+// Masking the `url` FIELD of a log statement is only half the job on an HTTP
+// failure path: net/http quotes the request URL inside the error it returns, so
+// `client.Post("https://host/mcp?token=SECRET", …)` renders as
+//
+//	Post "https://host/mcp?token=SECRET": dial tcp 10.0.0.1:443: i/o timeout
+//
+// and the credential the sibling `zap.String("metadata_url", logSafeURL(…))`
+// masks reaches the identical log line through `zap.Error(err)`. internal/
+// transport has scrubbed its error fields since #1148 round 3; internal/oauth —
+// which makes most of the outbound discovery requests — did not.
+//
+// ScrubUpstreamText rather than RedactSensitiveData: an error string has no
+// enclosing key to judge it by, so the value-shaped detector has to run as well
+// (`?opaque=ghp_…` is invisible to the name rule). The field NAME stays "error"
+// so existing log queries keep working.
+func logSafeErrorField(err error) zap.Field {
+	if err == nil {
+		return zap.Skip()
+	}
+	return zap.String("error", ScrubUpstreamText(err.Error()))
+}
+
+// logSafeNamedErrorField is logSafeErrorField under a caller-chosen field name,
+// for the sites that log two errors on one statement.
+func logSafeNamedErrorField(name string, err error) zap.Field {
+	if err == nil {
+		return zap.Skip()
+	}
+	return zap.String(name, ScrubUpstreamText(err.Error()))
+}
+
+// LogSafeErrorText renders an error's text for a log field or a structured
+// error leaf, with any credential it quotes removed. Exported for
+// internal/upstream/core, which builds the same OAuth failure payloads.
+func LogSafeErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return ScrubUpstreamText(err.Error())
+}
+
+// StateFingerprint renders an OAuth `state` for a LOG FIELD or an error message
+// (issue #1158, review round 2 finding B1).
+//
+// `state` is the CSRF nonce that binds a callback to the flow that minted it.
+// It is not an access credential on its own, but it is the other half of the
+// pair an attacker who has read the log needs: with the authorization code AND
+// the state, a callback can be replayed against the waiting flow. It was
+// written verbatim on five log statements and inside two error messages.
+//
+// The fingerprint keeps what the log lines actually use it for — correlating
+// "Registered waiter" with "callback received" with "dropped, nobody waiting"
+// across one flow — while carrying no bytes of the nonce itself. A truncated
+// SHA-256 is enough: the values it distinguishes are the handful of flows live
+// in one process.
+func StateFingerprint(state string) string {
+	if state == "" {
+		return "(none)"
+	}
+	sum := sha256.Sum256([]byte(state))
+	return "sha256:" + hex.EncodeToString(sum[:])[:12]
+}
+
+// callbackParamField renders ONE OAuth callback query parameter for a log
+// field, by name.
+//
+// The authorization `code` is a single-use credential exchangeable for an
+// access token at the token endpoint, and it was logged at INFO on every
+// successful login — so `~/.mcpproxy/logs/main.log` held a working credential
+// for the window before mcpproxy redeemed it, and forever after for any flow
+// that failed to complete. It is masked whole: unlike a URL, no part of it is
+// diagnostic.
+func callbackParamField(name, value string) string {
+	switch strings.ToLower(name) {
+	case "state":
+		return StateFingerprint(value)
+	case "code", "access_token", "id_token", "refresh_token", "token", "client_secret":
+		if value == "" {
+			return ""
+		}
+		return AuditMaskValue(value)
+	case "error", "error_description", "error_uri":
+		// Provider-authored free text: it has no enclosing key to judge it by
+		// and providers do echo request parameters back into it.
+		return ScrubUpstreamText(value)
+	default:
+		return AuditRedaction.Leaf(name, value)
+	}
+}
+
+// LogSafeCallbackQuery renders a whole OAuth callback query string for a log
+// field, parameter by parameter.
+//
+// The raw `r.URL.RawQuery` of the callback request was logged at INFO on TWO
+// handlers, which put the authorization code on disk a second and third time
+// even after the dedicated `code` field was masked. Rendering per parameter
+// rather than dropping the field keeps the diagnostic the line exists for:
+// WHICH parameters the provider sent back.
+func LogSafeCallbackQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return rawQuery
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		// Unparseable: fall back to the free-form rule rather than publishing
+		// it, and say so.
+		return ScrubUpstreamText(rawQuery)
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		for _, v := range values[name] {
+			parts = append(parts, name+"="+callbackParamField(name, v))
+		}
+	}
+	return strings.Join(parts, "&")
 }

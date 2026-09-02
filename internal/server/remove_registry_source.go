@@ -69,7 +69,7 @@ func (s *Server) RemoveRegistrySource(id string) (*config.RegistryEntry, error) 
 
 	s.logger.Info("Removed custom registry source",
 		zap.String("registry_id", removed.ID),
-		zap.String("url", oauth.RedactURLQueryParams(removed.URL)))
+		zap.String("url", oauth.LogSafeURL(removed.URL)))
 
 	return &removed, nil
 }

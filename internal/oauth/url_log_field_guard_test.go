@@ -27,7 +27,21 @@ import (
 // no debug flag at all.
 
 // urlFieldName matches the zap field NAMES whose values are URLs.
-var urlFieldName = regexp.MustCompile(`(?i)(^url$|^urls$|_url$|_urls$|urls_tried|^resource$|_resource$|^endpoint$|_endpoint$)`)
+//
+// Review round 2 (finding B2) widened it. The first cut matched the LITERAL
+// `urls_tried`, so the sibling `url_tried` four lines below a site it had just
+// fixed sailed through, and so did every `auth_server*` field in
+// discovery.go — five names, all of them holding a URL derived from the
+// configured upstream URL. A guard whose regex is written from the sites that
+// were already fixed proves nothing about the ones that were not.
+var urlFieldName = regexp.MustCompile(`(?i)(` + strings.Join([]string{
+	`^url$`, `^urls$`, `_url$`, `_urls$`,
+	`_tried$`, // url_tried, urls_tried, metadata_urls_tried, …
+	`^resource$`, `_resource$`,
+	`^endpoint$`, `_endpoint$`,
+	`^auth_server$`, `^auth_servers$`, `^auth_server_base$`,
+	`^authorization_servers$`,
+}, "|") + `)`)
 
 // safeURLRenderer matches the call expressions that are an acceptable value for
 // such a field. Anything else is a raw URL reaching a log sink.
@@ -151,4 +165,208 @@ func TestAuthorizationURLIsNeverPrintedRaw(t *testing.T) {
 		return true
 	})
 	assert.Zero(t, printfs)
+}
+
+// TestNoRawErrorSitsBesideAMaskedURL is the other half of the same rule
+// (issue #1158, review round 2, finding B3).
+//
+// Masking a statement's `url` field does not mask the statement. A net/http
+// error quotes the request URL inside its own message —
+//
+//	Post "https://host/mcp?token=SECRET": dial tcp 10.0.0.1:443: i/o timeout
+//
+// — so `zap.Error(err)` sitting next to `zap.String("metadata_url",
+// logSafeURL(u))` publishes, on the identical log line, the credential its
+// neighbour was written to hide. internal/oauth/discovery.go had fourteen of
+// these, every one on an HTTP failure path.
+//
+// The rule is therefore structural rather than per-site: on a log statement
+// that carries a URL field at all, the error goes through the scrubbing
+// renderer (logSafeErrorField / oauth.LogSafeErrorText), never zap.Error.
+func TestNoRawErrorSitsBesideAMaskedURL(t *testing.T) {
+	pkgs := []guardedPkg{
+		{".", "internal/oauth"},
+		{"../upstream/core", "internal/upstream/core"},
+		{"../transport", "internal/transport"},
+	}
+
+	logMethod := map[string]bool{"Debug": true, "Info": true, "Warn": true, "Error": true, "Fatal": true, "Panic": true}
+	checked := 0
+
+	for _, pkg := range pkgs {
+		files, err := filepath.Glob(filepath.Join(pkg.dir, "*.go"))
+		require.NoError(t, err)
+		require.NotEmpty(t, files, "%s: the guard found no files to scan", pkg.name)
+
+		for _, file := range files {
+			if strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(file) //nolint:gosec // fixed, in-repo paths
+			require.NoError(t, err)
+			fset := token.NewFileSet()
+			parsed, err := parser.ParseFile(fset, file, src, 0)
+			require.NoError(t, err)
+
+			ast.Inspect(parsed, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || !logMethod[sel.Sel.Name] {
+					return true
+				}
+
+				carriesURL := false
+				var rawErrors []string
+				for _, arg := range call.Args {
+					argSrc := string(src[arg.Pos()-1 : arg.End()-1])
+					if name, ok := zapFieldName(arg); ok && urlFieldName.MatchString(name) {
+						carriesURL = true
+					}
+					if safeURLRenderer.MatchString(argSrc) {
+						carriesURL = true
+					}
+					if isZapErrorField(arg) {
+						rawErrors = append(rawErrors, argSrc)
+					}
+				}
+				if !carriesURL {
+					return true
+				}
+				checked++
+				for _, raw := range rawErrors {
+					assert.Fail(t,
+						"a raw error sits on a log statement whose URL is masked",
+						"%s: %s writes a URL through the safe renderer and then hands the same "+
+							"line `%s`. A *url.Error renders the request URL verbatim inside its "+
+							"own text, so the credential the sibling field masks reaches the log "+
+							"anyway. Use logSafeErrorField / oauth.LogSafeErrorText (issue #1158).",
+						fset.Position(call.Pos()), sel.Sel.Name, raw)
+				}
+				return true
+			})
+		}
+	}
+
+	assert.Greater(t, checked, 20,
+		"the guard matched only %d URL-bearing log statements — it has stopped seeing the sites it exists for", checked)
+}
+
+// zapFieldName returns the literal field name of a `zap.String("x", …)` /
+// `zap.Strings("x", …)` argument.
+func zapFieldName(arg ast.Expr) (string, bool) {
+	call, ok := arg.(*ast.CallExpr)
+	if !ok || len(call.Args) != 2 {
+		return "", false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	pkgIdent, ok := sel.X.(*ast.Ident)
+	if !ok || pkgIdent.Name != "zap" {
+		return "", false
+	}
+	if sel.Sel.Name != "String" && sel.Sel.Name != "Strings" {
+		return "", false
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	name, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return name, true
+}
+
+// isZapErrorField reports whether an argument is zap.Error(…) / zap.NamedError(…).
+func isZapErrorField(arg ast.Expr) bool {
+	call, ok := arg.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkgIdent, ok := sel.X.(*ast.Ident)
+	if !ok || pkgIdent.Name != "zap" {
+		return false
+	}
+	return sel.Sel.Name == "Error" || sel.Sel.Name == "NamedError"
+}
+
+// TestEveryOAuthFlowErrorIsScrubbedAtConstruction pins finding B7.
+//
+// contracts.OAuthFlowError is JSON-encoded straight to the REST caller. Its
+// leaves were scrubbed one field at a time at eight construction sites, and one
+// of them got it half right: emptyClientIDFlowError masked Details.ServerURL
+// and set Details.DCRStatus.Error raw on the same struct. Per-field scrubbing
+// at N sites is how that happens, so the rule is now "every literal goes
+// through scrubbedFlowError" — and that is checkable.
+func TestEveryOAuthFlowErrorIsScrubbedAtConstruction(t *testing.T) {
+	files, err := filepath.Glob("../upstream/core/*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+
+	literals := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(file) //nolint:gosec // fixed, in-repo paths
+		require.NoError(t, err)
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, file, src, 0)
+		require.NoError(t, err)
+
+		// Collect the positions of every literal that IS an argument of
+		// scrubbedFlowError, then require every literal to be one of them.
+		wrapped := map[token.Pos]bool{}
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := call.Fun.(*ast.Ident)
+			if !ok || ident.Name != "scrubbedFlowError" || len(call.Args) != 1 {
+				return true
+			}
+			arg := call.Args[0]
+			if unary, ok := arg.(*ast.UnaryExpr); ok {
+				arg = unary.X
+			}
+			wrapped[arg.Pos()] = true
+			return true
+		})
+
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			sel, ok := lit.Type.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "OAuthFlowError" {
+				return true
+			}
+			pkgIdent, ok := sel.X.(*ast.Ident)
+			if !ok || pkgIdent.Name != "contracts" {
+				return true
+			}
+			literals++
+			assert.True(t, wrapped[lit.Pos()],
+				"%s: this contracts.OAuthFlowError literal is not wrapped in scrubbedFlowError. "+
+					"The struct is JSON-encoded to the REST caller; scrubbing its leaves per site "+
+					"is what let DCRStatus.Error ship raw next to a masked ServerURL (issue #1158).",
+				fset.Position(lit.Pos()))
+			return true
+		})
+	}
+
+	assert.GreaterOrEqual(t, literals, 7,
+		"the guard matched only %d OAuthFlowError literals — it has stopped seeing the sites it exists for", literals)
 }

@@ -729,7 +729,7 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 			logger.Debug("Failed to fetch Protected Resource Metadata",
 				zap.String("server", serverConfig.Name),
 				zap.String("metadata_url", logSafeURL(metadataURL)),
-				zap.Error(err))
+				logSafeErrorField(err))
 			// Fallback to server URL
 			return serverConfig.URL
 		}
@@ -902,7 +902,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				logger.Warn("Authorization Server Metadata discovery failed",
 					zap.String("server", serverConfig.Name),
 					zap.String("metadata_url", logSafeURL(baseURL+"/.well-known/oauth-authorization-server")),
-					zap.Error(err))
+					logSafeErrorField(err))
 			}
 		}
 	}
@@ -1112,8 +1112,8 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		if err != nil {
 			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
 				zap.String("server", serverConfig.Name),
-				zap.String("url_tried", urlToUse),
-				zap.Error(err))
+				zap.String("url_tried", logSafeURL(urlToUse)),
+				logSafeErrorField(err))
 		} else {
 			authServerMetadataURL = workingURL
 			logger.Info("Using validated OAuth metadata URL",
@@ -1418,7 +1418,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 		callbackServer.logger.Info("📥 HTTP request received on callback server",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
-			zap.String("query", r.URL.RawQuery),
+			zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
 			zap.String("user_agent", r.UserAgent()),
 			zap.String("remote_addr", r.RemoteAddr))
 
@@ -1482,7 +1482,7 @@ func (c *CallbackServer) RegisterState(state string) <-chan map[string]string {
 
 	ch := make(chan map[string]string, 1)
 	c.waiters[state] = ch
-	c.logger.Debug("Registered OAuth callback waiter", zap.String("state", state))
+	c.logger.Debug("Registered OAuth callback waiter", zap.String("state", StateFingerprint(state)))
 	return ch
 }
 
@@ -1494,7 +1494,7 @@ func (c *CallbackServer) UnregisterState(state string) {
 
 	if _, exists := c.waiters[state]; exists {
 		delete(c.waiters, state)
-		c.logger.Debug("Unregistered OAuth callback waiter", zap.String("state", state))
+		c.logger.Debug("Unregistered OAuth callback waiter", zap.String("state", StateFingerprint(state)))
 	}
 }
 
@@ -1530,7 +1530,7 @@ func (c *CallbackServer) deliver(state string, params map[string]string) bool {
 
 	if !exists {
 		c.logger.Warn("OAuth callback carries a state no flow is waiting for",
-			zap.String("state", state),
+			zap.String("state", StateFingerprint(state)),
 			zap.Int("other_waiters", waiterCount))
 		return false
 	}
@@ -1541,7 +1541,7 @@ func (c *CallbackServer) deliver(state string, params map[string]string) bool {
 	default:
 		// Cannot happen: the channel is buffered and single-use.
 		c.logger.Error("OAuth callback waiter channel unexpectedly full",
-			zap.String("state", state))
+			zap.String("state", StateFingerprint(state)))
 		return false
 	}
 }
@@ -1586,7 +1586,7 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.String("query", r.URL.RawQuery),
+		zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
 		zap.String("remote_addr", r.RemoteAddr),
 		zap.String("user_agent", r.UserAgent()))
 
@@ -1599,11 +1599,18 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Log specific OAuth parameters
+	// Issue #1158 (review round 2, finding B1): the authorization CODE is a
+	// single-use credential exchangeable for an access token — it is masked
+	// whole, since no part of it is diagnostic — and `state` is reduced to the
+	// fingerprint the surrounding lines actually correlate on. `code_present`
+	// keeps the one thing an operator debugging a callback needs from the code:
+	// whether the provider sent one at all.
 	c.logger.Info("🔍 OAuth callback parameters extracted",
-		zap.String("code", params["code"]),
-		zap.String("state", params["state"]),
-		zap.String("error", params["error"]),
-		zap.String("error_description", params["error_description"]),
+		zap.Bool("code_present", params["code"] != ""),
+		zap.String("code", callbackParamField("code", params["code"])),
+		zap.String("state", StateFingerprint(params["state"])),
+		zap.String("error", ScrubUpstreamText(params["error"])),
+		zap.String("error_description", ScrubUpstreamText(params["error_description"])),
 		zap.Int("total_params", len(params)))
 
 	state := params["state"]
@@ -1612,14 +1619,14 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	// waiting for is NOT delivered to some other flow and NOT reported to the
 	// user as a success (issue #975).
 	if !c.deliver(state, params) {
-		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %q is unknown or expired "+
-			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, state)
+		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %s is unknown or expired "+
+			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, StateFingerprint(state))
 		if state == "" {
 			reason = fmt.Errorf("OAuth callback for server %q carried no state parameter and was rejected", c.ServerName)
 		}
 		c.logger.Error("❌ OAuth callback dropped - no flow is waiting for this state",
-			zap.String("state", state),
-			zap.String("error", params["error"]))
+			zap.String("state", StateFingerprint(state)),
+			zap.String("error", ScrubUpstreamText(params["error"])))
 
 		// Surface it to the operator instead of burying it in the log (issue #975).
 		GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
@@ -1632,7 +1639,7 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 
 	c.logger.Info("✅ OAuth callback parameters delivered to the waiting flow",
-		zap.String("state", state))
+		zap.String("state", StateFingerprint(state)))
 
 	// The provider itself reported a failure: the flow was told, but the user
 	// must not see a success page.

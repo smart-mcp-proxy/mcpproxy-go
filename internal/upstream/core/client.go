@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
@@ -790,7 +791,16 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		// Issue #1158 (review round 2, investigation 2). The token endpoint's
+		// error BODY was embedded verbatim, and this error is logged with the
+		// server name and returned to the REST caller. Two problems, both real:
+		// an OAuth error_description is provider-authored free text that does
+		// echo request parameters back (and this request's form carries
+		// client_secret and refresh_token), and the body is unbounded, so a
+		// 502 HTML page from a proxy in front of the endpoint went into
+		// main.log whole. Scrub with the free-text rule, then cap.
+		return nil, fmt.Errorf("token refresh failed with status %d: %s",
+			resp.StatusCode, cappedScrub(string(body), 512))
 	}
 
 	var tokenResp oauthTokenResponse
@@ -908,4 +918,24 @@ func (c *Client) oauthLogger() *zap.Logger {
 	default:
 		return zap.New(zapcore.NewTee(c.logger.Core(), c.upstreamLogger.Core()))
 	}
+}
+
+// cappedScrub renders an upstream-authored response body for an error message:
+// the free-form rule first, then the cap, and the cut moved back to a rune
+// boundary because the mask rendering is multi-byte.
+//
+// Scrub-then-cap, not cap-then-scrub: cutting first hands the detectors a
+// FRAGMENT of any credential straddling the boundary, and every vendor-shaped
+// matcher is anchored on a complete token, so the fragment matches nothing and
+// its leading bytes are published.
+func cappedScrub(s string, limit int) string {
+	scrubbed := oauth.ScrubUpstreamText(s)
+	if len(scrubbed) <= limit {
+		return scrubbed
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(scrubbed[cut]) {
+		cut--
+	}
+	return scrubbed[:cut] + "… (truncated)"
 }

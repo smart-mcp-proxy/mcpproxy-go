@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -72,7 +73,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		// #1148: the transport error quotes the request URL, credentials and
 		// all. Both sinks get the redacted rendering; the error itself is
 		// returned untouched to the caller.
-		safeErr := oauth.RedactSensitiveData(err.Error())
+		safeErr := oauth.ScrubUpstreamText(err.Error())
 		fmt.Printf("❌ HTTP REQUEST FAILED: %v (duration: %v)\n", safeErr, duration)
 		t.logger.Error("❌ HTTP REQUEST FAILED",
 			logSafeErrorField(err),
@@ -234,7 +235,7 @@ func (lr *loggingReader) Read(p []byte) (n int, err error) {
 		} else {
 			lr.logger.Debug("📥 RESPONSE BODY (truncated)",
 				zap.Int("total_size", len(body)),
-				zap.String("preview", oauth.ScrubUpstreamText(body[:1000])+"..."))
+				zap.String("preview", scrubbedPreview(body, 1000)+"..."))
 		}
 	}
 
@@ -246,4 +247,31 @@ func (lr *loggingReader) Close() error {
 		lr.logger.Info("🔴 Closing SSE stream")
 	}
 	return lr.rc.Close()
+}
+
+// scrubbedPreview redacts a response body and THEN truncates it (issue #1158,
+// review round 2 minor).
+//
+// The order matters and the old one was wrong: `ScrubUpstreamText(body[:1000])`
+// cut the body first, so a credential straddling byte 1000 was handed to the
+// detectors as a FRAGMENT. Every vendor-shaped matcher is anchored on a
+// complete token — a `ghp_` of the right length, a JWT with three segments, a
+// `<name>=<value>` pair with a value — so the fragment matched nothing, and the
+// leading bytes of a real secret were published while the log line claimed to
+// be redacted. Scrubbing the whole body first means the matchers see the
+// complete token; only the masked rendering is then cut.
+//
+// The cut is moved back to a rune boundary because the mask rendering is a run
+// of multi-byte U+2022 bullets, and slicing one in half produces invalid UTF-8
+// that zap escapes into noise.
+func scrubbedPreview(body string, limit int) string {
+	scrubbed := oauth.ScrubUpstreamText(body)
+	if len(scrubbed) <= limit {
+		return scrubbed
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(scrubbed[cut]) {
+		cut--
+	}
+	return scrubbed[:cut]
 }

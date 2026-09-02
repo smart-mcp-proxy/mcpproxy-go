@@ -63,11 +63,17 @@ const (
 // the file outlives the process and is readable by anything with disk access.
 //
 // The host and path survive, which is what makes the line diagnostic.
+//
+// #1158 (review round 2, finding B6): this delegates to oauth.LogSafeURL — the
+// DEEP audit renderer — rather than the name-rule-only RedactURLQueryParams it
+// used before. logSafeAuthURL below already argued that case for the authorize
+// URL; the same argument applies verbatim to the configured URL this renders,
+// and this value is served to REST callers inside OAuthErrorDetails.ServerURL.
 func (c *Client) logSafeURL() string {
 	if c.config == nil {
 		return ""
 	}
-	return oauth.RedactURLQueryParams(c.config.URL)
+	return oauth.LogSafeURL(c.config.URL)
 }
 
 // logSafeAuthURL renders an OAuth AUTHORIZATION URL for a LOG FIELD or for
