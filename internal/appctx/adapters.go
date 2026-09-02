@@ -128,7 +128,7 @@ func (d *DockerIsolationManagerImpl) StartIsolatedCommand(_ context.Context, com
 	// For now, this is a placeholder that returns the concept
 	d.logger.Info("Starting isolated command",
 		zap.String("command", command),
-		zap.Strings("args", args),
+		zap.Strings("args", oauth.AuditRedaction.SpawnArgv(args)),
 		zap.String("working_dir", workingDir))
 
 	return nil, fmt.Errorf("not implemented - would use isolation manager")

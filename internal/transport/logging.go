@@ -40,9 +40,14 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	startTime := time.Now()
 
-	// Log request
-	fmt.Printf("📤 HTTP REQUEST: %s %s\n", req.Method, req.URL.String())
-	fmt.Printf("   Headers: %v\n", req.Header)
+	// Log request.
+	//
+	// Issue #1158: BOTH sinks in this file get the same scrubbed string, never
+	// one and not the other — the Printf copy goes to the operator's terminal
+	// and an observer-only test would show green against a zap-only fix.
+	// The method, host and path survive; only credentials are replaced.
+	fmt.Printf("📤 HTTP REQUEST: %s %s\n", req.Method, oauth.AuditRedaction.URLValueDeep(req.URL.String()))
+	fmt.Printf("   Headers: %v\n", oauth.RedactHeaders(req.Header))
 
 	// Log request body if present (for non-SSE requests)
 	if req.Body != nil && req.Method != "GET" {
@@ -50,7 +55,11 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		if err == nil {
 			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			if len(bodyBytes) > 0 && len(bodyBytes) < 10000 {
-				t.logger.Debug("📤 REQUEST BODY", zap.String("body", string(bodyBytes)))
+				// An OAuth token-exchange body carries client_secret and
+				// refresh_token; ScrubUpstreamText rewrites only the
+				// recognised credential shapes, so the rest of the JSON stays
+				// byte-identical and trace mode keeps its purpose.
+				t.logger.Debug("📤 REQUEST BODY", zap.String("body", oauth.ScrubUpstreamText(string(bodyBytes))))
 			}
 		}
 	}
@@ -73,12 +82,13 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	// Log response using fmt.Printf
 	fmt.Printf("📥 HTTP RESPONSE: %d %s (duration: %v)\n", resp.StatusCode, resp.Status, duration)
-	fmt.Printf("   Response Headers: %v\n", resp.Header)
+	safeRespHeaders := oauth.RedactHeaders(resp.Header)
+	fmt.Printf("   Response Headers: %v\n", safeRespHeaders)
 
 	t.logger.Info("📥 HTTP RESPONSE",
 		zap.Int("status", resp.StatusCode),
 		zap.String("status_text", resp.Status),
-		zap.Any("headers", resp.Header),
+		zap.Any("headers", safeRespHeaders),
 		zap.Duration("duration", duration))
 
 	// Check if this is an SSE connection
@@ -149,7 +159,7 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Printf("   📜 Raw SSE line: %q\n", line)
+		fmt.Printf("   📜 Raw SSE line: %q\n", oauth.ScrubUpstreamText(line))
 
 		// Empty line indicates end of frame
 		if line == "" {
@@ -158,12 +168,14 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 				frameDuration := time.Since(frameStartTime)
 
 				frameContent := currentFrame.String()
+				safeData := oauth.ScrubUpstreamText(dataContent)
+				safeContent := oauth.ScrubUpstreamText(frameContent)
 				fmt.Printf("🔵 SSE FRAME #%d (event: %s, data: %s, duration since prev: %v)\n%s\n",
-					lr.frameID, eventType, dataContent, frameDuration, frameContent)
+					lr.frameID, eventType, safeData, frameDuration, safeContent)
 				lr.logger.Info(fmt.Sprintf("🔵 SSE FRAME #%d", lr.frameID),
 					zap.String("event", eventType),
-					zap.String("data", dataContent),
-					zap.String("content", frameContent),
+					zap.String("data", safeData),
+					zap.String("content", safeContent),
 					zap.Duration("time_since_prev", frameDuration),
 					zap.Time("timestamp", time.Now()))
 
@@ -218,11 +230,11 @@ func (lr *loggingReader) Read(p []byte) (n int, err error) {
 	if err == io.EOF && !lr.isSSE && lr.buffer.Len() > 0 {
 		body := lr.buffer.String()
 		if len(body) < 10000 {
-			lr.logger.Debug("📥 RESPONSE BODY", zap.String("body", body))
+			lr.logger.Debug("📥 RESPONSE BODY", zap.String("body", oauth.ScrubUpstreamText(body)))
 		} else {
 			lr.logger.Debug("📥 RESPONSE BODY (truncated)",
 				zap.Int("total_size", len(body)),
-				zap.String("preview", body[:1000]+"..."))
+				zap.String("preview", oauth.ScrubUpstreamText(body[:1000])+"..."))
 		}
 	}
 

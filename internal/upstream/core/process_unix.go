@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
@@ -40,7 +39,7 @@ func createProcessGroupCommandFunc(client *Client, workingDir string, logger *za
 
 		logger.Debug("Process group configuration applied",
 			zap.String("command", command),
-			zap.Strings("args", shellwrap.RedactDockerArgs(args)),
+			zap.Strings("args", logSafeArgs(args)),
 			zap.String("working_dir", workingDir))
 
 		if client != nil {

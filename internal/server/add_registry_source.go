@@ -145,7 +145,7 @@ func (s *Server) AddRegistrySource(req *AddRegistrySourceRequest) (*config.Regis
 
 	s.logger.Info("Added custom registry source",
 		zap.String("registry_id", entry.ID),
-		zap.String("url", entry.URL),
+		zap.String("url", oauth.RedactURLQueryParams(entry.URL)),
 		zap.String("provenance", entry.Provenance))
 
 	return &entry, nil
@@ -169,7 +169,7 @@ func (s *Server) resolveRegistrySourceShape(entry *config.RegistryEntry) error {
 	if err != nil {
 		if errors.Is(err, registries.ErrRegistrySourceUnreachable) {
 			s.logger.Warn("Could not probe registry source; adding it with the derived defaults",
-				zap.String("url", entry.URL), zap.Error(err))
+				zap.String("url", oauth.RedactURLQueryParams(entry.URL)), zap.Error(err))
 			return nil
 		}
 		return fmt.Errorf("%w: %v", ErrRegistrySourceUnusable, err)

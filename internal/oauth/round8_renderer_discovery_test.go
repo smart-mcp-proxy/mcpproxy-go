@@ -85,6 +85,27 @@ var redactionMethodRenderers = map[string][]func(string) string{
 		func(s string) string { return strings.Join(LiveRedaction.Argv([]string{s}), " ") },
 		func(s string) string { return strings.Join(AuditRedaction.Argv([]string{"--token", s}), " ") },
 	},
+	// Issue #1158. The three log-only spawn/URL renderings. They are bound here
+	// rather than exempted because they DO emit masks, so the fail-closed net
+	// must know their markers even though no write door echoes them back.
+	"Redaction.SpawnArgv": {
+		func(s string) string { return strings.Join(AuditRedaction.SpawnArgv([]string{"--token", s}), " ") },
+		func(s string) string { return strings.Join(AuditRedaction.SpawnArgv([]string{"-e", "K=" + s}), " ") },
+		func(s string) string { return strings.Join(LiveRedaction.SpawnArgv([]string{"--token", s}), " ") },
+	},
+	"Redaction.SpawnCommandString": {
+		func(s string) string { return AuditRedaction.SpawnCommandString("npx mcp --token " + s) },
+		func(s string) string { return LiveRedaction.SpawnCommandString("npx mcp --token " + s) },
+	},
+	"Redaction.URLValueDeep": {
+		func(s string) string { return AuditRedaction.URLValueDeep(s) },
+		func(s string) string { return LiveRedaction.URLValueDeep(s) },
+	},
+	"Redaction.ExtraParamValue": {
+		func(s string) string { return AuditRedaction.ExtraParamValue("resource", s) },
+		func(s string) string { return AuditRedaction.ExtraParamValue("audience", s) },
+		func(s string) string { return LiveRedaction.ExtraParamValue("resource", s) },
+	},
 }
 
 // notMaskRenderings records the discovered renderers that are NOT mask

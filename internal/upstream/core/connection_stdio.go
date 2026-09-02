@@ -109,7 +109,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		c.logger.Debug("Docker command detected, setting up container ID tracking",
 			zap.String("server", c.config.Name),
 			zap.String("command", c.config.Command),
-			zap.Strings("original_args", shellwrap.RedactDockerArgs(args)))
+			zap.Strings("original_args", logSafeArgs(args)))
 
 		// CRITICAL: Clean up any existing containers first to prevent duplicates
 		// This makes container creation idempotent and safe to call multiple times
@@ -186,7 +186,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			c.logger.Debug("Injected env vars into direct docker command",
 				zap.String("server", c.config.Name),
 				zap.Int("env_count", len(c.config.Env)),
-				zap.Strings("modified_args", shellwrap.RedactDockerArgs(argsToWrap)))
+				zap.Strings("modified_args", logSafeArgs(argsToWrap)))
 		}
 
 		var dockerShellWrapped bool
@@ -247,9 +247,9 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	c.logger.Debug("Initialized stdio transport",
 		zap.String("server", c.config.Name),
 		zap.String("final_command", finalCommand),
-		zap.Strings("final_args", shellwrap.RedactDockerArgs(finalArgs)),
+		zap.Strings("final_args", logSafeArgs(finalArgs)),
 		zap.String("original_command", c.config.Command),
-		zap.Strings("original_args", shellwrap.RedactDockerArgs(args)),
+		zap.Strings("original_args", logSafeArgs(args)),
 		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
@@ -434,7 +434,7 @@ func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand 
 	c.logger.Debug("Wrapping command with user shell for full environment inheritance",
 		zap.String("server", c.config.Name),
 		zap.String("original_command", command),
-		zap.Strings("original_args", shellwrap.RedactDockerArgs(args)),
+		zap.Strings("original_args", logSafeArgs(args)),
 		zap.String("shell", shellCommand))
 	return shellCommand, shellArgs
 }

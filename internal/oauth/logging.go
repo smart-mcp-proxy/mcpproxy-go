@@ -944,3 +944,41 @@ func LogOAuthFlowEnd(logger *zap.Logger, serverName string, correlationID string
 		)
 	}
 }
+
+// logSafeURL renders a URL for a LOG FIELD written from inside this package
+// (issue #1158).
+//
+// Every other package already masked its URL log fields — internal/transport
+// through cfg.logSafeURL, internal/upstream/core through Client.logSafeURL —
+// while internal/oauth, which handles URLs for a living, wrote the configured
+// upstream URL and every URL derived from it (RFC 8414 / RFC 9728 metadata
+// candidates, the RFC 8707 resource, the token-store key) verbatim. A
+// `?token=…` in the configured URL therefore reached ~/.mcpproxy/logs/main.log
+// on every discovery attempt.
+//
+// The AUDIT policy is used rather than the bare RedactURLQueryParams the issue
+// names: RedactURLQueryParams is name-rule-only, so a credential under an
+// unrecognised parameter name (`?opaque=ghp_…`) still reached the log. There is
+// no write-path echo to protect on a log sink, so running the value-shaped
+// detector as well is pure gain. URLValueDeep also decodes one level of nesting,
+// which is where the authorize URL hides the upstream URL.
+//
+// url.URL.Redacted() is deliberately NOT used anywhere: it masks the userinfo
+// password only and leaves `?token=` intact.
+func logSafeURL(rawURL string) string {
+	return AuditRedaction.URLValueDeep(rawURL)
+}
+
+// logSafeURLs is logSafeURL over a slice — the RFC 8414 candidate list is
+// logged whole (`urls_tried`) and every entry is derived from the configured
+// server URL.
+func logSafeURLs(urls []string) []string {
+	if urls == nil {
+		return nil
+	}
+	out := make([]string, len(urls))
+	for i, u := range urls {
+		out[i] = logSafeURL(u)
+	}
+	return out
+}

@@ -92,7 +92,7 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 		// but mcp-go only accepts 200.
 		if tokenReq && resp.StatusCode == http.StatusCreated {
 			w.logger.Debug("Normalized token response status 201→200",
-				zap.String("url", req.URL.String()))
+				zap.String("url", logSafeURL(req.URL.String())))
 			resp.StatusCode = http.StatusOK
 			resp.Status = "200 OK"
 		}
@@ -108,7 +108,7 @@ func (w *OAuthTransportWrapper) RoundTrip(req *http.Request) (*http.Response, er
 	// Normalize 201 Created to 200 OK for token responses even without extra params.
 	if tokenReq && resp.StatusCode == http.StatusCreated {
 		w.logger.Debug("Normalized token response status 201→200",
-			zap.String("url", req.URL.String()))
+			zap.String("url", logSafeURL(req.URL.String())))
 		resp.StatusCode = http.StatusOK
 		resp.Status = "200 OK"
 	}
@@ -151,7 +151,7 @@ func (w *OAuthTransportWrapper) injectQueryParams(req *http.Request) {
 	// Log at DEBUG level with selective masking
 	masked := maskExtraParams(w.extraParams)
 	w.logger.Debug("Injected extra params into authorization URL",
-		zap.String("url", req.URL.String()),
+		zap.String("url", logSafeURL(req.URL.String())),
 		zap.Any("extra_params", masked))
 }
 
@@ -197,7 +197,7 @@ func (w *OAuthTransportWrapper) injectFormParams(req *http.Request) {
 	// Log at DEBUG level with selective masking
 	masked := maskExtraParams(w.extraParams)
 	w.logger.Debug("Injected extra params into token request body",
-		zap.String("url", req.URL.String()),
+		zap.String("url", logSafeURL(req.URL.String())),
 		zap.Any("extra_params", masked))
 }
 

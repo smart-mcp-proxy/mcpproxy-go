@@ -78,9 +78,10 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 
 	sink := newLoggerWriter(c.upstreamLogger, c.logger)
 	spec := &launcher.Spec{
-		Cmd:     cmd,
-		LogSink: sink,
-		Name:    c.config.Name,
+		Cmd:        cmd,
+		LogSink:    sink,
+		Name:       c.config.Name,
+		RedactArgs: logSafeArgs,
 	}
 
 	handle, err := launcher.Spawn(ctx, spec, c.logger)
@@ -316,7 +317,7 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	c.logger.Debug("launcher command prepared",
 		zap.String("server", c.config.Name),
 		zap.String("command", finalCommand),
-		zap.Strings("args", finalArgs),
+		zap.Strings("args", logSafeArgs(finalArgs)),
 		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker", willUseDocker))
 

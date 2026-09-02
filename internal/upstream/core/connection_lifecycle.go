@@ -35,8 +35,12 @@ func (c *Client) initialize(ctx context.Context) error {
 	if err != nil {
 		// Log initialization failure to server-specific log
 		if c.upstreamLogger != nil {
+			// #1158: the transport error quotes the configured URL,
+			// credentials and all, and this line is written to the per-server
+			// log FILE which `upstream_servers tail_log` hands to any MCP
+			// caller.
 			c.upstreamLogger.Error("MCP initialize JSON-RPC call failed",
-				zap.Error(err))
+				logSafeErrorField(err))
 		}
 
 		// CRITICAL FIX: Additional cleanup for direct initialize() calls
@@ -46,7 +50,7 @@ func (c *Client) initialize(ctx context.Context) error {
 				zap.String("server", c.config.Name),
 				zap.String("container_name", c.containerName),
 				zap.String("container_id", c.containerID),
-				zap.Error(err))
+				logSafeErrorField(err))
 		}
 
 		// Surface the useful context that the raw "context deadline exceeded"

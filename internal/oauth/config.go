@@ -494,7 +494,7 @@ func CreateOAuthConfigWithExtraParamsAndLogger(ctx context.Context, serverConfig
 		if resource, hasResource := extraParams["resource"]; hasResource {
 			logger.Info("Using manual resource parameter from config",
 				zap.String("server", serverConfig.Name),
-				zap.String("resource", resource))
+				zap.String("resource", logSafeURL(resource)))
 		}
 	}
 
@@ -693,7 +693,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 			logger.Warn("Rate limited during resource auto-detection, exhausted retries, using server URL as fallback",
 				zap.String("server", serverConfig.Name),
 				zap.Int("attempts", resourceDetectMaxRetries+1),
-				zap.String("fallback_resource", serverConfig.URL))
+				zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 			return serverConfig.URL
 
 		case resp.StatusCode >= 400:
@@ -701,7 +701,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 			logger.Debug("Server returned error during resource auto-detection, using server URL as fallback",
 				zap.String("server", serverConfig.Name),
 				zap.Int("status_code", resp.StatusCode),
-				zap.String("fallback_resource", serverConfig.URL))
+				zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 			return serverConfig.URL
 
 		default:
@@ -728,7 +728,7 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 		if err != nil {
 			logger.Debug("Failed to fetch Protected Resource Metadata",
 				zap.String("server", serverConfig.Name),
-				zap.String("metadata_url", metadataURL),
+				zap.String("metadata_url", logSafeURL(metadataURL)),
 				zap.Error(err))
 			// Fallback to server URL
 			return serverConfig.URL
@@ -738,21 +738,21 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 		if metadata.Resource != "" {
 			logger.Info("Auto-detected resource parameter from Protected Resource Metadata (RFC 9728)",
 				zap.String("server", serverConfig.Name),
-				zap.String("resource", metadata.Resource))
+				zap.String("resource", logSafeURL(metadata.Resource)))
 			return metadata.Resource
 		}
 
 		// Metadata exists but lacks resource field - fallback to server URL
 		logger.Info("Protected Resource Metadata lacks resource field, using server URL as fallback",
 			zap.String("server", serverConfig.Name),
-			zap.String("fallback_resource", serverConfig.URL))
+			zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 		return serverConfig.URL
 	}
 
 	// No resource_metadata in WWW-Authenticate - fallback to server URL
 	logger.Debug("WWW-Authenticate header lacks resource_metadata, using server URL as fallback",
 		zap.String("server", serverConfig.Name),
-		zap.String("fallback_resource", serverConfig.URL))
+		zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 	return serverConfig.URL
 }
 
@@ -806,7 +806,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 
 	logger.Debug("🚀 Starting OAuth config creation",
 		zap.String("server", serverConfig.Name),
-		zap.String("url", serverConfig.URL))
+		zap.String("url", logSafeURL(serverConfig.URL)))
 
 	// Defer logging of total duration
 	defer func() {
@@ -839,7 +839,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		if err == nil && baseURL != "" {
 			logger.Debug("Attempting Protected Resource Metadata scope discovery (RFC 9728)",
 				zap.String("server", serverConfig.Name),
-				zap.String("base_url", baseURL))
+				zap.String("base_url", logSafeURL(baseURL)))
 
 			// Make a preflight HEAD request to get WWW-Authenticate header
 			resp, err := http.Head(serverConfig.URL)
@@ -851,7 +851,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 						scopes = discoveredScopes
 						logger.Info("✅ Auto-discovered OAuth scopes from Protected Resource Metadata (RFC 9728)",
 							zap.String("server", serverConfig.Name),
-							zap.String("metadata_url", metadataURL),
+							zap.String("metadata_url", logSafeURL(metadataURL)),
 							zap.Strings("scopes", scopes))
 					} else if err != nil {
 						logger.Debug("Protected Resource Metadata discovery failed",
@@ -861,7 +861,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 						// err == nil but no scopes returned
 						logger.Warn("Protected Resource Metadata returned no scopes - some clients wait for this before showing OAuth UI",
 							zap.String("server", serverConfig.Name),
-							zap.String("metadata_url", metadataURL))
+							zap.String("metadata_url", logSafeURL(metadataURL)))
 					}
 				} else {
 					logger.Warn("WWW-Authenticate header missing resource_metadata; OAuth clients may refuse to launch browser until PRM exists",
@@ -886,7 +886,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		if err == nil && baseURL != "" {
 			logger.Debug("Attempting Authorization Server Metadata scope discovery (RFC 8414)",
 				zap.String("server", serverConfig.Name),
-				zap.String("base_url", baseURL))
+				zap.String("base_url", logSafeURL(baseURL)))
 
 			discoveredScopes, err := DiscoverScopesFromAuthorizationServer(baseURL, 5*time.Second)
 			if err == nil && len(discoveredScopes) > 0 {
@@ -897,11 +897,11 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			} else if err == nil {
 				logger.Warn("Authorization Server Metadata returned no scopes; some OAuth clients will wait until scopes_supported is published",
 					zap.String("server", serverConfig.Name),
-					zap.String("metadata_url", baseURL+"/.well-known/oauth-authorization-server"))
+					zap.String("metadata_url", logSafeURL(baseURL+"/.well-known/oauth-authorization-server")))
 			} else {
 				logger.Warn("Authorization Server Metadata discovery failed",
 					zap.String("server", serverConfig.Name),
-					zap.String("metadata_url", baseURL+"/.well-known/oauth-authorization-server"),
+					zap.String("metadata_url", logSafeURL(baseURL+"/.well-known/oauth-authorization-server")),
 					zap.Error(err))
 			}
 		}
@@ -1103,8 +1103,8 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			urlToUse = authServerURL
 			logger.Info("Using discovered auth server URL for metadata discovery",
 				zap.String("server", serverConfig.Name),
-				zap.String("mcp_url", serverConfig.URL),
-				zap.String("auth_server_url", authServerURL))
+				zap.String("mcp_url", logSafeURL(serverConfig.URL)),
+				zap.String("auth_server_url", logSafeURL(authServerURL)))
 		}
 
 		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
@@ -1118,7 +1118,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			authServerMetadataURL = workingURL
 			logger.Info("Using validated OAuth metadata URL",
 				zap.String("server", serverConfig.Name),
-				zap.String("metadata_url", authServerMetadataURL))
+				zap.String("metadata_url", logSafeURL(authServerMetadataURL)))
 		}
 	} else {
 		logger.Info("Skipping OAuth metadata URL - no server URL configured",
@@ -1231,7 +1231,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		zap.Strings("scopes", scopes),
 		zap.Bool("pkce_enabled", true),
 		zap.String("redirect_uri", redirectURI),
-		zap.String("auth_server_metadata_url", authServerMetadataURL),
+		zap.String("auth_server_metadata_url", logSafeURL(authServerMetadataURL)),
 		zap.String("registration_mode", registrationMode),
 		zap.String("discovery_mode", "explicit metadata URL"), // Using explicit metadata URL to avoid discovery timeouts
 		zap.String("token_store", "shared"))                   // Using shared token store for token persistence

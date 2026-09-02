@@ -68,8 +68,8 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		zap.String("runtime_type", runtimeType),
 		zap.String("container_name", c.containerName),
 		zap.String("container_command", containerCommand),
-		zap.Strings("container_args", containerArgs),
-		zap.Strings("docker_run_args", dockerRunArgs))
+		zap.Strings("container_args", logSafeArgs(containerArgs)),
+		zap.Strings("docker_run_args", logSafeArgs(dockerRunArgs)))
 
 	// Log to server-specific log as well
 	if c.upstreamLogger != nil {
@@ -299,7 +299,7 @@ func (c *Client) insertCidfileIntoDockerArgs(args []string, cidFile string) []st
 	if len(args) == 0 || args[0] != cmdRun {
 		c.logger.Warn("Could not find 'run' as the first docker arg for cidfile insertion - container ID tracking may be limited",
 			zap.String("server", c.config.Name),
-			zap.Strings("args", args))
+			zap.Strings("args", logSafeArgs(args)))
 		return args
 	}
 
@@ -346,7 +346,7 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 	if len(shellArgs) < 2 {
 		c.logger.Error("Unexpected shell command format for Docker cidfile insertion - cannot track container ID",
 			zap.String("server", c.config.Name),
-			zap.Strings("shell_args", shellArgs),
+			zap.Strings("shell_args", logSafeArgs(shellArgs)),
 			zap.String("expected_format", "[shell, -c, docker_command] or [-l, -c, docker_command]"))
 		return shellArgs
 	}
@@ -354,7 +354,7 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 	if secondToLast != "-c" && secondToLast != "/c" {
 		c.logger.Error("Unexpected shell command format for Docker cidfile insertion - cannot track container ID",
 			zap.String("server", c.config.Name),
-			zap.Strings("shell_args", shellArgs),
+			zap.Strings("shell_args", logSafeArgs(shellArgs)),
 			zap.String("expected_format", "[shell, -c, docker_command] or [-l, -c, docker_command]"))
 		return shellArgs
 	}
@@ -375,8 +375,8 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 
 		c.logger.Debug("Inserted cidfile into shell-wrapped Docker command",
 			zap.String("server", c.config.Name),
-			zap.String("original_cmd", dockerCmd),
-			zap.String("modified_cmd", dockerCmdWithCid))
+			zap.String("original_cmd", logSafeCommand(dockerCmd)),
+			zap.String("modified_cmd", logSafeCommand(dockerCmdWithCid)))
 
 		return newArgs
 	}
@@ -384,7 +384,7 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 	// If we can't find "docker run", fall back to appending
 	c.logger.Warn("Could not find 'docker run' in shell command for cidfile insertion",
 		zap.String("server", c.config.Name),
-		zap.String("docker_cmd", dockerCmd))
+		zap.String("docker_cmd", logSafeCommand(dockerCmd)))
 	return append(shellArgs, "--cidfile", cidFile)
 }
 
@@ -403,6 +403,6 @@ func (c *Client) extractContainerNameFromArgs(dockerArgs []string) string {
 
 	c.logger.Warn("Could not extract container name from Docker args - cleanup may be limited",
 		zap.String("server", c.config.Name),
-		zap.Strings("docker_args", dockerArgs))
+		zap.Strings("docker_args", logSafeArgs(dockerArgs)))
 	return ""
 }

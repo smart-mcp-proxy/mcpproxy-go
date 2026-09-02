@@ -477,7 +477,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
-					ServerURL:  c.config.URL,
+					ServerURL:  c.logSafeURL(),
 					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
 				}
 			}
@@ -545,7 +545,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 					zap.String("server", c.config.Name))
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
-					ServerURL:  c.config.URL,
+					ServerURL:  c.logSafeURL(),
 					Message:    "server error with stored token - re-login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
 				}
 			}
@@ -963,7 +963,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 					ServerName: c.config.Name,
 					Message:    metadataErr.Message,
 					Details: &contracts.OAuthErrorDetails{
-						ServerURL: c.config.URL,
+						ServerURL: c.logSafeURL(),
 						ProtectedResourceMetadata: func() *contracts.MetadataStatus {
 							if metadataErr.Details.ProtectedResourceMetadata != nil {
 								return &contracts.MetadataStatus{
@@ -1163,7 +1163,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			ServerName: c.config.Name,
 			Message:    fmt.Sprintf("Failed to get authorization URL for '%s': %s", c.config.Name, authURLErr.Error()),
 			Details: &contracts.OAuthErrorDetails{
-				ServerURL: c.config.URL,
+				ServerURL: c.logSafeURL(),
 			},
 			Suggestion: suggestion,
 			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
@@ -1181,7 +1181,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 				c.logger.Debug("Added extra OAuth parameter to authorization URL",
 					zap.String("server", c.config.Name),
 					zap.String("key", key),
-					zap.String("value", value))
+					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
@@ -1206,8 +1206,8 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
 	c.logger.Info("OAuth authorization URL ready",
 		zap.String("server", c.config.Name),
-		zap.String("auth_url", authURL))
-	fmt.Printf("OAuth login URL for %s:\n%s\n", c.config.Name, authURL)
+		zap.String("auth_url", logSafeAuthURL(authURL)))
+	fmt.Printf("OAuth login URL for %s:\n%s\n", c.config.Name, logSafeAuthURL(authURL))
 
 	// Check if this is a manual OAuth flow using the proper context key
 	isManualFlow := c.isManualOAuthFlow(ctx)
@@ -1224,10 +1224,10 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("server", c.config.Name),
 			zap.Duration("time_since_last", timeSinceLastBrowser),
 			zap.Duration("rate_limit", browserRateLimit),
-			zap.String("auth_url", authURL))
+			zap.String("auth_url", logSafeAuthURL(authURL)))
 
 		fmt.Printf("OAuth authorization required for %s, but browser opening is rate limited.\n", c.config.Name)
-		fmt.Printf("Please open the following URL manually in your browser: %s\n", authURL)
+		fmt.Printf("Please open the following URL manually in your browser: %s\n", logSafeAuthURL(authURL))
 	} else {
 		if isManualFlow {
 			c.logger.Info("🎯 Manual OAuth flow detected - bypassing rate limiting",
@@ -1238,14 +1238,14 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		// Open the browser to the authorization URL
 		c.logger.Info("🌐 Opening browser for OAuth authorization",
 			zap.String("server", c.config.Name),
-			zap.String("auth_url", authURL))
+			zap.String("auth_url", logSafeAuthURL(authURL)))
 
 		if err := c.openBrowser(authURL); err != nil {
 			c.logger.Warn("Failed to open browser automatically, please open manually",
 				zap.String("server", c.config.Name),
-				zap.String("url", authURL),
+				zap.String("url", logSafeAuthURL(authURL)),
 				zap.Error(err))
-			fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
+			fmt.Printf("Please open the following URL in your browser: %s\n", logSafeAuthURL(authURL))
 		}
 
 		// Update the timestamp to track browser opening for rate limiting
@@ -1368,7 +1368,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 					CorrelationID: result.CorrelationID,
 					Message:       metadataErr.Message,
 					Details: &contracts.OAuthErrorDetails{
-						ServerURL: c.config.URL,
+						ServerURL: c.logSafeURL(),
 					},
 					Suggestion: metadataErr.Suggestion,
 					DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
@@ -1487,7 +1487,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			CorrelationID: result.CorrelationID,
 			Message:       fmt.Sprintf("Failed to get authorization URL: %v", authURLErr),
 			Details: &contracts.OAuthErrorDetails{
-				ServerURL: c.config.URL,
+				ServerURL: c.logSafeURL(),
 			},
 			Suggestion: "Check server OAuth configuration and try again.",
 			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
@@ -1506,7 +1506,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 				c.logger.Debug("Added extra OAuth parameter to authorization URL",
 					zap.String("server", c.config.Name),
 					zap.String("key", key),
-					zap.String("value", value))
+					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
@@ -1530,18 +1530,18 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	result.AuthURL = authURL
 	c.logger.Info("🌐 Authorization URL obtained",
 		zap.String("server", c.config.Name),
-		zap.String("auth_url", authURL),
+		zap.String("auth_url", logSafeAuthURL(authURL)),
 		zap.String("correlation_id", result.CorrelationID))
 
 	// Open the browser
 	if err := c.openBrowser(authURL); err != nil {
 		c.logger.Warn("Failed to open browser automatically, please open manually",
 			zap.String("server", c.config.Name),
-			zap.String("url", authURL),
+			zap.String("url", logSafeAuthURL(authURL)),
 			zap.Error(err))
 		result.BrowserOpened = false
 		result.BrowserError = err.Error()
-		fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
+		fmt.Printf("Please open the following URL in your browser: %s\n", logSafeAuthURL(authURL))
 	} else {
 		result.BrowserOpened = true
 	}
@@ -1866,7 +1866,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	if os.Getenv("HEADLESS") != "" {
 		c.logger.Info("📵 HEADLESS mode detected - skipping browser open",
 			zap.String("server", c.config.Name),
-			zap.String("auth_url", authURL))
+			zap.String("auth_url", logSafeAuthURL(authURL)))
 		result.BrowserOpened = false
 		result.BrowserError = "HEADLESS mode - browser not opened. Please open the auth_url manually."
 
@@ -1884,7 +1884,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	if err := c.openBrowser(authURL); err != nil {
 		c.logger.Warn("Failed to open browser automatically",
 			zap.String("server", c.config.Name),
-			zap.String("url", authURL),
+			zap.String("url", logSafeAuthURL(authURL)),
 			zap.Error(err))
 		result.BrowserOpened = false
 		result.BrowserError = err.Error()
@@ -2036,7 +2036,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 				c.logger.Debug("Added extra OAuth parameter to authorization URL",
 					zap.String("server", c.config.Name),
 					zap.String("key", key),
-					zap.String("value", value))
+					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
@@ -2097,7 +2097,7 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr er
 		zap.NamedError("dcr_error", dcrErr),
 		zap.String("help", "Register an OAuth app with the provider and set oauth.client_id in the server config"))
 	details := &contracts.OAuthErrorDetails{
-		ServerURL: c.config.URL,
+		ServerURL: c.logSafeURL(),
 	}
 	if dcrErr != nil {
 		dcrStatus := &contracts.DCRStatus{

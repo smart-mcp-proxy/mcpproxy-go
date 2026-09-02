@@ -106,13 +106,25 @@ func WrapWithUserShell(logger *zap.Logger, command string, args []string) (shell
 	commandString := strings.Join(parts, " ")
 
 	if logger != nil {
-		// Redact secret env values (`-e KEY=VALUE`) before logging — docker-command
-		// upstreams inject Slack/Jira tokens here and debug logs are written to disk.
+		// Issue #1158: this line deliberately does NOT print argv or the
+		// wrapped command string.
+		//
+		// RedactDockerArgs / RedactDockerCommandString are structural rules —
+		// they mask the value half of `-e KEY=VALUE` and nothing else — so a
+		// plain `npx some-mcp --api-key sk-live-...` went through them in the
+		// clear. The rule that catches that (oauth.Redaction.SpawnArgv) lives
+		// in internal/oauth, which already depends on this package, so it
+		// cannot be reached from here without an import cycle.
+		//
+		// Rather than keep a half-rule that reads as protection, the fields are
+		// dropped: the caller one frame up
+		// (upstream/core.Client.wrapWithUserShell) logs original_command,
+		// original_args and shell through the complete rule, so nothing
+		// diagnostic is lost on the path that actually spawns upstreams.
 		logger.Debug("shellwrap: wrapping command with user login shell",
 			zap.String("original_command", command),
-			zap.Strings("original_args", RedactDockerArgs(args)),
-			zap.String("shell", shell),
-			zap.String("wrapped_command", RedactDockerCommandString(commandString)))
+			zap.Int("arg_count", len(args)),
+			zap.String("shell", shell))
 	}
 
 	isBash := isBashLikeShell(shell)

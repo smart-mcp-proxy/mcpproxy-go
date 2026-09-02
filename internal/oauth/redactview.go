@@ -273,6 +273,16 @@ func maskDetectedInURLQuery(rawQuery string) string {
 // Everything else round-trips verbatim: package names, subcommands, paths and
 // ports are what make the payload useful.
 func (r Redaction) Argv(argv []string) []string {
+	return r.argvWith(argv, nil)
+}
+
+// argvWith is Argv with an optional rule for elements that carry embedded
+// whitespace - a whole command LINE squeezed into one argv element, which the
+// login-shell wrap produces (`["-l","-c","npx some-mcp --api-key ..."]`) and
+// which the per-token rules below cannot see into. Passing nil reproduces
+// Argv's behaviour byte for byte; only the log-only SpawnArgv rule supplies a
+// hook, so the read/write mask-echo contract Argv backs is untouched.
+func (r Redaction) argvWith(argv []string, commandStringRule func(string) string) []string {
 	if argv == nil {
 		return nil
 	}
@@ -282,6 +292,10 @@ func (r Redaction) Argv(argv []string) []string {
 		if maskNext {
 			out[i] = r.masker()(s)
 			maskNext = false
+			continue
+		}
+		if commandStringRule != nil && strings.ContainsAny(s, " \t\n\r") {
+			out[i] = commandStringRule(s)
 			continue
 		}
 		if flag, value, inline := strings.Cut(s, "="); inline && IsArgvFlag(flag) {
