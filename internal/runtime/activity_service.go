@@ -588,7 +588,13 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	arguments := getMapPayload(evt.Payload, "arguments")
 	response := getStringPayload(evt.Payload, "response")
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
-	response, storageTruncated := s.truncateForStorage(response)
+	// Truncated into a SEPARATE variable, deliberately. `response` stays whole
+	// because it is also the sensitive-data detector's input (scanText below).
+	// Rebinding it here would cut response scanning from the detector's own
+	// max_payload_size_kb (default 1MB) down to activity_max_response_size
+	// (default 64KB) — a 16x coverage loss that silently overrides an explicit
+	// operator setting, with a secret past byte 65536 going unreported.
+	storedResponse, storageTruncated := s.truncateForStorage(response)
 	responseTruncated = responseTruncated || storageTruncated
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
 
@@ -651,7 +657,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		ServerName:        serverName,
 		ToolName:          toolName,
 		Arguments:         arguments,
-		Response:          response,
+		Response:          storedResponse,
 		ResponseTruncated: responseTruncated,
 		Status:            status,
 		ErrorMessage:      errorMsg,
@@ -894,7 +900,10 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	// flag onto the record so a cost recomputation can exclude it instead of
 	// tokenizing text the agent never paid for.
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
-	responseStr, storageTruncated := s.truncateForStorage(responseStr)
+	// Separate variable, for symmetry with handleToolCallCompleted. This
+	// handler runs no detector today, but a future one must not silently
+	// inherit a 64KB scan window from a storage decision.
+	storedResponse, storageTruncated := s.truncateForStorage(responseStr)
 	responseTruncated = responseTruncated || storageTruncated
 
 	// Spec 103: pre-truncation sizes, emitted for built-ins as well as upstream
@@ -932,7 +941,7 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		ToolName:          internalToolName,
 		ServerName:        targetServer,
 		Arguments:         arguments,
-		Response:          responseStr,
+		Response:          storedResponse,
 		Status:            status,
 		ErrorMessage:      errorMsg,
 		DurationMs:        durationMs,
@@ -1011,7 +1020,11 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 	// Name the MCP client on the record so it survives session eviction.
 	metadata := s.withClientInfo(nil, sessionID)
 
-	responseStr, promptTruncated := s.truncateForStorage(responseStr)
+	// Separate variable: responseStr keeps feeding runAsyncDetection below at
+	// full length. Prompt content is upstream-controlled and carries the same
+	// injection/secret risk a tool response does, so its scan window must stay
+	// the detector's max_payload_size_kb rather than the storage cap.
+	storedResponse, promptTruncated := s.truncateForStorage(responseStr)
 
 	record := &storage.ActivityRecord{
 		Type:              storage.ActivityTypePromptGet,
@@ -1019,7 +1032,7 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 		ServerName:        serverName,
 		ToolName:          promptName,
 		Arguments:         arguments,
-		Response:          responseStr,
+		Response:          storedResponse,
 		ResponseTruncated: promptTruncated,
 		Status:            status,
 		ErrorMessage:      errorMsg,
