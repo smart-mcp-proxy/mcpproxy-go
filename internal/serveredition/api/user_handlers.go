@@ -1044,6 +1044,15 @@ func (h *UserHandlers) writeTokenMutationError(w http.ResponseWriter, op, userID
 		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
 		return
 	}
+	// A revoked token cannot be rotated back into service. This is NOT an
+	// oracle: the resolve is owner-scoped, so reaching this branch means the
+	// caller owns the record and already sees it, revoked, in their own
+	// GET /api/v1/user/tokens listing.
+	if errors.Is(err, storage.ErrAgentTokenRevoked) {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("Token %q is revoked and cannot be regenerated. Delete it and create a new token.", name))
+		return
+	}
 	h.logger.Errorw("failed to "+op+" token", "user_id", userID, "name", name, "error", err)
 	// Never interpolate err: a storage message is not a caller-facing string.
 	writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to %s token", op))

@@ -64,21 +64,39 @@ always did, and the bearer-JWT path now does too. The `role` claim inside a JWT
 is informational only; it is minted at login, never revoked, and must not be
 trusted for authorization.
 
-**Read this first: an `admin_emails` edit is NOT hot-reloadable.** The
-middleware captures `*config.ServerEditionConfig` at wiring time, so *no* edit —
-promotion or demotion — takes effect until the process restarts. Everything
-below describes what happens **once the edited config is loaded**, and in
-particular a demotion is *not* immediate: **restart the process before treating
-someone as demoted.**
+**An `admin_emails` edit takes effect on the next request — no restart.** The
+config file is hot-reloadable (`config.LoadFromFile` unmarshals `server_edition`
+in full, and it is not one of the restart-pinned fields), and the middleware
+reads the role through a `ServerEditionConfigProvider` over the runtime's
+current snapshot rather than a pointer captured at wiring time. It is the same
+provider (`Dependencies.ConfigProvider`) the admin-servers check uses; do not
+add a second mechanism, and do not capture `deps.Config.ServerEdition` in a new
+surface that makes a role decision.
 
-Once the edited config is loaded, on both auth paths:
+On both auth paths, once the file watcher has reloaded the edit:
 
-- Removing someone from `admin_emails` demotes them even while they hold an
-  unexpired admin JWT, and they can no longer renew an admin token via
-  `POST /api/v1/auth/token`. No re-login, and no waiting for their JWT to
-  expire — but also not before the restart above.
-- Adding someone promotes them on their next request, without re-login — again,
-  from the restart onward.
+- Removing someone from `admin_emails` demotes them on their next request, even
+  while they hold an unexpired admin JWT, and they can no longer renew an admin
+  token via `POST /api/v1/auth/token`. No re-login, no waiting for the JWT to
+  expire, and no restart.
+- Adding someone promotes them on their next request, without re-login.
+
+Two limits worth stating exactly, because they are what the guarantee does
+*not* cover:
+
+- The edit is live from the moment the **reload lands**, not from the moment the
+  file is saved. A malformed file is rejected and the previous config stays in
+  force (`Config hot-reload failed; keeping previous configuration`), so confirm
+  the reload before treating anyone as demoted.
+- If a reload produces a config with **no `server_edition` block at all**, the
+  provider falls back to the boot-time block rather than emptying the admin
+  list. That is the conservative direction — it can only preserve the list the
+  process started with, never widen it.
+
+`AdminHandlers.adminEmails` is a separate, boot-time copy used **only** to
+label rows in the dashboard response. It is not an access-control input (every
+admin route gates on `requireAdmin` → `AuthContext.IsAdmin()`), so a stale label
+there is cosmetic. Do not grow an authorization check on top of it.
 
 ### Agent tokens and tenant identity (issue #1168)
 
@@ -108,8 +126,19 @@ Once the edited config is loaded, on both auth paths:
   immediately, and the gate **fails closed**: a user store that cannot answer
   denies. `POST /api/v1/admin/users/{id}/disable` additionally **revokes** that
   user's tokens, so re-enabling the account does not resurrect a credential that
-  may be why it was disabled; `enable` deliberately does not un-revoke. An
-  admin-facing surface for revoking a *specific* tenant's token is issue #1179.
+  may be why it was disabled; `enable` deliberately does not un-revoke, and
+  **neither does regenerate** — rotating a revoked token answers `409`
+  (`storage.ErrAgentTokenRevoked`) on both editions' surfaces, because rotation
+  refreshes a live secret and is not an un-revoke by another name. Delete frees
+  the name, so creating a fresh token is the supported path. An admin-facing
+  surface for revoking a *specific* tenant's token is issue #1179.
+- **The owner gate is installed FIRST in `setup.go`, before any fallible step.**
+  `wireServerEditionOAuth` only *logs* `SetupAll`'s error — the process comes up
+  serving traffic either way — so a control installed after `cfg.Validate()`,
+  `EnsureBuckets()`, `GetOrCreateHMACKey()` or the credential store is simply
+  absent whenever one of those fails, and agent tokens would then be ungated.
+  Installed first it fails closed instead. Keep new fallible setup steps *below*
+  it.
 - `RegenerateAgentTokenForOwner`'s `narrowScope` hook can only ever narrow, and
   storage **enforces** that: the hook's return is intersected with the token's
   stored `AllowedServers` before it is persisted (a stored `"*"` counts as

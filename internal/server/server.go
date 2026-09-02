@@ -1732,11 +1732,8 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	// ranging over concurrently. Mutating its Servers slice in place is a data
 	// race, so copy-on-write: clone the config and its server list, append to
 	// the clone, then publish atomically via UpdateConfig.
-	currentConfig := s.runtime.Config()
-	if currentConfig != nil {
-		updatedConfig := *currentConfig
-		updatedConfig.Servers = append(append([]*config.ServerConfig(nil), currentConfig.Servers...), serverConfig)
-		s.runtime.UpdateConfig(&updatedConfig, "")
+	if updatedConfig := configWithAppendedServer(s.runtime.Config(), serverConfig); updatedConfig != nil {
+		s.runtime.UpdateConfig(updatedConfig, "")
 	}
 
 	// Save configuration to file

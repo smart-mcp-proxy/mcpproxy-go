@@ -86,7 +86,7 @@ func setupMiddlewareTest(t *testing.T) *testMiddlewareSetup {
 	// Logger (discard output in tests)
 	logger := zap.NewNop().Sugar()
 
-	mw := NewServerEditionAuthMiddleware(sessionManager, userStore, teamsConfig, hmacKey, logger)
+	mw := NewServerEditionAuthMiddleware(sessionManager, userStore, StaticServerEditionConfig(teamsConfig), hmacKey, logger)
 
 	return &testMiddlewareSetup{
 		db:             db,

@@ -18,21 +18,51 @@ import (
 // treated as JWT bearer tokens.
 const agentTokenPrefix = "mcp_agt_"
 
+// ServerEditionConfigProvider returns the server-edition configuration as of
+// NOW.
+//
+// It is a function, not a struct pointer, for the same reason
+// api.AdminServersProvider is: `admin_emails` is the sole source of truth for
+// the admin role, and the configuration is hot-reloadable. A middleware built
+// on the *config.ServerEditionConfig captured at wiring time answers every
+// later request from the file as it stood at process start, so an operator who
+// edits `admin_emails` — the documented way to promote and, more importantly,
+// to DEMOTE someone — changes nothing until the process restarts. Issue #1169
+// is that gap; moving it from "until the token expires" to "until restart" is
+// not closing it.
+//
+// The returned value is READ-ONLY. Implementations hand back the current
+// snapshot, not a defensive copy.
+type ServerEditionConfigProvider func() *config.ServerEditionConfig
+
+// StaticServerEditionConfig adapts a fixed config to ServerEditionConfigProvider.
+// It is for callers with genuinely no live configuration to read (tests, and
+// embedders with no config service) — never for production wiring, which must
+// pass a provider over the current snapshot.
+func StaticServerEditionConfig(cfg *config.ServerEditionConfig) ServerEditionConfigProvider {
+	return func() *config.ServerEditionConfig { return cfg }
+}
+
 // ServerEditionAuthMiddleware validates user authentication via session cookies
 // or JWT bearer tokens (server edition).
 type ServerEditionAuthMiddleware struct {
 	sessionManager *SessionManager
 	userStore      *users.UserStore
-	teamsConfig    *config.ServerEditionConfig
+	teamsConfig    ServerEditionConfigProvider
 	hmacKey        []byte
 	logger         *zap.SugaredLogger
 }
 
 // NewServerEditionAuthMiddleware creates a new ServerEditionAuthMiddleware.
+//
+// teamsConfig must read the LIVE configuration on every call; see
+// ServerEditionConfigProvider for why a captured pointer is the whole of issue
+// #1169. A nil provider — or one that returns nil — is tolerated and means "no
+// admins", which is the conservative reading for a role decision.
 func NewServerEditionAuthMiddleware(
 	sessionManager *SessionManager,
 	userStore *users.UserStore,
-	teamsConfig *config.ServerEditionConfig,
+	teamsConfig ServerEditionConfigProvider,
 	hmacKey []byte,
 	logger *zap.SugaredLogger,
 ) *ServerEditionAuthMiddleware {
@@ -184,12 +214,35 @@ func (m *ServerEditionAuthMiddleware) authenticateFromBearer(r *http.Request) (*
 }
 
 // buildAuthContext creates an AuthContext for the given user, determining the
-// role from the server config admin email list.
+// role from the CURRENT server config admin email list.
+//
+// Both auth paths land here, so this single read is what makes an
+// `admin_emails` edit take effect on the next request rather than on the next
+// process restart (issue #1169). The provider reads the runtime's published
+// config snapshot, which the file watcher republishes on every hot reload —
+// `server_edition` is loaded whole by config.LoadFromFile and is not among the
+// restart-pinned fields, so the edit really is live.
+//
+// A missing configuration yields a plain user, never an admin: a role decision
+// that cannot be made must not be made in the caller's favour.
 func (m *ServerEditionAuthMiddleware) buildAuthContext(user *users.User) *coreauth.AuthContext {
-	if m.teamsConfig.IsAdminEmail(user.Email) {
+	if m.isAdminEmail(user.Email) {
 		return coreauth.AdminUserContext(user.ID, user.Email, user.DisplayName, user.Provider)
 	}
 	return coreauth.UserContext(user.ID, user.Email, user.DisplayName, user.Provider)
+}
+
+// isAdminEmail resolves the admin list from the live configuration, failing to
+// "not an admin" when there is none to read.
+func (m *ServerEditionAuthMiddleware) isAdminEmail(email string) bool {
+	if m.teamsConfig == nil {
+		return false
+	}
+	cfg := m.teamsConfig()
+	if cfg == nil {
+		return false
+	}
+	return cfg.IsAdminEmail(email)
 }
 
 // writeJSONError writes a JSON-formatted error response.

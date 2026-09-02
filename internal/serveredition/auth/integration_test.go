@@ -149,7 +149,7 @@ func setupIntegration(t *testing.T, email, name, userSub string, oauthCfg *confi
 	// -- Components --
 	sessionMgr := NewSessionManager(store, sessionTTL, false)
 	oauthH := NewOAuthHandler(store, sessionMgr, teamsCfg, hmacKey, logger)
-	authMW := NewServerEditionAuthMiddleware(sessionMgr, store, teamsCfg, hmacKey, logger)
+	authMW := NewServerEditionAuthMiddleware(sessionMgr, store, StaticServerEditionConfig(teamsCfg), hmacKey, logger)
 
 	// -- Router --
 	r := chi.NewRouter()

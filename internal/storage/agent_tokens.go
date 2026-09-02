@@ -27,13 +27,18 @@ const (
 	// tenant's token.
 	//
 	// For that rollback promise to be true, all THREE maintenance paths must
-	// leave a foreign entry alone, not just the two that already did. Create
-	// used to Put unconditionally, overwriting whatever the name pointed at —
-	// including a pre-upgrade tenant's entry, the very thing the paragraph
-	// above promises to preserve. It now claims the slot only when the slot is
-	// free, or when the entry it holds dangles (its hash is no longer in
-	// agent_tokens). Delete and regenerate already required the entry to point
-	// at the very record being mutated.
+	// leave a foreign entry alone. Only delete already did, by requiring the
+	// entry to point at the very record being removed.
+	//
+	//   - Create used to Put unconditionally, overwriting whatever the name
+	//     pointed at — including a pre-upgrade tenant's entry, the very thing
+	//     the paragraph above promises to preserve. It now CLAIMS the slot:
+	//     taken when free, or when the entry it holds dangles (its hash is no
+	//     longer in agent_tokens); left alone when a live record holds it.
+	//   - Regenerate used to repoint unconditionally for any OWNERLESS
+	//     rotation (`userID == "" || …`), with the same stomp. It now follows
+	//     the entry only when the entry points at the record being rotated, and
+	//     otherwise applies create's claim rule.
 	AgentTokenNamesBucket = "agent_token_names" //nolint:gosec // bucket name, not a credential
 )
 
@@ -61,6 +66,15 @@ var (
 	// "absent" from "owned by someone else" in their response: the lookup is
 	// owner-scoped, so both produce this same error.
 	ErrAgentTokenNotFound = errors.New("agent token not found")
+
+	// ErrAgentTokenRevoked is returned by RegenerateAgentTokenForOwner when the
+	// named token has been revoked. Rotation refreshes a LIVE credential's
+	// secret; it is not an un-revoke.
+	//
+	// It is safe to report to the token's owner: the lookup that produced it is
+	// owner-scoped, so it can only ever describe a record the caller already
+	// owns and can already see in their own token list.
+	ErrAgentTokenRevoked = errors.New("agent token is revoked")
 )
 
 // findAgentTokenHashLocked resolves an (owner, name) pair to the hash key of
@@ -580,6 +594,22 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 			return ErrAgentTokenNotFound
 		}
 
+		// A revoked token is BURNED, and rotation must not resurrect it.
+		//
+		// This used to set Revoked = false, which quietly made regenerate an
+		// un-revoke by another name — and across a privilege boundary.
+		// Disabling a user revokes every token they minted precisely so that
+		// re-enabling the account cannot hand back the credential that may be
+		// why it was disabled (see RevokeAgentTokensForOwner and the enableUser
+		// handler, which documents exactly that). But regenerate is a TENANT
+		// operation: once re-enabled, the owner could name the burned token and
+		// get a working secret for the very record an admin had burned,
+		// contradicting the guarantee enable makes. Deletion frees the name, so
+		// creating a fresh token is the supported path and nothing is stuck.
+		if token.Revoked {
+			return ErrAgentTokenRevoked
+		}
+
 		tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
 		if tokenBucket == nil {
 			return ErrAgentTokenNotFound
@@ -590,10 +620,10 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 			return fmt.Errorf("failed to delete old agent token hash: %w", err)
 		}
 
-		// Update token with new hash and prefix, clear revoked status
+		// Update token with new hash and prefix. Revoked is deliberately NOT
+		// touched: it is false here, because a revoked token was refused above.
 		token.TokenHash = newHash
 		token.TokenPrefix = newPrefix
-		token.Revoked = false
 
 		// Re-apply the caller's current server entitlement, if they supplied
 		// one. Narrowing only, enforced by the intersection below rather than
@@ -612,12 +642,37 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 			return fmt.Errorf("failed to store regenerated agent token: %w", err)
 		}
 
-		// Keep the legacy owner-blind index in step only where it is
-		// maintained (ownerless tokens) or where it still points at this very
-		// record, so one owner's regenerate can never repoint another's entry.
+		// Keep the legacy owner-blind index in step, without ever stomping an
+		// entry that belongs to somebody else.
+		//
+		// Two ways to earn the Put, and `userID == ""` is not one of them. That
+		// disjunct claimed the slot for any ownerless rotation regardless of
+		// what the entry held — including the pre-upgrade server-edition entry
+		// the AgentTokenNamesBucket comment promises to leave intact, which on
+		// a rollback is a live tenant's token. It also contradicted the two
+		// sibling paths: create goes through claimAgentTokenNameSlot and delete
+		// requires the entry to point at the record being removed, so regenerate
+		// was the one maintenance path that could strand a rollback.
+		//
+		//  1. The entry still points at THIS record (its hash is oldHash) —
+		//     true for an owned token whose name predates per-owner scoping,
+		//     and the ordinary case for an ownerless one. Keeping it in step is
+		//     the whole point of the index.
+		//  2. The token is ownerless AND the slot is free or DANGLES — the same
+		//     rule create applies, so an ownerless token whose index entry went
+		//     missing can re-establish it without displacing a live record.
+		//     Evaluated after the Delete/Put above, so an entry pointing at
+		//     oldHash already reads as dangling; case 1 is what makes the
+		//     intent explicit rather than incidental.
+		//
+		// Declining the Put costs this token nothing: findAgentTokenHashLocked
+		// resolves by scan and never reads this index.
 		if nameBucket := tx.Bucket([]byte(AgentTokenNamesBucket)); nameBucket != nil {
 			indexed := nameBucket.Get([]byte(name))
-			repoint := userID == "" || (indexed != nil && string(indexed) == string(oldHash))
+			repoint := indexed != nil && string(indexed) == string(oldHash)
+			if !repoint && userID == "" {
+				repoint = claimAgentTokenNameSlot(tx, nameBucket, name)
+			}
 			if repoint {
 				if err := nameBucket.Put([]byte(name), []byte(newHash)); err != nil {
 					return fmt.Errorf("failed to update agent token name mapping: %w", err)

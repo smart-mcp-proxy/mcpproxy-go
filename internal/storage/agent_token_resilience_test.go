@@ -71,16 +71,20 @@ func TestAgentToken_CorruptRecordDoesNotBreakOtherTenants(t *testing.T) {
 	require.NoError(t, manager.CreateAgentToken(other, rawOther, testHMACKey),
 		"a corrupt row must not stop another tenant creating a token")
 
-	// Revoke, regenerate and delete on the healthy record.
-	require.NoError(t, manager.RevokeAgentTokenForOwner("userA", "ci"),
-		"a corrupt row must not break revoke")
-
+	// Regenerate, revoke and delete on the healthy record. Regenerate comes
+	// FIRST: a revoked token is no longer rotatable (rotation is not an
+	// un-revoke), so revoking first would make regenerate answer
+	// ErrAgentTokenRevoked and stop exercising the corrupt-row tolerance this
+	// test is about.
 	newRaw, err := auth.GenerateToken()
 	require.NoError(t, err)
 	regenerated, err := manager.RegenerateAgentTokenForOwner("userA", "ci", newRaw, testHMACKey, nil)
 	require.NoError(t, err, "a corrupt row must not break regenerate")
 	require.NotNil(t, regenerated)
-	assert.False(t, regenerated.Revoked, "regenerate clears the revoked flag")
+	assert.False(t, regenerated.Revoked, "a live token stays live across rotation")
+
+	require.NoError(t, manager.RevokeAgentTokenForOwner("userA", "ci"),
+		"a corrupt row must not break revoke")
 
 	require.NoError(t, manager.DeleteAgentTokenForOwner("userA", "ci"),
 		"a corrupt row must not break delete")

@@ -371,6 +371,14 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
 			return
 		}
+		// Rotation refreshes a live secret; it is not an un-revoke. Classified
+		// here so the refusal is a 409 with an actionable body rather than the
+		// generic 500 the fall-through would produce.
+		if errors.Is(err, storage.ErrAgentTokenRevoked) {
+			s.writeError(w, r, http.StatusConflict,
+				fmt.Sprintf("Token %q is revoked and cannot be regenerated. Delete it and create a new token.", name))
+			return
+		}
 		s.logger.Errorf("Failed to regenerate agent token: %v", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to regenerate token")
 		return
