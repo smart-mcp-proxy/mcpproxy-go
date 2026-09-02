@@ -963,14 +963,37 @@ func (p usageParams) canSee(serverName string) bool {
 // (and every other tenant) then read for the rest of the TTL, and vice versa.
 // Two tokens with the same allowed-server set legitimately share an entry;
 // nothing else does.
+//
+// The encoding is LENGTH-PREFIXED, and that is a correctness property, not a
+// style choice (round 10, P6). Joining the terms with a bare separator is not
+// injective when the separator can appear inside a term: config validation
+// rejects only a colon in a server name, so a single server literally named
+// `a,b` produced the same key as the scope ["a","b"], and a `?server=` filter
+// value containing a pipe collided across fields the same way. A collision here
+// serves one tenant's cached response to another — the disclosure this whole
+// door exists to prevent, arriving through the cache instead of the query.
 func (p usageParams) cacheKey() string {
-	scope := "admin"
-	if p.scoped {
-		sorted := append([]string(nil), p.allowed...)
-		sort.Strings(sorted)
-		scope = "scoped:" + strings.Join(sorted, ",")
+	var b strings.Builder
+	write := func(part string) {
+		b.WriteString(strconv.Itoa(len(part)))
+		b.WriteByte(':')
+		b.WriteString(part)
 	}
-	return strings.Join([]string{p.window, p.server, p.tool, p.status, p.sort, strconv.Itoa(p.top), scope}, "|")
+	for _, part := range []string{p.window, p.server, p.tool, p.status, p.sort, strconv.Itoa(p.top)} {
+		write(part)
+	}
+	if !p.scoped {
+		write("admin")
+		return b.String()
+	}
+	sorted := append([]string(nil), p.allowed...)
+	sort.Strings(sorted)
+	write("scoped")
+	write(strconv.Itoa(len(sorted)))
+	for _, name := range sorted {
+		write(name)
+	}
+	return b.String()
 }
 
 // windowStart returns the lower time bound for the window relative to now, plus
@@ -1159,6 +1182,30 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	}
 
 	sortUsageRows(rows, p.sort)
+
+	// Round 10 (P7): the headline for a scoped caller is summed HERE, over the
+	// rows it may see, before the top-N fold discards the tail.
+	//
+	// The early return below skips the timeline loop, which is where an admin's
+	// TotalCalls / TotalErrors are accumulated — so a scoped caller used to be
+	// served `"total_calls":0` beside per-tool rows whose calls plainly summed
+	// to a non-zero number. The response contradicted itself, and a client with
+	// no way to know why reads a zero as "no traffic".
+	//
+	// The population differs from an admin's, and the field comment on
+	// contracts.UsageAggregateResponse says why it must: the timeline is
+	// window-bucketed and global, this sum is the lifetime-cumulative rollup of
+	// the tools active in the window. A scoped caller cannot be given the
+	// former (there is no per-server timeline to project) so it is given a
+	// number that agrees with the rest of ITS OWN response instead of one that
+	// contradicts it. Nothing new is disclosed: every addend is a row the same
+	// response already carries.
+	if p.scoped {
+		for i := range rows {
+			resp.TotalCalls += rows[i].Calls
+			resp.TotalErrors += rows[i].Errors
+		}
+	}
 
 	// Top-N + 'other' fold.
 	if len(rows) > p.top {

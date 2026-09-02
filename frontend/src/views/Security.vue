@@ -580,6 +580,12 @@ const historyPage = ref(1)
 const HISTORY_PAGE_SIZE = 20
 const historyTotalPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / HISTORY_PAGE_SIZE)))
 
+// The sentinel the core substitutes for a literal scanner env value on every
+// API serialization path (scanner.RedactedEnvValue, #1166 round 10 P3). It is
+// truthy on purpose so "is this variable set?" still answers correctly here;
+// saveConfig must never send it back, or the mask would overwrite the secret.
+const REDACTED_ENV_VALUE = '***'
+
 // Scan All state
 const scanAllRunning = ref(false)
 const scanAllStartTime = ref<number>(0)
@@ -923,10 +929,12 @@ function addCustomEnv() {
 
 async function saveConfig() {
   if (!configScanner.value) return
-  // Only send non-empty values that aren't keyring references (new values)
+  // Only send non-empty values that aren't keyring references or the core's
+  // redaction sentinel (new values). Sending the sentinel back would store
+  // '***' as the scanner's real API key.
   const toSend: Record<string, string> = {}
   for (const [k, v] of Object.entries(configValues.value)) {
-    if (v && !v.startsWith('${keyring:')) {
+    if (v && v !== REDACTED_ENV_VALUE && !v.startsWith('${keyring:')) {
       toSend[k] = v
     }
   }

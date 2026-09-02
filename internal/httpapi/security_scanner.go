@@ -80,7 +80,9 @@ func (s *Server) handleListScanners(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeSuccess(w, scanners)
+	// #1166 round 10 (P3): ConfiguredEnv holds the vendor API keys an operator
+	// typed into the scanner config dialog. They went out in the clear here.
+	s.writeSuccess(w, scanner.RedactScannersForAPI(scanners))
 }
 
 func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +187,9 @@ func (s *Server) handleGetScannerStatus(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
-	s.writeSuccess(w, sc)
+	// Same redaction as the list door — one scanner is not a lesser disclosure
+	// than all of them (P3).
+	s.writeSuccess(w, sc.RedactedForAPI())
 }
 
 // --- Scan operation handlers ---
@@ -345,6 +349,17 @@ func (s *Server) handleCheckIntegrity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSecurityOverview(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
+		return
+	}
+	// #1166 round 10 (P4): DENIED to a non-admin caller, not filtered. The
+	// overview is nothing but deployment-wide scan and finding counts —
+	// scanned/unscanned server totals and severity tallies computed across the
+	// whole inventory. There is no per-server breakdown to project through
+	// canSeeServer, and the scalars themselves are the count oracle for exactly
+	// what /servers now withholds. Same call as /stats/tokens and
+	// /telemetry/payload; a scoped caller reads its own server's verdict from
+	// /servers/{id}/scan/status, which the subtree gate already scopes.
+	if !s.requireAdminRead(w, r, securityFleetDenialMessage) {
 		return
 	}
 	overview, err := s.securityController.GetSecurityOverview(r.Context())
@@ -576,6 +591,17 @@ func (s *Server) handleGetQueueProgress(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// #1166 round 10 (P4): DENIED to a non-admin caller. QueueProgress.Items
+	// carries a ServerName per queued server — the full inventory, live, on a
+	// route that sits right beside the subtree gate — and the counters around
+	// it (total/pending/running/completed/failed) are fleet-wide scalars that
+	// cannot be re-derived from a filtered item list. Filtering the items alone
+	// would leave those scalars as an exact count of what was hidden, so the
+	// whole document is denied, as /stats/tokens and /security/overview are.
+	if !s.requireAdminRead(w, r, securityFleetDenialMessage) {
+		return
+	}
+
 	progress := s.securityController.GetQueueProgress()
 	if progress == nil {
 		s.writeSuccess(w, map[string]interface{}{
@@ -709,6 +735,20 @@ func (s *Server) handleGetScanReportByJobID(w http.ResponseWriter, r *http.Reque
 	report, err := s.securityController.GetScanReportByJobID(r.Context(), jobID)
 	if err != nil {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// #1166 round 10 (P4): this is the per-server scan report reached by JOB id
+	// instead of by server name, so it walked around the /servers/{id} subtree
+	// gate — a scoped token read another tenant's findings, scanned file paths
+	// and risk score by guessing or reading a job id. Unlike the queue and the
+	// overview this document IS per-server, so it is scoped rather than denied:
+	// a caller entitled to the server still gets its report.
+	//
+	// The 404 is the same status and shape the unknown-job branch above returns,
+	// so "not yours" and "no such job" are indistinguishable to the caller.
+	if report != nil && !canSeeServer(r.Context(), report.ServerName) {
+		s.writeError(w, r, http.StatusNotFound, "scan report not found: "+jobID)
 		return
 	}
 

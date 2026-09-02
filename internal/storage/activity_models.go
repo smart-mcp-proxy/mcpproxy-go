@@ -346,7 +346,6 @@ func (f *ActivityFilter) ValidateForExport() {
 	}
 }
 
-// Matches checks if an activity record matches the filter criteria
 // serverAllowed applies the AllowedServers authorization filter. nil means
 // unrestricted; see the field comment for why empty-but-non-nil matches nothing
 // and why an unattributed record is not matched.
@@ -365,6 +364,7 @@ func (f *ActivityFilter) serverAllowed(serverName string) bool {
 	return false
 }
 
+// Matches checks if an activity record matches the filter criteria.
 func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 	// Check types filter (Spec 024: OR logic for multiple types)
 	if len(f.Types) > 0 {

@@ -76,27 +76,62 @@ func scopeAllowedServers(ctx context.Context) ([]string, bool) {
 // operator document, not a per-server one.
 const sessionsDenialMessage = "Agent tokens cannot read MCP session history"
 
+// The round-10 denial messages. Each names a route class whose whole document
+// is a DEPLOYMENT-WIDE aggregate: it either enumerates the inventory outright
+// or reports scalars computed across it that cannot be re-derived from the
+// caller's own slice. Filtering such a document leaves the scalars beside the
+// filtered part as an exact oracle for what was hidden, which is why every one
+// of them takes the /api/v1/config and /stats/tokens answer — 403 — instead.
+const (
+	// /security/overview and /security/queue. QueueProgress.Items names every
+	// queued server; the overview is fleet-wide scan and finding counts.
+	securityFleetDenialMessage = "Agent tokens cannot read deployment-wide security scan state"
+
+	// /telemetry/payload. The heartbeat carries server_count,
+	// connected_server_count, tool_count and server_docker_isolated_count —
+	// precisely the count oracle removed from /status.
+	telemetryPayloadDenialMessage = "Agent tokens cannot read the deployment telemetry payload"
+
+	// /onboarding/state and /onboarding/mark (which echoes the same document).
+	// configured_server_count is an inventory size and connected_client_ids is
+	// the operator's MCP-client inventory — the same class as /sessions.
+	onboardingDenialMessage = "Agent tokens cannot read onboarding state"
+
+	// /secrets/refs and /secrets/config. Values are masked, so this is a
+	// credential INVENTORY rather than a disclosure — but it names the secrets
+	// belonging to servers the caller may not enumerate, along with the keyring
+	// reference text and whether each resolves. It is a strictly narrower view
+	// of the document GET /api/v1/config already answers 403 for.
+	secretsInventoryDenialMessage = "Agent tokens cannot read the configuration's secret inventory"
+)
+
 // serverExists reports whether a server with this exact name is configured.
 //
 // It reads GetAllServers — the same inventory the /servers list and the
 // per-server diagnostics door answer from — so "exists" cannot mean one thing
-// to the gate and another to the handler behind it. An error reports "does not
-// exist": the only caller is the scoped-caller gate below, where failing that
-// way hides rather than reveals.
-func (s *Server) serverExists(name string) bool {
+// to the gate and another to the handler behind it.
+//
+// The error is RETURNED rather than folded into the boolean (round 10, P8).
+// Collapsing it to false made a transient inventory read failure answer "no
+// such server" on hot paths like /servers/{id}/logs and /servers/{id}/tools:
+// the caller is told its own server has been deleted, retries stop, and the
+// operator chases a phantom deletion instead of the read error. "Does not
+// exist" and "could not determine" are different answers and get different
+// statuses — 404 and 503.
+func (s *Server) serverExists(name string) (bool, error) {
 	if name == "" {
-		return false
+		return false, nil
 	}
 	servers, err := s.controller.GetAllServers()
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, sv := range servers {
 		if n, _ := sv["name"].(string); n == name {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // scopedServerSubtree is the ONE scope gate for /api/v1/servers/{id}/**.
@@ -136,7 +171,21 @@ func (s *Server) scopedServerSubtree(next http.Handler) http.Handler {
 		// decodeServerIDParam is registered first on this subtree, so the
 		// value here is the real server name, not its percent-encoded form.
 		id := chi.URLParam(r, "id")
-		if canSeeServer(ctx, id) && s.serverExists(id) {
+		if !canSeeServer(ctx, id) {
+			s.writeError(w, r, http.StatusNotFound, "Server not found: "+id)
+			return
+		}
+		exists, err := s.serverExists(id)
+		if err != nil {
+			// The caller IS entitled to this name, so no existence fact leaks
+			// by admitting we could not read the inventory. Saying 404 here
+			// would tell an entitled caller its own server is gone (P8).
+			s.logger.Errorw("Scope gate could not read the server inventory",
+				"server", id, "error", err)
+			s.writeError(w, r, http.StatusServiceUnavailable, "Server inventory temporarily unavailable")
+			return
+		}
+		if exists {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -1361,6 +1361,7 @@ func (s *Server) desiredConfigForPatch() (*config.Config, error) {
 // handleGetInfo godoc
 // @Summary Get server information
 // @Description Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
+// @Description web_ui_url carries the ?apikey= credential ONLY for an authenticated admin; a scoped agent token receives the bare URL
 // @Description This endpoint is designed for tray-core communication and version checking
 // @Description Use refresh=true query parameter to force an immediate update check against GitHub
 // @Description The launched_by field reports durable launch provenance ("tray", "installer", or "" for user-launched/unknown)
@@ -1452,16 +1453,48 @@ func buildWebUIURL(listenAddr string, r *http.Request) string {
 	return fmt.Sprintf("%s://%s/ui/", protocol, listenAddr)
 }
 
-// buildWebUIURLWithAPIKey constructs the web UI URL with API key included if configured
+// buildWebUIURLWithAPIKey constructs the web UI URL, appending the GLOBAL ADMIN
+// API key as a `?apikey=` query ONLY for a caller entitled to hold it.
+//
+// #1166 round 10, PRIVILEGE ESCALATION. GET /api/v1/info was registered with no
+// gate at all and handed this string to anybody who could reach the route —
+// including a read-only agent token scoped to one server, which received
+//
+//	"web_ui_url":"http://127.0.0.1:8080/ui/?apikey=<the admin key>"
+//
+// and could then re-authenticate as an admin. That made every scope control on
+// this mux moot: a scoped caller simply read the key out of /info and stopped
+// being scoped. The defect predates this branch; it must not survive it.
+//
+// The route is NOT denied, and the field is NOT dropped. /info is version,
+// endpoint, pid, provenance and update-policy metadata that agents and the CLI
+// legitimately poll, and the base URL discloses nothing the same payload's
+// `listen_addr` does not. Exactly one thing in it is privileged — the
+// credential in the query string — so exactly that is what is withheld. A
+// scoped caller gets `http://127.0.0.1:8080/ui/` and no way in.
+//
+// The predicate is CanRevealSecrets, not IsAdmin: it is the same test the other
+// raw-credential doors answer from (#1148/#1167), it fails CLOSED on a nil
+// AuthContext, and it refuses the unauthenticated /mcp back-compat admin
+// context, which has proved no identity. Absence is treated as unprivileged
+// HERE, unlike auth.CanEnumerateServer, because the two questions differ: not
+// knowing who is calling is a reason to withhold a credential and not a reason
+// to hide a server's name. Every real operator path carries an explicit admin
+// context — the API key over TCP, the Unix socket, the Windows named pipe — so
+// nothing first-party changes.
 func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) string {
 	baseURL := buildWebUIURL(listenAddr, r)
 	if baseURL == "" {
 		return ""
 	}
 
+	if !auth.AuthContextFromContext(r.Context()).CanRevealSecrets() {
+		return baseURL
+	}
+
 	// Add API key if configured
 	cfg, err := s.controller.GetConfig()
-	if err == nil && cfg.APIKey != "" {
+	if err == nil && cfg != nil && cfg.APIKey != "" {
 		return baseURL + "?apikey=" + cfg.APIKey
 	}
 
@@ -4085,6 +4118,16 @@ func (s *Server) writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, canF
 // Secrets management handlers
 
 func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {
+	// #1166 round 10 (P5): DENIED to a non-admin caller. Values are masked, so
+	// this enumerates rather than discloses — but it enumerates every keyring
+	// and env secret reference in the whole configuration, including the ones
+	// belonging to servers the caller may not know exist, and the reference
+	// text names them. It is a strictly narrower view of the document
+	// GET /api/v1/config already answers 403 for.
+	if !s.requireAdminRead(w, r, secretsInventoryDenialMessage) {
+		return
+	}
+
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
@@ -4157,6 +4200,12 @@ func (s *Server) handleMigrateSecrets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) {
+	// Same document as /secrets/refs, projected through the config instead of
+	// the providers, and denied for the same reason (P5).
+	if !s.requireAdminRead(w, r, secretsInventoryDenialMessage) {
+		return
+	}
+
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
@@ -4472,11 +4521,21 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Telemetry heartbeat payload"
+// @Failure 403 {object} contracts.ErrorResponse "Agent tokens cannot read the deployment telemetry payload"
 // @Failure 503 {object} contracts.ErrorResponse "Telemetry service unavailable"
 // @Router /api/v1/telemetry/payload [get]
 func (s *Server) handleGetTelemetryPayload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// #1166 round 10 (P4): DENIED to a non-admin caller. The heartbeat is a
+	// fleet-wide census — server_count, connected_server_count, tool_count,
+	// server_docker_isolated_count — computed over the whole inventory with no
+	// per-server breakdown to project. It is the exact count oracle this branch
+	// removed from GET /api/v1/status, reachable through a preview route.
+	if !s.requireAdminRead(w, r, telemetryPayloadDenialMessage) {
 		return
 	}
 

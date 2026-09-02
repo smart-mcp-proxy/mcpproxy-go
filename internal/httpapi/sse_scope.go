@@ -45,7 +45,11 @@ import (
 // A key counts only when its value is a NON-EMPTY string, so an event that
 // carries no server name at all (config.saved's `path`,
 // security.scanner_changed's `scanner_id`) is unaffected, and an empty name is
-// not read as "a server called empty-string" and dropped on that basis.
+// not read as "a server called empty-string".
+//
+// Round 10 corrected what "unaffected" means for a frame that OUGHT to name a
+// server and does not — that is undecidable, not harmless, and it is decided by
+// identityBearingEventTypes below rather than by this list.
 //
 // This is a KEY list rather than a per-type table on purpose: a new event type
 // that names a server through one of these keys — the shape every producer in
@@ -74,6 +78,53 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	internalRuntime.EventTypeConfigReloaded: {},
 	internalRuntime.EventTypeConfigSaved:    {},
 	internalRuntime.EventTypeSecretsChanged: {},
+}
+
+// identityBearingEventTypes are the event types whose payload is ABOUT one
+// upstream server. Membership is a property of the TYPE, not of whether the
+// producer happened to fill the field in on this particular publish.
+//
+// #1166 round 10. The key scan below drops a frame only when an identity key
+// holds a NON-EMPTY string, so an identity-bearing frame whose name is missing
+// sailed through to a scoped subscriber intact. That is not hypothetical:
+// Runtime.EmitActivityInternalToolCall OMITS `target_server` entirely when it is
+// empty (event_bus.go), which is every built-in call that is not routed to one
+// upstream — retrieve_tools, describe_tool, upstream_servers — and those frames
+// carry `arguments` and `response`, i.e. the fleet-wide tool inventory the rest
+// of this door exists to withhold. EmitActivityPromptGet and the tool-call
+// emitters always SET `server_name` and would publish it as "" on the same
+// paths.
+//
+// The safe default for "this frame is about a server and I cannot tell which"
+// is to DROP it, for the same reason auth.RevealSecretsAllowed fails closed:
+// an unidentifiable payload cannot be checked against a scope, so it cannot be
+// shown to a scoped caller. Deciding by type rather than by populated value
+// also means a producer that starts omitting a field — the exact regression
+// shape above — cannot silently reopen the door.
+//
+// servers.changed is deliberately absent: it is the coalesced, state-carrying
+// event that eventVisibleToCaller never drops and
+// renderEventPayloadForCaller narrows instead.
+//
+// TestSSE_IdentityBearingEventTypesCoverEveryNamingProducer pins this set
+// against the fixtures that exercise each type end-to-end, and
+// TestSSE_EveryRuntimeEventTypeIsClassified pins those fixtures against the
+// runtime's own constants — so a new event type must be classified in BOTH
+// places before it ships.
+var identityBearingEventTypes = map[internalRuntime.EventType]struct{}{
+	internalRuntime.EventTypeActivityConfigChange:         {},
+	internalRuntime.EventTypeActivityInternalToolCall:     {},
+	internalRuntime.EventTypeActivityToolCallStarted:      {},
+	internalRuntime.EventTypeActivityToolCallCompleted:    {},
+	internalRuntime.EventTypeActivityToolCallRejected:     {},
+	internalRuntime.EventTypeActivityPolicyDecision:       {},
+	internalRuntime.EventTypeActivityQuarantineChange:     {},
+	internalRuntime.EventTypeActivityToolQuarantineChange: {},
+	internalRuntime.EventTypeActivityPromptGet:            {},
+	internalRuntime.EventTypeOAuthTokenRefreshed:          {},
+	internalRuntime.EventTypeOAuthRefreshFailed:           {},
+	internalRuntime.EventTypeSecurityScanSettled:          {},
+	internalRuntime.EventTypeSecurityIntegrityAlert:       {},
 }
 
 // eventVisibleToCaller reports whether a runtime event may be delivered to the
@@ -117,14 +168,22 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if _, adminOnly := adminConfigEventTypes[evt.Type]; adminOnly {
 		return false
 	}
+	named := false
 	for _, key := range eventServerIdentityFields {
 		name, ok := evt.Payload[key].(string)
 		if !ok || name == "" {
 			continue
 		}
+		named = true
 		if !canSeeServer(ctx, name) {
 			return false
 		}
+	}
+	// The frame is about a server but names none: undecidable, so fail closed.
+	// See identityBearingEventTypes for why this is keyed on the TYPE and not
+	// on whether the producer happened to populate the field.
+	if _, bearsIdentity := identityBearingEventTypes[evt.Type]; bearsIdentity && !named {
+		return false
 	}
 	return true
 }
