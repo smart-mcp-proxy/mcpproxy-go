@@ -8,7 +8,7 @@
 # at runtime as an env var).
 #
 # Published as: ghcr.io/smart-mcp-proxy/scanner-snyk:latest
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 LABEL org.opencontainers.image.source="https://github.com/smart-mcp-proxy/mcpproxy-go"
 LABEL org.opencontainers.image.description="Snyk Agent Scan packaged for MCPProxy"
