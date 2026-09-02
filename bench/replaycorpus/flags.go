@@ -72,11 +72,19 @@ const (
 	// free; treating it as free would silently understate the workload.
 	ReasonNoByteCounts ExclusionReason = "no_byte_counts"
 
-	// ReasonInternalNoByteCounts is ReasonNoByteCounts for the specific, known
-	// gap: the internal tool-call emission never populates the byte fields, so
-	// EVERY built-in call (retrieve_tools above all) is unaccountable with
-	// bodies off. It has its own name because it is a systematic gap an
-	// operator should see as one line, not as noise inside a general bucket.
+	// ReasonInternalNoByteCounts is ReasonNoByteCounts for a built-in call.
+	//
+	// It is no longer systematic. The internal tool-call emission DID leave the
+	// byte fields empty — so every built-in call, retrieve_tools above all, was
+	// unaccountable with bodies off — until Runtime.EmitActivityInternalToolCallTruncated
+	// (internal/runtime/event_bus.go) began measuring both counts on every
+	// internal emission. Today it fires on corpora captured before that, and on
+	// a live record whose request or response was genuinely empty (an error
+	// path, where the zero is true rather than unknown).
+	//
+	// It keeps its own name for the same reason ReasonSubCallZeroBytes does: an
+	// operator can then tell an old corpus from a live gap, instead of reading
+	// one undifferentiated pile that looks like data loss.
 	ReasonInternalNoByteCounts ExclusionReason = "internal_no_byte_counts"
 
 	// ReasonSubCallZeroBytes is the second known gap: a code-execution sub-call
@@ -526,10 +534,11 @@ func recordOverstatesDelivery(rec *decodedRecord) bool {
 }
 
 // byteGapReason names WHICH known gap left this record without a byte length.
-// The two systematic gaps get their own names so an operator reading the
-// exclusion report sees "every built-in call" and "every sandbox sub-call" as
-// two facts about the recording pipeline, rather than one undifferentiated pile
-// that looks like data loss.
+// The two once-systematic gaps keep their own names so an operator reading the
+// exclusion report can separate a corpus captured before the emitters measured
+// their bodies from a live recording gap, rather than reading one
+// undifferentiated pile that looks like data loss. Neither is systematic any
+// more — see the two constants.
 func byteGapReason(rec *decodedRecord, isSubCall bool) ExclusionReason {
 	switch {
 	case isSubCall:

@@ -520,8 +520,12 @@ func (s *UsageStore) Snapshot() *UsageAggregate {
 // emitter population that produced those records — an internal_tool_call was
 // the only CutShortenedAgentOnly emitter then, and still is. It must not be
 // extended: a NEW emitter reaching this without a stamp is a bug in the
-// emitter, and the compiler already prevents one (contracts.ResponseCut is a
-// required argument, not a bool).
+// emitter. The compiler stops the obvious form — contracts.ResponseCut is a
+// required argument, not a bool, so nothing can flag a cut without naming a
+// direction — but not the form read_cache was in: truncate the text, then
+// report through the whole-response wrapper, which legitimately passes CutNone.
+// TestTruncatingEmittersNameTheirCut (internal/contracts) is what catches that
+// one, by keying off the truncation call sites instead of the emitters.
 //
 // The residual, stated so nobody re-derives "delivered" from this: no branch
 // yields delivered bytes for the forward-cut population, and no field on the

@@ -14,9 +14,14 @@ import (
 
 // The guard that is supposed to make a sixth round impossible.
 //
-// There are two enforcement layers, and this is the SECOND one.
+// There are THREE enforcement layers, and this is the SECOND one. The third is
+// TestTruncatingEmittersNameTheirCut (truncation_call_site_guard_test.go),
+// which exists because the first two share a blind spot: they can only see code
+// that FLAGS a cut. Neither notices a handler that cuts its text and then
+// reports through the whole-response emitter, which passes CutNone perfectly
+// legally — read_cache did that, and both layers below were silent.
 //
-// The first — and the one that actually matters — is the COMPILER. Setting
+// The first is the COMPILER. Setting
 // response_truncated is only reachable through two emit helpers, and both take
 // a contracts.ResponseCut rather than a bool:
 //

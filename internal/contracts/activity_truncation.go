@@ -60,8 +60,9 @@ const (
 	// full pre-cut text. The record is therefore LARGER than what was
 	// delivered — the one case in which recomputing cost from the log
 	// OVERSTATES what mcpproxy cost. Today: the built-in emitters
-	// (retrieve_tools, and the internal_tool_call mirror of a call_tool_*
-	// dispatch), which record the pre-forward text under `tool_response_limit`.
+	// (retrieve_tools, read_cache, and the internal_tool_call mirror of a
+	// call_tool_* dispatch), which record the pre-forward text under
+	// `tool_response_limit`.
 	CutShortenedAgentOnly ResponseCut = "agent_only"
 
 	// CutShortenedRecordOnly: only the RECORD was cut; the agent received the

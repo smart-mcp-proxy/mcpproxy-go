@@ -834,8 +834,15 @@ func mintActivityRequestID(serverName, toolName string) string {
 //
 // This is the whole-response form: the built-in returned to the agent exactly
 // the text it recorded. Handlers that SHAPE their text before returning it —
-// today only retrieve_tools, which is subject to tool_response_limit — must use
+// today retrieve_tools and read_cache, both subject to tool_response_limit, and
+// the internal_tool_call mirror of a call_tool_* dispatch — must use
 // emitActivityInternalToolCallTruncated instead, so the record says so.
+//
+// Calling THIS form after truncating is not a type error, which is why
+// TestTruncatingEmittersNameTheirCut (internal/contracts) keys off the
+// truncation call sites: a handler that cuts its text and then reports through
+// this wrapper records a genuine cut as no cut, and that is how read_cache went
+// unstamped through the whole typed-stamp conversion.
 func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
 	p.emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, contracts.CutNone)
 }
@@ -870,11 +877,11 @@ func (p *MCPProxyServer) emitActivityInternalToolCallTruncated(internalToolName,
 // records its full pre-cut response and the agent gets it cut to
 // tool_response_limit, so the record holds MORE than was delivered.
 //
-// A named helper rather than an inline conditional because both built-in call
-// sites (retrieve_tools and the internal_tool_call mirror of a call_tool_*
-// dispatch) must not drift apart, and because it puts the reason at the one
-// place a third built-in would copy from. A handler whose cut points the other
-// way must NOT use it — see contracts.ResponseCut for the vocabulary.
+// A named helper rather than an inline conditional because all three built-in
+// call sites (retrieve_tools, read_cache, and the internal_tool_call mirror of a
+// call_tool_* dispatch) must not drift apart, and because it puts the reason at
+// the one place a fourth built-in would copy from. A handler whose cut points
+// the other way must NOT use it — see contracts.ResponseCut for the vocabulary.
 func agentOnlyCut(wasTruncated bool) contracts.ResponseCut {
 	if wasTruncated {
 		return contracts.CutShortenedAgentOnly
@@ -2751,8 +2758,16 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// OUT at tool_response_limit, and `response` above is the join of the
 	// blocks it forwarded — so the agent and this record hold the same cut
 	// copy, and nothing retains the removed text.
+	//
+	// The input is forwardContentResult's own `wasTruncated`, NOT
+	// tokenMetrics.WasTruncated. tokenMetrics is only populated when a tokenizer
+	// is available AND its count succeeds (see the block above, and
+	// Tokenizer()), so deriving the stamp from it reports CutNone — and, since
+	// the emitter derives `response_truncated` from the stamp, no truncation at
+	// all — on a genuinely cut call whenever tokenization is unavailable. The
+	// truncator is the only thing that knows whether it cut.
 	responseCut := contracts.CutNone
-	if tokenMetrics != nil && tokenMetrics.WasTruncated {
+	if wasTruncated {
 		responseCut = contracts.CutShortenedAgentAndRecord
 	}
 	var intentMap map[string]interface{}
@@ -2779,11 +2794,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// benchmark recomputing cost from the log tokenized text the agent never
 	// paid for and overstated what mcpproxy cost.
 	//
-	// wasTruncated is used rather than the paired tool_call record's
-	// `responseCut`: that one is derived from tokenMetrics.WasTruncated,
-	// which is only assigned when a tokenizer is available and the count
-	// succeeds, so it reads false on a truncated call whenever tokenization is
-	// unavailable. wasTruncated comes straight from forwardContentResult.
+	// Both records now read the SAME input — forwardContentResult's own
+	// `wasTruncated` — so the pair can never disagree about whether the dispatch
+	// was cut. (The paired tool_call stamp used to be derived from
+	// tokenMetrics.WasTruncated, which is only assigned when a tokenizer is
+	// available and the count succeeds, so it read false on a truncated call
+	// whenever tokenization was unavailable.)
 	//
 	// The stamp is CutShortenedAgentOnly and NOT the paired tool_call record's
 	// CutShortenedAgentAndRecord, even though one dispatch and one cut produced
@@ -3220,9 +3236,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	//
 	// Same cut as the Spec 018 path above and the same stamp: forwardContentResult
 	// shortened the agent's copy, and `response` is the join of the blocks it
-	// forwarded.
+	// forwarded. And, as there, the input is the truncator's own `wasTruncated`
+	// rather than tokenMetrics.WasTruncated, which is only assigned when a
+	// tokenizer is available and its count succeeds.
 	responseCut := contracts.CutNone
-	if tokenMetrics != nil && tokenMetrics.WasTruncated {
+	if wasTruncated {
 		responseCut = contracts.CutShortenedAgentAndRecord
 	}
 	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseCut, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
@@ -5698,9 +5716,11 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 
 	// read_cache has no token-metrics plumbing (it reports via the activity
 	// log, not the tokenMetrics/toolCallRecord path used by upstream tool
-	// calls). A recursively re-truncated page is otherwise invisible to
-	// operators, so surface it as a structured log: it signals the agent is
-	// walking a payload deep enough that even one cache page overflows.
+	// calls). The activity record now carries the cut and its direction (see
+	// the emit below); this log line stays because it names the diagnostic
+	// detail the record does not — key, page and full byte size — and signals
+	// that the agent is walking a payload deep enough that even one cache page
+	// overflows.
 	if reTruncated {
 		p.logger.Info("read_cache output exceeded the response limit and was truncated",
 			zap.String("requested_key", key),
@@ -5711,8 +5731,23 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		)
 	}
 
-	// Spec 024: Emit success event with args and response
-	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
+	// Spec 024: Emit success event with args and response.
+	//
+	// The TRUNCATED form, with the same stamp retrieve_tools carries: `response`
+	// here is the FULL page the cache produced, while the agent received `text`
+	// — the copy maybeTruncateAndCacheText cut to tool_response_limit a few
+	// lines above. So the record holds MORE than was delivered, which is exactly
+	// contracts.CutShortenedAgentOnly.
+	//
+	// This handler truncates and then emits, and it was the one truncating
+	// emitter the typed-stamp conversion missed: the compiler can force a
+	// direction onto the emit helpers that CAN flag a cut, but it cannot catch a
+	// handler that cuts its text and then reports through the whole-response
+	// wrapper, which correctly passes contracts.CutNone. A genuine cut was
+	// recorded as no cut at all. TestTruncatingEmittersNameTheirCut
+	// (internal/contracts) now keys off the truncation call sites rather than
+	// the emitters, so the next handler that does this fails the build.
+	p.emitActivityInternalToolCallTruncated("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "", agentOnlyCut(reTruncated))
 
 	return mcp.NewToolResultText(text), nil
 }
