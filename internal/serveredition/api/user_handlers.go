@@ -36,14 +36,22 @@ type UserHandlers struct {
 // server edition — two tenants can each hold a token called "ci" — and an
 // owner-blind lookup followed by an ownership re-check would answer "exists,
 // but not yours", which is an oracle for other tenants' token names. Scoping
-// the lookup makes "absent" and "not yours" produce the same nil.
+// the lookup makes "absent" and "not yours" produce the same
+// storage.ErrAgentTokenNotFound.
+//
+// There is deliberately no by-name READ here. The mutators resolve (owner,
+// name) inside their own transaction and report not-found themselves, so a
+// preflight read would only reintroduce the TOCTOU window and the sentinel leak
+// that writeTokenMutationError exists to close.
 type tokenStore interface {
 	CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error
 	ListAgentTokens() ([]auth.AgentToken, error)
-	GetAgentTokenByOwnerAndName(userID, name string) (*auth.AgentToken, error)
 	RevokeAgentTokenForOwner(userID, name string) error
 	DeleteAgentTokenForOwner(userID, name string) error
-	RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
+	// narrowScope re-applies the owner's current server entitlement to the
+	// rotated token; it must only narrow, and must not do I/O (it runs inside
+	// the write transaction). See narrowScopeToEntitled.
+	RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (*auth.AgentToken, error)
 }
 
 // NewUserHandlers creates a new UserHandlers instance.
@@ -329,10 +337,29 @@ func (h *UserHandlers) createServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check conflict with shared servers.
-	for _, shared := range h.sharedServers {
-		if shared.Shared && strings.EqualFold(shared.Name, req.Name) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("Server name %q conflicts with a shared server", req.Name))
+	// Refuse a name already taken by ANY server in the admin configuration,
+	// shared or not.
+	//
+	// The `Shared` qualifier that used to be here made the whole entitlement
+	// check on token scope bypassable: a tenant created a personal server named
+	// exactly like one of the admin's PRIVATE upstreams, entitledServerNames
+	// then added that name because they now owned a server called that, and the
+	// token they minted named a server auth.AuthContext.CanAccessServer compares
+	// by bare string — so it reached the admin's server. The same collision is a
+	// routing hazard independent of tokens: multiuser.Router.GetServerForUser
+	// matches the whole configuration BEFORE the caller's workspace, so the name
+	// resolves to the ADMIN's config, credentials and all.
+	//
+	// The message is IDENTICAL for a shared and an unshared collision. It has to
+	// be: a distinguishing message would name the admin's private inventory to a
+	// tenant who cannot list it, which is the existence oracle this branch just
+	// closed on token names, reopened one shape over. A refusal necessarily
+	// signals that the name is unavailable — there is no way to reject without
+	// that — but it signals nothing else: not whether the holder is shared,
+	// private or another tenant's, and not one byte of the server's config.
+	for _, existing := range h.sharedServers {
+		if existing != nil && strings.EqualFold(existing.Name, req.Name) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("Server name %q is not available", req.Name))
 			return
 		}
 	}
@@ -708,6 +735,18 @@ var errServerScopeLookup = errors.New("failed to load server scope")
 // An admin_user administers the deployment, so for them the candidate set is
 // the whole configuration; the check degrades to the personal edition's
 // "is this a known server?" validation (internal/httpapi/tokens.go).
+//
+// A tenant's personal server whose name COLLIDES with one in the admin
+// configuration is excluded (for a non-admin), whether or not the admin's copy
+// is Shared. A bare name is the whole of what CanAccessServer compares, so an
+// entitlement derived from "I own a server called X" is indistinguishable, at
+// enforcement time, from "I may reach the admin's X" — which is how a personal
+// server named after an admin-private upstream turned into a grant over it.
+// createServer now refuses to mint such a collision, but this set must not
+// depend on that: a row created before the refusal existed, or an admin who
+// later adds a server whose name a tenant already used, both produce one.
+// Excluding it costs the tenant only a token scope, never their server, which
+// multiuser.Router would in any case resolve to the admin's config.
 func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]string, error) {
 	personal, err := h.userStore.ListUserServers(userID)
 	if err != nil {
@@ -728,9 +767,13 @@ func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]strin
 	}
 
 	for _, sc := range personal {
-		if sc != nil {
-			add(sc.Name)
+		if sc == nil {
+			continue
 		}
+		if !isAdmin && h.collidesWithAdminConfig(sc.Name) {
+			continue
+		}
+		add(sc.Name)
 	}
 	for _, sc := range h.sharedServers {
 		if sc == nil {
@@ -742,6 +785,22 @@ func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]strin
 	}
 
 	return names, nil
+}
+
+// collidesWithAdminConfig reports whether name is taken by any server in the
+// admin configuration, shared or private.
+//
+// Case-insensitive, matching createServer's refusal, so a case-variant personal
+// server cannot be used to smuggle the name past this check and then be lined up
+// against a case-variant request. It is deliberately BROADER than the exact
+// comparison the enforcement layer performs.
+func (h *UserHandlers) collidesWithAdminConfig(name string) bool {
+	for _, sc := range h.sharedServers {
+		if sc != nil && strings.EqualFold(sc.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveTokenServerScope turns the requested allowed_servers into the list
@@ -838,6 +897,94 @@ func (h *UserHandlers) resolveTokenServerScope(r *http.Request, userID string, r
 	return resolved, nil
 }
 
+// narrowScopeToEntitled trims a stored AllowedServers list to the caller's
+// current entitlement. It is the re-check half of resolveTokenServerScope, and
+// the two must agree on what "*" means.
+//
+// It only ever REMOVES a grant (or, for a tenant's star, replaces one unbounded
+// grant with the bounded set it currently stands for). It cannot widen: every
+// name it emits came from the entitled set the caller was just proved to hold,
+// and an empty result denies every server, which is the safe end of the range.
+//
+// Unlike the mint path there is no rejection here. Refusing to rotate a token
+// whose scope has gone stale would leave the over-broad grant in place and
+// working, punishing the one action that repairs it; trimming actually shrinks
+// the credential, and the handler echoes the result back so the change is
+// visible.
+func narrowScopeToEntitled(current, entitled []string, isAdmin bool) []string {
+	if len(current) == 0 {
+		return current
+	}
+
+	allowed := make(map[string]struct{}, len(entitled))
+	for _, name := range entitled {
+		allowed[name] = struct{}{}
+	}
+
+	narrowed := make([]string, 0, len(current))
+	seen := make(map[string]struct{}, len(current))
+	appendOnce := func(name string) {
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		narrowed = append(narrowed, name)
+	}
+
+	for _, raw := range current {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if name == "*" {
+			// Same rule as the mint path: an admin administers every server, so
+			// the star stays literal; for a tenant it means "every server I can
+			// reach" and is materialised into that set — which is how a
+			// pre-branch token holding a bare "*" gets its unbounded grant
+			// converted into a bounded one on its first rotation.
+			if isAdmin {
+				return []string{"*"}
+			}
+			for _, n := range entitled {
+				appendOnce(n)
+			}
+			continue
+		}
+		if _, ok := allowed[name]; !ok {
+			continue
+		}
+		appendOnce(name)
+	}
+
+	return narrowed
+}
+
+// writeTokenMutationError classifies an owner-scoped mutator's error into the
+// response, with no preflight read in front of it.
+//
+// The preflight this replaces (GetAgentTokenByOwnerAndName, then a separate
+// mutating transaction) had two defects. It was a TOCTOU window: an owner who
+// concurrently deleted and recreated the name had the in-flight regenerate land
+// on the REPLACEMENT token, and one that vanished between the two calls fell
+// through to the generic 500 branch, whose body interpolated the raw storage
+// error — leaking the ErrAgentTokenNotFound sentinel text into the response.
+// Classifying the mutator's own error closes the window and the leak together:
+// the resolve and the write are one transaction, and 404 is reached by a typed
+// errors.Is rather than by a nil check on an earlier read.
+//
+// The 404 body is byte-identical to an absent token's, because the lookup is
+// owner-scoped and cannot tell "someone else's" from "not there" — that
+// indistinguishability is the whole #1168 fix, and it must survive here.
+func (h *UserHandlers) writeTokenMutationError(w http.ResponseWriter, op, userID, name string, err error) {
+	if errors.Is(err, storage.ErrAgentTokenNotFound) {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+		return
+	}
+	h.logger.Errorw("failed to "+op+" token", "user_id", userID, "name", name, "error", err)
+	// Never interpolate err: a storage message is not a caller-facing string.
+	writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to %s token", op))
+}
+
 // createUserToken creates a new agent token owned by the authenticated user.
 func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserID(r)
@@ -923,7 +1070,15 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, storage.ErrAgentTokenNameExists):
 			writeError(w, http.StatusConflict, fmt.Sprintf("You already have a token named %q", req.Name))
 		case errors.Is(err, storage.ErrAgentTokenLimitReached):
-			writeError(w, http.StatusServiceUnavailable, "Token limit reached; please try again later")
+			// 409, matching the personal edition's twin
+			// (internal/httpapi/tokens.go). One storage condition must not
+			// present as two different statuses depending on which door the
+			// caller knocked on. 409 is also the honest one: the cap is a
+			// permanent conflict with the deployment's state that the caller
+			// resolves by deleting a token, not a transient outage a client
+			// should sit and retry the way a 503 invites.
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("Maximum number of agent tokens (%d) reached", auth.MaxTokens))
 		default:
 			writeError(w, http.StatusInternalServerError, "Failed to create token")
 		}
@@ -961,23 +1116,11 @@ func (h *UserHandlers) revokeUserToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Owner-scoped lookup: a token owned by someone else resolves to nil, the
-	// same as one that does not exist, so the two cases are indistinguishable
-	// in the response below. There is deliberately no "not yours" branch.
-	existing, err := h.tokenStore.GetAgentTokenByOwnerAndName(userID, name)
-	if err != nil {
-		h.logger.Errorw("failed to get token for revoke", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get token")
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
-		return
-	}
-
+	// One owner-scoped transaction, no preflight read. The mutator resolves
+	// (owner, name) itself and reports ErrAgentTokenNotFound for both "absent"
+	// and "someone else's" — see writeTokenMutationError.
 	if err := h.tokenStore.RevokeAgentTokenForOwner(userID, name); err != nil {
-		h.logger.Errorw("failed to revoke token", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to revoke token: %v", err))
+		h.writeTokenMutationError(w, "revoke", userID, name, err)
 		return
 	}
 
@@ -1005,22 +1148,9 @@ func (h *UserHandlers) deleteUserToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Owner-scoped lookup — see revokeUserToken. "Not yours" and "not there"
-	// are the same nil, and therefore the same response.
-	existing, err := h.tokenStore.GetAgentTokenByOwnerAndName(userID, name)
-	if err != nil {
-		h.logger.Errorw("failed to get token for delete", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get token")
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
-		return
-	}
-
+	// One owner-scoped transaction, no preflight read — see revokeUserToken.
 	if err := h.tokenStore.DeleteAgentTokenForOwner(userID, name); err != nil {
-		h.logger.Errorw("failed to delete token", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete token: %v", err))
+		h.writeTokenMutationError(w, "delete", userID, name, err)
 		return
 	}
 
@@ -1047,19 +1177,6 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Owner-scoped lookup — see revokeUserToken. "Not yours" and "not there"
-	// are the same nil, and therefore the same response.
-	existing, err := h.tokenStore.GetAgentTokenByOwnerAndName(userID, name)
-	if err != nil {
-		h.logger.Errorw("failed to get token for regenerate", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get token")
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
-		return
-	}
-
 	newRawToken, err := auth.GenerateToken()
 	if err != nil {
 		h.logger.Errorw("failed to generate new token", "user_id", userID, "error", err)
@@ -1067,10 +1184,35 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	updated, err := h.tokenStore.RegenerateAgentTokenForOwner(userID, name, newRawToken, h.hmacKey)
+	// Re-check the token's server scope against the owner's CURRENT
+	// entitlement, and persist the re-checked list in the same transaction that
+	// rotates the hash.
+	//
+	// resolveTokenServerScope runs once, at mint time, and nothing revalidates
+	// afterwards: when an admin un-shares a server, every token already scoped
+	// to it keeps that grant, and a token minted with a literal "*" before this
+	// branch existed still carries the star the enforcement layer honours
+	// unconditionally. Rotation is the one moment the owner's entitlement is in
+	// hand, so it is where the standing grant gets trimmed. Narrowing only —
+	// see narrowScopeToEntitled — and the response echoes the resulting list, so
+	// nothing is dropped silently. It is not a substitute for revocation: a
+	// token that is never rotated is never re-checked. See the DOCS note.
+	//
+	// The entitlement lookup happens HERE, outside the write transaction: the
+	// hook itself must not do I/O.
+	ac := auth.AuthContextFromContext(r.Context())
+	isAdmin := ac != nil && ac.IsAdmin()
+	entitled, scopeErr := h.entitledServerNames(userID, isAdmin)
+	if scopeErr != nil {
+		h.logger.Errorw("failed to resolve token server scope for regenerate", "user_id", userID, "error", scopeErr)
+		writeError(w, http.StatusInternalServerError, "Failed to resolve server scope")
+		return
+	}
+
+	updated, err := h.tokenStore.RegenerateAgentTokenForOwner(userID, name, newRawToken, h.hmacKey,
+		func(current []string) []string { return narrowScopeToEntitled(current, entitled, isAdmin) })
 	if err != nil {
-		h.logger.Errorw("failed to regenerate token", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to regenerate token: %v", err))
+		h.writeTokenMutationError(w, "regenerate", userID, name, err)
 		return
 	}
 

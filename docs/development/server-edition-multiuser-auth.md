@@ -62,15 +62,23 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 auth paths re-derive it from the config on every request — the session path
 always did, and the bearer-JWT path now does too. The `role` claim inside a JWT
 is informational only; it is minted at login, never revoked, and must not be
-trusted for authorization. Consequences:
+trusted for authorization.
+
+**Read this first: an `admin_emails` edit is NOT hot-reloadable.** The
+middleware captures `*config.ServerEditionConfig` at wiring time, so *no* edit —
+promotion or demotion — takes effect until the process restarts. Everything
+below describes what happens **once the edited config is loaded**, and in
+particular a demotion is *not* immediate: **restart the process before treating
+someone as demoted.**
+
+Once the edited config is loaded, on both auth paths:
 
 - Removing someone from `admin_emails` demotes them even while they hold an
   unexpired admin JWT, and they can no longer renew an admin token via
-  `POST /api/v1/auth/token`.
-- Adding someone promotes them on their next request, without re-login.
-- **Not hot-reloadable.** The middleware captures `*config.ServerEditionConfig`
-  at wiring time, so an `admin_emails` edit takes effect at the next process
-  restart, not immediately — on both auth paths.
+  `POST /api/v1/auth/token`. No re-login, and no waiting for their JWT to
+  expire — but also not before the restart above.
+- Adding someone promotes them on their next request, without re-login — again,
+  from the restart onward.
 
 ### Agent tokens and tenant identity (issue #1168)
 
@@ -82,6 +90,12 @@ trusted for authorization. Consequences:
   identical **404** for "does not exist" and "belongs to another tenant", and
   create no longer reports a conflict on another tenant's name. Do not
   reintroduce a "not yours" branch — it is a name-existence oracle.
+- Those three do the lookup **inside the mutating transaction** and classify its
+  error (`storage.ErrAgentTokenNotFound` → 404). Do not put a `Get…` preflight
+  back in front: it opens a TOCTOU window on delete-then-recreate, and its
+  fall-through 500 used to interpolate the storage sentinel into the body.
+- The token cap answers **409** on both editions' surfaces
+  (`ErrAgentTokenLimitReached`). One storage condition, one status.
 - An agent token's `AuthContext` carries its owner's `UserID` (so its activity
   is attributable) but stays at `AuthTypeAgent`. Per-user surfaces must gate on
   `IsUser()`, never on a non-empty `UserID`.
@@ -116,6 +130,42 @@ themselves a token over the admin's whole inventory.
 - **An omitted `allowed_servers` stays empty**, which denies every server at the
   agent tier. Do not copy the personal edition's "empty means `["*"]`" default:
   there the only caller is the operator.
+- **A personal server may not take a name used anywhere in the admin
+  configuration**, shared or private. `AllowedServers` is compared by bare
+  string, so "I own a server called X" and "I may reach the admin's X" are
+  indistinguishable at enforcement time — a personal server named after an
+  admin-private upstream was a way to mint a token over it.
+  `entitledServerNames` also drops such a collision for a non-admin, so a row
+  that predates the refusal (or an admin who later adds a colliding name) cannot
+  resurrect the escalation. The refusal message is identical for a shared and a
+  private collision: naming which would be a server-name existence oracle.
+
+#### Scope is a snapshot, not a live check
+
+`resolveTokenServerScope` runs at mint time and **nothing re-validates at use
+time**. Un-sharing a server, or removing a personal one, does **not** revoke the
+grants already written into live tokens — to actually withdraw access, revoke or
+delete the tokens.
+
+Rotation is the one re-check: `POST /api/v1/user/tokens/{name}/regenerate`
+re-runs the entitlement predicate and persists the **narrowed** list
+(`narrowScopeToEntitled`), echoing it back in the response. It only ever narrows,
+and it never rejects — refusing to rotate would leave the over-broad grant in
+place and working. A token that is never rotated is never re-checked.
+
+**Tokens minted with a literal `"*"` before this constraint existed.** The
+enforcement layer honours `"*"` unconditionally, so any such token is a standing
+grant over the whole deployment. There is no migration and no admin-facing
+report: `GET /api/v1/user/tokens` is per-caller, and the server edition has no
+cross-tenant token listing (that belongs in `admin_handlers`, as its own
+feature). Until one exists, an operator audits them straight from storage —
+every record in the `agent_tokens` bucket whose `allowed_servers` contains `"*"`
+and whose `user_id` is non-empty — and revokes them; a tenant's own rotation
+also materialises the star into their entitled set. **This does not block the
+release**: the escalation route is closed for every token minted from here on,
+and a pre-existing `"*"` token could only have been minted by a tenant who was
+already able to mint one, i.e. it is not a new exposure. It is a cleanup item to
+carry into the cross-tenant token administration feature.
 
 ## Key Directories
 

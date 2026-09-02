@@ -18,11 +18,22 @@ const (
 	// (UserID == ""), i.e. every personal-edition token, so the personal
 	// edition is byte-identical on disk and a rollback sees exactly what it
 	// wrote. Owner-scoped lookups never consult it — see
-	// findAgentTokenHashLocked. Entries left behind by a pre-upgrade
-	// server-edition deployment are simply not read; they are deliberately NOT
-	// swept, because sweeping them would strand those tokens on a rollback
-	// while every by-name path on the old code already re-checks ownership and
-	// can therefore only deny, never act on the wrong tenant's token.
+	// findAgentTokenHashLocked.
+	//
+	// Entries left behind by a pre-upgrade server-edition deployment are not
+	// read, and are deliberately NOT swept: sweeping them would strand those
+	// tokens on a rollback, while every by-name path on the old code already
+	// re-checks ownership and can therefore only deny, never act on the wrong
+	// tenant's token.
+	//
+	// For that rollback promise to be true, all THREE maintenance paths must
+	// leave a foreign entry alone, not just the two that already did. Create
+	// used to Put unconditionally, overwriting whatever the name pointed at —
+	// including a pre-upgrade tenant's entry, the very thing the paragraph
+	// above promises to preserve. It now claims the slot only when the slot is
+	// free, or when the entry it holds dangles (its hash is no longer in
+	// agent_tokens). Delete and regenerate already required the entry to point
+	// at the very record being mutated.
 	AgentTokenNamesBucket = "agent_token_names" //nolint:gosec // bucket name, not a credential
 )
 
@@ -60,7 +71,18 @@ var (
 //
 // The caller must complete this scan before mutating the bucket: bbolt forbids
 // mutating a bucket while iterating it.
-func findAgentTokenHashLocked(tx *bbolt.Tx, userID, name string) ([]byte, *auth.AgentToken, error) {
+//
+// A record that fails to unmarshal is SKIPPED, not fatal. Because this walks
+// the whole bucket rather than reading one indexed record, aborting on the
+// first bad row would let a single unparseable entry — a truncated write, a
+// hand-edited DB, a record from a future schema — turn create, revoke, delete
+// and regenerate into a 500 for EVERY tenant of the deployment, which the
+// indexed read it replaced could not do. Skipping degrades the blast radius to
+// "that one token is unresolvable": the corrupt row's own (owner, name) stops
+// resolving, so its management operations answer not-found, and every other
+// token keeps working. The skip is logged at WARN with the bucket key so an
+// operator can find the row; that key is an HMAC hash, not a credential.
+func (m *Manager) findAgentTokenHashLocked(tx *bbolt.Tx, userID, name string) ([]byte, *auth.AgentToken, error) {
 	tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
 	if tokenBucket == nil {
 		return nil, nil, nil
@@ -77,7 +99,11 @@ func findAgentTokenHashLocked(tx *bbolt.Tx, userID, name string) ([]byte, *auth.
 		}
 		var token auth.AgentToken
 		if err := json.Unmarshal(v, &token); err != nil {
-			return fmt.Errorf("failed to unmarshal agent token: %w", err)
+			if m.logger != nil {
+				m.logger.Warnw("skipping unparseable agent token record",
+					"bucket", AgentTokensBucket, "key", string(k), "error", err)
+			}
+			return nil
 		}
 		if token.Name != name || token.UserID != userID {
 			return nil
@@ -136,7 +162,7 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 		// Check for a duplicate name WITHIN THIS OWNER's namespace. Scanning
 		// must finish before any Put below: bbolt forbids mutating a bucket
 		// while it is being iterated.
-		existingHash, _, err := findAgentTokenHashLocked(tx, token.UserID, token.Name)
+		existingHash, _, err := m.findAgentTokenHashLocked(tx, token.UserID, token.Name)
 		if err != nil {
 			return err
 		}
@@ -163,14 +189,45 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 		// Maintain the legacy owner-blind index only for ownerless tokens, so
 		// the personal edition is byte-identical. A user-owned name must never
 		// claim the global slot, or one tenant's name would shadow another's.
+		//
+		// The slot is CLAIMED, not overwritten. An unconditional Put stomps
+		// whatever the name already pointed at — including the pre-upgrade
+		// server-edition entry the bucket comment above promises to leave
+		// intact for a rollback, which on the old code is a live tenant's
+		// token. A DANGLING entry (its hash no longer in agent_tokens) is fair
+		// game: nothing can resolve through it, on this code or a rollback.
+		// Declining the Put costs the new token nothing —
+		// findAgentTokenHashLocked resolves by scan and never reads this index.
 		if token.UserID == "" {
-			if err := nameBucket.Put([]byte(token.Name), []byte(hash)); err != nil {
-				return fmt.Errorf("failed to store agent token name mapping: %w", err)
+			if claimAgentTokenNameSlot(tx, nameBucket, token.Name) {
+				if err := nameBucket.Put([]byte(token.Name), []byte(hash)); err != nil {
+					return fmt.Errorf("failed to store agent token name mapping: %w", err)
+				}
 			}
 		}
 
 		return nil
 	})
+}
+
+// claimAgentTokenNameSlot reports whether the legacy owner-blind name index may
+// be pointed at a newly created OWNERLESS token.
+//
+// True when the name is unclaimed, or when the entry it holds DANGLES — its
+// hash is absent from agent_tokens, so nothing resolves through it on this code
+// or on a rollback. False when a live record already holds the slot, which in
+// practice means a pre-upgrade server-edition tenant's token: overwriting that
+// is precisely the rollback stranding the bucket comment promises not to cause.
+func claimAgentTokenNameSlot(tx *bbolt.Tx, nameBucket *bbolt.Bucket, name string) bool {
+	indexed := nameBucket.Get([]byte(name))
+	if indexed == nil {
+		return true
+	}
+	tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+	if tokenBucket == nil {
+		return true
+	}
+	return tokenBucket.Get(indexed) == nil
 }
 
 // GetAgentTokenByName retrieves an OWNERLESS agent token by its name — that
@@ -201,7 +258,7 @@ func (m *Manager) GetAgentTokenByOwnerAndName(userID, name string) (*auth.AgentT
 	var token *auth.AgentToken
 
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
-		_, found, err := findAgentTokenHashLocked(tx, userID, name)
+		_, found, err := m.findAgentTokenHashLocked(tx, userID, name)
 		if err != nil {
 			return err
 		}
@@ -291,7 +348,7 @@ func (m *Manager) RevokeAgentTokenForOwner(userID, name string) error {
 
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
 		// Resolve first; the scan must finish before the Put below.
-		hash, token, err := findAgentTokenHashLocked(tx, userID, name)
+		hash, token, err := m.findAgentTokenHashLocked(tx, userID, name)
 		if err != nil {
 			return err
 		}
@@ -337,7 +394,7 @@ func (m *Manager) DeleteAgentTokenForOwner(userID, name string) error {
 
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
 		// Resolve first; the scan must finish before any Delete below.
-		hash, token, err := findAgentTokenHashLocked(tx, userID, name)
+		hash, token, err := m.findAgentTokenHashLocked(tx, userID, name)
 		if err != nil {
 			return err
 		}
@@ -373,13 +430,25 @@ func (m *Manager) DeleteAgentTokenForOwner(userID, name string) error {
 // old hash entry and creates a new one with the new raw token's hash.
 // Returns the updated token record.
 func (m *Manager) RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error) {
-	return m.RegenerateAgentTokenForOwner("", name, newRawToken, hmacKey)
+	return m.RegenerateAgentTokenForOwner("", name, newRawToken, hmacKey, nil)
 }
 
 // RegenerateAgentTokenForOwner regenerates the token called name owned by
 // userID. Returns ErrAgentTokenNotFound when the (owner, name) pair does not
 // resolve, whether because it is absent or because it belongs to someone else.
-func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error) {
+//
+// narrowScope, when non-nil, is applied to the stored AllowedServers inside the
+// same transaction that rotates the hash, and its result is persisted. It exists
+// because a token's server scope is decided once, at mint time, and nothing
+// re-checks it afterwards: un-sharing a server does not revoke the grants
+// already written into live tokens. Rotation is the one moment the owner's
+// current entitlement is known, so the server edition passes a filter that drops
+// anything they may no longer reach (see resolveTokenServerScope). It MUST only
+// ever narrow — a hook that widened would hand the caller a privilege escalation
+// through the one operation that is supposed to be neutral — and it MUST NOT do
+// I/O: it runs inside a write transaction while m.mu is held, so the caller
+// computes the entitled set before the call and passes a pure filter.
+func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (*auth.AgentToken, error) {
 	if name == "" {
 		return nil, fmt.Errorf("agent token name cannot be empty")
 	}
@@ -394,7 +463,7 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
 		// Resolve first; the scan must finish before the Delete/Put below.
-		oldHash, token, err := findAgentTokenHashLocked(tx, userID, name)
+		oldHash, token, err := m.findAgentTokenHashLocked(tx, userID, name)
 		if err != nil {
 			return err
 		}
@@ -416,6 +485,12 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 		token.TokenHash = newHash
 		token.TokenPrefix = newPrefix
 		token.Revoked = false
+
+		// Re-apply the caller's current server entitlement, if they supplied
+		// one. Narrowing only; see the doc comment.
+		if narrowScope != nil {
+			token.AllowedServers = narrowScope(token.AllowedServers)
+		}
 
 		updatedData, err := json.Marshal(token)
 		if err != nil {
@@ -463,7 +538,7 @@ func (m *Manager) UpdateAgentTokenLastUsed(name string) error {
 		defer m.mu.RUnlock()
 		var found *auth.AgentToken
 		err := m.db.db.View(func(tx *bbolt.Tx) error {
-			_, t, err := findAgentTokenHashLocked(tx, "", name)
+			_, t, err := m.findAgentTokenHashLocked(tx, "", name)
 			found = t
 			return err
 		})

@@ -160,6 +160,15 @@ func (r *Router) GetServerForUser(ctx context.Context, serverName string) (*Serv
 // It errors if there is no auth context or the server is not accessible to the
 // user; it does not require the server to actually declare an auth_broker block,
 // so callers can key uniformly and decide per server whether to broker.
+//
+// Only a USER-tier context keys as its own user id. Since issue #1168 an agent
+// token's AuthContext carries its OWNER's UserID (so its activity is
+// attributable), and keying straight off GetUserID() would therefore pool an
+// agent-token request onto the owner's own brokered connection — a connection
+// carrying the owner's injected IdP credential, which is precisely the sharing
+// FR-018 exists to prevent. Every non-user tier is namespaced instead, so it can
+// never collide with a user session's entry while two agent tokens of different
+// owners still stay apart. This is one place; see brokerPoolIdentity.
 func (r *Router) BrokeredConnectionKey(ctx context.Context, serverName string) (string, error) {
 	ac := auth.AuthContextFromContext(ctx)
 	if ac == nil {
@@ -170,7 +179,28 @@ func (r *Router) BrokeredConnectionKey(ctx context.Context, serverName string) (
 	if err != nil {
 		return "", err
 	}
-	return broker.ConnectionKey(ac.GetUserID(), info.Config), nil
+	return broker.ConnectionKey(brokerPoolIdentity(ac), info.Config), nil
+}
+
+// nonUserPoolPrefix namespaces the pooling identity of every non-user tier so
+// it cannot collide with a user session's. It contains a character no ULID
+// carries, so no user id can be forged into this namespace either.
+const nonUserPoolPrefix = "non-user:"
+
+// brokerPoolIdentity returns the identity half of a brokered connection's
+// pooling key.
+//
+// A user session keys as its bare user id, exactly as before. Anything else —
+// an agent token (which now carries its owner's UserID), the personal-edition
+// API key, an anonymous back-compat context — keys inside a separate namespace,
+// qualified by tier and by whatever user id it does carry. That keeps two
+// different owners' agent tokens apart while guaranteeing neither of them ever
+// lands on a user session's pool entry.
+func brokerPoolIdentity(ac *auth.AuthContext) string {
+	if ac.IsUser() && ac.GetUserID() != "" {
+		return ac.GetUserID()
+	}
+	return nonUserPoolPrefix + ac.Type + ":" + ac.GetUserID()
 }
 
 // IsServerAccessible returns true if the user from the context can access

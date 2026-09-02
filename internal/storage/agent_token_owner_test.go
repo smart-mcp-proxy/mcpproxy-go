@@ -140,7 +140,7 @@ func TestAgentToken_RevokeAndRegenerateAreOwnerScoped(t *testing.T) {
 	// would for a name nobody has.
 	assert.ErrorIs(t, manager.RevokeAgentTokenForOwner("userC", "ci"), ErrAgentTokenNotFound)
 	assert.ErrorIs(t, manager.RevokeAgentTokenForOwner("userC", "nope"), ErrAgentTokenNotFound)
-	_, err := manager.RegenerateAgentTokenForOwner("userC", "ci", "mcp_agt_whatever", testHMACKey)
+	_, err := manager.RegenerateAgentTokenForOwner("userC", "ci", "mcp_agt_whatever", testHMACKey, nil)
 	assert.ErrorIs(t, err, ErrAgentTokenNotFound)
 
 	// Positive control: the owner CAN revoke, and only their own record moves.
@@ -160,7 +160,7 @@ func TestAgentToken_RevokeAndRegenerateAreOwnerScoped(t *testing.T) {
 	// Regenerate is likewise confined to the owner's record.
 	newRawB, err := auth.GenerateToken()
 	require.NoError(t, err)
-	updatedB, err := manager.RegenerateAgentTokenForOwner("userB", "ci", newRawB, testHMACKey)
+	updatedB, err := manager.RegenerateAgentTokenForOwner("userB", "ci", newRawB, testHMACKey, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "userB", updatedB.UserID)
 	_, err = manager.ValidateAgentToken(newRawB, testHMACKey)

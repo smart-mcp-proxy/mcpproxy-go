@@ -47,8 +47,19 @@ func (f *ActivityFilter) GetUserActivity(ctx context.Context, limit, offset int)
 		return f.storageProvider.ListActivities(filter)
 	}
 
-	// Regular users only see their own activity
-	if ac == nil || ac.UserID == "" {
+	// Regular users only see their own activity.
+	//
+	// Gated on the user TIER, not merely on a non-empty UserID. Since issue
+	// #1168 an agent token's AuthContext carries its OWNER's UserID so its
+	// activity can be attributed (EnrichRecord below is exactly that, and
+	// deliberately stays UserID-based). A bare `UserID != ""` check would have
+	// let that attribution field double as an authorization claim, handing a
+	// scoped, read-only agent token its owner's entire activity log. The
+	// server-edition middleware already refuses agent tokens on this route, so
+	// this is defence in depth — but the branch's rule is that per-user
+	// surfaces gate on IsUser(), never on a non-empty UserID, and one
+	// middleware branch must not be the whole boundary.
+	if ac == nil || !ac.IsUser() || ac.UserID == "" {
 		return nil, 0, fmt.Errorf("authentication required")
 	}
 
