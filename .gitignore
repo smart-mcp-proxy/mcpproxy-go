@@ -5,6 +5,8 @@
 *.so
 *.dylib
 /mcpproxy
+/mcpproxy-server
+/warmtiktoken
 /test/launcher-server/launcher-server
 __debug_bin*
 
