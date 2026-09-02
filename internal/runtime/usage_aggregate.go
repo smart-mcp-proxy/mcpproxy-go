@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -492,29 +493,58 @@ func (s *UsageStore) Snapshot() *UsageAggregate {
 // narrower rule that mcpproxy must not inflate its own cost with text nobody
 // consumed.
 //
-// The record types differ, and an earlier version of this comment had the
-// difference backwards on both halves. What is actually true — see
+// The question this answers is narrow: did the cut leave the RECORD holding
+// more than was delivered? Only then does counting ResponseBytes inflate the
+// usage timeline in the flattering direction, which is the one error a cost
+// surface must not make.
+//
+// The answer comes off the EMITTER'S stamp, never off the record type — see
 // contracts.ResolveResponseTruncation, internal/contracts/activity_truncation.go,
-// the single authority:
+// the single authority on what a record's truncation state means.
 //
-//   - an upstream tool_call is cut on the way OUT, not on the way into the log.
-//     Its record holds the POST-forward text, so the log holds the agent's copy
-//     (or, with activity_max_response_size also in play, strictly LESS than it)
-//     and never more. Its ResponseBytes is the PRE-forward upstream size, larger
-//     than both bodies — which is exactly what an upstream-payload-volume metric
-//     is defined to report, so it is counted;
-//   - an internal built-in — retrieve_tools above all — records the PRE-forward
-//     text, and its ResponseBytes describes mcpproxy's OWN un-consumed output.
-//     Counting that inflates the usage timeline in the flattering direction,
-//     which is the one error a cost surface must not make.
+// That is exactly contracts.CutShortenedAgentOnly — the built-ins, retrieve_tools
+// above all, which record the pre-cut text while the agent got it cut. The
+// other two stamps are counted:
 //
-// The residual, stated so nobody re-derives "delivered" from this: neither
-// branch yields delivered bytes, and no field on the aggregate does. A consumer
-// that needs delivered volume has to tokenize or measure the stored bodies.
+//   - CutShortenedAgentAndRecord (ordinary upstream tool_call forward
+//     truncation): the record holds the agent's copy and never more, and
+//     ResponseBytes is the PRE-cut upstream size, larger than both bodies —
+//     which is exactly what an upstream-payload-volume metric is defined to
+//     report;
+//   - CutShortenedRecordOnly (a code-execution sub-call): the whole response
+//     WAS delivered, so ResponseBytes is honest about delivery; only the log
+//     copy is short.
+//
+// The type fallback is for records written before the stamp existed. It is the
+// predicate this function used to be, kept because it was correct for the
+// emitter population that produced those records — an internal_tool_call was
+// the only CutShortenedAgentOnly emitter then, and still is. It must not be
+// extended: a NEW emitter reaching this without a stamp is a bug in the
+// emitter, and the compiler already prevents one (contracts.ResponseCut is a
+// required argument, not a bool).
+//
+// The residual, stated so nobody re-derives "delivered" from this: no branch
+// yields delivered bytes for the forward-cut population, and no field on the
+// aggregate does. A consumer that needs delivered volume has to tokenize or
+// measure the stored bodies.
 //
 // It became reachable only when internal calls began carrying byte counts at all
 // (spec 103); before that they contributed zero and the question could not
 // arise.
 func truncatedBuiltinOverstatesDelivery(rec *storage.ActivityRecord) bool {
-	return rec.ResponseTruncated && rec.Type == storage.ActivityTypeInternalToolCall
+	if !rec.ResponseTruncated {
+		return false
+	}
+	switch rec.ResponseTruncationCut {
+	case contracts.CutShortenedAgentOnly:
+		return true
+	case contracts.CutShortenedAgentAndRecord, contracts.CutShortenedRecordOnly:
+		return false
+	case contracts.CutNone:
+		// Truncated with no stamp: a legacy record. See above.
+		return rec.Type == storage.ActivityTypeInternalToolCall
+	default:
+		// A stamp from a newer core. Unrecognised, so unstamped.
+		return rec.Type == storage.ActivityTypeInternalToolCall
+	}
 }

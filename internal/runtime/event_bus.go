@@ -420,7 +420,7 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // toonOutput is the spec-084 per-block encoding decision metadata (FR-010) - optional
 // parentID is the correlation id of the parent code_execution call for a
 // sandbox sub-call; empty for every top-level dispatch
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string) {
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseCut contracts.ResponseCut, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string) {
 	// Spec 042: classify failed tool calls into the upstream error categories.
 	// We never record the error message itself; only a fixed enum value.
 	if status == "error" && errorMsg != "" {
@@ -435,16 +435,21 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 	}
 
 	payload := map[string]any{
-		"server_name":        serverName,
-		"tool_name":          toolName,
-		"session_id":         sessionID,
-		"request_id":         requestID,
-		"source":             source,
-		"status":             status,
-		"error_message":      errorMsg,
-		"duration_ms":        durationMs,
-		"response":           response,
-		"response_truncated": responseTruncated,
+		"server_name":   serverName,
+		"tool_name":     toolName,
+		"session_id":    sessionID,
+		"request_id":    requestID,
+		"source":        source,
+		"status":        status,
+		"error_message": errorMsg,
+		"duration_ms":   durationMs,
+		"response":      response,
+		// Both derived from ONE value, so the boolean can never claim a cut the
+		// stamp does not describe. A caller cannot set the flag without naming
+		// which copies the cut shortened: that is not a convention, it is the
+		// parameter type (contracts.ResponseCut).
+		"response_truncated":      responseCut.Cuts(),
+		"response_truncation_cut": string(responseCut),
 	}
 	// Add arguments if provided
 	if arguments != nil {
@@ -587,23 +592,24 @@ func (r *Runtime) EmitActivitySystemStop(reason, signal string, uptimeSeconds in
 // arguments contains the input parameters, response contains the output
 // intent is the intent declaration metadata
 func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
-	r.EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, false)
+	r.EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, contracts.CutNone)
 }
 
 // EmitActivityInternalToolCallTruncated is EmitActivityInternalToolCall for a
-// built-in whose RECORDED response is larger than the one the agent received.
+// built-in whose response was cut, with responseCut naming WHICH copies the cut
+// shortened.
 //
-// The non-internal path has carried this since Spec 024 (see the
-// "response_truncated" key in EmitActivityToolCallCompleted); the internal path
-// did not, and that asymmetry is a correctness problem rather than a cosmetic
-// one. retrieve_tools deliberately writes its FULL pre-truncation response to
-// the activity log while the agent consumed only the cut text, so a record that
-// does not say it was truncated is indistinguishable from a complete one.
+// The non-internal path has carried a truncation signal since Spec 024 (see
+// EmitActivityToolCallCompleted); the internal path did not, and that asymmetry
+// is a correctness problem rather than a cosmetic one. retrieve_tools
+// deliberately writes its FULL pre-truncation response to the activity log
+// while the agent consumed only the cut text — contracts.CutShortenedAgentOnly
+// — so a record that does not say so is indistinguishable from a complete one.
 // Anything recomputing cost from the log then tokenizes text the agent never
 // paid for and OVERSTATES what mcpproxy cost — the one direction of error the
 // Spec 103 token benchmark exists to prevent, and one that cannot be detected
 // after the fact.
-func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseTruncated bool) {
+func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseCut contracts.ResponseCut) {
 	payload := map[string]any{
 		"internal_tool_name": internalToolName,
 		"session_id":         sessionID,
@@ -636,7 +642,12 @@ func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, target
 	// Always set, never omitempty-style conditional: absent and false must not be
 	// the same wire state here, because a consumer reading "no key" as "not
 	// truncated" is exactly the silent understatement this flag prevents.
-	payload["response_truncated"] = responseTruncated
+	//
+	// Both keys come off ONE value, so the boolean can never claim a cut the
+	// stamp does not describe, and a caller cannot set the flag without naming
+	// which copies the cut shortened.
+	payload["response_truncated"] = responseCut.Cuts()
+	payload["response_truncation_cut"] = string(responseCut)
 	// Spec 103: pre-truncation byte lengths, the same measure the upstream
 	// tool-call path carries. Every built-in call was unaccountable without
 	// these — 0 means UNKNOWN in the activity log, not free, so a cost
@@ -645,9 +656,11 @@ func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, target
 	//
 	// `response` here is the FULL pre-truncation value (see the doc on
 	// MCPProxyServer.emitActivityInternalToolCallTruncated), which is exactly
-	// what response_bytes is defined to mean. When responseTruncated is set the
-	// agent consumed LESS than this, and the flag travelling beside it is what
+	// what response_bytes is defined to mean. Under CutShortenedAgentOnly the
+	// agent consumed LESS than this, and the stamp travelling beside it is what
 	// lets a consumer exclude the row rather than overstate mcpproxy's cost.
+	// These fields ARE populated on every internal emission — nothing may
+	// document the internal path as leaving them empty.
 	if n := jsonByteLen(arguments); n > 0 {
 		payload["request_bytes"] = n
 	}

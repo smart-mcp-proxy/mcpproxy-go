@@ -196,6 +196,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
 			contractActivities[i].ResponseTruncated = false
+			contractActivities[i].ResponseTruncationCut = contracts.CutNone
 			contractActivities[i].ResponseStorageTruncated = false
 			// The notice explains a body this projection just removed, and it
 			// would be the only survivor still asserting the flags cleared
@@ -370,17 +371,23 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		Arguments:         a.Arguments,
 		Response:          a.Response,
 		ResponseTruncated: a.ResponseTruncated,
-		// Opposite direction to ResponseTruncated (issue #1173): the stored
-		// body is a PREFIX of what the agent received. Carried separately so a
+		// The emitter's stamp for that cut. Carried so a client that needs to
+		// branch (rather than read prose) has the direction without re-deriving
+		// it from Type — which is not derivable from Type.
+		ResponseTruncationCut: a.ResponseTruncationCut,
+		// Issue #1173: the stored body is a PREFIX of what the EMITTER handed
+		// over. Whether that also makes it shorter than the agent's copy
+		// depends on the other cut's stamp, which is why the resolver below —
+		// not this comment — is what renderers read. Carried separately so a
 		// consumer of either flag cannot be misled by the other.
 		ResponseStorageTruncated: a.ResponseStorageTruncated,
-		// The RESOLVED meaning of the two flags for this record's type, so no
-		// client re-derives the direction table (internal/contracts/
-		// activity_truncation.go). It is prose about the record, not content,
-		// so masking does not apply — but exclude_payloads clears it below,
-		// because it explains a body that projection removes.
+		// The RESOLVED meaning of this record's truncation state, so no client
+		// re-derives it (internal/contracts/activity_truncation.go). It is
+		// prose about the record, not content, so masking does not apply — but
+		// exclude_payloads clears it below, because it explains a body that
+		// projection removes.
 		ResponseTruncationNotice: contracts.ResolveResponseTruncation(
-			string(a.Type), a.ResponseTruncated, a.ResponseStorageTruncated,
+			a.ResponseTruncationCut, a.ResponseTruncated, a.ResponseStorageTruncated,
 		).NoticeWithBytes(a.ResponseBytes),
 		Status:        a.Status,
 		ErrorMessage:  a.ErrorMessage,
@@ -490,8 +497,9 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		ToolName:          a.ToolName,
 		ResponseTruncated: a.ResponseTruncated,
 		// Copied unconditionally, like the byte counts below and unlike the
-		// bodies: it describes the record, not its content, and a bodies-on
-		// consumer that tokenizes Response has to know the text is a prefix.
+		// bodies: they describe the record, not its content, and a bodies-on
+		// consumer that tokenizes Response has to know which way each cut went.
+		ResponseTruncationCut:    a.ResponseTruncationCut,
 		ResponseStorageTruncated: a.ResponseStorageTruncated,
 		// Same rule, and the same resolver as the list converter: the two
 		// converters must not drift (TestActivityConvertersAgreeFieldByField).
@@ -499,7 +507,7 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		// are then the only cost signal, and the notice is what says whether
 		// they describe the stored body, the delivered one, or neither.
 		ResponseTruncationNotice: contracts.ResolveResponseTruncation(
-			string(a.Type), a.ResponseTruncated, a.ResponseStorageTruncated,
+			a.ResponseTruncationCut, a.ResponseTruncated, a.ResponseStorageTruncated,
 		).NoticeWithBytes(a.ResponseBytes),
 		Status:        a.Status,
 		ErrorMessage:  a.ErrorMessage,

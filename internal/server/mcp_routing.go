@@ -501,7 +501,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// lines down, so the two are one series to a consumer.
 			p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
 			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", errMsg,
-				time.Since(startTime).Milliseconds(), enrichedArgs, "", false, "", nil,
+				time.Since(startTime).Milliseconds(), enrichedArgs, "", contracts.CutNone, "", nil,
 				contracts.ContentTrustForTool(annotations), "", 0, 0, "", nil, "")
 
 			return invalidParamsErrorResult(entry.DisplayName, entry.ParamsJSON, detail), nil
@@ -538,7 +538,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				return shedToolResult(limitErr), nil
 			}
 			// Emit error activity
-			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
+			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", contracts.CutNone, "", nil, directContentTrust, "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
@@ -618,7 +618,14 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Spec 069 A1: pre-truncation sizes; result was measured before the truncation loop above.
 		routingResponseBytes := rawByteSize(result)
 		routingRequestBytes := rawByteSize(enrichedArgs)
-		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
+		// CutShortenedAgentAndRecord: the loop above rewrote the content blocks
+		// the agent receives and built responseText from those same cut blocks,
+		// so this record holds exactly the delivered copy.
+		responseCut := contracts.CutNone
+		if truncated {
+			responseCut = contracts.CutShortenedAgentAndRecord
+		}
+		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, responseCut, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
 
 		return forwarded, nil
 	}

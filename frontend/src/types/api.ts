@@ -1,5 +1,5 @@
 // Re-export common types from contracts (generated from Go constants)
-export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction } from './contracts'
+export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction, ResponseCut } from './contracts'
 export {
   HealthLevelHealthy,
   HealthLevelDegraded,
@@ -15,10 +15,13 @@ export {
   HealthActionViewLogs,
   HealthActionSetSecret,
   HealthActionConfigure,
+  CutShortenedAgentAndRecord,
+  CutShortenedAgentOnly,
+  CutShortenedRecordOnly,
 } from './contracts'
 
-// Import HealthStatus for use in this file
-import type { HealthStatus } from './contracts'
+// Import HealthStatus and ResponseCut for use in this file
+import type { HealthStatus, ResponseCut } from './contracts'
 
 // Quarantine stats for tool-level quarantine (Spec 032)
 export interface QuarantineStats {
@@ -864,25 +867,40 @@ export interface ActivityRecord {
   arguments?: Record<string, any>
   response?: string
   /**
-   * Spec 103: the response was cut to `tool_response_limit` on the way to the
-   * agent.
+   * Spec 103: the response was cut. WHICH copies the cut shortened is in
+   * `response_truncation_cut`.
    *
-   * Never render a direction from this flag. Which side of the cut the record
-   * holds depends on `type` AND on whether `response_storage_truncated` is also
-   * set — a `tool_call` with only this flag holds exactly the agent's copy, but
-   * the same record with the storage flag too holds strictly LESS than it.
-   * `response_truncation_notice` carries the backend's resolved answer for the
-   * record in hand; use it.
+   * Never render a direction from this flag, and never from `type`. Several
+   * backend emitters set it and they point different ways — a code-execution
+   * sub-call is a `tool_call` record whose cut runs the opposite way from an
+   * ordinary one's. `response_truncation_notice` carries the backend's resolved
+   * answer for the record in hand; use it.
    */
   response_truncated?: boolean
   /**
+   * The emitter's stamp saying which copies of the response the
+   * `response_truncated` cut shortened (`contracts.ResponseCut`, Go).
+   *
+   * - `agent_and_record` — the agent's copy was cut and this record holds that
+   *   same cut copy (ordinary upstream forward truncation).
+   * - `agent_only` — only the agent's copy was cut; this record holds the full
+   *   pre-cut text, so it holds MORE than was delivered (built-ins).
+   * - `record_only` — only this record was cut; the agent received the whole
+   *   response (code-execution sub-calls, cut to bound the log).
+   *
+   * Absent means unstated: with `response_truncated` false nothing was cut,
+   * and with it true the record came from an older core that did not stamp a
+   * direction. Do not fill one in.
+   */
+  response_truncation_cut?: ResponseCut
+  /**
    * Issue #1173: the RECORDED response is smaller than the text the emitter
    * handed over, because `activity_max_response_size` cut it on the way into
-   * the database. Unlike `response_truncated` this is type-independent.
-   * It means "smaller than what the agent received" only when
-   * `response_truncated` is false; with both set the forward cut already shaped
-   * the text and the order of the two sizes is not fixed. `response_bytes` is
-   * measured pre-truncation and stays honest. Both can be true.
+   * the database. Unlike `response_truncated` this cut needs no stamp — it has
+   * only ever had one direction. Whether it also makes the record smaller than
+   * what the AGENT received depends on the other cut, which is what
+   * `response_truncation_notice` resolves. `response_bytes` is measured
+   * pre-truncation and stays honest. Both flags can be true.
    */
   response_storage_truncated?: boolean
   /**

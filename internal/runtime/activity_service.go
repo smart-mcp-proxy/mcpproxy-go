@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -614,7 +615,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	errorMsg := getStringPayload(evt.Payload, "error_message")
 	arguments := getMapPayload(evt.Payload, "arguments")
 	response := getStringPayload(evt.Payload, "response")
-	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
+	responseCut, responseTruncated := responseCutFromPayload(evt.Payload)
 	// Truncated into a SEPARATE variable, deliberately. `response` stays whole
 	// because it is also the sensitive-data detector's input (scanText below).
 	// Rebinding it here would cut response scanning from the detector's own
@@ -685,7 +686,12 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		Arguments:         arguments,
 		Response:          storedResponse,
 		ResponseTruncated: responseTruncated,
-		// Deliberately NOT OR-ed into ResponseTruncated: opposite directions.
+		// The emitter's stamp for the cut the flag above reports. Written
+		// together with it and derived from the same value, so the record can
+		// never carry a direction-less claim from a current core.
+		ResponseTruncationCut: responseCut,
+		// Deliberately NOT OR-ed into ResponseTruncated: this cut always
+		// shortens the record and only the record.
 		ResponseStorageTruncated: storageTruncated,
 		Status:                   status,
 		ErrorMessage:             errorMsg,
@@ -925,9 +931,10 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 
 	// Spec 103: the recorded response can be larger than the one the agent
 	// received (retrieve_tools stores the full pre-truncation text). Carry the
-	// flag onto the record so a cost recomputation can exclude it instead of
-	// tokenizing text the agent never paid for.
-	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
+	// flag AND the emitter's direction stamp onto the record so a cost
+	// recomputation can exclude it instead of tokenizing text the agent never
+	// paid for — and so no consumer has to guess the direction from the type.
+	responseCut, responseTruncated := responseCutFromPayload(evt.Payload)
 	// Separate variable, for symmetry with handleToolCallCompleted. This
 	// handler runs no detector today, but a future one must not silently
 	// inherit a 64KB scan window from a storage decision.
@@ -978,7 +985,10 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
 		ResponseTruncated: responseTruncated,
-		// Deliberately NOT OR-ed into ResponseTruncated: opposite directions.
+		// The emitter's stamp for the cut the flag above reports.
+		ResponseTruncationCut: responseCut,
+		// Deliberately NOT OR-ed into ResponseTruncated: this cut always
+		// shortens the record and only the record.
 		ResponseStorageTruncated: storageTruncated,
 		RequestBytes:             internalRequestBytes,
 		ResponseBytes:            internalResponseBytes,
@@ -1185,6 +1195,28 @@ func getBoolPayload(payload map[string]any, key string) bool {
 		}
 	}
 	return false
+}
+
+// responseCutFromPayload reads the emitter's truncation-direction stamp.
+//
+// The emitters publish the flag and the stamp off ONE contracts.ResponseCut
+// value (EmitActivityToolCallCompleted and EmitActivityInternalToolCallTruncated),
+// and this is where they are put back together, so a record written by a
+// current core can never carry "truncated, direction unknown".
+//
+// The returned boolean is the OR of the stamp and the legacy key, never the
+// stamp alone. A payload that says a cut happened but not which copies it
+// shortened cannot come from a current emitter, yet dropping its flag would be
+// the one unsafe direction of error: a consumer would then tokenize a partial
+// body as if it were complete. It is recorded as truncated-but-unstamped, which
+// ResolveResponseTruncation answers without claiming a direction. An
+// unrecognised stamp is treated as no stamp, for the same reason.
+func responseCutFromPayload(payload map[string]any) (contracts.ResponseCut, bool) {
+	cut := contracts.ResponseCut(getStringPayload(payload, "response_truncation_cut"))
+	if !cut.Valid() {
+		cut = contracts.CutNone
+	}
+	return cut, cut.Cuts() || getBoolPayload(payload, "response_truncated")
 }
 
 func getInt64Payload(payload map[string]any, key string) int64 {

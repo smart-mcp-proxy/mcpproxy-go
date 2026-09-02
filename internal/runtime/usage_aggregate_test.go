@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -328,68 +329,123 @@ func BenchmarkUsageStore_Apply(b *testing.B) {
 	}
 }
 
-// A truncated BUILT-IN response must not contribute its pre-truncation size to
-// delivered traffic.
+// A record whose stored text holds MORE than the agent consumed must not
+// contribute its pre-cut size to delivered traffic.
 //
-// The asymmetry (spec 103): for an ordinary upstream tool_call, truncation cuts
-// the STORED text while the agent consumed the whole thing, so the pre-truncation
-// length is honest. For an internal built-in — retrieve_tools above all — it is
-// the other way round: the log keeps the FULL response while the agent consumed
-// the CUT text, so counting the full length overstates what was delivered.
+// That condition is contracts.CutShortenedAgentOnly and nothing else. It is a
+// property of the EMITTER, not of the record type: a built-in (retrieve_tools
+// above all) records the full response while the agent consumed the cut text,
+// whereas an ordinary upstream tool_call records the POST-forward text and so
+// holds the agent's own copy — and a code-execution sub-call, also a tool_call,
+// holds a PREFIX of what the sandbox got. Only the first overstates.
 //
 // This became reachable only when internal calls started carrying byte counts at
-// all; before that they contributed 0 and the question could not arise. Found by
-// cross-model review of that change.
-func TestUsageAggregate_TruncatedBuiltinDoesNotInflateDeliveredBytes(t *testing.T) {
+// all; before that they contributed 0 and the question could not arise.
+func TestUsageAggregate_AgentOnlyCutDoesNotInflateDeliveredBytes(t *testing.T) {
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
-	internal := func(truncated bool, respBytes int) *storage.ActivityRecord {
+	internal := func(cut contracts.ResponseCut, respBytes int) *storage.ActivityRecord {
 		return &storage.ActivityRecord{
-			Type:              storage.ActivityTypeInternalToolCall,
-			ToolName:          "retrieve_tools",
-			Status:            "success",
-			ResponseBytes:     respBytes,
-			ResponseTruncated: truncated,
-			Timestamp:         base,
+			Type:                  storage.ActivityTypeInternalToolCall,
+			ToolName:              "retrieve_tools",
+			Status:                "success",
+			ResponseBytes:         respBytes,
+			ResponseTruncated:     cut.Cuts(),
+			ResponseTruncationCut: cut,
+			Timestamp:             base,
 		}
 	}
-
-	agg := newUsageAggregate()
-	agg.Apply(internal(false, 4_000))
-	var delivered int64
-	for _, b := range agg.Buckets {
-		delivered += b.RespBytesSum
+	sum := func(rec *storage.ActivityRecord) int64 {
+		agg := newUsageAggregate()
+		agg.Apply(rec)
+		var total int64
+		for _, b := range agg.Buckets {
+			total += b.RespBytesSum
+		}
+		return total
 	}
-	require.EqualValues(t, 4_000, delivered, "an untruncated built-in is delivered in full")
 
-	agg2 := newUsageAggregate()
-	agg2.Apply(internal(true, 1_000_000)) // stored 1MB, agent consumed the cut text
-	var inflated int64
-	for _, b := range agg2.Buckets {
-		inflated += b.RespBytesSum
-	}
-	assert.Zero(t, inflated,
+	require.EqualValues(t, 4_000, sum(internal(contracts.CutNone, 4_000)),
+		"an untruncated built-in is delivered in full")
+
+	assert.Zero(t, sum(internal(contracts.CutShortenedAgentOnly, 1_000_000)),
 		"the stored size describes more than the agent consumed; counting it overstates traffic")
 
-	// An upstream tool_call is the OPPOSITE case and must still count.
-	agg3 := newUsageAggregate()
+	// An ordinary upstream tool_call is the OPPOSITE case and must still count.
 	up := toolCall("github", "search", "success", 10, 100, 50_000, base)
 	up.ResponseTruncated = true
-	agg3.Apply(up)
-	var upstream int64
-	for _, b := range agg3.Buckets {
-		upstream += b.RespBytesSum
-	}
-	assert.EqualValues(t, 50_000, upstream,
-		"an upstream response was consumed whole; only the STORED copy was cut")
+	up.ResponseTruncationCut = contracts.CutShortenedAgentAndRecord
+	assert.EqualValues(t, 50_000, sum(up),
+		"an upstream response was consumed whole up to the forward cut, and the record holds that same copy")
 }
 
-// The mirror of the test above, and the guard on the field split.
+// The round-4 regression at the usage aggregate.
 //
-// A STORAGE-truncated built-in with NO forward cut points the other way: the log
-// holds LESS than the agent consumed, because activity_max_response_size cut the
-// text on the way into BBolt while nothing cut it on the way out. ResponseBytes
-// is measured pre-truncation by the emitter, so here it is exactly what was
-// delivered and must still be counted. Folding storage truncation into
+// A code-execution sub-call is a Type=tool_call record with
+// response_truncated=true, and its stamp is CutShortenedRecordOnly: the whole
+// response reached the sandbox and only the LOG copy was cut. Its ResponseBytes
+// is therefore an honest delivered size and must be counted. A predicate that
+// asked "is this truncated and internal?" got this right by accident; one that
+// asked "is this truncated?" would silently drop it.
+func TestUsageAggregate_RecordOnlyCutStillCountsDeliveredBytes(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	sub := toolCall("github", "search", "success", 10, 100, 50_000, base)
+	sub.Source = storage.ActivitySourceInternal
+	sub.ParentID = "parent-req-1"
+	sub.ResponseTruncated = true
+	sub.ResponseTruncationCut = contracts.CutShortenedRecordOnly
+
+	agg := newUsageAggregate()
+	agg.Apply(sub)
+	var total int64
+	for _, b := range agg.Buckets {
+		total += b.RespBytesSum
+	}
+	assert.EqualValues(t, 50_000, total,
+		"the sandbox received the whole response; only the activity log was cut")
+}
+
+// A record from an older core carries no stamp, and the predicate falls back to
+// the type test it used to be — which was correct for the emitter population
+// that wrote those records. Deleting the fallback would silently start counting
+// every legacy retrieve_tools row.
+func TestUsageAggregate_UnstampedLegacyRecordsFallBackToTheTypeTest(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	sum := func(rec *storage.ActivityRecord) int64 {
+		agg := newUsageAggregate()
+		agg.Apply(rec)
+		var total int64
+		for _, b := range agg.Buckets {
+			total += b.RespBytesSum
+		}
+		return total
+	}
+
+	// unstamped-legacy-record-on-purpose: written before the stamp existed.
+	legacyBuiltin := &storage.ActivityRecord{
+		Type:              storage.ActivityTypeInternalToolCall,
+		ToolName:          "retrieve_tools",
+		Status:            storage.ActivityStatusSuccess,
+		ResponseBytes:     1_000_000,
+		ResponseTruncated: true,
+		Timestamp:         base,
+	}
+	assert.Zero(t, sum(legacyBuiltin),
+		"a legacy truncated built-in still overstates delivered traffic")
+
+	// unstamped-legacy-record-on-purpose: the tool_call half of the same era.
+	legacyUpstream := toolCall("github", "search", "success", 10, 100, 50_000, base)
+	legacyUpstream.ResponseTruncated = true
+	assert.EqualValues(t, 50_000, sum(legacyUpstream),
+		"a legacy truncated tool_call held the agent's copy and must still count")
+}
+
+// The mirror of the tests above, and the guard on the field split.
+//
+// A STORAGE-truncated built-in with NO response cut points the other way: the
+// log holds LESS than the agent consumed, because activity_max_response_size cut
+// the text on the way into BBolt while nothing cut it on the way out.
+// ResponseBytes is measured pre-truncation by the emitter, so here it is exactly
+// what was delivered and must still be counted. Folding storage truncation into
 // ResponseTruncated would send this record through
 // truncatedBuiltinOverstatesDelivery and silently under-report — in the
 // flattering direction, on the very records the cap creates.
@@ -431,9 +487,10 @@ func TestUsageAggregate_StorageTruncatedBuiltinStillCountsDeliveredBytes(t *test
 		r.ResponseStorageTruncated = true
 	})), "the agent received all 200000 bytes; only the stored copy was cut")
 
-	// The negative half: the Spec 103 direction must STILL be excluded, so this
-	// cannot pass by the predicate having been deleted outright.
+	// The negative half: the agent-only direction must STILL be excluded, so
+	// this cannot pass by the predicate having been deleted outright.
 	assert.Zero(t, sum(builtin(func(r *storage.ActivityRecord) {
 		r.ResponseTruncated = true
-	})), "a Spec 103 truncated built-in still overstates delivered traffic")
+		r.ResponseTruncationCut = contracts.CutShortenedAgentOnly
+	})), "a built-in whose record holds more than was delivered still overstates traffic")
 }

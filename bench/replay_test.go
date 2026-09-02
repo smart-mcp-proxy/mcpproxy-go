@@ -564,15 +564,16 @@ func TestRunReplay_SurfacesLoaderLevelAccounting(t *testing.T) {
 		// An internal record whose stored response is LARGER than the one the
 		// agent consumed: admitted to its session, but its cost is withheld
 		// because tokenizing the stored text would overstate what was paid.
-		ID:                "a-trunc",
-		Type:              contracts.ActivityType("internal_tool_call"),
-		Timestamp:         at(7),
-		WorkSessionID:     "ws-1",
-		ToolName:          "retrieve_tools",
-		Status:            "success",
-		Response:          "a stored response larger than the agent received",
-		ResponseTruncated: true,
-		ResponseBytes:     4096,
+		ID:                    "a-trunc",
+		Type:                  contracts.ActivityType("internal_tool_call"),
+		Timestamp:             at(7),
+		WorkSessionID:         "ws-1",
+		ToolName:              "retrieve_tools",
+		Status:                "success",
+		Response:              "a stored response larger than the agent received",
+		ResponseTruncated:     true,
+		ResponseTruncationCut: contracts.CutShortenedAgentOnly,
+		ResponseBytes:         4096,
 	})
 
 	opts := replayOptions(t)

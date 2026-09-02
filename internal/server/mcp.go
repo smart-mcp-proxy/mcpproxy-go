@@ -737,6 +737,13 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
 // profile is the Spec 057 profile slug for /mcp/p/<slug> calls - optional (FR-011)
+// responseCut states WHICH copies of the response this emitter's cut shortened
+// (contracts.ResponseCut) — contracts.CutNone when nothing was cut. It is a
+// typed value rather than a bool on purpose: setting the record's
+// response_truncated flag is only possible by naming a direction, so no future
+// emitter can leave a consumer to guess one from the record type. Both a
+// Type=tool_call forward truncation and a code-execution sub-call's log-side
+// 8KB cut arrive through here, and they point opposite ways.
 // detectionText is the spec-084 pre-encoding detection scan input (FR-007b) —
 // empty when TOON is off or on non-call_tool_* paths (detector falls back to response)
 // toonDecisions are the spec-084 per-block encoding decisions (FR-010) — nil when the feature did not run
@@ -744,9 +751,9 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 // sub-call (issue C) — empty for every top-level dispatch. It is the LAST
 // parameter on purpose: TestActivityCompletionNeverHardcodesSuccess pins the
 // position of `status`, so new parameters have to go after it.
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID string) {
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseCut contracts.ResponseCut, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID string) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseCut, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID)
 	}
 }
 
@@ -830,13 +837,14 @@ func mintActivityRequestID(serverName, toolName string) string {
 // today only retrieve_tools, which is subject to tool_response_limit — must use
 // emitActivityInternalToolCallTruncated instead, so the record says so.
 func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string) {
-	p.emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, false)
+	p.emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, contracts.CutNone)
 }
 
 // emitActivityInternalToolCallTruncated is emitActivityInternalToolCall for a
-// handler whose recorded response is LARGER than what the agent received,
-// mirroring the responseTruncated argument the non-internal path already
-// carries through emitActivityToolCallCompleted.
+// handler whose response was cut, with responseCut naming WHICH copies the cut
+// shortened — mirroring the typed argument the non-internal path carries
+// through emitActivityToolCallCompleted. Today every built-in that sets it is
+// contracts.CutShortenedAgentOnly: the record holds MORE than was delivered.
 //
 // Why the flag has to reach the record and not just the log (Spec 103): the
 // activity log deliberately stores the FULL pre-truncation retrieve_tools
@@ -852,10 +860,26 @@ func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetSe
 // event payload, and ActivityService.handleInternalToolCall, which reads it back
 // onto ActivityRecord.ResponseTruncated — the same two hops the non-internal
 // path has always used.
-func (p *MCPProxyServer) emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseTruncated bool) {
+func (p *MCPProxyServer) emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseCut contracts.ResponseCut) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, responseTruncated)
+		p.mainServer.runtime.EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, responseCut)
 	}
+}
+
+// agentOnlyCut is the stamp every BUILT-IN truncation carries: the handler
+// records its full pre-cut response and the agent gets it cut to
+// tool_response_limit, so the record holds MORE than was delivered.
+//
+// A named helper rather than an inline conditional because both built-in call
+// sites (retrieve_tools and the internal_tool_call mirror of a call_tool_*
+// dispatch) must not drift apart, and because it puts the reason at the one
+// place a third built-in would copy from. A handler whose cut points the other
+// way must NOT use it — see contracts.ResponseCut for the vocabulary.
+func agentOnlyCut(wasTruncated bool) contracts.ResponseCut {
+	if wasTruncated {
+		return contracts.CutShortenedAgentOnly
+	}
+	return contracts.CutNone
 }
 
 // emitActivityPromptGet safely emits an upstream prompts/get completion (F10).
@@ -2109,7 +2133,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// (same order handleReadCache uses). Which is exactly why wasTruncated has
 	// to travel with it: the stored response is not what the agent paid for, and
 	// nothing downstream can tell the two apart without the flag (Spec 103).
-	p.emitActivityInternalToolCallTruncated("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "", wasTruncated)
+	p.emitActivityInternalToolCallTruncated("retrieve_tools", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "", agentOnlyCut(wasTruncated))
 
 	return mcp.NewToolResultText(text), nil
 }
@@ -2418,7 +2442,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			}
 			errMsg := fmt.Sprintf("invalid arguments for %s: %s", toolName, detail)
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, contracts.CutNone, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return invalidParamsErrorResult(toolName, meta.ParamsJSON, detail), nil
 		}
 	}
@@ -2439,7 +2463,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, contracts.CutNone, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -2464,7 +2488,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			intentMap = intent.ToMap()
 		}
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, contracts.CutNone, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2597,7 +2621,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if intent != nil {
 			intentMap = intent.ToMap()
 		}
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", contracts.CutNone, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 
 		// Spec 024: Emit internal tool call event for error
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -2721,13 +2745,21 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success (with intent metadata for Spec 018)
-	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
+	// Emit activity completed event for success (with intent metadata for Spec 018).
+	//
+	// CutShortenedAgentAndRecord: forwardContentResult cut the text on its way
+	// OUT at tool_response_limit, and `response` above is the join of the
+	// blocks it forwarded — so the agent and this record hold the same cut
+	// copy, and nothing retains the removed text.
+	responseCut := contracts.CutNone
+	if tokenMetrics != nil && tokenMetrics.WasTruncated {
+		responseCut = contracts.CutShortenedAgentAndRecord
+	}
 	var intentMap map[string]interface{}
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions, "")
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseCut, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions, "")
 
 	// Spec 024: Emit internal tool call event. It carries the SAME classification
 	// as the tool_call record above (issue #935) — the two describe one dispatch,
@@ -2748,11 +2780,15 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// paid for and overstated what mcpproxy cost.
 	//
 	// wasTruncated is used rather than the paired tool_call record's
-	// `responseTruncated`: that one is derived from tokenMetrics.WasTruncated,
+	// `responseCut`: that one is derived from tokenMetrics.WasTruncated,
 	// which is only assigned when a tokenizer is available and the count
 	// succeeds, so it reads false on a truncated call whenever tokenization is
 	// unavailable. wasTruncated comes straight from forwardContentResult.
-	p.emitActivityInternalToolCallTruncated(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "", wasTruncated)
+	//
+	// The stamp is CutShortenedAgentOnly and NOT the paired tool_call record's
+	// CutShortenedAgentAndRecord, even though one dispatch and one cut produced
+	// both records: the two records stored different sides of it.
+	p.emitActivityInternalToolCallTruncated(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "", agentOnlyCut(wasTruncated))
 
 	return forwarded, nil
 }
@@ -2941,7 +2977,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			}
 			// Log the early failure to activity (Spec 024)
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, contracts.CutNone, "", nil, "", "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -2950,7 +2986,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
 		// Log the early failure to activity (Spec 024)
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, contracts.CutNone, "", nil, "", "", 0, 0, "", nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -3086,7 +3122,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		// Emit activity completed event for error with determined source (legacy - no intent)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", contracts.CutNone, "", nil, "", "", 0, 0, "", nil, "")
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -3181,8 +3217,15 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Emit activity completed event with determined source (legacy - no intent).
 	// Status comes from the upstream result, not from err alone (issue #935).
-	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
+	//
+	// Same cut as the Spec 018 path above and the same stamp: forwardContentResult
+	// shortened the agent's copy, and `response` is the join of the blocks it
+	// forwarded.
+	responseCut := contracts.CutNone
+	if tokenMetrics != nil && tokenMetrics.WasTruncated {
+		responseCut = contracts.CutShortenedAgentAndRecord
+	}
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseCut, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
 
 	return forwarded, nil
 }

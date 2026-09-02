@@ -39,7 +39,7 @@ type ActivityRecord struct {
 	ToolName          string                 `json:"tool_name,omitempty"`                      // Name of tool called
 	Arguments         map[string]interface{} `json:"arguments,omitempty" swaggertype:"object"` // Tool call arguments
 	Response          string                 `json:"response,omitempty"`                       // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // Spec 103: cut to tool_response_limit on the way out; which side was recorded depends on Type — see ResponseStorageTruncated below
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // Spec 103: the response was cut. WHICH copies it shortened is in ResponseTruncationCut — never infer it from Type.
 	Status            string                 `json:"status"`                                   // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`                  // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`                    // Execution duration in milliseconds
@@ -49,19 +49,32 @@ type ActivityRecord struct {
 	RequestID         string                 `json:"request_id,omitempty"`                     // HTTP request ID for correlation
 	ParentID          string                 `json:"parent_id,omitempty"`                      // Correlation id of the parent call (the code_execution whose sandbox issued this sub-call)
 
+	// ResponseTruncationCut is the EMITTER'S stamp saying which copies of the
+	// response the ResponseTruncated cut actually shortened — the agent's, the
+	// record's, or both (ResponseCut, internal/contracts/activity_truncation.go).
+	//
+	// It exists because the direction is a property of which emitter cut the
+	// text, not of the record type it wrote: a code-execution sub-call is a
+	// Type=tool_call record whose cut runs the OPPOSITE way from an ordinary
+	// tool_call's. Five rounds of review re-derived that at render time and each
+	// was wrong about one emitter population.
+	//
+	// Empty means UNSTATED. On a record with ResponseTruncated false that simply
+	// means nothing was cut; with ResponseTruncated true it is a LEGACY record
+	// written before this field existed, and ResolveResponseTruncation answers
+	// it without claiming a direction.
+	ResponseTruncationCut ResponseCut `json:"response_truncation_cut,omitempty"`
+
 	// ResponseStorageTruncated means the recorded response is SMALLER than the
 	// text the emitter handed over, because activity_max_response_size cut it on
 	// the way into BBolt (issue #1173). The two truncation flags are independent
 	// and can both be true.
 	//
-	// Where ResponseTruncated's direction depends on the record TYPE — an
-	// internal_tool_call records the full pre-forward text, a tool_call records
-	// the agent's own post-forward copy (see storage.ActivityRecord's field doc)
-	// — this one does not: it always means the stored body is a prefix. It says
-	// "smaller than what the agent received" only when ResponseTruncated is
-	// false; with both set, the forward cut already shaped the emitter's text
-	// and the two limits are unrelated settings, so the order of the stored and
-	// delivered sizes is not fixed.
+	// Unlike ResponseTruncated it needs no stamp: this cut has only ever had one
+	// direction, and it always means the stored body is a prefix of what the
+	// emitter handed over. Whether that also makes it smaller than what the
+	// AGENT received depends on the other cut, which is why the resolver — not
+	// this comment — is what renderers call.
 	//
 	// It must not be folded into ResponseTruncated. ResponseBytes is measured
 	// pre-truncation, so a storage-truncated record's byte accounting stays
@@ -74,18 +87,20 @@ type ActivityRecord struct {
 	// ResolveResponseTruncation (internal/contracts/activity_truncation.go).
 	// Empty when nothing was cut.
 	//
-	// It is on the payload on purpose. What the flags mean depends on the
-	// record Type *and* on whether both are set, and every client that
-	// re-derived that from the flags got a cell wrong — so clients are given
-	// the answer instead of the inputs to a table they would have to keep in
-	// sync. The Web UI renders this string on BOTH truncation badges rather
-	// than composing a tooltip per badge: a per-badge tooltip can only see one
-	// flag, which is exactly how a both-flags record came to be described as
-	// "the agent's own copy" when it is strictly shorter than the agent's copy.
+	// It is on the payload on purpose. What the flags mean depends on
+	// ResponseTruncationCut *and* on whether both flags are set — and NOT on
+	// Type, which does not determine it: every client that re-derived a
+	// direction got a cell wrong, so clients are given the answer instead of
+	// the inputs to a table they would have to keep in sync.
 	//
-	// Advisory prose, not a machine field: parse the two booleans, never this.
-	// Absent on a bodies-suppressed projection (`exclude_payloads=true`), which
-	// clears the flags it explains.
+	// The Web UI renders this string on BOTH truncation badges rather than
+	// composing a tooltip per badge: a per-badge tooltip can only see one flag,
+	// which is exactly how a both-flags record came to be described as "the
+	// agent's own copy" when it is strictly shorter than the agent's copy.
+	//
+	// Advisory prose, not a machine field: branch on ResponseTruncationCut and
+	// the two booleans, never on this. Absent on a bodies-suppressed projection
+	// (`exclude_payloads=true`), which clears the fields it explains.
 	ResponseTruncationNotice string `json:"response_truncation_notice,omitempty"`
 
 	Metadata map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"` // Additional context-specific data
@@ -97,10 +112,14 @@ type ActivityRecord struct {
 	// byte LENGTHS, not token counts — the basis for an explicit estimate, never
 	// a measured figure (spec 103, contracts/replay-input.md).
 	//
-	// Zero means UNKNOWN, not free: legacy records predate the measurement and
-	// code-execution sub-calls record both as zero. Hence omitempty — an absent
-	// key tells a consumer to fall to exclusion accounting, whereas a present
-	// zero would read as a costless call and silently understate the workload.
+	// Zero means UNKNOWN, not free: legacy records predate the measurement.
+	// Code-execution sub-calls DO carry both counts (subCallByteSizes,
+	// internal/server/mcp_code_execution.go); the one sub-call path that still
+	// records zero response bytes is a policy REFUSAL (emitSubCallRefused),
+	// where no response existed and the zero is true rather than unknown.
+	// Hence omitempty — an absent key tells a consumer to fall to exclusion
+	// accounting, whereas a present zero would read as a costless call and
+	// silently understate the workload.
 	RequestBytes  int `json:"request_bytes,omitempty"`  // JSON-serialized request arguments size in bytes
 	ResponseBytes int `json:"response_bytes,omitempty"` // Raw upstream response size in bytes before truncation
 

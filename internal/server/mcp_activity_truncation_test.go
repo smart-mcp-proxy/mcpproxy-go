@@ -12,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -140,6 +141,18 @@ func TestRetrieveTools_TruncatedResponseIsFlaggedOnTheActivityRecord(t *testing.
 	assert.True(t, rec.ResponseTruncated,
 		"the truncated retrieve_tools response must be flagged on the activity record; "+
 			"without the flag a benchmark loader tokenizes the stored FULL response and overstates agent cost")
+	assert.Equal(t, contracts.CutShortenedAgentOnly, rec.ResponseTruncationCut,
+		"the flag alone says nothing about direction. This record holds MORE than was "+
+			"delivered, and only the emitter knows that — a consumer reading the TYPE "+
+			"cannot, because a code-execution sub-call is also flagged and points the other way")
+
+	// The whole point of the stamp, exercised: the resolved sentence has to say
+	// the agent got LESS, which is the one direction that makes a cost
+	// recomputation exclude the row instead of overstating mcpproxy's cost.
+	resolved := contracts.ResolveResponseTruncation(
+		rec.ResponseTruncationCut, rec.ResponseTruncated, rec.ResponseStorageTruncated)
+	assert.Equal(t, contracts.StoredLargerThanDelivered, resolved.Relation)
+	assert.Contains(t, resolved.Notice, "LESS")
 }
 
 // TestRetrieveTools_UntruncatedResponseIsNotFlagged is the other half of the
@@ -168,4 +181,6 @@ func TestRetrieveTools_UntruncatedResponseIsNotFlagged(t *testing.T) {
 	rec := awaitRetrieveToolsActivity(t, rt.StorageManager())
 	assert.False(t, rec.ResponseTruncated,
 		"a complete response must not be flagged truncated, or the loader excludes everything")
+	assert.Equal(t, contracts.CutNone, rec.ResponseTruncationCut,
+		"no cut, no stamp: a blanket stamp would be as wrong as a blanket direction")
 }

@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // truncationSuffix is what truncateResponse appends. Named here so the size
@@ -52,6 +54,10 @@ func TestTruncatedRecordSurvivesMarshalRoundTripWithinCap(t *testing.T) {
 		Timestamp:         time.Now().UTC(),
 		Response:          stored,
 		ResponseTruncated: true,
+		// Any stamp does; this test is about the BYTES surviving the round
+		// trip, not about direction. It carries one because the flag and the
+		// stamp are written together on every real record.
+		ResponseTruncationCut: contracts.CutShortenedAgentAndRecord,
 	}
 
 	encoded, err := rec.MarshalBinary()

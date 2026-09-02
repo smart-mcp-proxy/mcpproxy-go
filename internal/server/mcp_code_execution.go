@@ -813,9 +813,26 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName string, ar
 
 	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
 	requestBytes, responseBytes := subCallByteSizes(args, result)
+	// CutShortenedRecordOnly, and note that this is a Type=tool_call record
+	// whose cut runs the OPPOSITE way from every other tool_call's.
+	//
+	// A direct dispatch is cut on the way OUT at tool_response_limit, so its
+	// record holds the agent's own copy. Nothing of the kind happened here: the
+	// sandbox script received the WHOLE result — it is a Go value returned up
+	// the stack, never forwarded through a truncator — and only the text this
+	// record stores was cut, at subCallActivityResponseLimit, purely to bound
+	// the log. The record is therefore a PREFIX of what was delivered, and
+	// responseBytes (measured pre-cut, above) is the delivered size.
+	//
+	// Four review rounds inferred this record's direction from its type and got
+	// it backwards. Nothing infers it now; this call site states it.
+	responseCut := contracts.CutNone
+	if truncated {
+		responseCut = contracts.CutShortenedRecordOnly
+	}
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
-		status, errMsg, duration.Milliseconds(), args, responseText, truncated,
+		status, errMsg, duration.Milliseconds(), args, responseText, responseCut,
 		"", nil, "", "", requestBytes, responseBytes, "", nil, u.parentCallID)
 }
 
@@ -861,7 +878,7 @@ func (u *upstreamToolCaller) emitSubCallRefused(serverName, toolName string, arg
 	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
-		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,
+		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", contracts.CutNone,
 		// The policy gate refused this before dispatch, so there IS no response
 		// and 0 response bytes is a true zero, not an unmeasured one. The
 		// request was still formed and is measured like any other.

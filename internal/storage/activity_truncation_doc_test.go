@@ -8,29 +8,28 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
-// The doc comment on the truncation flags is what the NEXT consumer author
+// The doc comment on the truncation fields is what the NEXT consumer author
 // reads before deciding whether to exclude a record's cost, so it carries more
-// weight than either rendered surface. Round 2 stated "the RECORDED response is
-// LARGER than the one the agent received" as a property of ResponseTruncated
-// and cited internal/runtime/usage_aggregate.go as if it applied to every
-// record. It does not: that file's predicate is
+// weight than either rendered surface. Its history is the history of this bug:
 //
-//	rec.ResponseTruncated && rec.Type == storage.ActivityTypeInternalToolCall
+//	round 2 stated "the RECORDED response is LARGER than the one the agent
+//	  received" as a property of ResponseTruncated. False for a tool_call,
+//	  whose record holds the POST-forward text.
+//	round 3 wrote that correction as an unconditional property of the TYPE
+//	  ("ActivityTypeToolCall: the RECORDED response IS the delivered one"),
+//	  with the both-flags exception parked 25 lines below.
+//	round 4 built a per-(type, flags) table. False for code-execution
+//	  sub-calls, which are Type=tool_call records cut on the LOG side.
 //
-// and for a tool_call record the claim is backwards — handleToolCallCompleted
-// stores the POST-forward text, so the log holds exactly the agent's copy.
-//
-// Round 3 then wrote THAT correction as an unconditional property of the type
-// ("ActivityTypeToolCall: the RECORDED response IS the delivered one"), with
-// the both-flags exception 25 lines below under a different field. Two
-// renderers lifted the unconditional half and neither lifted the caveat — the
-// direct cause of both round-4 blocking findings.
-//
-// These tests read the comment itself, because a prose defect has no runtime
-// behaviour to assert on and the wrong sentence is what propagates.
-func truncationFlagDoc(t *testing.T) string {
+// Every one of those was an attempt to state the direction here, in prose,
+// keyed on the type. The direction is not a function of the type, so these
+// tests now assert the opposite of what they used to: that the doc REFUSES to
+// derive a direction and hands off to the emitter's stamp.
+func truncationFieldDoc(t *testing.T, fieldName string) string {
 	t.Helper()
 
 	fset := token.NewFileSet()
@@ -40,7 +39,7 @@ func truncationFlagDoc(t *testing.T) string {
 	var doc string
 	ast.Inspect(file, func(n ast.Node) bool {
 		field, ok := n.(*ast.Field)
-		if !ok || len(field.Names) != 1 || field.Names[0].Name != "ResponseStorageTruncated" {
+		if !ok || len(field.Names) != 1 || field.Names[0].Name != fieldName {
 			return true
 		}
 		if field.Doc != nil {
@@ -48,75 +47,145 @@ func truncationFlagDoc(t *testing.T) string {
 		}
 		return false
 	})
-	require.NotEmpty(t, doc, "the shared truncation-flag doc block sits above ResponseStorageTruncated")
+	require.NotEmpty(t, doc, "%s must carry a doc comment", fieldName)
 	return doc
 }
 
-func TestTruncationDocNamesTheTypeRestriction(t *testing.T) {
-	doc := truncationFlagDoc(t)
+// The stamp's own doc has to say WHY it exists, or the next author deletes it
+// as redundant with the type and re-derives round 4.
+func TestStampDocForbidsDerivingTheDirectionFromTheType(t *testing.T) {
+	doc := truncationFieldDoc(t, "ResponseTruncationCut")
 
-	require.Contains(t, doc, "ActivityTypeInternalToolCall",
-		"the doc must name the type for which RECORDED > DELIVERED actually holds")
-	require.Contains(t, doc, "ActivityTypeToolCall",
-		"the doc must name the type for which it does not")
-	require.Contains(t, doc, "truncatedBuiltinOverstatesDelivery",
-		"cite the real predicate, not the file as a whole")
-	require.Contains(t, doc, "Type == ActivityTypeInternalToolCall",
-		"spell out the type gate the predicate applies")
-}
-
-// The universal claim must not come back in any of its round-2 phrasings.
-func TestTruncationDocDoesNotStateTheDirectionUniversally(t *testing.T) {
-	doc := truncationFlagDoc(t)
-
-	// Split at the sentence that introduces the per-type breakdown; everything
-	// before it is the part that speaks about the flag in general.
-	idx := strings.Index(doc, "depends on the record TYPE")
-	require.Positive(t, idx, "the doc must say the direction depends on the record type")
-	general := doc[:idx]
-
-	require.NotContains(t, general, "means the RECORDED response is LARGER",
-		"stating the direction as a property of the flag is the defect")
-	require.Contains(t, doc, "DO NOT READ A DIRECTION OUT OF EITHER FLAG HERE",
-		"the doc must warn that neither flag alone fixes a direction")
-}
-
-// The round-3 defect: the tool_call correction stated unconditionally, with its
-// exception parked under a different field. A reader copies from the point the
-// claim is made, so the qualification has to be AT that point — and the doc must
-// hand off to the one resolver rather than being a table anyone re-implements.
-func TestTruncationDocQualifiesTheToolCallClaimInPlace(t *testing.T) {
-	doc := truncationFlagDoc(t)
-
-	require.NotContains(t, doc, "the RECORDED response IS the delivered one.",
-		"true only while ResponseStorageTruncated is false; unconditional is the defect")
-
-	idx := strings.Index(doc, "ActivityTypeToolCall: handleToolCallCompleted")
-	require.Positive(t, idx, "the tool_call bullet must still explain which side is recorded")
-	bullet := doc[idx:]
-
-	for _, required := range []string{
-		"STRICTLY SHORTER",
-		"ResponseStorageTruncated is false",
-	} {
-		require.Contains(t, bullet, required,
-			"the both-flags caveat must live in the same bullet as the claim it qualifies")
-	}
-
-	// The authority, named before any of the prose a reader might copy.
-	authority := strings.Index(doc, "contracts.ResolveResponseTruncation")
-	require.Positive(t, authority, "the doc must name the single resolver")
-	require.Less(t, authority, idx, "name the resolver BEFORE the summary, not after it")
+	require.Contains(t, doc, "DO NOT READ A DIRECTION OUT OF THE RECORD TYPE",
+		"the doc must forbid the exact inference five rounds kept making")
+	require.Contains(t, doc, "mcp_code_execution.go",
+		"name the counterexample: a Type=tool_call record whose cut runs the other way")
+	require.Contains(t, doc, "subCallActivityResponseLimit",
+		"name the limit that makes that record different, so a reader can check it")
+	require.Contains(t, doc, "contracts.ResolveResponseTruncation",
+		"the doc must name the single resolver")
 	require.Contains(t, doc, "internal/contracts/activity_truncation.go")
 }
 
-// The predicate the doc cites must still look the way the doc says it does. If
-// someone widens it, the citation goes stale silently, and a stale citation is
-// how the universal claim got written in the first place.
-func TestCitedPredicateIsStillTypeGated(t *testing.T) {
-	rec := &ActivityRecord{Type: ActivityTypeToolCall, ResponseTruncated: true}
-	require.NotEqual(t, ActivityTypeInternalToolCall, rec.Type,
-		"guard against the two constants collapsing to one value")
+// An unstamped record is a LEGACY record and nothing else. If the doc ever
+// suggests a current emitter can leave the stamp off, a consumer will start
+// filling one in from the type again.
+func TestStampDocExplainsTheEmptyValue(t *testing.T) {
+	doc := truncationFieldDoc(t, "ResponseTruncationCut")
+
+	require.Contains(t, doc, "UNSTATED")
+	require.Contains(t, doc, "before this field existed",
+		"the empty-with-flag state must be identified as a legacy record")
+	require.Contains(t, doc, "contracts.ResponseCut.Cuts",
+		"say WHY a current core cannot produce it: the boolean is derived from the stamp")
+}
+
+// None of the three superseded claims may come back, in any field's doc.
+func TestTruncationDocsCarryNoneOfTheSupersededClaims(t *testing.T) {
+	doc := truncationFieldDoc(t, "ResponseTruncationCut") +
+		truncationFieldDoc(t, "ResponseStorageTruncated")
+
+	for _, banned := range []string{
+		// Round 2: the direction as a property of the flag.
+		"means the RECORDED response is LARGER",
+		// Round 3: the direction as an unconditional property of the type.
+		"the RECORDED response IS the delivered one.",
+		// Round 4: the direction as a property of (type, flags).
+		"which side was recorded depends on Type",
+	} {
+		require.NotContains(t, doc, banned, "superseded claim resurfaced: %q", banned)
+	}
+}
+
+// The storage cut is the one that never needed a stamp, and the doc must say so
+// for a reason a reader can check — otherwise the next round adds a second
+// stamp nobody needs, or drops the first one as symmetric noise.
+func TestStorageCutDocClaimsItsSingleDirection(t *testing.T) {
+	doc := truncationFieldDoc(t, "ResponseStorageTruncated")
+
+	require.Contains(t, doc, "only ever had one direction")
+	require.Contains(t, doc, "prefix of what the emitter handed over")
+	require.Contains(t, doc, "depends on the STAMP, not the type",
+		"the both-flags answer must point at the stamp")
+}
+
+// The predicate the doc cites must still read the stamp. If someone narrows it
+// back to a type test, the citation goes stale silently — and a stale citation
+// is how the universal claim got written in the first place.
+func TestStampedRecordsCarryBothHalvesTogether(t *testing.T) {
+	rec := &ActivityRecord{
+		Type:                  ActivityTypeToolCall,
+		ResponseTruncated:     true,
+		ResponseTruncationCut: contracts.CutShortenedRecordOnly,
+	}
+
+	// The counterexample as data: a tool_call record whose stamp is the one an
+	// ordinary tool_call can never carry.
+	require.Equal(t, ActivityTypeToolCall, rec.Type)
+	require.Equal(t, contracts.CutShortenedRecordOnly, rec.ResponseTruncationCut)
+	require.NotEqual(t, contracts.CutShortenedAgentAndRecord, rec.ResponseTruncationCut,
+		"the two tool_call populations must remain distinguishable on the record")
+
 	require.Equal(t, ActivityType("tool_call"), ActivityTypeToolCall)
 	require.Equal(t, ActivityType("internal_tool_call"), ActivityTypeInternalToolCall)
+}
+
+// The stamp has to survive a BBolt round trip, or every record read back is a
+// legacy record and the resolver goes direction-free for the whole log.
+func TestStampSurvivesBinaryRoundTrip(t *testing.T) {
+	for _, cut := range []contracts.ResponseCut{
+		contracts.CutNone,
+		contracts.CutShortenedAgentAndRecord,
+		contracts.CutShortenedAgentOnly,
+		contracts.CutShortenedRecordOnly,
+	} {
+		original := &ActivityRecord{
+			ID:                    "01ABC",
+			Type:                  ActivityTypeToolCall,
+			ResponseTruncated:     cut.Cuts(),
+			ResponseTruncationCut: cut,
+		}
+		encoded, err := original.MarshalBinary()
+		require.NoError(t, err)
+
+		var decoded ActivityRecord
+		require.NoError(t, decoded.UnmarshalBinary(encoded))
+		require.Equal(t, cut, decoded.ResponseTruncationCut, string(cut))
+		require.Equal(t, cut.Cuts(), decoded.ResponseTruncated, string(cut))
+	}
+
+	// And the wire name is what every other surface reads it by.
+	encoded, err := (&ActivityRecord{
+		ResponseTruncated:     true,
+		ResponseTruncationCut: contracts.CutShortenedRecordOnly,
+	}).MarshalBinary()
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"response_truncation_cut":"record_only"`)
+}
+
+// A record written by an older core has no stamp and must decode as UNSTATED,
+// not as some default direction.
+func TestLegacyRecordDecodesWithNoStamp(t *testing.T) {
+	var decoded ActivityRecord
+	require.NoError(t, decoded.UnmarshalBinary(
+		[]byte(`{"id":"01ABC","type":"tool_call","response_truncated":true}`)))
+
+	require.True(t, decoded.ResponseTruncated)
+	require.Equal(t, contracts.CutNone, decoded.ResponseTruncationCut)
+	require.False(t,
+		contracts.ResolveResponseTruncation(
+			decoded.ResponseTruncationCut, decoded.ResponseTruncated, false).Stamped,
+		"a legacy record must resolve as unstamped, so nothing claims a direction for it")
+}
+
+// The doc block is unusually long, and length is how a wrong sentence hides. If
+// it grows a table of directions again, that table will be copied.
+func TestStampDocDoesNotRestateADirectionTable(t *testing.T) {
+	doc := truncationFieldDoc(t, "ResponseTruncationCut")
+	lower := strings.ToLower(doc)
+
+	require.NotContains(t, lower, "stored == delivered",
+		"a copyable direction table in a comment is what four renderers copied")
+	require.NotContains(t, lower, "stored > delivered")
+	require.NotContains(t, lower, "stored < delivered")
 }

@@ -4,36 +4,97 @@ import "fmt"
 
 // ONE place that knows what the two truncation flags mean.
 //
-// An activity record can be cut twice, by two unrelated settings:
+// An activity record can be cut twice, by two unrelated mechanisms:
 //
-//   - the FORWARD cut (`response_truncated`, Spec 103) applies
-//     `tool_response_limit` per text block on the way to the agent —
-//     internal/server/content_forward.go. Because the recorded text is the JOIN
-//     of every forwarded block, the joined body can be far LARGER than
-//     `tool_response_limit` even with the flag set.
+//   - the RESPONSE cut (`response_truncated`, Spec 103). Several different
+//     emitters set this flag, under different limits, cutting different copies
+//     of the text. It is therefore NOT a direction: see ResponseCut below.
 //   - the STORAGE cut (`response_storage_truncated`, issue #1173) applies
 //     `activity_max_response_size` in bytes to whatever text the emitter hands
-//     the activity service — internal/runtime/activity_service.go.
+//     the activity service — internal/runtime/activity_service.go. This one HAS
+//     always had a single direction: it shortens the RECORD and nothing else.
 //
-// Defaults are 20000 and 65536; neither bounds the other, so BOTH flags on one
-// record is an ordinary, reachable state and not a corner case.
+// Neither limit bounds the other, so BOTH flags on one record is an ordinary,
+// reachable state and not a corner case.
 //
-// What the flags say about the record depends on the record TYPE *and* on
-// whether the other flag is set, because the emitters record different sides of
-// the forward cut:
+// FIVE rounds of review tried to recover the response cut's direction at RENDER
+// time — first universally, then per record type, then per (type, flags) pair.
+// Every one of them was right about the emitters it knew and wrong about one it
+// did not, because the direction is a property of WHICH EMITTER CUT THE TEXT,
+// not of the record it happened to write. Round 4's per-type table was defeated
+// by code-execution sub-calls, which are emitted as Type=tool_call with
+// response_truncated=true and whose cut runs the OPPOSITE way from every other
+// tool_call's (internal/server/mcp_code_execution.go, subCallActivityResponseLimit).
 //
-//	                     forward only        storage only       BOTH
-//	tool_call            stored == delivered stored < delivered stored < delivered
-//	internal_tool_call   stored >  delivered stored < delivered order not fixed
-//	prompt_get           (not emitted)       stored < delivered (not emitted)
+// So nothing infers any more. The emitter STAMPS the direction on the record
+// (ResponseCut), and ResolveResponseTruncation reads the stamp.
+
+// ResponseCut says WHICH COPIES of a response the `response_truncated` cut
+// actually shortened. The emitter that performed the cut sets it; no consumer
+// derives it.
 //
-// Four rendering surfaces restated that table in prose and four rounds of
-// review found a different cell wrong each time. So no renderer composes a
-// sentence from the flags any more: `ResolveResponseTruncation` is the single
-// authority, `internal/contracts/activity_truncation_test.go` pins all twelve
-// cells, and every consumer — the CLI (`mcpproxy activity show`), the REST
-// payload's `response_truncation_notice`, and through it the Web UI drawer —
-// renders what it returns.
+// It is deliberately not a two-way "forward vs log" split. Two of mcpproxy's
+// emitters cut on the way into the log and they point OPPOSITE ways: a
+// code-execution sub-call's record is a prefix of what the sandbox got, while a
+// built-in's record holds the whole text the agent only saw cut. Merging those
+// into one value would reintroduce exactly the class of bug this type exists to
+// end, so the vocabulary names the bodies, not the plumbing.
+type ResponseCut string
+
+const (
+	// CutNone means no response cut happened. It is the zero value, so a record
+	// that carries no stamp reads as "no cut" — which is only correct while
+	// `response_truncated` is false. A record with the flag set and no stamp is
+	// a LEGACY record written before this field existed, and the resolver
+	// answers it without claiming a direction. See ResolveResponseTruncation.
+	CutNone ResponseCut = ""
+
+	// CutShortenedAgentAndRecord: the cut happened on the way to the AGENT and
+	// the record holds that same cut copy. Nothing anywhere retains the removed
+	// text. This is ordinary upstream tool_call forward truncation
+	// (`tool_response_limit`, internal/server/content_forward.go): the recorded
+	// text is the join of the forwarded blocks.
+	CutShortenedAgentAndRecord ResponseCut = "agent_and_record"
+
+	// CutShortenedAgentOnly: only the AGENT's copy was cut; the record holds the
+	// full pre-cut text. The record is therefore LARGER than what was
+	// delivered — the one case in which recomputing cost from the log
+	// OVERSTATES what mcpproxy cost. Today: the built-in emitters
+	// (retrieve_tools, and the internal_tool_call mirror of a call_tool_*
+	// dispatch), which record the pre-forward text under `tool_response_limit`.
+	CutShortenedAgentOnly ResponseCut = "agent_only"
+
+	// CutShortenedRecordOnly: only the RECORD was cut; the agent received the
+	// whole text. The record is a prefix of what was delivered. Today: a
+	// code-execution sub-call, cut to subCallActivityResponseLimit (8KB) purely
+	// to bound the log — the sandbox script got the entire result.
+	CutShortenedRecordOnly ResponseCut = "record_only"
+)
+
+// Cuts reports whether this stamp describes an actual cut. It is what derives
+// ActivityRecord.ResponseTruncated at emission, so the boolean can never
+// disagree with the stamp beside it.
+func (c ResponseCut) Cuts() bool { return c != CutNone }
+
+// Valid reports whether c is one of the declared values. Used when reading a
+// stamp back off the wire: an unrecognised string is treated as unstated rather
+// than trusted, so a newer core's value cannot be misread by an older one.
+func (c ResponseCut) Valid() bool {
+	switch c {
+	case CutNone, CutShortenedAgentAndRecord, CutShortenedAgentOnly, CutShortenedRecordOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidResponseCuts is the closed vocabulary, for API documentation and for the
+// TypeScript mirror in cmd/generate-types.
+var ValidResponseCuts = []string{
+	string(CutShortenedAgentAndRecord),
+	string(CutShortenedAgentOnly),
+	string(CutShortenedRecordOnly),
+}
 
 // StoredVsDelivered is how the RECORDED response body compares to the body the
 // agent actually received.
@@ -46,18 +107,18 @@ const (
 	StoredSmallerThanDelivered StoredVsDelivered = "smaller"
 	// StoredLargerThanDelivered: the agent's copy is a prefix of the record.
 	StoredLargerThanDelivered StoredVsDelivered = "larger"
-	// StoredVsDeliveredUnknown: two cuts pointing opposite ways under unrelated
-	// limits, so the order of the two sizes is not fixed. Never guess a
-	// direction here — guessing is what produced the bug this type replaces.
+	// StoredVsDeliveredUnknown: either two cuts pointing opposite ways under
+	// unrelated limits, so the order of the two sizes is not fixed, or a legacy
+	// record whose emitter left no stamp. Never guess a direction here —
+	// guessing is what produced the five rounds this type replaces.
 	StoredVsDeliveredUnknown StoredVsDelivered = "unknown"
 )
 
 // ResponseBytesSubject says which body, if either, `response_bytes` measures.
 //
-// `response_bytes` is `rawByteSize(result)` — the PRE-forward, PRE-TOON upstream
-// payload (internal/server/mcp.go). Whenever a forward cut happened it is
-// strictly larger than both the stored and the delivered body, so quoting it as
-// "what the agent received" overstates delivery by exactly what the cut removed.
+// `response_bytes` is always the emitter's PRE-cut measurement of the response,
+// so which body it describes falls straight out of the stamp: the bodies the
+// cut did not shorten still match it.
 type ResponseBytesSubject string
 
 const (
@@ -68,17 +129,26 @@ const (
 	ResponseBytesDescribesStored ResponseBytesSubject = "stored"
 	// ResponseBytesDescribesDelivered: it measures the text the agent received.
 	ResponseBytesDescribesDelivered ResponseBytesSubject = "delivered"
-	// ResponseBytesDescribesNeither: a forward cut sits between the measurement
-	// and both bodies.
+	// ResponseBytesDescribesNeither: a cut sits between the measurement and
+	// both bodies.
 	ResponseBytesDescribesNeither ResponseBytesSubject = "neither"
 )
 
 // ResponseTruncation is the resolved truth about one record's truncation state.
 type ResponseTruncation struct {
+	// Cut echoes the stamp the emitter left, so a consumer holding only this
+	// struct can still branch on it.
+	Cut ResponseCut `json:"cut"`
+
 	// ForwardTruncated / StorageTruncated echo the inputs so a consumer that
 	// holds only this struct can still branch on them.
 	ForwardTruncated bool `json:"forward_truncated"`
 	StorageTruncated bool `json:"storage_truncated"`
+
+	// Stamped is false for a record whose response cut carries no direction —
+	// only ever a record written by a core older than the stamp. Everything
+	// this struct says about such a record is deliberately direction-free.
+	Stamped bool `json:"stamped"`
 
 	// Relation is the order of the stored and delivered bodies.
 	Relation StoredVsDelivered `json:"relation"`
@@ -96,155 +166,185 @@ func (t ResponseTruncation) Truncated() bool {
 	return t.ForwardTruncated || t.StorageTruncated
 }
 
-// Record types that resolve to a known direction. Kept as literals rather than
-// importing internal/storage: this package is the API contract and must stay
-// importable from the CLI, the HTTP layer and the frontend generator without
-// dragging BBolt in.
-const (
-	activityTypeToolCall         = "tool_call"
-	activityTypeInternalToolCall = "internal_tool_call"
-	activityTypePromptGet        = "prompt_get"
-)
-
 // Sentence fragments, named so a change lands in one place.
 const (
-	noticeForwardToolCall = "This is the agent's own copy: the upstream response was cut to " +
-		"tool_response_limit before being both forwarded and recorded."
+	noticeAgentAndRecord = "This is the agent's own copy: the response was cut once, to " +
+		"tool_response_limit, before being both forwarded and recorded."
 
-	noticeForwardInternal = "The agent received LESS than this: the built-in recorded its full " +
+	noticeAgentOnly = "The agent received LESS than this: the emitter recorded its full " +
 		"response, and the agent got it cut to tool_response_limit."
+
+	noticeRecordOnly = "The agent received MORE than this: the whole response was delivered, " +
+		"and only the recorded copy was shortened to bound the activity log."
 
 	noticeStorageOnly = "The agent received MORE than this: the recorded text was shortened to " +
 		"fit activity_max_response_size."
 
-	noticeBothToolCall = "The agent received MORE than this: the upstream response was cut to " +
+	noticeBothAgentAndRecord = "The agent received MORE than this: the response was cut to " +
 		"tool_response_limit before being forwarded and recorded, and the recorded copy was " +
 		"then shortened AGAIN to fit activity_max_response_size."
 
-	noticeBothInternal = "Neither body is known to be the larger: the built-in recorded its full " +
+	noticeBothAgentOnly = "Neither body is known to be the larger: the emitter recorded its full " +
 		"response while the agent got it cut to tool_response_limit, and the record was then " +
 		"shortened to fit activity_max_response_size — two unrelated limits."
 
-	noticeForwardUnknownType = "The response was cut to tool_response_limit before being " +
-		"forwarded; this record type does not say which side of that cut it recorded."
+	noticeBothRecordOnly = "The agent received MORE than this: the whole response was delivered, " +
+		"and the recorded copy was shortened twice — once to bound the activity log, and again " +
+		"to fit activity_max_response_size."
 
-	noticeBothUnknownType = "The response was cut to tool_response_limit before being forwarded " +
-		"and the record was then shortened to fit activity_max_response_size; this record type " +
-		"does not say which side of the forward cut it recorded, so neither body is known to be " +
-		"the larger."
+	noticeUnstamped = "The response was cut, but this record was written by an older mcpproxy " +
+		"that did not say which copy was shortened, so neither body is known to be the larger."
+
+	noticeUnstampedBoth = "The response was cut and the record was then shortened to fit " +
+		"activity_max_response_size. This record was written by an older mcpproxy that did not " +
+		"say which copy the first cut shortened, so neither body is known to be the larger."
 )
 
-// ResolveResponseTruncation is the single authority on what a record's two
-// truncation flags mean. Every rendering surface calls it; none reimplements it.
+// ResolveResponseTruncation is the single authority on what a record's
+// truncation state means. Every rendering surface calls it; none reimplements
+// it, and none infers a direction.
 //
-// recordType is ActivityRecord.Type as a string. An unrecognised type is
-// treated like prompt_get: the storage cut still has a fixed direction, and the
-// forward cut gets a direction-FREE statement rather than a borrowed one, so a
-// future emitter cannot silently inherit a claim it never established.
-func ResolveResponseTruncation(recordType string, forwardTruncated, storageTruncated bool) ResponseTruncation {
+// cut is ActivityRecord.ResponseTruncationCut — the stamp the emitter left.
+// responseTruncated and storageTruncated are the record's two booleans.
+//
+// The stamp and the boolean are emitted together (ResponseCut.Cuts derives the
+// boolean), so they can only disagree on a record written before the stamp
+// existed: responseTruncated true, cut empty. That case gets a direction-FREE
+// answer. Saying less is correct; saying something false is what five rounds of
+// review were about.
+//
+// An unrecognised stamp — a value from a NEWER core, read by an older binary —
+// is treated the same way, for the same reason.
+func ResolveResponseTruncation(cut ResponseCut, responseTruncated, storageTruncated bool) ResponseTruncation {
+	if !cut.Valid() {
+		cut = CutNone
+	}
 	res := ResponseTruncation{
-		ForwardTruncated: forwardTruncated,
+		Cut:              cut,
+		ForwardTruncated: responseTruncated,
 		StorageTruncated: storageTruncated,
+		Stamped:          !responseTruncated || cut.Cuts(),
 	}
 
-	if !forwardTruncated && !storageTruncated {
+	if !responseTruncated && !storageTruncated {
 		res.Relation = StoredEqualsDelivered
 		res.BytesSubject = ResponseBytesDescribesBoth
 		return res
 	}
 
-	if !forwardTruncated {
-		// The storage cut alone is the one type-independent cell: whatever the
-		// emitter handed over WAS delivered, and BBolt kept a prefix of it.
+	if !responseTruncated {
+		// The storage cut alone is the one cell that needs no stamp: whatever
+		// the emitter handed over WAS delivered, and BBolt kept a prefix of it.
+		// This cut has only ever had one direction.
 		res.Relation = StoredSmallerThanDelivered
 		res.BytesSubject = ResponseBytesDescribesDelivered
 		res.Notice = noticeStorageOnly
 		return res
 	}
 
-	// A forward cut happened, so response_bytes (pre-forward) is larger than
-	// the delivered body on every type; only the no-forward-cut cells above can
-	// attribute it to a body.
-	switch recordType {
-	case activityTypeToolCall:
-		// handleToolCallCompleted is passed the POST-forward text (the
-		// forwardedText call in internal/server/mcp.go), so the record starts
-		// life as exactly the agent's copy...
+	switch cut {
+	case CutShortenedAgentAndRecord:
+		// One cut, applied to the text on its way out; the record is the join
+		// of the forwarded blocks, so it starts life as exactly the agent's
+		// copy. response_bytes was measured before that cut, so it is larger
+		// than both bodies.
 		if storageTruncated {
-			// ...and activity_service.go then cuts that already-forwarded text
-			// again, strictly shortening it below the delivered body.
 			res.Relation = StoredSmallerThanDelivered
 			res.BytesSubject = ResponseBytesDescribesNeither
-			res.Notice = noticeBothToolCall
+			res.Notice = noticeBothAgentAndRecord
 			return res
 		}
 		res.Relation = StoredEqualsDelivered
 		res.BytesSubject = ResponseBytesDescribesNeither
-		res.Notice = noticeForwardToolCall
+		res.Notice = noticeAgentAndRecord
 		return res
 
-	case activityTypeInternalToolCall:
-		// emitActivityInternalToolCallTruncated is fed the PRE-forward result,
-		// so this is the only type whose record can hold MORE than was
-		// delivered.
+	case CutShortenedAgentOnly:
+		// The record kept the full pre-cut text, so it holds MORE than was
+		// delivered and response_bytes measures the record.
 		if storageTruncated {
-			// The record holds a prefix of the pre-forward text and the agent
-			// holds a per-block cut of it. tool_response_limit and
-			// activity_max_response_size are unrelated knobs, so which of the
-			// two is larger is not decidable from the flags.
+			// The record is now a prefix of the pre-cut text and the agent
+			// holds a per-block cut of it, under two unrelated limits: which is
+			// larger is not decidable, and response_bytes describes neither.
 			res.Relation = StoredVsDeliveredUnknown
 			res.BytesSubject = ResponseBytesDescribesNeither
-			res.Notice = noticeBothInternal
+			res.Notice = noticeBothAgentOnly
 			return res
 		}
 		res.Relation = StoredLargerThanDelivered
 		res.BytesSubject = ResponseBytesDescribesStored
-		res.Notice = noticeForwardInternal
+		res.Notice = noticeAgentOnly
 		return res
 
-	case activityTypePromptGet:
-		// No forward cut runs in front of prompt_get, so this flag is not
-		// emitted for it today. Treated exactly like a future unknown type.
-		return directionFreeForwardCut(res, storageTruncated)
+	case CutShortenedRecordOnly:
+		// Only the log copy was shortened, so the delivered body is the whole
+		// response and response_bytes — measured pre-cut — describes it. A
+		// second, storage-side cut shortens the same record again and cannot
+		// flip the order.
+		res.Relation = StoredSmallerThanDelivered
+		res.BytesSubject = ResponseBytesDescribesDelivered
+		if storageTruncated {
+			res.Notice = noticeBothRecordOnly
+			return res
+		}
+		res.Notice = noticeRecordOnly
+		return res
+
+	case CutNone:
+		// responseTruncated is true and no stamp came with it: a legacy record.
+		return unstampedCut(res, storageTruncated)
 
 	default:
-		return directionFreeForwardCut(res, storageTruncated)
+		// Unreachable: Valid() above narrowed cut to the four constants.
+		return unstampedCut(res, storageTruncated)
 	}
 }
 
-// directionFreeForwardCut is the answer for any type that has not established
-// which side of the forward cut it records: state what happened, claim no
-// direction. A renderer that borrowed tool_call's or internal_tool_call's
-// direction here would be asserting something the emitter never established.
-func directionFreeForwardCut(res ResponseTruncation, storageTruncated bool) ResponseTruncation {
+// unstampedCut is the answer for a record whose response cut carries no
+// direction: state what happened, claim no direction. Borrowing another
+// emitter's direction here is precisely the mistake that produced five rounds
+// of review.
+func unstampedCut(res ResponseTruncation, storageTruncated bool) ResponseTruncation {
+	res.Stamped = false
 	res.Relation = StoredVsDeliveredUnknown
 	res.BytesSubject = ResponseBytesDescribesNeither
 	if storageTruncated {
-		res.Notice = noticeBothUnknownType
+		res.Notice = noticeUnstampedBoth
 		return res
 	}
-	res.Notice = noticeForwardUnknownType
+	res.Notice = noticeUnstamped
 	return res
 }
 
 // NoticeWithBytes is Notice plus the one honest sentence about response_bytes.
 //
-// responseBytes <= 0 means UNKNOWN (legacy records, and every internal_tool_call
-// — the built-in emitter never populates the byte fields), so the clause is
-// dropped rather than printed as "0 bytes", which would read as an empty
-// response.
+// responseBytes <= 0 means UNKNOWN — a legacy record predating the measurement,
+// or a policy-refused code-execution sub-call, which records a true zero
+// (emitSubCallRefused, internal/server/mcp_code_execution.go). It is NOT the
+// case that built-ins leave the byte fields empty: EmitActivityInternalToolCall
+// Truncated populates response_bytes on every internal emission
+// (internal/runtime/event_bus.go) and ActivityService.handleInternalToolCall
+// reads it back. The clause is dropped rather than printed as "0 bytes", which
+// would read as an empty response.
 func (t ResponseTruncation) NoticeWithBytes(responseBytes int) string {
 	if t.Notice == "" || responseBytes <= 0 {
 		return t.Notice
 	}
 	switch t.BytesSubject {
 	case ResponseBytesDescribesDelivered:
-		return t.Notice + fmt.Sprintf(" response_bytes (%d) is what the agent received.", responseBytes)
+		// "What the agent received" is the emitter's measurement of the payload
+		// it forwarded. Two off-by-default features rewrite the payload AFTER
+		// that measurement: spotlightForwarded adds source delimiters
+		// (Spec 054), and TOON re-encodes text blocks (Spec 084). With either
+		// enabled this is the delivered body's size to within what they added,
+		// not to the byte — which is why the clause says "measures" rather than
+		// asserting an exact identity.
+		return t.Notice + fmt.Sprintf(" response_bytes (%d) measures the response the agent received.", responseBytes)
 	case ResponseBytesDescribesStored:
 		return t.Notice + fmt.Sprintf(" response_bytes (%d) is the size of this recorded text.", responseBytes)
 	case ResponseBytesDescribesNeither:
 		return t.Notice + fmt.Sprintf(
-			" response_bytes (%d) is the pre-forward upstream size, so it describes neither this record nor the agent's copy.",
+			" response_bytes (%d) is the pre-cut upstream size, so it describes neither this record nor the agent's copy.",
 			responseBytes)
 	case ResponseBytesDescribesBoth:
 		// Unreachable: BytesSubject is "both" only in the nothing-was-cut cell,

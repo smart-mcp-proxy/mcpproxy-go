@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // newPreChurnTestConfig builds a minimal config rooted at dataDir. A fresh
@@ -168,7 +169,7 @@ func TestRuntimeCloseWaitsForActivityWritersBeforeMarkerResolve(t *testing.T) {
 	for {
 		rt.EmitActivityToolCallCompleted(
 			"prechurn-srv", "prechurn-tool", "sess-1", "req-1", "mcp",
-			"success", "", 7, nil, "ok", false, "", nil, "", "", 0, 0, "", nil, "")
+			"success", "", 7, nil, "ok", contracts.CutNone, "", nil, "", "", 0, 0, "", nil, "")
 		if snap := rt.ActivityService().UsageSnapshot(); snap != nil && len(snap.Tools) > 0 {
 			break
 		}

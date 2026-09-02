@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // ActivityRecordsBucket is the BBolt bucket name for activity records
@@ -195,7 +197,7 @@ type ActivityRecord struct {
 	ToolName          string                 `json:"tool_name,omitempty"`          // Name of tool called
 	Arguments         map[string]interface{} `json:"arguments,omitempty"`          // Tool call arguments
 	Response          string                 `json:"response,omitempty"`           // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // Spec 103: cut to ToolResponseLimit on the way out; which side was recorded depends on Type — see below
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // Spec 103: the response was cut. WHICH copies it shortened is stamped in ResponseTruncationCut — see below
 	Status            string                 `json:"status"`                       // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`      // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`        // Execution duration in milliseconds
@@ -216,72 +218,60 @@ type ActivityRecord struct {
 	// call and for every record written before this field existed.
 	ParentID string `json:"parent_id,omitempty"`
 
+	// ResponseTruncationCut is the EMITTER'S stamp on the ResponseTruncated cut:
+	// which copies of the response it actually shortened — the agent's, the
+	// record's, or both.
+	//
+	// DO NOT READ A DIRECTION OUT OF THE RECORD TYPE. Five review rounds tried,
+	// and each was correct for the emitters it knew and wrong about one it did
+	// not: a code-execution sub-call is a Type=tool_call record whose cut runs
+	// the OPPOSITE way from every other tool_call's, because it is a log-side
+	// cut at subCallActivityResponseLimit (internal/server/mcp_code_execution.go)
+	// rather than a forward cut at ToolResponseLimit. The direction is a
+	// property of which emitter cut the text, so the emitter states it.
+	//
+	// The vocabulary and the resolved meaning of every combination live in one
+	// place:
+	//
+	//	contracts.ResponseCut / contracts.ResolveResponseTruncation
+	//	  internal/contracts/activity_truncation.go
+	//	  every cell pinned in internal/contracts/activity_truncation_test.go
+	//
+	// Every rendering surface calls the resolver; none restates the table. This
+	// comment exists to tell you the shape of the problem, never to be copied.
+	//
+	// Empty means UNSTATED. With ResponseTruncated false that just means nothing
+	// was cut. With ResponseTruncated true it can ONLY be a record written
+	// before this field existed, because the emitters derive the boolean from
+	// the stamp (contracts.ResponseCut.Cuts) — and such a record is answered
+	// without a direction rather than with a borrowed one.
+	ResponseTruncationCut contracts.ResponseCut `json:"response_truncation_cut,omitempty"`
+
 	// The two truncation flags are independent — both can be true on one
 	// record — and neither implies the other.
 	//
-	// DO NOT READ A DIRECTION OUT OF EITHER FLAG HERE. What a flag says about
-	// this record depends on the record TYPE *and* on whether the other flag is
-	// also set, and there is exactly one implementation of that table:
-	//
-	//	contracts.ResolveResponseTruncation
-	//	  internal/contracts/activity_truncation.go
-	//	  all 12 cells pinned in internal/contracts/activity_truncation_test.go
-	//
-	// Every rendering surface calls it. Four review rounds' worth of wrong
-	// cells came from surfaces that instead lifted a sentence out of a comment
-	// like this one, so the summary below is deliberately incomplete-by-design:
-	// it exists to tell you the shape of the problem, never to be copied.
-	//
-	//	                     forward only        storage only       BOTH
-	//	tool_call            stored == delivered stored < delivered stored < delivered
-	//	internal_tool_call   stored >  delivered stored < delivered order not fixed
-	//	prompt_get           (not emitted)       stored < delivered (not emitted)
-	//
-	// ResponseTruncated (above, Spec 103) means the response was cut to
-	// ToolResponseLimit on its way to the agent — per TEXT BLOCK, so the
+	// ResponseTruncated (above, Spec 103) means the response was cut. For the
+	// forward emitters that cut is per TEXT BLOCK at ToolResponseLimit, so the
 	// recorded text (the join of every forwarded block) can far exceed
 	// ToolResponseLimit even with the flag set. That is why the both-flags
-	// column is reachable at stock defaults (20000 / 65536, unrelated knobs),
-	// and it is the column every previous restatement omitted.
+	// column is reachable at stock defaults (20000 / 65536, unrelated knobs).
 	//
-	//   - ActivityTypeInternalToolCall: emitActivityInternalToolCallTruncated is
-	//     fed the PRE-forward result, so this is the ONLY type whose record can
-	//     hold more than was delivered.
-	//   - ActivityTypeToolCall: handleToolCallCompleted is passed the
-	//     POST-forward text (the forwardedText call in internal/server/mcp.go),
-	//     so the record starts life as exactly the agent's copy — and the
-	//     storage cut, when it also fires, then shortens that already-forwarded
-	//     text again, leaving the record STRICTLY SHORTER than the delivered
-	//     body. "The recorded response IS the delivered one" is therefore true
-	//     only while ResponseStorageTruncated is false; stating it
-	//     unconditionally is the specific error that reached two renderers.
-	//
-	// The only consumers that act on the flag gate on the type as well: the
+	// The only consumers that act on the flag also read the stamp: the
 	// predicate is truncatedBuiltinOverstatesDelivery in
-	// internal/runtime/usage_aggregate.go, which is
-	// `ResponseTruncated && Type == ActivityTypeInternalToolCall`, and the token
-	// benchmark withholds such a record's response cost rather than tokenizing
-	// text nobody paid for.
-	//
-	// No other type sets this flag today; a new emitter that does must say
-	// which side of the cut it recorded, and must add its rows to
-	// ResolveResponseTruncation — until it does, that resolver gives it a
-	// direction-FREE wording rather than letting it inherit a claim.
+	// internal/runtime/usage_aggregate.go, and the token benchmark withholds a
+	// record's response cost rather than tokenizing text nobody paid for.
 	//
 	// ResponseStorageTruncated means activity_max_response_size cut the text on
 	// the way into BBolt, so a single multi-megabyte payload cannot outweigh
-	// the whole log (issue #1173). Unlike ResponseTruncated its direction
-	// relative to the EMITTER'S text is type-independent: record.Response is
-	// always a prefix of what the emitter handed over, on every type that
-	// carries it (tool_call, internal_tool_call and prompt_get).
+	// the whole log (issue #1173). Unlike ResponseTruncated it needs no stamp:
+	// this cut has only ever had one direction — record.Response is always a
+	// prefix of what the emitter handed over, on every type that carries it
+	// (tool_call, internal_tool_call and prompt_get).
 	//
-	// Relative to what the AGENT received it is not that simple, and again the
+	// Relative to what the AGENT received it is not that simple, and the
 	// resolver is the authority: with ResponseTruncated false the emitter's
 	// text WAS the delivered text, so the record is smaller than it; with both
-	// set the answer depends on the type (strictly smaller for a tool_call,
-	// undecidable for an internal_tool_call, whose two cuts point opposite ways
-	// under unrelated limits) and ResponseBytes describes the pre-forward
-	// upstream payload rather than either body.
+	// set the answer depends on the STAMP, not the type.
 	//
 	// ResponseBytes is measured PRE-truncation by the emitter and is therefore
 	// still honest, so this flag must never reach the Spec 103 consumers —

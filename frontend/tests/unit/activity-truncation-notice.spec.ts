@@ -103,4 +103,42 @@ describe('responseTruncationNotice', () => {
       expect(notice).not.toContain('This is the agent')
     }
   })
+
+  it('gives two tool_call records with opposite cuts their own sentences', () => {
+    // The round-4 regression, at the badge. A code-execution sub-call and an
+    // ordinary upstream dispatch are BOTH `tool_call` records with
+    // response_truncated set, and their cuts point opposite ways. Any UI that
+    // derived a direction from `type` would render one sentence for both, and
+    // it would be definitionally false for one of them.
+    const ordinary = responseTruncationNotice({
+      type: 'tool_call',
+      response_truncated: true,
+      response_truncation_cut: 'agent_and_record',
+      response_truncation_notice:
+        "This is the agent's own copy: the response was cut once, to tool_response_limit, " +
+        'before being both forwarded and recorded.',
+    } as never)
+    const subCall = responseTruncationNotice({
+      type: 'tool_call',
+      response_truncated: true,
+      response_truncation_cut: 'record_only',
+      response_truncation_notice:
+        'The agent received MORE than this: the whole response was delivered, and only the ' +
+        'recorded copy was shortened to bound the activity log.',
+    } as never)
+
+    expect(ordinary).not.toBe(subCall)
+    expect(subCall).not.toContain("agent's own copy")
+    // A sub-call's cut is not tool_response_limit; naming it would send an
+    // operator to a setting that cannot change this record.
+    expect(subCall).not.toContain('tool_response_limit')
+  })
+
+  it('does not tell a reader the direction depends on the record type', () => {
+    // The fallback used to say exactly that. It was the surviving copy of the
+    // claim five review rounds were spent disproving: the direction is a
+    // property of the emitter, and the type does not determine it.
+    expect(TRUNCATION_NOTICE_UNRESOLVED.toLowerCase()).not.toContain('record type')
+    expect(TRUNCATION_NOTICE_UNRESOLVED).toContain('emitter')
+  })
 })

@@ -237,17 +237,24 @@ type decodedRecord struct {
 	timestamp  time.Time
 	internal   bool
 	truncated  bool
+	// cut is the EMITTER'S stamp on the `truncated` cut: which copies of the
+	// response it shortened (contracts.ResponseCut). The direction is not
+	// derivable from the record type — a code-execution sub-call is a
+	// `tool_call` record whose cut runs the opposite way from an ordinary one's
+	// — so it travels on the record. Empty on a corpus exported before the
+	// stamp existed; see recordOverstatesDelivery for what that falls back to.
+	cut contracts.ResponseCut
 	// storageTruncated says activity_max_response_size cut the body on the way
 	// into the activity log, so the stored text is a prefix of whatever the
 	// emitter handed over.
 	//
 	// It is NOT simply "the opposite of truncated". The two flags interact, and
-	// what they jointly say about this record depends on its type — see
+	// what they jointly say about this record depends on `cut` above — see
 	// contracts.ResolveResponseTruncation
 	// (internal/contracts/activity_truncation.go), the single authority. In
-	// particular an internal_tool_call carrying BOTH flags has two cuts
-	// pointing opposite ways under two unrelated limits, so neither the stored
-	// nor the delivered body is known to be the larger.
+	// particular a CutShortenedAgentOnly record carrying BOTH flags has two
+	// cuts pointing opposite ways under two unrelated limits, so neither the
+	// stored nor the delivered body is known to be the larger.
 	//
 	// responseBytes stays the pre-truncation size in every case, so this flag
 	// only matters to a consumer that reads the body TEXT.
@@ -294,6 +301,7 @@ func admit(rec *contracts.ActivityRecord, report *ExclusionReport) (*decodedReco
 		timestamp:        rec.Timestamp,
 		internal:         string(rec.Type) == "internal_tool_call",
 		truncated:        rec.ResponseTruncated,
+		cut:              rec.ResponseTruncationCut,
 		storageTruncated: rec.ResponseStorageTruncated,
 		sensitive:        rec.HasSensitiveData,
 		requestBytes:     rec.RequestBytes,

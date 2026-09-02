@@ -3,6 +3,8 @@ package replaycorpus
 import (
 	"sort"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // ExclusionReason names one reason a record, or one cost component of a record,
@@ -78,36 +80,51 @@ const (
 	ReasonInternalNoByteCounts ExclusionReason = "internal_no_byte_counts"
 
 	// ReasonSubCallZeroBytes is the second known gap: a code-execution sub-call
-	// records BOTH byte counts as zero (internal/server/mcp_code_execution.go),
-	// so a sandbox's sub-calls cannot use the byte-length estimate either.
+	// with no byte length, so the byte-estimate fallback has nothing to work
+	// from.
+	//
+	// It is no longer systematic. Sub-calls DID record both counts as zero
+	// until subCallByteSizes began measuring them
+	// (internal/server/mcp_code_execution.go); today it fires on corpora
+	// captured before that, and on the one live path that still records zero
+	// response bytes — a policy REFUSAL (emitSubCallRefused), where no response
+	// existed and the zero is true rather than unknown. It keeps its own name
+	// so an operator can tell an old corpus from a live gap.
 	ReasonSubCallZeroBytes ExclusionReason = "sub_call_zero_bytes"
 
 	// ReasonTruncatedRetrieveOverstates is the asymmetry that makes truncated
 	// built-in records worse than useless.
 	//
-	// The direction of `response_truncated` is NOT universal — it depends on
-	// the record type and on whether `response_storage_truncated` is also set.
-	// contracts.ResolveResponseTruncation is the authority
-	// (internal/contracts/activity_truncation.go); what matters here is the one
-	// row it returns for a forward-truncated internal_tool_call:
+	// The direction of `response_truncated` is NOT derivable from the record
+	// type. It is stamped on the record by the emitter that performed the cut
+	// (`response_truncation_cut`, contracts.ResponseCut), because several
+	// emitters set the flag and they point different ways — a code-execution
+	// sub-call is a `tool_call` record whose cut runs the opposite way from an
+	// ordinary one's. contracts.ResolveResponseTruncation
+	// (internal/contracts/activity_truncation.go) is the single authority on
+	// what a record's truncation state means; nothing here restates its table.
 	//
-	//	stored > delivered — the log holds the FULL pre-forward response while
+	// The stamp this reason fires on is contracts.CutShortenedAgentOnly:
+	//
+	//	stored > delivered — the log holds the FULL pre-cut response while
 	//	the agent consumed the cut text, so BOTH the stored text and
 	//	`response_bytes` describe something larger than what was paid for.
 	//
 	// Counting either would overstate mcpproxy's cost — flattering, and still
 	// wrong — so the cost is withheld and counted.
 	//
-	// This reason is deliberately NOT applied to an ordinary upstream
-	// tool_call, but not because "truncation cuts the stored text while the
-	// agent consumed the whole thing" — that is backwards on both halves. A
-	// tool_call's response is cut on the way OUT, and its record holds the
-	// post-forward text, so the log holds the agent's copy (or, with the
-	// storage cut too, strictly less than it) and never more. `response_bytes`
-	// is then the PRE-forward upstream size: larger than both bodies, and so
-	// not an honest estimate of what the agent consumed either — it is an
-	// honest estimate of the UPSTREAM PAYLOAD, which is the quantity the byte
-	// figures are defined as. That is why it is kept rather than excluded.
+	// The other two stamps are kept rather than excluded:
+	//
+	//   - CutShortenedAgentAndRecord (ordinary upstream forward truncation):
+	//     the record holds the agent's copy (or, with the storage cut too,
+	//     strictly less than it) and never more. `response_bytes` is then the
+	//     PRE-cut upstream size: larger than both bodies, and so not an honest
+	//     estimate of what the agent consumed either — it is an honest estimate
+	//     of the UPSTREAM PAYLOAD, which is the quantity the byte figures are
+	//     defined as.
+	//   - CutShortenedRecordOnly (a sandbox sub-call): the whole response was
+	//     delivered, so `response_bytes` is honest about delivery and only the
+	//     log copy is short.
 	//
 	// The alternative permitted by the contract is to re-apply the recorded
 	// truncation limit before counting; that needs a limit the export does not
@@ -418,7 +435,7 @@ func responseCost(rec *decodedRecord, isSubCall bool, opts *Options, count func(
 		rep.withhold(ReasonSensitive)
 		return Cost{Basis: CostUnavailable, Reason: ReasonSensitive}
 	}
-	if rec.truncated && rec.internal {
+	if recordOverstatesDelivery(rec) {
 		rep.withhold(ReasonTruncatedRetrieveOverstates)
 		return Cost{Basis: CostUnavailable, Reason: ReasonTruncatedRetrieveOverstates}
 	}
@@ -481,6 +498,32 @@ const (
 	emptyArgsJSON     = "{}"
 	emptyArgsMaxBytes = 4
 )
+
+// recordOverstatesDelivery reports whether this record's stored text and
+// response_bytes describe something LARGER than what the agent consumed — the
+// one condition under which counting the record inflates mcpproxy's cost.
+//
+// It reads the emitter's stamp and never the record type. The type fallback
+// covers corpora exported before the stamp existed: `truncated && internal` was
+// this predicate's whole body then, and it was correct for the emitter
+// population that wrote those records — an internal_tool_call was the only
+// CutShortenedAgentOnly emitter, and a sandbox sub-call (a `tool_call`) has
+// always been excluded from it. Do not extend the fallback; a new emitter
+// reaching it without a stamp is a bug in the emitter.
+func recordOverstatesDelivery(rec *decodedRecord) bool {
+	if !rec.truncated {
+		return false
+	}
+	switch rec.cut {
+	case contracts.CutShortenedAgentOnly:
+		return true
+	case contracts.CutShortenedAgentAndRecord, contracts.CutShortenedRecordOnly:
+		return false
+	default:
+		// CutNone (a pre-stamp export) or a value from a newer core.
+		return rec.internal
+	}
+}
 
 // byteGapReason names WHICH known gap left this record without a byte length.
 // The two systematic gaps get their own names so an operator reading the

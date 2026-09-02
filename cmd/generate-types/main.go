@@ -86,6 +86,21 @@ export type HealthAction =
   | typeof HealthActionConfigure
   | typeof HealthActionEditURL;
 
+// Response truncation direction - generated from internal/contracts/activity_truncation.go
+// The EMITTER stamps which copies of a response its cut shortened. It is NOT
+// derivable from the record type: several emitters set response_truncated and
+// they point different ways (a code-execution sub-call is a tool_call record
+// whose cut runs the opposite way from an ordinary one's). Render
+// response_truncation_notice, which the backend resolves; branch on these only
+// when prose will not do.
+export const CutShortenedAgentAndRecord = 'agent_and_record' as const;
+export const CutShortenedAgentOnly = 'agent_only' as const;
+export const CutShortenedRecordOnly = 'record_only' as const;
+export type ResponseCut =
+  | typeof CutShortenedAgentAndRecord
+  | typeof CutShortenedAgentOnly
+  | typeof CutShortenedRecordOnly;
+
 export interface HealthStatus {
   level: HealthLevel;
   admin_state: AdminState;

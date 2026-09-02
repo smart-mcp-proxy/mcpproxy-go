@@ -2195,16 +2195,18 @@ const formatDuration = (ms: number): string => {
 //
 // ONE sentence for the whole record, shown on BOTH badges.
 //
-// There is no direction table here. What `response_truncated` and
-// `response_storage_truncated` mean depends on the record TYPE and on whether
-// both are set; this component used to hold a copy of that table, split across
-// two per-badge tooltips, and a reader hovering only "Truncated" on a
-// both-flags record was told the stored body is the agent's own copy when it is
-// strictly shorter than it — with no correction anywhere in that tooltip.
+// There is no direction table here, and no inference from `type`. This
+// component used to hold a copy of that table split across two per-badge
+// tooltips, and a reader hovering only "Truncated" on a both-flags record was
+// told the stored body is the agent's own copy when it is strictly shorter than
+// it. A later per-type version was wrong for code-execution sub-calls, which
+// are `tool_call` records whose cut runs the other way.
 //
-// The backend resolves the cell once and ships the answer as
-// `response_truncation_notice` (contracts.ResolveResponseTruncation, pinned
-// across all 12 cells in internal/contracts/activity_truncation_test.go).
+// The direction is a property of the emitter that made the cut, so it travels
+// on the record as `response_truncation_cut`; the backend resolves the cell
+// once and ships the answer as `response_truncation_notice`
+// (contracts.ResolveResponseTruncation, pinned across every stamp x flag
+// combination in internal/contracts/activity_truncation_test.go).
 // `responseTruncationNotice` in @/utils/activity only chooses it, and falls back
 // to a direction-FREE line for a payload from an older core.
 const truncationNotice = computed(() =>

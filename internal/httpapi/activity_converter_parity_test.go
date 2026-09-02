@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -39,6 +40,7 @@ func fullyPopulatedStorageRecord() *storage.ActivityRecord {
 		Arguments:                map[string]interface{}{"repo": "smart-mcp-proxy/mcpproxy-go"},
 		Response:                 "only the first 64KB of a much longer payload...[truncated]",
 		ResponseTruncated:        true,
+		ResponseTruncationCut:    contracts.CutShortenedAgentAndRecord,
 		ResponseStorageTruncated: true,
 		Status:                   "success",
 		ErrorMessage:             "none",

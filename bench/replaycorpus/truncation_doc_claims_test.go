@@ -68,3 +68,39 @@ func TestTruncationDocsDoNotRestateTheUniversalClaim(t *testing.T) {
 		})
 	}
 }
+
+// Round 4's residue: this doc still asserted that a code-execution sub-call
+// records BOTH byte counts as zero. That stopped being true when
+// subCallByteSizes began measuring them (internal/server/mcp_code_execution.go);
+// the only sub-call path that still records a zero response is a policy
+// REFUSAL, and that zero is TRUE rather than unknown.
+//
+// Worth pinning because the claim reads as a systematic pipeline gap, and a
+// maintainer acting on it would build an estimator for a population that no
+// longer needs one — or, worse, distrust byte figures that are correct.
+func TestSubCallZeroBytesDocIsNotStatedAsSystematic(t *testing.T) {
+	raw, err := os.ReadFile("flags.go")
+	require.NoError(t, err)
+	src := string(raw)
+
+	assert.NotContains(t, src, "records BOTH byte counts as zero",
+		"sub-calls carry byte counts now; the only live zero is a policy refusal")
+	assert.Contains(t, src, "emitSubCallRefused",
+		"name the one path that still records a zero response, so the claim is checkable")
+	assert.Contains(t, src, "subCallByteSizes",
+		"name the function that made the systematic gap stop being systematic")
+}
+
+// The decoded record must carry the emitter's stamp, or every consumer in this
+// package is back to guessing from `internal`.
+func TestDecodedRecordCarriesTheStamp(t *testing.T) {
+	assert.Contains(t, mustRead(t, "load.go"), "cut:              rec.ResponseTruncationCut",
+		"the loader must copy the stamp off the exported record")
+}
+
+func mustRead(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(name)
+	require.NoError(t, err)
+	return string(raw)
+}

@@ -1464,15 +1464,22 @@ drawer. `response_bytes` is measured before either cut and stays accurate, so it
 is how a reader learns how much was removed.
 
 `response_storage_truncated` is not simply the opposite of `response_truncated`.
-`response_truncated` means the response was cut to `tool_response_limit` on the
-way to the agent, and **which side of that cut the log kept depends on the
-record type AND on whether the storage cut also fired**:
+`response_truncated` means the response was cut — and **which copies that cut
+shortened is NOT derivable from the record type**. Several emitters set the
+flag, under different limits, and they point different ways: a code-execution
+sub-call is a `tool_call` record whose cut runs the opposite way from an
+ordinary `tool_call`'s. The emitter therefore stamps the direction on the record
+as `response_truncation_cut`:
 
-| Record type | forward cut only | storage cut only | BOTH cuts |
-|-------------|------------------|------------------|-----------|
-| `tool_call` | the log kept the agent's OWN post-forward copy — stored **==** delivered | stored **<** delivered | the forwarded copy was shortened again — stored **<** delivered |
-| `internal_tool_call` | the log kept the FULL response, the agent got the cut copy — stored **>** delivered. The only case the usage aggregate and the token benchmark exclude. | stored **<** delivered | two cuts under two unrelated limits — the order is **not fixed** |
-| `prompt_get` | not emitted (no forward cut runs in front of it) | stored **<** delivered | not emitted |
+| `response_truncation_cut` | what the cut shortened | who emits it today |
+|---------------------------|------------------------|--------------------|
+| `agent_and_record` | the agent's copy, and the log holds that same cut copy — stored **==** delivered | an upstream `tool_call`, cut to `tool_response_limit` on the way out |
+| `agent_only` | only the agent's copy; the log holds the full pre-cut text — stored **>** delivered. The only case the usage aggregate and the token benchmark exclude. | the built-ins: `retrieve_tools`, and the `internal_tool_call` mirror of a `call_tool_*` dispatch |
+| `record_only` | only the log copy; the whole response was delivered — stored **<** delivered | a code-execution sub-call, cut at 8KB purely to bound the log |
+| *(absent)* | unstated | only records written before this field existed; nothing claims a direction for them |
+
+The storage cut needs no stamp: it has only ever had one direction, always
+shortening the record and nothing else.
 
 Both cuts on one record is ordinary, not a corner case: the forward cut applies
 per text *block*, so a multi-block response can be forward-truncated and still
@@ -1485,10 +1492,11 @@ for that exact record — in the REST list and detail responses and the NDJSON
 export; the Web UI shows it on both truncation badges, and
 `mcpproxy activity show <id> --include-response` prints it under the body.
 
-When a forward cut happened, `response_bytes` is the *pre-forward upstream*
-size: larger than both the stored and the delivered body, so it is a measure of
-the upstream payload rather than of either copy. With no forward cut it is
-exactly what the agent received.
+`response_bytes` is always the emitter's measurement taken BEFORE its cut, so
+which body it describes follows from the stamp: with `agent_and_record` it is
+the pre-cut upstream size and describes neither copy; with `agent_only` it is
+the size of the stored text; with `record_only`, and whenever only the storage
+cut fired, it is the size of what the agent received.
 
 The budget is a budget for the TEXT, not for the stored field: when the cut
 happens the record keeps the first `activity_max_response_size` bytes (backed up

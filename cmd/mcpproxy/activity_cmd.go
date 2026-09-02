@@ -1733,20 +1733,24 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 
 // activityTruncationNotices explains a truncation marker in the printed body.
 //
-// It composes NOTHING. What the two flags mean depends on the record TYPE and
-// on whether both are set, and four rounds of review found a different cell
-// wrong each time a renderer restated that in prose — including this one, whose
-// per-flag split could not see the other flag and so told a both-flags
-// tool_call reader that the stored body "IS the agent's copy" when it is
-// strictly shorter than it. contracts.ResolveResponseTruncation is the single
-// authority (see internal/contracts/activity_truncation.go and the 12-cell
-// table in its test); this function only feeds it the record's fields.
+// It composes NOTHING, and in particular it does not look at the record's TYPE.
+// Five rounds of review tried to recover the response cut's direction at render
+// time and each was wrong about one emitter — the last of them defeated by
+// code-execution sub-calls, which are Type=tool_call records whose cut runs the
+// other way. The direction now travels ON the record as
+// `response_truncation_cut`, stamped by the emitter that performed the cut;
+// contracts.ResolveResponseTruncation is the single authority on what it means
+// (see internal/contracts/activity_truncation.go and the table in its test),
+// and this function only feeds it the record's fields.
+//
+// A record from an older core has no stamp; the resolver answers those without
+// claiming a direction, which is why nothing here fills one in.
 //
 // The result is one line, not one per flag: the two cuts interact, so only a
 // sentence that has seen both can be true about either.
 func activityTruncationNotices(activity map[string]interface{}) []string {
 	resolved := contracts.ResolveResponseTruncation(
-		getStringField(activity, "type"),
+		contracts.ResponseCut(getStringField(activity, "response_truncation_cut")),
 		getBoolField(activity, "response_truncated"),
 		getBoolField(activity, "response_storage_truncated"),
 	)
@@ -1757,8 +1761,9 @@ func activityTruncationNotices(activity map[string]interface{}) []string {
 	// response_bytes is measured PRE-truncation, and which body (if either) it
 	// describes is part of what the resolver decides — hence NoticeWithBytes
 	// rather than a byte clause assembled here. Zero means the API supplied
-	// none: `omitempty` drops it on a legacy record, and the internal emitter
-	// never populates it at all.
+	// none: `omitempty` drops it on a legacy record, and on a policy-refused
+	// code-execution sub-call, where zero response bytes is true rather than
+	// unknown. Built-ins DO populate it.
 	return []string{resolved.NoticeWithBytes(getIntField(activity, "response_bytes"))}
 }
 
