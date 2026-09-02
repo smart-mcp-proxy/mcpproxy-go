@@ -60,3 +60,109 @@ updates:
       website-dependencies:
         patterns:
           - "*"
+  - package-ecosystem: npm
+    directory: "/e2e/playwright"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      e2e-playwright-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: "/e2e/web-ui-sweep"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      e2e-web-ui-sweep-dependencies:
+        patterns:
+          - "*"
+  # tests/echo-rugpull-server and tests/malicious-mcp-server are local-only
+  # npm fixtures for the quarantine/TPA scanner test suite (tests/README.md):
+  # never published, never shipped, spawned only from test tooling and bound
+  # to localhost. A vulnerable transitive dep here is alert noise, not a real
+  # exposure — but Dependabot previously had NO entry for either directory,
+  # so ten open alerts (5 per fixture, identical) sat unfixed because nothing
+  # ever opened a PR for them. Low limit + own commit prefix keep fixture
+  # bumps from competing with real dependency PRs for review attention.
+  - package-ecosystem: npm
+    directory: "/tests/echo-rugpull-server"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps-fixtures)"
+    groups:
+      echo-rugpull-fixture-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: "/tests/malicious-mcp-server"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps-fixtures)"
+    groups:
+      malicious-mcp-fixture-dependencies:
+        patterns:
+          - "*"
+  # bench/tscg pins @tscg/core to an exact version (1.4.3) on purpose: the
+  # discovery-profiler benchmark (spec 083) reports figures — e.g. "TSCG
+  # (-23.8%)" in specs/085-compact-router/spec.md — that are only comparable
+  # run-to-run if the shim's encoding behavior doesn't drift. Auto-bumping it
+  # would silently invalidate published numbers, the same reason
+  # github.com/mark3labs/mcp-go is excluded from the gomod group above. No
+  # dependabot entry for bench/tscg; re-pin it manually, in its own reviewed
+  # commit, if a bump is ever warranted.
+  #
+  # cmd/mcpfixture/Dockerfile is `FROM scratch` (see the file's own header
+  # comment) — there is no base image for the docker ecosystem to track, so
+  # it has no entry below either.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: docker
+    directory: "/docker/scanners/cisco"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-scanners)"
+  - package-ecosystem: docker
+    directory: "/docker/scanners/proximity"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-scanners)"
+  - package-ecosystem: docker
+    directory: "/docker/scanners/ramparts"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-scanners)"
+  - package-ecosystem: docker
+    directory: "/docker/scanners/snyk"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-scanners)"
+  - package-ecosystem: docker
+    directory: "/docker/scanners/trivy"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-scanners)"
