@@ -5,13 +5,20 @@
 **Status**: Draft — READY FOR PLANNING (dependency gate CLEARED 2026-08-12; spec revised 2026-08-24)
 **Input**: User description: "MCP protocol upgrade to the 2026-07-28 spec revision"
 
-## Dependency Gate *(CLEARED 2026-08-12)*
+## Dependency Gate *(CLEARED 2026-08-12; STABLE 2026-09-02 — see the amendment note below)*
 
 **The gate has cleared.** `github.com/mark3labs/mcp-go` **v1.0.0-beta.1** (released 2026-08-12, mark3labs/mcp-go#951) ships full `2026-07-28` support with per-request protocol-era detection: both protocol eras are served concurrently on one endpoint, modern (stateless) requests synthesize legacy session state so existing `ClientSessionFromContext`-based handlers still receive a session object — though no persistent session id is bound, so session-id-dependent behavior (e.g. Spec-057's session-scoped `set_profile`) still fails; see Cross-Spec Reconciliation — and client-side `initialize` is capped at `2025-11-25`, and a conformance suite pins legacy byte-compatibility. The stable v0.x line (latest v0.58.0, 2026-08-11) does **not** include this support. mcpproxy currently pins **v0.57.0** (an earlier revision of this paragraph said v0.54.0; the pin has moved since).
 
 A compile probe against v1.0.0-beta.1 produced **zero compile errors** on both editions, a clean `go vet`, and exactly **2 unit-test failures** — `TestProfile_SetProfileSessionScoped` and `TestProfile_SetProfileUnknown` (`internal/server/profile_integration_test.go`) — which is precisely the Spec-057 tension flagged in the Cross-Spec Reconciliation section below. *(Independently reproduced 2026-08-26 on `main` @ `4d30624`: `go get github.com/mark3labs/mcp-go@v1.0.0-beta.1` → `go build ./...` exit 0, `go build -tags server ./cmd/mcpproxy` exit 0, `go vet ./internal/...` exit 0, `go test ./internal/server -run TestProfile_` → exactly those two failures and no others.)*
 
 **Merge constraint:** a v1.0.0-beta.x library pin MUST NOT merge to main unless either (a) mcp-go v1.0.0 stable has shipped, or (b) the client-facing Streamable HTTP transport is pinned legacy-only per FR-028. (Gate history: opened 2026-05-28 against v0.54.x; tracked weekly on issue #532 until cleared.)
+
+> **Amendment 2026-09-03 (v1.0.0 stable probe).** mcp-go **v1.0.0 stable** shipped 2026-09-02, so condition (a) is satisfied. Re-probing against stable corrected **two claims in the paragraphs above**, and both corrections change plan-level decisions:
+>
+> 1. **"client-side `initialize` is capped at `2025-11-25`" is FALSE for stable.** `client.Initialize` is *modern-first*: it probes `server/discover` and only falls back to a legacy handshake when that fails (`client/client.go:305-333`), and `mcp.LATEST_PROTOCOL_VERSION` is now `2026-07-28` (`mcp/version.go:35`). Because `internal/upstream/core/connection_lifecycle.go:19` sends that constant, **the library bump by itself switches the upstream-facing hop to `2026-07-28`** — FR-028's pin covers only the client-facing side. FR-027 is therefore amended below to name both sides explicitly.
+> 2. **"zero compile errors" no longer holds for stable.** `server.NewTestStreamableHTTPServer`/`NewTestServer` moved to a new `server/servertest` package (32 call sites across 6 test files). Production code still compiles unchanged on both editions, and the **full** `internal/server` suite under stable fails on exactly `TestProfile_SetProfileSessionScoped` and `TestProfile_SetProfileUnknown` and nothing else.
+>
+> Evidence and the full delta: [research.md](./research.md). Amendments in this document were ratified under the repo's zero-interruption policy (`CLAUDE.md`) rather than by separate maintainer sign-off; each states its rationale inline so it can be reversed on review.
 
 ## Cross-Spec Reconciliation *(read at plan time)*
 
@@ -137,7 +144,7 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 
 **Routing headers & metadata**
 
-- **FR-007**: mcpproxy MUST set `Mcp-Method` and `MCP-Protocol-Version` on every request/notification it forwards upstream, and `Mcp-Name` on `tools/call`, `resources/read`, and `prompts/get`.
+- **FR-007** *(amended 2026-09-03)*: mcpproxy MUST set `Mcp-Method` and `MCP-Protocol-Version` on every **request** it forwards upstream, and `Mcp-Name` on `tools/call`, `resources/read`, and `prompts/get`. **Notifications are excluded**: `StreamableHTTP.SendNotification` passes a nil header (`client/transport/streamable_http.go:915-925`), `mcp.JSONRPCNotification` has no header field, and mcpproxy originates no client-side notifications — so the original "request/notification" wording was unsatisfiable and untestable. Revisit if the library grows a notification header path.
 - **FR-008**: mcpproxy MUST validate that incoming `MCP-Protocol-Version` (and related required headers) match the request body `_meta`, returning the header-mismatch error (`-32020`, `HEADER_MISMATCH` per SEP-2243 — the RC-era `-32001` was renumbered in the final spec) on disagreement and not forwarding the request.
 - **FR-009**: mcpproxy MUST support `x-mcp-header` param-to-header mirroring, copying designated tool params into `Mcp-Param-*` headers and Base64-encoding non-ASCII values.
 - **FR-010**: mcpproxy MUST reject or flag tools that declare an invalid `x-mcp-header` mapping rather than forwarding them.
@@ -151,13 +158,20 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 
 **MRTR (multi round-trip input)**
 
-- **FR-015**: mcpproxy MUST relay an upstream `input_required` result (with its `inputRequests`) to the originating client.
-- **FR-016**: mcpproxy MUST continue a call by forwarding the client's `inputResponses` together with the echoed `requestState` under a new request id, returning the final result.
+> **Amended 2026-09-03 — relay deferred, detect-and-frame adopted.** MRTR relay **cannot be built on mcp-go v1.0.0's public client API**. `client.CallTool` is hard-wired to an internal multi-round-trip loop (`client/client.go:631-643`, `client/mrtr.go:56-103`) that both swallows `input_required` results and overwrites any caller-supplied `inputResponses`/`requestState`; the single-shot entry points (`callToolOnce`, `sendRequest`) are unexported. A proxy must neither answer an input request itself nor let the library answer it, so there is no code path that satisfies the original FR-015/FR-016 short of reimplementing the call path. mcpproxy also proxies no elicitation/sampling/roots handlers today, so nothing regresses by deferring. Two of three independent design reviews chose deferral over a relay built on library internals.
+
+- **FR-015** *(amended)*: mcpproxy MUST detect an upstream `input_required` result and return a **structured, machine-readable `isError` notice** to the originating client (error type, tool, input kind, hint), rather than forwarding a result the client cannot act on or silently dropping the marker. Upstream free text and upstream-authored input-request ids MUST NOT appear in the notice body.
+- **FR-016** *(amended)*: mcpproxy MUST reject an unsolicited continuation — a `call_tool_*`, direct-surface, or legacy `call_tool` request carrying `inputResponses`/`requestState` — pre-dispatch, rather than forwarding it upstream. The guard applies to those surfaces only, so a future built-in may legitimately use MRTR.
+- **FR-016a** *(deferred to a follow-up spec)*: true relay and continuation. Design of record: a proxy-owned sealed envelope (`mpx1.<b64url(payload)>.<b64url(tag)>`, HMAC-SHA256, tool binding, args fingerprint) rather than passing the upstream `requestState` verbatim, because a verbatim relay lets a client redirect a continuation to a different upstream. Gated on mcp-go exporting a single-shot `CallTool` that accepts `mcp.MultiRoundTripParams` plus a typed input-required error; file those upstream issues before starting.
+
+**Sibling requirement surfaced by the same analysis:**
+
+- **FR-016b** *(added 2026-09-03, belongs to the library bump)*: mcpproxy MUST NOT copy an upstream `CallToolResult`'s embedded result envelope wholesale into its own response. `forwardContentResult` (`internal/server/content_forward.go:130-131`) and its direct-surface twin (`mcp_routing.go:595-596`) do exactly that; under v1.0.0 the struct gains `resultType` and the MRTR fields, so an upstream's `input_required` marker would reach the client as though mcpproxy had produced it. Copy the intended fields explicitly.
 
 **Subscriptions & error codes**
 
 - **FR-017**: mcpproxy MUST route resource update subscriptions via `subscriptions/listen` instead of `resources/subscribe`/`unsubscribe`.
-- **FR-018**: mcpproxy MUST emit `-32602` (Invalid Params) for resource-not-found conditions on the `2026-07-28` era and MUST translate an upstream's legacy `-32002` to `-32602` when bridging across eras. *(Verified against mcp-go v1.0.0-beta.1: the final spec aligns resource-not-found with JSON-RPC `INVALID_PARAMS`; `-32002` remains emitted to, and accepted from, legacy-era peers only, so translation applies at era boundaries.)*
+- **FR-018** *(amended 2026-09-03 — vacuous, no work in this spec)*: the requirement stands as written for any future resource proxying, but **mcpproxy proxies no resources today**, so there is nothing to translate. Verified: the only `AddResource` call in the tree is the JSON-schema compiler (`internal/server/mcp_input_validation.go:144`); grep for `-32002`/`RESOURCE_NOT_FOUND` across non-test code is empty; and the sole JSON-RPC-code seam (`classifyUpstreamInvalidParams`, `internal/server/mcp.go:5760-5778`) matches a type whose constructors have no callers. Implementing a translation layer now would produce untestable dead code. Re-open together with FR-017 if resource proxying is ever added.
 
 **Additive feature adoption**
 
@@ -175,7 +189,7 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 **Compatibility & rollout**
 
 - **FR-026**: The personal edition's existing tool-discovery/curation behavior MUST remain functionally unchanged from the connecting agent's perspective after the upgrade.
-- **FR-027**: The upgrade MUST be gated behind the availability of `2026-07-28` support in the underlying MCP library; the codebase MUST NOT switch its negotiated default to `2026-07-28` until that support exists and is verified. *(Availability satisfied by mcp-go v1.0.0-beta.1 as of 2026-08-12; "verified" additionally requires the FR-028 intermediate state or v1.0.0 stable before the client-facing default changes.)*
+- **FR-027** *(amended 2026-09-03 — now names both hops)*: the codebase MUST NOT switch **either** negotiated default — client-facing or upstream-facing — to `2026-07-28` until that support exists and is verified for that hop. This is a substantive change, not a clarification: the original wording said "its negotiated default" as though there were one, and `internal/upstream/core/connection_lifecycle.go:19` sends `mcp.LATEST_PROTOCOL_VERSION`, which v1.0.0 redefines to `2026-07-28`. Under the original reading, **the library bump alone would have violated this requirement** by silently upgrading every upstream hop. The library-bump PR MUST therefore pin the upstream `initialize` to `mcp.LATEST_LEGACY_PROTOCOL_VERSION` alongside FR-028's client-facing pin, and each pin MUST be lifted in its own change with its own acceptance evidence. *(Availability satisfied by mcp-go v1.0.0 stable as of 2026-09-02.)*
 - **FR-028** *(added 2026-08-24 — safe intermediate state)*: Until the Spec-057 Option A/B reconciliation is implemented and its acceptance tests pass, the client-facing Streamable HTTP transport MUST be pinned to legacy protocol versions only via `server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...)`. A v1.0.0-beta.x pin of `mcp-go` MUST NOT merge to main without either mcp-go v1.0.0 stable or this pin in place.
 
 ### Key Entities
@@ -184,7 +198,7 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 - **Request Metadata (`_meta`)**: Per-request envelope carrying protocol version, client identity/capabilities, log level, trace context, and (for MRTR) `requestState` — replacing the prior connection-level handshake.
 - **Required Headers**: `Mcp-Method`, `Mcp-Name`, `MCP-Protocol-Version`, plus mirrored `Mcp-Param-*`; proxy-owned on every hop.
 - **CacheableResult**: List/read result attributes (`ttlMs`, `cacheScope`) advising clients how long and how widely a result may be cached.
-- **Input-Required Result**: An upstream response (`resultType: "input_required"`) carrying `inputRequests`; resolved by a client follow-up with `inputResponses` + echoed `requestState`.
+- **Input-Required Result**: An upstream response (`resultType: "input_required"`) carrying `inputRequests`. In this spec it is **detected and reported**, not resolved (FR-015/FR-016 as amended); the client follow-up with `inputResponses` + echoed `requestState` belongs to the deferred FR-016a.
 - **Identity Scope**: The agent-token or user identity that determines which servers/tools a caller may see/use — now derived per-request rather than per-session.
 
 ## Success Criteria *(mandatory)*
@@ -195,8 +209,8 @@ mcpproxy emits the new caching and ordering hints and modern schema defaults so 
 - **SC-002**: 100% of requests forwarded upstream carry correct `Mcp-Method`, `MCP-Protocol-Version`, and (where applicable) `Mcp-Name` headers, verified across all proxied method types.
 - **SC-003**: Header/body version mismatches are rejected in 100% of injected-mismatch test cases with the correct error, and never forwarded.
 - **SC-004**: Under concurrent connections from differently-scoped agent tokens, each caller sees only its permitted tools while the canonical list facade is byte-identical across connections, with no reliance on session ids.
-- **SC-005**: Resource-not-found conditions surface the new error code in 100% of cases, including when bridging an upstream that returns the legacy code.
-- **SC-006**: List/read responses carry valid cache hints, and clients observe a measurable reduction in repeated tool-metadata fetches versus the pre-upgrade baseline.
+- **SC-005** *(amended 2026-09-03)*: **not applicable while mcpproxy proxies no resources** — see FR-018. There is no resource-not-found path to measure; a "100% of cases" figure over an empty set would be a false green.
+- **SC-006** *(amended 2026-09-03)*: list/read responses carry valid cache hints (`ttlMs` plus a `cacheScope` appropriate to the content's identity-sensitivity), asserted directly on the responses. The original second clause — a measured reduction in repeated client-side metadata fetches — is **withdrawn as unmeasurable from mcpproxy's side**: the fetch reduction happens in the client's cache, there is no pre-upgrade baseline recorded, and no telemetry counts repeated `tools/list` calls per client. Re-add it only with a funded bench cell that drives a cache-honouring client, since a criterion nothing can evaluate is worse than no criterion.
 - **SC-007**: Trace context provided by a client is present and correlated in the corresponding activity-log records 100% of the time.
 - **SC-008**: The full existing test suite (unit, race, API E2E, OAuth E2E) passes on both editions after the upgrade, and the personal edition's negotiated default does not change until library support is confirmed.
 

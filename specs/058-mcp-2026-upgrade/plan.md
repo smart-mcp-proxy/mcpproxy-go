@@ -45,7 +45,7 @@ The rollout is deliberately staged so that each PR is independently safe:
 
 ```text
 specs/058-mcp-2026-upgrade/
-├── spec.md              # exists; needs the two amendments below before implementation
+├── spec.md              # amended 2026-09-03 (Phase A)
 ├── plan.md              # this file
 ├── research.md          # Phase 0 output
 ├── data-model.md        # Phase 1 output
@@ -82,16 +82,20 @@ docs/features/profiles.md, docs/architecture.md                # doc corrections
 
 ## Phases
 
-### Phase A — Ratify the spec amendments (blocking, human decision)
+### Phase A — Spec amendments *(applied 2026-09-03)*
 
-The research surfaced three requirements that cannot be met as written. **This is the one place the plan stops and asks**, because implementing around an unratified MUST is worse than pausing.
+The research surfaced requirements that cannot be met as written. Under the repo's zero-interruption policy (`CLAUDE.md`) these were **decided and written into spec.md** rather than parked for sign-off; each amendment carries its rationale inline so review can reverse any of them cheaply.
 
-- **FR-015 / FR-016 (MRTR relay)** → detect-and-frame in this spec; relay deferred to a follow-up. `client.CallTool` is hard-wired to an internal round-trip loop and the single-shot entry points are unexported, so a proxy **cannot** relay MRTR through the v1.0.0 public API. Two of three design judges chose deferral.
-- **FR-018 / SC-005 (resource-not-found translation)** → vacuous; mcpproxy proxies no resources.
-- **FR-007 (notifications)** → re-scope to requests; the library provides no header path for client-originated notifications, and mcpproxy originates none.
-- **SC-006** → downgrade to "hints present and valid" or fund a bench cell.
+| Requirement | Amendment | Why it could not stand |
+|---|---|---|
+| FR-015 / FR-016 | detect-and-frame; true relay deferred to **FR-016a** | `client.CallTool` hard-wires the round-trip loop and the single-shot entries are unexported, so no code path satisfies the original text |
+| FR-016b (new) | stop copying the upstream result envelope wholesale | v1.0.0 adds `resultType` + MRTR fields, so an upstream marker would reach clients as mcpproxy's own |
+| FR-007 | scoped to **requests** | no header path exists for notifications, and mcpproxy originates none |
+| FR-018 / SC-005 | vacuous today, kept for future resource proxying | no resources are proxied; a translation layer would be dead code |
+| FR-027 | now names **both** hops | as written, the library bump alone would have violated it |
+| SC-006 | "hints present and valid"; fetch-reduction clause withdrawn | unmeasurable from mcpproxy's side, with no recorded baseline |
 
-Cross-review the amendments before they land (repo convention for generated specs).
+Cross-review these before the implementation PRs merge (repo convention for generated specs).
 
 ### Phase B — The bump (one PR, no wire change)
 
