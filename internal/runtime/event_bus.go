@@ -676,6 +676,26 @@ func (r *Runtime) EmitActivityPromptGet(serverName, promptName, sessionID, reque
 	if response != nil {
 		payload["response"] = response
 	}
+	// Pre-truncation byte lengths, the same measure the tool-call and
+	// internal-tool-call emitters carry.
+	//
+	// Not cosmetic parity: prompt_get records became storage-truncatable
+	// (handlePromptGet runs truncateForStorage), and a shortened record whose
+	// ResponseBytes is 0 makes its pre-truncation size unrecoverable from every
+	// surface — the CLI notice, the drawer badge and the export all read this
+	// field to say how much text there was. `response` here is the full value,
+	// measured before handlePromptGet applies activity_max_response_size, so
+	// the number stays honest exactly as it does on the tool paths.
+	//
+	// 0 means UNKNOWN, not free; jsonByteLen already returns 0 for an absent or
+	// unmarshalable value, and the keys are omitted in that case so a consumer
+	// cannot read a present zero as a costless call.
+	if n := jsonByteLen(arguments); n > 0 {
+		payload["request_bytes"] = n
+	}
+	if n := jsonByteLen(response); n > 0 {
+		payload["response_bytes"] = n
+	}
 	r.publishEvent(newEvent(EventTypeActivityPromptGet, payload))
 }
 

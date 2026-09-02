@@ -3,22 +3,26 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 
-// Issue #1173. There are TWO response truncations and they point in OPPOSITE
-// directions, so one "Truncated" badge cannot serve both:
+// Issue #1173. There are TWO response truncations, they are independent, and
+// only ONE of them has a direction that is fixed by the flag alone:
 //
-//   response_truncated          the agent received LESS than this record holds
-//                               (the log kept the full pre-forward text)
-//   response_storage_truncated  the agent received MORE than this record holds
-//                               (activity_max_response_size cut it on the way
-//                               into BBolt)
+//   response_storage_truncated  activity_max_response_size cut the text on the
+//                               way into BBolt. Always means the stored body is
+//                               a prefix, on every record type.
+//   response_truncated          the response was cut to tool_response_limit on
+//                               the way to the agent. WHICH SIDE this record
+//                               holds depends on `type`:
+//                                 internal_tool_call → the log kept the FULL
+//                                   text, so the agent received LESS
+//                                 tool_call → handleToolCallCompleted stores
+//                                   the POST-forward text, so the log kept the
+//                                   agent's OWN copy, not more than it
 //
-// Showing the same badge for both — or showing none for the second — leaves the
-// reader looking at a body ending in `...[truncated]` with the wrong story, or
-// no story. The drawer badges them separately; these are the assertions that
-// keep it that way.
+// The earlier version of this spec asserted 'less than this' against a
+// tool_call fixture, which PINNED the backwards wording for the dominant
+// population carrying the flag. These tests vary the TYPE, not just the flags.
 
 const BASE = {
-  type: 'tool_call',
   status: 'success',
   timestamp: '2026-09-02T10:00:00Z',
   server_name: 'github',
@@ -30,21 +34,50 @@ const BASE = {
 
 const STORAGE_TRUNCATED = {
   ...BASE,
+  type: 'tool_call',
   id: 'act-storage-cut',
   request_id: 'req-storage-cut',
   response_storage_truncated: true,
   response_bytes: 200039,
 }
 
-const FORWARD_TRUNCATED = {
+// An upstream call. The record holds the forwarded copy — exactly what the
+// agent got — so nothing here may say the agent received less than this.
+const TOOL_CALL_FORWARD_TRUNCATED = {
   ...BASE,
+  type: 'tool_call',
   id: 'act-forward-cut',
   request_id: 'req-forward-cut',
   response_truncated: true,
+  response_bytes: 200039,
+}
+
+// A built-in. This is the one case where the log really does hold more than
+// the agent consumed, and it is the only case usage_aggregate.go acts on.
+const INTERNAL_FORWARD_TRUNCATED = {
+  ...BASE,
+  type: 'internal_tool_call',
+  server_name: '',
+  tool_name: 'retrieve_tools',
+  id: 'act-internal-cut',
+  request_id: 'req-internal-cut',
+  response_truncated: true,
+  response_bytes: 200039,
+}
+
+const BOTH_CUTS = {
+  ...BASE,
+  type: 'tool_call',
+  id: 'act-both-cuts',
+  request_id: 'req-both-cuts',
+  response_truncated: true,
+  response_storage_truncated: true,
+  response_bytes: 200039,
 }
 
 const WHOLE = {
   ...BASE,
+  type: 'tool_call',
   id: 'act-whole',
   request_id: 'req-whole',
   response: 'a short, complete response',
@@ -107,19 +140,10 @@ describe('Activity drawer — storage truncation badge (#1173)', () => {
     expect(badge.attributes('title')).toContain('more than this')
   })
 
-  it('does not also raise the forward-truncation badge, which means the opposite', async () => {
+  it('does not also raise the forward-truncation badge, which means something else', async () => {
     const wrapper = await openDrawer(STORAGE_TRUNCATED)
 
     expect(wrapper.find('[data-test="response-truncated-badge"]').exists()).toBe(false)
-  })
-
-  it('keeps the forward-truncation badge for the other direction', async () => {
-    const wrapper = await openDrawer(FORWARD_TRUNCATED)
-
-    const badge = wrapper.get('[data-test="response-truncated-badge"]')
-    expect(badge.text()).toBe('Truncated')
-    expect(badge.attributes('title')).toContain('less than this')
-    expect(wrapper.find('[data-test="response-storage-truncated-badge"]').exists()).toBe(false)
   })
 
   it('badges an untouched response with neither', async () => {
@@ -127,5 +151,62 @@ describe('Activity drawer — storage truncation badge (#1173)', () => {
 
     expect(wrapper.find('[data-test="response-storage-truncated-badge"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="response-truncated-badge"]').exists()).toBe(false)
+  })
+})
+
+describe('Activity drawer — forward truncation reads by record type (#1174)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    window.localStorage.clear()
+  })
+
+  it("does not tell the operator a tool_call's agent received less than the log holds", async () => {
+    const wrapper = await openDrawer(TOOL_CALL_FORWARD_TRUNCATED)
+
+    const badge = wrapper.get('[data-test="response-truncated-badge"]')
+    expect(badge.text()).toBe('Truncated')
+    const title = badge.attributes('title') ?? ''
+    // The record holds the POST-forward text, so the agent received EXACTLY
+    // this. "less than this" is the exact inverse of what happened.
+    expect(title).not.toContain('less than this')
+    expect(title).toContain("agent's own copy")
+    expect(title).toContain('tool_response_limit')
+    expect(wrapper.find('[data-test="response-storage-truncated-badge"]').exists()).toBe(false)
+  })
+
+  it('keeps the "agent received less" wording for the built-in, where it is true', async () => {
+    const wrapper = await openDrawer(INTERNAL_FORWARD_TRUNCATED)
+
+    const badge = wrapper.get('[data-test="response-truncated-badge"]')
+    expect(badge.text()).toBe('Truncated')
+    const title = badge.attributes('title') ?? ''
+    expect(title).toContain('less than this')
+    expect(title).toContain('tool_response_limit')
+    expect(wrapper.find('[data-test="response-storage-truncated-badge"]').exists()).toBe(false)
+  })
+
+  it('gives the two record types different tooltips', async () => {
+    const toolCall = await openDrawer(TOOL_CALL_FORWARD_TRUNCATED)
+    const toolTitle = toolCall.get('[data-test="response-truncated-badge"]').attributes('title')
+
+    const internal = await openDrawer(INTERNAL_FORWARD_TRUNCATED)
+    const internalTitle = internal.get('[data-test="response-truncated-badge"]').attributes('title')
+
+    // One sentence serving both types IS the defect.
+    expect(toolTitle).not.toBe(internalTitle)
+  })
+
+  it('stops claiming the delivered size once both cuts are in play', async () => {
+    const wrapper = await openDrawer(BOTH_CUTS)
+
+    const storage = wrapper.get('[data-test="response-storage-truncated-badge"]')
+    const title = storage.attributes('title') ?? ''
+    // With a forward cut too, response_bytes describes the pre-forward upstream
+    // payload — neither the stored body nor the delivered one — so the "agent
+    // received more than this" claim no longer follows.
+    expect(title).not.toContain('more than this')
+    expect(title).toContain('activity_max_response_size')
+    expect(wrapper.find('[data-test="response-truncated-badge"]').exists()).toBe(true)
   })
 })

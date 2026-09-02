@@ -810,11 +810,29 @@ export interface SearchRegistryServersResponse {
 
 // Activity Log types (RFC-003)
 
+/**
+ * Every type internal/storage/activity_models.go emits.
+ *
+ * This union used to list four of them, so any narrowing comparison against a
+ * real backend type — `activity.type === 'internal_tool_call'`, say — was a
+ * compile error claiming the two "have no overlap", which is the opposite of
+ * the truth. Keep it in step with ACTIVITY_TYPE_LABELS in @/utils/activity,
+ * whose parity with the backend is already pinned by
+ * internal/storage/activity_label_parity_test.go.
+ */
 export type ActivityType =
   | 'tool_call'
+  | 'internal_tool_call'
   | 'policy_decision'
   | 'quarantine_change'
+  | 'tool_quarantine_change'
   | 'server_change'
+  | 'config_change'
+  | 'system_start'
+  | 'system_stop'
+  | 'security_scan'
+  | 'credential_broker'
+  | 'prompt_get'
   /**
    * Spec 098: one executed required-tools preflight. Set-scoped, not
    * server-scoped — server_name/tool_name are empty and the verdict,
@@ -846,15 +864,26 @@ export interface ActivityRecord {
   arguments?: Record<string, any>
   response?: string
   /**
-   * Spec 103: the RECORDED response is larger than the one the agent received —
-   * the log kept the full text while the agent got a cut version.
+   * Spec 103: the response was cut to `tool_response_limit` on the way to the
+   * agent. WHICH SIDE of that cut this record holds depends on `type`:
+   *
+   * - `internal_tool_call` — the log kept the FULL pre-forward text, so the
+   *   record holds more than the agent received.
+   * - `tool_call` — the log kept the agent's own POST-forward copy, so the
+   *   record holds exactly what was delivered; only `response_bytes`, measured
+   *   pre-truncation, is larger.
+   *
+   * Do not render a direction from this flag alone.
    */
   response_truncated?: boolean
   /**
-   * The opposite direction (issue #1173): the RECORDED response is smaller than
-   * the one the agent received, because `activity_max_response_size` cut it on
-   * the way into the database. `response_bytes` is measured pre-truncation and
-   * stays honest. Independent of `response_truncated`; both can be true.
+   * Issue #1173: the RECORDED response is smaller than the text the emitter
+   * handed over, because `activity_max_response_size` cut it on the way into
+   * the database. Unlike `response_truncated` this is type-independent.
+   * It means "smaller than what the agent received" only when
+   * `response_truncated` is false; with both set the forward cut already shaped
+   * the text and the order of the two sizes is not fixed. `response_bytes` is
+   * measured pre-truncation and stays honest. Both can be true.
    */
   response_storage_truncated?: boolean
   status: ActivityStatus

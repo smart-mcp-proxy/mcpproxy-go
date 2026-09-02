@@ -1235,13 +1235,13 @@
                 <span
                   v-if="selectedActivity.response_truncated"
                   class="badge badge-sm badge-warning"
-                  title="The agent received less than this: the log kept the full response"
+                  :title="forwardTruncationTooltip(selectedActivity)"
                   data-test="response-truncated-badge"
                 >Truncated</span>
                 <span
                   v-if="selectedActivity.response_storage_truncated"
                   class="badge badge-sm badge-warning"
-                  title="The agent received more than this: the response was shortened to fit activity_max_response_size before being stored"
+                  :title="storageTruncationTooltip(selectedActivity)"
                   data-test="response-storage-truncated-badge"
                 >Shortened for storage</span>
                 <span
@@ -2185,6 +2185,42 @@ const formatRelativeTime = (timestamp: string): string => {
 const formatDuration = (ms: number): string => {
   if (ms < 1000) return `${Math.round(ms)}ms`
   return `${(ms / 1000).toFixed(2)}s`
+}
+
+// Truncation badge tooltips (#1173).
+//
+// response_truncated says the response was cut to tool_response_limit on the
+// way to the agent. It does NOT say which side of that cut this record holds —
+// that depends on the record TYPE, and stating one direction universally gets
+// it backwards for the dominant population:
+//
+//   internal_tool_call  the built-in logged its FULL response, the agent got
+//                       the cut copy, so the log holds MORE
+//   tool_call           handleToolCallCompleted logs the POST-forward text, so
+//                       the log holds EXACTLY the agent's copy
+//
+// Any other type gets the direction-free statement of fact; none sets the flag
+// today, and a new emitter must say which side it recorded before claiming one.
+const forwardTruncationTooltip = (activity: ActivityRecord): string => {
+  if (activity.type === 'internal_tool_call') {
+    return 'The agent received less than this: the built-in logged its full response, and the agent got it cut to tool_response_limit'
+  }
+  if (activity.type === 'tool_call') {
+    return "This is the agent's own copy: the upstream response was cut to tool_response_limit before being both forwarded and logged"
+  }
+  return 'The response was cut to tool_response_limit before being forwarded'
+}
+
+// The storage cut's direction IS type-independent, but it only describes the
+// delivered response when nothing cut it on the way out. With a forward cut
+// also in play, response_bytes measures the pre-forward upstream payload —
+// neither the stored body nor the delivered one — so the tooltip drops the
+// "more than this" claim rather than overstate delivery.
+const storageTruncationTooltip = (activity: ActivityRecord): string => {
+  if (activity.response_truncated) {
+    return 'Shortened again to fit activity_max_response_size, so this is shorter than the copy the Truncated badge describes'
+  }
+  return 'The agent received more than this: the response was shortened to fit activity_max_response_size before being stored'
 }
 
 // Parse response data - try to parse as JSON, fallback to string

@@ -14,13 +14,21 @@ Complete reference for MCPProxy configuration file (`mcp_config.json`). This doc
 8. [Docker Isolation](#docker-isolation)
 9. [Docker Recovery](#docker-recovery)
 10. [Environment Configuration](#environment-configuration)
-11. [Code Execution](#code-execution)
-12. [Feature Flags](#feature-flags)
-13. [Registries](#registries)
-14. [Activity Log Retention](#activity-log-retention)
-15. [Observability](#observability)
-16. [Update Check](#update-check)
-17. [Complete Example](#complete-example)
+11. [Routing Mode](#routing-mode)
+12. [Tool Response Mode](#tool-response-mode)
+13. [Direct Tool Response Mode](#direct-tool-response-mode)
+14. [Server Instructions](#server-instructions)
+15. [Tool-Level Quarantine](#tool-level-quarantine)
+16. [Code Execution](#code-execution)
+17. [Feature Flags](#feature-flags)
+18. [Registries](#registries)
+19. [Activity Log Retention](#activity-log-retention)
+20. [Observability](#observability)
+21. [Update Check](#update-check)
+22. [Complete Example](#complete-example)
+23. [Environment Variables](#environment-variables)
+24. [Validation](#validation)
+25. [Related Documentation](#related-documentation)
 
 ---
 
@@ -1436,6 +1444,14 @@ Two operational notes:
 - **Absent is not zero.** An omitted key inherits the 65536 default; only an
   explicit `0` disables the cap. The setting is read once at startup and is not
   hot-reloadable — edit `mcp_config.json` and restart.
+- **A full-document apply that omits the key deletes it.**
+  `POST /api/v1/config/apply` replaces the whole document, so a body without
+  `activity_max_response_size` leaves the setting absent and the cap returns to
+  the 65536 default at the next restart. The response names
+  `activity_max_response_size` in `changed_fields` with `requires_restart: true`
+  when that happens, so the deletion is visible — but if you disabled the cap
+  deliberately, send the explicit `0` back with every apply. `PATCH
+  /api/v1/config` merges instead of replacing and does not have this hazard.
 - **Pruning does not shrink the file.** BBolt frees pages for reuse but does
   not return them to the OS, so an already-grown `config.db` stays its current
   size on disk. Compact it (`bbolt compact`, or export and re-import) if you
@@ -1444,9 +1460,23 @@ Two operational notes:
 A record whose response was cut on the way into the database is marked
 `response_storage_truncated` — in the REST list and detail responses, the
 NDJSON/CSV export, `mcpproxy activity show --include-response`, and the Web UI
-drawer. That is the opposite of `response_truncated`, which means the log holds
-MORE than the agent received; `response_bytes` is measured before either cut and
-stays accurate, so it is how a reader learns how much was removed.
+drawer. `response_bytes` is measured before either cut and stays accurate, so it
+is how a reader learns how much was removed.
+
+`response_storage_truncated` is not simply the opposite of `response_truncated`,
+because `response_truncated` has no single direction. It means the response was
+cut to `tool_response_limit` on the way to the agent; **which side of that cut
+the log kept depends on the record type**:
+
+| Record type | `response_truncated` means |
+|-------------|----------------------------|
+| `internal_tool_call` | the log kept the FULL response and the agent received the cut copy — the log holds MORE. This is the only case the usage aggregate and the token benchmark exclude. |
+| `tool_call` | the log kept the agent's OWN post-forward copy — the log holds exactly what was delivered. Only `response_bytes`, measured pre-truncation, is larger. |
+
+`response_storage_truncated` therefore means "smaller than what the agent
+received" only when `response_truncated` is false. With both set on one record,
+the forward cut already shaped the text and the two limits are unrelated
+settings, so the order of the stored and delivered sizes is not fixed.
 
 The budget is a budget for the TEXT, not for the stored field: when the cut
 happens the record keeps the first `activity_max_response_size` bytes (backed up

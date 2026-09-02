@@ -1055,6 +1055,13 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 	// the detector's max_payload_size_kb rather than the storage cap.
 	storedResponse, storageTruncated := s.truncateForStorage(responseStr)
 
+	// Measured pre-truncation by the emitter, exactly as on the tool paths.
+	// Without them a storage-truncated prompt record could not say how much was
+	// cut, since Response is the only other size signal and it is the shortened
+	// copy. 0 means unknown (legacy records predate the emitter carrying them).
+	promptRequestBytes := int(getInt64Payload(evt.Payload, "request_bytes"))
+	promptResponseBytes := int(getInt64Payload(evt.Payload, "response_bytes"))
+
 	record := &storage.ActivityRecord{
 		Type:                     storage.ActivityTypePromptGet,
 		Source:                   storage.ActivitySourceMCP,
@@ -1071,6 +1078,8 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 		WorkSessionID:            s.resolveWorkSession(sessionID),
 		RequestID:                requestID,
 		Metadata:                 metadata,
+		RequestBytes:             promptRequestBytes,
+		ResponseBytes:            promptResponseBytes,
 	}
 
 	// Server-edition identity, mirroring the tool path.

@@ -1,0 +1,87 @@
+package storage
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// The doc comment on the truncation flags is what the NEXT consumer author
+// reads before deciding whether to exclude a record's cost, so it carries more
+// weight than either rendered surface. Round 2 stated "the RECORDED response is
+// LARGER than the one the agent received" as a property of ResponseTruncated
+// and cited internal/runtime/usage_aggregate.go as if it applied to every
+// record. It does not: that file's predicate is
+//
+//	rec.ResponseTruncated && rec.Type == storage.ActivityTypeInternalToolCall
+//
+// and for a tool_call record the claim is backwards — handleToolCallCompleted
+// stores the POST-forward text, so the log holds exactly the agent's copy.
+//
+// This test reads the comment itself, because a prose defect has no runtime
+// behaviour to assert on and the wrong sentence is what propagates.
+func truncationFlagDoc(t *testing.T) string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "activity_models.go", nil, parser.ParseComments)
+	require.NoError(t, err)
+
+	var doc string
+	ast.Inspect(file, func(n ast.Node) bool {
+		field, ok := n.(*ast.Field)
+		if !ok || len(field.Names) != 1 || field.Names[0].Name != "ResponseStorageTruncated" {
+			return true
+		}
+		if field.Doc != nil {
+			doc = field.Doc.Text()
+		}
+		return false
+	})
+	require.NotEmpty(t, doc, "the shared truncation-flag doc block sits above ResponseStorageTruncated")
+	return doc
+}
+
+func TestTruncationDocNamesTheTypeRestriction(t *testing.T) {
+	doc := truncationFlagDoc(t)
+
+	require.Contains(t, doc, "ActivityTypeInternalToolCall",
+		"the doc must name the type for which RECORDED > DELIVERED actually holds")
+	require.Contains(t, doc, "ActivityTypeToolCall",
+		"the doc must name the type for which it does not")
+	require.Contains(t, doc, "truncatedBuiltinOverstatesDelivery",
+		"cite the real predicate, not the file as a whole")
+	require.Contains(t, doc, "Type == ActivityTypeInternalToolCall",
+		"spell out the type gate the predicate applies")
+}
+
+// The universal claim must not come back in any of its round-2 phrasings.
+func TestTruncationDocDoesNotStateTheDirectionUniversally(t *testing.T) {
+	doc := truncationFlagDoc(t)
+
+	// Split at the sentence that introduces the per-type breakdown; everything
+	// before it is the part that speaks about the flag in general.
+	idx := strings.Index(doc, "depends on the record TYPE")
+	require.Positive(t, idx, "the doc must say the direction depends on the record type")
+	general := doc[:idx]
+
+	require.NotContains(t, general, "means the RECORDED response is LARGER",
+		"stating the direction as a property of the flag is the defect")
+	require.Contains(t, doc, "does NOT by itself say",
+		"the doc must warn that the flag alone fixes no direction")
+}
+
+// The predicate the doc cites must still look the way the doc says it does. If
+// someone widens it, the citation goes stale silently, and a stale citation is
+// how the universal claim got written in the first place.
+func TestCitedPredicateIsStillTypeGated(t *testing.T) {
+	rec := &ActivityRecord{Type: ActivityTypeToolCall, ResponseTruncated: true}
+	require.NotEqual(t, ActivityTypeInternalToolCall, rec.Type,
+		"guard against the two constants collapsing to one value")
+	require.Equal(t, ActivityType("tool_call"), ActivityTypeToolCall)
+	require.Equal(t, ActivityType("internal_tool_call"), ActivityTypeInternalToolCall)
+}

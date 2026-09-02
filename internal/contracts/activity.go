@@ -39,7 +39,7 @@ type ActivityRecord struct {
 	ToolName          string                 `json:"tool_name,omitempty"`                      // Name of tool called
 	Arguments         map[string]interface{} `json:"arguments,omitempty" swaggertype:"object"` // Tool call arguments
 	Response          string                 `json:"response,omitempty"`                       // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // Spec 103: recorded response is LARGER than the one the agent received
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // Spec 103: cut to tool_response_limit on the way out; which side was recorded depends on Type — see ResponseStorageTruncated below
 	Status            string                 `json:"status"`                                   // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`                  // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`                    // Execution duration in milliseconds
@@ -49,10 +49,19 @@ type ActivityRecord struct {
 	RequestID         string                 `json:"request_id,omitempty"`                     // HTTP request ID for correlation
 	ParentID          string                 `json:"parent_id,omitempty"`                      // Correlation id of the parent call (the code_execution whose sandbox issued this sub-call)
 
-	// ResponseStorageTruncated is the OPPOSITE direction to ResponseTruncated:
-	// the recorded response is SMALLER than the one the agent received, because
-	// activity_max_response_size cut it on the way into BBolt (issue #1173).
-	// The two are independent and can both be true.
+	// ResponseStorageTruncated means the recorded response is SMALLER than the
+	// text the emitter handed over, because activity_max_response_size cut it on
+	// the way into BBolt (issue #1173). The two truncation flags are independent
+	// and can both be true.
+	//
+	// Where ResponseTruncated's direction depends on the record TYPE — an
+	// internal_tool_call records the full pre-forward text, a tool_call records
+	// the agent's own post-forward copy (see storage.ActivityRecord's field doc)
+	// — this one does not: it always means the stored body is a prefix. It says
+	// "smaller than what the agent received" only when ResponseTruncated is
+	// false; with both set, the forward cut already shaped the emitter's text
+	// and the two limits are unrelated settings, so the order of the stored and
+	// delivered sizes is not fixed.
 	//
 	// It must not be folded into ResponseTruncated. ResponseBytes is measured
 	// pre-truncation, so a storage-truncated record's byte accounting stays

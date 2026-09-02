@@ -345,6 +345,38 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		}
 	}
 
+	// activity_max_response_size. The cap is read once, in runtime.New, so it
+	// cannot apply hot — the same shape as code_execution_pool_size above, and
+	// reported the same way: named in ChangedFields with RequiresRestart set and
+	// no early return, so the caller is told a field moved AND told the change
+	// is not live. That is the honest middle path; claiming AppliedImmediately
+	// for it would promise a hot-apply the code does not have.
+	//
+	// Why this field is reported when its activity_* neighbours are not: it is
+	// the only one whose ABSENCE and whose explicit ZERO mean opposite things.
+	// nil resolves to the 64KB default, 0 disables the cap entirely, and the
+	// key is `omitempty`, so POST /api/v1/config/apply with a full body that
+	// merely OMITS it — which UnmaskLiveConfigDocument decodes into a fresh
+	// zero-valued Config, leaving the pointer nil — DELETES an operator's
+	// explicit off switch from disk and silently reinstates the cap at the next
+	// restart. Round 2 fixed the field's type so an explicit 0 survives a
+	// round trip; it did not make the deletion visible. Detecting on the
+	// RESOLVED value (EffectiveActivityMaxResponseSize) is what catches it:
+	// nil→0 and 0→nil both change the effective cap, while writing 65536 out
+	// explicitly over an absent key does not and stays silent.
+	//
+	// The plain-int neighbours (activity_retention_days, activity_max_records,
+	// activity_max_size_mb, activity_cleanup_interval_min) have no such gap:
+	// absent and 0 decode to the same value, so an omitted key cannot destroy a
+	// distinct setting the way it can here.
+	if oldCfg.EffectiveActivityMaxResponseSize() != newCfg.EffectiveActivityMaxResponseSize() {
+		result.ChangedFields = append(result.ChangedFields, "activity_max_response_size")
+		result.RequiresRestart = true
+		if result.RestartReason == "" {
+			result.RestartReason = "activity_max_response_size is read at startup - requires restart"
+		}
+	}
+
 	// Logging configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
 		result.ChangedFields = append(result.ChangedFields, "logging")

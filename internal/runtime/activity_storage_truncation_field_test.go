@@ -12,12 +12,19 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
-// ResponseTruncated and ResponseStorageTruncated describe OPPOSITE directions:
+// ResponseTruncated and ResponseStorageTruncated describe DIFFERENT cuts:
 //
-//	ResponseTruncated        recorded > delivered  (Spec 103)
-//	ResponseStorageTruncated recorded < delivered  (activity_max_response_size)
+//	ResponseTruncated        cut to tool_response_limit on the way OUT (Spec 103)
+//	ResponseStorageTruncated cut to activity_max_response_size on the way IN
 //
-// Three consumers act on the Spec 103 direction by REFUSING to count a record:
+// Which side of the first cut a record kept depends on its TYPE — an
+// internal_tool_call logs the full pre-forward text (recorded > delivered), a
+// tool_call logs the agent's own post-forward copy (recorded == delivered) —
+// which is why every consumer below gates on the type as well as the flag, and
+// why the surfaces that RENDER the flag must not state one direction for both.
+//
+// Three consumers act on the internal_tool_call direction by REFUSING to count
+// such a record:
 // usage_aggregate.go's truncatedBuiltinOverstatesDelivery drops its
 // ResponseBytes from delivered traffic, and bench/replaycorpus withholds its
 // response cost and any code-execution saving it belongs to. Storage truncation

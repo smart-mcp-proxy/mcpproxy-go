@@ -195,7 +195,7 @@ type ActivityRecord struct {
 	ToolName          string                 `json:"tool_name,omitempty"`          // Name of tool called
 	Arguments         map[string]interface{} `json:"arguments,omitempty"`          // Tool call arguments
 	Response          string                 `json:"response,omitempty"`           // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // Spec 103: RECORDED > DELIVERED — see below
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"` // Spec 103: cut to ToolResponseLimit on the way out; which side was recorded depends on Type — see below
 	Status            string                 `json:"status"`                       // Result status: "success", "error", "blocked", "rejected"
 	ErrorMessage      string                 `json:"error_message,omitempty"`      // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`        // Execution duration in milliseconds
@@ -216,28 +216,61 @@ type ActivityRecord struct {
 	// call and for every record written before this field existed.
 	ParentID string `json:"parent_id,omitempty"`
 
-	// The two truncation flags point in OPPOSITE directions and are
-	// independent — both can be true on one record.
+	// The two truncation flags are independent — both can be true on one
+	// record — and neither implies the other.
 	//
-	// ResponseTruncated (above, Spec 103) means the RECORDED response is LARGER
-	// than the one the agent received: retrieve_tools stores its full
-	// pre-truncation text while the agent consumed the cut version, and a
-	// direct call_tool_* dispatch records the upstream result while the agent
-	// received it cut to ToolResponseLimit. Consumers act on it by REFUSING to
-	// count the record: internal/runtime/usage_aggregate.go excludes its
-	// ResponseBytes from delivered traffic, and the token benchmark withholds
-	// its response cost rather than tokenizing text nobody paid for.
+	// ResponseTruncated (above, Spec 103) means the response was cut to
+	// ToolResponseLimit on its way to the agent. It does NOT by itself say
+	// whether this record holds more, less or exactly the delivered text: that
+	// depends on the record TYPE, because the two emitters record different
+	// sides of the same cut.
 	//
-	// ResponseStorageTruncated means the RECORDED response is SMALLER than the
-	// one the agent received: activity_max_response_size cut the text on the
-	// way into BBolt so a single multi-megabyte payload cannot outweigh the
-	// whole log (issue #1173). ResponseBytes is measured PRE-truncation by the
-	// emitter and is therefore still honest, so this flag must never reach the
-	// Spec 103 consumers — OR-ing the two would make them discard exactly the
-	// oversized records the cap exists to bound, under an inverted
-	// justification. What it does mean is that record.Response is no longer the
-	// whole text: anything that MEASURES the stored body (as opposed to its
-	// recorded byte length) must not treat it as complete.
+	//   - ActivityTypeInternalToolCall: the RECORDED response is LARGER than
+	//     the delivered one. retrieve_tools stores its full pre-truncation text,
+	//     and a call_tool_* dispatch records the pre-forward upstream result,
+	//     while the agent consumed the cut copy in both cases.
+	//   - ActivityTypeToolCall: the RECORDED response IS the delivered one.
+	//     handleToolCallCompleted is passed the POST-forward text (see the
+	//     forwardedText call in internal/server/mcp.go), so the log kept the
+	//     agent's own copy, not more than it. Only ResponseBytes — measured
+	//     pre-truncation — is larger than what was delivered.
+	//
+	// So do not restate "recorded > delivered" as a property of the flag. The
+	// only consumers that act on it gate on the type as well: the predicate is
+	// truncatedBuiltinOverstatesDelivery in internal/runtime/usage_aggregate.go
+	// (`ResponseTruncated && Type == ActivityTypeInternalToolCall`), which
+	// excludes such a record's ResponseBytes from delivered traffic, and the
+	// token benchmark withholds its response cost rather than tokenizing text
+	// nobody paid for. Applying that exclusion to a tool_call record would
+	// discard a byte count that is honest about the upstream payload.
+	//
+	// No other type sets this flag today; a new emitter that does must state
+	// which side of the cut it recorded, here and at the rendering surfaces
+	// (cmd/mcpproxy/activity_cmd.go's forwardTruncationNotice and the
+	// Activity.vue drawer badge), which currently fall back to a
+	// direction-free wording for an unrecognised type.
+	//
+	// ResponseStorageTruncated means activity_max_response_size cut the text on
+	// the way into BBolt, so a single multi-megabyte payload cannot outweigh
+	// the whole log (issue #1173). Unlike ResponseTruncated this one IS
+	// type-independent: it always means record.Response holds less than the
+	// text handed to the emitter, on every type that carries it (tool_call,
+	// internal_tool_call and prompt_get).
+	//
+	// It says "smaller than what the agent received" only when
+	// ResponseTruncated is false. When both are set, the emitter's text had
+	// already been shaped by the forward cut, and the two limits are unrelated
+	// settings — so nothing here fixes the order of the stored size and the
+	// delivered one, and ResponseBytes describes the pre-forward upstream
+	// payload rather than either.
+	//
+	// ResponseBytes is measured PRE-truncation by the emitter and is therefore
+	// still honest, so this flag must never reach the Spec 103 consumers —
+	// OR-ing the two would make them discard exactly the oversized records the
+	// cap exists to bound, under an inverted justification. What it does mean
+	// is that record.Response is no longer the whole text: anything that
+	// MEASURES the stored body (as opposed to its recorded byte length) must
+	// not treat it as complete.
 	ResponseStorageTruncated bool `json:"response_storage_truncated,omitempty"`
 
 	// WorkSessionID groups records into one unit of USER WORK (Spec 082): one
