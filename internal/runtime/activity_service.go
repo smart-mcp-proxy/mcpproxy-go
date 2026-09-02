@@ -23,6 +23,10 @@ const (
 	DefaultRetentionCheckInterval = 1 * time.Hour
 	// DefaultRetentionMaxSizeBytes is the default total activity-log size cap (256MB)
 	DefaultRetentionMaxSizeBytes int64 = 256 * 1024 * 1024
+	// DefaultActivityMaxResponseSize is the default per-record response cap (64KB).
+	// Aliased here because NewActivityService's first parameter shadows the
+	// storage package inside that function body.
+	DefaultActivityMaxResponseSize = storage.DefaultMaxResponseSize
 )
 
 // SensitiveDataEventEmitter provides the ability to emit sensitive data detection events.
@@ -103,6 +107,11 @@ type ActivityService struct {
 	maxSizeBytes  int64 // total activity-log size cap in bytes (0 = disabled)
 	checkInterval time.Duration
 
+	// maxResponseSize bounds the response text persisted on a single activity
+	// record (activity_max_response_size). Applied to every record type on the
+	// write path, so one huge upstream payload cannot outweigh the whole log.
+	maxResponseSize int
+
 	// Sensitive data detector (Spec 026)
 	detector *security.Detector
 
@@ -128,8 +137,10 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 		maxRecords:    DefaultRetentionMaxRecords,
 		maxSizeBytes:  DefaultRetentionMaxSizeBytes,
 		checkInterval: DefaultRetentionCheckInterval,
-		detector:      nil, // Detector is optional, set via SetDetector
-		usage:         newUsageStore(),
+
+		maxResponseSize: DefaultActivityMaxResponseSize,
+		detector:        nil, // Detector is optional, set via SetDetector
+		usage:           newUsageStore(),
 	}
 	s.usagePersistIntervalNs.Store(int64(DefaultUsagePersistInterval))
 	return s
@@ -217,6 +228,30 @@ func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords in
 	if maxSizeBytes >= 0 {
 		s.maxSizeBytes = maxSizeBytes
 	}
+}
+
+// SetMaxResponseSize sets the per-record response size cap in bytes.
+// Values <= 0 are ignored, leaving the current cap in place; truncateForStorage
+// falls back to storage.DefaultMaxResponseSize if it is ever unset.
+func (s *ActivityService) SetMaxResponseSize(maxResponseSize int) {
+	if maxResponseSize > 0 {
+		s.maxResponseSize = maxResponseSize
+	}
+}
+
+// truncateForStorage caps the response text persisted on an activity record.
+//
+// This is the only thing bounding a single record's size: retention prunes the
+// log by age, count and total bytes, but nothing else limits one record, so a
+// multi-megabyte upstream response was previously stored whole.
+//
+// The returned bool is OR-ed into ActivityRecord.ResponseTruncated. That field
+// already carries the Spec 103 meaning "the recorded response is larger than the
+// one the agent received"; storage truncation is the other direction, but the
+// field documents itself as "true if response was truncated" and a consumer
+// wanting the untruncated text cannot get it in either case.
+func (s *ActivityService) truncateForStorage(response string) (string, bool) {
+	return storage.TruncateActivityResponse(response, s.maxResponseSize)
 }
 
 // Start begins listening for activity events and persisting them.
@@ -553,6 +588,8 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	arguments := getMapPayload(evt.Payload, "arguments")
 	response := getStringPayload(evt.Payload, "response")
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
+	response, storageTruncated := s.truncateForStorage(response)
+	responseTruncated = responseTruncated || storageTruncated
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
 
 	// Extract intent metadata if present (Spec 018)
@@ -857,6 +894,8 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	// flag onto the record so a cost recomputation can exclude it instead of
 	// tokenizing text the agent never paid for.
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
+	responseStr, storageTruncated := s.truncateForStorage(responseStr)
+	responseTruncated = responseTruncated || storageTruncated
 
 	// Spec 103: pre-truncation sizes, emitted for built-ins as well as upstream
 	// dispatches. 0 stays UNKNOWN rather than free.
@@ -972,21 +1011,24 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 	// Name the MCP client on the record so it survives session eviction.
 	metadata := s.withClientInfo(nil, sessionID)
 
+	responseStr, promptTruncated := s.truncateForStorage(responseStr)
+
 	record := &storage.ActivityRecord{
-		Type:          storage.ActivityTypePromptGet,
-		Source:        storage.ActivitySourceMCP,
-		ServerName:    serverName,
-		ToolName:      promptName,
-		Arguments:     arguments,
-		Response:      responseStr,
-		Status:        status,
-		ErrorMessage:  errorMsg,
-		DurationMs:    durationMs,
-		Timestamp:     evt.Timestamp,
-		SessionID:     sessionID,
-		WorkSessionID: s.resolveWorkSession(sessionID),
-		RequestID:     requestID,
-		Metadata:      metadata,
+		Type:              storage.ActivityTypePromptGet,
+		Source:            storage.ActivitySourceMCP,
+		ServerName:        serverName,
+		ToolName:          promptName,
+		Arguments:         arguments,
+		Response:          responseStr,
+		ResponseTruncated: promptTruncated,
+		Status:            status,
+		ErrorMessage:      errorMsg,
+		DurationMs:        durationMs,
+		Timestamp:         evt.Timestamp,
+		SessionID:         sessionID,
+		WorkSessionID:     s.resolveWorkSession(sessionID),
+		RequestID:         requestID,
+		Metadata:          metadata,
 	}
 
 	// Server-edition identity, mirroring the tool path.
