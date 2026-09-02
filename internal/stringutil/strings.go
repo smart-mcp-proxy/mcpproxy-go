@@ -1,7 +1,10 @@
 // Package stringutil provides common string utility functions.
 package stringutil
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // ContainsIgnoreCase checks if s contains substr, ignoring case.
 func ContainsIgnoreCase(s, substr string) bool {
@@ -70,4 +73,33 @@ func isWrapperPhrase(s string) bool {
 		}
 	}
 	return true
+}
+
+// SafeTruncateBytes returns the largest cut length <= limit at which s can be
+// sliced without splitting a multi-byte UTF-8 rune.
+//
+// Several budgets in this codebase are RAW BYTE budgets — a forwarded tool
+// response under ToolResponseLimit, a stored activity response under
+// activity_max_response_size, a recorded error message — and cutting at the raw
+// offset can land in the middle of a multi-byte character. The result is
+// invalid UTF-8, which JSON encoders do not reject: encoding/json substitutes
+// U+FFFD, so the value silently GROWS past the very budget that produced it and
+// its tail is corrupted. Backing up to the rune boundary is the only cut that
+// keeps both properties.
+//
+// Callers must ensure limit < len(s) — i.e. that truncation is actually needed
+// — before using the result as a cut point.
+func SafeTruncateBytes(s string, limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	if limit >= len(s) {
+		return len(s)
+	}
+	// Back up to the start of the rune that straddles the cut point.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return cut
 }

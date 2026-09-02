@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -18,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
@@ -41,19 +41,13 @@ const (
 // TextContent, which downstream JSON encoders/clients reject or render as a
 // replacement char. Callers must ensure limit < len(s) (i.e. truncation is
 // actually needed) before calling.
+//
+// The implementation moved to internal/stringutil so packages that cannot
+// import internal/server — internal/storage, which applies the same raw byte
+// budget to a stored activity response — share ONE definition rather than
+// growing a fourth copy of the loop.
 func safeTruncateBytes(s string, limit int) int {
-	if limit <= 0 {
-		return 0
-	}
-	if limit >= len(s) {
-		return len(s)
-	}
-	// Back up to the start of the rune that straddles the cut point.
-	cut := limit
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return cut
+	return stringutil.SafeTruncateBytes(s, limit)
 }
 
 // ParseDirectToolName parses a direct mode tool name (serverName__toolName) into server and tool components.

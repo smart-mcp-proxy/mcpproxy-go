@@ -7,6 +7,8 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	"go.etcd.io/bbolt"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 // DefaultMaxResponseSize is the default maximum size for response truncation (64KB)
@@ -32,6 +34,19 @@ func parseActivityKey(key []byte) string {
 
 // truncateResponse truncates a response string if it exceeds maxSize.
 // Returns the (potentially truncated) string and whether truncation occurred.
+//
+// maxSize is a RAW BYTE budget, so the cut is backed up to a rune boundary
+// (stringutil.SafeTruncateBytes, the same helper the direct-mode
+// ToolResponseLimit cut and the 8KB code-exec sub-call cap use). Slicing at the
+// raw offset splits a multi-byte character; ActivityRecord.MarshalBinary is
+// json.Marshal, which substitutes U+FFFD for invalid UTF-8 rather than
+// erroring, so a naive cut both corrupts the tail AND lets the persisted record
+// exceed the very cap that produced it.
+//
+// A non-positive maxSize keeps the historical "fall back to the documented
+// default" behaviour. Disabling the cap outright is decided one layer up, at
+// ActivityService.truncateForStorage, so that this helper's contract — and its
+// callers that pass a size they did not choose — stay unchanged.
 func truncateResponse(response string, maxSize int) (string, bool) {
 	if maxSize <= 0 {
 		maxSize = DefaultMaxResponseSize
@@ -39,7 +54,7 @@ func truncateResponse(response string, maxSize int) (string, bool) {
 	if len(response) <= maxSize {
 		return response, false
 	}
-	return response[:maxSize] + "...[truncated]", true
+	return response[:stringutil.SafeTruncateBytes(response, maxSize)] + "...[truncated]", true
 }
 
 // SaveActivity stores an activity record in BBolt.
