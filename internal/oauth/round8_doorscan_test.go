@@ -62,10 +62,12 @@ var rawServerLeafDoors = map[string]string{
 		"oauth.RedactServerSecretFields.",
 
 	// --- redacted at the return of the same function ---
-	"internal/server/server.go:(m).GetUpstreamStats": "the per-server entries are built raw and the whole map is " +
-		"handed to oauth.RedactUpstreamStats at every return, reveal-gated. Issue #1148 round 8: this is the " +
+	"internal/server/server.go:upstreamStatsFromSnapshot": "the per-server entries are built raw and the whole map is " +
+		"handed to oauth.RedactUpstreamStats at the single return, reveal-gated. Issue #1148 round 8: this is the " +
 		"upstream_stats implementation that actually runs (the StateView path); round 4 masked only the " +
-		"upstream.Manager fallback.",
+		"upstream.Manager fallback. Issue #1166 extracted this body out of (m).GetUpstreamStats so the entry " +
+		"shape is reachable from a test without standing up a Supervisor; the redaction moved with it, and " +
+		"GetUpstreamStats now pins reveal=false before delegating here (issue #1167).",
 
 	// --- already-redacted input; the function holds no config ---
 	"cmd/mcpproxy-tray/internal/api/adapter.go:(m).GetAllServers": "re-shapes the payload the tray fetched from " +
