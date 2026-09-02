@@ -75,16 +75,32 @@ func TestGetStats_UsesTheSharedFreeTextRuleForLastError(t *testing.T) {
 		"upstream_stats must scrub `last_error` with the one shared free-text rule")
 }
 
-func TestGetStats_RevealSecretHeadersStillOptsOut(t *testing.T) {
+// TestGetStats_MasksEvenWhenRevealSet is the DELIBERATE inversion of the old
+// TestGetStats_RevealSecretHeadersStillOptsOut (issue #1167), not a regression
+// of the round-4/round-8 work.
+//
+// GetStats takes no ctx, and its consumer chain is context-free too, so this
+// producer has no caller to AND the operator flag with. Honouring the flag here
+// meant a scoped, read-only agent token polling GET /api/v1/status (or
+// subscribing to /events) received every server's raw url and last_error the
+// moment an operator opted in. A producer with no caller masks for the
+// least-privileged possible reader. The operator still reads the real values on
+// the gated doors: GET /api/v1/servers and GET /api/v1/config.
+func TestGetStats_MasksEvenWhenRevealSet(t *testing.T) {
 	rawURL := "https://h/mcp?opaque=" + round8GHPToken
+	msg := "boom " + round8GHPToken
 	manager, client := newStatsManager(t, &config.ServerConfig{
 		Name: "leaky", Protocol: "http", URL: rawURL, Enabled: true,
 	}, &config.Config{RevealSecretHeaders: true})
-	client.StateManager.SetError(errors.New("boom " + round8GHPToken))
+	client.StateManager.SetError(errors.New(msg))
 
 	rendered := fmt.Sprint(manager.GetStats())
-	assert.Contains(t, rendered, rawURL, "the opt-out must still expose the real URL")
-	assert.Contains(t, rendered, "boom "+round8GHPToken, "the opt-out must still expose the real error")
+	assert.NotContains(t, rendered, round8GHPToken,
+		"reveal_secret_headers must NOT expose a credential on a producer with no caller (#1167)")
+	assert.Equal(t, oauth.LiveRedaction.URLValue(rawURL), statsServerField(t, manager, "leaky", "url"),
+		"`url` must take the one shared live rule regardless of the flag")
+	assert.Equal(t, oauth.ScrubUpstreamText(msg), statsServerField(t, manager, "leaky", "last_error"),
+		"`last_error` must take the one shared free-text rule regardless of the flag")
 }
 
 func statsServerField(t *testing.T, m *Manager, server, field string) string {

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
@@ -136,6 +137,9 @@ func TestDoctorRedactsUpstreamErrorSecrets(t *testing.T) {
 		assert.NotContains(t, diag.UpstreamErrors[0].ErrorMessage, "LEAKED123")
 	})
 
+	// #1167: the opt-out now also requires an authenticated admin identity on
+	// the ctx. This subtest used to pass context.Background(); it would
+	// otherwise flip to failing for the right reason.
 	t.Run("reveal_secret_headers keeps the raw error", func(t *testing.T) {
 		cfg := &config.Config{RevealSecretHeaders: true}
 		emitter := &mockEventEmitter{}
@@ -148,7 +152,7 @@ func TestDoctorRedactsUpstreamErrorSecrets(t *testing.T) {
 		}
 
 		svc := NewService(runtime, cfg, "", emitter, nil, logger)
-		diag, err := svc.Doctor(context.Background())
+		diag, err := svc.Doctor(auth.WithAuthContext(context.Background(), auth.AdminContext()))
 
 		require.NoError(t, err)
 		require.Len(t, diag.UpstreamErrors, 1)

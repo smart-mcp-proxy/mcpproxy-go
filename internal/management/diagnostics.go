@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
@@ -64,14 +65,22 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	secretsMap := make(map[string][]string) // secret name -> list of servers using it
 
 	// Issue #872: connect errors echoed into Health.Detail / last_error can
-	// carry the full upstream URL, including query-string credentials. Scrub
-	// them before they land in UpstreamErrors.ErrorMessage — parity with the
-	// /api/v1/servers list route — unless the operator opted out.
+	// carry the full upstream URL, including query-string credentials.
+	//
+	// Issue #1167: the gate is the SHARED predicate, not the flag alone.
+	// Doctor has exactly two callers in the tree - httpapi.handleGetDiagnostics
+	// (GET /api/v1/diagnostics, GET /api/v1/doctor) and mcp.handleDoctor -
+	// and BOTH pass a request context carrying an AuthContext, which this
+	// function already received as its first parameter and simply ignored in
+	// favour of the service's stored config. Neither door carries an admin
+	// gate of its own, so this was also the one site where the MCP surface
+	// leaked too. Evaluated once, here, so no branch below can re-derive it.
+	reveal := auth.RevealSecretsAllowed(ctx, s.config != nil && s.config.RevealSecretHeaders)
 	redactErr := func(msg string) string {
-		if s.config != nil && s.config.RevealSecretHeaders {
+		if reveal {
 			return msg
 		}
-		// Round 8 finding 2: the ONE shared free-text rule — the same one
+		// Round 8 finding 2: the ONE shared free-text rule - the same one
 		// oauth.RedactServerSecretFields applies to health.detail and last_error
 		// on the REST/SSE door these strings are copied from.
 		return oauth.ScrubUpstreamText(msg)
@@ -82,9 +91,30 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		serverName := getStringFromMap(srvRaw, "name")
 		lastError := getStringFromMap(srvRaw, "last_error")
 
+		// #1166: a server the caller may not enumerate contributes nothing to
+		// the diagnosis it is handed. Same predicate the REST list uses.
+		if !auth.CanEnumerateServer(ctx, serverName) {
+			continue
+		}
+
 		// Extract health status from server using helper that handles both
 		// struct pointer (from GetAllServers) and map (from JSON)
 		healthAction, healthDetail := extractHealthFromMap(srvRaw)
+		rawHealthDetail := healthDetail
+
+		// Scrub the two free-text strings ONCE, here, rather than at each use
+		// site. Applying redactErr per branch is what let the ActionConfigure
+		// case below emit this same healthDetail RAW into
+		// contracts.OAuthIssue.Error while the ActionRestart case scrubbed it -
+		// serialized verbatim by writeSuccess on /api/v1/doctor and by
+		// mcp.handleDoctor, to any caller, with reveal_secret_headers OFF.
+		// health.ExtractOAuthConfigError returns last_error VERBATIM for the
+		// OAuth-config patterns, and last_error is the wrapped upstream connect
+		// error - exactly the free-form text ScrubUpstreamText exists for.
+		// Scrubbing at the top of the loop means a future health.Action case
+		// cannot reintroduce a raw copy.
+		healthDetail = redactErr(healthDetail)
+		lastError = redactErr(lastError)
 
 		// Aggregate based on Health.Action
 		switch healthAction {
@@ -97,7 +127,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			}
 			diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
 				ServerName:   serverName,
-				ErrorMessage: redactErr(healthDetail),
+				ErrorMessage: healthDetail,
 				Timestamp:    errorTime,
 			})
 
@@ -110,7 +140,12 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 
 		case health.ActionConfigure:
 			// Extract parameter name from error
-			paramName := extractParameterName(healthDetail)
+			// The parameter NAME is read off the pre-scrub string: it is an
+			// OAuth parameter identifier ('resource', 'audience'), never a
+			// credential, and scrubbing can move the quote positions this
+			// scanner keys on. Only the free-text Error field below is
+			// narrowed, which is the field that carries the URL.
+			paramName := extractParameterName(rawHealthDetail)
 			diag.OAuthIssues = append(diag.OAuthIssues, contracts.OAuthIssue{
 				ServerName:    serverName,
 				Issue:         "OAuth provider parameter mismatch",
@@ -141,7 +176,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			}
 			diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
 				ServerName:   serverName,
-				ErrorMessage: redactErr(lastError),
+				ErrorMessage: lastError,
 				Timestamp:    errorTime,
 			})
 		}

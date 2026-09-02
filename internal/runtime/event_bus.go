@@ -319,7 +319,26 @@ func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
 }
 
 // redactServerSecrets masks the secret-bearing fields of every server in an SSE
-// payload unless the loaded config opts out via reveal_secret_headers: true.
+// payload. ALWAYS - there is no opt-out on this door.
+//
+// Issue #1167. A payload produced ONCE for a mixed-privilege audience is
+// masked for the least-privileged member of that audience. This function has
+// no caller to gate against by construction: publishEvent fans one Event value
+// out to every subscriber channel under eventMu, and the subscribers are one
+// SSE connection per HTTP client (each with its own privilege level) plus
+// three in-process consumers. There is no request context at build time, and
+// the payload map and the []contracts.Server it holds are shared, so no
+// consumer may re-render it in place either. Emitting raw here and trusting
+// each consumer to mask is the fail-open shape #1167 is made of - it is how a
+// scoped, read-only agent token subscribed to /events and received every
+// server Authorization header, URL credential, argv secret and env secret in
+// the clear.
+//
+// The cost of that, for an operator who deliberately set the opt-in flag, is
+// paid at the per-subscriber seam instead: httpapi.renderEventPayloadForCaller
+// degrades this embed to the notify-only shape for a caller who MAY see raw
+// values, so the client re-fetches through the gated REST door and the two
+// doors stay in parity rather than flickering masked/raw.
 //
 // The field list AND the rules are oauth.RedactServerSecretFields — the same
 // function the REST list path calls, applying the same oauth.LiveRedaction the
@@ -333,10 +352,6 @@ func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
 // as authoritative, so a masked-vs-plaintext mismatch between the two would
 // flicker on every delivery.
 func (r *Runtime) redactServerSecrets(servers []contracts.Server) {
-	cfg := r.Config()
-	if cfg != nil && cfg.RevealSecretHeaders {
-		return
-	}
 	for i := range servers {
 		oauth.RedactServerSecretFields(&servers[i])
 	}

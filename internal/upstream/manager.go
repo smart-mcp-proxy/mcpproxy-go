@@ -1697,13 +1697,17 @@ func (m *Manager) HasDockerContainers() bool {
 // server list on those same payloads, which httpapi.redactServerSecrets and
 // Runtime.redactServerSecrets already mask. Leaving `url` and `last_error` raw
 // here meant one half of a single response was masked and the other half was
-// not. Mask them at the point they are written, honouring the same
-// reveal_secret_headers opt-out the two sibling redactors honour.
+// not. Mask them at the point they are written.
+//
+// Issue #1167: unconditionally, with no reveal_secret_headers opt-out. This
+// producer takes no ctx and neither does its consumer chain, so there is no
+// caller identity to AND the operator flag with - and the flag alone handed a
+// scoped agent token every server's raw url and last_error on /api/v1/status
+// and on every SSE status event. Same rule, same reason, as the StateView
+// implementation in internal/server.Server.GetUpstreamStats, which is the one
+// that actually runs.
 func (m *Manager) GetStats() map[string]interface{} {
-	revealSecrets := false
-	if gc := m.globalConfig.Load(); gc != nil {
-		revealSecrets = gc.RevealSecretHeaders
-	}
+	const revealSecrets = false
 
 	// Phase 6: Copy client references while holding lock briefly
 	m.mu.RLock()

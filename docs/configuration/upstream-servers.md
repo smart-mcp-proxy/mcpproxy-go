@@ -146,6 +146,11 @@ To disable redaction (for debugging only), set `reveal_secret_headers: true`
 in `mcp_config.json`. **It's not normally needed**: the editing flow
 described below works without ever exposing the plaintext to the client.
 
+The flag reveals raw values only to an **authenticated admin**, and only on
+the REST and MCP read doors. It never applies to the `/events` SSE stream or
+to `upstream_stats`, and `GET /api/v1/config` is denied to agent tokens
+outright (issue #1167).
+
 Since v0.64 (issue #1148) the flag additionally requires an **authenticated**
 caller. `/mcp` is deliberately unprotected by default
 (`require_mcp_auth: false`), so an unauthenticated MCP client is treated as

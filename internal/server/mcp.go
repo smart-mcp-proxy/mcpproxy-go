@@ -3789,8 +3789,13 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	// that endpoint got the raw values the flag was meant to hand the
 	// operator. CanRevealSecrets is nil-safe: an in-process/stdio caller with
 	// no context gets masked values rather than admin-by-absence.
-	revealHeaders := p.config != nil && p.config.RevealSecretHeaders &&
-		auth.AuthContextFromContext(ctx).CanRevealSecrets()
+	//
+	// Issue #1167 moved the expression itself into auth.RevealSecretsAllowed.
+	// This door was already correct; five REST/SSE/doctor doors checked the
+	// flag alone. Rather than leave the right answer written out in one place
+	// and the wrong one in five, every door now reads it from the shared
+	// predicate, so they cannot drift apart again.
+	revealHeaders := auth.RevealSecretsAllowed(ctx, p.config != nil && p.config.RevealSecretHeaders)
 	for i, server := range servers {
 		// The secret-bearing fields are sourced from redactedServerView — the
 		// shared walker over the config's own JSON — rather than from a

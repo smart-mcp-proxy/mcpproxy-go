@@ -1200,10 +1200,17 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 	// StateView path served `url` and `last_error` verbatim on
 	// GET /api/v1/status and on every SSE status event. Both implementations
 	// now hand their map to the one shared rule at this boundary.
-	reveal := false
-	if cfg, err := s.GetConfig(); err == nil && cfg != nil {
-		reveal = cfg.RevealSecretHeaders
-	}
+	//
+	// Issue #1167: the reveal_secret_headers opt-out is GONE from this
+	// producer. GetUpstreamStats takes no ctx and its caller
+	// httpapi.handleGetStatus used to discard the *http.Request outright, so
+	// there is no caller here to AND the flag with - and with the flag on, a
+	// scoped agent token polling /api/v1/status received every server's raw
+	// url and last_error. Masking unconditionally is the only shape that
+	// cannot fail open. An operator with the flag on loses nothing they
+	// cannot read on a gated door: GET /api/v1/servers and GET /api/v1/config
+	// still hand an authenticated admin the real values.
+	const reveal = false
 
 	if supervisor := s.runtime.Supervisor(); supervisor != nil {
 		if view := supervisor.StateView(); view != nil {

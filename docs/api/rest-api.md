@@ -145,7 +145,14 @@ secrets.
 
 Setting `reveal_secret_headers: true` in
 [`mcp_config.json`](../configuration/config-file.md) disables redaction on
-all three channels. This is **not normally needed**: the Web UI / macOS
+all three channels **for an authenticated admin only** (issue #1167). An
+agent token, a server-edition non-admin user and an unauthenticated caller
+keep getting masked values no matter how the flag is set. The flag has no
+effect at all on the `/events` SSE stream or on the `upstream_stats` block of
+`GET /api/v1/status`: those payloads are produced once for a mixed-privilege
+audience with no caller to check, so they are always masked. An admin
+subscribed to `/events` with the flag on receives the notify-only form of
+`servers.changed` and re-fetches the raw values through `GET /api/v1/servers`. This is **not normally needed**: the Web UI / macOS
 tray / CLI can edit, delete, and convert-to-secret without ever seeing
 the plaintext, because the PATCH endpoint deep-merges (omitted keys are
 preserved) and the [`config-to-secret`](#post-apiv1serversnameconfig-to-secret)

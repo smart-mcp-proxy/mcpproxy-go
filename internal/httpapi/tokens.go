@@ -84,9 +84,22 @@ const defaultExpiryDuration = 30 * 24 * time.Hour
 // requireAdminAuth checks that the request is authenticated as admin (not an agent token).
 // Returns true if the request should proceed, false if a 403 was written.
 func (s *Server) requireAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	return s.requireAdminRead(w, r, "Agent tokens cannot manage tokens")
+}
+
+// requireAdminRead is requireAdminAuth with a caller-supplied denial message,
+// so a route outside token management does not 403 with "Agent tokens cannot
+// manage tokens" (#1166 — GET /api/v1/config reuses this gate).
+//
+// It keys on AuthTypeAgent rather than !IsAdmin() deliberately: only admin and
+// agent contexts are ever installed on this mux (apiKeyAuthMiddleware), and a
+// request with NO AuthContext is the middleware's testing/bootstrap
+// passthrough, which must stay as permissive as it is today. If server-edition
+// OAuth user contexts ever reach this mux, tighten it to !IsAdmin().
+func (s *Server) requireAdminRead(w http.ResponseWriter, r *http.Request, message string) bool {
 	ac := auth.AuthContextFromContext(r.Context())
 	if ac != nil && ac.Type == auth.AuthTypeAgent {
-		s.writeError(w, r, http.StatusForbidden, "Agent tokens cannot manage tokens")
+		s.writeError(w, r, http.StatusForbidden, message)
 		return false
 	}
 	return true

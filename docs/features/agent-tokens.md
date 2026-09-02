@@ -172,9 +172,20 @@ mcpproxy token create --name deploy-bot --servers github,gitlab --permissions re
 mcpproxy token create --name all-access --servers "*" --permissions read
 ```
 
-Server scoping is enforced at two levels:
+Server scoping is enforced at three levels:
 1. **Tool discovery** (`retrieve_tools`) — only returns tools from allowed servers
 2. **Tool execution** (`call_tool_*`) — blocks calls to out-of-scope servers
+3. **Enumeration** — since issue #1166, `allowed_servers` also scopes what the
+   REST surface will *list*, not only what the token may call. A scoped token
+   sees only its own servers on `GET /api/v1/servers` (array **and** the
+   `stats` counters), `GET /api/v1/status` (`upstream_stats`), the `/events`
+   SSE stream, `GET /api/v1/tools`, `GET /api/v1/index/search`,
+   `GET /api/v1/diagnostics` / `doctor`, `GET /api/v1/profiles`,
+   `GET /api/v1/annotations/coverage` and `GET /api/v1/security/scans`. A
+   server outside the scope returns the same `404` as one that does not exist
+   on `GET /api/v1/servers/{id}/diagnostics`, so the response cannot be used to
+   probe for hidden servers. `GET /api/v1/config` is an admin document and is
+   denied to agent tokens outright (`403`).
 
 ## Administrative Operations Are Admin-Only
 
@@ -186,7 +197,7 @@ Denied to agent tokens on both surfaces:
 - **Security state**: quarantine, unquarantine, tool approve/block, and the security scanner (scan start/cancel, security approve/reject)
 - **Config & registries**: applying/patching configuration (which can add/remove/enable/disable servers) and mutating registry sources — an agent must not bypass the per-server gate by rewriting config or a registry wholesale
 
-On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (mutating `/api/v1/servers/...`, `/api/v1/config/...`, and `/api/v1/registries/...` routes) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, config/registry reads, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface).
+On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (mutating `/api/v1/servers/...`, `/api/v1/config/...`, and `/api/v1/registries/...` routes) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, registry reads, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface). Those reads are **scope-filtered** as described above. `GET /api/v1/config` is the exception: it is an admin document (it carries the global `api_key`, every server's credentials, and a second enumeration of server names under `profiles[].servers`), so it returns `403` for an agent token rather than a filtered view.
 
 ## Profile Pinning
 

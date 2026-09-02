@@ -80,7 +80,14 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 			break
 		}
 	}
-	if hit == nil {
+	// #1166: a server the caller may not enumerate takes the SAME exit as one
+	// that does not exist — same status, same message — so the response cannot
+	// be used to probe for hidden servers. This route already 404s on absent,
+	// which is why the parity is reachable here and why the rest of the
+	// /servers/{id} read subtree is a follow-up (those handlers return 200 for
+	// a name that does not exist, so there is no 404 to be at parity WITH
+	// until each grows an existence check).
+	if hit == nil || !canSeeServer(r.Context(), serverID) {
 		s.writeError(w, r, http.StatusNotFound, "Server not found: "+serverID)
 		return
 	}
@@ -88,11 +95,10 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 	// Issue #872: health.detail and diagnostic.cause echo the raw connect
 	// error, which carries the full upstream URL (query secrets and all).
 	// Scrub them in parity with the /api/v1/servers list route unless the
-	// operator opted out via reveal_secret_headers.
-	reveal := false
-	if cfg, cfgErr := s.controller.GetConfig(); cfgErr == nil && cfg != nil {
-		reveal = cfg.RevealSecretHeaders
-	}
+	// operator opted out via reveal_secret_headers AND the caller is an
+	// authenticated admin (#1167 — this read the flag alone, with `r` in
+	// scope and its AuthContext simply never consulted).
+	reveal := s.revealSecrets(r.Context())
 
 	resp := map[string]interface{}{
 		"server":    serverID,

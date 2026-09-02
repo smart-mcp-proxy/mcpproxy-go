@@ -214,7 +214,7 @@ export const SECURITY_FIELDS: SettingField[] = [
   {
     key: 'reveal_secret_headers',
     label: 'Show secret headers (debug)',
-    help: 'Normally mcpproxy redacts Authorization / API-Key header values in responses and logs. Turning this on shows them in clear text — debugging only.',
+    help: 'Normally mcpproxy redacts Authorization / API-Key header values in responses and logs. Turning this on shows them in clear text to an authenticated ADMIN only — agent tokens stay masked, and the /events stream and upstream_stats are always masked. Debugging only.',
     control: 'toggle',
     danger: {
       confirmValue: true,

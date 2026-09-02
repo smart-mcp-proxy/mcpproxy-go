@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
@@ -637,6 +638,20 @@ func (s *Server) handleListScanHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		return less
 	})
+
+	// #1166: each summary carries ServerName, so an unfiltered history is a
+	// complete inventory enumeration on a route that is otherwise about scan
+	// results. Rebuild rather than compact — `summaries` comes straight from
+	// the controller.
+	if auth.IsScopedCaller(r.Context()) {
+		scoped := make([]scanner.ScanJobSummary, 0, len(summaries))
+		for _, sum := range summaries {
+			if canSeeServer(r.Context(), sum.ServerName) {
+				scoped = append(scoped, sum)
+			}
+		}
+		summaries = scoped
+	}
 
 	// Status filter
 	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {

@@ -4177,6 +4177,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read the configuration document
         "500":
           content:
             application/json:
