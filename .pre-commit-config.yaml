@@ -15,9 +15,21 @@ repos:
         exclude: '\.(patch|diff)$'
       - id: end-of-file-fixer
       - id: check-merge-conflict
+      - id: check-added-large-files
+        # A 43 MB `warmtiktoken` Mach-O binary was committed at the repo root
+        # in #1153 (go build in the wrong cwd). Screenshots and verification
+        # reports are legitimately 1-6 MB, so cap well above them.
+        args: ['--maxkb=8192']
 
   - repo: local
     hooks:
+      - id: no-native-binaries
+        name: Reject compiled executables (Mach-O/ELF/PE)
+        entry: scripts/check-no-native-binaries.sh
+        language: script
+        # Uses `file(1)`; images are excluded to keep the hook fast.
+        exclude: '^(docs|website|assets|specs)/.*\.(png|jpe?g|gif|ico|webp|svg|pdf)$'
+
       - id: gofmt
         name: gofmt
         entry: gofmt -w

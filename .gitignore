@@ -5,11 +5,16 @@
 *.so
 *.dylib
 /mcpproxy
+/mcpproxy-server
+/warmtiktoken
 /test/launcher-server/launcher-server
 __debug_bin*
 
 # Playwright MCP artifacts
 .playwright-mcp/
+
+# osgrep local server config (contains a local auth token)
+.osgrep/
 
 # Bleve search index directories
 index.bleve/
