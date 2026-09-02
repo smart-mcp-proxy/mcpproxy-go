@@ -74,13 +74,13 @@ graph LR
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🔵 **Planning/docs truth automation** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
+- ⚪ **MCP protocol upgrade to 2026-07-28 revision** — Todo · P1
 - ⚪ **Windows native tray app** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
 - ⚫ **Paid-tier MVP (billing / seats / license)** — Todo · P3 · parked
 - ⚫ **SDK v1 migration** — Todo · P3 · parked
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
-- ⚪ **MCP protocol upgrade to 2026-07-28 revision** — Todo · P3
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
 - 🟢 **Upgrade awareness & guided update** — Done · P0
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
@@ -178,13 +178,16 @@ graph LR
   action_log_tray_menu["Activity in the tray menu (recent tool calls…"]
   tray_menu_open_telemetry["tray_menu_opened counter: Swift menuWillOpen…"]
   action_log_retention_tie_in["Tie activity retention/size into the glance v…"]
+  activity_storage_bounds["Bound every activity-adjacent store: response…"]
 
   action_log_glance_view --> action_log_tray_menu
   action_log_glance_view --> action_log_retention_tie_in
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sessions_web_ui done;
+  class activity_storage_bounds in_progress;
   class action_log_glance_view,action_log_tray_menu,tray_menu_open_telemetry,action_log_retention_tie_in todo;
 ```
 
@@ -195,6 +198,7 @@ graph LR
 | Activity in the tray menu (recent tool calls + security events, jump to full log) | ⚪ Todo | — |
 | tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
 | Tie activity retention/size into the glance view | ⚪ Todo | — |
+| Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175) | 🔵 In progress | #1174 |
 
 </details>
 
@@ -203,7 +207,7 @@ graph LR
 
 > Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix. Spec 103 landed 2026-08-31 (#1137 spec+plan, #1139 tasks) after 13 cross-model review rounds; three of its findings changed the design rather than the wording: a recording carries no prompt/conversation/completion oracle so replay CANNOT show agent behaviour (US1 deterministic cost vs US2 live loop are now separate stories); replay needs a FLEET INPUT because the export has no fleet snapshot; and bodies-off yields menu costs plus one cross-mode delta, never an absolute workload cost. The matrix is 5 distinct behaviours, not a 3x2x2 product.
 
-Spec: [103-token-bench](./specs/103-token-bench/) · PR: #1141
+Spec: [103-token-bench](./specs/103-token-bench/) · PR: #1141 #1147 #1151 #1153 #1160
 
 ```mermaid
 graph LR
@@ -215,15 +219,15 @@ graph LR
   token_bench_harness --> token_bench_public
   token_bench_public --> token_bench_blog
 
-  classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class token_bench_harness in_progress;
+  class token_bench_harness done;
   class token_bench_public,token_bench_blog,token_bench_telemetry todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
-| Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries | 🔵 In progress | #1141 |
+| Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries | 🟢 Done | #1141 #1147 #1151 #1153 #1160 |
 | Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results | ⚪ Todo | — |
 | Publish results + methodology on mcpproxy.app/blog | ⚪ Todo | — |
 | Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation | ⚪ Todo | — |
@@ -382,6 +386,15 @@ graph LR
 </details>
 
 <details>
+<summary>⚪ MCP protocol upgrade to 2026-07-28 revision — Todo · P1</summary>
+
+> STABLE GATE CLEARED 2026-09-02: mark3labs/mcp-go v1.0.0 (stable) released; go.mod still pins v0.57.0. Raised P3->P1 on the 2026-09-02 issue-prioritization pass — spec 058 has spec.md only, next step is speckit.plan then tasks (tracker #532). Earlier: UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that — implementation has not started, hence todo): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
+
+Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
+
+</details>
+
+<details>
 <summary>⚪ Windows native tray app — Todo · P2 · MCP-43</summary>
 
 > No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first. 2026-08-31 audit: reset from in_review to todo. Scoped precisely: Windows tray support DID ship in 2025 via the cross-platform Go/systray build (#74, merged 2025-10-23, cmd/mcpproxy-tray/ + internal/tray under GOOS=windows) — what this epic tracks is the NATIVE WebView2 replacement, and for that no PR is open or merged and native/windows/ holds only a README placeholder with no WebView2 code anywhere in the tree. So 'in review' had no PR to point at.
@@ -461,15 +474,6 @@ graph LR
 | Session-aware rank boost in retrieve_tools | ⚪ Todo | — |
 | Workflow mining: frequent chains → suggested stored scripts (spec 097 synergy) | ⚪ Todo | — |
 | Usage-chain analytics on the dashboard/stats page | ⚪ Todo | — |
-
-</details>
-
-<details>
-<summary>⚪ MCP protocol upgrade to 2026-07-28 revision — Todo · P3</summary>
-
-> UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that — implementation has not started, hence todo): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
-
-Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
 
 </details>
 
@@ -772,16 +776,16 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
-| Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) | #1141 |
+| Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) | #1141 #1147 #1151 #1153 #1160 |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
+| MCP protocol upgrade to 2026-07-28 revision | Todo | P1 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
-| MCP protocol upgrade to 2026-07-28 revision | Todo | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Server marketplace `MCP-37` | Todo (parked) | P3 | — |  |  |
 | Audit SIEM integration `MCP-39` | Todo (parked) | P3 | — |  |  |
