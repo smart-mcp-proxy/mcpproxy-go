@@ -168,11 +168,19 @@ func (m *ServerEditionAuthMiddleware) authenticateFromBearer(r *http.Request) (*
 		return nil, nil
 	}
 
-	// Build auth context from JWT claims
-	if claims.Role == "admin" {
-		return coreauth.AdminUserContext(claims.Subject, claims.Email, claims.DisplayName, claims.Provider), nil
-	}
-	return coreauth.UserContext(claims.Subject, claims.Email, claims.DisplayName, claims.Provider), nil
+	// Re-derive the role from the CURRENT config rather than trusting the
+	// frozen `role` claim. The claim is minted at login and is never revoked,
+	// so an admin removed from admin_emails would otherwise keep admin until
+	// the token expires — and could renew it indefinitely via
+	// POST /api/v1/auth/token, which mints a fresh JWT from ac.Role.
+	//
+	// The user record was already loaded above, so this costs no extra lookup,
+	// and it makes the bearer path agree with the session path (which has
+	// always re-derived the role). Identity field parity is exact: GetUser is
+	// keyed by User.ID, so user.ID == claims.Subject, and both mint sites pass
+	// user.ID/user.Email/user.DisplayName/user.Provider — the same four values
+	// buildAuthContext reads, only fresher.
+	return m.buildAuthContext(user), nil
 }
 
 // buildAuthContext creates an AuthContext for the given user, determining the

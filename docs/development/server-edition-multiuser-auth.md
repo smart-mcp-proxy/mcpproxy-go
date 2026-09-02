@@ -56,6 +56,40 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 - **Admin**: Identified by `admin_emails` config. Sees all activity, manages users.
 - **Build tag**: All server code behind `//go:build server`. Personal edition unaffected.
 
+### Role freshness (issue #1169)
+
+`admin_emails` is the single source of truth for the admin role, and **both**
+auth paths re-derive it from the config on every request — the session path
+always did, and the bearer-JWT path now does too. The `role` claim inside a JWT
+is informational only; it is minted at login, never revoked, and must not be
+trusted for authorization. Consequences:
+
+- Removing someone from `admin_emails` demotes them even while they hold an
+  unexpired admin JWT, and they can no longer renew an admin token via
+  `POST /api/v1/auth/token`.
+- Adding someone promotes them on their next request, without re-login.
+- **Not hot-reloadable.** The middleware captures `*config.ServerEditionConfig`
+  at wiring time, so an `admin_emails` edit takes effect at the next process
+  restart, not immediately — on both auth paths.
+
+### Agent tokens and tenant identity (issue #1168)
+
+- Agent-token names are a **per-owner** namespace: two tenants can each hold a
+  token called `ci`. Storage resolves by `(owner, name)`; the legacy
+  `agent_token_names` index is kept only for ownerless (personal-edition)
+  tokens, and there is no migration.
+- `/api/v1/user/tokens/{name}` revoke, delete and regenerate answer an
+  identical **404** for "does not exist" and "belongs to another tenant", and
+  create no longer reports a conflict on another tenant's name. Do not
+  reintroduce a "not yours" branch — it is a name-existence oracle.
+- An agent token's `AuthContext` carries its owner's `UserID` (so its activity
+  is attributable) but stays at `AuthTypeAgent`. Per-user surfaces must gate on
+  `IsUser()`, never on a non-empty `UserID`.
+- The personal-edition admin surface (`/api/v1/tokens/{name}`) operates in the
+  ownerless namespace and therefore no longer reaches server-edition users'
+  tokens by name. Cross-tenant token administration belongs in
+  `admin_handlers` as its own feature.
+
 ## Key Directories
 
 | Directory | Purpose |

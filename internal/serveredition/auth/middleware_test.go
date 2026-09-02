@@ -600,3 +600,117 @@ func TestAdminOnly_NoContext(t *testing.T) {
 		t.Fatalf("expected 401, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// --- Issue #1169: the bearer path must re-derive the role from config ---
+
+// TestMiddleware_DemotedAdminJWT_DerivesRoleFromConfig pins the demotion
+// direction: a JWT whose frozen `role` claim says "admin" must NOT confer
+// admin when the subject's email is no longer in admin_emails.
+//
+// BITES: on unfixed code authenticateFromBearer branches on claims.Role and
+// returns AdminUserContext, so type=admin_user / role=admin.
+func TestMiddleware_DemotedAdminJWT_DerivesRoleFromConfig(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	// s.testUser (user@example.com) is NOT in AdminEmails. The claim lies.
+	token := s.generateJWT(t, s.testUser.ID, s.testUser.Email, s.testUser.DisplayName, "admin", s.testUser.Provider, 1*time.Hour)
+
+	handler := s.middleware.Middleware()(authContextHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if body["type"] != coreauth.AuthTypeUser {
+		t.Errorf("stale admin claim conferred admin: expected type %q, got %q", coreauth.AuthTypeUser, body["type"])
+	}
+	if body["role"] != "user" {
+		t.Errorf("stale admin claim conferred admin: expected role %q, got %q", "user", body["role"])
+	}
+}
+
+// TestMiddleware_PromotedUserJWT_DerivesRoleFromConfig pins the REVERSE
+// direction so nobody "hardens" the fix into a demote-only AND of the claim
+// and the config: that variant would silently strand promoted users and
+// re-create the very asymmetry with the session path that #1169 is about.
+//
+// BITES: on unfixed code the frozen role="user" claim wins, so type=user.
+func TestMiddleware_PromotedUserJWT_DerivesRoleFromConfig(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	// s.adminUser (admin@example.com) IS in AdminEmails, but the token was
+	// minted before the promotion and carries role="user".
+	token := s.generateJWT(t, s.adminUser.ID, s.adminUser.Email, s.adminUser.DisplayName, "user", s.adminUser.Provider, 1*time.Hour)
+
+	handler := s.middleware.Middleware()(authContextHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if body["type"] != coreauth.AuthTypeAdminUser {
+		t.Errorf("stale user claim blocked promotion: expected type %q, got %q", coreauth.AuthTypeAdminUser, body["type"])
+	}
+	if body["role"] != "admin" {
+		t.Errorf("stale user claim blocked promotion: expected role %q, got %q", "admin", body["role"])
+	}
+}
+
+// TestMiddleware_BearerContextFieldParity is deliberately NOT a bite test: it
+// passes both before and after the #1169 fix. It is the anti-regression net
+// for the constructor swap — switching from
+// AdminUserContext(claims.Subject, claims.Email, ...) to
+// buildAuthContext(user) must not silently drop the subject, email, display
+// name or provider. Do not flag it as non-biting; that is its job.
+func TestMiddleware_BearerContextFieldParity(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	token := s.generateJWT(t, s.adminUser.ID, s.adminUser.Email, s.adminUser.DisplayName, "admin", s.adminUser.Provider, 1*time.Hour)
+
+	handler := s.middleware.Middleware()(authContextHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	for _, tc := range []struct{ field, want string }{
+		{"user_id", s.adminUser.ID},
+		{"email", s.adminUser.Email},
+		{"display_name", s.adminUser.DisplayName},
+		{"provider", s.adminUser.Provider},
+	} {
+		if got, _ := body[tc.field].(string); got != tc.want {
+			t.Errorf("bearer auth context dropped %s: want %q, got %q", tc.field, tc.want, got)
+		}
+	}
+}

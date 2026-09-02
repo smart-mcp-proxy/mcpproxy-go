@@ -5,6 +5,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // UserHandlers provides REST endpoints for user server management.
@@ -30,13 +32,18 @@ type UserHandlers struct {
 
 // tokenStore defines the interface for agent token storage operations.
 // Implemented by *storage.Manager.
+// Every by-name method here is OWNER-SCOPED. A bare name is ambiguous in the
+// server edition — two tenants can each hold a token called "ci" — and an
+// owner-blind lookup followed by an ownership re-check would answer "exists,
+// but not yours", which is an oracle for other tenants' token names. Scoping
+// the lookup makes "absent" and "not yours" produce the same nil.
 type tokenStore interface {
 	CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error
 	ListAgentTokens() ([]auth.AgentToken, error)
-	GetAgentTokenByName(name string) (*auth.AgentToken, error)
-	RevokeAgentToken(name string) error
-	DeleteAgentToken(name string) error
-	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
+	GetAgentTokenByOwnerAndName(userID, name string) (*auth.AgentToken, error)
+	RevokeAgentTokenForOwner(userID, name string) error
+	DeleteAgentTokenForOwner(userID, name string) error
+	RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 }
 
 // NewUserHandlers creates a new UserHandlers instance.
@@ -738,7 +745,17 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.tokenStore.CreateAgentToken(token, rawToken, h.hmacKey); err != nil {
 		h.logger.Errorw("failed to create agent token", "user_id", userID, "name", req.Name, "error", err)
-		writeError(w, http.StatusConflict, fmt.Sprintf("Failed to create token: %v", err))
+		// Never echo the raw storage error: it used to name the conflicting
+		// token verbatim, which told the caller that SOMEONE owns that name.
+		// Names are per-owner now, so a duplicate can only be the caller's own.
+		switch {
+		case errors.Is(err, storage.ErrAgentTokenNameExists):
+			writeError(w, http.StatusConflict, fmt.Sprintf("You already have a token named %q", req.Name))
+		case errors.Is(err, storage.ErrAgentTokenLimitReached):
+			writeError(w, http.StatusServiceUnavailable, "Token limit reached; please try again later")
+		default:
+			writeError(w, http.StatusInternalServerError, "Failed to create token")
+		}
 		return
 	}
 
@@ -773,8 +790,10 @@ func (h *UserHandlers) revokeUserToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the token belongs to this user.
-	existing, err := h.tokenStore.GetAgentTokenByName(name)
+	// Owner-scoped lookup: a token owned by someone else resolves to nil, the
+	// same as one that does not exist, so the two cases are indistinguishable
+	// in the response below. There is deliberately no "not yours" branch.
+	existing, err := h.tokenStore.GetAgentTokenByOwnerAndName(userID, name)
 	if err != nil {
 		h.logger.Errorw("failed to get token for revoke", "user_id", userID, "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to get token")
@@ -784,12 +803,8 @@ func (h *UserHandlers) revokeUserToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
 		return
 	}
-	if existing.UserID != userID {
-		writeError(w, http.StatusForbidden, "Cannot revoke another user's token")
-		return
-	}
 
-	if err := h.tokenStore.RevokeAgentToken(name); err != nil {
+	if err := h.tokenStore.RevokeAgentTokenForOwner(userID, name); err != nil {
 		h.logger.Errorw("failed to revoke token", "user_id", userID, "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to revoke token: %v", err))
 		return
@@ -819,8 +834,9 @@ func (h *UserHandlers) deleteUserToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the token belongs to this user.
-	existing, err := h.tokenStore.GetAgentTokenByName(name)
+	// Owner-scoped lookup — see revokeUserToken. "Not yours" and "not there"
+	// are the same nil, and therefore the same response.
+	existing, err := h.tokenStore.GetAgentTokenByOwnerAndName(userID, name)
 	if err != nil {
 		h.logger.Errorw("failed to get token for delete", "user_id", userID, "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to get token")
@@ -830,12 +846,8 @@ func (h *UserHandlers) deleteUserToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
 		return
 	}
-	if existing.UserID != userID {
-		writeError(w, http.StatusForbidden, "Cannot delete another user's token")
-		return
-	}
 
-	if err := h.tokenStore.DeleteAgentToken(name); err != nil {
+	if err := h.tokenStore.DeleteAgentTokenForOwner(userID, name); err != nil {
 		h.logger.Errorw("failed to delete token", "user_id", userID, "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete token: %v", err))
 		return
@@ -864,8 +876,9 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Verify the token belongs to this user.
-	existing, err := h.tokenStore.GetAgentTokenByName(name)
+	// Owner-scoped lookup — see revokeUserToken. "Not yours" and "not there"
+	// are the same nil, and therefore the same response.
+	existing, err := h.tokenStore.GetAgentTokenByOwnerAndName(userID, name)
 	if err != nil {
 		h.logger.Errorw("failed to get token for regenerate", "user_id", userID, "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to get token")
@@ -873,10 +886,6 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 	}
 	if existing == nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
-		return
-	}
-	if existing.UserID != userID {
-		writeError(w, http.StatusForbidden, "Cannot regenerate another user's token")
 		return
 	}
 
@@ -887,7 +896,7 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	updated, err := h.tokenStore.RegenerateAgentToken(name, newRawToken, h.hmacKey)
+	updated, err := h.tokenStore.RegenerateAgentTokenForOwner(userID, name, newRawToken, h.hmacKey)
 	if err != nil {
 		h.logger.Errorw("failed to regenerate token", "user_id", userID, "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to regenerate token: %v", err))
@@ -909,9 +918,17 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 // --- Helpers ---
 
 // getUserID extracts the authenticated user's ID from the request context.
+//
+// The user TIER is required, not merely a non-empty UserID: agent tokens now
+// carry their owner's UserID (so their activity can be attributed and scoped),
+// and a scoped, read-only agent token must never be accepted as its owner's
+// full session on the per-user management surface. Today agent tokens are also
+// rejected upstream by the server-edition auth middleware, but that single
+// branch must not be the whole boundary. IsUser() covers both "user" and
+// "admin_user", so no legitimate server-edition principal is locked out.
 func getUserID(r *http.Request) (string, error) {
 	authCtx := auth.AuthContextFromContext(r.Context())
-	if authCtx == nil || authCtx.GetUserID() == "" {
+	if authCtx == nil || !authCtx.IsUser() || authCtx.GetUserID() == "" {
 		return "", fmt.Errorf("not authenticated")
 	}
 	return authCtx.GetUserID(), nil

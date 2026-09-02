@@ -61,7 +61,12 @@ func NewAdminHandlers(
 }
 
 // RegisterRoutes registers admin routes on the provided router.
-// The caller should wrap this with AdminOnly middleware.
+//
+// NOTE: enforcement lives in each handler's own requireAdmin call, NOT in
+// middleware. Production (internal/serveredition/setup.go) applies only
+// authMiddleware.Middleware() to this group; ServerEditionAuthMiddleware's
+// AdminOnly() is not used there. Every route added here MUST call requireAdmin
+// as its first statement, or it ships unguarded.
 func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
 	r.Get("/admin/users", h.listUsers)
 	r.Post("/admin/users/{id}/disable", h.disableUser)

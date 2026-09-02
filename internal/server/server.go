@@ -406,7 +406,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 
 			// Update last-used timestamp in background
 			go func() {
-				if updateErr := storageManager.UpdateAgentTokenLastUsed(agentToken.Name); updateErr != nil {
+				if updateErr := storageManager.UpdateAgentTokenLastUsedByHash(agentToken.TokenHash); updateErr != nil {
 					s.logger.Warn("Failed to update agent token last-used timestamp",
 						zap.String("name", agentToken.Name),
 						zap.Error(updateErr))

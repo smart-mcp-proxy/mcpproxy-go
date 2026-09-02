@@ -135,6 +135,14 @@ func principalFromContext(ctx context.Context) string {
 	}
 	switch {
 	case ac.AgentName != "":
+		// Agent token names are unique per owner, not globally: two tenants can
+		// each hold a token called "ci". Qualify the principal with the owning
+		// user so their work sessions (and the work_session_id stamped onto
+		// their activity records) cannot collapse into one. Personal-edition
+		// tokens have no owner and keep the historical bare form.
+		if ac.UserID != "" {
+			return "agent:" + ac.UserID + ":" + ac.AgentName
+		}
 		return "agent:" + ac.AgentName
 	case ac.UserID != "":
 		return "user:" + ac.UserID

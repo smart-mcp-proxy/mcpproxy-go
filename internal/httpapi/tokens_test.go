@@ -102,7 +102,7 @@ func (m *mockTokenStore) ValidateAgentToken(rawToken string, _ []byte) (*auth.Ag
 	return nil, fmt.Errorf("invalid token format")
 }
 
-func (m *mockTokenStore) UpdateAgentTokenLastUsed(_ string) error {
+func (m *mockTokenStore) UpdateAgentTokenLastUsedByHash(_ string) error {
 	return nil
 }
 
