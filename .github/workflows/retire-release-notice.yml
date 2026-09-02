@@ -1,0 +1,102 @@
+name: Retire release notice
+
+# .github/RELEASE_NOTICE.md is prepended verbatim to the release body by
+# release.yml. It is written for ONE release — a security advisory, a migration
+# step, a breaking change — so leaving it in place would silently repeat it on
+# every subsequent release, which is worse than not having it: a reader who
+# sees the same advisory on three releases stops believing any of them.
+#
+# Deleting it is therefore a required step, and a required step that depends on
+# someone remembering is not a step. This opens the removal PR automatically as
+# soon as the release that carried the notice is published.
+#
+# It opens a PR rather than pushing to main so the deletion goes through the
+# same review and checks as any other change, and so a maintainer who wants to
+# keep the notice for a follow-up patch release can simply close the PR.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why you are retiring the notice manually"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check for a notice to retire
+        id: check
+        run: |
+          if [ -f .github/RELEASE_NOTICE.md ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "A release notice is present; it will be retired."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No .github/RELEASE_NOTICE.md - nothing to retire."
+          fi
+
+      - name: Open the removal PR
+        if: steps.check.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || 'a manual dispatch' }}
+        run: |
+          set -euo pipefail
+
+          # Do not stack a second removal PR on top of an unmerged one.
+          EXISTING=$(gh pr list --state open --search 'in:title "Retire the release notice"' --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "PR #${EXISTING} is already open to retire the notice; nothing to do."
+            exit 0
+          fi
+
+          BRANCH="chore/retire-release-notice-${GITHUB_RUN_ID}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git rm -q .github/RELEASE_NOTICE.md
+
+          cat > /tmp/retire-commit.txt <<EOF
+          chore: retire the release notice carried by ${RELEASE_TAG}
+
+          .github/RELEASE_NOTICE.md is prepended verbatim to the release body and is
+          written for one release. ${RELEASE_TAG} has shipped, so it is removed here
+          to stop it repeating on the next release.
+
+          Opened automatically by .github/workflows/retire-release-notice.yml.
+          EOF
+          sed -i 's/^          //' /tmp/retire-commit.txt
+
+          git commit -q -F /tmp/retire-commit.txt
+          git push -q origin "$BRANCH"
+
+          cat > /tmp/retire-body.md <<EOF
+          \`.github/RELEASE_NOTICE.md\` is prepended verbatim to the release body by \`release.yml\`, and is written for a single release.
+
+          **${RELEASE_TAG} has shipped**, so the notice is removed here. Without this, the same advisory would repeat on every subsequent release — and a reader who sees the same advisory three times stops believing any of them.
+
+          If you want the notice to stay for a follow-up patch release, close this PR; another will be opened after the next published release.
+
+          Opened automatically by \`.github/workflows/retire-release-notice.yml\`.
+          EOF
+          sed -i 's/^          //' /tmp/retire-body.md
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: retire the release notice carried by ${RELEASE_TAG}" \
+            --body-file /tmp/retire-body.md
