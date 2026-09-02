@@ -2734,7 +2734,25 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// and a "success" wrapper around a failed call is exactly what made the
 	// failure invisible.
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
-	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
+	// The TRUNCATED form, because `result` here is the PRE-forward upstream
+	// result: forwardContentResult built a new content slice for the agent and
+	// cut it to ToolResponseLimit, so what this record stores is LARGER than
+	// what the agent received whenever wasTruncated is set. That is precisely
+	// the Spec 103 condition emitActivityInternalToolCallTruncated exists for,
+	// and the whole-response form's own doc comment restricts it to handlers
+	// whose recorded text equals what they returned.
+	//
+	// Using the whole-response form here is why call_tool_read records stored
+	// multi-megabyte payloads with response_truncated=false (issue #1173): a
+	// benchmark recomputing cost from the log tokenized text the agent never
+	// paid for and overstated what mcpproxy cost.
+	//
+	// wasTruncated is used rather than the paired tool_call record's
+	// `responseTruncated`: that one is derived from tokenMetrics.WasTruncated,
+	// which is only assigned when a tokenizer is available and the count
+	// succeeds, so it reads false on a truncated call whenever tokenization is
+	// unavailable. wasTruncated comes straight from forwardContentResult.
+	p.emitActivityInternalToolCallTruncated(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "", wasTruncated)
 
 	return forwarded, nil
 }
