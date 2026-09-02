@@ -62,6 +62,13 @@ func (t *AgentToken) AuthContext() *AuthContext {
 		AllowedServers: t.AllowedServers,
 		Permissions:    t.Permissions,
 		ProfilePin:     t.ProfilePin,
+		// UserID carries the owning tenant (server edition). Without it an
+		// agent-token request had no tenant identity at all, so its activity
+		// could not be attributed or scoped. It does NOT confer the user tier:
+		// Type stays AuthTypeAgent, so IsUser()/IsAdmin() remain false, and
+		// every per-user surface must gate on IsUser() rather than on a
+		// non-empty UserID.
+		UserID: t.UserID,
 	}
 }
 

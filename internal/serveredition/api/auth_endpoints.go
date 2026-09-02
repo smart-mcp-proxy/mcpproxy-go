@@ -75,7 +75,9 @@ type TokenResponse struct {
 // getMe returns the current authenticated user's profile.
 func (h *AuthEndpoints) getMe(w http.ResponseWriter, r *http.Request) {
 	ac := auth.AuthContextFromContext(r.Context())
-	if ac == nil || ac.GetUserID() == "" {
+	// Require the user TIER: agent tokens carry their owner's UserID but must
+	// not be able to read that owner's profile.
+	if ac == nil || !ac.IsUser() || ac.GetUserID() == "" {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
@@ -103,7 +105,10 @@ func (h *AuthEndpoints) getMe(w http.ResponseWriter, r *http.Request) {
 // generateToken creates a new JWT bearer token for MCP access.
 func (h *AuthEndpoints) generateToken(w http.ResponseWriter, r *http.Request) {
 	ac := auth.AuthContextFromContext(r.Context())
-	if ac == nil || ac.GetUserID() == "" {
+	// Require the user TIER. This is the sharp one: without it, a scoped
+	// read-only agent token carrying its owner's UserID could mint a full user
+	// session JWT for that owner — a privilege upgrade, not a lateral move.
+	if ac == nil || !ac.IsUser() || ac.GetUserID() == "" {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}

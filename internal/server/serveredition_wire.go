@@ -5,6 +5,7 @@ package server
 import (
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition"
 )
@@ -25,11 +26,16 @@ func wireServerEditionOAuth(s *Server, httpAPIServer *httpapi.Server) {
 	}
 
 	deps := serveredition.Dependencies{
-		Router:            httpAPIServer.Router(),
-		DB:                sm.GetDB(),
-		Logger:            s.logger.Sugar(),
-		Config:            cfg,
-		DataDir:           cfg.DataDir,
+		Router:  httpAPIServer.Router(),
+		DB:      sm.GetDB(),
+		Logger:  s.logger.Sugar(),
+		Config:  cfg,
+		DataDir: cfg.DataDir,
+		// Runtime.Config() reads the current snapshot through the config
+		// service's atomic pointer, so this stays correct across hot reloads —
+		// which is load-bearing for the server edition's name-collision and
+		// entitlement checks. See Dependencies.ConfigProvider.
+		ConfigProvider:    func() *config.Config { return s.runtime.Config() },
 		ManagementService: s.runtime.GetManagementService(),
 		StorageManager:    sm,
 	}

@@ -211,4 +211,4 @@ func (s *socketE2ETokenStore) DeleteAgentToken(string) error { return nil }
 func (s *socketE2ETokenStore) RegenerateAgentToken(string, string, []byte) (*auth.AgentToken, error) {
 	return nil, fmt.Errorf("not supported")
 }
-func (s *socketE2ETokenStore) UpdateAgentTokenLastUsed(string) error { return nil }
+func (s *socketE2ETokenStore) UpdateAgentTokenLastUsedByHash(string) error { return nil }

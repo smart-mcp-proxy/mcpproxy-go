@@ -38,7 +38,7 @@ func testSetup(t *testing.T, sharedServers []*config.ServerConfig) (*UserHandler
 	require.NoError(t, store.EnsureBuckets())
 
 	logger := zap.NewNop().Sugar()
-	handlers := NewUserHandlers(store, sharedServers, nil, nil, logger)
+	handlers := NewUserHandlers(store, StaticAdminServers(sharedServers), nil, nil, logger)
 
 	return handlers, store
 }
@@ -213,7 +213,10 @@ func TestCreateServer_ConflictsWithShared(t *testing.T) {
 
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Contains(t, resp["message"], "conflicts with a shared server")
+	// The message must NOT say which kind of server holds the name: the same
+	// refusal covers an admin-private collision, where naming it would be a
+	// server-name existence oracle. See TestCreateServer_CollisionMessageIsUniform.
+	assert.Contains(t, resp["message"], "is not available")
 }
 
 func TestCreateServer_MissingName(t *testing.T) {

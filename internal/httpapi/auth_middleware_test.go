@@ -32,7 +32,7 @@ func (s *testTokenStore) DeleteAgentToken(_ string) error                       
 func (s *testTokenStore) RegenerateAgentToken(_ string, _ string, _ []byte) (*auth.AgentToken, error) {
 	return nil, nil
 }
-func (s *testTokenStore) UpdateAgentTokenLastUsed(_ string) error { return nil }
+func (s *testTokenStore) UpdateAgentTokenLastUsedByHash(_ string) error { return nil }
 
 func (s *testTokenStore) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.AgentToken, error) {
 	if s.validateFunc != nil {

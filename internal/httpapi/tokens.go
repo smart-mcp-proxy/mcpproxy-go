@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // TokenStore defines the storage interface for agent token CRUD operations.
@@ -25,7 +27,10 @@ type TokenStore interface {
 	DeleteAgentToken(name string) error
 	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 	ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.AgentToken, error)
-	UpdateAgentTokenLastUsed(name string) error
+	// UpdateAgentTokenLastUsedByHash is keyed by the token's HMAC hash, not by
+	// its name: names are unique only within an owner in the server edition,
+	// so a by-name stamp could land on another tenant's token.
+	UpdateAgentTokenLastUsedByHash(hash string) error
 }
 
 // ServerNameLister provides the list of known server names for allowed_servers validation.
@@ -208,9 +213,15 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tokenStore.CreateAgentToken(agentToken, rawToken, hmacKey); err != nil {
-		// Check for duplicate name
-		if strings.Contains(err.Error(), "already exists") {
-			s.writeError(w, r, http.StatusConflict, err.Error())
+		// Check for duplicate name. Classified on a typed sentinel rather than
+		// a substring of the storage message, so the response never echoes
+		// storage internals.
+		if errors.Is(err, storage.ErrAgentTokenNameExists) || strings.Contains(err.Error(), "already exists") {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("A token named %q already exists", req.Name))
+			return
+		}
+		if errors.Is(err, storage.ErrAgentTokenLimitReached) {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("Maximum number of agent tokens (%d) reached", auth.MaxTokens))
 			return
 		}
 		s.logger.Errorf("Failed to create agent token: %v", err)
@@ -377,6 +388,14 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+			return
+		}
+		// Rotation refreshes a live secret; it is not an un-revoke. Classified
+		// here so the refusal is a 409 with an actionable body rather than the
+		// generic 500 the fall-through would produce.
+		if errors.Is(err, storage.ErrAgentTokenRevoked) {
+			s.writeError(w, r, http.StatusConflict,
+				fmt.Sprintf("Token %q is revoked and cannot be regenerated. Delete it and create a new token.", name))
 			return
 		}
 		s.logger.Errorf("Failed to regenerate agent token: %v", err)

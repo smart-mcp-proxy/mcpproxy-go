@@ -243,10 +243,6 @@ func TestAgentTokenRegenerate(t *testing.T) {
 	err := mgr.CreateAgentToken(token, rawToken, testHMACKey)
 	require.NoError(t, err)
 
-	// Revoke the original (to verify regeneration clears revoked status)
-	err = mgr.RevokeAgentToken("regen-bot")
-	require.NoError(t, err)
-
 	// Generate new token
 	newRawToken, err := auth.GenerateToken()
 	require.NoError(t, err)
@@ -259,7 +255,7 @@ func TestAgentTokenRegenerate(t *testing.T) {
 	assert.Equal(t, "regen-bot", updated.Name)
 	assert.Equal(t, []string{"github", "gitlab"}, updated.AllowedServers)
 	assert.Equal(t, []string{auth.PermRead, auth.PermWrite}, updated.Permissions)
-	assert.False(t, updated.Revoked, "regeneration should clear revoked status")
+	assert.False(t, updated.Revoked, "a live token stays live across rotation")
 
 	// Verify new hash
 	newHash := auth.HashToken(newRawToken, testHMACKey)

@@ -4875,14 +4875,19 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		// Update runtime's in-memory config with the new server
 		// This is CRITICAL for test environments where SaveConfiguration() might fail
 		// Without this, the ConfigService won't know about the new server
+		//
+		// Copy-on-write: runtime.Config() returns the PUBLISHED snapshot that
+		// other goroutines read lock-free — the background reconcile/index
+		// passes, the httpapi handlers, and (server edition) an
+		// AdminServersProvider call on every authenticated request. Appending
+		// to its Servers in place writes shared state under those readers.
+		// See configWithAppendedServer.
 		currentConfig := p.mainServer.runtime.Config()
-		if currentConfig != nil {
-			// Add server to config's server list
-			currentConfig.Servers = append(currentConfig.Servers, serverConfig)
-			p.mainServer.runtime.UpdateConfig(currentConfig, "")
+		if updatedConfig := configWithAppendedServer(currentConfig, serverConfig); updatedConfig != nil {
+			p.mainServer.runtime.UpdateConfig(updatedConfig, "")
 			p.logger.Debug("Updated runtime config with new server",
 				zap.String("server", name),
-				zap.Int("total_servers", len(currentConfig.Servers)))
+				zap.Int("total_servers", len(updatedConfig.Servers)))
 		}
 
 		// Save configuration first to ensure servers are persisted to config file

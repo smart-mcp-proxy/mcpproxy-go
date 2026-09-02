@@ -22,6 +22,13 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 )
 
+// adminTokenRevoker revokes every agent token an owner holds. Implemented by
+// *storage.Manager; optional, so the handlers work in tests and in deployments
+// with no token storage wired.
+type adminTokenRevoker interface {
+	RevokeAgentTokensForOwner(userID string) (int, error)
+}
+
 // AdminHandlers provides admin-only REST endpoints.
 type AdminHandlers struct {
 	userStore      *users.UserStore
@@ -32,7 +39,16 @@ type AdminHandlers struct {
 	config         *config.Config
 	configPath     string
 	managementSvc  interface{} // management.Service - kept as interface{} to avoid circular imports
+	tokenRevoker   adminTokenRevoker
 	logger         *zap.SugaredLogger
+}
+
+// SetTokenRevoker wires the agent-token store used when disabling a user.
+// Optional: with no revoker, disabling still disables the account and the
+// storage-level owner gate still refuses that user's tokens; only the permanent
+// burn of already-minted credentials is skipped. Passing nil clears it.
+func (h *AdminHandlers) SetTokenRevoker(revoker adminTokenRevoker) {
+	h.tokenRevoker = revoker
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
@@ -61,7 +77,12 @@ func NewAdminHandlers(
 }
 
 // RegisterRoutes registers admin routes on the provided router.
-// The caller should wrap this with AdminOnly middleware.
+//
+// NOTE: enforcement lives in each handler's own requireAdmin call, NOT in
+// middleware. Production (internal/serveredition/setup.go) applies only
+// authMiddleware.Middleware() to this group; ServerEditionAuthMiddleware's
+// AdminOnly() is not used there. Every route added here MUST call requireAdmin
+// as its first statement, or it ships unguarded.
 func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
 	r.Get("/admin/users", h.listUsers)
 	r.Post("/admin/users/{id}/disable", h.disableUser)
@@ -145,7 +166,28 @@ func (h *AdminHandlers) listUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, profiles)
 }
 
-// disableUser disables a user and revokes all their sessions.
+// disableUser disables a user and revokes all their sessions AND agent tokens.
+//
+// Disabling is the documented remediation for a compromised account, so it has
+// to reach every credential that speaks for that account, not just the
+// interactive ones. Sessions and JWTs were already covered; agent tokens are
+// separate records that nothing here touched, and each one carries the user's
+// UserID into every downstream authorisation and activity decision.
+//
+// Two mechanisms, deliberately:
+//
+//   - storage.Manager's owner gate (installed in internal/serveredition/setup.go)
+//     refuses a disabled owner's tokens on the authentication path, which is what
+//     makes the remediation take effect IMMEDIATELY and covers tokens minted in
+//     the same instant, without this handler having to win a race;
+//   - the revocation below burns them permanently, so RE-ENABLING the account
+//     does not hand the attacker their stolen token back. Revoked is a soft
+//     delete: the records stay visible to the operator, and the owner mints new
+//     tokens once they are re-enabled.
+//
+// Token revocation is non-fatal on error, exactly like session revocation: the
+// account is disabled either way, and the owner gate is the part that must not
+// be missed.
 func (h *AdminHandlers) disableUser(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
@@ -181,11 +223,27 @@ func (h *AdminHandlers) disableUser(w http.ResponseWriter, r *http.Request) {
 		// Non-fatal: user is disabled even if session revocation fails.
 	}
 
+	// Revoke the agent tokens they minted. See this handler's doc comment for
+	// why this is done in addition to the authentication-path owner gate.
+	if h.tokenRevoker != nil {
+		revoked, err := h.tokenRevoker.RevokeAgentTokensForOwner(userID)
+		if err != nil {
+			h.logger.Errorw("failed to revoke agent tokens for disabled user", "user_id", userID, "error", err)
+			// Non-fatal: the owner gate already refuses this user's tokens.
+		} else if revoked > 0 {
+			h.logger.Infow("revoked agent tokens for disabled user", "user_id", userID, "count", revoked)
+		}
+	}
+
 	h.logger.Infow("user disabled", "user_id", userID, "email", user.Email)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "User disabled"})
 }
 
 // enableUser enables a previously disabled user.
+//
+// Their agent tokens are NOT un-revoked. disableUser burns them precisely so
+// that re-enabling an account cannot resurrect a credential that may be why the
+// account was disabled; the owner mints new ones.
 func (h *AdminHandlers) enableUser(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return

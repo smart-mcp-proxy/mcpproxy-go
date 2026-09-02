@@ -17,11 +17,21 @@ import (
 // These are provided by the server during initialization and passed
 // to each feature's Setup function.
 type Dependencies struct {
-	Router            chi.Router
-	DB                *bbolt.DB
-	Logger            *zap.SugaredLogger
-	Config            *config.Config
-	DataDir           string
+	Router  chi.Router
+	DB      *bbolt.DB
+	Logger  *zap.SugaredLogger
+	Config  *config.Config
+	DataDir string
+	// ConfigProvider returns the CURRENT configuration. Config above is the one
+	// that existed at setup time, and the configuration is hot-reloadable, so a
+	// feature that makes an authorisation decision from a boot-time snapshot
+	// silently stops seeing servers (and settings) added afterwards. Features
+	// must read through this and fall back to Config only when it is nil.
+	//
+	// The runtime publishes each configuration as an immutable snapshot behind
+	// an atomic pointer, so calling this is cheap and lock-free; the value it
+	// returns is READ-ONLY.
+	ConfigProvider    func() *config.Config
 	ManagementService interface{}      // management.Service - kept as interface{} to avoid circular imports
 	StorageManager    *storage.Manager // Shared storage manager for token operations
 }

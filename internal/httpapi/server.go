@@ -556,7 +556,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 
 	// Update last-used timestamp in background
 	go func() {
-		if updateErr := s.tokenStore.UpdateAgentTokenLastUsed(agentToken.Name); updateErr != nil {
+		if updateErr := s.tokenStore.UpdateAgentTokenLastUsedByHash(agentToken.TokenHash); updateErr != nil {
 			s.logger.Warnw("Failed to update agent token last-used timestamp",
 				zap.String("name", agentToken.Name),
 				zap.Error(updateErr))
