@@ -237,10 +237,20 @@ type decodedRecord struct {
 	timestamp  time.Time
 	internal   bool
 	truncated  bool
-	// storageTruncated is the OPPOSITE of truncated: the activity log stored
-	// LESS than the agent received, because activity_max_response_size cut it.
-	// responseBytes is still the pre-truncation size, so this only matters to a
-	// consumer that reads the body text.
+	// storageTruncated says activity_max_response_size cut the body on the way
+	// into the activity log, so the stored text is a prefix of whatever the
+	// emitter handed over.
+	//
+	// It is NOT simply "the opposite of truncated". The two flags interact, and
+	// what they jointly say about this record depends on its type — see
+	// contracts.ResolveResponseTruncation
+	// (internal/contracts/activity_truncation.go), the single authority. In
+	// particular an internal_tool_call carrying BOTH flags has two cuts
+	// pointing opposite ways under two unrelated limits, so neither the stored
+	// nor the delivered body is known to be the larger.
+	//
+	// responseBytes stays the pre-truncation size in every case, so this flag
+	// only matters to a consumer that reads the body TEXT.
 	storageTruncated bool
 	sensitive        bool
 	requestBytes     int

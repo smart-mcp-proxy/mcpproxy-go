@@ -83,17 +83,35 @@ const (
 	ReasonSubCallZeroBytes ExclusionReason = "sub_call_zero_bytes"
 
 	// ReasonTruncatedRetrieveOverstates is the asymmetry that makes truncated
-	// built-in records worse than useless. For an ordinary upstream call,
-	// truncation cuts the STORED text while the agent consumed the whole thing,
-	// so the pre-truncation byte length is an honest estimate. For
-	// retrieve_tools it is the other way round: the log stores the FULL
-	// response while the agent consumed the cut text, so both the stored text
-	// and the byte length describe something LARGER than what was paid for.
+	// built-in records worse than useless.
+	//
+	// The direction of `response_truncated` is NOT universal — it depends on
+	// the record type and on whether `response_storage_truncated` is also set.
+	// contracts.ResolveResponseTruncation is the authority
+	// (internal/contracts/activity_truncation.go); what matters here is the one
+	// row it returns for a forward-truncated internal_tool_call:
+	//
+	//	stored > delivered — the log holds the FULL pre-forward response while
+	//	the agent consumed the cut text, so BOTH the stored text and
+	//	`response_bytes` describe something larger than what was paid for.
+	//
 	// Counting either would overstate mcpproxy's cost — flattering, and still
-	// wrong — so the cost is withheld and counted. The alternative permitted by
-	// the contract is to re-apply the recorded truncation limit before
-	// counting; that needs a limit the export does not carry, so exclusion is
-	// what is implementable here.
+	// wrong — so the cost is withheld and counted.
+	//
+	// This reason is deliberately NOT applied to an ordinary upstream
+	// tool_call, but not because "truncation cuts the stored text while the
+	// agent consumed the whole thing" — that is backwards on both halves. A
+	// tool_call's response is cut on the way OUT, and its record holds the
+	// post-forward text, so the log holds the agent's copy (or, with the
+	// storage cut too, strictly less than it) and never more. `response_bytes`
+	// is then the PRE-forward upstream size: larger than both bodies, and so
+	// not an honest estimate of what the agent consumed either — it is an
+	// honest estimate of the UPSTREAM PAYLOAD, which is the quantity the byte
+	// figures are defined as. That is why it is kept rather than excluded.
+	//
+	// The alternative permitted by the contract is to re-apply the recorded
+	// truncation limit before counting; that needs a limit the export does not
+	// carry, so exclusion is what is implementable here.
 	ReasonTruncatedRetrieveOverstates ExclusionReason = "truncated_retrieve_tools_overstates"
 
 	// ReasonMixedCostBasis marks a figure withheld because its components did

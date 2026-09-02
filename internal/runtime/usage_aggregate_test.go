@@ -385,13 +385,14 @@ func TestUsageAggregate_TruncatedBuiltinDoesNotInflateDeliveredBytes(t *testing.
 
 // The mirror of the test above, and the guard on the field split.
 //
-// A STORAGE-truncated built-in is the opposite direction: the log holds LESS
-// than the agent consumed, because activity_max_response_size cut the text on
-// the way into BBolt. ResponseBytes is measured pre-truncation by the emitter,
-// so it is still exactly what was delivered and must still be counted. Folding
-// storage truncation into ResponseTruncated would send this record through
-// truncatedBuiltinOverstatesDelivery and silently under-report delivered
-// traffic — in the flattering direction, on the very records the cap creates.
+// A STORAGE-truncated built-in with NO forward cut points the other way: the log
+// holds LESS than the agent consumed, because activity_max_response_size cut the
+// text on the way into BBolt while nothing cut it on the way out. ResponseBytes
+// is measured pre-truncation by the emitter, so here it is exactly what was
+// delivered and must still be counted. Folding storage truncation into
+// ResponseTruncated would send this record through
+// truncatedBuiltinOverstatesDelivery and silently under-report — in the
+// flattering direction, on the very records the cap creates.
 //
 // ToolName must be retrieve_tools (or describe_tool): storage.CountsAsCall
 // admits a SUCCESSFUL internal_tool_call into the timeline only for those two

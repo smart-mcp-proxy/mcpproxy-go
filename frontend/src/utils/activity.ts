@@ -1163,3 +1163,36 @@ export const paginateActivities = (
 export const calculateTotalPages = (totalItems: number, pageSize: number): number => {
   return Math.ceil(totalItems / pageSize)
 }
+
+/**
+ * The one sentence explaining a record's truncation state, for BOTH truncation
+ * badges (#1173).
+ *
+ * There is no direction table here on purpose. What the two flags mean depends
+ * on the record type AND on whether both are set, and four review rounds found a
+ * different cell wrong each time a renderer restated that. The backend resolves
+ * it once (`contracts.ResolveResponseTruncation`, pinned across all 3 types x 4
+ * flag combinations in internal/contracts/activity_truncation_test.go) and ships
+ * the answer as `response_truncation_notice`; this helper only chooses it.
+ *
+ * The fallback is for a payload from an older core that predates the field. It
+ * deliberately claims NO direction — an older core is exactly the situation in
+ * which this UI cannot know which side of the cut the record holds, and a guess
+ * is what produced the bug. It names the CLI, which resolves the cell locally.
+ *
+ * Both badges get this same string. A per-badge tooltip can only see one flag,
+ * so a reader hovering "Truncated" on a both-flags record was told something
+ * definitionally false with no correction anywhere in that tooltip.
+ */
+export const TRUNCATION_NOTICE_UNRESOLVED =
+  'The recorded response was truncated. Which side of the cut this record holds depends on the ' +
+  'record type and on which limits applied — run `mcpproxy activity show <id> --include-response` ' +
+  'for the resolved answer.'
+
+export const responseTruncationNotice = (
+  activity: { response_truncation_notice?: unknown }
+): string => {
+  const resolved = activity.response_truncation_notice
+  if (typeof resolved === 'string' && resolved !== '') return resolved
+  return TRUNCATION_NOTICE_UNRESOLVED
+}

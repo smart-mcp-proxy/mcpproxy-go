@@ -865,15 +865,14 @@ export interface ActivityRecord {
   response?: string
   /**
    * Spec 103: the response was cut to `tool_response_limit` on the way to the
-   * agent. WHICH SIDE of that cut this record holds depends on `type`:
+   * agent.
    *
-   * - `internal_tool_call` — the log kept the FULL pre-forward text, so the
-   *   record holds more than the agent received.
-   * - `tool_call` — the log kept the agent's own POST-forward copy, so the
-   *   record holds exactly what was delivered; only `response_bytes`, measured
-   *   pre-truncation, is larger.
-   *
-   * Do not render a direction from this flag alone.
+   * Never render a direction from this flag. Which side of the cut the record
+   * holds depends on `type` AND on whether `response_storage_truncated` is also
+   * set — a `tool_call` with only this flag holds exactly the agent's copy, but
+   * the same record with the storage flag too holds strictly LESS than it.
+   * `response_truncation_notice` carries the backend's resolved answer for the
+   * record in hand; use it.
    */
   response_truncated?: boolean
   /**
@@ -886,6 +885,21 @@ export interface ActivityRecord {
    * measured pre-truncation and stays honest. Both can be true.
    */
   response_storage_truncated?: boolean
+  /**
+   * The backend's RESOLVED sentence about the two flags above for this record
+   * (`contracts.ResolveResponseTruncation`, Go). Empty/absent when nothing was
+   * cut, and absent on an `exclude_payloads=true` projection, which clears the
+   * flags it explains.
+   *
+   * This is the truth for the whole record, not for one flag, so both
+   * truncation badges show this same string. Do not slice it up or compose a
+   * per-badge variant: a per-badge sentence can only see one flag, which is how
+   * a both-flags record came to be labelled "the agent's own copy" when it is
+   * strictly shorter than the agent's copy.
+   *
+   * Advisory prose, never parse it — branch on the two booleans.
+   */
+  response_truncation_notice?: string
   status: ActivityStatus
   error_message?: string
   duration_ms?: number

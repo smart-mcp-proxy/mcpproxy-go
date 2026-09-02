@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -1732,91 +1733,33 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 
 // activityTruncationNotices explains a truncation marker in the printed body.
 //
-// There are TWO truncations and they are independent — both can be true on one
-// record — so one "(response was truncated)" line cannot serve both. The CLI
-// printed that line for response_truncated only, which left a storage-truncated
-// body ending in `...[truncated]` with nothing at all to say why.
+// It composes NOTHING. What the two flags mean depends on the record TYPE and
+// on whether both are set, and four rounds of review found a different cell
+// wrong each time a renderer restated that in prose — including this one, whose
+// per-flag split could not see the other flag and so told a both-flags
+// tool_call reader that the stored body "IS the agent's copy" when it is
+// strictly shorter than it. contracts.ResolveResponseTruncation is the single
+// authority (see internal/contracts/activity_truncation.go and the 12-cell
+// table in its test); this function only feeds it the record's fields.
 //
-// The forward cut's DIRECTION depends on the record TYPE, and stating it
-// universally gets it backwards for the dominant population:
-//
-//   - internal_tool_call: the built-in records its FULL response and the agent
-//     consumed the copy cut to tool_response_limit, so the record holds MORE
-//     than was delivered. This is the only case the Spec 103 consumers act on;
-//     the predicate is truncatedBuiltinOverstatesDelivery in
-//     internal/runtime/usage_aggregate.go, which is type-gated for this reason.
-//   - tool_call: handleToolCallCompleted stores the POST-forward text (see the
-//     forwardedText call in internal/server/mcp.go), so the record holds
-//     EXACTLY the agent's own copy — not more than it. Only response_bytes,
-//     measured pre-truncation, is larger.
-//
-// response_bytes is therefore quoted as "what the upstream sent" rather than
-// "what the agent received" whenever a forward cut happened, because in that
-// case it describes neither the stored body nor the delivered one.
+// The result is one line, not one per flag: the two cuts interact, so only a
+// sentence that has seen both can be true about either.
 func activityTruncationNotices(activity map[string]interface{}) []string {
-	forwardCut := getBoolField(activity, "response_truncated")
-	storageCut := getBoolField(activity, "response_storage_truncated")
-	if !forwardCut && !storageCut {
+	resolved := contracts.ResolveResponseTruncation(
+		getStringField(activity, "type"),
+		getBoolField(activity, "response_truncated"),
+		getBoolField(activity, "response_storage_truncated"),
+	)
+	if !resolved.Truncated() {
 		return nil
 	}
 
-	// response_bytes is measured PRE-truncation, so it is how much text existed
-	// before any cut. Zero means the API supplied none — `omitempty` drops it on
-	// a legacy record, and printing "0 bytes" would read as an empty response.
-	upstreamBytes := getIntField(activity, "response_bytes")
-
-	var notices []string
-	if forwardCut {
-		notices = append(notices, forwardTruncationNotice(getStringField(activity, "type"), upstreamBytes))
-	}
-	if storageCut {
-		notices = append(notices, storageTruncationNotice(forwardCut, upstreamBytes))
-	}
-	return notices
-}
-
-// forwardTruncationNotice renders response_truncated for one record type.
-//
-// Only tool_call and internal_tool_call ever carry the flag (see
-// ActivityService.handleToolCallCompleted / handleInternalToolCall); any other
-// type falls back to the direction-free statement of what happened, which stays
-// true whatever a future emitter does with its stored copy.
-func forwardTruncationNotice(recordType string, upstreamBytes int) string {
-	switch recordType {
-	case "internal_tool_call":
-		return "(the agent received LESS than this: the built-in recorded its full response, " +
-			"and the agent got it cut to tool_response_limit)"
-	case "tool_call":
-		if upstreamBytes > 0 {
-			return fmt.Sprintf(
-				"(this IS the agent's copy: the upstream sent %d bytes, cut to tool_response_limit before being both forwarded and recorded)",
-				upstreamBytes)
-		}
-		return "(this IS the agent's copy: the upstream response was cut to tool_response_limit before being both forwarded and recorded)"
-	default:
-		return "(the response was cut to tool_response_limit before being forwarded)"
-	}
-}
-
-// storageTruncationNotice renders response_storage_truncated.
-//
-// The "agent received MORE" direction holds only when nothing cut the response
-// on the way out: then response_bytes IS what was delivered, and the stored
-// body is the sole shortened copy. When a forward cut also happened,
-// response_bytes describes the pre-forward upstream text instead, so attaching
-// it to "the agent received" would overstate delivery by exactly the amount the
-// forward cut removed. What is still certain in that case is the relation
-// between the two bodies, so that is all this claims.
-func storageTruncationNotice(forwardCut bool, upstreamBytes int) string {
-	if forwardCut {
-		return "(shortened again to fit activity_max_response_size, so this is shorter than the copy described above)"
-	}
-	if upstreamBytes > 0 {
-		return fmt.Sprintf(
-			"(the agent received MORE than this: %d bytes, shortened to fit activity_max_response_size before being stored)",
-			upstreamBytes)
-	}
-	return "(the agent received MORE than this: the stored text was shortened to fit activity_max_response_size)"
+	// response_bytes is measured PRE-truncation, and which body (if either) it
+	// describes is part of what the resolver decides — hence NoticeWithBytes
+	// rather than a byte clause assembled here. Zero means the API supplied
+	// none: `omitempty` drops it on a legacy record, and the internal emitter
+	// never populates it at all.
+	return []string{resolved.NoticeWithBytes(getIntField(activity, "response_bytes"))}
 }
 
 // runActivitySummary implements the activity summary command

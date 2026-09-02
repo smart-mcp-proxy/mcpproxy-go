@@ -1232,16 +1232,19 @@
               <h4 class="font-semibold mb-2 flex items-center gap-2">
                 Response Body
                 <span class="badge badge-sm badge-info">JSON</span>
+                <!-- Both badges carry the SAME resolved sentence: the two
+                     cuts interact, so a per-badge tooltip that sees one flag
+                     cannot be true about it. See responseTruncationNotice. -->
                 <span
                   v-if="selectedActivity.response_truncated"
                   class="badge badge-sm badge-warning"
-                  :title="forwardTruncationTooltip(selectedActivity)"
+                  :title="truncationNotice"
                   data-test="response-truncated-badge"
                 >Truncated</span>
                 <span
                   v-if="selectedActivity.response_storage_truncated"
                   class="badge badge-sm badge-warning"
-                  :title="storageTruncationTooltip(selectedActivity)"
+                  :title="truncationNotice"
                   data-test="response-storage-truncated-badge"
                 >Shortened for storage</span>
                 <span
@@ -1345,6 +1348,7 @@ import {
   showParentBadgeInTypeColumn,
   statusBucketTiles,
   statusPresentation,
+  responseTruncationNotice,
   INTENT_LEGEND,
   OTHER_STATUS,
   SENSITIVE_LEGEND,
@@ -2187,41 +2191,25 @@ const formatDuration = (ms: number): string => {
   return `${(ms / 1000).toFixed(2)}s`
 }
 
-// Truncation badge tooltips (#1173).
+// Truncation badge tooltip (#1173).
 //
-// response_truncated says the response was cut to tool_response_limit on the
-// way to the agent. It does NOT say which side of that cut this record holds —
-// that depends on the record TYPE, and stating one direction universally gets
-// it backwards for the dominant population:
+// ONE sentence for the whole record, shown on BOTH badges.
 //
-//   internal_tool_call  the built-in logged its FULL response, the agent got
-//                       the cut copy, so the log holds MORE
-//   tool_call           handleToolCallCompleted logs the POST-forward text, so
-//                       the log holds EXACTLY the agent's copy
+// There is no direction table here. What `response_truncated` and
+// `response_storage_truncated` mean depends on the record TYPE and on whether
+// both are set; this component used to hold a copy of that table, split across
+// two per-badge tooltips, and a reader hovering only "Truncated" on a
+// both-flags record was told the stored body is the agent's own copy when it is
+// strictly shorter than it — with no correction anywhere in that tooltip.
 //
-// Any other type gets the direction-free statement of fact; none sets the flag
-// today, and a new emitter must say which side it recorded before claiming one.
-const forwardTruncationTooltip = (activity: ActivityRecord): string => {
-  if (activity.type === 'internal_tool_call') {
-    return 'The agent received less than this: the built-in logged its full response, and the agent got it cut to tool_response_limit'
-  }
-  if (activity.type === 'tool_call') {
-    return "This is the agent's own copy: the upstream response was cut to tool_response_limit before being both forwarded and logged"
-  }
-  return 'The response was cut to tool_response_limit before being forwarded'
-}
-
-// The storage cut's direction IS type-independent, but it only describes the
-// delivered response when nothing cut it on the way out. With a forward cut
-// also in play, response_bytes measures the pre-forward upstream payload —
-// neither the stored body nor the delivered one — so the tooltip drops the
-// "more than this" claim rather than overstate delivery.
-const storageTruncationTooltip = (activity: ActivityRecord): string => {
-  if (activity.response_truncated) {
-    return 'Shortened again to fit activity_max_response_size, so this is shorter than the copy the Truncated badge describes'
-  }
-  return 'The agent received more than this: the response was shortened to fit activity_max_response_size before being stored'
-}
+// The backend resolves the cell once and ships the answer as
+// `response_truncation_notice` (contracts.ResolveResponseTruncation, pinned
+// across all 12 cells in internal/contracts/activity_truncation_test.go).
+// `responseTruncationNotice` in @/utils/activity only chooses it, and falls back
+// to a direction-FREE line for a payload from an older core.
+const truncationNotice = computed(() =>
+  selectedActivity.value ? responseTruncationNotice(selectedActivity.value) : ''
+)
 
 // Parse response data - try to parse as JSON, fallback to string
 const parseResponseData = (response: string | object): unknown => {

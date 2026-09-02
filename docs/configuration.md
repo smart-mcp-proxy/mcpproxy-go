@@ -1463,20 +1463,32 @@ NDJSON/CSV export, `mcpproxy activity show --include-response`, and the Web UI
 drawer. `response_bytes` is measured before either cut and stays accurate, so it
 is how a reader learns how much was removed.
 
-`response_storage_truncated` is not simply the opposite of `response_truncated`,
-because `response_truncated` has no single direction. It means the response was
-cut to `tool_response_limit` on the way to the agent; **which side of that cut
-the log kept depends on the record type**:
+`response_storage_truncated` is not simply the opposite of `response_truncated`.
+`response_truncated` means the response was cut to `tool_response_limit` on the
+way to the agent, and **which side of that cut the log kept depends on the
+record type AND on whether the storage cut also fired**:
 
-| Record type | `response_truncated` means |
-|-------------|----------------------------|
-| `internal_tool_call` | the log kept the FULL response and the agent received the cut copy — the log holds MORE. This is the only case the usage aggregate and the token benchmark exclude. |
-| `tool_call` | the log kept the agent's OWN post-forward copy — the log holds exactly what was delivered. Only `response_bytes`, measured pre-truncation, is larger. |
+| Record type | forward cut only | storage cut only | BOTH cuts |
+|-------------|------------------|------------------|-----------|
+| `tool_call` | the log kept the agent's OWN post-forward copy — stored **==** delivered | stored **<** delivered | the forwarded copy was shortened again — stored **<** delivered |
+| `internal_tool_call` | the log kept the FULL response, the agent got the cut copy — stored **>** delivered. The only case the usage aggregate and the token benchmark exclude. | stored **<** delivered | two cuts under two unrelated limits — the order is **not fixed** |
+| `prompt_get` | not emitted (no forward cut runs in front of it) | stored **<** delivered | not emitted |
 
-`response_storage_truncated` therefore means "smaller than what the agent
-received" only when `response_truncated` is false. With both set on one record,
-the forward cut already shaped the text and the two limits are unrelated
-settings, so the order of the stored and delivered sizes is not fixed.
+Both cuts on one record is ordinary, not a corner case: the forward cut applies
+per text *block*, so a multi-block response can be forward-truncated and still
+join to far more than `tool_response_limit`, which then trips
+`activity_max_response_size` as well.
+
+You do not have to work the table out yourself. Every record whose response was
+cut carries `response_truncation_notice` — one sentence resolved by the server
+for that exact record — in the REST list and detail responses and the NDJSON
+export; the Web UI shows it on both truncation badges, and
+`mcpproxy activity show <id> --include-response` prints it under the body.
+
+When a forward cut happened, `response_bytes` is the *pre-forward upstream*
+size: larger than both the stored and the delivered body, so it is a measure of
+the upstream payload rather than of either copy. With no forward cut it is
+exactly what the agent received.
 
 The budget is a budget for the TEXT, not for the stored field: when the cut
 happens the record keeps the first `activity_max_response_size` bytes (backed up

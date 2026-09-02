@@ -219,50 +219,69 @@ type ActivityRecord struct {
 	// The two truncation flags are independent — both can be true on one
 	// record — and neither implies the other.
 	//
+	// DO NOT READ A DIRECTION OUT OF EITHER FLAG HERE. What a flag says about
+	// this record depends on the record TYPE *and* on whether the other flag is
+	// also set, and there is exactly one implementation of that table:
+	//
+	//	contracts.ResolveResponseTruncation
+	//	  internal/contracts/activity_truncation.go
+	//	  all 12 cells pinned in internal/contracts/activity_truncation_test.go
+	//
+	// Every rendering surface calls it. Four review rounds' worth of wrong
+	// cells came from surfaces that instead lifted a sentence out of a comment
+	// like this one, so the summary below is deliberately incomplete-by-design:
+	// it exists to tell you the shape of the problem, never to be copied.
+	//
+	//	                     forward only        storage only       BOTH
+	//	tool_call            stored == delivered stored < delivered stored < delivered
+	//	internal_tool_call   stored >  delivered stored < delivered order not fixed
+	//	prompt_get           (not emitted)       stored < delivered (not emitted)
+	//
 	// ResponseTruncated (above, Spec 103) means the response was cut to
-	// ToolResponseLimit on its way to the agent. It does NOT by itself say
-	// whether this record holds more, less or exactly the delivered text: that
-	// depends on the record TYPE, because the two emitters record different
-	// sides of the same cut.
+	// ToolResponseLimit on its way to the agent — per TEXT BLOCK, so the
+	// recorded text (the join of every forwarded block) can far exceed
+	// ToolResponseLimit even with the flag set. That is why the both-flags
+	// column is reachable at stock defaults (20000 / 65536, unrelated knobs),
+	// and it is the column every previous restatement omitted.
 	//
-	//   - ActivityTypeInternalToolCall: the RECORDED response is LARGER than
-	//     the delivered one. retrieve_tools stores its full pre-truncation text,
-	//     and a call_tool_* dispatch records the pre-forward upstream result,
-	//     while the agent consumed the cut copy in both cases.
-	//   - ActivityTypeToolCall: the RECORDED response IS the delivered one.
-	//     handleToolCallCompleted is passed the POST-forward text (see the
-	//     forwardedText call in internal/server/mcp.go), so the log kept the
-	//     agent's own copy, not more than it. Only ResponseBytes — measured
-	//     pre-truncation — is larger than what was delivered.
+	//   - ActivityTypeInternalToolCall: emitActivityInternalToolCallTruncated is
+	//     fed the PRE-forward result, so this is the ONLY type whose record can
+	//     hold more than was delivered.
+	//   - ActivityTypeToolCall: handleToolCallCompleted is passed the
+	//     POST-forward text (the forwardedText call in internal/server/mcp.go),
+	//     so the record starts life as exactly the agent's copy — and the
+	//     storage cut, when it also fires, then shortens that already-forwarded
+	//     text again, leaving the record STRICTLY SHORTER than the delivered
+	//     body. "The recorded response IS the delivered one" is therefore true
+	//     only while ResponseStorageTruncated is false; stating it
+	//     unconditionally is the specific error that reached two renderers.
 	//
-	// So do not restate "recorded > delivered" as a property of the flag. The
-	// only consumers that act on it gate on the type as well: the predicate is
-	// truncatedBuiltinOverstatesDelivery in internal/runtime/usage_aggregate.go
-	// (`ResponseTruncated && Type == ActivityTypeInternalToolCall`), which
-	// excludes such a record's ResponseBytes from delivered traffic, and the
-	// token benchmark withholds its response cost rather than tokenizing text
-	// nobody paid for. Applying that exclusion to a tool_call record would
-	// discard a byte count that is honest about the upstream payload.
+	// The only consumers that act on the flag gate on the type as well: the
+	// predicate is truncatedBuiltinOverstatesDelivery in
+	// internal/runtime/usage_aggregate.go, which is
+	// `ResponseTruncated && Type == ActivityTypeInternalToolCall`, and the token
+	// benchmark withholds such a record's response cost rather than tokenizing
+	// text nobody paid for.
 	//
-	// No other type sets this flag today; a new emitter that does must state
-	// which side of the cut it recorded, here and at the rendering surfaces
-	// (cmd/mcpproxy/activity_cmd.go's forwardTruncationNotice and the
-	// Activity.vue drawer badge), which currently fall back to a
-	// direction-free wording for an unrecognised type.
+	// No other type sets this flag today; a new emitter that does must say
+	// which side of the cut it recorded, and must add its rows to
+	// ResolveResponseTruncation — until it does, that resolver gives it a
+	// direction-FREE wording rather than letting it inherit a claim.
 	//
 	// ResponseStorageTruncated means activity_max_response_size cut the text on
 	// the way into BBolt, so a single multi-megabyte payload cannot outweigh
-	// the whole log (issue #1173). Unlike ResponseTruncated this one IS
-	// type-independent: it always means record.Response holds less than the
-	// text handed to the emitter, on every type that carries it (tool_call,
-	// internal_tool_call and prompt_get).
+	// the whole log (issue #1173). Unlike ResponseTruncated its direction
+	// relative to the EMITTER'S text is type-independent: record.Response is
+	// always a prefix of what the emitter handed over, on every type that
+	// carries it (tool_call, internal_tool_call and prompt_get).
 	//
-	// It says "smaller than what the agent received" only when
-	// ResponseTruncated is false. When both are set, the emitter's text had
-	// already been shaped by the forward cut, and the two limits are unrelated
-	// settings — so nothing here fixes the order of the stored size and the
-	// delivered one, and ResponseBytes describes the pre-forward upstream
-	// payload rather than either.
+	// Relative to what the AGENT received it is not that simple, and again the
+	// resolver is the authority: with ResponseTruncated false the emitter's
+	// text WAS the delivered text, so the record is smaller than it; with both
+	// set the answer depends on the type (strictly smaller for a tool_call,
+	// undecidable for an internal_tool_call, whose two cuts point opposite ways
+	// under unrelated limits) and ResponseBytes describes the pre-forward
+	// upstream payload rather than either body.
 	//
 	// ResponseBytes is measured PRE-truncation by the emitter and is therefore
 	// still honest, so this flag must never reach the Spec 103 consumers —

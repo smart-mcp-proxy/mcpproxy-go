@@ -1339,6 +1339,26 @@ components:
           description: 'Spec 103: cut to tool_response_limit on the way out; which
             side was recorded depends on Type — see ResponseStorageTruncated below'
           type: boolean
+        response_truncation_notice:
+          description: |-
+            ResponseTruncationNotice is the RESOLVED, human-readable truth about the
+            two flags above for THIS record, as produced by
+            ResolveResponseTruncation (internal/contracts/activity_truncation.go).
+            Empty when nothing was cut.
+
+            It is on the payload on purpose. What the flags mean depends on the
+            record Type *and* on whether both are set, and every client that
+            re-derived that from the flags got a cell wrong — so clients are given
+            the answer instead of the inputs to a table they would have to keep in
+            sync. The Web UI renders this string on BOTH truncation badges rather
+            than composing a tooltip per badge: a per-badge tooltip can only see one
+            flag, which is exactly how a both-flags record came to be described as
+            "the agent's own copy" when it is strictly shorter than the agent's copy.
+
+            Advisory prose, not a machine field: parse the two booleans, never this.
+            Absent on a bodies-suppressed projection (`exclude_payloads=true`), which
+            clears the flags it explains.
+          type: string
         server_name:
           description: Name of upstream MCP server
           type: string

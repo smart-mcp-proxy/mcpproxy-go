@@ -3,24 +3,30 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 
-// Issue #1173. There are TWO response truncations, they are independent, and
-// only ONE of them has a direction that is fixed by the flag alone:
+// Issues #1173 / #1174. There are TWO response truncations and they interact:
 //
 //   response_storage_truncated  activity_max_response_size cut the text on the
 //                               way into BBolt. Always means the stored body is
-//                               a prefix, on every record type.
+//                               a prefix of what the emitter handed over.
 //   response_truncated          the response was cut to tool_response_limit on
-//                               the way to the agent. WHICH SIDE this record
-//                               holds depends on `type`:
-//                                 internal_tool_call → the log kept the FULL
-//                                   text, so the agent received LESS
-//                                 tool_call → handleToolCallCompleted stores
-//                                   the POST-forward text, so the log kept the
-//                                   agent's OWN copy, not more than it
+//                               the way to the agent.
 //
-// The earlier version of this spec asserted 'less than this' against a
-// tool_call fixture, which PINNED the backwards wording for the dominant
-// population carrying the flag. These tests vary the TYPE, not just the flags.
+// Which side of the forward cut a record holds depends on its TYPE *and* on
+// whether the storage flag is also set — a tool_call with only the forward flag
+// holds exactly the agent's copy, but the same record with the storage flag too
+// holds strictly LESS than it, because activity_service.go cuts the
+// already-forwarded text again.
+//
+// This drawer used to encode that table itself, split across two per-badge
+// tooltips. A per-badge tooltip can only see one flag, so a reader hovering
+// "Truncated" on a both-flags record was told the stored body is the agent's own
+// copy — definitionally false, with no correction anywhere in that tooltip.
+//
+// The backend now resolves the cell once (contracts.ResolveResponseTruncation,
+// pinned across all 12 cells in internal/contracts/activity_truncation_test.go)
+// and ships the answer as `response_truncation_notice`. These fixtures carry the
+// sentences that resolver actually produces, and the drawer must put the SAME
+// one on BOTH badges.
 
 const BASE = {
   status: 'success',
@@ -39,10 +45,14 @@ const STORAGE_TRUNCATED = {
   request_id: 'req-storage-cut',
   response_storage_truncated: true,
   response_bytes: 200039,
+  response_truncation_notice:
+    'The agent received MORE than this: the recorded text was shortened to fit ' +
+    'activity_max_response_size. response_bytes (200039) is what the agent received.',
 }
 
-// An upstream call. The record holds the forwarded copy — exactly what the
-// agent got — so nothing here may say the agent received less than this.
+// An upstream call with ONLY the forward cut. The record holds the forwarded
+// copy — exactly what the agent got — so nothing here may say the agent
+// received less than this.
 const TOOL_CALL_FORWARD_TRUNCATED = {
   ...BASE,
   type: 'tool_call',
@@ -50,6 +60,10 @@ const TOOL_CALL_FORWARD_TRUNCATED = {
   request_id: 'req-forward-cut',
   response_truncated: true,
   response_bytes: 200039,
+  response_truncation_notice:
+    "This is the agent's own copy: the upstream response was cut to tool_response_limit before " +
+    'being both forwarded and recorded. response_bytes (200039) is the pre-forward upstream size, ' +
+    "so it describes neither this record nor the agent's copy.",
 }
 
 // A built-in. This is the one case where the log really does hold more than
@@ -63,8 +77,14 @@ const INTERNAL_FORWARD_TRUNCATED = {
   request_id: 'req-internal-cut',
   response_truncated: true,
   response_bytes: 200039,
+  response_truncation_notice:
+    'The agent received LESS than this: the built-in recorded its full response, and the agent ' +
+    'got it cut to tool_response_limit. response_bytes (200039) is the size of this recorded text.',
 }
 
+// The cell four review rounds got wrong. Reachable at stock defaults: the
+// forward cut applies per text BLOCK, so the joined recorded text routinely
+// exceeds tool_response_limit and then trips activity_max_response_size too.
 const BOTH_CUTS = {
   ...BASE,
   type: 'tool_call',
@@ -73,6 +93,11 @@ const BOTH_CUTS = {
   response_truncated: true,
   response_storage_truncated: true,
   response_bytes: 200039,
+  response_truncation_notice:
+    'The agent received MORE than this: the upstream response was cut to tool_response_limit ' +
+    'before being forwarded and recorded, and the recorded copy was then shortened AGAIN to fit ' +
+    'activity_max_response_size. response_bytes (200039) is the pre-forward upstream size, so it ' +
+    "describes neither this record nor the agent's copy.",
 }
 
 const WHOLE = {
@@ -137,7 +162,7 @@ describe('Activity drawer — storage truncation badge (#1173)', () => {
     // can actually change — "Truncated" alone is what made the two cuts
     // indistinguishable in the first place.
     expect(badge.attributes('title')).toContain('activity_max_response_size')
-    expect(badge.attributes('title')).toContain('more than this')
+    expect(badge.attributes('title')).toContain('MORE than this')
   })
 
   it('does not also raise the forward-truncation badge, which means something else', async () => {
@@ -168,8 +193,8 @@ describe('Activity drawer — forward truncation reads by record type (#1174)', 
     expect(badge.text()).toBe('Truncated')
     const title = badge.attributes('title') ?? ''
     // The record holds the POST-forward text, so the agent received EXACTLY
-    // this. "less than this" is the exact inverse of what happened.
-    expect(title).not.toContain('less than this')
+    // this. "LESS than this" is the exact inverse of what happened.
+    expect(title).not.toContain('LESS than this')
     expect(title).toContain("agent's own copy")
     expect(title).toContain('tool_response_limit')
     expect(wrapper.find('[data-test="response-storage-truncated-badge"]').exists()).toBe(false)
@@ -181,7 +206,7 @@ describe('Activity drawer — forward truncation reads by record type (#1174)', 
     const badge = wrapper.get('[data-test="response-truncated-badge"]')
     expect(badge.text()).toBe('Truncated')
     const title = badge.attributes('title') ?? ''
-    expect(title).toContain('less than this')
+    expect(title).toContain('LESS than this')
     expect(title).toContain('tool_response_limit')
     expect(wrapper.find('[data-test="response-storage-truncated-badge"]').exists()).toBe(false)
   })
@@ -197,16 +222,29 @@ describe('Activity drawer — forward truncation reads by record type (#1174)', 
     expect(toolTitle).not.toBe(internalTitle)
   })
 
-  it('stops claiming the delivered size once both cuts are in play', async () => {
+  // The blocking finding. Hovering EITHER badge on a both-flags record must give
+  // the reader the whole truth, because a reader hovers one badge, not both.
+  it('puts one true sentence on BOTH badges when both cuts landed', async () => {
     const wrapper = await openDrawer(BOTH_CUTS)
 
-    const storage = wrapper.get('[data-test="response-storage-truncated-badge"]')
-    const title = storage.attributes('title') ?? ''
-    // With a forward cut too, response_bytes describes the pre-forward upstream
-    // payload — neither the stored body nor the delivered one — so the "agent
-    // received more than this" claim no longer follows.
-    expect(title).not.toContain('more than this')
-    expect(title).toContain('activity_max_response_size')
-    expect(wrapper.find('[data-test="response-truncated-badge"]').exists()).toBe(true)
+    const forwardTitle = wrapper.get('[data-test="response-truncated-badge"]').attributes('title') ?? ''
+    const storageTitle =
+      wrapper.get('[data-test="response-storage-truncated-badge"]').attributes('title') ?? ''
+
+    expect(forwardTitle).toBe(storageTitle)
+
+    for (const title of [forwardTitle, storageTitle]) {
+      // The stored body is STRICTLY shorter than the delivered one here: the
+      // storage cut shortened the already-forwarded text again.
+      expect(title).toContain('MORE than this')
+      expect(title).not.toContain("agent's own copy")
+      // Both settings an operator can change are named, so neither cut is
+      // invisible from whichever badge was hovered.
+      expect(title).toContain('tool_response_limit')
+      expect(title).toContain('activity_max_response_size')
+      // response_bytes is the PRE-forward upstream size, larger than both
+      // bodies, so it must not be quoted as what was delivered.
+      expect(title).toContain('describes neither')
+    }
   })
 })

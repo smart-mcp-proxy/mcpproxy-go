@@ -67,8 +67,28 @@ type ActivityRecord struct {
 	// pre-truncation, so a storage-truncated record's byte accounting stays
 	// honest and its cost must still be counted; only a consumer that TOKENIZES
 	// the stored body needs to know the body is a prefix.
-	ResponseStorageTruncated bool                   `json:"response_storage_truncated,omitempty"`
-	Metadata                 map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"` // Additional context-specific data
+	ResponseStorageTruncated bool `json:"response_storage_truncated,omitempty"`
+
+	// ResponseTruncationNotice is the RESOLVED, human-readable truth about the
+	// two flags above for THIS record, as produced by
+	// ResolveResponseTruncation (internal/contracts/activity_truncation.go).
+	// Empty when nothing was cut.
+	//
+	// It is on the payload on purpose. What the flags mean depends on the
+	// record Type *and* on whether both are set, and every client that
+	// re-derived that from the flags got a cell wrong — so clients are given
+	// the answer instead of the inputs to a table they would have to keep in
+	// sync. The Web UI renders this string on BOTH truncation badges rather
+	// than composing a tooltip per badge: a per-badge tooltip can only see one
+	// flag, which is exactly how a both-flags record came to be described as
+	// "the agent's own copy" when it is strictly shorter than the agent's copy.
+	//
+	// Advisory prose, not a machine field: parse the two booleans, never this.
+	// Absent on a bodies-suppressed projection (`exclude_payloads=true`), which
+	// clears the flags it explains.
+	ResponseTruncationNotice string `json:"response_truncation_notice,omitempty"`
+
+	Metadata map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"` // Additional context-specific data
 
 	// Byte sizes measured pre-truncation, mirroring storage.ActivityRecord
 	// (Spec 069 A1). They are the only cost signal a bodies-off export carries:

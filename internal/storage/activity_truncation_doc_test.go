@@ -22,7 +22,13 @@ import (
 // and for a tool_call record the claim is backwards — handleToolCallCompleted
 // stores the POST-forward text, so the log holds exactly the agent's copy.
 //
-// This test reads the comment itself, because a prose defect has no runtime
+// Round 3 then wrote THAT correction as an unconditional property of the type
+// ("ActivityTypeToolCall: the RECORDED response IS the delivered one"), with
+// the both-flags exception 25 lines below under a different field. Two
+// renderers lifted the unconditional half and neither lifted the caveat — the
+// direct cause of both round-4 blocking findings.
+//
+// These tests read the comment itself, because a prose defect has no runtime
 // behaviour to assert on and the wrong sentence is what propagates.
 func truncationFlagDoc(t *testing.T) string {
 	t.Helper()
@@ -71,8 +77,37 @@ func TestTruncationDocDoesNotStateTheDirectionUniversally(t *testing.T) {
 
 	require.NotContains(t, general, "means the RECORDED response is LARGER",
 		"stating the direction as a property of the flag is the defect")
-	require.Contains(t, doc, "does NOT by itself say",
-		"the doc must warn that the flag alone fixes no direction")
+	require.Contains(t, doc, "DO NOT READ A DIRECTION OUT OF EITHER FLAG HERE",
+		"the doc must warn that neither flag alone fixes a direction")
+}
+
+// The round-3 defect: the tool_call correction stated unconditionally, with its
+// exception parked under a different field. A reader copies from the point the
+// claim is made, so the qualification has to be AT that point — and the doc must
+// hand off to the one resolver rather than being a table anyone re-implements.
+func TestTruncationDocQualifiesTheToolCallClaimInPlace(t *testing.T) {
+	doc := truncationFlagDoc(t)
+
+	require.NotContains(t, doc, "the RECORDED response IS the delivered one.",
+		"true only while ResponseStorageTruncated is false; unconditional is the defect")
+
+	idx := strings.Index(doc, "ActivityTypeToolCall: handleToolCallCompleted")
+	require.Positive(t, idx, "the tool_call bullet must still explain which side is recorded")
+	bullet := doc[idx:]
+
+	for _, required := range []string{
+		"STRICTLY SHORTER",
+		"ResponseStorageTruncated is false",
+	} {
+		require.Contains(t, bullet, required,
+			"the both-flags caveat must live in the same bullet as the claim it qualifies")
+	}
+
+	// The authority, named before any of the prose a reader might copy.
+	authority := strings.Index(doc, "contracts.ResolveResponseTruncation")
+	require.Positive(t, authority, "the doc must name the single resolver")
+	require.Less(t, authority, idx, "name the resolver BEFORE the summary, not after it")
+	require.Contains(t, doc, "internal/contracts/activity_truncation.go")
 }
 
 // The predicate the doc cites must still look the way the doc says it does. If

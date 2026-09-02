@@ -197,6 +197,10 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 			contractActivities[i].Response = ""
 			contractActivities[i].ResponseTruncated = false
 			contractActivities[i].ResponseStorageTruncated = false
+			// The notice explains a body this projection just removed, and it
+			// would be the only survivor still asserting the flags cleared
+			// above.
+			contractActivities[i].ResponseTruncationNotice = ""
 			contractActivities[i].Metadata = projectContextualMetadata(contractActivities[i].Metadata)
 		}
 	}
@@ -370,15 +374,23 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		// body is a PREFIX of what the agent received. Carried separately so a
 		// consumer of either flag cannot be misled by the other.
 		ResponseStorageTruncated: a.ResponseStorageTruncated,
-		Status:                   a.Status,
-		ErrorMessage:             a.ErrorMessage,
-		DurationMs:               a.DurationMs,
-		Timestamp:                a.Timestamp,
-		SessionID:                a.SessionID,
-		WorkSessionID:            a.WorkSessionID,
-		RequestID:                a.RequestID,
-		ParentID:                 a.ParentID,
-		Metadata:                 a.Metadata,
+		// The RESOLVED meaning of the two flags for this record's type, so no
+		// client re-derives the direction table (internal/contracts/
+		// activity_truncation.go). It is prose about the record, not content,
+		// so masking does not apply — but exclude_payloads clears it below,
+		// because it explains a body that projection removes.
+		ResponseTruncationNotice: contracts.ResolveResponseTruncation(
+			string(a.Type), a.ResponseTruncated, a.ResponseStorageTruncated,
+		).NoticeWithBytes(a.ResponseBytes),
+		Status:        a.Status,
+		ErrorMessage:  a.ErrorMessage,
+		DurationMs:    a.DurationMs,
+		Timestamp:     a.Timestamp,
+		SessionID:     a.SessionID,
+		WorkSessionID: a.WorkSessionID,
+		RequestID:     a.RequestID,
+		ParentID:      a.ParentID,
+		Metadata:      a.Metadata,
 		// Pre-truncation byte lengths (Spec 069 A1), carried here for the same
 		// reason the export converter carries them — and, until this was fixed,
 		// the ONE place they were missing. GET /api/v1/activity and
@@ -481,15 +493,23 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		// bodies: it describes the record, not its content, and a bodies-on
 		// consumer that tokenizes Response has to know the text is a prefix.
 		ResponseStorageTruncated: a.ResponseStorageTruncated,
-		Status:                   a.Status,
-		ErrorMessage:             a.ErrorMessage,
-		DurationMs:               a.DurationMs,
-		Timestamp:                a.Timestamp,
-		SessionID:                a.SessionID,
-		WorkSessionID:            a.WorkSessionID,
-		RequestID:                a.RequestID,
-		ParentID:                 a.ParentID,
-		Metadata:                 a.Metadata,
+		// Same rule, and the same resolver as the list converter: the two
+		// converters must not drift (TestActivityConvertersAgreeFieldByField).
+		// A bodies-OFF export is exactly where this matters most — byte counts
+		// are then the only cost signal, and the notice is what says whether
+		// they describe the stored body, the delivered one, or neither.
+		ResponseTruncationNotice: contracts.ResolveResponseTruncation(
+			string(a.Type), a.ResponseTruncated, a.ResponseStorageTruncated,
+		).NoticeWithBytes(a.ResponseBytes),
+		Status:        a.Status,
+		ErrorMessage:  a.ErrorMessage,
+		DurationMs:    a.DurationMs,
+		Timestamp:     a.Timestamp,
+		SessionID:     a.SessionID,
+		WorkSessionID: a.WorkSessionID,
+		RequestID:     a.RequestID,
+		ParentID:      a.ParentID,
+		Metadata:      a.Metadata,
 		// Pre-truncation byte lengths (Spec 069 A1). Copied unconditionally,
 		// NOT under includeBodies: they are sizes, not content, and the
 		// bodies-off export is exactly the case where they are the only cost

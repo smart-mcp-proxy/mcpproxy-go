@@ -59,13 +59,20 @@ func toolKey(server, tool string) string {
 
 // ToolUsage is a per-(server,tool) incremental rollup.
 type ToolUsage struct {
-	Server         string    `json:"server"`
-	Tool           string    `json:"tool"`
-	Calls          int64     `json:"calls"`
-	Errors         int64     `json:"errors"`
-	Blocked        int64     `json:"blocked"`
-	Rejected       int64     `json:"rejected"` // spec 093: shed by a concurrency limit, never executed
-	ReqBytesSum    int64     `json:"req_bytes_sum"`
+	Server      string `json:"server"`
+	Tool        string `json:"tool"`
+	Calls       int64  `json:"calls"`
+	Errors      int64  `json:"errors"`
+	Blocked     int64  `json:"blocked"`
+	Rejected    int64  `json:"rejected"` // spec 093: shed by a concurrency limit, never executed
+	ReqBytesSum int64  `json:"req_bytes_sum"`
+	// RespBytesSum is the sum of ActivityRecord.ResponseBytes, which is the
+	// PRE-forward, pre-truncation upstream payload size. It is response VOLUME,
+	// not delivered traffic: when tool_response_limit cut the response on its
+	// way to the agent, this sum is larger than what the agent received — and
+	// larger than what the log stored — by exactly what the cut removed. The UI
+	// presents it as "Response Size" for that reason. Do not relabel it
+	// "delivered".
 	RespBytesSum   int64     `json:"resp_bytes_sum"`
 	SizedReqCalls  int64     `json:"sized_req_calls"`  // calls with RequestBytes>0
 	SizedRespCalls int64     `json:"sized_resp_calls"` // calls with ResponseBytes>0
@@ -145,10 +152,13 @@ func (t *ToolUsage) clone() *ToolUsage {
 
 // TimeBucket is a pre-bucketed slice of call volume over time for the timeline.
 type TimeBucket struct {
-	Start        time.Time `json:"start"`
-	Calls        int64     `json:"calls"`
-	Errors       int64     `json:"errors"`
-	RespBytesSum int64     `json:"resp_bytes_sum"`
+	Start  time.Time `json:"start"`
+	Calls  int64     `json:"calls"`
+	Errors int64     `json:"errors"`
+	// Same definition as ToolUsage.RespBytesSum — pre-forward upstream payload
+	// volume, not delivered traffic — minus the one population
+	// truncatedBuiltinOverstatesDelivery excludes.
+	RespBytesSum int64 `json:"resp_bytes_sum"`
 }
 
 // UsageAggregate is the actor-owned rollup. Exported fields are JSON-serialized
@@ -472,22 +482,39 @@ func (s *UsageStore) Snapshot() *UsageAggregate {
 	return snap
 }
 
-// truncatedBuiltinOverstatesDelivery reports whether a record's ResponseBytes
-// describes MORE than the agent actually consumed, and so must not be added to
-// delivered traffic.
+// truncatedBuiltinOverstatesDelivery excludes ONE population from RespBytesSum:
+// a forward-truncated internal built-in, whose ResponseBytes counts text
+// mcpproxy generated and then withheld from the agent.
 //
-// The direction differs by record type, and that is the whole point:
+// Read the name precisely. RespBytesSum is NOT delivered traffic (see its field
+// doc); it is response payload VOLUME measured pre-cut. So this predicate is not
+// "keep the sum to what was delivered" — nothing here does that — it is the
+// narrower rule that mcpproxy must not inflate its own cost with text nobody
+// consumed.
 //
-//   - an upstream tool_call is truncated on the way into the LOG while the agent
-//     received the whole response, so the pre-truncation length is honest;
-//   - an internal built-in — retrieve_tools above all — is the reverse: the log
-//     keeps the FULL response and the agent consumed the CUT text, so the
-//     pre-truncation length describes something larger than was delivered.
+// The record types differ, and an earlier version of this comment had the
+// difference backwards on both halves. What is actually true — see
+// contracts.ResolveResponseTruncation, internal/contracts/activity_truncation.go,
+// the single authority:
 //
-// Counting the second case inflates the usage timeline in the flattering
-// direction, which is the one error a cost surface must not make. It became
-// reachable only when internal calls began carrying byte counts at all (spec
-// 103); before that they contributed zero and the question could not arise.
+//   - an upstream tool_call is cut on the way OUT, not on the way into the log.
+//     Its record holds the POST-forward text, so the log holds the agent's copy
+//     (or, with activity_max_response_size also in play, strictly LESS than it)
+//     and never more. Its ResponseBytes is the PRE-forward upstream size, larger
+//     than both bodies — which is exactly what an upstream-payload-volume metric
+//     is defined to report, so it is counted;
+//   - an internal built-in — retrieve_tools above all — records the PRE-forward
+//     text, and its ResponseBytes describes mcpproxy's OWN un-consumed output.
+//     Counting that inflates the usage timeline in the flattering direction,
+//     which is the one error a cost surface must not make.
+//
+// The residual, stated so nobody re-derives "delivered" from this: neither
+// branch yields delivered bytes, and no field on the aggregate does. A consumer
+// that needs delivered volume has to tokenize or measure the stored bodies.
+//
+// It became reachable only when internal calls began carrying byte counts at all
+// (spec 103); before that they contributed zero and the question could not
+// arise.
 func truncatedBuiltinOverstatesDelivery(rec *storage.ActivityRecord) bool {
 	return rec.ResponseTruncated && rec.Type == storage.ActivityTypeInternalToolCall
 }
