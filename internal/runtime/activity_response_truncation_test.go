@@ -145,19 +145,23 @@ func TestDefaultResponseCapAppliesWithoutConfig(t *testing.T) {
 	assert.True(t, records[0].ResponseStorageTruncated)
 }
 
-// SetMaxResponseSize takes the same "ignore non-positive" shape as the other
-// retention setters, so a zero-valued config cannot silently disable the cap.
-func TestSetMaxResponseSizeIgnoresNonPositive(t *testing.T) {
+// SetMaxResponseSize takes SetRetentionConfig's maxSizeBytes convention rather
+// than the "ignore non-positive" shape of the setters above it: 0 DISABLES the
+// cap and -1 means "leave unchanged". See TestZeroCapStoresTheResponseWhole for
+// the end-to-end half — the convention is only worth anything if the truncation
+// path honours it too.
+func TestSetMaxResponseSizeConvention(t *testing.T) {
 	svc := NewActivityService(nil, zap.NewNop())
 	require.Equal(t, DefaultActivityMaxResponseSize, svc.maxResponseSize)
 
-	svc.SetMaxResponseSize(0)
-	assert.Equal(t, DefaultActivityMaxResponseSize, svc.maxResponseSize,
-		"an unset config value must leave the default in place")
-
 	svc.SetMaxResponseSize(-1)
-	assert.Equal(t, DefaultActivityMaxResponseSize, svc.maxResponseSize)
+	assert.Equal(t, DefaultActivityMaxResponseSize, svc.maxResponseSize,
+		"a negative sentinel must leave the current cap alone")
 
 	svc.SetMaxResponseSize(2048)
 	assert.Equal(t, 2048, svc.maxResponseSize)
+
+	svc.SetMaxResponseSize(0)
+	assert.Equal(t, 0, svc.maxResponseSize,
+		"an explicit 0 must reach the service; it is how an operator disables the cap")
 }

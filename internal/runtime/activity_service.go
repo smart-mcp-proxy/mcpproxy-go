@@ -231,10 +231,26 @@ func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords in
 }
 
 // SetMaxResponseSize sets the per-record response size cap in bytes.
-// Values <= 0 are ignored, leaving the current cap in place; truncateForStorage
-// falls back to storage.DefaultMaxResponseSize if it is ever unset.
+//
+// It takes SetRetentionConfig's maxSizeBytes convention, not the "ignore
+// non-positive" shape of the setters above it: 0 is a MEANINGFUL value that
+// DISABLES the cap, so a negative sentinel (-1) means "leave unchanged" and
+// >= 0 is applied verbatim. Without an off switch a 64KB floor would
+// permanently foreclose the token benchmark's measured-token basis for any
+// response above it, with no operator remedy.
+//
+// The caller is responsible for distinguishing "absent" from "explicitly zero".
+// runtime.New is the only caller today and its config came through
+// config.LoadFromFile, which unmarshals over config.DefaultConfig(), so an
+// absent key arrives as 65536 and only a deliberate 0 disables. That invariant
+// does NOT hold everywhere: POST /api/v1/config reaches ApplyConfig via
+// oauth.UnmaskLiveConfigDocument, which unmarshals the submitted document into
+// a ZERO-valued config.Config, so a body omitting activity_max_response_size
+// yields 0. Anything wiring this setter into the config-reload path must
+// normalize against DefaultConfig() first, or the cap silently turns itself off
+// — invisibly, since the field is `omitempty` and vanishes from the saved file.
 func (s *ActivityService) SetMaxResponseSize(maxResponseSize int) {
-	if maxResponseSize > 0 {
+	if maxResponseSize >= 0 {
 		s.maxResponseSize = maxResponseSize
 	}
 }
@@ -254,6 +270,14 @@ func (s *ActivityService) SetMaxResponseSize(maxResponseSize int) {
 // benchmark drop exactly the oversized records this cap exists to bound, and
 // do it under an inverted justification.
 func (s *ActivityService) truncateForStorage(response string) (string, bool) {
+	// The off switch lives HERE, not in storage.TruncateActivityResponse: that
+	// helper reads a non-positive maxSize as "fall back to the documented 64KB
+	// default" — the behaviour its own table test pins — so delegating an
+	// explicit 0 would map it straight back onto 65536 and the documented
+	// escape hatch would silently no-op.
+	if s.maxResponseSize <= 0 {
+		return response, false
+	}
 	return storage.TruncateActivityResponse(response, s.maxResponseSize)
 }
 

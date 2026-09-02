@@ -17,7 +17,8 @@ Complete reference for MCPProxy configuration file (`mcp_config.json`). This doc
 11. [Code Execution](#code-execution)
 12. [Feature Flags](#feature-flags)
 13. [Registries](#registries)
-14. [Update Check](#update-check)
+14. [Activity Log Retention](#activity-log-retention)
+15. [Update Check](#update-check)
 15. [Complete Example](#complete-example)
 
 ---
@@ -1387,6 +1388,62 @@ Default `false` (secure). See [Registries Documentation](registries.md#adding-yo
 > **Deprecated former-defaults:** earlier versions also shipped `pulse`, `smithery`, `fleur`, `azure-mcp-demo`, and `remote-mcp-servers` as defaults. These were removed and are pruned from an existing `mcp_config.json` on load, so upgrades converge to the three defaults above. Genuinely user-added custom registries are never touched; `pulse`/`smithery` can be added back as custom sources.
 
 See [Registries Documentation](registries.md) and [Search Servers Documentation](search_servers.md) for complete details.
+
+---
+
+## Activity Log Retention
+
+Bounds how much of `config.db` the activity log may occupy. Three of the four
+settings prune the log as a whole; `activity_max_response_size` is the only one
+that bounds a SINGLE record, and without it one multi-megabyte proxied response
+can outweigh the entire rest of the log.
+
+```json
+{
+  "activity_retention_days": 90,
+  "activity_max_records": 100000,
+  "activity_max_size_mb": 256,
+  "activity_max_response_size": 65536,
+  "activity_cleanup_interval_min": 60
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `activity_retention_days` | int | `90` | Days to retain activity records. |
+| `activity_max_records` | int | `100000` | Maximum records before the oldest are pruned. |
+| `activity_max_size_mb` | int | `256` | Maximum TOTAL activity-log size in MB before the oldest are pruned (`0` disables). |
+| `activity_max_response_size` | int | `65536` | Maximum response text stored on ONE record, in bytes. `0` stores responses whole. |
+| `activity_cleanup_interval_min` | int | `60` | Background cleanup interval, in minutes. |
+
+### `activity_max_response_size: 0` — store responses whole
+
+Setting this to `0` disables the per-record cap: the full response text is
+persisted, however large. It is the setting required for the token benchmark's
+`--bodies=on-unmasked` measured-token basis above 64KB — a capped body is a
+prefix, and a prefix may not be tokenized as if it were the whole response, so
+a corpus captured under the default cap degrades to a byte estimate for every
+oversized record.
+
+Turn it on deliberately and turn it off again afterwards. With the cap
+disabled, a handful of large proxied calls can add hundreds of MB to
+`config.db`; `activity_max_size_mb` still prunes the log as a whole, but only
+after the bytes have been written.
+
+Two operational notes:
+
+- **Absent is not zero.** An omitted key inherits the 65536 default; only an
+  explicit `0` disables the cap. The setting is read once at startup and is not
+  hot-reloadable — edit `mcp_config.json` and restart.
+- **Pruning does not shrink the file.** BBolt frees pages for reuse but does
+  not return them to the OS, so an already-grown `config.db` stays its current
+  size on disk. Compact it (`bbolt compact`, or export and re-import) if you
+  need the space back.
+
+A record whose response was cut on the way into the database is marked
+`response_storage_truncated` in the API and the CSV export. That is the
+opposite of `response_truncated`, which means the log holds MORE than the agent
+received; `response_bytes` is measured before either cut and stays accurate.
 
 ---
 
