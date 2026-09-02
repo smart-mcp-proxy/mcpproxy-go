@@ -253,6 +253,13 @@ epics:
         status: todo
         note: "No spec: link on purpose — 073-activity-size-retention is the SHIPPED retention backend (13/14); this task is the glance-view tie-in on top of it."
         depends_on: [action-log-glance-view]
+      - id: activity-storage-bounds
+        title: "Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175)"
+        status: in_progress
+        priority: P1
+        pr: "#1174"
+        note: "User report 2026-09-02 (#1173): config.db reached 940MB; activity_max_response_size existed but was never read, and server_<id>_tool_calls buckets have no size, count or age bound at all (the other ~432MB). #1174 (external contributor, CI green) wires the 64KB cap; #1176 and #1175 are the follow-ons. Retention backend (073) prunes activity records only, not the per-server buckets."
+        depends_on: []
 
   - id: analytics-dashboard
     title: Analytics dashboard as default page
@@ -392,14 +399,14 @@ epics:
     status: in_progress
     priority: P1
     spec: specs/103-token-bench
-    pr: "#1141"
     depends_on: [schema-deferred]
     note: "Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix. Spec 103 landed 2026-08-31 (#1137 spec+plan, #1139 tasks) after 13 cross-model review rounds; three of its findings changed the design rather than the wording: a recording carries no prompt/conversation/completion oracle so replay CANNOT show agent behaviour (US1 deterministic cost vs US2 live loop are now separate stories); replay needs a FLEET INPUT because the export has no fleet snapshot; and bodies-off yields menu costs plus one cross-mode delta, never an absolute workload cost. The matrix is 5 distinct behaviours, not a 3x2x2 product."
     tasks:
       - id: token-bench-harness
         title: "Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries"
-        status: in_progress
-        pr: "#1141"
+        status: done
+        pr: ["#1141", "#1147", "#1151", "#1153", "#1160"]
+        note: "Shipped 2026-08-31..09-01: #1141 replay MVP, #1147 payload decomposition (US4), #1151 tools/list primitive + live fleet source, #1153 live agent loop + reproducibility + publication, #1160 code-execution response-side saving. Epic stays in_progress: public suites, blog post and heartbeat-v10 counters remain todo."
         depends_on: []
         note: "BUILDS ON the existing bench/ harness - do NOT rebuild token counting, encoding arms, break-even or recall. Already shipped there (PRs #747/#748 MCP-42, #851 spec 083): six encoding arms including direct_deferred (spec 102), cl100k_base counting, live response cost, break-even, RecallAtK/NDCGAtK, the v2 report + dashboard, `make bench-discovery` and CI wiring in bench.yml/eval.yml. 2026-08-31 audit correction: the old note claimed this task absorbs discovery-eval-harness because it would measure retrieval recall - recall is ALREADY measured (eval.yml retrieval-d1 + bench/armindex.go), so that is not this task's contribution. GENUINELY OPEN and unique here: (a) activity-log session REPLAY (nothing in bench/ reads the activity log; internal/contracts/activity.go already carries WorkSessionID, ToolName and Response - watch ResponseTruncated, which would undercount tokens); (b) MEASURED first-call success and retry rate — today they are assumed, not observed: bench/session.go defines per-arm literature-derived defaults (armRetryRates, research D8) and bench/report.go only renders and labels them as estimates; (c) tokens-per-SUCCESSFUL-task, which needs a task-completion signal the static harness has no concept of."
       - id: token-bench-public
@@ -715,10 +722,10 @@ epics:
   - id: mcp-2026-upgrade
     title: MCP protocol upgrade to 2026-07-28 revision
     status: todo
-    priority: P3
+    priority: P1
     spec: specs/058-mcp-2026-upgrade
     depends_on: []
-    note: "UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that — implementation has not started, hence todo): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532."
+    note: "STABLE GATE CLEARED 2026-09-02: mark3labs/mcp-go v1.0.0 (stable) released; go.mod still pins v0.57.0. Raised P3->P1 on the 2026-09-02 issue-prioritization pass — spec 058 has spec.md only, next step is speckit.plan then tasks (tracker #532). Earlier: UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that — implementation has not started, hence todo): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532."
   - id: security-gateway-cd
     title: Security gateway Tracks C/D (per-arg least-privilege + signature provenance)
     status: todo
