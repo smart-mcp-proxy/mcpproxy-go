@@ -212,6 +212,32 @@ Server scoping is enforced at three levels:
      configured server, and the scalars beside it are fleet-wide.
    - `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}` — an MCP session
      describes a *client* and the user's workspace, with no server attribution.
+   - `GET /api/v1/security/overview`, `GET /api/v1/security/queue` — fleet-wide
+     scan and finding counts, and a queue that names every server waiting to be
+     scanned. A scoped caller reads its own server's verdict from
+     `GET /api/v1/servers/{id}/scan/status`, which the subtree gate scopes.
+   - `GET /api/v1/telemetry/payload` — the heartbeat carries `server_count`,
+     `connected_server_count`, `tool_count` and `server_docker_isolated_count`:
+     precisely the count oracle removed from `/status`.
+   - `GET /api/v1/onboarding/state`, `POST /api/v1/onboarding/mark` (which
+     echoes the same document) — `configured_server_count` is an inventory size
+     and `connected_client_ids` is the operator's MCP-client inventory.
+   - `GET /api/v1/secrets/refs`, `GET /api/v1/secrets/config` — values are
+     masked, so this is a credential *inventory* rather than a disclosure, but
+     it names the secrets of servers the caller may not enumerate. A strictly
+     narrower view of the document `GET /api/v1/config` already denies.
+
+   **Withheld rather than denied.** `GET /api/v1/status` stays open — agents
+   legitimately poll it for liveness — but its `activation` block is omitted for
+   a scoped caller. `mcp_clients_seen_ever` is the operator's MCP-client
+   inventory and `retrieve_tools_calls_24h` is an exact deployment-wide counter,
+   neither of which has a per-server part to project. The key is already absent
+   when telemetry is unwired, so clients tolerate its absence.
+
+   `PUT /api/v1/profiles/active` answers `403`: the active profile is
+   server-level shared state that decides what the Web UI and tray render, so a
+   read-scoped credential must not be able to change it. It is gated by the same
+   `config_write` policy as the other config-level writes.
 
    On the `/events` stream, scoping applies **per event**, not only to the
    `servers.changed` server list:

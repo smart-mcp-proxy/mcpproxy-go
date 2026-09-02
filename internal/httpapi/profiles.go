@@ -127,6 +127,7 @@ type SetActiveProfileRequest struct {
 // @Param body body SetActiveProfileRequest true "Profile slug to activate (empty clears)"
 // @Success 200 {object} contracts.SuccessResponse "Active profile updated"
 // @Failure 400 {object} contracts.ErrorResponse "Invalid request body"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot change the active profile)"
 // @Failure 404 {object} contracts.ErrorResponse "Unknown profile"
 // @Router /api/v1/profiles/active [put]
 func (s *Server) handleSetActiveProfile(w http.ResponseWriter, r *http.Request) {

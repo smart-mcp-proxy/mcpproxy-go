@@ -770,7 +770,12 @@ func (s *Server) setupRoutes() {
 		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
 		r.Get("/profiles", s.handleListProfiles)
 		r.Get("/profiles/active", s.handleGetActiveProfile)
-		r.Put("/profiles/active", s.handleSetActiveProfile)
+		// #1166 round 11: the ONLY mutating route in this group, and it was
+		// ungated. The active profile is server-level shared state — it decides
+		// which servers the Web UI and the tray render — so a READ-scoped agent
+		// token could reshape the operator's view. Same gate as every other
+		// config-level write.
+		r.Put("/profiles/active", s.requireServerOp(auth.ServerOpConfigWrite, s.handleSetActiveProfile))
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
@@ -1193,7 +1198,18 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	// env_kind. Read-only — mutation happens on MCP/connect events, never
 	// through this endpoint. nil when the telemetry service (or activation
 	// store) is not wired (e.g. very early startup).
-	if s.telemetryPayloadProvider != nil {
+	//
+	// #1166 round 11: OMITTED for a scoped caller. /status stays open to an
+	// agent token because it is a liveness surface agents legitimately poll —
+	// but this block is pure operator plane and has no per-server part to
+	// project. mcp_clients_seen_ever is the operator's entire MCP-client
+	// inventory, the same class /sessions and /onboarding/state answer 403 for;
+	// retrieve_tools_calls_24h and configured_ide_count are exact
+	// deployment-wide counters, the count-oracle shape this very route already
+	// removed from upstream_stats.total_servers. Withholding the key rather
+	// than denying the route is safe for clients: `activation` is already
+	// absent whenever telemetry is unwired, so every consumer tolerates it.
+	if !auth.IsScopedCaller(r.Context()) && s.telemetryPayloadProvider != nil {
 		if svc := s.telemetryPayloadProvider(); svc != nil {
 			if store := svc.ActivationStore(); store != nil {
 				if db := svc.ActivationDB(); db != nil {

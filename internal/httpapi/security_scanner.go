@@ -142,6 +142,33 @@ func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, map[string]string{"status": "disabled", "id": id})
 }
 
+// stripRedactedScannerEnv removes every entry whose value is the API redaction
+// sentinel, returning a fresh map plus whether anything was dropped. A nil or
+// empty input yields a nil map, so the caller's "nothing to do" check is
+// unchanged.
+//
+// It never mutates the caller's map: the decoded request body is not shared
+// today, but the whole point of this guard is that a future caller must not be
+// able to reintroduce the write by handing us a map it also uses.
+func stripRedactedScannerEnv(env map[string]string) (map[string]string, bool) {
+	if len(env) == 0 {
+		return nil, false
+	}
+	out := make(map[string]string, len(env))
+	dropped := false
+	for k, v := range env {
+		if v == scanner.RedactedEnvValue {
+			dropped = true
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil, dropped
+	}
+	return out, dropped
+}
+
 func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
 		return
@@ -160,12 +187,28 @@ func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(req.Env) == 0 && req.DockerImage == "" {
+	// #1166 round 11: the read doors redact every literal env value to
+	// scanner.RedactedEnvValue, so a client that GETs /security/scanners and
+	// posts the document back would store the sentinel OVER the operator's real
+	// API key — a silent credential destruction that leaves the scanner
+	// authenticating as "***". The Web UI was taught to skip the sentinel, but
+	// the server must not depend on a cooperating client; any API caller, CLI
+	// or script can round-trip the redacted document. Drop those entries here.
+	// ConfigureScanner MERGES into ConfiguredEnv, so an omitted key keeps its
+	// stored value — which is exactly the semantics the sentinel means.
+	env, droppedRedacted := stripRedactedScannerEnv(req.Env)
+	if len(env) == 0 && req.DockerImage == "" {
+		if droppedRedacted {
+			s.writeError(w, r, http.StatusBadRequest,
+				"env values must not be the redaction placeholder "+scanner.RedactedEnvValue+
+					" — omit a key to keep its stored value")
+			return
+		}
 		s.writeError(w, r, http.StatusBadRequest, "env map or docker_image is required")
 		return
 	}
 
-	if err := s.securityController.ConfigureScanner(r.Context(), id, req.Env, req.DockerImage); err != nil {
+	if err := s.securityController.ConfigureScanner(r.Context(), id, env, req.DockerImage); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
