@@ -4177,6 +4177,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read the configuration document
         "500":
           content:
             application/json:
@@ -4866,6 +4872,7 @@ paths:
     get:
       description: |-
         Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
+        web_ui_url carries the ?apikey= credential ONLY for an authenticated admin; a scoped agent token receives the bare URL
         This endpoint is designed for tray-core communication and version checking
         Use refresh=true query parameter to force an immediate update check against GitHub
         The launched_by field reports durable launch provenance ("tray", "installer", or "" for user-launched/unknown)
@@ -4930,6 +4937,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read onboarding state
         "503":
           content:
             application/json:
@@ -4955,6 +4968,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
           description: OnboardingStateResponse
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read onboarding state
         "503":
           content:
             application/json:
@@ -5093,6 +5112,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Invalid request body
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot change the active profile)
         "404":
           content:
             application/json:
@@ -6824,6 +6849,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read MCP session history
         "405":
           content:
             application/json:
@@ -6873,6 +6904,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read MCP session history
         "404":
           content:
             application/json:
@@ -6901,6 +6938,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.SuccessResponse'
           description: Token statistics
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read deployment-wide token statistics
         "500":
           content:
             application/json:
@@ -6948,6 +6991,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.SuccessResponse'
           description: Telemetry heartbeat payload
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Agent tokens cannot read the deployment telemetry payload
         "503":
           content:
             application/json:

@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
@@ -79,9 +80,12 @@ type ScannerPlugin struct {
 	// source/Docker (MCP-2082).
 	InProcess bool `json:"in_process,omitempty"`
 	// Runtime state (not in registry)
-	Status        string            `json:"status"` // available, installed, configured, error
-	InstalledAt   time.Time         `json:"installed_at,omitempty"`
-	ConfiguredEnv map[string]string `json:"configured_env,omitempty"` // Set env values (secrets redacted in API)
+	Status      string    `json:"status"` // available, installed, configured, error
+	InstalledAt time.Time `json:"installed_at,omitempty"`
+	// ConfiguredEnv holds the env values an operator set for this scanner —
+	// vendor API keys, in practice. RedactedForAPI() is what makes the "secrets
+	// redacted in API" promise true; call it on every serialization path.
+	ConfiguredEnv map[string]string `json:"configured_env,omitempty"` // Set env values (secrets redacted in API — see RedactedForAPI)
 	ImageOverride string            `json:"image_override,omitempty"` // User override for DockerImage
 	LastUsedAt    time.Time         `json:"last_used_at,omitempty"`
 	ErrorMsg      string            `json:"error_message,omitempty"`
@@ -118,6 +122,54 @@ func copyEnv(env map[string]string) map[string]string {
 	out := make(map[string]string, len(env))
 	for k, v := range env {
 		out[k] = v
+	}
+	return out
+}
+
+// RedactedEnvValue replaces a literal scanner env value on every API
+// serialization path. It is a fixed sentinel rather than a partial mask so it
+// carries no information about the secret's length or shape, and it is TRUTHY
+// so a client can still tell that the variable is set — which is all the Web UI
+// ever needed from the value (it renders "(configured)" and gates the "needs an
+// API key" badge on presence).
+const RedactedEnvValue = "***"
+
+// RedactedForAPI returns a copy of the plugin safe to serialize to an API
+// client: every literal ConfiguredEnv value is replaced by RedactedEnvValue.
+//
+// #1166 round 10, P3. GET /api/v1/security/scanners and
+// /security/scanners/{id}/status marshalled this struct straight out, so the
+// vendor API keys an operator had typed into the scanner config dialog came
+// back down the wire in the clear — while the field's own comment claimed they
+// were "redacted in API". Redacting HERE, at the type, rather than at each
+// handler is what keeps that comment true for a serialization path added later.
+//
+// A `${keyring:...}` value is preserved verbatim: it is a REFERENCE to a
+// secret, not the secret, and the UI reads it to distinguish "stored in your
+// keychain" from "stored in the config file". Preserving it also keeps the
+// save path honest — the dialog re-submits only values that are neither a
+// keyring reference nor the redaction sentinel, so a round-trip through this
+// function can never overwrite a real secret with its own mask.
+func (s *ScannerPlugin) RedactedForAPI() *ScannerPlugin {
+	if s == nil {
+		return nil
+	}
+	cp := s.clone()
+	for k, v := range cp.ConfiguredEnv {
+		if v == "" || strings.HasPrefix(v, "${keyring:") {
+			continue
+		}
+		cp.ConfiguredEnv[k] = RedactedEnvValue
+	}
+	return cp
+}
+
+// RedactScannersForAPI applies RedactedForAPI to a whole list, allocating a new
+// slice so the registry's own records are never touched.
+func RedactScannersForAPI(list []*ScannerPlugin) []*ScannerPlugin {
+	out := make([]*ScannerPlugin, 0, len(list))
+	for _, sc := range list {
+		out = append(out, sc.RedactedForAPI())
 	}
 	return out
 }

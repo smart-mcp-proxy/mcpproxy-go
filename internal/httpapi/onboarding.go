@@ -103,9 +103,20 @@ type OnboardingMarkRequest struct {
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Success     200 {object} contracts.APIResponse "OnboardingStateResponse"
+// @Failure     403 {object} contracts.ErrorResponse "Agent tokens cannot read onboarding state"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/onboarding/state [get]
 func (s *Server) handleGetOnboardingState(w http.ResponseWriter, r *http.Request) {
+	// #1166 round 10 (P4): DENIED to a non-admin caller. The wizard document is
+	// an OPERATOR document twice over — configured_server_count is the size of
+	// the whole inventory (the oracle /servers now withholds), and
+	// connected_client_ids plus mcp_clients_seen_ever are the operator's
+	// MCP-client inventory, the same class of fact /sessions already 403s for.
+	// Neither has a per-server projection, so the whole document is denied.
+	if !s.requireAdminRead(w, r, onboardingDenialMessage) {
+		return
+	}
+
 	resp, err := s.computeOnboardingState()
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("compute onboarding state: %v", err))
@@ -126,9 +137,17 @@ func (s *Server) handleGetOnboardingState(w http.ResponseWriter, r *http.Request
 // @Param       body body OnboardingMarkRequest true "Mark request"
 // @Success     200 {object} contracts.APIResponse "Updated OnboardingStateResponse"
 // @Failure     400 {object} contracts.ErrorResponse "Bad request"
+// @Failure     403 {object} contracts.ErrorResponse "Agent tokens cannot read onboarding state"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/onboarding/mark [post]
 func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Request) {
+	// The mark POST ECHOES the same recomputed document on success, so gating
+	// the GET alone would leave the disclosure one POST away. It also writes
+	// operator wizard state, which an agent token has no business moving.
+	if !s.requireAdminRead(w, r, onboardingDenialMessage) {
+		return
+	}
+
 	var req OnboardingMarkRequest
 	if r.Body != nil && r.ContentLength > 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

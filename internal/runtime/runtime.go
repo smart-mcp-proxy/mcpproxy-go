@@ -1114,8 +1114,14 @@ func convertToolAnnotations(a *config.ToolAnnotations) *contracts.ToolAnnotation
 	}
 }
 
-// GetToolCalls retrieves tool call history with pagination
-func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+// GetToolCalls retrieves tool call history with pagination.
+//
+// scope restricts the result to a set of server names (nil = unrestricted,
+// #1166 follow-up). It is applied BEFORE pagination so `total`, the page and
+// the offset all describe the same record set — a post-filter in the handler
+// would shrink the page while the total kept counting the hidden records, which
+// is both a broken pager and an exact oracle for what was hidden.
+func (r *Runtime) GetToolCalls(limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -1144,6 +1150,17 @@ func (r *Runtime) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, 
 		r.logger.Sugar().Warnw("Failed to get code_execution tool calls", "error", err)
 	} else {
 		allCalls = append(allCalls, codeExecCalls...)
+	}
+
+	// Entitlement filter, before the sort and before pagination.
+	if scope != nil {
+		visible := make([]*storage.ToolCallRecord, 0, len(allCalls))
+		for _, call := range allCalls {
+			if call != nil && scope.Allows(call.ServerName) {
+				visible = append(visible, call)
+			}
+		}
+		allCalls = visible
 	}
 
 	// Sort by timestamp (most recent first)
@@ -1424,12 +1441,16 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	}, nil
 }
 
-// GetToolCallsBySession returns tool calls filtered by session ID
-func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+// GetToolCallsBySession returns tool calls filtered by session ID.
+//
+// scope restricts the result to a set of server names (nil = unrestricted). It
+// is pushed down into storage so it lands in the same pass that computes
+// `total` (#1166 follow-up).
+func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	storageRecords, total, err := r.storageManager.GetToolCallsBySession(sessionID, limit, offset)
+	storageRecords, total, err := r.storageManager.GetToolCallsBySession(sessionID, limit, offset, scope)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get tool calls by session: %w", err)
 	}

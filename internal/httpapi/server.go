@@ -156,12 +156,16 @@ type ServerController interface {
 	GetCurrentConfig() interface{}
 	NotifySecretsChanged(ctx context.Context, operation, secretName string) error
 
-	// Tool call history
-	GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error)
+	// Tool call history. The ToolCallScope argument is the caller's server
+	// entitlement (nil = unrestricted, #1166 follow-up); it is passed DOWN
+	// rather than applied to the result because these reads also report a
+	// `total`, and a post-filter would leave the total counting records the
+	// page no longer contains.
+	GetToolCalls(limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error)
 	GetToolCallByID(id string) (*contracts.ToolCallRecord, error)
 	GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error)
 	ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error)
-	GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error)
+	GetToolCallsBySession(sessionID string, limit, offset int, scope storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error)
 
 	// Session management. status filters on session status ("active" /
 	// "closed"); an empty string means no filter.
@@ -561,9 +565,18 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 
 	// Built through the shared constructor so every field the MCP path carries
 	// reaches the REST path too — notably ProfilePin, which this path dropped
-	// before Spec 098. Evaluation scope is token scope ∩ token pin ∩ requested
-	// profile (preflight.ResolveScope), so a dropped pin silently widened what
-	// a pinned token could see.
+	// before Spec 098. PREFLIGHT's evaluation scope is token scope ∩ token pin ∩
+	// requested profile (preflight.ResolveScope), so a dropped pin silently
+	// widened what a pinned token could resolve there.
+	//
+	// That intersection is preflight's, not this package's ENUMERATION
+	// boundary. Every read door under /api/v1 answers from
+	// auth.CanEnumerateServer — token scope alone. The profile terms are
+	// ergonomic filters and one of them (the requested profile) is
+	// caller-selectable, so folding them into the enumeration boundary would
+	// let a caller change what it is authorized to see by switching profiles.
+	// The three notions of scope, and why only one of them is a boundary, are
+	// laid out at the top of scope_subtree.go.
 	authCtx := agentToken.AuthContext()
 	ctx := auth.WithAuthContext(r.Context(), authCtx)
 
@@ -757,7 +770,12 @@ func (s *Server) setupRoutes() {
 		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
 		r.Get("/profiles", s.handleListProfiles)
 		r.Get("/profiles/active", s.handleGetActiveProfile)
-		r.Put("/profiles/active", s.handleSetActiveProfile)
+		// #1166 round 11: the ONLY mutating route in this group, and it was
+		// ungated. The active profile is server-level shared state — it decides
+		// which servers the Web UI and the tray render — so a READ-scoped agent
+		// token could reshape the operator's view. Same gate as every other
+		// config-level write.
+		r.Put("/profiles/active", s.requireServerOp(auth.ServerOpConfigWrite, s.handleSetActiveProfile))
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
@@ -784,6 +802,12 @@ func (s *Server) setupRoutes() {
 			// MCP-1056). Centralising the decode also prevents new sub-resource
 			// routes from silently reintroducing the gap.
 			r.Use(decodeServerIDParam)
+			// #1166 follow-up: ONE scope gate for the whole subtree, so a new
+			// sub-resource inherits it instead of shipping open. Registered
+			// after decodeServerIDParam so it sees the decoded name. For a
+			// scoped caller an unentitled server and an absent one are the same
+			// 404; admins are unaffected. See scopedServerSubtree.
+			r.Use(s.scopedServerSubtree)
 			// Mutating per-server routes carry the shared agent-token gate
 			// (issues #877/#878).
 			r.Patch("/", s.requireServerOp(auth.ServerOpPatch, s.handlePatchServer))                                   // Partial update server config
@@ -1117,7 +1141,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 // @Success 200 {object} contracts.SuccessResponse "Server status information"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/status [get]
-func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	// Get routing mode from config
 	routingMode := config.RoutingModeRetrieveTools
 	// …and the data directory, which is where the tray's autostart sidecar
@@ -1137,14 +1161,20 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 
 	// One traversal, used for both the top-level field and the nested snapshot,
 	// so the two cannot disagree and the O(servers) walk happens once (#1084).
-	liveUpstreamStats := s.controller.GetUpstreamStats()
+	//
+	// #1166: `upstream_stats.servers` is keyed by every server name, so this
+	// route was a complete inventory enumeration on the single most-polled
+	// door. Scope it once, here, and BOTH the top-level field and the nested
+	// snapshot narrow together — the #1084 single-traversal property is what
+	// makes one filter enough.
+	liveUpstreamStats := filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats())
 
 	response := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
 		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": liveUpstreamStats,
-		"status":         withLiveUpstreamStats(s.controller.GetStatus(), liveUpstreamStats),
+		"status":         withLiveUpstreamStats(r.Context(), s.controller.GetStatus(), liveUpstreamStats),
 		"routing_mode":   routingMode,
 		"timestamp":      time.Now().Unix(),
 		// Unix seconds at which this core process started, so a UI can render a
@@ -1168,7 +1198,18 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	// env_kind. Read-only — mutation happens on MCP/connect events, never
 	// through this endpoint. nil when the telemetry service (or activation
 	// store) is not wired (e.g. very early startup).
-	if s.telemetryPayloadProvider != nil {
+	//
+	// #1166 round 11: OMITTED for a scoped caller. /status stays open to an
+	// agent token because it is a liveness surface agents legitimately poll —
+	// but this block is pure operator plane and has no per-server part to
+	// project. mcp_clients_seen_ever is the operator's entire MCP-client
+	// inventory, the same class /sessions and /onboarding/state answer 403 for;
+	// retrieve_tools_calls_24h and configured_ide_count are exact
+	// deployment-wide counters, the count-oracle shape this very route already
+	// removed from upstream_stats.total_servers. Withholding the key rather
+	// than denying the route is safe for clients: `activation` is already
+	// absent whenever telemetry is unwired, so every consumer tolerates it.
+	if !auth.IsScopedCaller(r.Context()) && s.telemetryPayloadProvider != nil {
 		if svc := s.telemetryPayloadProvider(); svc != nil {
 			if store := svc.ActivationStore(); store != nil {
 				if db := svc.ActivationDB(); db != nil {
@@ -1336,6 +1377,7 @@ func (s *Server) desiredConfigForPatch() (*config.Config, error) {
 // handleGetInfo godoc
 // @Summary Get server information
 // @Description Get essential server metadata including version, web UI URL, endpoint addresses, and update availability
+// @Description web_ui_url carries the ?apikey= credential ONLY for an authenticated admin; a scoped agent token receives the bare URL
 // @Description This endpoint is designed for tray-core communication and version checking
 // @Description Use refresh=true query parameter to force an immediate update check against GitHub
 // @Description The launched_by field reports durable launch provenance ("tray", "installer", or "" for user-launched/unknown)
@@ -1427,16 +1469,48 @@ func buildWebUIURL(listenAddr string, r *http.Request) string {
 	return fmt.Sprintf("%s://%s/ui/", protocol, listenAddr)
 }
 
-// buildWebUIURLWithAPIKey constructs the web UI URL with API key included if configured
+// buildWebUIURLWithAPIKey constructs the web UI URL, appending the GLOBAL ADMIN
+// API key as a `?apikey=` query ONLY for a caller entitled to hold it.
+//
+// #1166 round 10, PRIVILEGE ESCALATION. GET /api/v1/info was registered with no
+// gate at all and handed this string to anybody who could reach the route —
+// including a read-only agent token scoped to one server, which received
+//
+//	"web_ui_url":"http://127.0.0.1:8080/ui/?apikey=<the admin key>"
+//
+// and could then re-authenticate as an admin. That made every scope control on
+// this mux moot: a scoped caller simply read the key out of /info and stopped
+// being scoped. The defect predates this branch; it must not survive it.
+//
+// The route is NOT denied, and the field is NOT dropped. /info is version,
+// endpoint, pid, provenance and update-policy metadata that agents and the CLI
+// legitimately poll, and the base URL discloses nothing the same payload's
+// `listen_addr` does not. Exactly one thing in it is privileged — the
+// credential in the query string — so exactly that is what is withheld. A
+// scoped caller gets `http://127.0.0.1:8080/ui/` and no way in.
+//
+// The predicate is CanRevealSecrets, not IsAdmin: it is the same test the other
+// raw-credential doors answer from (#1148/#1167), it fails CLOSED on a nil
+// AuthContext, and it refuses the unauthenticated /mcp back-compat admin
+// context, which has proved no identity. Absence is treated as unprivileged
+// HERE, unlike auth.CanEnumerateServer, because the two questions differ: not
+// knowing who is calling is a reason to withhold a credential and not a reason
+// to hide a server's name. Every real operator path carries an explicit admin
+// context — the API key over TCP, the Unix socket, the Windows named pipe — so
+// nothing first-party changes.
 func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) string {
 	baseURL := buildWebUIURL(listenAddr, r)
 	if baseURL == "" {
 		return ""
 	}
 
+	if !auth.AuthContextFromContext(r.Context()).CanRevealSecrets() {
+		return baseURL
+	}
+
 	// Add API key if configured
 	cfg, err := s.controller.GetConfig()
-	if err == nil && cfg.APIKey != "" {
+	if err == nil && cfg != nil && cfg.APIKey != "" {
 		return baseURL + "?apikey=" + cfg.APIKey
 	}
 
@@ -1539,13 +1613,19 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// so they send only the diff — redacted-but-unchanged values
 		// stay out of the patch and the backend keeps the real string.
 		// See PR #425 for the original threat model.
-		s.redactServerSecrets(serverValues)
+		s.redactServerSecrets(r.Context(), serverValues)
 
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats
 		if stats != nil {
 			statsValue = *stats
 		}
+
+		// #1166: enumeration is scoped LAST, so a reviewer sees one obvious
+		// final gate. The stats must narrow with the array or total_servers
+		// stays an exact count oracle for what the filter just hid.
+		serverValues = visibleServers(r.Context(), serverValues)
+		statsValue = recomputeServerStats(r.Context(), serverValues, statsValue)
 
 		response := contracts.GetServersResponse{
 			Servers: serverValues,
@@ -1570,9 +1650,16 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	s.enrichServersWithQuarantineStats(servers)
 
 	// See note above the management-service path for redaction rationale.
-	s.redactServerSecrets(servers)
+	s.redactServerSecrets(r.Context(), servers)
 
-	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
+	// #1166, legacy branch. This branch is invisible to a test suite whose
+	// default mock returns a non-nil management service, which is exactly how
+	// a one-branch fix ships looking complete.
+	servers = visibleServers(r.Context(), servers)
+	// Filtering the upstream-stats map BEFORE the conversion is free
+	// correctness: ConvertUpstreamStatsToServerStats derives every counter by
+	// walking stats["servers"], so the counts narrow with it.
+	stats := contracts.ConvertUpstreamStatsToServerStats(filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats()))
 
 	response := contracts.GetServersResponse{
 		Servers: servers,
@@ -1605,18 +1692,22 @@ func flattenNullableMap(m map[string]*string) map[string]string {
 // …), env-var secrets, URL query credentials, and any URL secrets echoed into
 // the last_error / health.detail strings. Sensitive values render as the
 // masked-display format `••••<last2> (<N> chars)` (references pass through);
-// error strings use the `***REDACTED***` sentinel. Skips redaction entirely
-// when `reveal_secret_headers: true` is set in the loaded config, matching the
-// behaviour of the `upstream_servers` MCP tool and the SSE event stream.
+// error strings use the `***REDACTED***` sentinel. Skips redaction only when
+// `reveal_secret_headers: true` is set in the loaded config AND the caller is
+// an authenticated admin, matching the `upstream_servers` MCP tool exactly
+// (issue #1167).
 //
 // The UI edit-and-save flow works without seeing the real values because
 // PATCH /api/v1/servers/{id} deep-merges (omitted keys preserved), so the
 // client computes a diff and only sends the keys that actually changed.
 // Redacted-but-unchanged values never round-trip — the backend keeps the
 // real string on disk.
-func (s *Server) redactServerSecrets(servers []contracts.Server) {
-	cfg, err := s.controller.GetConfig()
-	if err == nil && cfg != nil && cfg.RevealSecretHeaders {
+func (s *Server) redactServerSecrets(ctx context.Context, servers []contracts.Server) {
+	// #1167: this used to read the flag alone, with no ctx parameter at all —
+	// identity was not merely unchecked, it was unreachable at this frame.
+	// Both callers hold the *http.Request, so the caller is threaded in and
+	// the answer comes from the shared predicate.
+	if s.revealSecrets(ctx) {
 		return
 	}
 	for i := range servers {
@@ -3555,6 +3646,14 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			continue
 		}
+		// #1166: without this, a token scoped to one server was denied the
+		// inventory on GET /api/v1/servers and then handed a STRICTLY LARGER
+		// one here — every server_name plus every tool name, description and
+		// schema. Skipping is not a fetch failure, so it must not set
+		// Partial / FailedServers.
+		if !canSeeServer(r.Context(), name) {
+			continue
+		}
 		// #1064: a quarantined server contributes nothing here -- its tools are
 		// unreachable (SECURITY BLOCK at dispatch) and its descriptions are the
 		// TPA payload #1061 removed from the index. Skipping is not a failure,
@@ -3690,6 +3789,19 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed search results
 	typedResults := contracts.ConvertGenericSearchResultsToTyped(results)
 
+	// #1166: the MCP twin of this discovery surface filters through
+	// serverInScope (internal/server/mcp_visibility.go); this one returned
+	// tool_name + server_name pairs for the whole index to any scoped token.
+	if auth.IsScopedCaller(r.Context()) {
+		scoped := make([]contracts.SearchResult, 0, len(typedResults))
+		for i := range typedResults {
+			if canSeeServer(r.Context(), typedResults[i].Tool.ServerName) {
+				scoped = append(scoped, typedResults[i])
+			}
+		}
+		typedResults = scoped
+	}
+
 	// Restore the bare-tool-name contract on this REST surface (#871). The index
 	// read seams canonicalize the name to "server:tool" for the MCP discovery
 	// path, but external consumers of /api/v1/index/search assemble the id
@@ -3774,12 +3886,15 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	defer heartbeat.Stop()
 
 	// Send initial status
-	initialLiveStats := s.controller.GetUpstreamStats()
+	// #1166: /events sits behind the same apiKeyAuthMiddleware as /servers, so
+	// a scoped agent token can subscribe. Scoping /servers while leaving this
+	// stream unfiltered closes the front door and leaves the window open.
+	initialLiveStats := filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": initialLiveStats,
-		"status":         withLiveUpstreamStats(s.controller.GetStatus(), initialLiveStats),
+		"status":         withLiveUpstreamStats(r.Context(), s.controller.GetStatus(), initialLiveStats),
 		"timestamp":      time.Now().Unix(),
 		"started_at":     processStart.Unix(),
 	}
@@ -3813,12 +3928,12 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			// The channel snapshot is a point-in-time capture that never
 			// passes through GetStatus(), so without this the stream's nested
 			// stats stay stale for the life of the connection (#1084).
-			eventLiveStats := s.controller.GetUpstreamStats()
+			eventLiveStats := filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats())
 			response := map[string]interface{}{
 				"running":        s.controller.IsRunning(),
 				"listen_addr":    s.controller.GetListenAddress(),
 				"upstream_stats": eventLiveStats,
-				"status":         withLiveUpstreamStats(status, eventLiveStats),
+				"status":         withLiveUpstreamStats(r.Context(), status, eventLiveStats),
 				"timestamp":      time.Now().Unix(),
 				"started_at":     processStart.Unix(),
 			}
@@ -3833,8 +3948,17 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			// #1166 — most event types name a server in a scalar field
+			// rather than in the servers.changed embed, so a scoped caller
+			// learned about servers it cannot see through activity, oauth and
+			// security frames. Decided per subscriber, before rendering:
+			// nothing is written back to the shared event.
+			if !eventVisibleToCaller(r.Context(), evt) {
+				continue
+			}
+
 			eventPayload := map[string]interface{}{
-				"payload":   s.maskEventPayload(evt.Payload),
+				"payload":   s.maskEventPayload(s.renderEventPayloadForCaller(r.Context(), evt)),
 				"timestamp": evt.Timestamp.Unix(),
 			}
 
@@ -3844,6 +3968,91 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// renderEventPayloadForCaller renders a runtime event for ONE SSE subscriber.
+//
+// The rule this function exists to obey: the payload map, and the
+// []contracts.Server inside it, are built ONCE in
+// runtime.buildServersChangedPayload and fanned out BY POINTER to every
+// subscriber (internal/runtime/event_bus.go publishEvent). Other SSE
+// goroutines - the admin Web UI, the Swift tray - are concurrently inside
+// json.Marshal on that same map. So a per-connection view is RENDERED into a
+// fresh map and a fresh slice; nothing here ever writes into evt.Payload.
+// Editing it in place would (a) empty the admin's server list, because the Web
+// UI's mergeServers treats each payload as authoritative and deletes absent
+// fields, and (b) be an unsynchronised concurrent map write, which Go turns
+// into a fatal error that takes the whole core down for every client.
+//
+// Three narrowings, all only for servers.changed — every OTHER event type that
+// names a server is dropped for a scoped caller before it reaches this
+// function, by eventVisibleToCaller (sse_scope.go), which also explains why
+// this one type is rendered instead of dropped:
+//
+//   - #1166 - the coalescer extras that NAME a server ("server": "beta") are
+//     removed when the caller may not enumerate it. That extra survived the
+//     original embed filter, and on the notify-only path it was the entire
+//     payload.
+//   - #1166 - a scoped caller gets only the servers it may enumerate, with
+//     `stats` recomputed so total_servers is not a count oracle for the rest.
+//   - #1167 - a caller who MAY see raw values gets the embed dropped entirely
+//     (notify-only). The bus masks this payload unconditionally now, because a
+//     payload produced once for a mixed-privilege audience has no caller to
+//     gate against and must be masked for the least-privileged member of that
+//     audience. Handing an admin the masked embed while GET /api/v1/servers
+//     hands them the real one would make the UI's authoritative merge flicker
+//     between the two, so the embed is degraded to the notify-only shape
+//     buildServersChangedPayload already documents as its fallback, and the
+//     client re-fetches through the gated REST door. Costs one extra GET per
+//     coalescing window, and only when reveal_secret_headers is on.
+func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRuntime.Event) map[string]interface{} {
+	payload := evt.Payload
+	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
+		return payload
+	}
+
+	if s.revealSecrets(ctx) {
+		out := make(map[string]interface{}, len(payload))
+		for k, v := range payload {
+			if k == "servers" || k == "stats" {
+				continue
+			}
+			out[k] = v
+		}
+		return out
+	}
+
+	if !auth.IsScopedCaller(ctx) {
+		return payload
+	}
+
+	// The coalescer's extras name the server whose change won the window
+	// ("server": "beta"), so narrowing the embed alone left the name on the
+	// wire beside it — and on the notify-only path (ListServers failed
+	// upstream, so there is no embed) that extra was the WHOLE payload. The
+	// copy is unconditional now for that reason: there is always something to
+	// scope, embed or not.
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		if isOutOfScopeIdentityField(ctx, k, v) {
+			continue
+		}
+		out[k] = v
+	}
+
+	servers, ok := payload["servers"].([]contracts.Server)
+	if !ok {
+		// Notify-only payload (ListServers failed upstream) - no embed to
+		// narrow, but the extras above still were.
+		return out
+	}
+	scoped := visibleServers(ctx, servers)
+	out["servers"] = scoped
+	if stats, ok := payload["stats"].(*contracts.ServerStats); ok && stats != nil {
+		recomputed := recomputeServerStats(ctx, scoped, *stats)
+		out["stats"] = &recomputed
+	}
+	return out
 }
 
 // eventPayloadTextFields are the runtime-event payload keys whose PRESENCE
@@ -3925,6 +4134,16 @@ func (s *Server) writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, canF
 // Secrets management handlers
 
 func (s *Server) handleGetSecretRefs(w http.ResponseWriter, r *http.Request) {
+	// #1166 round 10 (P5): DENIED to a non-admin caller. Values are masked, so
+	// this enumerates rather than discloses — but it enumerates every keyring
+	// and env secret reference in the whole configuration, including the ones
+	// belonging to servers the caller may not know exist, and the reference
+	// text names them. It is a strictly narrower view of the document
+	// GET /api/v1/config already answers 403 for.
+	if !s.requireAdminRead(w, r, secretsInventoryDenialMessage) {
+		return
+	}
+
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
@@ -3997,6 +4216,12 @@ func (s *Server) handleMigrateSecrets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) {
+	// Same document as /secrets/refs, projected through the config instead of
+	// the providers, and denied for the same reason (P5).
+	if !s.requireAdminRead(w, r, secretsInventoryDenialMessage) {
+		return
+	}
+
 	resolver := s.controller.GetSecretResolver()
 	if resolver == nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
@@ -4239,13 +4464,16 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed servers
 	servers := contracts.ConvertGenericServersToTyped(genericServers)
 
+	// #1166: scope the inventory before anything is derived from it, so the
+	// per-server error/oauth/secret detail below cannot describe a server the
+	// caller may not know exists.
+	servers = visibleServers(r.Context(), servers)
+
 	// Issue #872: last_error can echo the full upstream URL, including query
 	// credentials. Scrub it before surfacing on the doctor route unless the
-	// operator opted out via reveal_secret_headers.
-	reveal := false
-	if cfg, cfgErr := s.controller.GetConfig(); cfgErr == nil && cfg != nil {
-		reveal = cfg.RevealSecretHeaders
-	}
+	// operator opted out via reveal_secret_headers AND the caller is an
+	// authenticated admin (#1167 — this read the flag alone with `r` in scope).
+	reveal := s.revealSecrets(r.Context())
 
 	// Collect diagnostics (legacy format)
 	var upstreamErrors []contracts.DiagnosticIssue
@@ -4309,11 +4537,21 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Telemetry heartbeat payload"
+// @Failure 403 {object} contracts.ErrorResponse "Agent tokens cannot read the deployment telemetry payload"
 // @Failure 503 {object} contracts.ErrorResponse "Telemetry service unavailable"
 // @Router /api/v1/telemetry/payload [get]
 func (s *Server) handleGetTelemetryPayload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// #1166 round 10 (P4): DENIED to a non-admin caller. The heartbeat is a
+	// fleet-wide census — server_count, connected_server_count, tool_count,
+	// server_docker_isolated_count — computed over the whole inventory with no
+	// per-server breakdown to project. It is the exact count oracle this branch
+	// removed from GET /api/v1/status, reachable through a preview route.
+	if !s.requireAdminRead(w, r, telemetryPayloadDenialMessage) {
 		return
 	}
 
@@ -4340,11 +4578,29 @@ func (s *Server) handleGetTelemetryPayload(w http.ResponseWriter, r *http.Reques
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Token statistics"
+// @Failure 403 {object} contracts.ErrorResponse "Agent tokens cannot read deployment-wide token statistics"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/stats/tokens [get]
 func (s *Server) handleGetTokenStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// #1166 follow-up (G3): DENIED to a non-admin caller, not filtered.
+	//
+	// contracts.ServerTokenMetrics.PerServerToolListSizes is a map keyed by
+	// EVERY configured server name — a complete inventory enumeration, which is
+	// the exact thing GET /api/v1/servers now withholds. Projecting the map
+	// through canSeeServer would not be enough: the scalars beside it
+	// (SavedTokens, SavedTokensPercentage, the baseline sizes) are computed over
+	// the whole fleet and cannot be re-derived per server, so a scoped caller
+	// would still hold a cross-tenant oracle in numbers that merely LOOKED
+	// filtered. recomputeServerStats already takes the same position on the same
+	// struct — it DROPS TokenMetrics from GET /api/v1/servers rather than report
+	// it wrongly — and this route is nothing but that struct, so the consistent
+	// answer for the whole document is the one /api/v1/config gets: 403.
+	if !s.requireAdminRead(w, r, "Agent tokens cannot read deployment-wide token statistics") {
 		return
 	}
 
@@ -4480,11 +4736,22 @@ func (s *Server) handleGetToolCalls(w http.ResponseWriter, r *http.Request) {
 	var total int
 	var err error
 
+	// #1166 follow-up (G2): the caller's entitlement goes DOWN into the read,
+	// not over its result. These records carry the arguments and responses of
+	// every tool call on every server; a scoped token had no gate here at all.
+	// Filtering the returned page instead would leave `total` counting the
+	// records the page no longer contains — a broken pager, and a count oracle
+	// for exactly what was hidden.
+	var scope storage.ToolCallScope
+	if allowed, scoped := scopeAllowedServers(r.Context()); scoped {
+		scope = allowed
+	}
+
 	// Get tool calls - either filtered by session or all
 	if sessionID != "" {
-		toolCalls, total, err = s.controller.GetToolCallsBySession(sessionID, limit, offset)
+		toolCalls, total, err = s.controller.GetToolCallsBySession(sessionID, limit, offset, scope)
 	} else {
-		toolCalls, total, err = s.controller.GetToolCalls(limit, offset)
+		toolCalls, total, err = s.controller.GetToolCalls(limit, offset, scope)
 	}
 
 	if err != nil {
@@ -4533,6 +4800,15 @@ func (s *Server) handleGetToolCallDetail(w http.ResponseWriter, r *http.Request)
 	toolCall, err := s.controller.GetToolCallByID(id)
 	if err != nil {
 		s.logger.Errorw("Failed to get tool call detail", "id", id, "error", err)
+		s.writeError(w, r, http.StatusNotFound, "Tool call not found")
+		return
+	}
+
+	// #1166 follow-up (G2): a record on a server the caller may not see takes
+	// the SAME exit as an id that does not exist — same status, same message.
+	// The oracle for this is status parity with an unknown id, not "the body
+	// omits the server name": this 404 body echoes nothing of the request.
+	if toolCall == nil || !canSeeServer(r.Context(), toolCall.ServerName) {
 		s.writeError(w, r, http.StatusNotFound, "Tool call not found")
 		return
 	}
@@ -4676,6 +4952,19 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #1166 follow-up (G2): replay dispatches a real call to the recorded
+	// server, so it must answer the same entitlement question the read door
+	// does — and with the same 404, so it cannot be used to probe for ids the
+	// caller may not read. Same shape as the /servers/{id} subtree gate: an
+	// out-of-scope record and an unknown id are one response.
+	if auth.IsScopedCaller(r.Context()) {
+		recorded, lookupErr := s.controller.GetToolCallByID(id)
+		if lookupErr != nil || recorded == nil || !canSeeServer(r.Context(), recorded.ServerName) {
+			s.writeError(w, r, http.StatusNotFound, "Tool call not found")
+			return
+		}
+	}
+
 	// Replay the tool call with modified arguments. The request context travels
 	// with it so a client that disconnects while the replay waits for a
 	// concurrency slot releases that slot immediately (spec 093 FR-005).
@@ -4725,6 +5014,7 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 // @Produce      json
 // @Success      200  {object}  contracts.GetConfigResponse  "Configuration retrieved successfully"
 // @Failure      401  {object}  contracts.ErrorResponse      "Unauthorized - missing or invalid API key"
+// @Failure      403  {object}  contracts.ErrorResponse      "Agent tokens cannot read the configuration document"
 // @Failure      500  {object}  contracts.ErrorResponse      "Failed to get configuration"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
@@ -4732,6 +5022,28 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Issues #1166 and #1167. This route was registered as a bare
+	// r.Get("/config", …) beside POST/PATCH twins that DO carry
+	// auth.ServerOpConfigWrite, so a scoped read-only agent token GET the
+	// whole document: every server name (the #1166 enumeration), and — with
+	// reveal_secret_headers on — every env value, header, oauth.client_secret,
+	// URL credential AND the global admin api_key. That last one is a
+	// privilege-escalation primitive: the scoped token reads the key that
+	// grants full admin on every route it is denied.
+	//
+	// This is an admin document, not a server list, so it is DENIED rather
+	// than filtered. Filtering it leaf by leaf is an open-ended allowlist
+	// problem (profiles[].servers enumerates names a second time, api_key,
+	// listen, docker_isolation.extra_args, registries, telemetry endpoints…)
+	// and it is a GET-then-POST-back document whose write twin binds
+	// mcpServers BY NAME — serving a truncated document that looks complete is
+	// the #1142 corruption shape. A denial has no allowlist to keep in sync.
+	// Agents that need server metadata have GET /api/v1/servers, which returns
+	// their scoped subset with richer runtime state than this document holds.
+	if !s.requireAdminRead(w, r, "Agent tokens cannot read the configuration document") {
 		return
 	}
 
@@ -4768,11 +5080,12 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// the #1142 corruption. The two are one change.
 	//
 	// `reveal_secret_headers` opts out exactly as it does on GET
-	// /api/v1/servers and the /events payload; the flag is read off the RUNNING
-	// config, not the desired one, so a client cannot widen its own read by
-	// staging the flag and re-reading before the restart.
+	// /api/v1/servers; the flag is read off the RUNNING config, not the desired
+	// one, so a client cannot widen its own read by staging the flag and
+	// re-reading before the restart, and (#1167) it is ANDed with the caller's
+	// identity so only an authenticated admin can exercise the opt-out.
 	published := cfg
-	if !s.revealSecretHeaders() {
+	if !s.revealSecrets(r.Context()) {
 		published = oauth.RedactedConfig(cfg)
 		if published == nil {
 			// Fail CLOSED. Serving the unmasked config because the walk could
@@ -4790,14 +5103,6 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
-}
-
-// revealSecretHeaders reports the operator's opt-out of secret masking. Read
-// from the RUNNING config, which is the same source redactServerSecrets uses,
-// so the two doors cannot disagree about whether this response is masked.
-func (s *Server) revealSecretHeaders() bool {
-	cfg, err := s.controller.GetConfig()
-	return err == nil && cfg != nil && cfg.RevealSecretHeaders
 }
 
 // handleValidateConfig godoc
@@ -5151,7 +5456,14 @@ func (s *Server) writeApplyConfigError(w http.ResponseWriter, r *http.Request, m
 // Copies rather than mutates: the SSE value is a map owned by the publisher,
 // and refreshing it in place would edit something another goroutine may hold.
 // Keys are preserved rather than dropped — clients read data.status.*.
-func withLiveUpstreamStats(status interface{}, live map[string]interface{}) interface{} {
+//
+// ctx carries the caller so `message` can be scoped. That string is written by
+// runtime.UpdatePhaseMessage as "Connected to %d/%d servers, retrying..." — a
+// verbatim count of the WHOLE inventory, sitting one key away from the
+// total_servers that #1166 recomputed precisely so it would stop being a count
+// oracle. A scoped caller gets it blanked; `phase` (Ready/Loading/…) survives,
+// carries no counts, and is what clients switch on.
+func withLiveUpstreamStats(ctx context.Context, status interface{}, live map[string]interface{}) interface{} {
 	snapshot, ok := status.(map[string]interface{})
 	if !ok || live == nil {
 		return status
@@ -5163,6 +5475,9 @@ func withLiveUpstreamStats(status interface{}, live map[string]interface{}) inte
 	refreshed["upstream_stats"] = live
 	if totalTools, ok := live["total_tools"].(int); ok {
 		refreshed["tools_indexed"] = totalTools
+	}
+	if _, present := refreshed["message"]; present && auth.IsScopedCaller(ctx) {
+		refreshed["message"] = ""
 	}
 	return refreshed
 }
@@ -5740,6 +6055,7 @@ func getBool(m map[string]interface{}, key string) bool {
 // @Success      200     {object}  contracts.GetSessionsResponse     "Sessions retrieved successfully"
 // @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter"
 // @Failure      401     {object}  contracts.ErrorResponse           "Unauthorized - missing or invalid API key"
+// @Failure      403     {object}  contracts.ErrorResponse           "Agent tokens cannot read MCP session history"
 // @Failure      405     {object}  contracts.ErrorResponse           "Method not allowed"
 // @Failure      500     {object}  contracts.ErrorResponse           "Failed to get sessions"
 // @Security     ApiKeyAuth
@@ -5748,6 +6064,10 @@ func getBool(m map[string]interface{}, key string) bool {
 func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
 		return
 	}
 
@@ -5813,6 +6133,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 // @Success      200  {object}  contracts.GetSessionDetailResponse      "Session details retrieved successfully"
 // @Failure      400  {object}  contracts.ErrorResponse                 "Session ID required"
 // @Failure      401  {object}  contracts.ErrorResponse                 "Unauthorized - missing or invalid API key"
+// @Failure      403  {object}  contracts.ErrorResponse                 "Agent tokens cannot read MCP session history"
 // @Failure      404  {object}  contracts.ErrorResponse                 "Session not found"
 // @Failure      405  {object}  contracts.ErrorResponse                 "Method not allowed"
 // @Security     ApiKeyAuth
@@ -5821,6 +6142,10 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSessionDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
 		return
 	}
 
@@ -6271,6 +6596,11 @@ func (s *Server) handleAnnotationCoverage(w http.ResponseWriter, r *http.Request
 	for _, srv := range allServers {
 		name, _ := srv["name"].(string)
 		if name == "" {
+			continue
+		}
+		// #1166: same enumeration gate as GET /api/v1/tools — this route emits
+		// one row per server name.
+		if !canSeeServer(r.Context(), name) {
 			continue
 		}
 		// #1064: a quarantined server's tools are not available, so they are

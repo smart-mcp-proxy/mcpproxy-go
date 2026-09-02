@@ -172,9 +172,92 @@ mcpproxy token create --name deploy-bot --servers github,gitlab --permissions re
 mcpproxy token create --name all-access --servers "*" --permissions read
 ```
 
-Server scoping is enforced at two levels:
+Server scoping is enforced at three levels:
 1. **Tool discovery** (`retrieve_tools`) — only returns tools from allowed servers
 2. **Tool execution** (`call_tool_*`) — blocks calls to out-of-scope servers
+3. **Enumeration** — since issue #1166, `allowed_servers` also scopes what the
+   REST surface will *list*, not only what the token may call. A scoped token
+   sees only its own servers on `GET /api/v1/servers` (array **and** the
+   `stats` counters), `GET /api/v1/status` (`upstream_stats`), the `/events`
+   SSE stream, `GET /api/v1/tools`, `GET /api/v1/index/search`,
+   `GET /api/v1/diagnostics` / `doctor`, `GET /api/v1/profiles`,
+   `GET /api/v1/annotations/coverage` and `GET /api/v1/security/scans`.
+
+   **The whole `/api/v1/servers/{id}` subtree** answers `404 Server not found`
+   for a server outside the scope — `tools`, `logs`, `tool-calls`,
+   `diagnostics`, `scan/status`, `scan/report`, `scan/files`, `integrity`,
+   `tools/export`, `tools/{tool}/diff` and every sub-resource added later, since
+   the gate is a middleware on the subtree. It is the *same* `404` a server that
+   does not exist returns — byte for byte, once the echoed name is normalised —
+   so the response cannot be used to probe for hidden servers. `logs` matters
+   most: upstream stderr routinely echoes the argv and env the server process
+   was launched with.
+
+   **The activity, tool-call and usage doors** are scoped to records
+   attributable to an allowed server: `GET /api/v1/activity`,
+   `/activity/summary`, `/activity/usage`, `/activity/export`, `/activity/{id}`,
+   `GET /api/v1/tool-calls` and `/tool-calls/{id}` (plus its `/replay`). The
+   entitlement is applied inside the query, so `total` and the page always
+   describe the same record set, and a `?server=` filter narrows *within* the
+   scope rather than escaping it. Records with no server attribution
+   (`system_start`, `config_change`, …) are operator-plane events and are not
+   shown. On `/activity/usage`, aggregates that cannot be re-derived per server
+   — the tokens-saved headline and the global timeline — are omitted rather than
+   reported fleet-wide.
+
+   **Denied outright (`403`)** to agent tokens, because there is nothing
+   per-server to project:
+   - `GET /api/v1/config` — an admin document, and it carries the admin API key.
+   - `GET /api/v1/stats/tokens` — `per_server_tool_list_sizes` is keyed by every
+     configured server, and the scalars beside it are fleet-wide.
+   - `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}` — an MCP session
+     describes a *client* and the user's workspace, with no server attribution.
+   - `GET /api/v1/security/overview`, `GET /api/v1/security/queue` — fleet-wide
+     scan and finding counts, and a queue that names every server waiting to be
+     scanned. A scoped caller reads its own server's verdict from
+     `GET /api/v1/servers/{id}/scan/status`, which the subtree gate scopes.
+   - `GET /api/v1/telemetry/payload` — the heartbeat carries `server_count`,
+     `connected_server_count`, `tool_count` and `server_docker_isolated_count`:
+     precisely the count oracle removed from `/status`.
+   - `GET /api/v1/onboarding/state`, `POST /api/v1/onboarding/mark` (which
+     echoes the same document) — `configured_server_count` is an inventory size
+     and `connected_client_ids` is the operator's MCP-client inventory.
+   - `GET /api/v1/secrets/refs`, `GET /api/v1/secrets/config` — values are
+     masked, so this is a credential *inventory* rather than a disclosure, but
+     it names the secrets of servers the caller may not enumerate. A strictly
+     narrower view of the document `GET /api/v1/config` already denies.
+
+   **Withheld rather than denied.** `GET /api/v1/status` stays open — agents
+   legitimately poll it for liveness — but its `activation` block is omitted for
+   a scoped caller. `mcp_clients_seen_ever` is the operator's MCP-client
+   inventory and `retrieve_tools_calls_24h` is an exact deployment-wide counter,
+   neither of which has a per-server part to project. The key is already absent
+   when telemetry is unwired, so clients tolerate its absence.
+
+   `PUT /api/v1/profiles/active` answers `403`: the active profile is
+   server-level shared state that decides what the Web UI and tray render, so a
+   read-scoped credential must not be able to change it. It is gated by the same
+   `config_write` policy as the other config-level writes.
+
+   On the `/events` stream, scoping applies **per event**, not only to the
+   `servers.changed` server list:
+
+   - An event that names a server the token may not enumerate — through
+     `server_name`, `server`, `target_server` or `affected_entity`, which is
+     every activity, OAuth and security event — is **not delivered** to that
+     subscriber at all. It is dropped rather than blanked, because a frame with
+     the name removed still discloses the mutation, its timing and the number
+     of servers being hidden.
+   - `servers.changed` is the exception and is always delivered, because it is
+     coalesced last-write-wins and carries the state a client renders. Its
+     server list is narrowed, its `stats` recomputed, and any coalescer extra
+     that names an out-of-scope server (`"server": "beta"`) is removed.
+   - `config.reloaded`, `config.saved` and `secrets.changed` announce mutations
+     of the admin config document and are dropped, matching the `403` on
+     `GET /api/v1/config`.
+
+   Admin subscribers — the API key, the Web UI, the tray over the unix socket —
+   receive every event unchanged; the stream is rendered per connection.
 
 ## Administrative Operations Are Admin-Only
 
@@ -186,7 +269,7 @@ Denied to agent tokens on both surfaces:
 - **Security state**: quarantine, unquarantine, tool approve/block, and the security scanner (scan start/cancel, security approve/reject)
 - **Config & registries**: applying/patching configuration (which can add/remove/enable/disable servers) and mutating registry sources — an agent must not bypass the per-server gate by rewriting config or a registry wholesale
 
-On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (mutating `/api/v1/servers/...`, `/api/v1/config/...`, and `/api/v1/registries/...` routes) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, config/registry reads, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface).
+On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (mutating `/api/v1/servers/...`, `/api/v1/config/...`, and `/api/v1/registries/...` routes) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, registry reads, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface). Those reads are **scope-filtered** as described above. `GET /api/v1/config` is the exception: it is an admin document (it carries the global `api_key`, every server's credentials, and a second enumeration of server names under `profiles[].servers`), so it returns `403` for an agent token rather than a filtered view.
 
 ## Profile Pinning
 

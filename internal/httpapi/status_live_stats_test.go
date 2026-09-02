@@ -32,7 +32,7 @@ func liveStats() map[string]interface{} {
 }
 
 func TestWithLiveUpstreamStats_RefreshesTheStaleNestedFields(t *testing.T) {
-	out, ok := withLiveUpstreamStats(staleSnapshot(), liveStats()).(map[string]interface{})
+	out, ok := withLiveUpstreamStats(t.Context(), staleSnapshot(), liveStats()).(map[string]interface{})
 	require.True(t, ok)
 
 	assert.Equal(t, 13, out["tools_indexed"], "tools_indexed must track the live count")
@@ -49,7 +49,7 @@ func TestWithLiveUpstreamStats_RefreshesTheStaleNestedFields(t *testing.T) {
 // Unrelated keys survive: clients read data.status.* and the fix must refresh,
 // not replace, the snapshot.
 func TestWithLiveUpstreamStats_PreservesEverythingElse(t *testing.T) {
-	out := withLiveUpstreamStats(staleSnapshot(), liveStats()).(map[string]interface{})
+	out := withLiveUpstreamStats(t.Context(), staleSnapshot(), liveStats()).(map[string]interface{})
 	assert.Equal(t, true, out["running"])
 	assert.Equal(t, "Ready", out["phase"])
 	assert.Equal(t, "127.0.0.1:8080", out["listen_addr"])
@@ -59,7 +59,7 @@ func TestWithLiveUpstreamStats_PreservesEverythingElse(t *testing.T) {
 // it in place would mutate something another goroutine may still hold.
 func TestWithLiveUpstreamStats_DoesNotMutateItsInput(t *testing.T) {
 	in := staleSnapshot()
-	withLiveUpstreamStats(in, liveStats())
+	withLiveUpstreamStats(t.Context(), in, liveStats())
 
 	assert.Equal(t, 0, in["tools_indexed"], "the caller's snapshot must be untouched")
 	original := in["upstream_stats"].(map[string]interface{})
@@ -68,18 +68,18 @@ func TestWithLiveUpstreamStats_DoesNotMutateItsInput(t *testing.T) {
 
 // Degenerate inputs must pass through rather than panic or blank the payload.
 func TestWithLiveUpstreamStats_PassesThroughWhenItCannotRefresh(t *testing.T) {
-	assert.Nil(t, withLiveUpstreamStats(nil, liveStats()))
+	assert.Nil(t, withLiveUpstreamStats(t.Context(), nil, liveStats()))
 
 	// A non-map status (a future typed snapshot) is returned untouched.
-	assert.Equal(t, "opaque", withLiveUpstreamStats("opaque", liveStats()))
+	assert.Equal(t, "opaque", withLiveUpstreamStats(t.Context(), "opaque", liveStats()))
 
 	// No live stats to apply: keep what we had rather than emit nothing.
-	unchanged := withLiveUpstreamStats(staleSnapshot(), nil).(map[string]interface{})
+	unchanged := withLiveUpstreamStats(t.Context(), staleSnapshot(), nil).(map[string]interface{})
 	assert.Equal(t, 0, unchanged["tools_indexed"])
 
 	// total_tools absent or wrongly typed leaves tools_indexed alone rather
 	// than zeroing it.
-	partial := withLiveUpstreamStats(staleSnapshot(), map[string]interface{}{"servers": map[string]interface{}{}}).(map[string]interface{})
+	partial := withLiveUpstreamStats(t.Context(), staleSnapshot(), map[string]interface{}{"servers": map[string]interface{}{}}).(map[string]interface{})
 	assert.Equal(t, 0, partial["tools_indexed"])
 	assert.NotNil(t, partial["upstream_stats"])
 }

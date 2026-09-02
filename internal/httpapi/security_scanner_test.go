@@ -41,6 +41,11 @@ type mockSecurityController struct {
 	queueRunning bool
 
 	deepScanEnabled bool
+
+	// What the last ConfigureScanner call carried.
+	configuredEnv   map[string]string
+	configuredImage string
+	configureCalls  int
 }
 
 func (m *mockSecurityController) DeepScanEnabled() bool {
@@ -60,6 +65,13 @@ func (m *mockSecurityController) RemoveScanner(_ context.Context, id string) err
 }
 
 func (m *mockSecurityController) ConfigureScanner(_ context.Context, id string, env map[string]string, dockerImage string) error {
+	// Captured so a test can assert what the handler actually forwarded to the
+	// service, not merely that the request returned 200. The real service
+	// MERGES env into ConfiguredEnv, so "the sentinel never arrives" and "the
+	// stored secret survives" are the same assertion.
+	m.configuredEnv = env
+	m.configuredImage = dockerImage
+	m.configureCalls++
 	return m.configureErr
 }
 

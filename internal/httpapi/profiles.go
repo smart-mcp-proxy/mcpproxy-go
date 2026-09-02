@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"net/http"
 	"strings"
 )
@@ -60,7 +61,23 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 	toolCounts := s.serverToolCounts()
 	out := make([]ProfileSummary, 0, len(cfg.Profiles))
 	for i := range cfg.Profiles {
+		// #1166: profiles[].servers enumerates upstream server names a second
+		// time, independently of mcpServers — which is precisely why
+		// GET /api/v1/config denies a scoped caller rather than filtering. The
+		// denial buys nothing if this sibling route hands the same names back,
+		// so narrow the list here too. EffectiveServers returns a fresh slice,
+		// but it is rebuilt anyway rather than compacted, so nothing derived
+		// from the live config is ever mutated.
 		eff := cfg.Profiles[i].EffectiveServers(cfg)
+		if auth.IsScopedCaller(r.Context()) {
+			scoped := make([]string, 0, len(eff))
+			for _, name := range eff {
+				if canSeeServer(r.Context(), name) {
+					scoped = append(scoped, name)
+				}
+			}
+			eff = scoped
+		}
 		tc := 0
 		for _, name := range eff {
 			tc += toolCounts[name]
@@ -110,6 +127,7 @@ type SetActiveProfileRequest struct {
 // @Param body body SetActiveProfileRequest true "Profile slug to activate (empty clears)"
 // @Success 200 {object} contracts.SuccessResponse "Active profile updated"
 // @Failure 400 {object} contracts.ErrorResponse "Invalid request body"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot change the active profile)"
 // @Failure 404 {object} contracts.ErrorResponse "Unknown profile"
 // @Router /api/v1/profiles/active [put]
 func (s *Server) handleSetActiveProfile(w http.ResponseWriter, r *http.Request) {

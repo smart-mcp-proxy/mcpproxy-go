@@ -174,3 +174,73 @@ func AdminUserContext(userID, email, displayName, provider string) *AuthContext 
 		Provider:    provider,
 	}
 }
+
+// RevealSecretsAllowed is THE shared predicate for "may this caller be handed
+// raw credential values?" (issues #1148 and #1167).
+//
+// Both halves are required and neither is sufficient:
+//
+//   - flagEnabled — the operator's `reveal_secret_headers` opt-in, and
+//   - CanRevealSecrets() — an authenticated, non-anonymous admin identity.
+//
+// #1167: the MCP door already ANDed the two; the REST list, the whole-config
+// read, both doctor doors and the per-server diagnostics door checked the flag
+// ALONE, so a read-only agent token scoped to one server received every other
+// server's Authorization header, URL query credential, argv secret and env
+// secret in plaintext the moment an operator turned the flag on. Every
+// request-scoped door now reads the answer from here so they cannot drift
+// apart again.
+//
+// Fails CLOSED on absence: a nil ctx (an in-process or future background
+// caller) and a ctx with no AuthContext both yield false. A payload with no
+// caller has no identity to check, so it gets masked values.
+func RevealSecretsAllowed(ctx context.Context, flagEnabled bool) bool {
+	if !flagEnabled || ctx == nil {
+		return false
+	}
+	return AuthContextFromContext(ctx).CanRevealSecrets()
+}
+
+// CanEnumerateServer is THE shared predicate for "may this caller SEE that a
+// server named `name` exists?" (issue #1166).
+//
+// The MCP door has filtered upstream enumeration through
+// AuthContext.CanAccessServer since Spec 028; the REST doors never did, so a
+// token scoped to `allowed_servers: ["alpha"]` still enumerated every
+// configured server on GET /api/v1/servers, /api/v1/config, /api/v1/tools,
+// /api/v1/status and the /events stream. Reads on both surfaces now answer
+// from one place.
+//
+// Fails OPEN on absence, deliberately and in exact mirror of
+// AuthorizeServerOp: apiKeyAuthMiddleware forwards a request with NO
+// AuthContext whenever the controller has no usable config (the testing /
+// bootstrap passthrough), and treating that as "sees nothing" would blank the
+// server list for every such caller. Absence of a token must not be stricter
+// than a scoped token — it must be treated exactly as today's unrestricted
+// behaviour. The unauthenticated /mcp back-compat context (AnonymousContext)
+// is admin-typed and likewise unrestricted here; hiding a server's NAME from
+// it is not the boundary this predicate defends, revealing its CREDENTIALS is,
+// and that is what RevealSecretsAllowed refuses it.
+func CanEnumerateServer(ctx context.Context, name string) bool {
+	if ctx == nil {
+		return true
+	}
+	ac := AuthContextFromContext(ctx)
+	if ac == nil || ac.IsAdmin() {
+		return true
+	}
+	return ac.CanAccessServer(name)
+}
+
+// IsScopedCaller reports whether ctx carries a non-admin identity whose
+// visibility is limited by AllowedServers. It is the cheap short-circuit for
+// handlers that would otherwise copy a payload just to filter it: an admin (or
+// an absent context, per CanEnumerateServer) sees everything, so the payload
+// can be forwarded untouched.
+func IsScopedCaller(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ac := AuthContextFromContext(ctx)
+	return ac != nil && !ac.IsAdmin()
+}

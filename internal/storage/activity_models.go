@@ -280,6 +280,24 @@ type ActivityFilter struct {
 	AgentName string // Filter by agent token name in metadata
 	AuthType  string // Filter by auth type: "admin" or "agent"
 
+	// AllowedServers is an AUTHORIZATION filter, not a user-facing one (#1166
+	// follow-up): nil means unrestricted, a non-nil slice restricts matches to
+	// records attributable to one of these server names ("*" is a wildcard, as
+	// in auth.AuthContext.AllowedServers).
+	//
+	// It lives HERE, in the predicate ListActivities and StreamActivities both
+	// run, rather than as a post-filter over a returned page. A post-filter
+	// shrinks the page while `total` keeps counting the records it removed —
+	// which is its own count oracle for exactly what was hidden, and breaks
+	// pagination for the caller besides.
+	//
+	// An empty non-nil slice matches NOTHING, deliberately: it is the shape a
+	// token allowed no servers produces, and treating it as unrestricted would
+	// open the door it exists to close. A record with no ServerName (system
+	// start/stop, config change) is likewise not matched — those are
+	// operator-plane events with no server to be entitled to.
+	AllowedServers []string
+
 	// ExcludeCallToolSuccess filters out call_tool_* internal tool calls, which
 	// are always paired with a canonical record carrying the same request_id:
 	// successful and failed ones with the upstream tool_call record
@@ -328,7 +346,25 @@ func (f *ActivityFilter) ValidateForExport() {
 	}
 }
 
-// Matches checks if an activity record matches the filter criteria
+// serverAllowed applies the AllowedServers authorization filter. nil means
+// unrestricted; see the field comment for why empty-but-non-nil matches nothing
+// and why an unattributed record is not matched.
+func (f *ActivityFilter) serverAllowed(serverName string) bool {
+	if f.AllowedServers == nil {
+		return true
+	}
+	if serverName == "" {
+		return false
+	}
+	for _, allowed := range f.AllowedServers {
+		if allowed == "*" || allowed == serverName {
+			return true
+		}
+	}
+	return false
+}
+
+// Matches checks if an activity record matches the filter criteria.
 func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 	// Check types filter (Spec 024: OR logic for multiple types)
 	if len(f.Types) > 0 {
@@ -342,6 +378,12 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		if !typeMatches {
 			return false
 		}
+	}
+
+	// Authorization filter first: a caller must never be able to widen its own
+	// visibility with any of the query-string filters below it.
+	if !f.serverAllowed(record.ServerName) {
+		return false
 	}
 
 	// Check server filter

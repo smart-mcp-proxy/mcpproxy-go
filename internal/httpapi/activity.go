@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -129,6 +130,26 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 	return filter
 }
 
+// applyActivityScope stamps the caller's server entitlement onto a filter
+// (#1166 follow-up, G2).
+//
+// The activity log is the widest read door on the mux: it carries tool-call
+// ARGUMENTS and RESPONSES for every server, which is strictly more than the
+// enumeration the earlier round closed. The entitlement goes into
+// storage.ActivityFilter so ListActivities' `total` and StreamActivities' whole
+// pass see the same predicate the page does — a post-filter would shrink the
+// page while `total` kept counting the records it removed.
+//
+// It is applied AFTER parseActivityFilters on purpose: a caller-supplied
+// ?server= narrows within the entitlement, and can never widen past it, because
+// both live in the same Matches() call and the authorization term is evaluated
+// first.
+func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
+	if allowed, scoped := scopeAllowedServers(ctx); scoped {
+		filter.AllowedServers = allowed
+	}
+}
+
 // handleListActivity handles GET /api/v1/activity
 // @Summary List activity records
 // @Description Returns paginated list of activity records with optional filtering
@@ -164,6 +185,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Router /api/v1/activity [get]
 func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	filter := parseActivityFilters(r)
+	applyActivityScope(r.Context(), &filter)
 
 	activities, total, err := s.controller.ListActivities(filter)
 	if err != nil {
@@ -238,7 +260,12 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if activity == nil {
+	// #1166 follow-up (G2): a record the caller is not entitled to takes the
+	// SAME exit as one that does not exist — same status, same message. The
+	// oracle is status parity with an absent id, not "the body omits the server
+	// name": this route's 404 body carries no echo of the caller's input, so an
+	// absence assertion would pass vacuously.
+	if activity == nil || !canSeeServer(r.Context(), activity.ServerName) {
 		s.writeError(w, r, http.StatusNotFound, "Activity not found")
 		return
 	}
@@ -520,6 +547,7 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Router /api/v1/activity/export [get]
 func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 	filter := parseActivityFilters(r)
+	applyActivityScope(r.Context(), &filter)
 
 	// Re-parse limit/offset from query for export — parseActivityFilters caps at 100 via Validate(),
 	// but export supports up to 50000. Re-read raw values and apply export-specific validation.
@@ -709,6 +737,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	filter.StartTime = startTime
 	filter.EndTime = endTime
 	filter.Limit = 0
+	applyActivityScope(r.Context(), &filter)
 
 	// Calculate summary statistics
 	var totalCount, successCount, errorCount, blockedCount, rejectedCount, otherCount int
@@ -892,7 +921,8 @@ const (
 	usageTokenSource   = "bytes" // size-based proxy (FR-006); FR-010 → "estimated_tokens"
 )
 
-// usageParams holds the validated query parameters for the usage endpoint.
+// usageParams holds the validated query parameters for the usage endpoint,
+// plus the caller's server entitlement (#1166 follow-up, G2).
 type usageParams struct {
 	window string // "24h" | "7d" | "all"
 	server string
@@ -900,11 +930,70 @@ type usageParams struct {
 	status string // "" | "success" | "error" | "blocked" | "rejected"
 	top    int
 	sort   string // "calls" | "resp_bytes" | "error_rate" | "p95"
+
+	// allowed is the scoped caller's server entitlement; scoped says whether
+	// one applies at all. They are separate because a token allowed NO servers
+	// produces an empty-but-non-nil slice that must hide everything, while an
+	// admin (or the no-AuthContext bootstrap passthrough) is unrestricted.
+	allowed []string
+	scoped  bool
+}
+
+// canSee reports whether this caller may see rows attributed to serverName.
+func (p usageParams) canSee(serverName string) bool {
+	if !p.scoped {
+		return true
+	}
+	if serverName == "" {
+		return false
+	}
+	for _, allowed := range p.allowed {
+		if allowed == "*" || allowed == serverName {
+			return true
+		}
+	}
+	return false
 }
 
 // cacheKey is a stable identity for the params, used by the short-TTL cache.
+//
+// The caller's entitlement is PART of that identity. handleActivityUsage caches
+// the built response for usage_cache_ttl in a process-wide map: without the
+// scope term the first agent token to ask would seed the entry the admin Web UI
+// (and every other tenant) then read for the rest of the TTL, and vice versa.
+// Two tokens with the same allowed-server set legitimately share an entry;
+// nothing else does.
+//
+// The encoding is LENGTH-PREFIXED, and that is a correctness property, not a
+// style choice (round 10, P6). Joining the terms with a bare separator is not
+// injective when the separator can appear inside a term: config validation
+// rejects only a colon in a server name, so a single server literally named
+// `a,b` produced the same key as the scope ["a","b"], and a `?server=` filter
+// value containing a pipe collided across fields the same way. A collision here
+// serves one tenant's cached response to another — the disclosure this whole
+// door exists to prevent, arriving through the cache instead of the query.
 func (p usageParams) cacheKey() string {
-	return strings.Join([]string{p.window, p.server, p.tool, p.status, p.sort, strconv.Itoa(p.top)}, "|")
+	var b strings.Builder
+	write := func(part string) {
+		b.WriteString(strconv.Itoa(len(part)))
+		b.WriteByte(':')
+		b.WriteString(part)
+	}
+	for _, part := range []string{p.window, p.server, p.tool, p.status, p.sort, strconv.Itoa(p.top)} {
+		write(part)
+	}
+	if !p.scoped {
+		write("admin")
+		return b.String()
+	}
+	sorted := append([]string(nil), p.allowed...)
+	sort.Strings(sorted)
+	write("scoped")
+	write(strconv.Itoa(len(sorted)))
+	for _, name := range sorted {
+		write(name)
+	}
+	return b.String()
 }
 
 // windowStart returns the lower time bound for the window relative to now, plus
@@ -932,6 +1021,10 @@ func parseUsageParams(r *http.Request) (usageParams, error) {
 		top:    usageDefaultTop,
 		sort:   usageDefaultSort,
 	}
+	// Resolved HERE, not at the call site, so the entitlement cannot be
+	// forgotten by a future caller and — more importantly — so it is inside
+	// cacheKey() by construction.
+	p.allowed, p.scoped = scopeAllowedServers(r.Context())
 
 	if v := q.Get("window"); v != "" {
 		switch v {
@@ -1040,7 +1133,15 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 		Tools:       make([]contracts.UsageToolStat, 0),
 		Timeline:    make([]contracts.UsageTimeBucket, 0),
 	}
-	if tokens != nil {
+	// #1166 follow-up (G3): the tokens-saved headline and the timeline below are
+	// FLEET-WIDE aggregates. Neither can be re-derived per server — the token
+	// metrics are computed across the whole inventory, and snap.Timeline() is a
+	// set of global buckets with no per-server breakdown — so for a scoped
+	// caller they are dropped rather than reported wrongly. Same position
+	// recomputeServerStats already takes on the same struct (it drops
+	// TokenMetrics from GET /api/v1/servers instead of projecting it), so the
+	// three doors that touch contracts.ServerTokenMetrics agree.
+	if tokens != nil && !p.scoped {
 		resp.TokensSaved = tokens.SavedTokens
 		resp.TokensSavedPercentage = tokens.SavedTokensPercentage
 	}
@@ -1058,6 +1159,13 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	// Per-tool rollup: filter by membership, project to contract rows.
 	rows := make([]contracts.UsageToolStat, 0, len(snap.Tools))
 	for _, tu := range snap.Tools {
+		// Entitlement first, so no query parameter below can widen past it.
+		// Each row names a server and a tool: without this a scoped token read
+		// the whole fleet's tool inventory plus its call volumes off a route
+		// with no gate at all.
+		if !p.canSee(tu.Server) {
+			continue
+		}
 		if p.server != "" && tu.Server != p.server {
 			continue
 		}
@@ -1074,6 +1182,30 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	}
 
 	sortUsageRows(rows, p.sort)
+
+	// Round 10 (P7): the headline for a scoped caller is summed HERE, over the
+	// rows it may see, before the top-N fold discards the tail.
+	//
+	// The early return below skips the timeline loop, which is where an admin's
+	// TotalCalls / TotalErrors are accumulated — so a scoped caller used to be
+	// served `"total_calls":0` beside per-tool rows whose calls plainly summed
+	// to a non-zero number. The response contradicted itself, and a client with
+	// no way to know why reads a zero as "no traffic".
+	//
+	// The population differs from an admin's, and the field comment on
+	// contracts.UsageAggregateResponse says why it must: the timeline is
+	// window-bucketed and global, this sum is the lifetime-cumulative rollup of
+	// the tools active in the window. A scoped caller cannot be given the
+	// former (there is no per-server timeline to project) so it is given a
+	// number that agrees with the rest of ITS OWN response instead of one that
+	// contradicts it. Nothing new is disclosed: every addend is a row the same
+	// response already carries.
+	if p.scoped {
+		for i := range rows {
+			resp.TotalCalls += rows[i].Calls
+			resp.TotalErrors += rows[i].Errors
+		}
+	}
 
 	// Top-N + 'other' fold.
 	if len(rows) > p.top {
@@ -1092,6 +1224,16 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	// window's headline count — computed here, server-side, from the same bars
 	// the response carries, so the tiles and the histogram beneath them agree
 	// and so the Activity Log can print the same number (F1, #1046).
+	//
+	// GLOBAL is the operative word, and it is why a scoped caller gets none of
+	// it: the buckets aggregate every server's traffic with no per-server
+	// breakdown to project, so emitting them would hand a tenant the whole
+	// deployment's call and error volume over time. Empty timeline, zero totals
+	// — the same "cannot be re-derived, so not reported" rule as the tokens
+	// headline above.
+	if p.scoped {
+		return resp
+	}
 	for _, b := range snap.Timeline() {
 		if bounded && b.Start.Before(start) {
 			continue

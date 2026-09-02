@@ -80,7 +80,17 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 			break
 		}
 	}
-	if hit == nil {
+	// #1166: a server the caller may not enumerate takes the SAME exit as one
+	// that does not exist — same status, same message — so the response cannot
+	// be used to probe for hidden servers.
+	//
+	// The scopedServerSubtree middleware now applies exactly this rule to the
+	// whole /servers/{id} subtree, so for a scoped caller the request no longer
+	// reaches this line. Kept anyway: it is the route's own absent-server exit
+	// (hit == nil, which still fires for an admin), and the redundant scope
+	// term costs one predicate call while making this handler correct on its
+	// own if it is ever remounted somewhere without that middleware.
+	if hit == nil || !canSeeServer(r.Context(), serverID) {
 		s.writeError(w, r, http.StatusNotFound, "Server not found: "+serverID)
 		return
 	}
@@ -88,11 +98,10 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 	// Issue #872: health.detail and diagnostic.cause echo the raw connect
 	// error, which carries the full upstream URL (query secrets and all).
 	// Scrub them in parity with the /api/v1/servers list route unless the
-	// operator opted out via reveal_secret_headers.
-	reveal := false
-	if cfg, cfgErr := s.controller.GetConfig(); cfgErr == nil && cfg != nil {
-		reveal = cfg.RevealSecretHeaders
-	}
+	// operator opted out via reveal_secret_headers AND the caller is an
+	// authenticated admin (#1167 — this read the flag alone, with `r` in
+	// scope and its AuthContext simply never consulted).
+	reveal := s.revealSecrets(r.Context())
 
 	resp := map[string]interface{}{
 		"server":    serverID,

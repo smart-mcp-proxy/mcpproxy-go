@@ -1830,7 +1830,10 @@ func (m *Manager) CloseInactiveSessions(inactivityTimeout time.Duration) (int, e
 }
 
 // GetToolCallsBySession retrieves tool calls filtered by session ID
-func (m *Manager) GetToolCallsBySession(sessionID string, limit, offset int) ([]*ToolCallRecord, int, error) {
+// scope restricts the read to a set of server names; nil is unrestricted. It is
+// applied inside the same pass that computes `total`, so the page and the total
+// never describe different record sets (#1166 follow-up).
+func (m *Manager) GetToolCallsBySession(sessionID string, limit, offset int, scope ToolCallScope) ([]*ToolCallRecord, int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -1853,8 +1856,8 @@ func (m *Manager) GetToolCallsBySession(sessionID string, limit, offset int) ([]
 					continue
 				}
 
-				// Filter by session ID
-				if record.MCPSessionID == sessionID {
+				// Filter by session ID, then by the caller's entitlement.
+				if record.MCPSessionID == sessionID && scope.Allows(record.ServerName) {
 					total++
 					if total > offset && len(toolCalls) < limit {
 						toolCalls = append(toolCalls, &record)

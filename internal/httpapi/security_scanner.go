@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
@@ -79,7 +80,9 @@ func (s *Server) handleListScanners(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeSuccess(w, scanners)
+	// #1166 round 10 (P3): ConfiguredEnv holds the vendor API keys an operator
+	// typed into the scanner config dialog. They went out in the clear here.
+	s.writeSuccess(w, scanner.RedactScannersForAPI(scanners))
 }
 
 func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +142,33 @@ func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, map[string]string{"status": "disabled", "id": id})
 }
 
+// stripRedactedScannerEnv removes every entry whose value is the API redaction
+// sentinel, returning a fresh map plus whether anything was dropped. A nil or
+// empty input yields a nil map, so the caller's "nothing to do" check is
+// unchanged.
+//
+// It never mutates the caller's map: the decoded request body is not shared
+// today, but the whole point of this guard is that a future caller must not be
+// able to reintroduce the write by handing us a map it also uses.
+func stripRedactedScannerEnv(env map[string]string) (map[string]string, bool) {
+	if len(env) == 0 {
+		return nil, false
+	}
+	out := make(map[string]string, len(env))
+	dropped := false
+	for k, v := range env {
+		if v == scanner.RedactedEnvValue {
+			dropped = true
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil, dropped
+	}
+	return out, dropped
+}
+
 func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
 		return
@@ -157,12 +187,28 @@ func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(req.Env) == 0 && req.DockerImage == "" {
+	// #1166 round 11: the read doors redact every literal env value to
+	// scanner.RedactedEnvValue, so a client that GETs /security/scanners and
+	// posts the document back would store the sentinel OVER the operator's real
+	// API key — a silent credential destruction that leaves the scanner
+	// authenticating as "***". The Web UI was taught to skip the sentinel, but
+	// the server must not depend on a cooperating client; any API caller, CLI
+	// or script can round-trip the redacted document. Drop those entries here.
+	// ConfigureScanner MERGES into ConfiguredEnv, so an omitted key keeps its
+	// stored value — which is exactly the semantics the sentinel means.
+	env, droppedRedacted := stripRedactedScannerEnv(req.Env)
+	if len(env) == 0 && req.DockerImage == "" {
+		if droppedRedacted {
+			s.writeError(w, r, http.StatusBadRequest,
+				"env values must not be the redaction placeholder "+scanner.RedactedEnvValue+
+					" — omit a key to keep its stored value")
+			return
+		}
 		s.writeError(w, r, http.StatusBadRequest, "env map or docker_image is required")
 		return
 	}
 
-	if err := s.securityController.ConfigureScanner(r.Context(), id, req.Env, req.DockerImage); err != nil {
+	if err := s.securityController.ConfigureScanner(r.Context(), id, env, req.DockerImage); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -184,7 +230,9 @@ func (s *Server) handleGetScannerStatus(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
-	s.writeSuccess(w, sc)
+	// Same redaction as the list door — one scanner is not a lesser disclosure
+	// than all of them (P3).
+	s.writeSuccess(w, sc.RedactedForAPI())
 }
 
 // --- Scan operation handlers ---
@@ -344,6 +392,17 @@ func (s *Server) handleCheckIntegrity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSecurityOverview(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
+		return
+	}
+	// #1166 round 10 (P4): DENIED to a non-admin caller, not filtered. The
+	// overview is nothing but deployment-wide scan and finding counts —
+	// scanned/unscanned server totals and severity tallies computed across the
+	// whole inventory. There is no per-server breakdown to project through
+	// canSeeServer, and the scalars themselves are the count oracle for exactly
+	// what /servers now withholds. Same call as /stats/tokens and
+	// /telemetry/payload; a scoped caller reads its own server's verdict from
+	// /servers/{id}/scan/status, which the subtree gate already scopes.
+	if !s.requireAdminRead(w, r, securityFleetDenialMessage) {
 		return
 	}
 	overview, err := s.securityController.GetSecurityOverview(r.Context())
@@ -575,6 +634,17 @@ func (s *Server) handleGetQueueProgress(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// #1166 round 10 (P4): DENIED to a non-admin caller. QueueProgress.Items
+	// carries a ServerName per queued server — the full inventory, live, on a
+	// route that sits right beside the subtree gate — and the counters around
+	// it (total/pending/running/completed/failed) are fleet-wide scalars that
+	// cannot be re-derived from a filtered item list. Filtering the items alone
+	// would leave those scalars as an exact count of what was hidden, so the
+	// whole document is denied, as /stats/tokens and /security/overview are.
+	if !s.requireAdminRead(w, r, securityFleetDenialMessage) {
+		return
+	}
+
 	progress := s.securityController.GetQueueProgress()
 	if progress == nil {
 		s.writeSuccess(w, map[string]interface{}{
@@ -638,6 +708,20 @@ func (s *Server) handleListScanHistory(w http.ResponseWriter, r *http.Request) {
 		return less
 	})
 
+	// #1166: each summary carries ServerName, so an unfiltered history is a
+	// complete inventory enumeration on a route that is otherwise about scan
+	// results. Rebuild rather than compact — `summaries` comes straight from
+	// the controller.
+	if auth.IsScopedCaller(r.Context()) {
+		scoped := make([]scanner.ScanJobSummary, 0, len(summaries))
+		for _, sum := range summaries {
+			if canSeeServer(r.Context(), sum.ServerName) {
+				scoped = append(scoped, sum)
+			}
+		}
+		summaries = scoped
+	}
+
 	// Status filter
 	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {
 		filtered := summaries[:0]
@@ -694,6 +778,20 @@ func (s *Server) handleGetScanReportByJobID(w http.ResponseWriter, r *http.Reque
 	report, err := s.securityController.GetScanReportByJobID(r.Context(), jobID)
 	if err != nil {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// #1166 round 10 (P4): this is the per-server scan report reached by JOB id
+	// instead of by server name, so it walked around the /servers/{id} subtree
+	// gate — a scoped token read another tenant's findings, scanned file paths
+	// and risk score by guessing or reading a job id. Unlike the queue and the
+	// overview this document IS per-server, so it is scoped rather than denied:
+	// a caller entitled to the server still gets its report.
+	//
+	// The 404 is the same status and shape the unknown-job branch above returns,
+	// so "not yours" and "no such job" are indistinguishable to the caller.
+	if report != nil && !canSeeServer(r.Context(), report.ServerName) {
+		s.writeError(w, r, http.StatusNotFound, "scan report not found: "+jobID)
 		return
 	}
 

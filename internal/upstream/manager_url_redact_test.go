@@ -128,10 +128,14 @@ func TestGetStats_MasksURLAndErrorCredentials(t *testing.T) {
 	assert.Contains(t, rendered, "debug=1", "non-sensitive parameters must stay readable")
 }
 
-// TestGetStats_RevealSecretHeadersOptOut mirrors the escape hatch the two
-// sibling redactors honour, so a user who has deliberately opted in still sees
-// the real URL on every surface rather than only some of them.
-func TestGetStats_RevealSecretHeadersOptOut(t *testing.T) {
+// TestGetStats_MasksURLEvenWhenRevealSet is the DELIBERATE inversion of the old
+// TestGetStats_RevealSecretHeadersOptOut (issue #1167). The escape hatch it
+// used to assert is gone from this producer on purpose: GetStats takes no ctx,
+// so there is no caller identity to AND the operator flag with, and the flag
+// alone handed a scoped agent token the real URL on /api/v1/status. See
+// TestGetStats_MasksEvenWhenRevealSet in round8_stats_rule_test.go for the
+// full rationale.
+func TestGetStats_MasksURLEvenWhenRevealSet(t *testing.T) {
 	const urlSecret = "urlsecret999"
 
 	logger := zap.NewNop()
@@ -158,6 +162,9 @@ func TestGetStats_RevealSecretHeadersOptOut(t *testing.T) {
 	require.NoError(t, err)
 	manager.clients[serverConfig.Name] = client
 
-	assert.Contains(t, fmt.Sprint(manager.GetStats()), urlSecret,
-		"reveal_secret_headers:true must expose the real URL, as it does on /api/v1/servers")
+	rendered := fmt.Sprint(manager.GetStats())
+	assert.NotContains(t, rendered, urlSecret,
+		"reveal_secret_headers:true must NOT expose the real URL on a producer with no caller (#1167)")
+	assert.Contains(t, rendered, "host/mcp",
+		"precondition: the status map still carries the URL, only the credential is masked")
 }
