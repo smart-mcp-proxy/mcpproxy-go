@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -9,6 +10,44 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 )
+
+// posixShellescape mirrors the POSIX branch of shellwrap.Shellescape.
+//
+// The fixtures below must be POSIX-quoted on EVERY host, not just on POSIX
+// ones. shellwrap.Shellescape switches on runtime.GOOS and emits cmd.exe
+// double-quoting on Windows, so building the fixture with it directly made
+// these tests assert Windows quoting against a tokenizer whose whole job is the
+// POSIX `-c "<command line>"` form that WrapWithUserShell produces. That is not
+// a Windows-only code path from the reader's side: a Windows core reads
+// per-server logs and configs that a POSIX host wrote, and the masker must
+// still cover them.
+//
+// TestPosixShellescape_MatchesProduction below pins this against the real
+// implementation on POSIX, so the copy cannot drift from the quoting the
+// product actually emits — which is what building the fixture from
+// shellwrap.Shellescape was protecting in the first place.
+func posixShellescape(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func TestPosixShellescape_MatchesProduction(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shellwrap.Shellescape emits cmd.exe quoting here; the POSIX equivalence cannot be checked")
+	}
+	for _, in := range []string{
+		"", "plain", "SUPERSECRET PASSPHRASE WITH SPACES", "pass'word with spaces",
+		`double"quote`, "semi;colon", "tilde~expand",
+	} {
+		assert.Equal(t, shellwrap.Shellescape(in), posixShellescape(in),
+			"the test's POSIX escaper has drifted from shellwrap.Shellescape for %q", in)
+	}
+}
 
 // Issue #1158, review round 2, finding B4.
 //
@@ -22,15 +61,17 @@ import (
 func TestSpawnArgv_MasksAWhitespaceBearingSecretInTheDashCForm(t *testing.T) {
 	const secret = "SUPERSECRET PASSPHRASE WITH SPACES"
 
-	// Built the way the product builds it, not by hand: Shellescape decides the
-	// quoting, so the test cannot drift from the real shape.
+	// Built the way the product builds it on a POSIX host, not by hand: the
+	// escaper decides the quoting, and TestPosixShellescape_MatchesProduction
+	// pins it against shellwrap.Shellescape, so the test cannot drift from the
+	// real shape.
 	commandLine := strings.Join([]string{
-		shellwrap.Shellescape("npx"),
-		shellwrap.Shellescape("some-mcp"),
-		shellwrap.Shellescape("--api-key"),
-		shellwrap.Shellescape(secret),
+		posixShellescape("npx"),
+		posixShellescape("some-mcp"),
+		posixShellescape("--api-key"),
+		posixShellescape(secret),
 	}, " ")
-	require.Contains(t, commandLine, "'", "sanity: Shellescape must have quoted the spaced value")
+	require.Contains(t, commandLine, "'", "sanity: the spaced value must be quoted")
 
 	for name, got := range map[string]string{
 		"SpawnCommandString": AuditRedaction.SpawnCommandString(commandLine),
@@ -51,7 +92,7 @@ func TestSpawnArgv_MasksAWhitespaceBearingSecretInTheDashCForm(t *testing.T) {
 // the tokenizer into ending the quoted run early.
 func TestSpawnCommandString_HandlesTheEmbeddedQuoteIdiom(t *testing.T) {
 	const secret = "pass'word with spaces"
-	commandLine := "npx some-mcp --api-key " + shellwrap.Shellescape(secret)
+	commandLine := "npx some-mcp --api-key " + posixShellescape(secret)
 	require.Contains(t, commandLine, `'"'"'`, "sanity: this is the idiom under test")
 
 	got := AuditRedaction.SpawnCommandString(commandLine)

@@ -3,7 +3,9 @@ package launcher
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,25 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+// echoWithSecret returns a harmless, short-lived process carrying the secret in
+// its argv, plus the command path the banner is expected to keep as its
+// diagnostic.
+//
+// What is under test here is argv redaction in the spawn banner, which is
+// platform-independent — so this must run on Windows too rather than being
+// skipped the way the POSIX signal-semantics tests in this package are.
+// /bin/echo does not exist there, so the interpreter is chosen per host.
+func echoWithSecret(secret string) (cmd *exec.Cmd, wantPath string) {
+	if runtime.GOOS == "windows" {
+		comspec := os.Getenv("COMSPEC")
+		if comspec == "" {
+			comspec = "cmd.exe"
+		}
+		return exec.Command(comspec, "/c", "echo", "--api-key", secret), comspec
+	}
+	return exec.Command("/bin/echo", "--api-key", secret), "/bin/echo"
+}
 
 // syncBuf is a race-free sink: Spawn's banner and the two pump goroutines all
 // write to it.
@@ -44,8 +65,9 @@ func TestSpawnBanner_OmitsArgvWithoutARedactor(t *testing.T) {
 	const secret = "SUPERSECRETBETAARGVVALUE"
 	sink := &syncBuf{}
 
+	cmd, wantPath := echoWithSecret(secret)
 	spec := &Spec{
-		Cmd:     exec.Command("/bin/echo", "--api-key", secret),
+		Cmd:     cmd,
 		LogSink: sink,
 		Name:    "no-redactor",
 		// RedactArgs deliberately unset.
@@ -59,7 +81,7 @@ func TestSpawnBanner_OmitsArgvWithoutARedactor(t *testing.T) {
 	banner := bannerLine(t, out)
 	assert.NotContains(t, banner, secret,
 		"a nil redactor must not publish argv: %s", banner)
-	assert.Contains(t, banner, "/bin/echo",
+	assert.Contains(t, banner, wantPath,
 		"the command path is the diagnostic that must survive")
 	assert.Contains(t, banner, "redacted")
 }
@@ -70,8 +92,9 @@ func TestSpawnBanner_UsesTheSuppliedRedactor(t *testing.T) {
 	const secret = "SUPERSECRETBETAARGVVALUE"
 	sink := &syncBuf{}
 
+	cmd, _ := echoWithSecret(secret)
 	spec := &Spec{
-		Cmd:     exec.Command("/bin/echo", "--api-key", secret),
+		Cmd:     cmd,
 		LogSink: sink,
 		Name:    "with-redactor",
 		RedactArgs: func(args []string) []string {
