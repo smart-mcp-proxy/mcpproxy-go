@@ -142,7 +142,16 @@ func redactURLCredentialsInError(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := oauth.RedactSensitiveData(err.Error())
+	// #1158 (review round 2, live check): upgraded from RedactSensitiveData to
+	// ScrubUpstreamText, for the reason logSafeErrorField and its twin in
+	// internal/transport were upgraded — the NAME rule cannot see a credential
+	// under an unrecognised query-parameter name. A live run with
+	// `?opaque=ghp_…` in the configured URL still put the token in main.log 15
+	// times, because this ONE seam is what every downstream log site inherits:
+	// managed.Client, upstream.Manager, the supervisor and the runtime all
+	// zap.Error this value, and none of them can be fixed from here except
+	// through the string they are handed.
+	msg := oauth.ScrubUpstreamText(err.Error())
 	if msg == err.Error() {
 		return err
 	}

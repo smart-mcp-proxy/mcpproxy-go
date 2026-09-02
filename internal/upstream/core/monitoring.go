@@ -193,6 +193,17 @@ func (c *Client) monitorStderr(ctx context.Context, stderr io.Reader) {
 				continue
 			}
 
+			// #1158 (review round 2, live check): this is the child's own
+			// stderr, and it lands in THREE places from here — main.log, the
+			// per-server log that GET /api/v1/servers/{id}/logs serves, and the
+			// recent-stderr ring buffer that connectStdio splices into the
+			// "did not respond to MCP initialize" error, which is itself
+			// logged and returned over REST. A live run proved it: a server
+			// whose startup banner named its own token published that token
+			// eight times. Scrubbing the line once here covers all three,
+			// which is the same shape as the launcher's loggerWriter fix.
+			line = oauth.ScrubUpstreamText(line)
+
 			// Log to main logger
 			c.logger.Info("stderr output",
 				zap.String("server", c.config.Name),

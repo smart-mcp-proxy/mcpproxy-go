@@ -1106,6 +1106,13 @@ func LogSafeCallbackQuery(rawQuery string) string {
 	if rawQuery == "" {
 		return rawQuery
 	}
+	if !strings.Contains(rawQuery, "=") {
+		// Not a `k=v` query: a bare token, or something that is not a query
+		// string at all. ParseQuery would turn it into `<whole thing>=`, which
+		// is a rewrite that says nothing; the free-form rule is the honest
+		// answer for a string with no parameter names to judge it by.
+		return ScrubUpstreamText(rawQuery)
+	}
 	values, err := url.ParseQuery(rawQuery)
 	if err != nil {
 		// Unparseable: fall back to the free-form rule rather than publishing

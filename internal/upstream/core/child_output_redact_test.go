@@ -1,6 +1,8 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -8,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Issue #1158, review round 2, investigation 3.
@@ -69,4 +73,58 @@ func TestCappedScrub_ScrubsAndCapsAnUpstreamBody(t *testing.T) {
 	for i := 0; i+8 <= len(secret); i++ {
 		assert.NotContains(t, capped, secret[i:i+8])
 	}
+}
+
+// The stdio stderr PUMP is a different code path from the launcher's
+// loggerWriter and feeds three sinks at once: main.log, the per-server log
+// (served by GET /api/v1/servers/{id}/logs) and the recent-stderr ring buffer
+// that connectStdio splices into the "did not respond to MCP initialize"
+// error. A live run proved all three published a token a child printed on
+// startup.
+func TestMonitorStderr_ScrubsAllThreeSinks(t *testing.T) {
+	const secret = "sk-live-ARGVSECRET0123456789"
+
+	mainCore, mainLogs := observer.New(zap.DebugLevel)
+	perServerCore, perServerLogs := observer.New(zap.DebugLevel)
+	c := &Client{
+		config:         &config.ServerConfig{Name: "alpha"},
+		logger:         zap.New(mainCore),
+		upstreamLogger: zap.New(perServerCore),
+	}
+
+	c.monitorStderr(context.Background(),
+		strings.NewReader("starting with token "+secret+"\nlistening on 127.0.0.1:9331\n"))
+
+	for name, logs := range map[string]*observer.ObservedLogs{"main": mainLogs, "per-server": perServerLogs} {
+		var joined string
+		for _, entry := range logs.All() {
+			joined += entry.Message
+			for k, v := range entry.ContextMap() {
+				joined += " " + k + "=" + toStr(v)
+			}
+		}
+		assert.NotContains(t, joined, secret, "%s log published the child's own credential", name)
+		assert.Contains(t, joined, "listening on 127.0.0.1:9331", "%s log lost an ordinary line", name)
+	}
+
+	snapshot := strings.Join(c.RecentStderrSnapshot(), "\n")
+	assert.NotContains(t, snapshot, secret,
+		"the recent-stderr buffer is spliced into a connect error that is logged AND returned over REST")
+	assert.Contains(t, snapshot, "listening on 127.0.0.1:9331")
+}
+
+// redactURLCredentialsInError is the ONE seam every downstream log site
+// inherits — managed.Client, upstream.Manager, the supervisor and the runtime
+// all zap.Error the value it returns. It ran the NAME rule only, so a
+// credential under an unrecognised query-parameter name reached main.log
+// fifteen times in a live run.
+func TestRedactURLCredentialsInError_RunsTheValueShapedDetector(t *testing.T) {
+	const secret = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+	err := errors.New(`Post "https://127.0.0.1:19999/mcp?opaque=` + secret + `": connection refused`)
+
+	got := redactURLCredentialsInError(err)
+	assert.NotContains(t, got.Error(), secret)
+	assert.Contains(t, got.Error(), "connection refused",
+		"the connect paths classify on this substring; masking must not eat it")
+	assert.ErrorIs(t, got, err, "the original must stay reachable through Unwrap")
 }
