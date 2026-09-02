@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 )
 
@@ -78,9 +79,10 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 
 	sink := newLoggerWriter(c.upstreamLogger, c.logger)
 	spec := &launcher.Spec{
-		Cmd:     cmd,
-		LogSink: sink,
-		Name:    c.config.Name,
+		Cmd:        cmd,
+		LogSink:    sink,
+		Name:       c.config.Name,
+		RedactArgs: logSafeArgs,
 	}
 
 	handle, err := launcher.Spawn(ctx, spec, c.logger)
@@ -316,7 +318,7 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	c.logger.Debug("launcher command prepared",
 		zap.String("server", c.config.Name),
 		zap.String("command", finalCommand),
-		zap.Strings("args", finalArgs),
+		zap.Strings("args", logSafeArgs(finalArgs)),
 		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker", willUseDocker))
 
@@ -343,6 +345,21 @@ func (w *loggerWriter) Write(p []byte) (int, error) {
 	if line == "" {
 		return len(p), nil
 	}
+	// Issue #1158 (review round 2, investigation 3). This is the child
+	// process's own stdout/stderr, written verbatim into
+	// ~/.mcpproxy/logs/server-<name>.log — and that file is not local-only: it
+	// is tailed by `mcpproxy upstream logs`, returned by the
+	// `upstream_servers tail_log` MCP tool, and served over HTTP by
+	// GET /api/v1/servers/{id}/logs. An upstream that echoes its own
+	// configuration on startup ("connecting with token sk-live-…", a stack
+	// trace quoting the request URL) therefore puts a credential on a REST
+	// surface, and it is a credential mcpproxy itself handed the child.
+	//
+	// ScrubUpstreamText is the rule this exact class of string gets everywhere
+	// else in the tree: text originated OUTSIDE mcpproxy's own structured
+	// fields, with no enclosing key to judge it by, so both the name rule and
+	// the value-shaped detector run. Ordinary child output is untouched by it.
+	line = oauth.ScrubUpstreamText(line)
 	switch {
 	case w.primary != nil:
 		w.primary.Info(line)

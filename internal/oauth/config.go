@@ -494,7 +494,7 @@ func CreateOAuthConfigWithExtraParamsAndLogger(ctx context.Context, serverConfig
 		if resource, hasResource := extraParams["resource"]; hasResource {
 			logger.Info("Using manual resource parameter from config",
 				zap.String("server", serverConfig.Name),
-				zap.String("resource", resource))
+				zap.String("resource", logSafeURL(resource)))
 		}
 	}
 
@@ -693,7 +693,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 			logger.Warn("Rate limited during resource auto-detection, exhausted retries, using server URL as fallback",
 				zap.String("server", serverConfig.Name),
 				zap.Int("attempts", resourceDetectMaxRetries+1),
-				zap.String("fallback_resource", serverConfig.URL))
+				zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 			return serverConfig.URL
 
 		case resp.StatusCode >= 400:
@@ -701,7 +701,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 			logger.Debug("Server returned error during resource auto-detection, using server URL as fallback",
 				zap.String("server", serverConfig.Name),
 				zap.Int("status_code", resp.StatusCode),
-				zap.String("fallback_resource", serverConfig.URL))
+				zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 			return serverConfig.URL
 
 		default:
@@ -728,8 +728,8 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 		if err != nil {
 			logger.Debug("Failed to fetch Protected Resource Metadata",
 				zap.String("server", serverConfig.Name),
-				zap.String("metadata_url", metadataURL),
-				zap.Error(err))
+				zap.String("metadata_url", logSafeURL(metadataURL)),
+				logSafeErrorField(err))
 			// Fallback to server URL
 			return serverConfig.URL
 		}
@@ -738,21 +738,21 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 		if metadata.Resource != "" {
 			logger.Info("Auto-detected resource parameter from Protected Resource Metadata (RFC 9728)",
 				zap.String("server", serverConfig.Name),
-				zap.String("resource", metadata.Resource))
+				zap.String("resource", logSafeURL(metadata.Resource)))
 			return metadata.Resource
 		}
 
 		// Metadata exists but lacks resource field - fallback to server URL
 		logger.Info("Protected Resource Metadata lacks resource field, using server URL as fallback",
 			zap.String("server", serverConfig.Name),
-			zap.String("fallback_resource", serverConfig.URL))
+			zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 		return serverConfig.URL
 	}
 
 	// No resource_metadata in WWW-Authenticate - fallback to server URL
 	logger.Debug("WWW-Authenticate header lacks resource_metadata, using server URL as fallback",
 		zap.String("server", serverConfig.Name),
-		zap.String("fallback_resource", serverConfig.URL))
+		zap.String("fallback_resource", logSafeURL(serverConfig.URL)))
 	return serverConfig.URL
 }
 
@@ -806,7 +806,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 
 	logger.Debug("🚀 Starting OAuth config creation",
 		zap.String("server", serverConfig.Name),
-		zap.String("url", serverConfig.URL))
+		zap.String("url", logSafeURL(serverConfig.URL)))
 
 	// Defer logging of total duration
 	defer func() {
@@ -839,7 +839,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		if err == nil && baseURL != "" {
 			logger.Debug("Attempting Protected Resource Metadata scope discovery (RFC 9728)",
 				zap.String("server", serverConfig.Name),
-				zap.String("base_url", baseURL))
+				zap.String("base_url", logSafeURL(baseURL)))
 
 			// Make a preflight HEAD request to get WWW-Authenticate header
 			resp, err := http.Head(serverConfig.URL)
@@ -851,7 +851,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 						scopes = discoveredScopes
 						logger.Info("✅ Auto-discovered OAuth scopes from Protected Resource Metadata (RFC 9728)",
 							zap.String("server", serverConfig.Name),
-							zap.String("metadata_url", metadataURL),
+							zap.String("metadata_url", logSafeURL(metadataURL)),
 							zap.Strings("scopes", scopes))
 					} else if err != nil {
 						logger.Debug("Protected Resource Metadata discovery failed",
@@ -861,7 +861,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 						// err == nil but no scopes returned
 						logger.Warn("Protected Resource Metadata returned no scopes - some clients wait for this before showing OAuth UI",
 							zap.String("server", serverConfig.Name),
-							zap.String("metadata_url", metadataURL))
+							zap.String("metadata_url", logSafeURL(metadataURL)))
 					}
 				} else {
 					logger.Warn("WWW-Authenticate header missing resource_metadata; OAuth clients may refuse to launch browser until PRM exists",
@@ -886,7 +886,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		if err == nil && baseURL != "" {
 			logger.Debug("Attempting Authorization Server Metadata scope discovery (RFC 8414)",
 				zap.String("server", serverConfig.Name),
-				zap.String("base_url", baseURL))
+				zap.String("base_url", logSafeURL(baseURL)))
 
 			discoveredScopes, err := DiscoverScopesFromAuthorizationServer(baseURL, 5*time.Second)
 			if err == nil && len(discoveredScopes) > 0 {
@@ -897,12 +897,12 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			} else if err == nil {
 				logger.Warn("Authorization Server Metadata returned no scopes; some OAuth clients will wait until scopes_supported is published",
 					zap.String("server", serverConfig.Name),
-					zap.String("metadata_url", baseURL+"/.well-known/oauth-authorization-server"))
+					zap.String("metadata_url", logSafeURL(baseURL+"/.well-known/oauth-authorization-server")))
 			} else {
 				logger.Warn("Authorization Server Metadata discovery failed",
 					zap.String("server", serverConfig.Name),
-					zap.String("metadata_url", baseURL+"/.well-known/oauth-authorization-server"),
-					zap.Error(err))
+					zap.String("metadata_url", logSafeURL(baseURL+"/.well-known/oauth-authorization-server")),
+					logSafeErrorField(err))
 			}
 		}
 	}
@@ -1103,8 +1103,8 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			urlToUse = authServerURL
 			logger.Info("Using discovered auth server URL for metadata discovery",
 				zap.String("server", serverConfig.Name),
-				zap.String("mcp_url", serverConfig.URL),
-				zap.String("auth_server_url", authServerURL))
+				zap.String("mcp_url", logSafeURL(serverConfig.URL)),
+				zap.String("auth_server_url", logSafeURL(authServerURL)))
 		}
 
 		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
@@ -1112,13 +1112,13 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		if err != nil {
 			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
 				zap.String("server", serverConfig.Name),
-				zap.String("url_tried", urlToUse),
-				zap.Error(err))
+				zap.String("url_tried", logSafeURL(urlToUse)),
+				logSafeErrorField(err))
 		} else {
 			authServerMetadataURL = workingURL
 			logger.Info("Using validated OAuth metadata URL",
 				zap.String("server", serverConfig.Name),
-				zap.String("metadata_url", authServerMetadataURL))
+				zap.String("metadata_url", logSafeURL(authServerMetadataURL)))
 		}
 	} else {
 		logger.Info("Skipping OAuth metadata URL - no server URL configured",
@@ -1231,7 +1231,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		zap.Strings("scopes", scopes),
 		zap.Bool("pkce_enabled", true),
 		zap.String("redirect_uri", redirectURI),
-		zap.String("auth_server_metadata_url", authServerMetadataURL),
+		zap.String("auth_server_metadata_url", logSafeURL(authServerMetadataURL)),
 		zap.String("registration_mode", registrationMode),
 		zap.String("discovery_mode", "explicit metadata URL"), // Using explicit metadata URL to avoid discovery timeouts
 		zap.String("token_store", "shared"))                   // Using shared token store for token persistence
@@ -1418,7 +1418,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 		callbackServer.logger.Info("📥 HTTP request received on callback server",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
-			zap.String("query", r.URL.RawQuery),
+			zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
 			zap.String("user_agent", r.UserAgent()),
 			zap.String("remote_addr", r.RemoteAddr))
 
@@ -1482,7 +1482,7 @@ func (c *CallbackServer) RegisterState(state string) <-chan map[string]string {
 
 	ch := make(chan map[string]string, 1)
 	c.waiters[state] = ch
-	c.logger.Debug("Registered OAuth callback waiter", zap.String("state", state))
+	c.logger.Debug("Registered OAuth callback waiter", zap.String("state", StateFingerprint(state)))
 	return ch
 }
 
@@ -1494,7 +1494,7 @@ func (c *CallbackServer) UnregisterState(state string) {
 
 	if _, exists := c.waiters[state]; exists {
 		delete(c.waiters, state)
-		c.logger.Debug("Unregistered OAuth callback waiter", zap.String("state", state))
+		c.logger.Debug("Unregistered OAuth callback waiter", zap.String("state", StateFingerprint(state)))
 	}
 }
 
@@ -1530,7 +1530,7 @@ func (c *CallbackServer) deliver(state string, params map[string]string) bool {
 
 	if !exists {
 		c.logger.Warn("OAuth callback carries a state no flow is waiting for",
-			zap.String("state", state),
+			zap.String("state", StateFingerprint(state)),
 			zap.Int("other_waiters", waiterCount))
 		return false
 	}
@@ -1541,7 +1541,7 @@ func (c *CallbackServer) deliver(state string, params map[string]string) bool {
 	default:
 		// Cannot happen: the channel is buffered and single-use.
 		c.logger.Error("OAuth callback waiter channel unexpectedly full",
-			zap.String("state", state))
+			zap.String("state", StateFingerprint(state)))
 		return false
 	}
 }
@@ -1586,7 +1586,7 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.String("query", r.URL.RawQuery),
+		zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
 		zap.String("remote_addr", r.RemoteAddr),
 		zap.String("user_agent", r.UserAgent()))
 
@@ -1599,11 +1599,18 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Log specific OAuth parameters
+	// Issue #1158 (review round 2, finding B1): the authorization CODE is a
+	// single-use credential exchangeable for an access token — it is masked
+	// whole, since no part of it is diagnostic — and `state` is reduced to the
+	// fingerprint the surrounding lines actually correlate on. `code_present`
+	// keeps the one thing an operator debugging a callback needs from the code:
+	// whether the provider sent one at all.
 	c.logger.Info("🔍 OAuth callback parameters extracted",
-		zap.String("code", params["code"]),
-		zap.String("state", params["state"]),
-		zap.String("error", params["error"]),
-		zap.String("error_description", params["error_description"]),
+		zap.Bool("code_present", params["code"] != ""),
+		zap.String("code", callbackParamField("code", params["code"])),
+		zap.String("state", StateFingerprint(params["state"])),
+		zap.String("error", ScrubUpstreamText(params["error"])),
+		zap.String("error_description", ScrubUpstreamText(params["error_description"])),
 		zap.Int("total_params", len(params)))
 
 	state := params["state"]
@@ -1612,14 +1619,14 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	// waiting for is NOT delivered to some other flow and NOT reported to the
 	// user as a success (issue #975).
 	if !c.deliver(state, params) {
-		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %q is unknown or expired "+
-			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, state)
+		reason := fmt.Errorf("OAuth callback for server %q could not be delivered: state %s is unknown or expired "+
+			"(the sign-in may have timed out, or it was started by a different mcpproxy session)", c.ServerName, StateFingerprint(state))
 		if state == "" {
 			reason = fmt.Errorf("OAuth callback for server %q carried no state parameter and was rejected", c.ServerName)
 		}
 		c.logger.Error("❌ OAuth callback dropped - no flow is waiting for this state",
-			zap.String("state", state),
-			zap.String("error", params["error"]))
+			zap.String("state", StateFingerprint(state)),
+			zap.String("error", ScrubUpstreamText(params["error"])))
 
 		// Surface it to the operator instead of burying it in the log (issue #975).
 		GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
@@ -1632,7 +1639,7 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 
 	c.logger.Info("✅ OAuth callback parameters delivered to the waiting flow",
-		zap.String("state", state))
+		zap.String("state", StateFingerprint(state)))
 
 	// The provider itself reported a failure: the flow was told, but the user
 	// must not see a success page.

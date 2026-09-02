@@ -475,13 +475,17 @@ func DetermineTransportType(serverConfig *config.ServerConfig) string {
 // (Client.logSafeURL); this is the same fix for the transport layer, which the
 // first cut of #1148 missed.
 //
-// oauth.RedactURLQueryParams leaves scheme, host, path and non-sensitive
-// parameters verbatim, so the log field stays as diagnosable as it was.
+// oauth.LogSafeURL leaves scheme, host, path and non-sensitive parameters
+// verbatim, so the log field stays as diagnosable as it was. Issue #1158
+// (review round 2, finding B6) moved it off the name-rule-only
+// RedactURLQueryParams: a credential under an unrecognised parameter name
+// survived that rule, and the sibling renderer in internal/oauth documents
+// exactly why the name rule alone is not enough.
 func (c *HTTPTransportConfig) logSafeURL() string {
 	if c == nil {
 		return ""
 	}
-	return oauth.RedactURLQueryParams(c.URL)
+	return oauth.LogSafeURL(c.URL)
 }
 
 // logSafeErrorField renders an error as a log field with any URL-embedded
@@ -491,9 +495,15 @@ func (c *HTTPTransportConfig) logSafeURL() string {
 // net/http error quotes the request URL inside its own message
 // (`Post "https://host/mcp?token=…": dial tcp …`), so the credential kept
 // reaching the log through zap.Error on the request-failure paths.
+//
+// #1158 (review round 2): upgraded from RedactSensitiveData to
+// ScrubUpstreamText, matching its twin in internal/upstream/core. An error
+// string has no enclosing key to judge it by, so the value-shaped detector has
+// to run as well — the name rule cannot see `?opaque=ghp_…`. The two helpers
+// are the same rule on the same class of text and had drifted apart.
 func logSafeErrorField(err error) zap.Field {
 	if err == nil {
 		return zap.Skip()
 	}
-	return zap.String("error", oauth.RedactSensitiveData(err.Error()))
+	return zap.String("error", oauth.ScrubUpstreamText(err.Error()))
 }

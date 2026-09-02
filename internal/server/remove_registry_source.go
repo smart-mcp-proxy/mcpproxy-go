@@ -9,6 +9,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
@@ -68,7 +69,7 @@ func (s *Server) RemoveRegistrySource(id string) (*config.RegistryEntry, error) 
 
 	s.logger.Info("Removed custom registry source",
 		zap.String("registry_id", removed.ID),
-		zap.String("url", removed.URL))
+		zap.String("url", oauth.LogSafeURL(removed.URL)))
 
 	return &removed, nil
 }

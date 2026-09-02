@@ -44,6 +44,10 @@ var exportedStringFuncs = map[string]func(string) string{
 	"RedactURLQueryParams": RedactURLQueryParams,
 	"ScrubUpstreamText":    ScrubUpstreamText,
 	"ArgvFlagKey":          ArgvFlagKey,
+	// Issue #1158, review round 2. Both emit masks, so the fail-closed net has
+	// to know their markers even though no write door echoes them back.
+	"LogSafeURL":           LogSafeURL,
+	"LogSafeCallbackQuery": LogSafeCallbackQuery,
 }
 
 // Round 9 finding 5. Discovery covered PACKAGE-LEVEL functions only, and the
@@ -85,6 +89,27 @@ var redactionMethodRenderers = map[string][]func(string) string{
 		func(s string) string { return strings.Join(LiveRedaction.Argv([]string{s}), " ") },
 		func(s string) string { return strings.Join(AuditRedaction.Argv([]string{"--token", s}), " ") },
 	},
+	// Issue #1158. The three log-only spawn/URL renderings. They are bound here
+	// rather than exempted because they DO emit masks, so the fail-closed net
+	// must know their markers even though no write door echoes them back.
+	"Redaction.SpawnArgv": {
+		func(s string) string { return strings.Join(AuditRedaction.SpawnArgv([]string{"--token", s}), " ") },
+		func(s string) string { return strings.Join(AuditRedaction.SpawnArgv([]string{"-e", "K=" + s}), " ") },
+		func(s string) string { return strings.Join(LiveRedaction.SpawnArgv([]string{"--token", s}), " ") },
+	},
+	"Redaction.SpawnCommandString": {
+		func(s string) string { return AuditRedaction.SpawnCommandString("npx mcp --token " + s) },
+		func(s string) string { return LiveRedaction.SpawnCommandString("npx mcp --token " + s) },
+	},
+	"Redaction.URLValueDeep": {
+		func(s string) string { return AuditRedaction.URLValueDeep(s) },
+		func(s string) string { return LiveRedaction.URLValueDeep(s) },
+	},
+	"Redaction.ExtraParamValue": {
+		func(s string) string { return AuditRedaction.ExtraParamValue("resource", s) },
+		func(s string) string { return AuditRedaction.ExtraParamValue("audience", s) },
+		func(s string) string { return LiveRedaction.ExtraParamValue("resource", s) },
+	},
 }
 
 // notMaskRenderings records the discovered renderers that are NOT mask
@@ -94,6 +119,11 @@ var redactionMethodRenderers = map[string][]func(string) string{
 var notMaskRenderings = map[string]string{
 	"ExtractResourceMetadataURL": "parses a WWW-Authenticate header and returns the resource-metadata URL it advertises; " +
 		"it extracts, it does not mask, and its output never reaches a write door as an echoed value",
+	"StateFingerprint": "not a RENDERING of its input at all: it is a one-way truncated SHA-256 that keeps " +
+		"no byte of the OAuth state nonce, and it exists only to correlate log LINES with each other. " +
+		"No read door publishes it and no write door consumes it, so there is nothing for the " +
+		"fail-closed net to recognise — binding it would put a per-value hash into MaskMarkers, which " +
+		"is meaningless. (Issue #1158, review round 2.)",
 	"Redaction.CapString": "a property of the DESTINATION, not a rule: it caps a leaf for a PERSISTED surface " +
 		"(the activity store) and introduces no mask of its own. The live read policies set no limit precisely " +
 		"so a masked value is never truncated below what the write path can recognise, which is why binding it " +

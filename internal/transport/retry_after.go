@@ -191,7 +191,7 @@ func (t *RetryAfterTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			// password — it leaves `?token=…` in the query verbatim, and this
 			// line fires at Info on every 429/503-with-a-hint. Route it through
 			// the project's own redactor, which masks both.
-			zap.String("url", oauth.RedactURLQueryParams(req.URL.String())),
+			zap.String("url", oauth.LogSafeURL(req.URL.String())),
 			zap.Duration("retry_after", delay),
 			zap.Time("retry_not_before", deadline))
 	}

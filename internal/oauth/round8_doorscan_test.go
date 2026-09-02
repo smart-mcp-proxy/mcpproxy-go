@@ -84,10 +84,6 @@ var rawServerLeafDoors = map[string]string{
 		"health.CalculateHealth from a fixed disconnected input; no upstream text and no config string reaches it.",
 	"cmd/mcpproxy/registry_cmd.go:newRegistrySearchCmd":     "registry SEARCH results are catalogue entries fetched from a remote registry, not operator configuration.",
 	"internal/runtime/runtime.go:(m).SearchRegistryServers": "same remote catalogue entries; the urls are the catalogue's.",
-	"internal/upstream/core/connection_oauth.go:(m).emptyClientIDFlowError": "the url in this message is the " +
-		"DISCOVERED authorization-server endpoint, not the configured upstream url.",
-	"internal/upstream/core/connection_oauth.go:(m).handleOAuthAuthorization":           "discovered authorization/token endpoints in zap log fields, not a client wire.",
-	"internal/upstream/core/connection_oauth.go:(m).handleOAuthAuthorizationWithResult": "same discovered endpoints.",
 }
 
 // openDoors is the third state a door can be in, and the only honest one for a

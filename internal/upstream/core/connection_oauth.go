@@ -233,7 +233,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		zap.Int("extra_params_count", len(extraParams)))
 
 	if oauthConfig == nil {
-		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR", zap.Error(oauthConfigErr))
+		c.logger.Error("🚨 OAUTH CONFIG IS NIL - RETURNING ERROR", logSafeErrorField(oauthConfigErr))
 		oauthErr = wrapOAuthConfigError(oauthConfigErr)
 		return oauthErr
 	}
@@ -252,7 +252,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
 	if err != nil {
 		c.logger.Error("💥 Failed to create OAuth HTTP client in transport layer",
-			zap.Error(err))
+			logSafeErrorField(err))
 		return fmt.Errorf("failed to create OAuth HTTP client: %w", err)
 	}
 
@@ -342,7 +342,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			if !client.IsOAuthAuthorizationRequiredError(err) {
 				c.logger.Error("❌ OAuth client start failed with non-OAuth error",
 					zap.String("server", c.config.Name),
-					zap.Error(err))
+					logSafeErrorField(err))
 				oauthErr = fmt.Errorf("OAuth client start failed: %w", err)
 				return oauthErr
 			}
@@ -404,7 +404,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			if err != nil {
 				c.logger.Error("❌ OAuth client start failed after authorization",
 					zap.String("server", c.config.Name),
-					zap.Error(err))
+					logSafeErrorField(err))
 				oauthErr = fmt.Errorf("OAuth client start failed after authorization: %w", err)
 				return oauthErr
 			}
@@ -414,7 +414,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		} else {
 			c.logger.Error("❌ OAuth client start failed with non-OAuth error",
 				zap.String("server", c.config.Name),
-				zap.Error(lastErr))
+				logSafeErrorField(lastErr))
 			oauthErr = fmt.Errorf("OAuth client start failed: %w", lastErr)
 			return oauthErr
 		}
@@ -434,7 +434,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 	if err := c.initialize(ctx); err != nil {
 		c.logger.Error("❌ MCP initialization failed after OAuth setup",
 			zap.String("server", c.config.Name),
-			zap.Error(err))
+			logSafeErrorField(err))
 
 		// Check if this is a deprecated endpoint error (HTTP 410 Gone)
 		// This indicates the server has migrated to a new endpoint URL
@@ -449,7 +449,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				zap.String("correlation_id", correlationID),
 				zap.String("action", "Update the server URL in your configuration"),
 				zap.String("hint", "Check the server's documentation or try removing /sse from the URL"),
-				zap.Error(err))
+				logSafeErrorField(err))
 
 			return transport.NewEndpointDeprecatedError(
 				c.config.URL,
@@ -477,7 +477,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
-					ServerURL:  c.config.URL,
+					ServerURL:  c.logSafeURL(),
 					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
 				}
 			}
@@ -512,7 +512,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			if retryErr := c.initialize(ctx); retryErr != nil {
 				c.logger.Error("❌ MCP initialization failed after OAuth authorization",
 					zap.String("server", c.config.Name),
-					zap.Error(retryErr))
+					logSafeErrorField(retryErr))
 				oauthErr = fmt.Errorf("MCP initialize failed after OAuth authorization: %w", retryErr)
 				return oauthErr
 			}
@@ -526,14 +526,14 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			// and attempt a fresh browser OAuth flow.
 			c.logger.Warn("⚠️ Server returned 5xx during MCP init - stored token may be invalid, attempting fresh OAuth",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 
 			// Clear the stored token so a fresh one can be obtained
 			if tokenStore, ok := oauthConfig.TokenStore.(interface{ ClearToken() error }); ok {
 				if clearErr := tokenStore.ClearToken(); clearErr != nil {
 					c.logger.Warn("Failed to clear stored token",
 						zap.String("server", c.config.Name),
-						zap.Error(clearErr))
+						logSafeErrorField(clearErr))
 				}
 			}
 
@@ -545,7 +545,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 					zap.String("server", c.config.Name))
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
-					ServerURL:  c.config.URL,
+					ServerURL:  c.logSafeURL(),
 					Message:    "server error with stored token - re-login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
 				}
 			}
@@ -561,7 +561,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 			if retryErr := c.initialize(ctx); retryErr != nil {
 				c.logger.Error("❌ MCP initialization failed after fresh OAuth (server may be down)",
 					zap.String("server", c.config.Name),
-					zap.Error(retryErr))
+					logSafeErrorField(retryErr))
 				oauthErr = fmt.Errorf("MCP initialize failed after fresh OAuth: %w", retryErr)
 				return oauthErr
 			}
@@ -668,7 +668,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
 	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
-		c.logger.Error("🚨 Failed to create OAuth config", zap.Error(oauthConfigErr))
+		c.logger.Error("🚨 Failed to create OAuth config", logSafeErrorField(oauthConfigErr))
 		oauthErr = wrapOAuthConfigError(oauthConfigErr)
 		return oauthErr
 	}
@@ -687,7 +687,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	sseClient, err := transport.CreateSSEClient(httpConfig)
 	if err != nil {
 		c.logger.Error("💥 Failed to create OAuth SSE client in transport layer",
-			zap.Error(err))
+			logSafeErrorField(err))
 		return fmt.Errorf("failed to create OAuth SSE client: %w", err)
 	}
 
@@ -700,7 +700,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 	c.client.OnConnectionLost(func(err error) {
 		c.logger.Warn("⚠️ SSE OAuth connection lost detected",
 			zap.String("server", c.config.Name),
-			zap.Error(err),
+			logSafeErrorField(err),
 			zap.String("transport", "sse-oauth"),
 			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
 	})
@@ -790,7 +790,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 			if !client.IsOAuthAuthorizationRequiredError(err) {
 				c.logger.Error("❌ SSE OAuth client start failed with non-OAuth error",
 					zap.String("server", c.config.Name),
-					zap.Error(err))
+					logSafeErrorField(err))
 				oauthErr = fmt.Errorf("SSE OAuth client start failed: %w", err)
 				return oauthErr
 			}
@@ -852,7 +852,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 			if err != nil {
 				c.logger.Error("❌ SSE OAuth client start failed after authorization",
 					zap.String("server", c.config.Name),
-					zap.Error(err))
+					logSafeErrorField(err))
 				oauthErr = fmt.Errorf("SSE OAuth client start failed after authorization: %w", err)
 				return oauthErr
 			}
@@ -862,7 +862,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 		} else {
 			c.logger.Error("❌ SSE OAuth client start failed with non-OAuth error",
 				zap.String("server", c.config.Name),
-				zap.Error(lastErr))
+				logSafeErrorField(lastErr))
 			oauthErr = fmt.Errorf("SSE OAuth client start failed: %w", lastErr)
 			return oauthErr
 		}
@@ -956,14 +956,14 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 					zap.String("error_type", metadataErr.ErrorType),
 					zap.String("message", metadataErr.Message))
 
-				return &contracts.OAuthFlowError{
+				return scrubbedFlowError(&contracts.OAuthFlowError{
 					Success:    false,
 					ErrorType:  metadataErr.ErrorType,
 					ErrorCode:  metadataErr.ErrorCode,
 					ServerName: c.config.Name,
 					Message:    metadataErr.Message,
 					Details: &contracts.OAuthErrorDetails{
-						ServerURL: c.config.URL,
+						ServerURL: c.logSafeURL(),
 						ProtectedResourceMetadata: func() *contracts.MetadataStatus {
 							if metadataErr.Details.ProtectedResourceMetadata != nil {
 								return &contracts.MetadataStatus{
@@ -988,12 +988,12 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 					},
 					Suggestion: metadataErr.Suggestion,
 					DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-				}
+				})
 			}
 			// For non-metadata errors, log and continue (don't block OAuth flow)
 			c.logger.Debug("OAuth metadata validation returned non-metadata error, continuing with flow",
 				zap.String("server", c.config.Name),
-				zap.Error(validationErr))
+				logSafeErrorField(validationErr))
 		}
 	}
 
@@ -1078,7 +1078,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			oauthMode = "public client (PKCE)"
 			c.logger.Warn("⚠️ Dynamic Client Registration not supported - using public client OAuth with PKCE",
 				zap.String("server", c.config.Name),
-				zap.Error(regErr))
+				logSafeErrorField(regErr))
 			c.logger.Info("💡 Proceeding with public client authentication (no client_id required)",
 				zap.String("server", c.config.Name),
 				zap.String("mode", "OAuth 2.1 public client with PKCE"),
@@ -1099,7 +1099,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 				if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
 					c.logger.Warn("Failed to persist DCR credentials - token refresh may fail later",
 						zap.String("server", c.config.Name),
-						zap.Error(err))
+						logSafeErrorField(err))
 				} else {
 					c.logger.Info("✅ DCR credentials persisted for token refresh",
 						zap.String("server", c.config.Name),
@@ -1156,18 +1156,18 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			suggestion = "The OAuth authorization server metadata is not available. Contact the server administrator."
 		}
 
-		return &contracts.OAuthFlowError{
+		return scrubbedFlowError(&contracts.OAuthFlowError{
 			Success:    false,
 			ErrorType:  errType,
 			ErrorCode:  errCode,
 			ServerName: c.config.Name,
 			Message:    fmt.Sprintf("Failed to get authorization URL for '%s': %s", c.config.Name, authURLErr.Error()),
 			Details: &contracts.OAuthErrorDetails{
-				ServerURL: c.config.URL,
+				ServerURL: c.logSafeURL(),
 			},
 			Suggestion: suggestion,
 			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-		}
+		})
 	}
 
 	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
@@ -1181,7 +1181,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 				c.logger.Debug("Added extra OAuth parameter to authorization URL",
 					zap.String("server", c.config.Name),
 					zap.String("key", key),
-					zap.String("value", value))
+					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
@@ -1191,7 +1191,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		} else {
 			c.logger.Warn("Failed to parse authorization URL for extra params",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 		}
 	}
 
@@ -1206,8 +1206,8 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
 	c.logger.Info("OAuth authorization URL ready",
 		zap.String("server", c.config.Name),
-		zap.String("auth_url", authURL))
-	fmt.Printf("OAuth login URL for %s:\n%s\n", c.config.Name, authURL)
+		zap.String("auth_url", logSafeAuthURL(authURL)))
+	fmt.Printf("OAuth login URL for %s:\n%s\n", c.config.Name, logSafeAuthURL(authURL))
 
 	// Check if this is a manual OAuth flow using the proper context key
 	isManualFlow := c.isManualOAuthFlow(ctx)
@@ -1224,10 +1224,10 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("server", c.config.Name),
 			zap.Duration("time_since_last", timeSinceLastBrowser),
 			zap.Duration("rate_limit", browserRateLimit),
-			zap.String("auth_url", authURL))
+			zap.String("auth_url", logSafeAuthURL(authURL)))
 
 		fmt.Printf("OAuth authorization required for %s, but browser opening is rate limited.\n", c.config.Name)
-		fmt.Printf("Please open the following URL manually in your browser: %s\n", authURL)
+		fmt.Printf("Please open the following URL manually in your browser: %s\n", logSafeAuthURL(authURL))
 	} else {
 		if isManualFlow {
 			c.logger.Info("🎯 Manual OAuth flow detected - bypassing rate limiting",
@@ -1238,14 +1238,14 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		// Open the browser to the authorization URL
 		c.logger.Info("🌐 Opening browser for OAuth authorization",
 			zap.String("server", c.config.Name),
-			zap.String("auth_url", authURL))
+			zap.String("auth_url", logSafeAuthURL(authURL)))
 
 		if err := c.openBrowser(authURL); err != nil {
 			c.logger.Warn("Failed to open browser automatically, please open manually",
 				zap.String("server", c.config.Name),
-				zap.String("url", authURL),
-				zap.Error(err))
-			fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
+				zap.String("url", logSafeAuthURL(authURL)),
+				logSafeErrorField(err))
+			fmt.Printf("Please open the following URL in your browser: %s\n", logSafeAuthURL(authURL))
 		}
 
 		// Update the timestamp to track browser opening for rate limiting
@@ -1293,7 +1293,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		if err != nil {
 			c.logger.Error("❌ Failed to process authorization response",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 			return fmt.Errorf("failed to process authorization response: %w", err)
 		}
 
@@ -1360,7 +1360,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 					zap.String("error_type", metadataErr.ErrorType),
 					zap.String("message", metadataErr.Message))
 
-				return result, &contracts.OAuthFlowError{
+				return result, scrubbedFlowError(&contracts.OAuthFlowError{
 					Success:       false,
 					ErrorType:     metadataErr.ErrorType,
 					ErrorCode:     metadataErr.ErrorCode,
@@ -1368,15 +1368,15 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 					CorrelationID: result.CorrelationID,
 					Message:       metadataErr.Message,
 					Details: &contracts.OAuthErrorDetails{
-						ServerURL: c.config.URL,
+						ServerURL: c.logSafeURL(),
 					},
 					Suggestion: metadataErr.Suggestion,
 					DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-				}
+				})
 			}
 			c.logger.Debug("OAuth metadata validation returned non-metadata error, continuing with flow",
 				zap.String("server", c.config.Name),
-				zap.Error(validationErr))
+				logSafeErrorField(validationErr))
 		}
 	}
 
@@ -1437,7 +1437,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			dcrErr = regErr
 			c.logger.Info("ℹ️ DCR not available, continuing with public client OAuth",
 				zap.String("server", c.config.Name),
-				zap.Error(regErr))
+				logSafeErrorField(regErr))
 		} else {
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
@@ -1454,7 +1454,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 				if saveErr := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); saveErr != nil {
 					c.logger.Warn("Failed to persist DCR credentials",
 						zap.String("server", c.config.Name),
-						zap.Error(saveErr))
+						logSafeErrorField(saveErr))
 				}
 			}
 		}
@@ -1478,8 +1478,8 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	if authURLErr != nil {
 		c.logger.Error("❌ Failed to get authorization URL",
 			zap.String("server", c.config.Name),
-			zap.Error(authURLErr))
-		return result, &contracts.OAuthFlowError{
+			logSafeErrorField(authURLErr))
+		return result, scrubbedFlowError(&contracts.OAuthFlowError{
 			Success:       false,
 			ErrorType:     contracts.OAuthErrorFlowFailed,
 			ErrorCode:     contracts.OAuthCodeFlowFailed,
@@ -1487,11 +1487,11 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			CorrelationID: result.CorrelationID,
 			Message:       fmt.Sprintf("Failed to get authorization URL: %v", authURLErr),
 			Details: &contracts.OAuthErrorDetails{
-				ServerURL: c.config.URL,
+				ServerURL: c.logSafeURL(),
 			},
 			Suggestion: "Check server OAuth configuration and try again.",
 			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-		}
+		})
 	}
 
 	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
@@ -1506,7 +1506,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 				c.logger.Debug("Added extra OAuth parameter to authorization URL",
 					zap.String("server", c.config.Name),
 					zap.String("key", key),
-					zap.String("value", value))
+					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
@@ -1516,7 +1516,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		} else {
 			c.logger.Warn("Failed to parse authorization URL for extra params",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 		}
 	}
 
@@ -1530,18 +1530,18 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	result.AuthURL = authURL
 	c.logger.Info("🌐 Authorization URL obtained",
 		zap.String("server", c.config.Name),
-		zap.String("auth_url", authURL),
+		zap.String("auth_url", logSafeAuthURL(authURL)),
 		zap.String("correlation_id", result.CorrelationID))
 
 	// Open the browser
 	if err := c.openBrowser(authURL); err != nil {
 		c.logger.Warn("Failed to open browser automatically, please open manually",
 			zap.String("server", c.config.Name),
-			zap.String("url", authURL),
-			zap.Error(err))
+			zap.String("url", logSafeAuthURL(authURL)),
+			logSafeErrorField(err))
 		result.BrowserOpened = false
-		result.BrowserError = err.Error()
-		fmt.Printf("Please open the following URL in your browser: %s\n", authURL)
+		result.BrowserError = oauth.LogSafeErrorText(err)
+		fmt.Printf("Please open the following URL in your browser: %s\n", logSafeAuthURL(authURL))
 	} else {
 		result.BrowserOpened = true
 	}
@@ -1640,7 +1640,7 @@ func (c *Client) markOAuthComplete() {
 		if err := tm.MarkOAuthCompletedWithDB(c.config.Name, c.storage); err != nil {
 			c.logger.Warn("Failed to persist OAuth completion event to DB; using in-memory notification",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 			tm.MarkOAuthCompleted(c.config.Name)
 		} else {
 			c.logger.Info("📢 OAuth completion recorded to DB for cross-process notification",
@@ -1657,7 +1657,7 @@ func (c *Client) markOAuthComplete() {
 		if err := manager.StopCallbackServer(c.config.Name); err != nil {
 			c.logger.Warn("Failed to stop OAuth callback server",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 		}
 	}
 }
@@ -1701,7 +1701,7 @@ func (c *Client) persistDCRCredentials() {
 	if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
 			zap.String("server", c.config.Name),
-			zap.Error(err))
+			logSafeErrorField(err))
 		return
 	}
 
@@ -1815,7 +1815,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", result.CorrelationID),
-			zap.Error(oauthConfigErr))
+			logSafeErrorField(oauthConfigErr))
 		return result, wrapOAuthConfigError(oauthConfigErr)
 	}
 
@@ -1828,7 +1828,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 					zap.String("server", c.config.Name),
 					zap.String("correlation_id", result.CorrelationID),
 					zap.String("error_type", metadataErr.ErrorType))
-				return result, &contracts.OAuthFlowError{
+				return result, scrubbedFlowError(&contracts.OAuthFlowError{
 					Success:       false,
 					ErrorType:     metadataErr.ErrorType,
 					ErrorCode:     metadataErr.ErrorCode,
@@ -1836,7 +1836,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 					CorrelationID: result.CorrelationID,
 					Message:       metadataErr.Message,
 					Suggestion:    metadataErr.Suggestion,
-				}
+				})
 			}
 		}
 	}
@@ -1847,7 +1847,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 		c.logger.Error("❌ Failed to get authorization URL",
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", result.CorrelationID),
-			zap.Error(err))
+			logSafeErrorField(err))
 
 		// Add correlation_id to structured errors for tracing
 		var flowErr *contracts.OAuthFlowError
@@ -1866,7 +1866,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	if os.Getenv("HEADLESS") != "" {
 		c.logger.Info("📵 HEADLESS mode detected - skipping browser open",
 			zap.String("server", c.config.Name),
-			zap.String("auth_url", authURL))
+			zap.String("auth_url", logSafeAuthURL(authURL)))
 		result.BrowserOpened = false
 		result.BrowserError = "HEADLESS mode - browser not opened. Please open the auth_url manually."
 
@@ -1884,10 +1884,10 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	if err := c.openBrowser(authURL); err != nil {
 		c.logger.Warn("Failed to open browser automatically",
 			zap.String("server", c.config.Name),
-			zap.String("url", authURL),
-			zap.Error(err))
+			zap.String("url", logSafeAuthURL(authURL)),
+			logSafeErrorField(err))
 		result.BrowserOpened = false
-		result.BrowserError = err.Error()
+		result.BrowserError = oauth.LogSafeErrorText(err)
 	} else {
 		result.BrowserOpened = true
 		c.logger.Info("✅ Browser opened successfully",
@@ -1982,7 +1982,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 			c.logger.Warn("⚠️ DCR failed",
 				zap.String("server", c.config.Name),
 				zap.String("correlation_id", correlationID),
-				zap.Error(regErr))
+				logSafeErrorField(regErr))
 		} else {
 			c.logger.Info("✅ DCR succeeded",
 				zap.String("server", c.config.Name),
@@ -2014,14 +2014,14 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	}()
 
 	if authURLErr != nil {
-		return "", nil, "", "", &contracts.OAuthFlowError{
+		return "", nil, "", "", scrubbedFlowError(&contracts.OAuthFlowError{
 			Success:    false,
 			ErrorType:  contracts.OAuthErrorFlowFailed,
 			ErrorCode:  contracts.OAuthCodeFlowFailed,
 			ServerName: c.config.Name,
 			Message:    fmt.Sprintf("Failed to get authorization URL: %v", authURLErr),
 			Suggestion: "Check server OAuth configuration and try again.",
-		}
+		})
 	}
 
 	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
@@ -2036,7 +2036,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 				c.logger.Debug("Added extra OAuth parameter to authorization URL",
 					zap.String("server", c.config.Name),
 					zap.String("key", key),
-					zap.String("value", value))
+					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
 			}
 			parsedURL.RawQuery = query.Encode()
 			authURL = parsedURL.String()
@@ -2046,7 +2046,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		} else {
 			c.logger.Warn("Failed to parse authorization URL for extra params",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 		}
 	}
 
@@ -2094,10 +2094,10 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr er
 	c.logger.Error("❌ OAuth provider requires a client_id but none is available (DCR unsupported or failed)",
 		zap.String("server", c.config.Name),
 		zap.String("url", c.logSafeURL()),
-		zap.NamedError("dcr_error", dcrErr),
+		zap.String("dcr_error", oauth.LogSafeErrorText(dcrErr)),
 		zap.String("help", "Register an OAuth app with the provider and set oauth.client_id in the server config"))
 	details := &contracts.OAuthErrorDetails{
-		ServerURL: c.config.URL,
+		ServerURL: c.logSafeURL(),
 	}
 	if dcrErr != nil {
 		dcrStatus := &contracts.DCRStatus{
@@ -2115,7 +2115,7 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr er
 		}
 		details.DCRStatus = dcrStatus
 	}
-	return &contracts.OAuthFlowError{
+	return scrubbedFlowError(&contracts.OAuthFlowError{
 		Success:       false,
 		ErrorType:     contracts.OAuthErrorClientIDRequired,
 		ErrorCode:     contracts.OAuthCodeNoClientID,
@@ -2125,7 +2125,7 @@ func (c *Client) emptyClientIDFlowError(authURL, correlationID string, dcrErr er
 		Details:       details,
 		Suggestion:    "Register an OAuth app with the provider and set oauth.client_id in the server config.",
 		DebugHint:     fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-	}
+	})
 }
 
 // waitForOAuthCallbackAsync waits for OAuth callback and handles token exchange in background.
@@ -2198,7 +2198,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		if err := oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier); err != nil {
 			c.logger.Error("❌ Failed to exchange authorization code",
 				zap.String("server", c.config.Name),
-				zap.Error(err))
+				logSafeErrorField(err))
 			c.reportOAuthFailure(fmt.Errorf("OAuth token exchange failed for %s: %w", c.config.Name, err))
 			return
 		}
@@ -2312,7 +2312,7 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
-			zap.Error(oauthConfigErr))
+			logSafeErrorField(oauthConfigErr))
 		return nil, wrapOAuthConfigError(oauthConfigErr)
 	}
 
@@ -2380,7 +2380,7 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
-			zap.Error(oauthConfigErr))
+			logSafeErrorField(oauthConfigErr))
 		return nil, wrapOAuthConfigError(oauthConfigErr)
 	}
 
@@ -2485,4 +2485,55 @@ func (c *Client) clearOAuthState() {
 	c.oauthInProgress = false
 	c.oauthCompleted = false
 	c.lastOAuthTimestamp = time.Time{}
+}
+
+// scrubbedFlowError masks every free-text and URL leaf of a structured OAuth
+// error at the point it is BUILT (issue #1158, review round 2 finding B7).
+//
+// The struct is JSON-encoded straight to the REST caller by handleServerLogin
+// and rendered by `mcpproxy auth status`, so every string on it is a published
+// surface. The original fix scrubbed the leaves it could see one at a time and
+// half of one struct got done: emptyClientIDFlowError masked
+// `Details.ServerURL` and then set `Details.DCRStatus.Error = dcrErr.Error()`
+// RAW on the same struct — a DCR failure quotes the registration endpoint URL,
+// and mcp-go returns the provider's own response text there.
+//
+// Scrubbing per-field at eight construction sites is how that happens. This
+// walks the whole struct instead, so a leaf added later is covered by
+// construction rather than by whoever remembers.
+//
+// The rules are the package's own: URL leaves keep scheme/host/path through the
+// deep audit renderer (the panel exists to say WHICH endpoint failed), and
+// free text goes through ScrubUpstreamText, which is what an
+// originated-outside-mcpproxy string gets everywhere else in the tree.
+//
+// Idempotent: every rule is a no-op on its own output, so wrapping a value that
+// was already rendered safely (`c.logSafeURL()`) costs nothing.
+func scrubbedFlowError(e *contracts.OAuthFlowError) *contracts.OAuthFlowError {
+	if e == nil {
+		return nil
+	}
+	e.Message = oauth.ScrubUpstreamText(e.Message)
+	e.Suggestion = oauth.ScrubUpstreamText(e.Suggestion)
+	e.DebugHint = oauth.ScrubUpstreamText(e.DebugHint)
+	if d := e.Details; d != nil {
+		d.ServerURL = oauth.LogSafeURL(d.ServerURL)
+		scrubMetadataStatus(d.ProtectedResourceMetadata)
+		scrubMetadataStatus(d.AuthorizationServerMetadata)
+		if s := d.DCRStatus; s != nil {
+			s.Error = oauth.ScrubUpstreamText(s.Error)
+		}
+	}
+	return e
+}
+
+func scrubMetadataStatus(m *contracts.MetadataStatus) {
+	if m == nil {
+		return
+	}
+	m.URLChecked = oauth.LogSafeURL(m.URLChecked)
+	m.Error = oauth.ScrubUpstreamText(m.Error)
+	for i, u := range m.AuthorizationServers {
+		m.AuthorizationServers[i] = oauth.LogSafeURL(u)
+	}
 }

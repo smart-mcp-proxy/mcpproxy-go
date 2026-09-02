@@ -43,6 +43,24 @@ type Spec struct {
 
 	// StopGrace overrides DefaultStopGrace if non-zero.
 	StopGrace time.Duration
+
+	// RedactArgs masks the child's argv for the startup banner written to
+	// LogSink (issue #1158).
+	//
+	// The banner previously wrote cmd.Args verbatim into
+	// ~/.mcpproxy/logs/server-<name>.log on every spawn - fully transformed,
+	// i.e. AFTER the docker env->argv injection has turned every configured
+	// env var into `-e KEY=VALUE`, and after a login-shell wrap has folded the
+	// whole command line into one `-c "..."` element.
+	//
+	// The redactor is injected rather than imported because this package is
+	// deliberately dependency-free (`go list -deps` returns only itself);
+	// importing internal/oauth would drag config/security/storage in with it.
+	//
+	// nil means the banner OMITS argv entirely. That default is fail-CLOSED on
+	// purpose: a future caller that forgets to set the field loses a
+	// diagnostic, not a secret.
+	RedactArgs func([]string) []string
 }
 
 // Handle represents a running child managed by the launcher. Stop, Wait,
@@ -146,8 +164,14 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 		if len(args) > 0 {
 			args = args[1:]
 		}
-		_, _ = fmt.Fprintf(sink, "[launcher] starting: %s %v (pid=%d)\n",
-			cmd.Path, args, cmd.Process.Pid)
+		if spec.RedactArgs == nil {
+			// Fail closed: no redactor, no argv. See Spec.RedactArgs.
+			_, _ = fmt.Fprintf(sink, "[launcher] starting: %s (%d args, redacted) (pid=%d)\n",
+				cmd.Path, len(args), cmd.Process.Pid)
+		} else {
+			_, _ = fmt.Fprintf(sink, "[launcher] starting: %s %v (pid=%d)\n",
+				cmd.Path, spec.RedactArgs(args), cmd.Process.Pid)
+		}
 	}
 
 	h.pumpWG.Add(2)

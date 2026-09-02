@@ -2320,7 +2320,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			if url != "" && r.storageManager != nil {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
-					zap.String("url", url),
+					// #1158: the configured upstream URL routinely carries a
+					// `?token=` credential; the host and path stay readable.
+					zap.String("url", oauth.AuditRedaction.URLValue(url)),
 					zap.Bool("has_explicit_oauth_config", serverStatus.Config.OAuth != nil))
 
 				// Generate server key matching PersistentTokenStore format

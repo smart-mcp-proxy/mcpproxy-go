@@ -59,7 +59,7 @@ func GenerateServerKey(serverName, serverURL string) string {
 	// Log key generation for debugging server key mismatches
 	zap.L().Debug("Generated OAuth server key",
 		zap.String("server_name", serverName),
-		zap.String("server_url", serverURL),
+		zap.String("server_url", logSafeURL(serverURL)),
 		zap.String("generated_key", key))
 
 	return key

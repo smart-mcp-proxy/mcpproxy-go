@@ -273,8 +273,30 @@ func maskDetectedInURLQuery(rawQuery string) string {
 // Everything else round-trips verbatim: package names, subcommands, paths and
 // ports are what make the payload useful.
 func (r Redaction) Argv(argv []string) []string {
+	return r.argvWith(argv, false, nil)
+}
+
+// argvWith is Argv with two optional log-only relaxations, both off for
+// `spawnRules == false` (which reproduces Argv's behaviour byte for byte, so
+// the read/write mask-echo contract Argv backs is untouched):
+//
+//   - commandStringRule handles elements that carry embedded whitespace — a
+//     whole command LINE squeezed into one argv element, which the login-shell
+//     wrap produces (`["-l","-c","npx some-mcp --api-key ..."]`) and which the
+//     per-token rules below cannot see into.
+//   - spawnRules swaps IsSensitiveKeyName's substring match for
+//     isSensitiveSpawnFlag's qualifier-aware one, so `--max-tokens 4096` and
+//     `--public-key-path /etc/x` keep the values an operator reads the spawn
+//     log for. See benignFlagQualifiers.
+func (r Redaction) argvWith(argv []string, spawnRules bool, commandStringRule func(string) string) []string {
 	if argv == nil {
 		return nil
+	}
+	leaf := r.Leaf
+	flagNamesSecret := func(flag string) bool { return IsSensitiveKeyName(ArgvFlagKey(flag)) }
+	if spawnRules {
+		leaf = r.spawnLeaf
+		flagNamesSecret = isSensitiveSpawnFlag
 	}
 	out := make([]string, len(argv))
 	maskNext := false
@@ -284,8 +306,12 @@ func (r Redaction) Argv(argv []string) []string {
 			maskNext = false
 			continue
 		}
+		if commandStringRule != nil && strings.ContainsAny(s, " \t\n\r") {
+			out[i] = commandStringRule(s)
+			continue
+		}
 		if flag, value, inline := strings.Cut(s, "="); inline && IsArgvFlag(flag) {
-			out[i] = flag + "=" + r.Leaf(ArgvFlagKey(flag), value)
+			out[i] = flag + "=" + leaf(ArgvFlagKey(flag), value)
 			continue
 		}
 		// An unpaired token — a positional argument, a flag name, or the value
@@ -293,8 +319,8 @@ func (r Redaction) Argv(argv []string) []string {
 		// enclosing key is what keeps the inline and space-separated spellings
 		// in step: it is the same function the inline branch delegates to, so
 		// the URL rule, the env-name rule and the detector all apply to both.
-		out[i] = r.Leaf("", s)
-		maskNext = IsArgvFlag(s) && IsSensitiveKeyName(ArgvFlagKey(s))
+		out[i] = leaf("", s)
+		maskNext = IsArgvFlag(s) && flagNamesSecret(s)
 	}
 	return out
 }

@@ -1095,7 +1095,7 @@ func (mc *Client) logSafeURL() string {
 	if cfg == nil {
 		return ""
 	}
-	return oauth.RedactURLQueryParams(cfg.URL)
+	return oauth.LogSafeURL(cfg.URL)
 }
 
 // onStateChange handles state transition events

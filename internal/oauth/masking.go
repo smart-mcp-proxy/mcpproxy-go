@@ -43,8 +43,12 @@ func maskExtraParams(params map[string]string) map[string]string {
 	masked := make(map[string]string, len(params))
 	for k, v := range params {
 		if isResourceParam(k) {
-			// Show resource URLs in full (public endpoints)
-			masked[k] = v
+			// Issue #1158: a `resource` parameter is NOT a public constant.
+			// autoDetectResource returns the CONFIGURED upstream URL verbatim
+			// on every fallback branch, so `resource` routinely carries the
+			// operator's `?token=...`. Keep the endpoint readable (that is why
+			// this branch exists) but mask its credentials.
+			masked[k] = AuditRedaction.URLValueDeep(v)
 		} else if containsSensitiveKeyword(k) {
 			// Likely sensitive - mask completely
 			masked[k] = "***"

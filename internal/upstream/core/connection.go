@@ -63,11 +63,66 @@ const (
 // the file outlives the process and is readable by anything with disk access.
 //
 // The host and path survive, which is what makes the line diagnostic.
+//
+// #1158 (review round 2, finding B6): this delegates to oauth.LogSafeURL — the
+// DEEP audit renderer — rather than the name-rule-only RedactURLQueryParams it
+// used before. logSafeAuthURL below already argued that case for the authorize
+// URL; the same argument applies verbatim to the configured URL this renders,
+// and this value is served to REST callers inside OAuthErrorDetails.ServerURL.
 func (c *Client) logSafeURL() string {
 	if c.config == nil {
 		return ""
 	}
-	return oauth.RedactURLQueryParams(c.config.URL)
+	return oauth.LogSafeURL(c.config.URL)
+}
+
+// logSafeAuthURL renders an OAuth AUTHORIZATION URL for a LOG FIELD or for
+// stdout (issue #1158).
+//
+// The authorize URL is the highest-frequency credential leak in the tree and
+// needs no debug flag to reach main.log: oauth.autoDetectResource returns
+// serverConfig.URL verbatim on every fallback branch (no resource_metadata in
+// WWW-Authenticate, metadata without a `resource` field, a failed fetch, any
+// 4xx/5xx), that value becomes extraParams["resource"], and every authorize-URL
+// builder splices each extra param into the query. The result was logged at
+// INFO and printed with fmt.Printf on every login attempt, so a configured
+// `https://host/mcp?token=SECRET` landed on disk and on the terminal.
+//
+// URLValueDeep rather than RedactURLQueryParams because the credential arrives
+// percent-encoded one level down (`resource=https%3A%2F%2Fhost%2Fmcp%3Ftoken%3D...`),
+// where neither the sensitive-parameter name rule nor secretPattern can see it.
+//
+// The authorize endpoint's scheme, host, path and its own non-secret parameters
+// survive, which is what lets an operator still diagnose the flow.
+func logSafeAuthURL(authURL string) string {
+	return oauth.AuditRedaction.URLValueDeep(authURL)
+}
+
+// logSafeArgs renders a child process's argument vector for a LOG FIELD
+// (issue #1158).
+//
+// Every spawn log line in this package previously used
+// shellwrap.RedactDockerArgs alone, which is a STRUCTURAL rule: it masks the
+// value half of every `-e KEY=VALUE` docker env injection but is blind to
+// `--api-key sk-live-...` and to a vendor-formatted credential sitting in a
+// positional argument. oauth.Redaction.SpawnArgv composes that rule with the
+// flag-name + value-shape rule, and also reaches inside the single
+// `-c "<whole command line>"` element the login-shell wrap produces - the form
+// every non-docker stdio server on macOS actually spawns as.
+//
+// AuditRedaction rather than LiveRedaction because these lines land in
+// ~/.mcpproxy/logs/main.log and server-<name>.log, which outlive the process
+// and are exported through `upstream_servers tail_log`: the `••••` marker
+// carries neither the secret's length nor its trailing bytes, unlike the
+// interactive `sk-****89` rendering the previous helper emitted.
+func logSafeArgs(args []string) []string {
+	return oauth.AuditRedaction.SpawnArgv(args)
+}
+
+// logSafeCommand renders a whole child command LINE for a LOG FIELD. See
+// logSafeArgs.
+func logSafeCommand(cmd string) string {
+	return oauth.AuditRedaction.SpawnCommandString(cmd)
 }
 
 // redactURLCredentialsInError strips URL-embedded credentials from an error's
@@ -87,7 +142,16 @@ func redactURLCredentialsInError(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := oauth.RedactSensitiveData(err.Error())
+	// #1158 (review round 2, live check): upgraded from RedactSensitiveData to
+	// ScrubUpstreamText, for the reason logSafeErrorField and its twin in
+	// internal/transport were upgraded — the NAME rule cannot see a credential
+	// under an unrecognised query-parameter name. A live run with
+	// `?opaque=ghp_…` in the configured URL still put the token in main.log 15
+	// times, because this ONE seam is what every downstream log site inherits:
+	// managed.Client, upstream.Manager, the supervisor and the runtime all
+	// zap.Error this value, and none of them can be fixed from here except
+	// through the string they are handed.
+	msg := oauth.ScrubUpstreamText(err.Error())
 	if msg == err.Error() {
 		return err
 	}
@@ -106,11 +170,16 @@ func (e *urlRedactedError) Unwrap() error { return e.cause }
 
 // logSafeErrorField renders an error as a log field with any URL-embedded
 // credential removed. Use it instead of zap.Error on the connection paths.
+//
+// #1158: upgraded from RedactSensitiveData to ScrubUpstreamText. The name rule
+// alone cannot see a credential under an unrecognised parameter name
+// (`?opaque=ghp_…`), and a transport error is exactly the free-form,
+// originated-outside-mcpproxy text ScrubUpstreamText is documented for.
 func logSafeErrorField(err error) zap.Field {
 	if err == nil {
 		return zap.Skip()
 	}
-	return zap.String("error", oauth.RedactSensitiveData(err.Error()))
+	return zap.String("error", oauth.ScrubUpstreamText(err.Error()))
 }
 
 func (c *Client) Connect(ctx context.Context) error {

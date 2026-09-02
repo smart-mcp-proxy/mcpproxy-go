@@ -107,7 +107,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.logger.Info("🔗 Starting connection to upstream server",
 		zap.String("server", c.config.Name),
 		zap.String("transport", c.getTransportType()),
-		zap.String("url", oauth.RedactURLQueryParams(c.config.URL)),
+		zap.String("url", oauth.LogSafeURL(c.config.URL)),
 		zap.String("command", c.config.Command))
 
 	// Enable JSON-RPC frame logging if trace level is enabled

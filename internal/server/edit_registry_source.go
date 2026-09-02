@@ -109,7 +109,7 @@ func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.Reg
 
 	s.logger.Info("Edited custom registry source",
 		zap.String("registry_id", updated.ID),
-		zap.String("url", updated.URL))
+		zap.String("url", oauth.LogSafeURL(updated.URL)))
 
 	return &updated, nil
 }

@@ -262,7 +262,7 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 	if imageName == "" {
 		c.logger.Warn("No image name found in docker command args",
 			zap.String("server", c.config.Name),
-			zap.Strings("args", c.config.Args))
+			zap.Strings("args", logSafeArgs(c.config.Args)))
 		return
 	}
 
