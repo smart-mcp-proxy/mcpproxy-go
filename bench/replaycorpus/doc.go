@@ -35,7 +35,13 @@
 // exists to prevent, so a truncated record either carries an explicitly
 // annotated estimate derived from its pre-truncation byte length, or is
 // excluded and counted. Every exclusion is counted and reportable (FR-002,
-// FR-003, SC-008): silence is never success.
+// FR-003, SC-008): silence is never success. Note that the first branch is a
+// real one: codeexec.go's BaselineDirect COUNTS a truncated sub-call, at its
+// full pre-truncation byte length, and stays inside this rule only because
+// CodeExecSaving.TruncatedSubCalls and TruncatedBaseline publish how many such
+// components contributed and how much of the baseline they are. Without that
+// annotation direct mode would be outside the invariant, which is why those two
+// fields are load-bearing rather than decorative.
 //
 // The binding contract for the input shape is
 // specs/103-token-bench/contracts/replay-input.md.

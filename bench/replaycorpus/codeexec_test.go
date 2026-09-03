@@ -1,7 +1,9 @@
 package replaycorpus
 
 import (
+	"encoding/json"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,7 +34,7 @@ func TestCodeExecSaving_MeasuresTheResponseSideDifference(t *testing.T) {
 		subCall(measured(40), measured(600)),
 	)
 
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineDirect)
 
 	require.Equal(t, CostMeasured, got.Basis)
 	assert.Equal(t, 3, got.SubCalls)
@@ -44,7 +46,7 @@ func TestCodeExecSaving_MeasuresTheResponseSideDifference(t *testing.T) {
 // A script that dispatches nothing costs tokens and returns none. That is a
 // real loss and must be reported as one rather than filtered out or floored.
 func TestCodeExecSaving_NoSubCallsIsARealNegative(t *testing.T) {
-	got := CodeExecSavingFor(codeExecCall(measured(500), measured(20)))
+	got := CodeExecSavingFor(codeExecCall(measured(500), measured(20)), BaselineDirect)
 
 	require.Equal(t, CostMeasured, got.Basis)
 	assert.Equal(t, 0, got.SubCalls)
@@ -59,7 +61,7 @@ func TestCodeExecSaving_NeverSumsAcrossBases(t *testing.T) {
 		subCall(measured(10), estimated(4000)),
 	)
 
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineDirect)
 
 	require.Equal(t, CostUnavailable, got.Basis)
 	assert.Equal(t, ReasonMixedCostBasis, got.Reason)
@@ -75,7 +77,7 @@ func TestCodeExecSaving_UnavailableComponentWithholdsTheWhole(t *testing.T) {
 		subCall(measured(10), unavailable()),
 	)
 
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineDirect)
 
 	require.Equal(t, CostUnavailable, got.Basis)
 	assert.Equal(t, ReasonSubCallZeroBytes, got.Reason, "the reason must survive to the caller")
@@ -88,7 +90,7 @@ func TestCodeExecSaving_EstimatedBasisIsBytes(t *testing.T) {
 		subCall(estimated(100), estimated(5000)),
 	)
 
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineDirect)
 
 	require.Equal(t, CostEstimated, got.Basis)
 	assert.Equal(t, 5100-600, got.Saving)
@@ -98,30 +100,38 @@ func TestCodeExecSaving_EstimatedBasisIsBytes(t *testing.T) {
 // This previously asserted that truncation merely set an annotation flag while
 // the saving was still computed and published — which is exactly the defect
 // cross-model review caught, so the assertion is inverted rather than dropped.
-func TestCodeExecSaving_TruncationWithholds(t *testing.T) {
+//
+// It pins the PROXY counterfactual specifically: the agent it compares against
+// dispatches through call_tool_*, where each block is cut at ToolResponseLimit,
+// so the full pre-truncation size overstates the baseline. That is a property of
+// THAT comparison, not a universal truth — under BaselineDirect the same
+// sub-call fixtures are counted, see the mirror tests below.
+func TestCodeExecSaving_TruncationWithholdsUnderProxyBaseline(t *testing.T) {
 	sub := subCall(measured(10), Cost{Basis: CostMeasured, Tokens: 900, Truncated: true})
-	got := CodeExecSavingFor(codeExecCall(measured(100), measured(50), sub))
+	got := CodeExecSavingFor(codeExecCall(measured(100), measured(50), sub), BaselineProxy)
 	require.Equal(t, CostUnavailable, got.Basis, "a truncated sub-call understates nothing — it OVERstates the baseline")
 	assert.Equal(t, ReasonTruncatedSubCallOverstates, got.Reason)
 
 	flagged := subCall(measured(10), measured(900))
 	flagged.Flags.Truncated = true
-	got2 := CodeExecSavingFor(codeExecCall(measured(100), measured(50), flagged))
+	got2 := CodeExecSavingFor(codeExecCall(measured(100), measured(50), flagged), BaselineProxy)
 	assert.Equal(t, CostUnavailable, got2.Basis, "the call-level flag must withhold too")
 
 	parentCut := codeExecCall(measured(100), measured(50), subCall(measured(10), measured(900)))
 	parentCut.Flags.Truncated = true
-	assert.Equal(t, CostUnavailable, CodeExecSavingFor(parentCut).Basis,
-		"a truncated PARENT understates the proxy cost, which also inflates the saving")
+	assert.Equal(t, CostUnavailable, CodeExecSavingFor(parentCut, BaselineProxy).Basis,
+		"a truncated PARENT overstates the proxy cost — response_bytes is pre-truncation while "+
+			"the model read the cut text — so it UNDERstates the saving; wrong either way, and "+
+			"no baseline choice repairs it")
 }
 
 func TestCodeExecSaving_RejectsNonCodeExecParents(t *testing.T) {
 	other := &ReplayCall{RequestID: "x", ToolName: "retrieve_tools", RequestCost: measured(1), ResponseCost: measured(1)}
-	got := CodeExecSavingFor(other)
+	got := CodeExecSavingFor(other, BaselineDirect)
 	require.Equal(t, CostUnavailable, got.Basis)
 	assert.Equal(t, ReasonNotACall, got.Reason)
 
-	assert.Equal(t, CostUnavailable, CodeExecSavingFor(nil).Basis)
+	assert.Equal(t, CostUnavailable, CodeExecSavingFor(nil, BaselineDirect).Basis)
 }
 
 // The aggregate must bucket by basis rather than producing one blended total,
@@ -137,7 +147,7 @@ func TestCodeExecSavingsFor_BucketsByBasisAndCountsWithheld(t *testing.T) {
 		},
 	}}
 
-	rep := CodeExecSavingsFor(sessions)
+	rep := CodeExecSavingsFor(sessions, BaselineDirect)
 
 	require.Len(t, rep.Buckets, 2, "measured and estimated must stay separate")
 	assert.Equal(t, 760, rep.Buckets[CostMeasured].Saving)
@@ -158,7 +168,7 @@ func TestCodeExecSavingsFor_DoesNotRevisitSubCalls(t *testing.T) {
 		CallCount:     1, SubCallCount: 1,
 	}}
 
-	rep := CodeExecSavingsFor(sessions)
+	rep := CodeExecSavingsFor(sessions, BaselineDirect)
 
 	assert.Len(t, rep.Savings, 1, "exactly one code_execution call was made")
 	assert.Equal(t, 760, rep.Buckets[CostMeasured].Saving)
@@ -262,14 +272,19 @@ func TestRequestCost_EmptyArgsWithLargePayloadStaysEstimated(t *testing.T) {
 // falls to an estimate while its siblings are measured, and the never-sum guard
 // withholds. With bodies OFF everything is estimated, the bases agree, and the
 // inflated number went straight into the total.
-func TestCodeExecSaving_TruncatedSubCallWithholdsRatherThanInflates(t *testing.T) {
+//
+// All of the above is the PROXY counterfactual's rationale and is still exactly
+// true of it. Under BaselineDirect the same fixture is counted, because that
+// agent has no proxy in the path and nothing cuts its response — see
+// TestCodeExecSaving_DirectBaselineCountsTruncatedSubCallAtFullSize.
+func TestCodeExecSaving_TruncatedSubCallWithholdsRatherThanInflates_UnderProxyBaseline(t *testing.T) {
 	huge := subCall(estimated(40), Cost{Basis: CostEstimated, Bytes: 250_000, Truncated: true})
 	parent := codeExecCall(estimated(400), estimated(200),
 		subCall(estimated(50), estimated(900)),
 		huge,
 	)
 
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineProxy)
 
 	require.Equal(t, CostUnavailable, got.Basis,
 		"the full pre-truncation size would inflate the baseline and so the saving")
@@ -280,12 +295,12 @@ func TestCodeExecSaving_TruncatedSubCallWithholdsRatherThanInflates(t *testing.T
 
 // The aggregate must not carry an inflated total either — the withheld call is
 // counted under its reason and contributes nothing to any bucket.
-func TestCodeExecSavingsFor_TruncatedSubCallNeverReachesTheTotal(t *testing.T) {
+func TestCodeExecSavingsFor_TruncatedSubCallNeverReachesTheTotal_UnderProxyBaseline(t *testing.T) {
 	clean := codeExecCall(estimated(400), estimated(200), subCall(estimated(50), estimated(900)))
 	dirty := codeExecCall(estimated(400), estimated(200),
 		subCall(estimated(40), Cost{Basis: CostEstimated, Bytes: 250_000, Truncated: true}))
 
-	rep := CodeExecSavingsFor([]*ReplaySession{{WorkSessionID: "w", Calls: []*ReplayCall{clean, dirty}}})
+	rep := CodeExecSavingsFor([]*ReplaySession{{WorkSessionID: "w", Calls: []*ReplayCall{clean, dirty}}}, BaselineProxy)
 
 	require.NotNil(t, rep.Buckets[CostEstimated])
 	assert.Equal(t, 1, rep.Buckets[CostEstimated].Calls)
@@ -309,7 +324,7 @@ func TestCodeExecSaving_SplitsByBillingDirection(t *testing.T) {
 		subCall(measured(12), measured(105)),
 	)
 
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineDirect)
 
 	require.Equal(t, CostMeasured, got.Basis)
 	assert.Equal(t, 36, got.BaselineOutput, "three calls of arguments the model would have written")
@@ -334,7 +349,7 @@ func TestCodeExecSaving_SplitsByBillingDirection(t *testing.T) {
 // A withheld saving has no numbers to price, and must not return a confident 0.
 func TestCodeExecSaving_PricedSavingRefusesWithheldFigures(t *testing.T) {
 	parent := codeExecCall(measured(100), measured(50), subCall(measured(10), unavailable()))
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineDirect)
 	require.Equal(t, CostUnavailable, got.Basis)
 
 	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
@@ -345,7 +360,7 @@ func TestCodeExecSaving_PricedSavingRefusesWithheldFigures(t *testing.T) {
 // wrong by roughly the bytes-per-token ratio and would look entirely plausible.
 func TestCodeExecSaving_PricedSavingRefusesByteEstimates(t *testing.T) {
 	parent := codeExecCall(estimated(400), estimated(200), subCall(estimated(100), estimated(5000)))
-	got := CodeExecSavingFor(parent)
+	got := CodeExecSavingFor(parent, BaselineDirect)
 	require.Equal(t, CostEstimated, got.Basis)
 
 	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
@@ -390,7 +405,7 @@ func TestBillableArguments_DropsServerResolvedScriptSource(t *testing.T) {
 // and would be reported as a confident dollar figure.
 func TestCodeExecSaving_PricedSavingRejectsNonsensePrices(t *testing.T) {
 	got := CodeExecSavingFor(codeExecCall(measured(78), measured(11),
-		subCall(measured(12), measured(105))))
+		subCall(measured(12), measured(105))), BaselineDirect)
 	require.Equal(t, CostMeasured, got.Basis)
 
 	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
@@ -409,4 +424,342 @@ func TestCodeExecSaving_PricedSavingRejectsNonsensePrices(t *testing.T) {
 		_, ok := got.PricedSavingUSD(bad.in, bad.out, bad.cacheMul)
 		assert.False(t, ok, "%s must be refused, not reported", bad.name)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// BaselineMode: the same log, two legitimate counterfactuals.
+// ---------------------------------------------------------------------------
+
+// The mirror of TestCodeExecSaving_TruncatedSubCallWithholdsRatherThanInflates_UnderProxyBaseline,
+// on the identical fixture. An agent wired straight to the upstream servers has
+// no proxy to cut its response, so the full pre-truncation size is exactly what
+// it reads and the call is countable. Two modes, one input, two right answers.
+func TestCodeExecSaving_DirectBaselineCountsTruncatedSubCallAtFullSize(t *testing.T) {
+	huge := subCall(estimated(40), Cost{Basis: CostEstimated, Bytes: 250_000, Truncated: true})
+	parent := codeExecCall(estimated(400), estimated(200),
+		subCall(estimated(50), estimated(900)),
+		huge,
+	)
+
+	got := CodeExecSavingFor(parent, BaselineDirect)
+
+	require.Equal(t, CostEstimated, got.Basis, "nothing truncates the counterfactual agent, so nothing is withheld")
+	assert.Equal(t, 250_990, got.Baseline)
+	assert.Equal(t, 600, got.Proxy)
+	assert.Equal(t, 250_390, got.Saving)
+	assert.Equal(t, 90, got.BaselineOutput, "two calls of arguments")
+	assert.Equal(t, 250_900, got.BaselineInput)
+	assert.Equal(t, 1, got.TruncatedSubCalls, "the tolerated component must be counted...")
+	assert.Equal(t, 250_000, got.TruncatedBaseline, "...and its magnitude published, not just its existence")
+	assert.Equal(t, BaselineDirect, got.Mode)
+}
+
+// The seam guard. The relaxation is deliberately NARROWER than "tolerate
+// Flags.Truncated": the parent's response is the PROXY term — what the model
+// actually read, after mcpproxy cut it at ToolResponseLimit — so counting its
+// full pre-truncation size overstates the proxy cost and understates the saving.
+// That is wrong under both counterfactuals and no baseline choice repairs it.
+func TestCodeExecSaving_DirectBaselineStillWithholdsATruncatedParent(t *testing.T) {
+	flagged := codeExecCall(measured(100), measured(50), subCall(measured(10), measured(900)))
+	flagged.Flags.Truncated = true
+
+	costCut := codeExecCall(estimated(400), Cost{Basis: CostEstimated, Bytes: 9_000, Truncated: true},
+		subCall(estimated(50), estimated(900)))
+
+	for _, tc := range []struct {
+		name   string
+		parent *ReplayCall
+	}{
+		{"call-level flag on the parent", flagged},
+		{"truncation marked on the parent's own response cost", costCut},
+	} {
+		for _, mode := range []BaselineMode{BaselineDirect, BaselineProxy} {
+			got := CodeExecSavingFor(tc.parent, mode)
+			require.Equal(t, CostUnavailable, got.Basis, "%s / %s", tc.name, mode)
+			assert.Equal(t, ReasonTruncatedSubCallOverstates, got.Reason, "%s / %s", tc.name, mode)
+			assert.Equal(t, mode, got.Mode, "a withheld line still has to say which baseline refused it")
+		}
+	}
+}
+
+// The blast radius is ONE gate. Every other refusal is a property of the record
+// rather than of the comparison, so both modes must agree exactly.
+func TestCodeExecSaving_DirectBaselineStillWithholdsEveryOtherReason(t *testing.T) {
+	sensitive := subCall(estimated(50), Cost{Basis: CostUnavailable, Reason: ReasonSensitive})
+	// The OPPOSITE truncation direction: for a built-in the log stores MORE
+	// than the agent consumed, so counting it overstates mcpproxy's own cost.
+	// Correct under both counterfactuals, and untouched by this change.
+	retrieveCut := subCall(estimated(50), Cost{Basis: CostUnavailable, Reason: ReasonTruncatedRetrieveOverstates})
+
+	for _, tc := range []struct {
+		name   string
+		parent *ReplayCall
+		basis  CostBasis
+		reason ExclusionReason
+	}{
+		{"nil parent", nil, CostUnavailable, ReasonNotACall},
+		{"not a code_execution call",
+			&ReplayCall{RequestID: "x", ToolName: "retrieve_tools", RequestCost: measured(1), ResponseCost: measured(1)},
+			CostUnavailable, ReasonNotACall},
+		{"sub-call with no honest figure",
+			codeExecCall(measured(100), measured(50), subCall(measured(10), unavailable())),
+			CostUnavailable, ReasonSubCallZeroBytes},
+		{"sensitive body",
+			codeExecCall(estimated(400), estimated(200), sensitive),
+			CostUnavailable, ReasonSensitive},
+		{"truncated internal retrieve_tools",
+			codeExecCall(estimated(400), estimated(200), retrieveCut),
+			CostUnavailable, ReasonTruncatedRetrieveOverstates},
+		{"measured and estimated components mixed",
+			codeExecCall(measured(100), measured(50), subCall(measured(10), estimated(4000))),
+			CostUnavailable, ReasonMixedCostBasis},
+	} {
+		direct := CodeExecSavingFor(tc.parent, BaselineDirect)
+		proxy := CodeExecSavingFor(tc.parent, BaselineProxy)
+		require.Equal(t, tc.basis, direct.Basis, "%s under direct", tc.name)
+		assert.Equal(t, tc.reason, direct.Reason, "%s under direct", tc.name)
+		assert.Equal(t, direct.Basis, proxy.Basis, "%s: the two modes must agree", tc.name)
+		assert.Equal(t, direct.Reason, proxy.Reason, "%s: the two modes must agree", tc.name)
+	}
+}
+
+// You did not invalidate anyone's untruncated numbers. On a corpus with no
+// truncation anywhere the two reports are identical but for the label.
+func TestCodeExecSaving_DirectAndProxyAgreeWhenNothingWasTruncated(t *testing.T) {
+	sessions := []*ReplaySession{
+		{WorkSessionID: "w1", Calls: []*ReplayCall{
+			codeExecCall(measured(120), measured(80),
+				subCall(measured(30), measured(900)),
+				subCall(measured(25), measured(1500))),
+			codeExecCall(measured(500), measured(20)),
+		}},
+		{WorkSessionID: "w2", Calls: []*ReplayCall{
+			codeExecCall(estimated(400), estimated(200), subCall(estimated(100), estimated(5000))),
+			codeExecCall(measured(100), measured(50), subCall(measured(10), unavailable())),
+		}},
+	}
+
+	direct := CodeExecSavingsFor(sessions, BaselineDirect)
+	proxy := CodeExecSavingsFor(sessions, BaselineProxy)
+
+	require.Equal(t, BaselineDirect, direct.Mode)
+	require.Equal(t, BaselineProxy, proxy.Mode)
+	// Normalise only the label; everything else must already match.
+	proxy.Mode = direct.Mode
+	for i := range proxy.Savings {
+		proxy.Savings[i].Mode = direct.Savings[i].Mode
+	}
+	assert.True(t, reflect.DeepEqual(direct, proxy),
+		"with nothing truncated the counterfactual cannot matter:\ndirect %+v\nproxy  %+v", direct, proxy)
+}
+
+// The record's own Flags.Truncated must annotate too, not just Cost.Truncated.
+// The loader can produce a call-level flag beside a cost that carries no marker,
+// and without component.record that component would contribute in silence —
+// which is exactly what doc.go's third invariant forbids.
+func TestCodeExecSaving_TruncationAnnotationCoversTheRecordFlagToo(t *testing.T) {
+	flagged := subCall(measured(10), measured(900))
+	flagged.Flags.Truncated = true
+
+	got := CodeExecSavingFor(codeExecCall(measured(100), measured(50), flagged), BaselineDirect)
+
+	require.Equal(t, CostMeasured, got.Basis, "direct counts it")
+	assert.Equal(t, 910, got.Baseline)
+	assert.Equal(t, 1, got.TruncatedSubCalls, "and says so")
+	assert.Equal(t, 900, got.TruncatedBaseline,
+		"the RESPONSE side only — truncation never cuts arguments, and charging both would double-count")
+}
+
+// Direct mode rescues LESS than its name suggests, and a talk claiming "the
+// withheld calls are now countable" is wrong in exactly the flattering
+// direction. On the bodies-on path responseCost refuses to tokenize cut text
+// (flags.go), so the truncated component falls to an ESTIMATE while its measured
+// siblings stay tokens — and the never-sum rule withholds regardless of mode.
+// Direct rescues the bodies-OFF, all-estimated population. The 8KB stored text
+// must never be tokenized as a "fix": it would understate.
+func TestCodeExecSaving_BodiesOnTruncatedSubCallIsMixedBasisNotCounted(t *testing.T) {
+	parent := codeExecCall(measured(400), measured(200),
+		subCall(measured(50), measured(900)),
+		subCall(measured(40), Cost{Basis: CostEstimated, Bytes: 250_000, Truncated: true}),
+	)
+
+	got := CodeExecSavingFor(parent, BaselineDirect)
+
+	require.Equal(t, CostUnavailable, got.Basis)
+	assert.Equal(t, ReasonMixedCostBasis, got.Reason)
+	assert.Zero(t, got.Saving)
+}
+
+// The zero value resolves to direct in ONE place, and the label is on every
+// return path. The marshalled-bytes assertions below cannot catch a later
+// `omitempty` on Mode — orDefault() means the field is never the zero value, so
+// it would be emitted anyway — so the tag is asserted directly, which is the
+// only form of that check that can actually fail.
+func TestCodeExecSaving_ZeroModeIsDirectAndAlwaysStamped(t *testing.T) {
+	parent := codeExecCall(measured(120), measured(80), subCall(measured(30), measured(900)))
+	assert.Equal(t, CodeExecSavingFor(parent, BaselineDirect), CodeExecSavingFor(parent, ""),
+		`"" must mean direct, decided once`)
+
+	withheldCall := codeExecCall(measured(100), measured(50), subCall(measured(10), unavailable()))
+	notACall := &ReplayCall{RequestID: "x", ToolName: "retrieve_tools", RequestCost: measured(1), ResponseCost: measured(1)}
+	for _, tc := range []struct {
+		name string
+		v    interface{}
+	}{
+		{"counted saving", CodeExecSavingFor(parent, "")},
+		{"withheld saving", CodeExecSavingFor(withheldCall, "")},
+		{"not a code_execution call", CodeExecSavingFor(notACall, "")},
+		{"nil parent", CodeExecSavingFor(nil, "")},
+		{"report", CodeExecSavingsFor([]*ReplaySession{{WorkSessionID: "w", Calls: []*ReplayCall{parent}}}, "")},
+	} {
+		b, err := json.Marshal(tc.v)
+		require.NoError(t, err, tc.name)
+		assert.Contains(t, string(b), `"baseline_mode":"direct"`,
+			"%s: a figure whose denominator is optional is the ambiguity being removed", tc.name)
+	}
+
+	clean, err := json.Marshal(CodeExecSavingFor(parent, BaselineProxy))
+	require.NoError(t, err)
+	assert.NotContains(t, string(clean), "truncated_sub_calls",
+		"an untruncated figure must not carry a zeroed annotation")
+	assert.NotContains(t, string(clean), "truncated_baseline")
+
+	// Directly, not via a marshalled instance: `omitempty` here would un-label
+	// any figure that ever did carry the zero value, and a published saving
+	// whose denominator is unstated is the ambiguity this type exists to remove.
+	for _, tc := range []struct {
+		typ   reflect.Type
+		field string
+	}{
+		{reflect.TypeOf(CodeExecSaving{}), "Mode"},
+		{reflect.TypeOf(CodeExecReport{}), "Mode"},
+	} {
+		f, ok := tc.typ.FieldByName(tc.field)
+		require.True(t, ok, "%s.%s must exist", tc.typ.Name(), tc.field)
+		assert.Equal(t, `json:"baseline_mode"`, string(f.Tag),
+			"%s.%s must be stamped unconditionally — no omitempty", tc.typ.Name(), tc.field)
+	}
+}
+
+// The proxy pre-pass is load-bearing for HEAD equivalence and only the REASON
+// distinguishes it from letting the component loop catch the same call: without
+// the pre-pass this fixture reports mixed_cost_basis, because the measured
+// sibling is summed before the truncated component is reached. Pinning the
+// withhold alone would pass either way.
+func TestCodeExecSaving_ProxyPrePassWinsTheReasonRace(t *testing.T) {
+	// Flags.Truncated is what the pre-pass reads (the loader sets it in
+	// classify); the estimated response beside measured parent costs is what
+	// makes the basis clash reachable in the same component.
+	sub := subCall(measured(10), Cost{Basis: CostEstimated, Bytes: 90_000, Truncated: true})
+	sub.Flags.Truncated = true
+	parent := codeExecCall(measured(100), measured(50), sub)
+
+	got := CodeExecSavingFor(parent, BaselineProxy)
+	require.Equal(t, CostUnavailable, got.Basis)
+	assert.Equal(t, ReasonTruncatedSubCallOverstates, got.Reason,
+		"truncation must be reported before the basis clash it would otherwise hide")
+
+	// Same fixture under direct: the pre-pass is gone, so the mixed basis the
+	// pre-pass was masking is what surfaces. Documents that withheld-by-reason
+	// tallies are not comparable across modes.
+	assert.Equal(t, ReasonMixedCostBasis, CodeExecSavingFor(parent, BaselineDirect).Reason)
+}
+
+// The headline behaviour change, asserted as a pair on one fixture.
+func TestCodeExecSavingsFor_DirectAndProxyDisagreeOnTheSameSessions(t *testing.T) {
+	clean := codeExecCall(estimated(400), estimated(200), subCall(estimated(50), estimated(900)))
+	dirty := codeExecCall(estimated(400), estimated(200),
+		subCall(estimated(40), Cost{Basis: CostEstimated, Bytes: 250_000, Truncated: true}))
+	sessions := []*ReplaySession{{WorkSessionID: "w", Calls: []*ReplayCall{clean, dirty}}}
+
+	proxy := CodeExecSavingsFor(sessions, BaselineProxy)
+	require.NotNil(t, proxy.Buckets[CostEstimated])
+	assert.Equal(t, 1, proxy.Buckets[CostEstimated].Calls)
+	assert.Equal(t, 350, proxy.Buckets[CostEstimated].Saving)
+	assert.Zero(t, proxy.Buckets[CostEstimated].TruncatedSubCalls, "proxy tolerates nothing")
+	assert.Equal(t, 1, proxy.Withheld[ReasonTruncatedSubCallOverstates])
+
+	direct := CodeExecSavingsFor(sessions, BaselineDirect)
+	require.NotNil(t, direct.Buckets[CostEstimated])
+	assert.Equal(t, 2, direct.Buckets[CostEstimated].Calls)
+	assert.Equal(t, 350+249_440, direct.Buckets[CostEstimated].Saving)
+	assert.Equal(t, 1, direct.Buckets[CostEstimated].TruncatedSubCalls)
+	assert.Equal(t, 250_000, direct.Buckets[CostEstimated].TruncatedBaseline)
+	assert.Empty(t, direct.Withheld)
+	assert.Equal(t, BaselineDirect, direct.Mode)
+}
+
+// Direct is a strict relaxation: it counts everything proxy counts, at the SAME
+// figure. An implementation that perturbed an untruncated call would pass the
+// pair test above and fail here.
+func TestCodeExecSavingsFor_DirectCountsAtLeastAsManyCallsAsProxy(t *testing.T) {
+	truncated := subCall(estimated(40), Cost{Basis: CostEstimated, Bytes: 250_000, Truncated: true})
+	flagged := subCall(estimated(20), estimated(700))
+	flagged.Flags.Truncated = true
+	sessions := []*ReplaySession{{WorkSessionID: "w", Calls: []*ReplayCall{
+		codeExecCall(estimated(400), estimated(200), subCall(estimated(50), estimated(900))),
+		codeExecCall(estimated(400), estimated(200), truncated),
+		codeExecCall(estimated(400), estimated(200), flagged),
+		codeExecCall(measured(120), measured(80), subCall(measured(30), measured(900))),
+		codeExecCall(measured(100), measured(50), subCall(measured(10), unavailable())),
+	}}}
+
+	direct := CodeExecSavingsFor(sessions, BaselineDirect)
+	proxy := CodeExecSavingsFor(sessions, BaselineProxy)
+
+	countedIn := func(rep *CodeExecReport) int {
+		n := 0
+		for _, k := range rep.Buckets {
+			n += k.Calls
+		}
+		return n
+	}
+	assert.GreaterOrEqual(t, countedIn(direct), countedIn(proxy))
+
+	require.Len(t, direct.Savings, len(proxy.Savings))
+	for i := range proxy.Savings {
+		if proxy.Savings[i].Basis == CostUnavailable {
+			continue
+		}
+		assert.Equal(t, proxy.Savings[i].Saving, direct.Savings[i].Saving,
+			"call %d was countable under proxy and must be unchanged under direct", i)
+		assert.Equal(t, proxy.Savings[i].Basis, direct.Savings[i].Basis)
+	}
+}
+
+// A typo'd -baseline that quietly produced the OTHER figure is the failure this
+// selector exists to remove, so the parser refuses everything it does not know
+// exactly — the empty string included.
+func TestParseBaselineMode_RejectsAnythingElse(t *testing.T) {
+	got, err := ParseBaselineMode("direct")
+	require.NoError(t, err)
+	assert.Equal(t, BaselineDirect, got)
+	got, err = ParseBaselineMode("proxy")
+	require.NoError(t, err)
+	assert.Equal(t, BaselineProxy, got)
+
+	for _, bad := range []string{"", "Direct", "DIRECT", " direct", "dir", "proxi", "baseline"} {
+		_, err := ParseBaselineMode(bad)
+		require.Error(t, err, "%q must be refused, not resolved", bad)
+		assert.Contains(t, err.Error(), "direct", "%q: the error must name both valid values", bad)
+		assert.Contains(t, err.Error(), "proxy", "%q: the error must name both valid values", bad)
+	}
+}
+
+// The USD headline never rests on tolerated data, so it does not move when the
+// default counterfactual flips: a truncated component is estimated-basis in
+// every path the loader can produce, and an estimated saving is bytes, which
+// PricedSavingUSD refuses to price as tokens.
+func TestCodeExecSaving_TruncatedSavingStaysUnpriceable(t *testing.T) {
+	parent := codeExecCall(estimated(400), estimated(200),
+		subCall(estimated(50), estimated(900)),
+		subCall(estimated(40), Cost{Basis: CostEstimated, Bytes: 250_000, Truncated: true}),
+	)
+
+	got := CodeExecSavingFor(parent, BaselineDirect)
+	require.Equal(t, CostEstimated, got.Basis)
+	require.Equal(t, 1, got.TruncatedSubCalls)
+
+	_, ok := got.PricedSavingUSD(3.0, 15.0, 0.1)
+	assert.False(t, ok, "byte lengths cannot be priced as tokens, tolerated or not")
 }
