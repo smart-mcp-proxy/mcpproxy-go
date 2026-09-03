@@ -3652,6 +3652,11 @@ func connectDirectClient(t *testing.T, env *TestEnvironment, route string, onNot
 	t.Helper()
 
 	base := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	// Spec 058: mcp-go deprecated WithContinuousListening because 2026-07-28
+	// removed the standalone GET stream. Keeping it here is deliberate — it
+	// holds this client on a legacy protocol version, which is what this test
+	// exercises, and matches the client-facing FR-028 pin.
+	//nolint:staticcheck // SA1019: legacy GET stream is the behavior under test.
 	httpTransport, err := transport.NewStreamableHTTP(base+route, transport.WithContinuousListening())
 	require.NoError(t, err)
 

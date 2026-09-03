@@ -7,6 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -83,7 +84,7 @@ func TestClient_ListPrompts_NotConnected_ReturnsError(t *testing.T) {
 
 func TestClient_ListPrompts_Success(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	mc := connectedManagedTestClient(t, testServer.URL)
@@ -102,7 +103,7 @@ func TestClient_ListPrompts_Success(t *testing.T) {
 // value down to the coreClient without requiring a reconnect.
 func TestClient_SetConfig_PropagatesExposePromptsToCoreClient(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	mc := connectedManagedTestClient(t, testServer.URL)
@@ -123,7 +124,7 @@ func TestClient_SetConfig_PropagatesExposePromptsToCoreClient(t *testing.T) {
 
 func TestClient_ListPrompts_UpstreamError(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	mc := connectedManagedTestClient(t, testServer.URL)
 
 	// Close the upstream out from under an established, "ready" client so the
@@ -146,7 +147,7 @@ func TestClient_GetPrompt_NotConnected_ReturnsError(t *testing.T) {
 
 func TestClient_GetPrompt_Success(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	mc := connectedManagedTestClient(t, testServer.URL)
@@ -161,7 +162,7 @@ func TestClient_GetPrompt_Success(t *testing.T) {
 
 func TestClient_GetPrompt_UpstreamError(t *testing.T) {
 	upstream := newTestPromptManagedUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	mc := connectedManagedTestClient(t, testServer.URL)
 
 	testServer.Close()

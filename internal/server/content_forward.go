@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
@@ -34,6 +35,69 @@ func logCacheStoreFailure(logger *zap.Logger, err error, toolName, cacheKey stri
 		zap.Int("payload_bytes", payloadBytes),
 		zap.Error(err),
 	)
+}
+
+// proxyResultEnvelope builds the mcp.Result envelope mcpproxy puts on a
+// forwarded tool result (Spec 058 FR-016b).
+//
+// Only _meta is relayed. Copying the upstream's envelope wholesale would also
+// replay its ResultType — a 2026-07-28 field telling the CLIENT how to
+// interpret the response — while mcp.CallToolResult embeds MultiRoundTripResult
+// separately, so the inputRequests and requestState that make an
+// "input_required" answerable were dropped on the same hop. The client was left
+// told to supply input it had no way to supply.
+//
+// Leaving ResultType unset lets mcp-go stamp the value appropriate to the era
+// mcpproxy is answering on, which is the only party that knows it.
+//
+// Both forwarding paths (forwardContentResult here, and the direct-surface
+// handler in mcp_routing.go) call this, so the two cannot drift apart.
+func proxyResultEnvelope(ctr *mcp.CallToolResult) mcp.Result {
+	if ctr == nil {
+		return mcp.Result{}
+	}
+	return mcp.Result{Meta: relaySafeResultMeta(ctr.Meta)}
+}
+
+// hopScopedResultMetaKeys are reserved _meta keys that describe the HOP a result
+// travelled over rather than the payload it carries, so they must not survive a
+// proxy hop.
+//
+// serverInfo is the one that bites. mcp-go stamps mcpproxy's own identity into
+// an outgoing modern result only when the field is still absent
+// (server/response.go decorateResult: `if meta.ServerInfo() == nil`). Relaying
+// an upstream's serverInfo therefore does not merely add noise — it suppresses
+// mcpproxy's identity and makes its response claim to BE the upstream server.
+// protocolVersion is hop-scoped for the same reason: the era mcpproxy negotiated
+// upstream is not the era it is answering on.
+var hopScopedResultMetaKeys = []string{
+	mcp.MetaKeyServerInfo,
+	mcp.MetaKeyProtocolVersion,
+}
+
+// relaySafeResultMeta copies meta minus the hop-scoped keys, leaving trace
+// context and any upstream-specific fields intact. It returns nil when nothing
+// survives, so no empty _meta object is emitted.
+func relaySafeResultMeta(meta *mcp.Meta) *mcp.Meta {
+	if meta == nil {
+		return nil
+	}
+
+	var fields map[string]any
+	for key, value := range meta.AdditionalFields {
+		if slices.Contains(hopScopedResultMetaKeys, key) {
+			continue
+		}
+		if fields == nil {
+			fields = make(map[string]any, len(meta.AdditionalFields))
+		}
+		fields[key] = value
+	}
+
+	if fields == nil && meta.ProgressToken == nil {
+		return nil
+	}
+	return &mcp.Meta{ProgressToken: meta.ProgressToken, AdditionalFields: fields}
 }
 
 // forwardContentResult preserves non-text content blocks (ImageContent, AudioContent,
@@ -128,7 +192,7 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 	}
 
 	forwarded = &mcp.CallToolResult{
-		Result:            ctr.Result,
+		Result:            proxyResultEnvelope(ctr),
 		Content:           newContent,
 		StructuredContent: ctr.StructuredContent,
 		IsError:           ctr.IsError,

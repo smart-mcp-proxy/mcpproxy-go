@@ -295,6 +295,17 @@ func (c *Client) Ping(ctx context.Context) error {
 		return fmt.Errorf("client not connected")
 	}
 
+	// Spec 058: mcp-go deprecated Ping because the RPC was removed in protocol
+	// 2026-07-28, where it returns success WITHOUT sending anything — a health
+	// probe that always passes is worse than none, since it reports a dead
+	// upstream as healthy.
+	//
+	// This remains a real probe today only because the upstream handshake is
+	// pinned to the legacy era (FR-027, connection_lifecycle.go). Lifting that
+	// pin MUST come with an era-aware replacement, or spec 074's health loop
+	// goes blind; that is tracked as a required task of the pin lift, not as
+	// cleanup.
+	//nolint:staticcheck // SA1019: valid on the legacy era this client is pinned to; see above.
 	return client.Ping(ctx)
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type toolHashContract struct {
@@ -97,6 +98,17 @@ func canonicalSchemaFromBytes(schemaJSON []byte) (json.RawMessage, error) {
 		return nil, err
 	}
 
+	// Same library-drift protection NormalizeJSON applies. This file holds TWO
+	// normalizers over the same decoded schema, and they back different hashes:
+	// NormalizeJSON feeds the Spec-032 approval hash, while this one feeds
+	// ToolHash/ComputeToolHashWithOutputSchema, i.e. ToolMetadata.Hash written
+	// at internal/upstream/core/client.go. Canonicalizing only one of them would
+	// leave the other drifting across a library upgrade — the exact defect the
+	// canonicalization exists to prevent, just on the other code path.
+	if hasHoistedDefsWithDraft07Refs(parsed) {
+		canonicalizeSchemaRefs(parsed)
+	}
+
 	canonical, err := json.Marshal(parsed)
 	if err != nil {
 		return nil, err
@@ -106,12 +118,14 @@ func canonicalSchemaFromBytes(schemaJSON []byte) (json.RawMessage, error) {
 
 // NormalizeJSON parses s and re-serializes it with object keys sorted, so that
 // semantically identical JSON with different key order or whitespace produces a
-// stable, comparable string. Empty or non-JSON input is returned unchanged.
+// stable, comparable string. It also canonicalizes JSON Schema draft-07 local
+// references (see canonicalizeSchemaRefs). Empty or non-JSON input is returned
+// unchanged.
 //
 // This is the single canonical JSON normalizer shared by the upstream tool
 // capture (internal/upstream/core) and the tool-approval hash
 // (internal/runtime), so a schema hashes identically no matter which path
-// observed it.
+// observed it — or which version of the MCP library decoded it.
 func NormalizeJSON(s string) string {
 	if s == "" {
 		return s
@@ -120,11 +134,80 @@ func NormalizeJSON(s string) string {
 	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
 		return s
 	}
+	if hasHoistedDefsWithDraft07Refs(parsed) {
+		canonicalizeSchemaRefs(parsed)
+	}
 	normalized, err := json.Marshal(parsed)
 	if err != nil {
 		return s
 	}
 	return string(normalized)
+}
+
+// draft07RefPrefix is the local-definition pointer prefix used by JSON Schema
+// draft-07. Drafts 2019-09 and later spell the same thing "#/$defs/".
+const (
+	draft07RefPrefix = "#/definitions/"
+	modernRefPrefix  = "#/$defs/"
+)
+
+// hasHoistedDefsWithDraft07Refs reports whether a document carries the specific
+// signature of a schema whose definitions were hoisted into "$defs" while its
+// "$ref" pointers were left spelling the old location: a root "$defs" and no
+// root "definitions".
+//
+// The narrowness is the point. A "$ref" of "#/definitions/X" is CORRECT in a
+// document that still has a "definitions" block, and rewriting it there would
+// point it at a member that does not exist — breaking Spec 056 output-schema
+// validation, which consumes this same normalized JSON. Only the hoisted-yet-
+// unrewritten combination is unambiguously the artifact described on
+// canonicalizeSchemaRefs, so only that combination is touched.
+func hasHoistedDefsWithDraft07Refs(root interface{}) bool {
+	doc, ok := root.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if _, hasDefs := doc["$defs"]; !hasDefs {
+		return false
+	}
+	if _, hasDefinitions := doc["definitions"]; hasDefinitions {
+		return false
+	}
+	return true
+}
+
+// canonicalizeSchemaRefs rewrites draft-07 local refs ("#/definitions/X") to
+// their modern spelling ("#/$defs/X") in place. Call it only when
+// hasHoistedDefsWithDraft07Refs approves the document.
+//
+// This exists because a tool's approval hash is computed over the MCP library's
+// DECODED input schema, not over the bytes the upstream sent
+// (mcp.Tool.RawInputSchema is `json:"-"`, so the original is discarded on
+// decode). Library versions disagree on the spelling they emit for one
+// identical wire schema: mcp-go hoisted `definitions` into `$defs` for a long
+// time while leaving the pointers dangling, and v1.0.0 began rewriting them.
+// Hashing the decoder's output verbatim therefore lets a library upgrade change
+// the hash of a tool nobody touched, which Spec 032 reports as a changed —
+// potentially rug-pulled — tool.
+//
+// Only the exact local-definition prefix is rewritten. Self-references such as
+// "#/properties/x", absolute URLs and already-modern pointers are left alone,
+// because rewriting those would change what a schema means rather than how it
+// is spelled.
+func canonicalizeSchemaRefs(node interface{}) {
+	switch v := node.(type) {
+	case map[string]interface{}:
+		if ref, ok := v["$ref"].(string); ok && strings.HasPrefix(ref, draft07RefPrefix) {
+			v["$ref"] = modernRefPrefix + strings.TrimPrefix(ref, draft07RefPrefix)
+		}
+		for _, child := range v {
+			canonicalizeSchemaRefs(child)
+		}
+	case []interface{}:
+		for _, item := range v {
+			canonicalizeSchemaRefs(item)
+		}
+	}
 }
 
 // StringHash computes SHA-256 hash of a string

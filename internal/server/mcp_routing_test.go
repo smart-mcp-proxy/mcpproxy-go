@@ -10,6 +10,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -958,7 +959,7 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 	proxy.config.QuarantineEnabled = &qOff // spec 100: these tests verify aggregation, not the rug-pull baseline
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
@@ -997,7 +998,7 @@ func TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen(t *testing.T) {
 	proxy.config.AggregateUpstreamPrompts = true
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
@@ -1035,7 +1036,7 @@ func TestRefreshPrompts_AggregationDisabled_BuiltinsOnly(t *testing.T) {
 	proxy.config.AggregateUpstreamPrompts = false // the default — safe posture
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
@@ -1086,7 +1087,7 @@ func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
 	proxy.config = &boot
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
 	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewResolver(), nil)
@@ -1139,7 +1140,7 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 	proxy.config.QuarantineEnabled = &qOff // spec 100: these tests verify aggregation, not the rug-pull baseline
 
 	upstreamSrv := newTestRefreshPromptsUpstream(t)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstreamSrv)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
 	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)

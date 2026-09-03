@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -47,7 +47,7 @@ func TestListToolsFailureIsLoggedOnceAndNotAsError(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
 	upstream := newTestPromptUpstreamServer(t, "greeting")
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 
 	require.NoError(t, m.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
@@ -106,7 +106,7 @@ func TestListToolsFailureIsStillReported(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
 	upstream := newTestPromptUpstreamServer(t, "greeting")
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 
 	require.NoError(t, m.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
