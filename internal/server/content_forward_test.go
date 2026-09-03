@@ -722,3 +722,83 @@ func TestForwardContentResult_FallbackPathStoresCache(t *testing.T) {
 	assert.Equal(t, "fallback:tool", store.calls[0].toolName)
 	assert.Contains(t, store.calls[0].content, `"rows"`, "fallback path should persist the JSON-serialized full result")
 }
+
+// Spec 058 FR-016b. mcp.CallToolResult embeds mcp.Result, which carries
+// ResultType — a field that only came into existence with the 2026-07-28
+// revision, and which the protocol defines as instructing the CLIENT how to
+// interpret the response.
+//
+// forwardContentResult used to copy that envelope wholesale (`Result: ctr.Result`).
+// The embedded MultiRoundTripResult was never copied, so an upstream returning
+// input_required produced the worst possible pairing downstream: mcpproxy told
+// the client "I need more input" while stripping the inputRequests and the
+// requestState that would let it answer. The client cannot proceed and cannot
+// know why.
+//
+// mcpproxy is not the upstream. It must speak for itself, and let the library
+// stamp the result type appropriate to the era it is answering on.
+func TestForwardContentResult_DoesNotForwardUpstreamResultType(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{ResultType: mcp.ResultTypeInputRequired},
+		MultiRoundTripResult: mcp.MultiRoundTripResult{
+			InputRequests: mcp.InputRequests{},
+			RequestState:  "upstream-opaque-token",
+		},
+		Content: []mcp.Content{mcp.TextContent{Type: "text", Text: "needs input"}},
+	}
+
+	forwarded, _, _ := forwardContentResult(upstream, nil, nil, zap.NewNop(), "some_tool", nil)
+
+	require.NotNil(t, forwarded)
+	assert.Empty(t, string(forwarded.ResultType),
+		"an upstream's resultType must not be replayed as mcpproxy's own; "+
+			"claiming input_required while dropping inputRequests leaves the client unable to answer or to diagnose")
+	assert.Empty(t, forwarded.RequestState,
+		"an upstream requestState must never reach the client verbatim (it is upstream-scoped and would let a continuation be redirected)")
+	assert.Empty(t, forwarded.InputRequests,
+		"input requests are reported through the FR-015 notice, not smuggled through the forwarded envelope")
+}
+
+// The rest of the envelope is legitimate passthrough: _meta carries trace
+// context and similar per-response metadata that a proxy should preserve.
+func TestForwardContentResult_PreservesResultMeta(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{
+			Meta: &mcp.Meta{AdditionalFields: map[string]any{"trace-id": "abc123"}},
+		},
+		Content: []mcp.Content{mcp.TextContent{Type: "text", Text: "ok"}},
+	}
+
+	forwarded, _, _ := forwardContentResult(upstream, nil, nil, zap.NewNop(), "some_tool", nil)
+
+	require.NotNil(t, forwarded)
+	require.NotNil(t, forwarded.Meta, "response _meta must survive the proxy hop so trace context is not lost")
+	assert.Equal(t, "abc123", forwarded.Meta.AdditionalFields["trace-id"])
+}
+
+// proxyResultEnvelope is the single decision point both forwarding paths share,
+// so testing it covers the direct-surface handler too — that path needs a fully
+// wired proxy to reach, and duplicating the assertion there would only test the
+// duplication.
+func TestProxyResultEnvelope(t *testing.T) {
+	t.Run("drops the upstream result type", func(t *testing.T) {
+		envelope := proxyResultEnvelope(&mcp.CallToolResult{
+			Result: mcp.Result{ResultType: mcp.ResultTypeInputRequired},
+		})
+
+		assert.Empty(t, string(envelope.ResultType),
+			"mcpproxy answers for itself; the era-appropriate result type is stamped by the library")
+	})
+
+	t.Run("relays response meta", func(t *testing.T) {
+		meta := &mcp.Meta{AdditionalFields: map[string]any{"trace-id": "abc123"}}
+
+		envelope := proxyResultEnvelope(&mcp.CallToolResult{Result: mcp.Result{Meta: meta}})
+
+		assert.Same(t, meta, envelope.Meta, "_meta carries trace context and must survive the hop")
+	})
+
+	t.Run("tolerates a nil result", func(t *testing.T) {
+		assert.Equal(t, mcp.Result{}, proxyResultEnvelope(nil))
+	})
+}

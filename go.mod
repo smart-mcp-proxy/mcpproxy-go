@@ -18,7 +18,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
-	github.com/mark3labs/mcp-go v0.57.0
+	github.com/mark3labs/mcp-go v1.0.0
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/prometheus/client_golang v1.24.1

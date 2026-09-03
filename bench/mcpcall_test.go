@@ -13,6 +13,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
 )
 
 // zeroLatencyIsClockArtifact reports whether a zero client-measured latency is
@@ -93,7 +94,7 @@ func newFixtureMCPServer(t *testing.T, respText string) (*httptest.Server, *atom
 			return mcp.NewToolResultText(respText), nil
 		},
 	)
-	ts := mcpserver.NewTestStreamableHTTPServer(srv)
+	ts := servertest.NewTestStreamableHTTPServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, &calls, &lastQuery
 }
@@ -212,7 +213,7 @@ func TestMCPCaller_RetrieveToolsLimit(t *testing.T) {
 			return mcp.NewToolResultText(fixture), nil
 		},
 	)
-	ts := mcpserver.NewTestStreamableHTTPServer(srv)
+	ts := servertest.NewTestStreamableHTTPServer(srv)
 	defer ts.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -247,7 +248,7 @@ func TestMCPCaller_ToolError(t *testing.T) {
 			return mcp.NewToolResultError("index unavailable: boom"), nil
 		},
 	)
-	ts := mcpserver.NewTestStreamableHTTPServer(srv)
+	ts := servertest.NewTestStreamableHTTPServer(srv)
 	defer ts.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

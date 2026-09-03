@@ -36,6 +36,28 @@ func logCacheStoreFailure(logger *zap.Logger, err error, toolName, cacheKey stri
 	)
 }
 
+// proxyResultEnvelope builds the mcp.Result envelope mcpproxy puts on a
+// forwarded tool result (Spec 058 FR-016b).
+//
+// Only _meta is relayed. Copying the upstream's envelope wholesale would also
+// replay its ResultType — a 2026-07-28 field telling the CLIENT how to
+// interpret the response — while mcp.CallToolResult embeds MultiRoundTripResult
+// separately, so the inputRequests and requestState that make an
+// "input_required" answerable were dropped on the same hop. The client was left
+// told to supply input it had no way to supply.
+//
+// Leaving ResultType unset lets mcp-go stamp the value appropriate to the era
+// mcpproxy is answering on, which is the only party that knows it.
+//
+// Both forwarding paths (forwardContentResult here, and the direct-surface
+// handler in mcp_routing.go) call this, so the two cannot drift apart.
+func proxyResultEnvelope(ctr *mcp.CallToolResult) mcp.Result {
+	if ctr == nil {
+		return mcp.Result{}
+	}
+	return mcp.Result{Meta: ctr.Meta}
+}
+
 // forwardContentResult preserves non-text content blocks (ImageContent, AudioContent,
 // EmbeddedResource) from an upstream CallToolResult while applying truncation only to
 // TextContent blocks. This fixes issue #368 where all content types were being
@@ -128,7 +150,7 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 	}
 
 	forwarded = &mcp.CallToolResult{
-		Result:            ctr.Result,
+		Result:            proxyResultEnvelope(ctr),
 		Content:           newContent,
 		StructuredContent: ctr.StructuredContent,
 		IsError:           ctr.IsError,

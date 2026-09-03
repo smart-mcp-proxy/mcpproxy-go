@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -75,7 +76,7 @@ func connectedTestClient(t *testing.T, url string, exposePrompts *bool) *Client 
 
 func TestClient_ListPrompts_ReturnsUpstreamPrompts(t *testing.T) {
 	upstream := newTestPromptUpstream(t, true, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -88,7 +89,7 @@ func TestClient_ListPrompts_ReturnsUpstreamPrompts(t *testing.T) {
 
 func TestClient_ListPrompts_NoCapability_ReturnsNil(t *testing.T) {
 	upstream := newTestPromptUpstream(t, false, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -101,7 +102,7 @@ func TestClient_ListPrompts_NoCapability_ReturnsNil(t *testing.T) {
 func TestClient_ListPrompts_ExposePromptsFalse_SkipsUpstreamCall(t *testing.T) {
 	calls := 0
 	upstream := newTestPromptUpstream(t, true, &calls)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, config.BoolPtr(false))
@@ -121,7 +122,7 @@ func TestClient_ListPrompts_ExposePromptsFalse_SkipsUpstreamCall(t *testing.T) {
 func TestClient_SetExposePrompts_TakesEffectWithoutReconnect(t *testing.T) {
 	calls := 0
 	upstream := newTestPromptUpstream(t, true, &calls)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -147,7 +148,7 @@ func TestClient_SetExposePrompts_TakesEffectWithoutReconnect(t *testing.T) {
 
 func TestClient_GetPrompt_ReturnsUpstreamResult(t *testing.T) {
 	upstream := newTestPromptUpstream(t, true, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -167,7 +168,7 @@ func TestClient_GetPrompt_ReturnsUpstreamResult(t *testing.T) {
 func TestClient_GetPrompt_ExposePromptsFalse_ReturnsErrorNoUpstreamCall(t *testing.T) {
 	calls := 0
 	upstream := newTestPromptUpstream(t, true, &calls)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, config.BoolPtr(false))
@@ -186,7 +187,7 @@ func TestClient_GetPrompt_ExposePromptsFalse_ReturnsErrorNoUpstreamCall(t *testi
 func TestClient_GetPrompt_SetExposePromptsFalse_TakesEffectWithoutReconnect(t *testing.T) {
 	calls := 0
 	upstream := newTestPromptUpstream(t, true, &calls)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -225,7 +226,7 @@ func TestClient_ListPrompts_NotConnected_ReturnsError(t *testing.T) {
 
 func TestClient_ListPrompts_ServerInfoNil_ReturnsError(t *testing.T) {
 	upstream := newTestPromptUpstream(t, true, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -244,7 +245,7 @@ func TestClient_ListPrompts_ServerInfoNil_ReturnsError(t *testing.T) {
 
 func TestClient_ListPrompts_UpstreamError_ReturnsWrappedError(t *testing.T) {
 	upstream := newTestPromptUpstream(t, true, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	c := connectedTestClient(t, testServer.URL, nil)
 
 	// Close the upstream out from under an already-connected client so the
@@ -268,7 +269,7 @@ func TestClient_GetPrompt_NotConnected_ReturnsError(t *testing.T) {
 
 func TestClient_GetPrompt_UpstreamError_ReturnsWrappedError(t *testing.T) {
 	upstream := newTestPromptUpstream(t, true, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	c := connectedTestClient(t, testServer.URL, nil)
 
 	testServer.Close()
@@ -309,7 +310,7 @@ func newPaginatedPromptUpstream(t *testing.T, count, pageLimit int) *mcpserver.M
 
 func TestClient_ListPrompts_FollowsPaginationAcrossPages(t *testing.T) {
 	upstream := newPaginatedPromptUpstream(t, 5, 2) // 3 pages: [2][2][1]
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -321,7 +322,7 @@ func TestClient_ListPrompts_FollowsPaginationAcrossPages(t *testing.T) {
 
 func TestClient_ListPrompts_StopsAtItemCap(t *testing.T) {
 	upstream := newPaginatedPromptUpstream(t, 250, 50) // 5 pages available
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -336,7 +337,7 @@ func TestClient_ListPrompts_StopsAtItemCap(t *testing.T) {
 func TestClient_ListPrompts_EndlessCursorTerminatesAtPageCap(t *testing.T) {
 	// 60 prompts at 1/page => a NextCursor on every page; the page cap must cut it.
 	upstream := newPaginatedPromptUpstream(t, maxListPromptsPages+10, 1)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -354,7 +355,7 @@ func TestClient_ListPrompts_EndlessCursorTerminatesAtPageCap(t *testing.T) {
 // QA; this asserts the dispatch + callback the proxy relies on.)
 func TestClient_HandlePromptsListChanged_FiresCallback(t *testing.T) {
 	upstream := newTestPromptUpstream(t, true, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)
@@ -378,7 +379,7 @@ func TestClient_HandlePromptsListChanged_FiresCallback(t *testing.T) {
 // safe when no callback is registered.
 func TestClient_HandlePromptsListChanged_NilCallbackNoPanic(t *testing.T) {
 	upstream := newTestPromptUpstream(t, true, nil)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	defer testServer.Close()
 
 	c := connectedTestClient(t, testServer.URL, nil)

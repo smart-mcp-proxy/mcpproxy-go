@@ -942,11 +942,8 @@ func (s *Server) Start(ctx context.Context) error {
 		// watcher hot-reloads — and reporting it would name a surface /mcp is
 		// not serving.
 		s.runtime.SetServedRoutingMode(config.ResolveRoutingMode(routingMode))
-		// mcp-go's built-in DNS-rebinding protection is disabled in favor of
-		// hostValidationMiddleware, which applies the same check but honors the
-		// trusted_hosts allowlist for reverse-proxy deployments (GH #898).
 		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(routingMode),
-			server.WithDisableLocalhostProtection(true))
+			clientFacingStreamableOptions()...)
 
 		// Create custom HTTP server for handling multiple routes
 		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {
@@ -2502,6 +2499,34 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 	})
 }
 
+// clientFacingStreamableOptions returns the options every client-facing
+// Streamable HTTP transport must be built with. It exists so the set cannot
+// drift between the five endpoints that serve MCP (/mcp, /mcp/all, /mcp/code,
+// /mcp/call and /mcp/p/<slug>) — a pin applied to four of five would leave one
+// door open on a different protocol era, which is the failure this helper is
+// designed to make impossible.
+//
+// The options are deliberately not configurable:
+//
+//   - DisableLocalhostProtection: mcp-go's built-in DNS-rebinding protection is
+//     replaced by hostValidationMiddleware, which applies the same check but
+//     honors the trusted_hosts allowlist for reverse-proxy deployments (#898).
+//
+//   - StreamableHTTPProtocolVersions, pinned to the legacy set: mcp-go v1.0.0
+//     serves MCP 2026-07-28 on the same endpoint, and that era binds no session
+//     id. Spec 058 FR-028 keeps the client-facing surface on the legacy versions
+//     until the stateless work (spec 058 US3) has landed, because session-keyed
+//     behavior — profile selection above all — silently degrades without it.
+//     Lifting this pin is a deliberate, separately verified change; it is a
+//     function rather than a package variable so it cannot be flipped at
+//     runtime or from a test.
+func clientFacingStreamableOptions() []server.StreamableHTTPOption {
+	return []server.StreamableHTTPOption{
+		server.WithDisableLocalhostProtection(true),
+		server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...),
+	}
+}
+
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
 	cfg := s.runtime.Config()
 	if cfg == nil {
@@ -2622,21 +2647,21 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Each endpoint always serves its specific routing mode regardless of config.
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
 	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
-		server.WithDisableLocalhostProtection(true))
+		clientFacingStreamableOptions()...)
 	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(directStreamable))))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
 	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
-		server.WithDisableLocalhostProtection(true))
+		clientFacingStreamableOptions()...)
 	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable))))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
 	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
-		server.WithDisableLocalhostProtection(true))
+		clientFacingStreamableOptions()...)
 	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(callToolStreamable))))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
@@ -2645,7 +2670,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Profile resolution is done by profileMiddleware which runs AFTER mcpAuthMiddleware
 	// so that agent-token scope can compose downstream with the profile scope.
 	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
-		server.WithDisableLocalhostProtection(true))
+		clientFacingStreamableOptions()...)
 	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable)))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)

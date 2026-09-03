@@ -593,7 +593,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				}
 			}
 			forwarded = &mcp.CallToolResult{
-				Result:            ctr.Result,
+				Result:            proxyResultEnvelope(ctr),
 				Content:           newContent,
 				StructuredContent: ctr.StructuredContent,
 				IsError:           ctr.IsError,

@@ -11,6 +11,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -72,7 +73,7 @@ func addConnectedTestServerWithConfig(t *testing.T, m *Manager, id string, cfg *
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
 	upstream := newTestPromptUpstreamServer(t, promptName)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	t.Cleanup(testServer.Close)
 
 	cfg.Protocol = "streamable-http"
@@ -301,7 +302,7 @@ func TestManager_ListPrompts_PerServerCap(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
 	upstream := newTestPromptUpstreamServerN(t, maxPromptsPerServer+5)
-	testServer := mcpserver.NewTestStreamableHTTPServer(upstream)
+	testServer := servertest.NewTestStreamableHTTPServer(upstream)
 	t.Cleanup(testServer.Close)
 
 	require.NoError(t, m.AddServerConfig("srv-a", &config.ServerConfig{

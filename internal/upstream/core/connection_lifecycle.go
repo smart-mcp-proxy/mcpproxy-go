@@ -16,7 +16,14 @@ import (
 // initialize performs MCP initialization handshake
 func (c *Client) initialize(ctx context.Context) error {
 	initRequest := mcp.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	// Spec 058 FR-027: pinned to the newest LEGACY revision rather than
+	// mcp.LATEST_PROTOCOL_VERSION, which mcp-go v1.0.0 redefined to 2026-07-28.
+	// Sending the latest constant would have made the library upgrade alone
+	// switch every upstream hop to the new protocol era, where Ping is a no-op
+	// (so Spec-074 health probes stop proving liveness) and server-initiated
+	// requests are gone (so roots-based workspace discovery cannot work).
+	// Lifting this pin is a separate, separately verified change.
+	initRequest.Params.ProtocolVersion = mcp.LATEST_LEGACY_PROTOCOL_VERSION
 	initRequest.Params.ClientInfo = mcp.Implementation{
 		Name:    "mcpproxy-go",
 		Version: "1.0.0",
