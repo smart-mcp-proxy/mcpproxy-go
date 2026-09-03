@@ -2501,10 +2501,19 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 
 // clientFacingStreamableOptions returns the options every client-facing
 // Streamable HTTP transport must be built with. It exists so the set cannot
-// drift between the five endpoints that serve MCP (/mcp, /mcp/all, /mcp/code,
+// drift between the five Streamable HTTP endpoints (/mcp, /mcp/all, /mcp/code,
 // /mcp/call and /mcp/p/<slug>) — a pin applied to four of five would leave one
-// door open on a different protocol era, which is the failure this helper is
-// designed to make impossible.
+// door open on a different protocol era.
+//
+// SCOPE, precisely: this covers the Streamable HTTP surfaces and nothing else.
+// mcp-go offers no equivalent option for stdio (server/stdio.go exposes only
+// error-logger, context-func and worker-pool options), and the protocol era is
+// decided per request from params._meta by the shared handler, with the version
+// gate living inside the Streamable HTTP transport. So a client speaking stdio
+// to `mcpproxy serve` in stdio mode can still opt into 2026-07-28 and be served
+// it. That gap is tracked with the rest of the stateless work (spec 058 US3);
+// it is not reachable by default, since an empty listen address is rewritten to
+// the HTTP default during config validation.
 //
 // The options are deliberately not configurable:
 //

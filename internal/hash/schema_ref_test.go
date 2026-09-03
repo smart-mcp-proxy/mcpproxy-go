@@ -136,3 +136,42 @@ func findRef(node interface{}) string {
 	}
 	return ""
 }
+
+// This file holds two normalizers over the same decoded schema, backing two
+// different hashes: NormalizeJSON feeds the Spec-032 approval hash, and
+// canonicalSchemaFromBytes (via ToolHash/ComputeToolHashWithOutputSchema) feeds
+// ToolMetadata.Hash. A cross-review of the original fix caught that only the
+// first had been canonicalized, which left the second drifting across the
+// library upgrade — the same defect, on the other path.
+func TestToolHashSurvivesDecoderRefRewrite(t *testing.T) {
+	stored, err := ToolHash("srv", "tool", "desc", json.RawMessage(decodedByV057))
+	if err != nil {
+		t.Fatalf("hashing the pre-bump schema: %v", err)
+	}
+	current, err := ToolHash("srv", "tool", "desc", json.RawMessage(decodedByV100))
+	if err != nil {
+		t.Fatalf("hashing the post-bump schema: %v", err)
+	}
+
+	if stored != current {
+		t.Errorf("ToolMetadata.Hash must survive the library's ref rewrite too,\n"+
+			"or the tool re-hashes on upgrade even though the upstream is unchanged\nstored:  %s\ncurrent: %s", stored, current)
+	}
+}
+
+// The output-schema half of the same contract takes the string path
+// (canonicalSchemaFromString), so it needs its own guard.
+func TestToolHashOutputSchemaSurvivesDecoderRefRewrite(t *testing.T) {
+	stored, err := ToolHashWithOutputSchema("srv", "tool", "desc", nil, decodedByV057)
+	if err != nil {
+		t.Fatalf("hashing the pre-bump output schema: %v", err)
+	}
+	current, err := ToolHashWithOutputSchema("srv", "tool", "desc", nil, decodedByV100)
+	if err != nil {
+		t.Fatalf("hashing the post-bump output schema: %v", err)
+	}
+
+	if stored != current {
+		t.Errorf("the output-schema hash must survive the rewrite as well\nstored:  %s\ncurrent: %s", stored, current)
+	}
+}

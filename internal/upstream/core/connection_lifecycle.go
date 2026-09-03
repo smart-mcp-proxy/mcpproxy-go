@@ -94,6 +94,24 @@ func (c *Client) initialize(ctx context.Context) error {
 			zap.String("formatted_json", string(respBytes)))
 	}
 
+	// Spec 058 FR-027: the pin above controls what mcpproxy ASKS for; this
+	// checks what it got. mcp-go accepts a modern answer to a legacy request —
+	// initializeLegacy validates only mcp.IsValidProtocolVersion, which is true
+	// for 2026-07-28, and then applies it — so a server answering with the
+	// modern era would silently flip this hop to it, exactly the outcome the pin
+	// exists to prevent (Ping stops sending anything, server-initiated requests
+	// disappear).
+	//
+	// Rejecting restores the pre-bump contract rather than inventing one: under
+	// mcp-go v0.57.0, 2026-07-28 was absent from ValidProtocolVersions, so this
+	// same answer failed the handshake outright. A compliant server will not do
+	// this — it must answer with a version the client can speak — so this fires
+	// only for a genuinely misbehaving upstream.
+	if negotiated := serverInfo.ProtocolVersion; mcp.IsModernProtocol(negotiated) {
+		return fmt.Errorf("upstream answered MCP protocol version %s to a %s request; mcpproxy does not yet serve the 2026-07-28 era on the upstream hop (spec 058 FR-027)",
+			negotiated, initRequest.Params.ProtocolVersion)
+	}
+
 	c.serverInfo = serverInfo
 	c.logger.Info("MCP initialization successful",
 		zap.String("server_name", serverInfo.ServerInfo.Name),

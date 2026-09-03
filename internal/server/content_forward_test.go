@@ -776,10 +776,15 @@ func TestForwardContentResult_PreservesResultMeta(t *testing.T) {
 	assert.Equal(t, "abc123", forwarded.Meta.AdditionalFields["trace-id"])
 }
 
-// proxyResultEnvelope is the single decision point both forwarding paths share,
-// so testing it covers the direct-surface handler too — that path needs a fully
-// wired proxy to reach, and duplicating the assertion there would only test the
-// duplication.
+// proxyResultEnvelope is the single decision point both forwarding paths are
+// written to share.
+//
+// Note what these tests do NOT establish: nothing here asserts that the
+// direct-mode handler (internal/server/mcp_routing.go) actually calls the
+// helper. Reaching that handler needs a fully wired proxy with a live upstream
+// manager, so the /mcp/all surface's FR-016b guarantee currently rests on the
+// call site staying as written. Covering it for real belongs with the direct-
+// surface work in spec 058 US3, which builds the harness that can drive it.
 func TestProxyResultEnvelope(t *testing.T) {
 	t.Run("drops the upstream result type", func(t *testing.T) {
 		envelope := proxyResultEnvelope(&mcp.CallToolResult{

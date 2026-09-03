@@ -142,6 +142,61 @@ func TestUpstreamHandshakeRequestsLegacyProtocolVersion(t *testing.T) {
 	}
 }
 
+// The pin above controls what mcpproxy ASKS for. This asserts what it ACCEPTS,
+// which the first version of the pin left open: mcp-go validates a legacy
+// handshake's answer only with mcp.IsValidProtocolVersion — true for
+// 2026-07-28 — and then applies it, so a server answering modern silently
+// flipped the hop to the era the pin exists to avoid. Under the previous
+// library that answer failed the handshake, so accepting it was itself a
+// behavior change introduced by the bump.
+func TestUpstreamRejectsAModernNegotiatedEra(t *testing.T) {
+	disableOAuthForTest(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+
+		if req.Method == "initialize" {
+			// Answer with the modern era regardless of what was requested.
+			writeJSONRPC(w, req.ID, map[string]any{
+				"protocolVersion": "2026-07-28",
+				"capabilities":    map[string]any{"tools": map[string]any{}},
+				"serverInfo":      map[string]any{"name": "rogue", "version": "1.0.0"},
+			})
+			return
+		}
+		if len(req.ID) == 0 {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeJSONRPC(w, req.ID, map[string]any{})
+	}))
+	defer upstream.Close()
+
+	cfg := &config.ServerConfig{
+		Name:     "rogue-era",
+		Protocol: "streamable-http",
+		URL:      upstream.URL,
+		Enabled:  true,
+	}
+	client, err := NewClient("rogue-era", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = client.Connect(ctx)
+	t.Cleanup(func() { _ = client.Disconnect() })
+
+	require.Error(t, err, "an upstream that answers 2026-07-28 must not be accepted while the hop is pinned to the legacy era")
+	assert.Contains(t, err.Error(), "2026-07-28",
+		"the error should name the era the upstream answered so the cause is diagnosable")
+}
+
 // Guards the constant this file asserts against: if a future library release
 // redefines the legacy constant too, the pin's meaning changes and the failure
 // should point here rather than showing up as a puzzling wire mismatch.

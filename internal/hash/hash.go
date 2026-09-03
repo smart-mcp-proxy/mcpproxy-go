@@ -98,6 +98,17 @@ func canonicalSchemaFromBytes(schemaJSON []byte) (json.RawMessage, error) {
 		return nil, err
 	}
 
+	// Same library-drift protection NormalizeJSON applies. This file holds TWO
+	// normalizers over the same decoded schema, and they back different hashes:
+	// NormalizeJSON feeds the Spec-032 approval hash, while this one feeds
+	// ToolHash/ComputeToolHashWithOutputSchema, i.e. ToolMetadata.Hash written
+	// at internal/upstream/core/client.go. Canonicalizing only one of them would
+	// leave the other drifting across a library upgrade — the exact defect the
+	// canonicalization exists to prevent, just on the other code path.
+	if hasHoistedDefsWithDraft07Refs(parsed) {
+		canonicalizeSchemaRefs(parsed)
+	}
+
 	canonical, err := json.Marshal(parsed)
 	if err != nil {
 		return nil, err
