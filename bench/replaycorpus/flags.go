@@ -116,6 +116,20 @@ const (
 	// considering later is to count the truncated component at its STORED
 	// length and publish the result as a lower bound — more informative, and it
 	// needs a saving type that can express "at least".
+	//
+	// SCOPE, since this is now conditional: everything above describes
+	// BaselineProxy, the counterfactual where the agent's own call goes through
+	// call_tool_* and IS cut at ToolResponseLimit. Under BaselineDirect the
+	// agent talks to the upstream servers with no proxy in the path, nothing
+	// truncates, and the full pre-truncation size is exactly what it reads — so
+	// codeexec.go counts the sub-call and annotates it (TruncatedSubCalls /
+	// TruncatedBaseline) instead of firing this reason. The PARENT half is
+	// unconditional: the parent's response is the proxy term, mcpproxy really
+	// did cut it, and this reason still fires for it in both modes.
+	//
+	// Corollary for anyone comparing two runs: a call withheld here under proxy
+	// is re-tested under direct and may withhold under a DIFFERENT reason, so
+	// per-reason tallies are not comparable across baselines.
 	ReasonTruncatedSubCallOverstates ExclusionReason = "truncated_sub_call_overstates_saving"
 )
 
