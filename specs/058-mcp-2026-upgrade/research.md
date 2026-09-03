@@ -186,3 +186,20 @@ The amendments and the Phase 1–2 implementation were cross-reviewed as the rep
 **And a defect in the implementation.** `proxyResultEnvelope` relayed the upstream's `_meta` wholesale. mcp-go stamps mcpproxy's identity into a modern result only when the field is absent (`server/response.go` `decorateResult`: `if meta.ServerInfo() == nil`), so relaying an upstream `serverInfo` **suppresses mcpproxy's own identity and makes its response claim to be the upstream server** — a misattribution the client cannot detect. Hop-scoped reserved keys (`serverInfo`, `protocolVersion`) are now filtered out, with the rest of `_meta` preserved.
 
 **Confirmed unchanged:** FR-027 (the constant really was redefined, so the pin is justified) and the FR-016b design — leaving `ResultType` empty is safe, because the decorator fills an empty value with `complete`.
+
+---
+
+## D10 — Adversarial review of the implementation (2026-09-03)
+
+Six lenses over the Phase 1–2 diff, every finding put through three skeptics. Four survived. Two were real defects; two were claims of mine that promised more than the code delivered. Both categories are worth recording, because the second kind is the sort that survives review by sounding right.
+
+**FR-027's pin constrained the request, not the outcome.** `initRequest.Params.ProtocolVersion` says what mcpproxy *asks* for; the era in force is what the upstream *answers*. `initializeLegacy` validates the answer with `mcp.IsValidProtocolVersion` — true for `2026-07-28` — then applies it, so a server answering modern flipped the hop anyway. Rejecting restores the pre-bump contract rather than inventing one: v0.57.0 did not list that version, so the same answer failed the handshake. Guarded and tested against a rogue upstream.
+
+**Only one of two hash normalizers was canonicalized.** `internal/hash` holds two, over the same decoded schema, backing different hashes. `NormalizeJSON` (Spec-032 approval hash) was fixed; `canonicalSchemaFromBytes` — behind `ToolHash`/`ComputeToolHashWithOutputSchema`, i.e. `ToolMetadata.Hash` — was not, and still drifted. The same defect the fix existed to prevent, one code path over. Both now guarded.
+
+**Two overclaiming comments, now corrected rather than defended:**
+
+- The transport pin covers Streamable HTTP only. mcp-go has no stdio equivalent, and the era is chosen per request by the shared handler, so a stdio client can still opt into `2026-07-28`. Not reachable by default — an empty listen address is rewritten to the HTTP default — but the doc comment implied coverage it does not have. Tracked as T036a.
+- The `proxyResultEnvelope` tests do not establish that the direct-mode handler calls it; reaching that handler needs a fully wired proxy. `/mcp/all`'s FR-016b guarantee rests on the call site staying as written. Tracked as T036b.
+
+**Reviewer noise worth noting:** 15 findings were refuted, and the stdio gap was independently raised by four of six lenses at "major" before verification settled it at minor — reviewer volume is not evidence of severity, and the per-finding skeptic pass is what separated the two real defects from the rest. Three verify agents also died on API errors, which lowers the effective vote count on their findings; a finding with one surviving vote out of two would be recorded as refuted, so the confirmed set is a floor, not a ceiling.

@@ -81,6 +81,8 @@ Single Go project. Backend paths are repo-relative: `internal/`, `cmd/`, `bench/
 - [ ] T034 [P] [US3] Correct the false "stable session id" comment in `internal/server/profile_resolver.go` and the false "background cleanup calls RemoveSession" comment in `internal/server/session_store.go`
 - [ ] T035 [P] [US3] Update the profile docs for era behaviour in `docs/features/profiles.md`
 - [ ] T036 [US3] Decide and record whether per-session token stats become legacy-only or are re-keyed on request-carried identity, in `specs/058-mcp-2026-upgrade/research.md`
+- [ ] T036a [US3] Close the stdio era gap: mcp-go offers no stdio equivalent of the Streamable HTTP version pin, and the era is chosen per request by the shared handler, so a stdio client can opt into `2026-07-28` today. Reject a modern `_meta` protocol version on the stdio surface (an `onRequestInitialization` hook or middleware on the server at `internal/server/server.go:985`), with a failing test first
+- [ ] T036b [US3] Assert the direct-mode handler actually calls `proxyResultEnvelope` (FR-016b on `/mcp/all`): today nothing does, because reaching that handler needs a fully wired proxy with a live upstream manager. Build on the harness this phase adds, in `internal/server/mcp_routing_test.go`
 
 **Checkpoint**: US3 independently testable and complete. Only now may a pin lift.
 
@@ -226,10 +228,10 @@ Phase 1 (Setup) ──► Phase 2 (Foundational, both pins) ──► Phase 3 (U
 |---|---|---|
 | 1 Setup | 8 | — |
 | 2 Foundational | 11 | — |
-| 3 Stateless readiness | 17 | US3 (P1) |
+| 3 Stateless readiness | 19 | US3 (P1) |
 | 4 Negotiation | 10 | US1 (P1) |
 | 5 Routing headers | 8 | US2 (P1) |
 | 6 Input-required detection | 8 | US4 (P2) |
 | 7 Additive adoption | 10 | US5 (P2) |
 | 8 Polish | 7 | — |
-| **Total** | **79** | |
+| **Total** | **81** | |
