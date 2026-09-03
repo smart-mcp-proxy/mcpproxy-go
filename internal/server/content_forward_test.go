@@ -795,10 +795,57 @@ func TestProxyResultEnvelope(t *testing.T) {
 
 		envelope := proxyResultEnvelope(&mcp.CallToolResult{Result: mcp.Result{Meta: meta}})
 
-		assert.Same(t, meta, envelope.Meta, "_meta carries trace context and must survive the hop")
+		require.NotNil(t, envelope.Meta, "_meta carries trace context and must survive the hop")
+		assert.Equal(t, "abc123", envelope.Meta.AdditionalFields["trace-id"])
+		assert.NotSame(t, meta, envelope.Meta,
+			"the relayed _meta must be a copy: hop-scoped keys are filtered out of it, and mutating the upstream's map would corrupt the record the activity log holds")
 	})
 
 	t.Run("tolerates a nil result", func(t *testing.T) {
 		assert.Equal(t, mcp.Result{}, proxyResultEnvelope(nil))
 	})
+}
+
+// The cross-review of this change caught a real defect here. mcp-go stamps
+// mcpproxy's own identity into an outgoing modern result ONLY when the field is
+// still absent (server/response.go decorateResult: `if meta.ServerInfo() == nil`).
+// Relaying an upstream's serverInfo therefore suppresses mcpproxy's identity and
+// makes its own response claim to be the upstream server — a misattribution a
+// client has no way to detect.
+func TestProxyResultEnvelope_StripsHopScopedMeta(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{Meta: &mcp.Meta{AdditionalFields: map[string]any{
+			mcp.MetaKeyServerInfo:      map[string]any{"name": "some-upstream", "version": "9.9.9"},
+			mcp.MetaKeyProtocolVersion: "2026-07-28",
+			"traceparent":              "00-abc-def-01",
+			"vendor.example/custom":    "keep me",
+		}}},
+	}
+
+	envelope := proxyResultEnvelope(upstream)
+
+	require.NotNil(t, envelope.Meta)
+	assert.NotContains(t, envelope.Meta.AdditionalFields, mcp.MetaKeyServerInfo,
+		"relaying the upstream's serverInfo suppresses mcpproxy's own identity, so its response would claim to be the upstream")
+	assert.NotContains(t, envelope.Meta.AdditionalFields, mcp.MetaKeyProtocolVersion,
+		"the era negotiated upstream is not the era mcpproxy is answering on")
+	assert.Equal(t, "00-abc-def-01", envelope.Meta.AdditionalFields["traceparent"],
+		"trace context describes the call, not the hop, and must survive")
+	assert.Equal(t, "keep me", envelope.Meta.AdditionalFields["vendor.example/custom"],
+		"upstream-specific metadata is not ours to drop")
+}
+
+// A _meta carrying nothing but hop-scoped keys must not leave an empty object
+// behind: an empty _meta still reads as "present" to mcp-go's ServerInfo check.
+func TestProxyResultEnvelope_DropsMetaThatBecomesEmpty(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{Meta: &mcp.Meta{AdditionalFields: map[string]any{
+			mcp.MetaKeyServerInfo: map[string]any{"name": "some-upstream"},
+		}}},
+	}
+
+	envelope := proxyResultEnvelope(upstream)
+
+	assert.Nil(t, envelope.Meta,
+		"nothing relay-safe survived, so no _meta should be emitted at all")
 }
