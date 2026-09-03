@@ -57,7 +57,11 @@ The `servertest` swap touches 32 call sites in 6 test files: `bench/mcpcall_test
 
 **Decision**: in this spec, detect an upstream `input_required` result, return a structured `isError` notice, and reject unsolicited continuations. Move the actual relay to a follow-up spec. **This requires amending FR-015/FR-016 in spec.md**, which is a decision for the maintainer to ratify, not something the plan can assume.
 
-**Rationale**: `client.CallTool` is hard-wired to an internal multi-round-trip loop (`client/client.go:631-643`, `client/mrtr.go:56-103`). It both swallows `input_required` results and clobbers any caller-supplied `inputResponses`/`requestState`. The single-shot entry points (`callToolOnce`, `sendRequest`) are unexported. **A proxy cannot relay MRTR through the v1.0.0 client API at all** without either reimplementing the call path or an upstream library change. Two of three judges chose deferral; the dissenter's sealed-envelope design is the right shape for the follow-up and is recorded below.
+**Rationale (corrected 2026-09-03 after cross-review)**: `client.CallTool` is hard-wired to an internal multi-round-trip loop (`client/client.go:631-643`, `client/mrtr.go:56-103`) that swallows `input_required` results and clobbers caller-supplied `inputResponses`/`requestState`, and `WithMaxInputRoundTrips` only bounds the loop.
+
+**The stronger claim this section originally made — that relay is impossible through the public API — was wrong.** `SendRequest` is exported on the transport interface (`client/transport/interface.go:22`, `client/transport/streamable_http.go:563`), mcpproxy builds that transport itself (`internal/transport/http.go:301-305`), and `client.GetTransport()` returns it. Relay is buildable today.
+
+Deferral therefore rests on cost: that path means hand-built JSON-RPC, proxy-owned request ids and correlation, and a second dispatch route that bypasses everything `internal/upstream/core` layers on `CallTool` (error classification, timeouts, activity emission, retry, reconnect). That is its own spec. Two of three judges chose deferral; the dissenter's sealed-envelope design is the right shape for the follow-up and is recorded below.
 
 **Follow-up design (for the later spec)**: a proxy-owned sealed envelope — `mpx1.<b64url(payload)>.<b64url(tag)>`, HMAC-SHA256, tool binding, args fingerprint — rather than passing the upstream `requestState` verbatim, because verbatim relay lets a client redirect a continuation to a different upstream. File the upstream mcp-go issue now: an exported single-shot `CallTool` accepting `mcp.MultiRoundTripParams`, and an exported typed input-required error.
 
@@ -161,3 +165,24 @@ The version-gated re-baseline remains available if field telemetry ever shows dr
 4. **`server/discover` before `initialize` against non-mcp-go upstreams** (python/TS SDKs) — connect-time cost and OAuth 401 discovery behaviour unmeasured. Mitigated for now by D3's upstream pin.
 5. **Modern-era activity rows carry `session_id ""`** — the Web UI grouping was not inspected. Needs a request-carried correlation key.
 6. **`inflightKey` collision**: `server/server.go:2479-2506` reportedly keys in-flight requests as `":<jsonrpc-id>"` for every modern request, which could let one client cancel another's call. Cited but not independently verified — **treat as a security item for the bump PR until disproved**.
+
+---
+
+## D9 — Cross-review outcome (2026-09-03)
+
+The amendments and the Phase 1–2 implementation were cross-reviewed as the repo convention requires. Recording it here because three of the four corrections were to reasoning I had already written down confidently.
+
+**A false clean first.** The initial review exited cleanly having verified nothing: it auto-rejected its own reads of the module cache and the scratch directory, so every claim came back unexamined. Its silence was indistinguishable from approval. The fix was to stage the library sources and the diff *inside* the repo working directory and re-run. **Treat a cross-review that produced no verdict text as not having run.**
+
+**What it rejected:**
+
+| Claim | Verdict |
+|---|---|
+| MRTR relay impossible on the public API | **Wrong.** `SendRequest` is exported and mcpproxy already holds the transport. Deferral now rests on cost; FR-016a gains a concrete starting point. |
+| No header path reaches notifications; mcpproxy originates none | **Wrong on both halves.** `sendHTTP` applies static and func headers to notifications, and the library sends `notifications/initialized` on mcpproxy's behalf. Only the per-method half is genuinely out of reach. |
+| SC-006 unmeasurable from mcpproxy's side | **Overstated.** A per-client `tools/list` counter on the existing `AddBeforeAny` hook would measure it. Missing instrumentation, not missing possibility. |
+| Only one `AddResource` call site | **Wrong in detail**, conclusion unaffected — there are two, both schema-compiler registrations. |
+
+**And a defect in the implementation.** `proxyResultEnvelope` relayed the upstream's `_meta` wholesale. mcp-go stamps mcpproxy's identity into a modern result only when the field is absent (`server/response.go` `decorateResult`: `if meta.ServerInfo() == nil`), so relaying an upstream `serverInfo` **suppresses mcpproxy's own identity and makes its response claim to be the upstream server** — a misattribution the client cannot detect. Hop-scoped reserved keys (`serverInfo`, `protocolVersion`) are now filtered out, with the rest of `_meta` preserved.
+
+**Confirmed unchanged:** FR-027 (the constant really was redefined, so the pin is justified) and the FR-016b design — leaving `ResultType` empty is safe, because the decorator fills an empty value with `complete`.

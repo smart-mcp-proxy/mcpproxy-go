@@ -88,14 +88,14 @@ The research surfaced requirements that cannot be met as written. Under the repo
 
 | Requirement | Amendment | Why it could not stand |
 |---|---|---|
-| FR-015 / FR-016 | detect-and-frame; true relay deferred to **FR-016a** | `client.CallTool` hard-wires the round-trip loop and the single-shot entries are unexported, so no code path satisfies the original text |
+| FR-015 / FR-016 | detect-and-frame; true relay deferred to **FR-016a** | relay IS possible via the exported transport `SendRequest`, so deferral rests on cost — a second dispatch path through `internal/upstream/core` — not on impossibility (corrected after cross-review) |
 | FR-016b (new) | stop copying the upstream result envelope wholesale | v1.0.0 adds `resultType` + MRTR fields, so an upstream marker would reach clients as mcpproxy's own |
-| FR-007 | scoped to **requests** | no header path exists for notifications, and mcpproxy originates none |
+| FR-007 | per-method headers scoped to **requests** | `WithHTTPHeaderFunc` takes only a context, so it cannot stamp a method; other headers DO reach notifications and mcpproxy does originate one (corrected after cross-review) |
 | FR-018 / SC-005 | vacuous today, kept for future resource proxying | no resources are proxied; a translation layer would be dead code |
 | FR-027 | now names **both** hops | as written, the library bump alone would have violated it |
-| SC-006 | "hints present and valid"; fetch-reduction clause withdrawn | unmeasurable from mcpproxy's side, with no recorded baseline |
+| SC-006 | "hints present and valid"; fetch-reduction clause deferred | measurable via a per-client counter on the existing hook, but the counter and a baseline do not exist yet (corrected after cross-review) |
 
-Cross-review these before the implementation PRs merge (repo convention for generated specs).
+**Cross-review outcome (2026-09-03).** These were cross-reviewed as the repo convention requires, and the review rejected the reasoning behind three of them plus found a defect in the implementation. All four are corrected above and in spec.md, each marked so the original claim and its withdrawal are both visible. FR-027 was confirmed, and FR-018/SC-005 confirmed with one factual fix. The first review attempt returned a **false clean** — it exited having auto-rejected its own file reads, so its silence meant nothing; the evidence had to be staged inside the repo before it could verify anything.
 
 ### Phase B — The bump (one PR, no wire change)
 
