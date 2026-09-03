@@ -13,8 +13,26 @@ name: Retire release notice
 # It opens a PR rather than pushing to main so the deletion goes through the
 # same review and checks as any other change, and so a maintainer who wants to
 # keep the notice for a follow-up patch release can simply close the PR.
+#
+# Why release.yml CALLS this workflow instead of relying on the release event:
+# GitHub does not create workflow runs for events raised with GITHUB_TOKEN, and
+# release.yml publishes the release with GITHUB_TOKEN. The `release: published`
+# trigger below therefore never fired for a normal release (it did not fire for
+# v0.64.0, whose security advisory sat on main until it was removed by hand).
+# workflow_call runs as a job of the release run itself, so it cannot be skipped
+# that way. The `release:` trigger is kept for releases created by a person.
+#
+# The same GITHUB_TOKEN rule applies to the PR this opens: `pull_request`
+# checks do not run on it. The PR body tells the maintainer to close and
+# reopen it (or push an empty commit) to get the required checks to run.
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "The release tag that carried the notice"
+        required: true
+        type: string
   release:
     types: [published]
   workflow_dispatch:
@@ -52,7 +70,7 @@ jobs:
         if: steps.check.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || 'a manual dispatch' }}
+          RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name || 'a manual dispatch' }}
         run: |
           set -euo pipefail
 
@@ -90,6 +108,8 @@ jobs:
           **${RELEASE_TAG} has shipped**, so the notice is removed here. Without this, the same advisory would repeat on every subsequent release — and a reader who sees the same advisory three times stops believing any of them.
 
           If you want the notice to stay for a follow-up patch release, close this PR; another will be opened after the next published release.
+
+          **Checks will not start on their own.** This PR was opened with \`GITHUB_TOKEN\`, and GitHub does not run \`pull_request\` workflows for it. Close and reopen the PR, or push an empty commit to the branch, and the required checks will run.
 
           Opened automatically by \`.github/workflows/retire-release-notice.yml\`.
           EOF

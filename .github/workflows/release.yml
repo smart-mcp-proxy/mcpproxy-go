@@ -1798,6 +1798,21 @@ jobs:
           done
           exit "$FAILED"
 
+  # Open the PR that deletes .github/RELEASE_NOTICE.md once this release has
+  # carried it. Called here rather than left to retire-release-notice.yml's own
+  # `release: published` trigger, because events raised with GITHUB_TOKEN (which
+  # is what creates the release above) never start a workflow run — the
+  # trigger silently did nothing for v0.64.0. The called workflow is a no-op
+  # when no notice file exists.
+  retire-release-notice:
+    needs: [release]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/retire-release-notice.yml
+    with:
+      tag: ${{ github.ref_name }}
+
   provenance:
     needs: [release]
     permissions:
