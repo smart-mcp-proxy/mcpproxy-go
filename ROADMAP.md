@@ -72,9 +72,9 @@ graph LR
 **Independent epics** (15) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
+- 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P1
 - 🔵 **Planning/docs truth automation** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
-- ⚪ **MCP protocol upgrade to 2026-07-28 revision** — Todo · P1
 - ⚪ **Windows native tray app** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -303,6 +303,15 @@ graph LR
 </details>
 
 <details>
+<summary>🔵 MCP protocol upgrade to 2026-07-28 revision — In progress · P1</summary>
+
+> STABLE GATE CLEARED 2026-09-02: mark3labs/mcp-go v1.0.0 (stable) released; go.mod still pins v0.57.0. Raised P3->P1 on the 2026-09-02 issue-prioritization pass — PLAN LANDED 2026-09-03 (research.md, plan.md, data-model.md, contracts/, quickstart.md) from a verified probe of mcp-go v1.0.0 STABLE. Production code compiles unchanged on both editions (only test symbol NewTestStreamableHTTPServer moved to server/servertest, 32 sites); the FULL internal/server suite under v1.0.0 fails on exactly the 2 known profile tests and nothing else. The bump ALONE flips the UPSTREAM-facing default to 2026-07-28 (connection_lifecycle.go:19 uses LATEST_PROTOCOL_VERSION), so the plan pins BOTH directions in the bump PR. Spec-057 conflict DECIDED: Option A (URL path = request-carried identity) plus 2 mandatory grafts (era-gate resolver tier 3, because stdio SessionID is the constant "stdio"; list-only resolver, which also fixes a PRE-EXISTING FR-012 violation on prompts/list). MRTR FR-015/016 cannot be met through the v1.0.0 public client API (CallTool hard-wires the round-trip loop; single-shot entries unexported) -> plan proposes detect-and-frame + a spec amendment, NEEDS MAINTAINER RATIFICATION before implementation. FR-018/SC-005 vacuous (no resource proxying). New security item R1: mcp-go inflightKey is ":<id>" for every modern request, so one client can cancel another's call; masked by the FR-028 pin. Spec-032 hash drift measured: real mechanism, 0 of 1096 real tools affected, fix is a NormalizeJSON ref canonicalisation + guard test. Next step is speckit.tasks after ratification (tracker #532). Earlier: UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. The cross-spec conflict named there (FR-012 vs shipped Spec 057) is the one RESOLVED above as Option A. 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
+
+Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
+
+</details>
+
+<details>
 <summary>🔵 Planning/docs truth automation — In progress · P2</summary>
 
 > Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests.
@@ -382,15 +391,6 @@ graph LR
 | Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
 | Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
 | Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
-
-</details>
-
-<details>
-<summary>⚪ MCP protocol upgrade to 2026-07-28 revision — Todo · P1</summary>
-
-> STABLE GATE CLEARED 2026-09-02: mark3labs/mcp-go v1.0.0 (stable) released; go.mod still pins v0.57.0. Raised P3->P1 on the 2026-09-02 issue-prioritization pass — spec 058 has spec.md only, next step is speckit.plan then tasks (tracker #532). Earlier: UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that — implementation has not started, hence todo): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. CROSS-SPEC CONFLICT still open and now the mandatory first task: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug> — Option A/B decided at plan time (acceptance = the 2 tests failing under beta.1). 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
-
-Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
 
 </details>
 
@@ -779,10 +779,10 @@ graph LR
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
+| MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
-| MCP protocol upgrade to 2026-07-28 revision | Todo | P1 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
