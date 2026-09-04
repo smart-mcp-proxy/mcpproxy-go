@@ -1231,7 +1231,11 @@ jobs:
 
   build-docker:
     runs-on: ubuntu-latest
-    needs: [build]
+    # `qa-gate` is load-bearing, not cosmetic: this job pushes to GHCR (including
+    # the `:latest` pointer), which is publishing to users. Without it in the
+    # closure a tag whose gate failed would still ship a container image — the
+    # exact hole cmd/release-gate's TestPublishJobsGatedOnQAGate exists to catch.
+    needs: [build, qa-gate]
     # Stable releases only, matching `build`/`release` — release.yml fires on every
     # `v*` tag, and an RC must never move `mcpproxy-server:latest`. prerelease.yml
     # owns the RC channel and publishes no image.
