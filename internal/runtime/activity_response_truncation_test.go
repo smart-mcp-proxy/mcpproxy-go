@@ -253,16 +253,25 @@ func TestSetMaxResponseSizeIgnoresNonPositive(t *testing.T) {
 //
 // Each case puts the key AFTER the storage cut, so it is absent from the
 // persisted response and can only be found via the pre-truncation string.
+//
+// The cap is set explicitly rather than left at the 64KB default, which keeps
+// the payload small. Detector.Scan costs roughly 5.5us/byte, and the race
+// detector multiplies that by ~23x: a payload sized to clear the default cap
+// took 9.5s to scan under -race against waitForDetectionMetadata's 5s poll
+// deadline, so the test failed in CI (which runs -race everywhere) while
+// passing locally without it. A 1KB cap exercises the identical seam.
 func TestDetectionScansUntruncatedResponse(t *testing.T) {
 	const awsKey = "AKIA1234567890ABCDEF"
-	// Comfortably past the 64KB default cap, well inside the detector's 1024KB.
-	padding := strings.Repeat("x", storage.DefaultMaxResponseSize+10_000)
+	const storageCap = 1024
+	// Past the storage cut, well inside the detector's own 1024KB window.
+	padding := strings.Repeat("x", storageCap*4)
 
 	t.Run("tool_call", func(t *testing.T) {
 		store, cleanup := setupTestStorage(t)
 		defer cleanup()
 
 		svc := NewActivityService(store, zap.NewNop())
+		svc.SetMaxResponseSize(storageCap)
 		svc.SetDetector(security.NewDetector(config.DefaultSensitiveDataDetectionConfig()))
 
 		svc.handleEvent(Event{
@@ -291,6 +300,7 @@ func TestDetectionScansUntruncatedResponse(t *testing.T) {
 		defer cleanup()
 
 		svc := NewActivityService(store, zap.NewNop())
+		svc.SetMaxResponseSize(storageCap)
 		svc.SetDetector(security.NewDetector(config.DefaultSensitiveDataDetectionConfig()))
 
 		svc.handleEvent(Event{
