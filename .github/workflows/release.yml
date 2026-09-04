@@ -1266,6 +1266,17 @@ jobs:
           tags: |
             ghcr.io/smart-mcp-proxy/mcpproxy-server:${{ github.ref_name }}
             ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
+          # image.source links the GHCR package back to this repo so it inherits the
+          # repo's README and shows up under the org's packages. It does NOT make the
+          # package public: a package first created by GITHUB_TOKEN is private, and
+          # visibility has to be flipped once by hand after the first push. Until that
+          # happens an anonymous `docker pull` gets `denied`.
+          labels: |
+            org.opencontainers.image.source=https://github.com/smart-mcp-proxy/mcpproxy-go
+            org.opencontainers.image.description=MCPProxy Server Edition — headless MCP proxy with tool discovery and quarantine
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
 
   # Spec 081: release qualification gate. Runs the server-type matrix +
   # invariants + assembled suites and produces one pass/fail verdict. The
