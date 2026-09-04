@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -61,6 +63,13 @@ func TestToolCallResponseTruncatedForStorage(t *testing.T) {
 
 // call_tool_read proxies whole upstream payloads, which is where the largest
 // records in a real database came from.
+//
+// The flag assertion is the interesting half. On an internal record
+// ResponseTruncated means "the agent received LESS than ResponseBytes", and two
+// cost consumers drop such rows from delivered traffic
+// (truncatedBuiltinOverstatesDelivery, bench/replaycorpus). A built-in cut only
+// on the way into the log was still delivered whole, so the flag must stay off
+// or the row vanishes from the usage timeline with an honest ResponseBytes.
 func TestInternalToolCallResponseTruncatedForStorage(t *testing.T) {
 	store, cleanup := setupTestStorage(t)
 	defer cleanup()
@@ -75,6 +84,7 @@ func TestInternalToolCallResponseTruncatedForStorage(t *testing.T) {
 			"internal_tool_name": "call_tool_read",
 			"status":             "success",
 			"response":           strings.Repeat("y", 50_000),
+			"response_bytes":     int64(50_000),
 		},
 	})
 
@@ -83,7 +93,78 @@ func TestInternalToolCallResponseTruncatedForStorage(t *testing.T) {
 
 	assert.Less(t, len(records[0].Response), 50_000,
 		"internal tool calls take the same cap as upstream calls")
-	assert.True(t, records[0].ResponseTruncated)
+	assert.True(t, strings.HasSuffix(records[0].Response, "...[truncated]"),
+		"the stored text still shows it was cut")
+	assert.False(t, records[0].ResponseTruncated,
+		"a storage-only cut must not set the flag that excludes the row from delivered bytes")
+}
+
+// The delivered-bytes consequence of the assertion above, driven end to end:
+// a built-in cut only for storage must still be counted in the usage timeline.
+// Mirrors TestUsageAggregate_TruncatedBuiltinDoesNotInflateDeliveredBytes from
+// the other side — that one proves an emitter-flagged record is excluded, this
+// one proves a storage-cut record is not.
+func TestStorageTruncatedBuiltinStillCountsDeliveredBytes(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.SetMaxResponseSize(1024)
+
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "describe_tool",
+			"status":             "success",
+			"response":           strings.Repeat("z", 80_000),
+			"response_bytes":     int64(80_000),
+		},
+	})
+
+	records := allActivities(t, store)
+	require.Len(t, records, 1)
+	require.EqualValues(t, 80_000, records[0].ResponseBytes,
+		"ResponseBytes describes what the agent received, before any storage cut")
+
+	agg := newUsageAggregate()
+	agg.Apply(records[0])
+	var delivered int64
+	for _, b := range agg.Buckets {
+		delivered += b.RespBytesSum
+	}
+	assert.EqualValues(t, 80_000, delivered,
+		"describe_tool delivers its response whole; only the stored copy was cut")
+}
+
+// handlePromptGet builds its record separately from the tool paths, so it needs
+// its own case — the rest of the package passes with only this path neutered.
+func TestPromptGetResponseTruncatedForStorage(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.SetMaxResponseSize(1024)
+
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityPromptGet,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "upstream",
+			"prompt_name": "big_prompt",
+			"status":      "success",
+			"response":    strings.Repeat("p", 50_000),
+		},
+	})
+
+	records := allActivities(t, store)
+	require.Len(t, records, 1)
+
+	assert.Less(t, len(records[0].Response), 50_000,
+		"prompts take the same per-record cap as tool responses")
+	assert.True(t, strings.HasSuffix(records[0].Response, "...[truncated]"))
+	assert.True(t, records[0].ResponseTruncated,
+		"on a prompt record the flag means the stored copy was cut, as on tool_call")
 }
 
 // An emitter-set response_truncated flag (Spec 103: recorded response larger
@@ -159,4 +240,75 @@ func TestSetMaxResponseSizeIgnoresNonPositive(t *testing.T) {
 
 	svc.SetMaxResponseSize(2048)
 	assert.Equal(t, 2048, svc.maxResponseSize)
+}
+
+// Storage truncation must not narrow the Spec 026 scan window.
+//
+// The detector has its own, far larger cap (sensitive_data_detection.
+// max_payload_size_kb, 1024KB by default). If the response were cut to
+// activity_max_response_size (64KB) before the scan, every secret past that
+// boundary would silently stop being detected — a 16x smaller window in the
+// DEFAULT configuration, with nothing recording that it had moved. Both
+// handlers therefore scan the text as received and store the cut copy.
+//
+// Each case puts the key AFTER the storage cut, so it is absent from the
+// persisted response and can only be found via the pre-truncation string.
+func TestDetectionScansUntruncatedResponse(t *testing.T) {
+	const awsKey = "AKIA1234567890ABCDEF"
+	// Comfortably past the 64KB default cap, well inside the detector's 1024KB.
+	padding := strings.Repeat("x", storage.DefaultMaxResponseSize+10_000)
+
+	t.Run("tool_call", func(t *testing.T) {
+		store, cleanup := setupTestStorage(t)
+		defer cleanup()
+
+		svc := NewActivityService(store, zap.NewNop())
+		svc.SetDetector(security.NewDetector(config.DefaultSensitiveDataDetectionConfig()))
+
+		svc.handleEvent(Event{
+			Type:      EventTypeActivityToolCallCompleted,
+			Timestamp: time.Now().UTC(),
+			Payload: map[string]any{
+				"server_name": "upstream",
+				"tool_name":   "dump_config",
+				"status":      "success",
+				"response":    padding + " trailing secret " + awsKey,
+			},
+		})
+
+		det := waitForDetectionMetadata(t, store, true)
+		assert.Equal(t, true, det["detected"],
+			"a secret past the storage cut must still be detected")
+
+		records := allActivities(t, store)
+		require.Len(t, records, 1)
+		assert.NotContains(t, records[0].Response, awsKey,
+			"the stored copy is still truncated — the scan is what sees the whole text")
+	})
+
+	t.Run("prompt_get", func(t *testing.T) {
+		store, cleanup := setupTestStorage(t)
+		defer cleanup()
+
+		svc := NewActivityService(store, zap.NewNop())
+		svc.SetDetector(security.NewDetector(config.DefaultSensitiveDataDetectionConfig()))
+
+		svc.handleEvent(Event{
+			Type:      EventTypeActivityPromptGet,
+			Timestamp: time.Now().UTC(),
+			Payload: map[string]any{
+				"server_name": "upstream",
+				"prompt_name": "render_context",
+				"status":      "success",
+				"response":    padding + " trailing secret " + awsKey,
+			},
+		})
+
+		det := waitForDetectionMetadata(t, store, true)
+		assert.Equal(t, true, det["detected"])
+
+		records := allActivities(t, store)
+		require.Len(t, records, 1)
+		assert.NotContains(t, records[0].Response, awsKey)
+	})
 }

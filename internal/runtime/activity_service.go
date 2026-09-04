@@ -245,11 +245,16 @@ func (s *ActivityService) SetMaxResponseSize(maxResponseSize int) {
 // log by age, count and total bytes, but nothing else limits one record, so a
 // multi-megabyte upstream response was previously stored whole.
 //
-// The returned bool is OR-ed into ActivityRecord.ResponseTruncated. That field
-// already carries the Spec 103 meaning "the recorded response is larger than the
-// one the agent received"; storage truncation is the other direction, but the
-// field documents itself as "true if response was truncated" and a consumer
-// wanting the untruncated text cannot get it in either case.
+// The returned bool is OR-ed into ActivityRecord.ResponseTruncated for tool_call
+// and prompt_get, where the field means "cut on the way into the log, ResponseBytes
+// still honest" — the same direction as a storage cut.
+//
+// It is deliberately NOT applied to internal_tool_call. There the flag carries the
+// Spec 103 meaning "the agent received LESS than ResponseBytes", which two cost
+// consumers read as "exclude this row from delivered traffic"
+// (truncatedBuiltinOverstatesDelivery and bench/replaycorpus). A built-in cut only
+// for storage was still delivered whole, so setting the flag would silently erase
+// it from the usage timeline. The "...[truncated]" suffix still marks the text.
 func (s *ActivityService) truncateForStorage(response string) (string, bool) {
 	return storage.TruncateActivityResponse(response, s.maxResponseSize)
 }
@@ -588,6 +593,13 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	arguments := getMapPayload(evt.Payload, "arguments")
 	response := getStringPayload(evt.Payload, "response")
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
+	// Spec 026 must keep scanning the response the agent actually received, not
+	// the shortened copy that lands on the record. Truncating first would narrow
+	// the detector's window from sensitive_data_detection.max_payload_size_kb
+	// (1024KB by default) to activity_max_response_size (64KB), so a secret past
+	// the storage cut would stop being detected with nothing to say the window
+	// had moved. The detector applies its own, much larger cap to this string.
+	detectionSource := response
 	response, storageTruncated := s.truncateForStorage(response)
 	responseTruncated = responseTruncated || storageTruncated
 	durationMs := getInt64Payload(evt.Payload, "duration_ms")
@@ -703,7 +715,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		// detection_text (feature off, non-call_tool_* paths) keeps today's
 		// behavior byte-for-byte.
 		if s.detector != nil {
-			scanText := response
+			scanText := detectionSource
 			if detectionText != "" {
 				scanText = detectionText
 			}
@@ -894,8 +906,14 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	// flag onto the record so a cost recomputation can exclude it instead of
 	// tokenizing text the agent never paid for.
 	responseTruncated := getBoolPayload(evt.Payload, "response_truncated")
-	responseStr, storageTruncated := s.truncateForStorage(responseStr)
-	responseTruncated = responseTruncated || storageTruncated
+	// Truncate the stored text but deliberately do NOT touch responseTruncated.
+	// On an internal record that flag has one specific meaning for cost:
+	// "the agent received LESS than ResponseBytes, so exclude the row"
+	// (truncatedBuiltinOverstatesDelivery, and bench/replaycorpus). A built-in
+	// that was cut only on the way into the log was still delivered whole with
+	// an honest ResponseBytes, so setting the flag here would drop it from
+	// delivered traffic. The "...[truncated]" suffix still marks the stored text.
+	responseStr, _ = s.truncateForStorage(responseStr)
 
 	// Spec 103: pre-truncation sizes, emitted for built-ins as well as upstream
 	// dispatches. 0 stays UNKNOWN rather than free.
@@ -1011,6 +1029,9 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 	// Name the MCP client on the record so it survives session eviction.
 	metadata := s.withClientInfo(nil, sessionID)
 
+	// Same as the tool path: scan before the storage cut, or the detector's
+	// window shrinks to activity_max_response_size.
+	detectionSource := responseStr
 	responseStr, promptTruncated := s.truncateForStorage(responseStr)
 
 	record := &storage.ActivityRecord{
@@ -1059,7 +1080,7 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 		s.workersWG.Add(1)
 		go func() {
 			defer s.workersWG.Done()
-			s.runAsyncDetection(record.ID, arguments, responseStr)
+			s.runAsyncDetection(record.ID, arguments, detectionSource)
 		}()
 	}
 }
