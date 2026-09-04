@@ -219,6 +219,7 @@ func main() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(telemetryCmd)
+	rootCmd.AddCommand(dbCmd)
 	rootCmd.AddCommand(feedbackCmd)
 	rootCmd.AddCommand(securityCmd)
 	rootCmd.AddCommand(connectCmd)

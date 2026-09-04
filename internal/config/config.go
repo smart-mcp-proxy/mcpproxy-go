@@ -254,11 +254,15 @@ type Config struct {
 	// without this key serialize byte-identically (SC-004).
 	Profiles []ProfileConfig `json:"profiles,omitempty" mapstructure:"profiles"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
-	TopK               int      `json:"top_k,omitempty" mapstructure:"top-k"`
-	ToolsLimit         int      `json:"tools_limit" mapstructure:"tools-limit"`
-	ToolResponseLimit  int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
-	CallToolTimeout    Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
-	MaxResultSizeChars int      `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"` // Advertised on every tool as `_meta.anthropic/maxResultSizeChars`; raises Claude Code's inline-response ceiling from 50k to up to 500k chars. Set to 0 to disable.
+	TopK              int      `json:"top_k,omitempty" mapstructure:"top-k"`
+	ToolsLimit        int      `json:"tools_limit" mapstructure:"tools-limit"`
+	ToolResponseLimit int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
+	CallToolTimeout   Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
+	// MaxResultSizeChars is advertised on every tool as
+	// `_meta.anthropic/maxResultSizeChars`; it raises Claude Code's
+	// inline-response ceiling from 50k to up to 500k chars. Omit the key for
+	// the 500000 default; set it to 0 to disable the annotation.
+	MaxResultSizeChars *int `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"`
 
 	// Concurrency limits (spec 093, GH #955). Scope (a) of FR-020: the GLOBAL
 	// AGGREGATE limiter — one proxy-wide cap on concurrently running upstream
@@ -462,11 +466,23 @@ type Config struct {
 	OAuthExpiryWarningHours float64 `json:"oauth_expiry_warning_hours,omitempty" mapstructure:"oauth-expiry-warning-hours"` // Hours before token expiry to show degraded status (default: 1.0)
 
 	// Activity logging settings (RFC-003)
-	ActivityRetentionDays      int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"`             // Max age before pruning (default: 90)
-	ActivityMaxRecords         int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`                   // Max records before pruning (default: 100000)
-	ActivityMaxSizeMB          int `json:"activity_max_size_mb,omitempty" mapstructure:"activity-max-size-mb"`                   // Max total activity-log size in MB before pruning oldest (default: 256, 0=disabled)
-	ActivityMaxResponseSize    int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
-	ActivityCleanupIntervalMin int `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
+	ActivityRetentionDays int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"` // Max age before pruning (default: 90)
+	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 100000)
+	// ActivityMaxSizeMB caps the total activity-log size in MB before the
+	// oldest records are pruned. Omit the key for the 256MB default; set it to
+	// 0 to disable the size cap.
+	ActivityMaxSizeMB          *int `json:"activity_max_size_mb,omitempty" mapstructure:"activity-max-size-mb"`
+	ActivityMaxResponseSize    int  `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
+	ActivityCleanupIntervalMin int  `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
+
+	// Bounds for the per-server tool-call history behind GET /api/v1/tool-calls
+	// (#1176). It is a recent-debugging window, not an audit log — the activity
+	// log is the durable record — and it kept every upstream response whole,
+	// per server, forever. A non-positive value means "use the default", not
+	// "disable": this store must never be unbounded again, so there is
+	// deliberately no off switch.
+	ToolCallMaxResponseSize     int `json:"tool_call_max_response_size,omitempty" mapstructure:"tool-call-max-response-size"`           // Cap on a stored response, in bytes (default: 65536)
+	ToolCallMaxRecordsPerServer int `json:"tool_call_max_records_per_server,omitempty" mapstructure:"tool-call-max-records-per-server"` // Calls retained per server (default: 1000)
 
 	// Intent declaration settings (Spec 018)
 	IntentDeclaration *IntentDeclarationConfig `json:"intent_declaration,omitempty" mapstructure:"intent-declaration"`
@@ -1483,7 +1499,8 @@ type TracingExporterConfig struct {
 	// "localhost:4318" for http or "localhost:4317" for grpc.
 	Endpoint string `json:"endpoint,omitempty" mapstructure:"endpoint"`
 	// SampleRate is the head-based trace sampling ratio in [0,1]. Default 0.1.
-	SampleRate float64 `json:"sample_rate,omitempty" mapstructure:"sample-rate"`
+	// Omit the key for the 0.1 default; set it to 0 to sample nothing.
+	SampleRate *float64 `json:"sample_rate,omitempty" mapstructure:"sample-rate"`
 }
 
 // Default OTLP transport values shared by defaults and validation repair.
@@ -1503,10 +1520,9 @@ func DefaultMetricsExporterConfig() *MetricsExporterConfig {
 // with sane transport defaults pre-filled.
 func DefaultTracingExporterConfig() *TracingExporterConfig {
 	return &TracingExporterConfig{
-		Enabled:    false,
-		Protocol:   defaultTracingProtocol,
-		Endpoint:   defaultTracingHTTPEnd,
-		SampleRate: defaultTracingSampleRate,
+		Enabled:  false,
+		Protocol: defaultTracingProtocol,
+		Endpoint: defaultTracingHTTPEnd,
 	}
 }
 
@@ -1697,15 +1713,14 @@ func PruneDeprecatedRegistries(cfg *Config) int {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Listen:             defaultPort,
-		EnableSocket:       true, // Enable Unix socket/named pipe by default for local IPC
-		DataDir:            "",   // Will be set to ~/.mcpproxy by loader
-		DebugSearch:        false,
-		Servers:            []*ServerConfig{},
-		ToolsLimit:         15,
-		ToolResponseLimit:  20000,                     // Default 20000 characters
-		CallToolTimeout:    Duration(2 * time.Minute), // Default 2 minutes for tool calls
-		MaxResultSizeChars: 500000,                    // Claude Code's inline-response hard max
+		Listen:            defaultPort,
+		EnableSocket:      true, // Enable Unix socket/named pipe by default for local IPC
+		DataDir:           "",   // Will be set to ~/.mcpproxy by loader
+		DebugSearch:       false,
+		Servers:           []*ServerConfig{},
+		ToolsLimit:        15,
+		ToolResponseLimit: 20000,                     // Default 20000 characters
+		CallToolTimeout:   Duration(2 * time.Minute), // Default 2 minutes for tool calls
 
 		// TOON output (spec 084): off by default — responses byte-identical
 		// to pre-feature behavior (FR-002).
@@ -1795,11 +1810,14 @@ func DefaultConfig() *Config {
 		ToolResponseSessionRiskWarning: false,
 
 		// Activity logging defaults (RFC-003)
-		ActivityRetentionDays:      90,     // 90 days retention
-		ActivityMaxRecords:         100000, // 100K records max
-		ActivityMaxSizeMB:          256,    // 256MB total activity-log size cap (0 = disabled)
-		ActivityMaxResponseSize:    65536,  // 64KB response truncation
-		ActivityCleanupIntervalMin: 60,     // 1 hour cleanup interval
+		ActivityRetentionDays:   90,     // 90 days retention
+		ActivityMaxRecords:      100000, // 100K records max
+		ActivityMaxResponseSize: 65536,  // 64KB response truncation
+
+		ToolCallMaxResponseSize:     65536, // 64KB per stored tool-call response
+		ToolCallMaxRecordsPerServer: 1000,  // recent-history window per server
+
+		ActivityCleanupIntervalMin: 60, // 1 hour cleanup interval
 
 		// Intent declaration defaults (Spec 018) - strict validation by default for security
 		IntentDeclaration: DefaultIntentDeclarationConfig(),
@@ -2729,8 +2747,12 @@ func (c *Config) Validate() error {
 			tr.Endpoint = defaultTracingHTTPEnd
 		}
 	}
-	if tr.SampleRate < 0 || tr.SampleRate > 1 {
-		tr.SampleRate = defaultTracingSampleRate
+	// Only repair a value the operator actually wrote. Leaving it nil keeps
+	// "absent" distinct from "explicitly 0" (#1175); materialising the default
+	// here would write the key into every config that never mentioned it.
+	if tr.SampleRate != nil && (*tr.SampleRate < 0 || *tr.SampleRate > 1) {
+		repaired := defaultTracingSampleRate
+		tr.SampleRate = &repaired
 	}
 
 	return nil

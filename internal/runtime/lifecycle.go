@@ -1061,6 +1061,17 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		} else if pruned > 0 {
 			r.logger.Info("Pruned orphan tool-approval records", zap.Int("removed", pruned))
 		}
+
+		// Same GC for per-server tool-call history (#1176). These buckets held
+		// ~432MB of one reporter's 940MB config.db and nothing ever deleted
+		// them — a server removed from the config left its whole call history
+		// behind forever. Guarded by the same non-empty check above, and the
+		// synthetic code_execution bucket is never treated as an orphan.
+		if pruned, perr := r.storageManager.PruneOrphanToolCalls(configuredNames); perr != nil {
+			r.logger.Warn("Failed to prune orphan tool-call history", zap.Error(perr))
+		} else if pruned > 0 {
+			r.logger.Info("Pruned orphan tool-call history", zap.Int("servers_removed", pruned))
+		}
 	}
 
 	// Add/remove servers asynchronously to prevent blocking on slow connections

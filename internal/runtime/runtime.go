@@ -319,20 +319,28 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		activityService.SetUsagePersistInterval(cfg.Observability.UsagePersistInterval.Duration())
 	}
 
+	// Per-record size caps are applied UNCONDITIONALLY, outside the retention
+	// guard below. They used to ride on that `if`, which only ever fired
+	// because `cfg.ActivityMaxSizeMB >= 0` is trivially true for a plain int —
+	// so making that field a tri-state pointer (#1175) would have silently
+	// disabled the 64KB cap #1174 shipped, for every config that omits the
+	// key. The caps are not retention; they do not belong behind its guard.
+	activityService.SetMaxResponseSize(cfg.ActivityMaxResponseSize)
+	storageManager.SetToolCallLimits(cfg.ToolCallMaxResponseSize, cfg.ToolCallMaxRecordsPerServer)
+
 	// Wire activity retention config from config file
-	if cfg.ActivityRetentionDays > 0 || cfg.ActivityMaxRecords > 0 || cfg.ActivityCleanupIntervalMin > 0 || cfg.ActivityMaxSizeMB >= 0 {
+	if cfg.ActivityRetentionDays > 0 || cfg.ActivityMaxRecords > 0 || cfg.ActivityCleanupIntervalMin > 0 || cfg.EffectiveActivityMaxSizeMB() >= 0 {
 		maxAge := time.Duration(cfg.ActivityRetentionDays) * 24 * time.Hour
 		checkInterval := time.Duration(cfg.ActivityCleanupIntervalMin) * time.Minute
 		// ActivityMaxSizeMB: 0 disables the size cap, so pass the explicit byte
 		// value (>= 0 is applied; -1 would mean "unchanged").
-		maxSizeBytes := int64(cfg.ActivityMaxSizeMB) * 1024 * 1024
+		maxSizeBytes := int64(cfg.EffectiveActivityMaxSizeMB()) * 1024 * 1024
 		activityService.SetRetentionConfig(maxAge, cfg.ActivityMaxRecords, checkInterval, maxSizeBytes)
-		activityService.SetMaxResponseSize(cfg.ActivityMaxResponseSize)
 		logger.Info("Activity retention config applied",
 			zap.Int("max_response_size", cfg.ActivityMaxResponseSize),
 			zap.Int("retention_days", cfg.ActivityRetentionDays),
 			zap.Int("max_records", cfg.ActivityMaxRecords),
-			zap.Int("max_size_mb", cfg.ActivityMaxSizeMB),
+			zap.Int("max_size_mb", cfg.EffectiveActivityMaxSizeMB()),
 			zap.Int("cleanup_interval_min", cfg.ActivityCleanupIntervalMin))
 	}
 
@@ -1188,24 +1196,26 @@ func (r *Runtime) GetToolCalls(limit, offset int, scope storage.ToolCallScope) (
 	contractCalls := make([]*contracts.ToolCallRecord, len(pagedCalls))
 	for i, call := range pagedCalls {
 		contractCalls[i] = &contracts.ToolCallRecord{
-			ID:               call.ID,
-			ServerID:         call.ServerID,
-			ServerName:       call.ServerName,
-			ToolName:         call.ToolName,
-			Arguments:        call.Arguments,
-			Response:         call.Response,
-			Error:            call.Error,
-			Duration:         call.Duration,
-			Timestamp:        call.Timestamp,
-			ConfigPath:       call.ConfigPath,
-			RequestID:        call.RequestID,
-			Metrics:          convertTokenMetrics(call.Metrics),
-			ParentCallID:     call.ParentCallID,
-			ExecutionType:    call.ExecutionType,
-			MCPSessionID:     call.MCPSessionID,
-			MCPClientName:    call.MCPClientName,
-			MCPClientVersion: call.MCPClientVersion,
-			Annotations:      convertToolAnnotations(call.Annotations),
+			ID:                call.ID,
+			ServerID:          call.ServerID,
+			ServerName:        call.ServerName,
+			ToolName:          call.ToolName,
+			Arguments:         call.Arguments,
+			Response:          call.Response,
+			Error:             call.Error,
+			Duration:          call.Duration,
+			Timestamp:         call.Timestamp,
+			ConfigPath:        call.ConfigPath,
+			RequestID:         call.RequestID,
+			Metrics:           convertTokenMetrics(call.Metrics),
+			ParentCallID:      call.ParentCallID,
+			ExecutionType:     call.ExecutionType,
+			MCPSessionID:      call.MCPSessionID,
+			MCPClientName:     call.MCPClientName,
+			MCPClientVersion:  call.MCPClientVersion,
+			Annotations:       convertToolAnnotations(call.Annotations),
+			ResponseTruncated: call.ResponseTruncated,
+			ResponseBytes:     call.ResponseBytes,
 		}
 	}
 
@@ -1232,24 +1242,26 @@ func (r *Runtime) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) 
 		for _, call := range calls {
 			if call.ID == id {
 				return &contracts.ToolCallRecord{
-					ID:               call.ID,
-					ServerID:         call.ServerID,
-					ServerName:       call.ServerName,
-					ToolName:         call.ToolName,
-					Arguments:        call.Arguments,
-					Response:         call.Response,
-					Error:            call.Error,
-					Duration:         call.Duration,
-					Timestamp:        call.Timestamp,
-					ConfigPath:       call.ConfigPath,
-					RequestID:        call.RequestID,
-					Metrics:          convertTokenMetrics(call.Metrics),
-					ParentCallID:     call.ParentCallID,
-					ExecutionType:    call.ExecutionType,
-					MCPSessionID:     call.MCPSessionID,
-					MCPClientName:    call.MCPClientName,
-					MCPClientVersion: call.MCPClientVersion,
-					Annotations:      convertToolAnnotations(call.Annotations),
+					ID:                call.ID,
+					ServerID:          call.ServerID,
+					ServerName:        call.ServerName,
+					ToolName:          call.ToolName,
+					Arguments:         call.Arguments,
+					Response:          call.Response,
+					Error:             call.Error,
+					Duration:          call.Duration,
+					Timestamp:         call.Timestamp,
+					ConfigPath:        call.ConfigPath,
+					RequestID:         call.RequestID,
+					Metrics:           convertTokenMetrics(call.Metrics),
+					ParentCallID:      call.ParentCallID,
+					ExecutionType:     call.ExecutionType,
+					MCPSessionID:      call.MCPSessionID,
+					MCPClientName:     call.MCPClientName,
+					MCPClientVersion:  call.MCPClientVersion,
+					Annotations:       convertToolAnnotations(call.Annotations),
+					ResponseTruncated: call.ResponseTruncated,
+					ResponseBytes:     call.ResponseBytes,
 				}, nil
 			}
 		}
@@ -1281,24 +1293,26 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 	contractCalls := make([]*contracts.ToolCallRecord, len(calls))
 	for i, call := range calls {
 		contractCalls[i] = &contracts.ToolCallRecord{
-			ID:               call.ID,
-			ServerID:         call.ServerID,
-			ServerName:       call.ServerName,
-			ToolName:         call.ToolName,
-			Arguments:        call.Arguments,
-			Response:         call.Response,
-			Error:            call.Error,
-			Duration:         call.Duration,
-			Timestamp:        call.Timestamp,
-			ConfigPath:       call.ConfigPath,
-			RequestID:        call.RequestID,
-			Metrics:          convertTokenMetrics(call.Metrics),
-			ParentCallID:     call.ParentCallID,
-			ExecutionType:    call.ExecutionType,
-			MCPSessionID:     call.MCPSessionID,
-			MCPClientName:    call.MCPClientName,
-			MCPClientVersion: call.MCPClientVersion,
-			Annotations:      convertToolAnnotations(call.Annotations),
+			ID:                call.ID,
+			ServerID:          call.ServerID,
+			ServerName:        call.ServerName,
+			ToolName:          call.ToolName,
+			Arguments:         call.Arguments,
+			Response:          call.Response,
+			Error:             call.Error,
+			Duration:          call.Duration,
+			Timestamp:         call.Timestamp,
+			ConfigPath:        call.ConfigPath,
+			RequestID:         call.RequestID,
+			Metrics:           convertTokenMetrics(call.Metrics),
+			ParentCallID:      call.ParentCallID,
+			ExecutionType:     call.ExecutionType,
+			MCPSessionID:      call.MCPSessionID,
+			MCPClientName:     call.MCPClientName,
+			MCPClientVersion:  call.MCPClientVersion,
+			Annotations:       convertToolAnnotations(call.Annotations),
+			ResponseTruncated: call.ResponseTruncated,
+			ResponseBytes:     call.ResponseBytes,
 		}
 	}
 
@@ -1428,18 +1442,20 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 
 	// Convert to contract type
 	return &contracts.ToolCallRecord{
-		ID:          newCall.ID,
-		ServerID:    newCall.ServerID,
-		ServerName:  newCall.ServerName,
-		ToolName:    newCall.ToolName,
-		Arguments:   newCall.Arguments,
-		Response:    newCall.Response,
-		Error:       newCall.Error,
-		Duration:    newCall.Duration,
-		Timestamp:   newCall.Timestamp,
-		ConfigPath:  newCall.ConfigPath,
-		RequestID:   newCall.RequestID,
-		Annotations: convertToolAnnotations(newCall.Annotations),
+		ID:                newCall.ID,
+		ServerID:          newCall.ServerID,
+		ServerName:        newCall.ServerName,
+		ToolName:          newCall.ToolName,
+		Arguments:         newCall.Arguments,
+		Response:          newCall.Response,
+		Error:             newCall.Error,
+		Duration:          newCall.Duration,
+		Timestamp:         newCall.Timestamp,
+		ConfigPath:        newCall.ConfigPath,
+		RequestID:         newCall.RequestID,
+		Annotations:       convertToolAnnotations(newCall.Annotations),
+		ResponseTruncated: newCall.ResponseTruncated,
+		ResponseBytes:     newCall.ResponseBytes,
 	}, nil
 }
 
@@ -1461,24 +1477,26 @@ func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int, sco
 	records := make([]*contracts.ToolCallRecord, 0, len(storageRecords))
 	for _, rec := range storageRecords {
 		records = append(records, &contracts.ToolCallRecord{
-			ID:               rec.ID,
-			ServerID:         rec.ServerID,
-			ServerName:       rec.ServerName,
-			ToolName:         rec.ToolName,
-			Arguments:        rec.Arguments,
-			Response:         rec.Response,
-			Error:            rec.Error,
-			Duration:         rec.Duration,
-			Timestamp:        rec.Timestamp,
-			ConfigPath:       rec.ConfigPath,
-			RequestID:        rec.RequestID,
-			Metrics:          convertTokenMetrics(rec.Metrics),
-			ParentCallID:     rec.ParentCallID,
-			ExecutionType:    rec.ExecutionType,
-			MCPSessionID:     rec.MCPSessionID,
-			MCPClientName:    rec.MCPClientName,
-			MCPClientVersion: rec.MCPClientVersion,
-			Annotations:      convertToolAnnotations(rec.Annotations),
+			ID:                rec.ID,
+			ServerID:          rec.ServerID,
+			ServerName:        rec.ServerName,
+			ToolName:          rec.ToolName,
+			Arguments:         rec.Arguments,
+			Response:          rec.Response,
+			Error:             rec.Error,
+			Duration:          rec.Duration,
+			Timestamp:         rec.Timestamp,
+			ConfigPath:        rec.ConfigPath,
+			RequestID:         rec.RequestID,
+			Metrics:           convertTokenMetrics(rec.Metrics),
+			ParentCallID:      rec.ParentCallID,
+			ExecutionType:     rec.ExecutionType,
+			MCPSessionID:      rec.MCPSessionID,
+			MCPClientName:     rec.MCPClientName,
+			MCPClientVersion:  rec.MCPClientVersion,
+			Annotations:       convertToolAnnotations(rec.Annotations),
+			ResponseTruncated: rec.ResponseTruncated,
+			ResponseBytes:     rec.ResponseBytes,
 		})
 	}
 

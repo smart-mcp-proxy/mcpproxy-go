@@ -32,6 +32,13 @@ type Manager struct {
 	// personal edition, where every token is ownerless. See
 	// SetAgentTokenOwnerGate.
 	ownerGate atomic.Value // agentTokenOwnerGate
+
+	// toolCallMaxResponseBytes and toolCallMaxRecords bound the per-server
+	// tool-call history (#1176). Both are guarded by mu, set once from config
+	// via SetToolCallLimits and read on every RecordToolCall. Zero means "use
+	// the documented default" — see toolCallLimits.
+	toolCallMaxResponseBytes int
+	toolCallMaxRecords       int
 }
 
 // NewManager creates a new storage manager
@@ -343,7 +350,25 @@ func (m *Manager) DeleteUpstreamServer(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.db.DeleteUpstream(name)
+	if err := m.db.DeleteUpstream(name); err != nil {
+		return err
+	}
+
+	// Drop the server's call history with it. Leaving it behind is how the
+	// tool-call buckets grew unbounded across a server's whole lifetime and
+	// beyond it (#1176): nothing else ever deleted them — CleanupStaleServerData
+	// exists but has no caller.
+	//
+	// The history is keyed by server IDENTITY, not by name, and one name can
+	// own several identities over its life (the id is a hash of the server's
+	// attributes, so editing a URL or command mints a new one). Delete every
+	// identity this name has held, plus a name-keyed bucket if some caller
+	// ever wrote one.
+	if err := m.deleteToolCallHistoryForName(name); err != nil {
+		return fmt.Errorf("failed to delete tool call history for %s: %w", name, err)
+	}
+
+	return nil
 }
 
 // EnableUpstreamServer enables/disables an upstream server using async operations
@@ -1048,7 +1073,10 @@ func (m *Manager) RecordToolCall(record *ToolCallRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	bucketName := fmt.Sprintf("server_%s_tool_calls", record.ServerID)
+	maxResponseBytes, maxRecords := m.toolCallLimits()
+	bounded := boundToolCallResponse(record, maxResponseBytes)
+
+	bucketName := toolCallsBucketName(record.ServerID)
 	key := fmt.Sprintf("%d_%s", record.Timestamp.UnixNano(), record.ID)
 
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
@@ -1057,12 +1085,20 @@ func (m *Manager) RecordToolCall(record *ToolCallRecord) error {
 			return err
 		}
 
-		data, err := json.Marshal(record)
+		data, err := json.Marshal(bounded)
 		if err != nil {
 			return err
 		}
 
-		return bucket.Put([]byte(key), data)
+		if err := bucket.Put([]byte(key), data); err != nil {
+			return err
+		}
+
+		// Bound the bucket in the same transaction as the write, so the
+		// history can never exceed the cap even briefly and no separate
+		// cleanup pass has to exist (there was none: CleanupStaleServerData
+		// has no caller).
+		return pruneToolCallBucket(bucket, maxRecords)
 	})
 }
 
