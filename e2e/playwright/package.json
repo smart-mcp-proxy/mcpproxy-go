@@ -10,7 +10,7 @@
     "install-browsers": "playwright install chromium"
   },
   "devDependencies": {
-    "@playwright/test": "^1.40.0",
-    "@types/node": "^20.10.0"
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.4.0"
   }
 }
