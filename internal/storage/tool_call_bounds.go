@@ -29,11 +29,6 @@ const (
 	// say, 1KB.
 	toolCallPreviewBytes = 2048
 
-	// toolCallEnvelopeBytes reserves room for the placeholder's other fields
-	// (truncated, original_bytes, note and the JSON punctuation) so the whole
-	// object stays under the cap, not just its preview.
-	toolCallEnvelopeBytes = 512
-
 	// serverIdentitiesBucket holds the ServerIdentity records that map a
 	// server NAME to the SHA-256 id its tool-call bucket is keyed by.
 	serverIdentitiesBucket = "server_identities"
@@ -124,13 +119,9 @@ func boundToolCallResponse(record *ToolCallRecord, maxBytes int) *ToolCallRecord
 		copied := *record
 		bounded = &copied
 	}
-	bounded.Response = map[string]interface{}{
-		"truncated":      true,
-		"original_bytes": len(encoded),
-		"preview":        truncateUTF8(string(encoded), previewBytes(maxBytes)),
-		"note": "response omitted: exceeded tool_call_max_response_size. " +
-			"The full response was delivered to the caller; only this stored copy is shortened.",
-	}
+	bounded.Response = boundedPlaceholder(string(encoded), maxBytes,
+		"response omitted: exceeded tool_call_max_response_size. "+
+			"The full response was delivered to the caller; only this stored copy is shortened.")
 	bounded.ResponseTruncated = true
 	bounded.ResponseBytes = int64(len(encoded))
 	return bounded
@@ -152,32 +143,72 @@ func boundToolCallArguments(args map[string]interface{}, maxBytes int) map[strin
 	if err != nil || len(encoded) <= maxBytes {
 		return nil
 	}
-	return map[string]interface{}{
-		"truncated":      true,
-		"original_bytes": len(encoded),
-		"preview":        truncateUTF8(string(encoded), previewBytes(maxBytes)),
-		"note": "arguments omitted: exceeded tool_call_max_response_size. " +
-			"The full arguments were sent to the upstream server; only this stored copy is shortened.",
-	}
+	return boundedPlaceholder(string(encoded), maxBytes,
+		"arguments omitted: exceeded tool_call_max_response_size. "+
+			"The full arguments were sent to the upstream server; only this stored copy is shortened.")
 }
 
-// previewBytes is how much of the payload the placeholder may carry, given the
-// cap the whole record has to fit inside. A truncation marker that is itself
-// over the limit would defeat the point of configuring a small one.
-func previewBytes(maxBytes int) int {
-	room := maxBytes - toolCallEnvelopeBytes
-	if room < 0 {
-		room = 0
+// boundedPlaceholder builds the replacement value for an oversized payload,
+// guaranteeing that the MARSHALLED object fits inside maxBytes.
+//
+// It measures rather than estimates, because a raw byte budget is not a
+// reliable proxy for the encoded size: the preview is itself JSON, so every
+// quote and backslash in it is escaped again on the way in. A payload of
+// quotes doubles, which is how a 512-byte preview budget produced a 1243-byte
+// "truncated" record under a 1024-byte cap.
+//
+// The preview halves until the whole object fits. If even an empty preview is
+// too big — a cap under ~230 bytes, far below anything useful — the preview
+// and the note are dropped, leaving the bare {truncated, original_bytes} that
+// keeps the record honest at ~45 bytes.
+func boundedPlaceholder(encoded string, maxBytes int, note string) map[string]interface{} {
+	build := func(preview string, withNote bool) map[string]interface{} {
+		p := map[string]interface{}{
+			"truncated":      true,
+			"original_bytes": len(encoded),
+		}
+		if preview != "" {
+			p["preview"] = preview + truncationMarker
+		}
+		if withNote {
+			p["note"] = note
+		}
+		return p
 	}
-	if room < toolCallPreviewBytes {
-		return room
+
+	fits := func(p map[string]interface{}) bool {
+		encodedPlaceholder, err := json.Marshal(p)
+		return err == nil && len(encodedPlaceholder) <= maxBytes
 	}
-	return toolCallPreviewBytes
+
+	raw := truncateRuneSafe(encoded, toolCallPreviewBytes)
+	for {
+		if p := build(raw, true); fits(p) {
+			return p
+		}
+		if raw == "" {
+			break
+		}
+		raw = truncateRuneSafe(raw, len(raw)/2)
+	}
+
+	if p := build("", true); fits(p) {
+		return p
+	}
+	return build("", false)
 }
 
-// truncateUTF8 cuts s to at most maxBytes without splitting a rune, so the
-// preview stays valid JSON text.
-func truncateUTF8(s string, maxBytes int) string {
+// truncationMarker is appended to a shortened preview so a reader can see the
+// text was cut rather than being a short payload.
+const truncationMarker = "...[truncated]"
+
+// truncateRuneSafe cuts s to at most maxBytes without splitting a rune. It adds
+// no marker: callers that want one append it, so the marker's own length is
+// visible to the size arithmetic instead of hiding inside this function.
+func truncateRuneSafe(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
 	if len(s) <= maxBytes {
 		return s
 	}
@@ -185,7 +216,7 @@ func truncateUTF8(s string, maxBytes int) string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + "...[truncated]"
+	return s[:cut]
 }
 
 // pruneToolCallBucket evicts the oldest records until at most maxRecords

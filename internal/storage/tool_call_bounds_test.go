@@ -344,12 +344,20 @@ func TestTruncatedArgumentsAreFlaggedForReplay(t *testing.T) {
 // preview whatever the cap was, so configuring a small cap produced a
 // "truncated" record LARGER than the limit it was meant to enforce.
 func TestTruncationPlaceholderFitsInsideASmallCap(t *testing.T) {
-	for _, cap := range []int{256, 1024, 4096} {
+	// The filler is deliberately escape-heavy. An earlier version of this test
+	// used plain "q"s and passed while the invariant was broken: the preview is
+	// embedded as JSON inside JSON, so every quote and backslash is escaped a
+	// second time. A 512-byte preview budget produced a 1243-byte record under
+	// a 1024-byte cap; plain letters hide that entirely.
+	filler := strings.Repeat("\"\\", 250_000)
+
+	for _, cap := range []int{64, 256, 1024, 4096, 65536} {
 		mgr := newBoundsManager(t)
 		mgr.SetToolCallLimits(cap, 0)
 
-		rec := bigToolCall("call-1", "srv", 500_000)
-		rec.Arguments = map[string]interface{}{"text": strings.Repeat("q", 500_000)}
+		rec := bigToolCall("call-1", "srv", 10)
+		rec.Response = map[string]interface{}{"text": filler}
+		rec.Arguments = map[string]interface{}{"text": filler}
 		require.NoError(t, mgr.RecordToolCall(rec))
 
 		stored, err := mgr.GetServerToolCalls("srv", 10)

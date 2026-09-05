@@ -490,3 +490,37 @@ func TestCopyFileReplacesTheDestinationInsteadOfTruncatingIt(t *testing.T) {
 		t.Fatalf("copyFile truncated a hard link to the live database: it is now %d bytes, was 8192", len(surviving))
 	}
 }
+
+// Releasing the lock must remove OUR lock, not whatever happens to sit at that
+// path. A review found the sequence: someone deletes A's stale-looking lock, B
+// creates a fresh one, A finishes and removes the pathname — which is now B's —
+// and a third compaction starts alongside B.
+func TestCompactLockReleaseDoesNotRemoveSomeoneElsesLock(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, dbFileName+".compact.lock")
+
+	releaseA, err := acquireCompactLock(dir)
+	if err != nil {
+		t.Fatalf("acquire A: %v", err)
+	}
+
+	// A's lock is cleared by hand, and B takes a fresh one.
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	releaseB, err := acquireCompactLock(dir)
+	if err != nil {
+		t.Fatalf("acquire B: %v", err)
+	}
+
+	releaseA() // must be a no-op: this lock is B's now
+
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("A's release removed B's lock, so a third compaction could start: %v", err)
+	}
+
+	releaseB()
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Error("B's own release must remove B's lock")
+	}
+}

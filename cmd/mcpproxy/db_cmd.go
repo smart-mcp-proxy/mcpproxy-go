@@ -320,9 +320,26 @@ func acquireCompactLock(dir string) (release func(), err error) {
 		}
 		return nil, fmt.Errorf("failed to create compaction lock %s: %w", lockPath, err)
 	}
-	_ = f.Close()
 
-	return func() { os.Remove(lockPath) }, nil
+	// Stamp the lock with this run's identity so release can tell OUR lock from
+	// a successor's. Without it: someone deletes A's stale-looking lock, B
+	// creates a fresh one, A finishes and removes the pathname — which is now
+	// B's lock — and a third compaction starts alongside B.
+	token := fmt.Sprintf("pid=%d\nstarted=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+	_, writeErr := f.WriteString(token)
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(lockPath)
+		return nil, fmt.Errorf("failed to write compaction lock %s: %w", lockPath, errors.Join(writeErr, closeErr))
+	}
+
+	return func() {
+		if current, rerr := os.ReadFile(lockPath); rerr == nil && string(current) != token {
+			// Not ours any more — leave it for whoever owns it now.
+			return
+		}
+		os.Remove(lockPath)
+	}, nil
 }
 
 func compactDatabase(srcPath string, opts compactOptions) (result *compactResult, err error) {
@@ -435,20 +452,6 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 		ReclaimedBytes: beforeBytes - afterInfo.Size(),
 	}
 
-	// Nothing has held a lock on the source since src.Close() above, and
-	// compaction of a large database takes minutes. Re-check that the file we
-	// are about to replace is still the one we compacted, and that nobody has
-	// taken it, before doing anything destructive.
-	//
-	// Without this the swap is a data-loss race: a core that started during
-	// compaction (or a second `db compact`) ends up holding the OLD, now
-	// unlinked inode, and every write it makes afterwards vanishes when the
-	// rename lands. Aborting here is always safe — the original is untouched
-	// and the temp file is removed by the deferred cleanup.
-	if err := assertSourceUnchangedAndFree(srcPath, info); err != nil {
-		return nil, err
-	}
-
 	// The backup is a hard link, not a move: config.db therefore never stops
 	// existing, and the rename below still replaces it in one step.
 	if opts.KeepBackup {
@@ -466,6 +469,24 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 		}
 		res.BackupPath = backupPath
 		res.BackupBytes = beforeBytes
+	}
+
+	// Re-check as LATE as possible — after the backup, immediately before the
+	// rename. Nothing has held a lock on the source since src.Close() above,
+	// and compaction of a large database takes minutes; without this the swap
+	// is a data-loss race, because a core that started meanwhile ends up
+	// holding the OLD, now-unlinked inode and every write it makes vanishes.
+	//
+	// This narrows that window from the whole compaction to the few
+	// microseconds between the check and the rename. It cannot close it: the
+	// file must be CLOSED for a rename to work on Windows, so no lock can span
+	// the rename itself. The command's documented precondition remains "stop
+	// mcpproxy first", and this is the backstop for when someone did not.
+	if err := assertSourceUnchangedAndFree(srcPath, info); err != nil {
+		if res.BackupPath != "" {
+			os.Remove(res.BackupPath)
+		}
+		return nil, err
 	}
 
 	if err := os.Rename(tmpPath, srcPath); err != nil {
@@ -509,6 +530,11 @@ func assertSourceUnchangedAndFree(srcPath string, before os.FileInfo) error {
 	if err != nil {
 		return fmt.Errorf("database %s went away during compaction: %w", srcPath, err)
 	}
+	// Size plus mtime, not a content hash: hashing a multi-gigabyte file to
+	// guard a microsecond window would cost more than the operation it
+	// protects. It therefore cannot see an in-place write that preserves both
+	// — but making such a write requires an open handle, which is exactly what
+	// the exclusive-open check below refuses.
 	if now.Size() != before.Size() || !now.ModTime().Equal(before.ModTime()) {
 		return fmt.Errorf(
 			"database %s changed during compaction (something started using it); nothing was replaced — stop mcpproxy and retry",
