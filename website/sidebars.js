@@ -45,6 +45,7 @@ const sidebars = {
         'cli/security-commands',
         'cli/credential-commands',
         'cli/status-command',
+        'cli/db-commands',
         'cli-client-mode',
         'cli-output-formatting',
       ],

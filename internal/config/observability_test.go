@@ -62,7 +62,7 @@ func TestDefaultObservabilityConfig_ExportersOffByDefault(t *testing.T) {
 	// Sane transport defaults are pre-filled so enabling is a one-line change.
 	assert.Equal(t, "http", o.Tracing.Protocol)
 	assert.NotEmpty(t, o.Tracing.Endpoint)
-	assert.InDelta(t, 0.1, o.Tracing.SampleRate, 1e-9)
+	assert.InDelta(t, 0.1, o.Tracing.EffectiveSampleRate(), 1e-9)
 }
 
 func TestValidate_FillsExporterSubConfigs(t *testing.T) {
@@ -85,11 +85,11 @@ func TestValidate_RepairsTracingProtocolAndSampleRate(t *testing.T) {
 	cfg.Observability.Tracing = &TracingExporterConfig{
 		Enabled:    true,
 		Protocol:   "carrier-pigeon", // unsupported -> repaired to http
-		SampleRate: 5.0,              // out of [0,1] -> clamped to default
+		SampleRate: ptrFloat64(5.0),  // out of [0,1] -> clamped to default
 	}
 	require.NoError(t, cfg.Validate())
 	assert.Equal(t, "http", cfg.Observability.Tracing.Protocol)
-	assert.InDelta(t, 0.1, cfg.Observability.Tracing.SampleRate, 1e-9)
+	assert.InDelta(t, 0.1, cfg.Observability.Tracing.EffectiveSampleRate(), 1e-9)
 	// A missing endpoint is filled so the exporter can construct.
 	assert.NotEmpty(t, cfg.Observability.Tracing.Endpoint)
 }
@@ -101,11 +101,13 @@ func TestValidate_PreservesValidTracingExporter(t *testing.T) {
 		Enabled:    true,
 		Protocol:   "grpc",
 		Endpoint:   "otel-collector:4317",
-		SampleRate: 0.5,
+		SampleRate: ptrFloat64(0.5),
 	}
 	require.NoError(t, cfg.Validate())
 	assert.True(t, cfg.Observability.Metrics.Enabled)
 	assert.Equal(t, "grpc", cfg.Observability.Tracing.Protocol)
 	assert.Equal(t, "otel-collector:4317", cfg.Observability.Tracing.Endpoint)
-	assert.InDelta(t, 0.5, cfg.Observability.Tracing.SampleRate, 1e-9)
+	assert.InDelta(t, 0.5, cfg.Observability.Tracing.EffectiveSampleRate(), 1e-9)
 }
+
+func ptrFloat64(v float64) *float64 { return &v }

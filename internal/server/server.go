@@ -199,7 +199,10 @@ func buildObservabilityConfig(cfg *config.Config) observability.Config {
 		out.Tracing.Enabled = obs.Tracing.Enabled
 		out.Tracing.Protocol = obs.Tracing.Protocol
 		out.Tracing.OTLPEndpoint = obs.Tracing.Endpoint
-		out.Tracing.SampleRate = obs.Tracing.SampleRate
+		// Resolve the tri-state pointer here (#1175): the observability manager
+		// takes a concrete ratio, and an operator's explicit 0 must reach it as 0
+		// rather than as "unset, so 10%".
+		out.Tracing.SampleRate = obs.Tracing.EffectiveSampleRate()
 	}
 	return out
 }

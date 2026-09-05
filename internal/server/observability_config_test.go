@@ -51,7 +51,7 @@ func TestBuildObservabilityConfig_EnablesAndMapsTracing(t *testing.T) {
 		Enabled:    true,
 		Protocol:   "grpc",
 		Endpoint:   "collector:4317",
-		SampleRate: 0.25,
+		SampleRate: samplePtr(0.25),
 	}
 	out := buildObservabilityConfig(cfg)
 	assert.True(t, out.Metrics.Enabled)
@@ -115,3 +115,6 @@ func TestFinishToolCall_NilObservabilityNoPanic(t *testing.T) {
 	assert.Nil(t, span)
 	p.finishToolCall(span, "s", "t", 1, nil) // must not panic
 }
+
+// samplePtr builds a *float64 for the tri-state SampleRate field (#1175).
+func samplePtr(v float64) *float64 { return &v }

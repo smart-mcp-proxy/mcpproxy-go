@@ -957,6 +957,19 @@ type ToolCallRecord struct {
 	MCPClientName    string                 `json:"mcp_client_name,omitempty"`               // MCP client name from InitializeRequest
 	MCPClientVersion string                 `json:"mcp_client_version,omitempty"`            // MCP client version
 	Annotations      *ToolAnnotation        `json:"annotations,omitempty"`                   // Tool behavior hints snapshot
+
+	// ResponseTruncated and ResponseBytes describe a STORAGE-side cut (#1176):
+	// the caller received the response whole, and only the persisted copy was
+	// shortened to tool_call_max_response_size. When ResponseTruncated is true
+	// the Response object carries {truncated, original_bytes, preview, note}
+	// instead of the upstream result, and ResponseBytes is its size before the
+	// cut.
+	ResponseTruncated bool  `json:"response_truncated,omitempty"` // Stored copy was shortened
+	ResponseBytes     int64 `json:"response_bytes,omitempty"`     // Marshalled response size before truncation
+	// ArgumentsTruncated marks Arguments as a placeholder rather than the
+	// arguments the tool was called with. Replaying such a record without
+	// supplying arguments explicitly is refused.
+	ArgumentsTruncated bool `json:"arguments_truncated,omitempty"`
 }
 
 // GetToolCallsResponse is the response for GET /api/v1/tool-calls

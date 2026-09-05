@@ -76,6 +76,20 @@ type ToolCallRecord struct {
 	MCPClientName    string                  `json:"mcp_client_name,omitempty"`    // MCP client name from InitializeRequest
 	MCPClientVersion string                  `json:"mcp_client_version,omitempty"` // MCP client version
 	Annotations      *config.ToolAnnotations `json:"annotations,omitempty"`        // Tool behavior hints snapshot
+
+	// ResponseTruncated and ResponseBytes describe a STORAGE-side cut (#1176):
+	// the caller received the response whole, and only this persisted copy was
+	// shortened to tool_call_max_response_size. ResponseBytes is the size of
+	// the marshalled response before the cut, so a consumer can tell a
+	// shortened record from a small one.
+	ResponseTruncated bool  `json:"response_truncated,omitempty"`
+	ResponseBytes     int64 `json:"response_bytes,omitempty"`
+
+	// ArgumentsTruncated says the stored Arguments are a placeholder, not the
+	// arguments the tool was called with. Replay MUST refuse to reuse them:
+	// re-dispatching the placeholder would call the upstream tool with
+	// nonsense, and call_tool_write / destructive variants reach real systems.
+	ArgumentsTruncated bool `json:"arguments_truncated,omitempty"`
 }
 
 // DiagnosticRecord represents a diagnostic event for a server

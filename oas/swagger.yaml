@@ -26,8 +26,10 @@ components:
           description: 'Response truncation limit in bytes (default: 65536)'
           type: integer
         activity_max_size_mb:
-          description: 'Max total activity-log size in MB before pruning oldest (default:
-            256, 0=disabled)'
+          description: |-
+            ActivityMaxSizeMB caps the total activity-log size in MB before the
+            oldest records are pruned. Omit the key for the 256MB default; set it to
+            0 to disable the size cap.
           type: integer
         activity_retention_days:
           description: Activity logging settings (RFC-003)
@@ -195,9 +197,11 @@ components:
             MCPPROXY_MAX_CONCURRENT_REQUESTS / _QUEUE_SIZE / _QUEUE_TIMEOUT (FR-022).
           type: integer
         max_result_size_chars:
-          description: Advertised on every tool as `_meta.anthropic/maxResultSizeChars`;
-            raises Claude Code's inline-response ceiling from 50k to up to 500k chars.
-            Set to 0 to disable.
+          description: |-
+            MaxResultSizeChars is advertised on every tool as
+            `_meta.anthropic/maxResultSizeChars`; it raises Claude Code's
+            inline-response ceiling from 50k to up to 500k chars. Omit the key for
+            the 500000 default; set it to 0 to disable the annotation.
           type: integer
         mcpServers:
           items:
@@ -299,6 +303,18 @@ components:
           $ref: '#/components/schemas/config.TLSConfig'
         tokenizer:
           $ref: '#/components/schemas/config.TokenizerConfig'
+        tool_call_max_records_per_server:
+          description: 'Calls retained per server (default: 1000)'
+          type: integer
+        tool_call_max_response_size:
+          description: |-
+            Bounds for the per-server tool-call history behind GET /api/v1/tool-calls
+            (#1176). It is a recent-debugging window, not an audit log — the activity
+            log is the durable record — and it kept every upstream response whole,
+            per server, forever. A non-positive value means "use the default", not
+            "disable": this store must never be unbounded again, so there is
+            deliberately no off switch.
+          type: integer
         tool_discovery_interval:
           type: string
         tool_response_limit:
@@ -1143,8 +1159,9 @@ components:
           description: 'Protocol selects the OTLP transport: "http" or "grpc".'
           type: string
         sample_rate:
-          description: SampleRate is the head-based trace sampling ratio in [0,1].
-            Default 0.1.
+          description: |-
+            SampleRate is the head-based trace sampling ratio in [0,1]. Default 0.1.
+            Omit the key for the 0.1 default; set it to 0 to sample nothing.
           type: number
       type: object
     config.UpdateCheckConfig:
@@ -2837,6 +2854,12 @@ components:
         arguments:
           description: Tool arguments
           type: object
+        arguments_truncated:
+          description: |-
+            ArgumentsTruncated marks Arguments as a placeholder rather than the
+            arguments the tool was called with. Replaying such a record without
+            supplying arguments explicitly is refused.
+          type: boolean
         config_path:
           description: Active config file path
           type: string
@@ -2872,6 +2895,18 @@ components:
         response:
           description: Tool response (success only)
           type: object
+        response_bytes:
+          description: Marshalled response size before truncation
+          type: integer
+        response_truncated:
+          description: |-
+            ResponseTruncated and ResponseBytes describe a STORAGE-side cut (#1176):
+            the caller received the response whole, and only the persisted copy was
+            shortened to tool_call_max_response_size. When ResponseTruncated is true
+            the Response object carries {truncated, original_bytes, preview, note}
+            instead of the upstream result, and ResponseBytes is its size before the
+            cut.
+          type: boolean
         server_id:
           description: Server identity hash
           type: string

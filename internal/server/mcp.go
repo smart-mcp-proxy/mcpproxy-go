@@ -504,7 +504,7 @@ func NewMCPProxyServer(
 	// the default 50k chars up to the declared value (max 500k), so large
 	// upstream tool responses flow through inline instead of being spilled
 	// to disk as a 2KB preview. No-op when config is 0.
-	registerMaxResultSizeHook(hooks, config.MaxResultSizeChars)
+	registerMaxResultSizeHook(hooks, config.EffectiveMaxResultSizeChars())
 
 	// Create MCP server with capabilities and hooks
 	capabilities := []mcpserver.ServerOption{
