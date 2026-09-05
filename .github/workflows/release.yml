@@ -1231,9 +1231,15 @@ jobs:
 
   build-docker:
     runs-on: ubuntu-latest
-    needs: [build]
-    # Disabled until server MVP is ready — uncomment to enable
-    if: false && startsWith(github.ref, 'refs/tags/v')
+    # `qa-gate` is load-bearing, not cosmetic: this job pushes to GHCR (including
+    # the `:latest` pointer), which is publishing to users. Without it in the
+    # closure a tag whose gate failed would still ship a container image — the
+    # exact hole cmd/release-gate's TestPublishJobsGatedOnQAGate exists to catch.
+    needs: [build, qa-gate]
+    # Stable releases only, matching `build`/`release` — release.yml fires on every
+    # `v*` tag, and an RC must never move `mcpproxy-server:latest`. prerelease.yml
+    # owns the RC channel and publishes no image.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     permissions:
       contents: read
       packages: write
@@ -1249,6 +1255,10 @@ jobs:
         with:
           context: .
           push: true
+          # linux/arm64 matters for Raspberry Pi / Graviton hosts, and the release
+          # already ships an arm64 Linux binary. The Dockerfile cross-compiles from
+          # $BUILDPLATFORM, so this costs a second native build, not QEMU emulation.
+          platforms: linux/amd64,linux/arm64
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
@@ -1256,6 +1266,17 @@ jobs:
           tags: |
             ghcr.io/smart-mcp-proxy/mcpproxy-server:${{ github.ref_name }}
             ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
+          # image.source links the GHCR package back to this repo so it inherits the
+          # repo's README and shows up under the org's packages. It does NOT make the
+          # package public: a package first created by GITHUB_TOKEN is private, and
+          # visibility has to be flipped once by hand after the first push. Until that
+          # happens an anonymous `docker pull` gets `denied`.
+          labels: |
+            org.opencontainers.image.source=https://github.com/smart-mcp-proxy/mcpproxy-go
+            org.opencontainers.image.description=MCPProxy Server Edition — headless MCP proxy with tool discovery and quarantine
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
 
   # Spec 081: release qualification gate. Runs the server-type matrix +
   # invariants + assembled suites and produces one pass/fail verdict. The
@@ -1271,7 +1292,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
 
   release:
-    needs: [build, sign-windows, generate-notes, qa-gate]  # add build-docker when server MVP is ready
+    needs: [build, build-docker, sign-windows, generate-notes, qa-gate]
     runs-on: ubuntu-latest
     environment: production
     # Explicit guard (belt-and-suspenders on top of the cascade from needs:) — RC tags

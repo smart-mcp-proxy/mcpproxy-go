@@ -309,6 +309,43 @@ You can then run `mcpproxy serve` directly, or wire up your own systemd unit mod
 
 The systemd unit launches mcpproxy with `--config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy` and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, and friends.
 
+## Docker (Server edition)
+
+The Server edition is published as a multi-arch image (`linux/amd64`, `linux/arm64`) on
+every stable release:
+
+```bash
+docker run -d --name mcpproxy \
+  -p 127.0.0.1:8080:8080 \
+  -e MCPPROXY_API_KEY="$(openssl rand -hex 32)" \
+  -v mcpproxy-data:/root/.mcpproxy \
+  ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
+```
+
+- **Tags**: `ghcr.io/smart-mcp-proxy/mcpproxy-server:<version>` (e.g. `v0.64.0`) and `:latest`,
+  which always points at the newest stable release. RC builds publish no image.
+- **State survives restarts, not replacement**: `docker restart` keeps everything. Removing and
+  re-running the container, upgrading the tag, or rescheduling the pod destroys whatever is not
+  on the volume — so mount one before you configure anything.
+- **Don't use `MCPPROXY_DATA` or a bare `--data-dir` to relocate state.** The data-dir override is
+  applied after the config file is resolved, so the config in that directory is never read and is
+  overwritten with a fresh default (rotating the API key) on every boot. Mount the volume at the
+  default `/root/.mcpproxy` path instead. (`MCPPROXY_DATA_DIR`, referenced elsewhere in the docs,
+  is not implemented at all.)
+- **Port**: the entrypoint is `mcpproxy serve --listen 0.0.0.0:8080`, so the container listens on
+  `8080` inside the network namespace. The `-p 127.0.0.1:8080:8080` above keeps it reachable only
+  from the host; drop the `127.0.0.1:` prefix only if you deliberately want it on the network, and
+  read [Network exposure: localhost by default](#network-exposure-localhost-by-default) first.
+- **State**: config, the BBolt DB, and the search index live in `/root/.mcpproxy`. Mount a volume
+  there or every restart starts from an empty config.
+- **API key**: the REST API and Web UI require one. Set `MCPPROXY_API_KEY` explicitly and keep a
+  copy — the image is distroless (no shell), so reading an auto-generated key back out of the
+  container is awkward.
+- **Web UI**: `http://localhost:8080/ui/`.
+
+Note that this image ships the Server edition binary (`mcpproxy version` reports `(server)`); it is
+the headless core only, with no system tray.
+
 ## Verify Installation
 
 After installation, verify MCPProxy is working:
