@@ -370,16 +370,22 @@ func TestCompactDatabaseReportsWhatTheBackupStillCosts(t *testing.T) {
 func TestPreReplaceCheckAbortsWhenTheDatabaseIsHeld(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := seedDB(t, dir)
-	info, err := os.Stat(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	held, err := bbolt.Open(dbPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatalf("hold db: %v", err)
 	}
 	defer held.Close()
+
+	// Stat AFTER the holder has opened it. Opening a bbolt database can write
+	// to it (a freelist flush on Windows, where this test first failed), which
+	// would trip the staleness half of the check and mask the half under test.
+	// Both halves abort the swap, which is what actually matters — but this
+	// case exists to pin the LOCK detection, so the file must look unchanged.
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	err = assertSourceUnchangedAndFree(dbPath, info)
 	if err == nil {
