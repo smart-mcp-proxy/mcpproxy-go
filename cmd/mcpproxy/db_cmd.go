@@ -296,7 +296,42 @@ func runDBStats(cmd *cobra.Command, _ []string) error {
 // The rename is what makes this safe to interrupt: until it succeeds the
 // original file is the only one anything reads, and every failure path removes
 // the temp file rather than leaving a half-written database beside the real one.
+// acquireCompactLock takes a whole-command exclusive lock beside the database.
+//
+// bbolt's own lock cannot serve here: it is released before the rename (the
+// file must be closed for a rename to work on Windows), which leaves the
+// destructive half of the operation unguarded. Two compactions could then both
+// finish reading, both pass the pre-replace check, and both rename — with the
+// second overwriting the first, and, worse, the backup fallback truncating a
+// hard link to the live database.
+//
+// O_CREATE|O_EXCL rather than flock: it is atomic on every platform Go
+// supports and needs no build-tagged syscall. The cost is that a crashed run
+// leaves a stale lock, so the error says how to clear it.
+func acquireCompactLock(dir string) (release func(), err error) {
+	lockPath := filepath.Join(dir, dbFileName+".compact.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600) //nolint:gosec // path is derived from the data dir
+	if err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf(
+				"another compaction is already running (lock file %s). "+
+					"If no mcpproxy command is running, a previous compaction was interrupted — delete that file and retry",
+				lockPath)
+		}
+		return nil, fmt.Errorf("failed to create compaction lock %s: %w", lockPath, err)
+	}
+	_ = f.Close()
+
+	return func() { os.Remove(lockPath) }, nil
+}
+
 func compactDatabase(srcPath string, opts compactOptions) (result *compactResult, err error) {
+	releaseLock, err := acquireCompactLock(filepath.Dir(srcPath))
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLock()
+
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat database %s: %w", srcPath, err)
@@ -375,6 +410,15 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 	}
 	src = nil
 
+	// Carry the original permissions across BEFORE the fsync — bbolt.Open does
+	// not chmod a file that already exists, so without this the temp file's
+	// 0600 would survive the rename. Doing it after the sync would leave the
+	// mode change itself unflushed, so a crash could land the data with the
+	// wrong permissions.
+	if err := os.Chmod(tmpPath, info.Mode().Perm()); err != nil {
+		return nil, fmt.Errorf("failed to set permissions on compacted database: %w", err)
+	}
+
 	if err := syncPath(tmpPath); err != nil {
 		return nil, fmt.Errorf("failed to sync compacted database: %w", err)
 	}
@@ -384,17 +428,25 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 		return nil, fmt.Errorf("failed to stat compacted database: %w", err)
 	}
 
-	// bbolt.Open does not chmod a file that already exists, so carry the
-	// original permissions across rather than leaking os.CreateTemp's 0600.
-	if err := os.Chmod(tmpPath, info.Mode().Perm()); err != nil {
-		return nil, fmt.Errorf("failed to set permissions on compacted database: %w", err)
-	}
-
 	res := &compactResult{
 		Path:           srcPath,
 		BeforeBytes:    beforeBytes,
 		AfterBytes:     afterInfo.Size(),
 		ReclaimedBytes: beforeBytes - afterInfo.Size(),
+	}
+
+	// Nothing has held a lock on the source since src.Close() above, and
+	// compaction of a large database takes minutes. Re-check that the file we
+	// are about to replace is still the one we compacted, and that nobody has
+	// taken it, before doing anything destructive.
+	//
+	// Without this the swap is a data-loss race: a core that started during
+	// compaction (or a second `db compact`) ends up holding the OLD, now
+	// unlinked inode, and every write it makes afterwards vanishes when the
+	// rename lands. Aborting here is always safe — the original is untouched
+	// and the temp file is removed by the deferred cleanup.
+	if err := assertSourceUnchangedAndFree(srcPath, info); err != nil {
+		return nil, err
 	}
 
 	// The backup is a hard link, not a move: config.db therefore never stops
@@ -405,8 +457,11 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 			return nil, fmt.Errorf("failed to remove stale backup %s: %w", backupPath, err)
 		}
 		if err := os.Link(srcPath, backupPath); err != nil {
-			if err := copyFile(srcPath, backupPath, info.Mode().Perm()); err != nil {
-				return nil, fmt.Errorf("failed to create backup %s: %w", backupPath, err)
+			if cerr := copyFile(srcPath, backupPath, info.Mode().Perm()); cerr != nil {
+				// A partially written copy is worse than none: the next run
+				// would treat it as a usable backup.
+				os.Remove(backupPath)
+				return nil, fmt.Errorf("failed to create backup %s: %w", backupPath, cerr)
 			}
 		}
 		res.BackupPath = backupPath
@@ -416,19 +471,69 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 	if err := os.Rename(tmpPath, srcPath); err != nil {
 		// The backup was linked just above and is now meaningless — the
 		// original is still in place, so leaving a .bak behind would only
-		// confuse the next run.
+		// confuse the next run. Report a failure to remove it: a stale .bak
+		// beside an uncompacted database is misleading, not harmless.
 		if res.BackupPath != "" {
-			os.Remove(res.BackupPath)
+			if rerr := os.Remove(res.BackupPath); rerr != nil && !os.IsNotExist(rerr) {
+				return nil, fmt.Errorf("failed to replace %s: %w (and the backup %s could not be removed: %v)",
+					srcPath, err, res.BackupPath, rerr)
+			}
 		}
 		return nil, fmt.Errorf("failed to replace %s: %w", srcPath, err)
 	}
 	cleanupTmp = false
 
-	// Fsync the directory so the rename itself survives a crash. Best-effort:
-	// Windows cannot fsync a directory handle, and the data is already durable.
-	_ = syncPath(dir)
+	// Fsync the directory so the rename itself survives a crash. Best-effort by
+	// necessity — Windows cannot fsync a directory handle — but not silent: the
+	// file data is already durable, so this only weakens the crash window, and
+	// the operator should know it happened.
+	if err := syncPath(dir); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: could not fsync %s (%v); the swap is complete but a crash in the next moments could lose the directory update\n",
+			dir, err)
+	}
 
 	return res, nil
+}
+
+// assertSourceUnchangedAndFree verifies, immediately before the destructive
+// rename, that the database still looks like the one that was compacted and
+// that no process holds it.
+//
+// The exclusive open is the real check: a running mcpproxy or a concurrent
+// compaction fails it. It is closed again straight away because a rename over
+// an open file fails on Windows — which leaves a window far smaller than the
+// whole compaction it replaces.
+func assertSourceUnchangedAndFree(srcPath string, before os.FileInfo) error {
+	now, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("database %s went away during compaction: %w", srcPath, err)
+	}
+	if now.Size() != before.Size() || !now.ModTime().Equal(before.ModTime()) {
+		return fmt.Errorf(
+			"database %s changed during compaction (something started using it); nothing was replaced — stop mcpproxy and retry",
+			srcPath)
+	}
+
+	// ReadOnly: a read-write open makes bbolt load and, on a database whose
+	// freelist was never persisted, COMMIT a freelist-flush transaction — which
+	// would modify the very file this check exists to prove untouched. A
+	// read-only open takes a shared lock, which a running mcpproxy's exclusive
+	// lock still refuses, so it detects exactly what it needs to.
+	guard, err := bbolt.Open(srcPath, before.Mode().Perm(), &bbolt.Options{
+		Timeout:  500 * time.Millisecond,
+		ReadOnly: true,
+	})
+	if err != nil {
+		if errors.Is(err, bbolterrors.ErrTimeout) {
+			return &storage.DatabaseLockedError{Path: srcPath, Err: err}
+		}
+		return fmt.Errorf("failed to re-check database %s before replacing it: %w", srcPath, err)
+	}
+	if err := guard.Close(); err != nil {
+		return fmt.Errorf("failed to release the pre-replace check on %s: %w", srcPath, err)
+	}
+	return nil
 }
 
 // databaseStats opens the database read-only and reports what compaction would
@@ -541,12 +646,42 @@ func syncPath(path string) error {
 }
 
 // copyFile is the fallback for filesystems that reject hard links.
+// copyFile writes srcPath to dstPath via a temp file and a rename.
+//
+// It must never open dstPath for writing directly. This is the hard-link
+// fallback for the backup, and dstPath can BE a hard link to the live database
+// (an earlier run's .bak, or a concurrent compaction's) — truncating it would
+// destroy config.db itself. A rename replaces the directory entry and leaves
+// any other link to the old inode intact.
 func copyFile(srcPath, dstPath string, perm os.FileMode) error {
 	data, err := os.ReadFile(srcPath) //nolint:gosec // path is derived from the data dir
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dstPath, data, perm)
+
+	tmp, err := os.CreateTemp(filepath.Dir(dstPath), filepath.Base(dstPath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dstPath)
 }
 
 // humanBytes renders a byte count for the table view; JSON/YAML keep the raw

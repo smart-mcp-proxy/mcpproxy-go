@@ -9,8 +9,10 @@ package config
 // constructor. A default that lives only in DefaultConfig() is wrong on those
 // paths, so the reader is the single resolution point.
 const (
-	defaultMaxResultSizeChars = 500000 // Claude Code's inline-response hard max
-	defaultActivityMaxSizeMB  = 256    // total activity-log size cap in MB
+	defaultMaxResultSizeChars   = 500000 // Claude Code's inline-response hard max
+	defaultActivityMaxSizeMB    = 256    // total activity-log size cap in MB
+	defaultActivityRetentionDay = 90     // days of activity history retained
+	defaultActivityMaxRecords   = 100000 // activity records retained
 )
 
 // EffectiveMaxResultSizeChars resolves the `_meta.anthropic/maxResultSizeChars`
@@ -46,4 +48,29 @@ func (t *TracingExporterConfig) EffectiveSampleRate() float64 {
 		return defaultTracingSampleRate
 	}
 	return *t.SampleRate
+}
+
+// EffectiveActivityRetentionDays and EffectiveActivityMaxRecords resolve the
+// two remaining retention counts.
+//
+// These stay plain ints rather than becoming tri-state pointers because 0 has
+// no documented meaning for them — but 0 and absent used to DIVERGE, which is
+// the #1175 defect in a quieter form: an omitted key took DefaultConfig's 90
+// days / 100000 records, while an explicit 0 was ignored by
+// ActivityService.SetRetentionConfig and silently fell through to that
+// service's own much smaller constants (7 days / 10000 records). An operator
+// who wrote 0 got a tenth of the retention the documentation promises, and
+// saving the config flipped them back. Resolving here makes the two agree.
+func (c *Config) EffectiveActivityRetentionDays() int {
+	if c == nil || c.ActivityRetentionDays <= 0 {
+		return defaultActivityRetentionDay
+	}
+	return c.ActivityRetentionDays
+}
+
+func (c *Config) EffectiveActivityMaxRecords() int {
+	if c == nil || c.ActivityMaxRecords <= 0 {
+		return defaultActivityMaxRecords
+	}
+	return c.ActivityMaxRecords
 }

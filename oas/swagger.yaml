@@ -2854,6 +2854,12 @@ components:
         arguments:
           description: Tool arguments
           type: object
+        arguments_truncated:
+          description: |-
+            ArgumentsTruncated marks Arguments as a placeholder rather than the
+            arguments the tool was called with. Replaying such a record without
+            supplying arguments explicitly is refused.
+          type: boolean
         config_path:
           description: Active config file path
           type: string

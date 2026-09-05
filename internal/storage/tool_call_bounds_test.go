@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -275,4 +276,94 @@ func TestRecordToolCallKeepsSmallArgumentsVerbatim(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, stored, 1)
 	assert.Equal(t, "/big", stored[0].Arguments["path"], "small arguments are stored verbatim")
+}
+
+// A cross-model review found this: the sweep skipped an identity whose JSON
+// would not unmarshal but still counted the store as populated, so a live
+// server's history — keyed by a hash the sweep could no longer resolve to a
+// name — was treated as an orphan and deleted.
+//
+// The bucket KEY is the identity id (saveServerIdentity puts under
+// identity.ID), so an unreadable record can still be spared.
+func TestPruneOrphanToolCallsKeepsHistoryBehindAnUnreadableIdentity(t *testing.T) {
+	mgr := newBoundsManager(t)
+
+	keptID := registerServer(t, mgr, "kept")
+	require.NoError(t, mgr.RecordToolCall(bigToolCall("call-1", keptID, 10)))
+
+	// A second, readable identity so the sweep does not abort for lack of any.
+	registerServer(t, mgr, "other")
+
+	// Corrupt the live server's identity record in place.
+	require.NoError(t, mgr.db.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(serverIdentitiesBucket)).Put([]byte(keptID), []byte("{not json"))
+	}))
+
+	removed, err := mgr.PruneOrphanToolCalls([]string{"kept", "other"})
+	require.NoError(t, err)
+	assert.Zero(t, removed)
+
+	stored, err := mgr.GetServerToolCalls(keptID, 10)
+	require.NoError(t, err)
+	assert.Len(t, stored, 1,
+		"an identity that cannot be read is a reason to keep its history, not to delete it")
+}
+
+// The argument cap has a consequence beyond storage: POST
+// /api/v1/tool-calls/{id}/replay re-dispatches a stored call's arguments when
+// the caller supplies none. Replaying the {truncated, original_bytes, preview}
+// placeholder would call the upstream tool with nonsense — and a
+// call_tool_write or destructive replay reaches a real system. The record has
+// to say so, so replay can refuse.
+func TestTruncatedArgumentsAreFlaggedForReplay(t *testing.T) {
+	mgr := newBoundsManager(t)
+	mgr.SetToolCallLimits(4096, 0)
+
+	rec := bigToolCall("call-1", "srv", 10)
+	rec.Arguments = map[string]interface{}{"text": strings.Repeat("q", 200_000)}
+	require.NoError(t, mgr.RecordToolCall(rec))
+
+	stored, err := mgr.GetServerToolCalls("srv", 10)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.True(t, stored[0].ArgumentsTruncated,
+		"a record whose arguments were shortened must be marked unreplayable")
+	assert.False(t, rec.ArgumentsTruncated, "the caller's record stays untouched")
+
+	require.NoError(t, mgr.RecordToolCall(bigToolCall("call-2", "srv", 10)))
+	all, err := mgr.GetServerToolCalls("srv", 10)
+	require.NoError(t, err)
+	for _, c := range all {
+		if c.ID == "call-2" {
+			assert.False(t, c.ArgumentsTruncated, "a record with small arguments stays replayable")
+		}
+	}
+}
+
+// A cross-model review caught this: the placeholder carried a fixed 2KB
+// preview whatever the cap was, so configuring a small cap produced a
+// "truncated" record LARGER than the limit it was meant to enforce.
+func TestTruncationPlaceholderFitsInsideASmallCap(t *testing.T) {
+	for _, cap := range []int{256, 1024, 4096} {
+		mgr := newBoundsManager(t)
+		mgr.SetToolCallLimits(cap, 0)
+
+		rec := bigToolCall("call-1", "srv", 500_000)
+		rec.Arguments = map[string]interface{}{"text": strings.Repeat("q", 500_000)}
+		require.NoError(t, mgr.RecordToolCall(rec))
+
+		stored, err := mgr.GetServerToolCalls("srv", 10)
+		require.NoError(t, err)
+		require.Len(t, stored, 1)
+
+		resp, err := json.Marshal(stored[0].Response)
+		require.NoError(t, err)
+		args, err := json.Marshal(stored[0].Arguments)
+		require.NoError(t, err)
+
+		assert.LessOrEqual(t, len(resp), cap,
+			"cap=%d: the stored response placeholder must fit inside the configured cap, got %d bytes", cap, len(resp))
+		assert.LessOrEqual(t, len(args), cap,
+			"cap=%d: the stored arguments placeholder must fit inside the configured cap, got %d bytes", cap, len(args))
+	}
 }

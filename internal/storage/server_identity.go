@@ -84,6 +84,12 @@ type ToolCallRecord struct {
 	// shortened record from a small one.
 	ResponseTruncated bool  `json:"response_truncated,omitempty"`
 	ResponseBytes     int64 `json:"response_bytes,omitempty"`
+
+	// ArgumentsTruncated says the stored Arguments are a placeholder, not the
+	// arguments the tool was called with. Replay MUST refuse to reuse them:
+	// re-dispatching the placeholder would call the upstream tool with
+	// nonsense, and call_tool_write / destructive variants reach real systems.
+	ArgumentsTruncated bool `json:"arguments_truncated,omitempty"`
 }
 
 // DiagnosticRecord represents a diagnostic event for a server

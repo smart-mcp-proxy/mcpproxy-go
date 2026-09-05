@@ -138,16 +138,21 @@ var numericOmitemptyAllowlist = map[string]string{
 	"Config.ToolCallMaxResponseSize":     "non-positive means 'use the default'; there is deliberately no off switch",
 	"Config.ToolCallMaxRecordsPerServer": "non-positive means 'use the default'; there is deliberately no off switch",
 	"Config.ActivityMaxResponseSize":     "ActivityService.SetMaxResponseSize ignores non-positive, so 0 and absent both mean 64KB",
-	"Config.ActivityRetentionDays":       "0 and absent both fall back to the built-in retention age",
-	"Config.ActivityMaxRecords":          "0 and absent both fall back to the built-in record cap",
+	"Config.ActivityRetentionDays":       "EffectiveActivityRetentionDays resolves <= 0 to the same 90 days an absent key gets",
+	"Config.ActivityMaxRecords":          "EffectiveActivityMaxRecords resolves <= 0 to the same 100000 an absent key gets",
 	"Config.ActivityCleanupIntervalMin":  "0 and absent both fall back to the built-in interval",
 	"Config.TopK":                        "deprecated and inert; superseded by ToolsLimit",
 	"Config.OAuthExpiryWarningHours":     "0 and absent both fall back to the 1.0h default",
 	"Config.ToonMinSavingsPct":           "documented as '0/unset -> 15' — the two are the same value by design",
 
 	// Durations whose own doc comments say zero and unset are the same value.
-	"Config.Servers.LauncherWaitTimeout":        "doc comment: 'Zero or unset -> 30s default'",
-	"Config.DockerIsolation.Timeout":            "container startup timeout; 0 and absent both take the built-in default",
+	"Config.Servers.LauncherWaitTimeout": "doc comment: 'Zero or unset -> 30s default'",
+	// The one entry whose justification is "unobservable" rather than "equal":
+	// this field has exactly one reader, a diagnostics display
+	// (internal/server/mcp.go:4033 renders it in a doctor payload). It is never
+	// used as an actual timeout, so an erased 0 changes a reported number and
+	// nothing else. Give it a real reader and it must be converted.
+	"Config.DockerIsolation.Timeout":            "no functional reader; sole use is the doctor payload at internal/server/mcp.go:4033",
 	"Config.Observability.UsageCacheTTL":        "doc comment: 'Default 5s' — 0 and absent both resolve to it",
 	"Config.Observability.UsagePersistInterval": "doc comment: 'Default 30s' — 0 and absent both resolve to it",
 	"Config.Security.ScanTimeoutDefault":        "0 and absent both take the built-in scan timeout",
@@ -165,6 +170,16 @@ var numericOmitemptyAllowlist = map[string]string{
 	// minus the pointer.
 	"Config.OutputValidation.MaxBytes": "EffectiveMaxBytes treats <= 0 as the 5MB default",
 	"Config.OutputValidation.MaxDepth": "EffectiveMaxDepth treats <= 0 as the depth-64 default",
+
+	// Server edition (//go:build server). These are invisible to an untagged
+	// run of this test, which is why it must also be run as
+	// `go test -tags server ./internal/config`. All four are normalised by
+	// ServerEditionConfig.Validate, which treats <= 0 as "use the default"
+	// (internal/config/server_edition_config.go:90-101).
+	"Config.ServerEdition.SessionTTL":           "Validate: <= 0 becomes the 24h default",
+	"Config.ServerEdition.BearerTokenTTL":       "Validate: <= 0 becomes the 24h default",
+	"Config.ServerEdition.WorkspaceIdleTimeout": "Validate: <= 0 becomes the 30m default",
+	"Config.ServerEdition.MaxUserServers":       "Validate: <= 0 becomes the 20 default",
 
 	// 0 and absent both fall back to the DefaultConfig value; there is no
 	// documented meaning for an explicit 0.
@@ -223,4 +238,32 @@ func isNumericKind(k reflect.Kind) bool {
 	default:
 		return false
 	}
+}
+
+// A cross-model review caught two allowlist entries whose stated reason was
+// false: an explicit 0 on these did NOT mean the same as an absent key. An
+// omitted key took DefaultConfig's 90 days / 100000 records, while an explicit
+// 0 was ignored by ActivityService.SetRetentionConfig and fell through to that
+// service's own far smaller constants (7 days / 10000). Saving the config then
+// erased the 0 and flipped the operator back — the #1175 defect in a quieter
+// form, and a tenfold change in how much history is kept.
+func TestZeroAndAbsentRetentionCountsResolveTheSame(t *testing.T) {
+	absent := DefaultConfig()
+	absent.ActivityRetentionDays = 0
+	absent.ActivityMaxRecords = 0
+
+	assert.Equal(t, defaultActivityRetentionDay, absent.EffectiveActivityRetentionDays(),
+		"an explicit 0 must resolve to the documented default, not to a smaller service constant")
+	assert.Equal(t, defaultActivityMaxRecords, absent.EffectiveActivityMaxRecords())
+
+	var zero Config
+	assert.Equal(t, defaultActivityRetentionDay, zero.EffectiveActivityRetentionDays(),
+		"the REST write paths decode into a zero Config and must resolve the same way")
+	assert.Equal(t, defaultActivityMaxRecords, zero.EffectiveActivityMaxRecords())
+
+	set := DefaultConfig()
+	set.ActivityRetentionDays = 3
+	set.ActivityMaxRecords = 42
+	assert.Equal(t, 3, set.EffectiveActivityRetentionDays(), "a real value is passed through")
+	assert.Equal(t, 42, set.EffectiveActivityMaxRecords())
 }

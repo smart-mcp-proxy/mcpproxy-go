@@ -358,3 +358,135 @@ func TestCompactDatabaseReportsWhatTheBackupStillCosts(t *testing.T) {
 		t.Errorf("--keep-backup=false must report no backup, got %q / %d", res2.BackupPath, res2.BackupBytes)
 	}
 }
+
+// Three properties keep the destructive half of compaction safe. Between
+// src.Close() and os.Rename nothing holds the database — a gap that spans the
+// whole (minutes-long) compaction of a large file — so each is pinned
+// separately.
+
+//  1. A process holding the database exclusively (a running core) must abort the
+//     swap. Without this the core keeps the OLD, now-unlinked inode and every
+//     write it makes afterwards disappears when the rename lands.
+func TestPreReplaceCheckAbortsWhenTheDatabaseIsHeld(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := seedDB(t, dir)
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := bbolt.Open(dbPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("hold db: %v", err)
+	}
+	defer held.Close()
+
+	err = assertSourceUnchangedAndFree(dbPath, info)
+	if err == nil {
+		t.Fatal("the pre-replace check passed while another process held the database")
+	}
+	var locked *storage.DatabaseLockedError
+	if !errors.As(err, &locked) {
+		t.Errorf("want a DatabaseLockedError so the caller can exit 3, got %T: %v", err, err)
+	}
+}
+
+//  2. A source that changed under us must abort the swap even if nothing holds
+//     it any more — the compacted copy no longer represents the file.
+func TestPreReplaceCheckAbortsWhenTheDatabaseChanged(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := seedDB(t, dir)
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uerr := db.Update(func(tx *bbolt.Tx) error {
+		b, berr := tx.CreateBucketIfNotExists([]byte("late"))
+		if berr != nil {
+			return berr
+		}
+		return b.Put([]byte("k"), bytes.Repeat([]byte("v"), 4096))
+	}); uerr != nil {
+		t.Fatal(uerr)
+	}
+	if cerr := db.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
+
+	if err := assertSourceUnchangedAndFree(dbPath, info); err == nil {
+		t.Fatal("the pre-replace check passed on a database that changed during compaction")
+	}
+}
+
+//  3. Two compactions must not overlap at all. The pre-replace check cannot
+//     catch them — both take only shared locks while reading — and the danger is
+//     not just a lost rename: the backup fallback would write into a path that
+//     is a hard link to the LIVE database.
+func TestCompactDatabaseRefusesToRunConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := seedDB(t, dir)
+	originalDigest := fileDigest(t, dbPath)
+
+	release, err := acquireCompactLock(dir)
+	if err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+
+	_, err = compactDatabase(dbPath, compactOptions{TxMaxSize: defaultCompactTxMaxSize, KeepBackup: true})
+	if err == nil {
+		t.Fatal("a second compaction ran while another held the lock")
+	}
+	if !strings.Contains(err.Error(), "another compaction") {
+		t.Errorf("the error must name the cause and how to clear it, got: %v", err)
+	}
+	if got := fileDigest(t, dbPath); got != originalDigest {
+		t.Error("the refused compaction must leave the database untouched")
+	}
+
+	release()
+
+	// And the lock must not leak: the next run succeeds.
+	if _, err := compactDatabase(dbPath, compactOptions{TxMaxSize: defaultCompactTxMaxSize}); err != nil {
+		t.Fatalf("compaction failed after the lock was released: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, dbFileName+".compact.lock")); !os.IsNotExist(serr) {
+		t.Error("a completed compaction must not leave its lock file behind")
+	}
+}
+
+// The backup fallback must never truncate its destination in place: that path
+// can be a hard link to the live database, and writing through it would
+// destroy config.db itself.
+func TestCopyFileReplacesTheDestinationInsteadOfTruncatingIt(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live.db")
+	if err := os.WriteFile(live, bytes.Repeat([]byte("L"), 8192), 0600); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(dir, "live.db.bak")
+	if err := os.Link(live, linked); err != nil {
+		t.Skipf("hard links unsupported here: %v", err)
+	}
+
+	source := filepath.Join(dir, "source")
+	if err := os.WriteFile(source, []byte("new contents"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyFile(source, linked, 0600); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+
+	surviving, err := os.ReadFile(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(surviving) != 8192 {
+		t.Fatalf("copyFile truncated a hard link to the live database: it is now %d bytes, was 8192", len(surviving))
+	}
+}

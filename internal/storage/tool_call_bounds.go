@@ -22,9 +22,17 @@ const (
 	// a recent window rather than everything.
 	DefaultToolCallMaxRecordsPerServer = 1000
 
-	// toolCallPreviewBytes is how much of an oversized response survives as a
-	// readable head on the stored record.
+	// toolCallPreviewBytes is how much of an oversized payload survives as a
+	// readable head on the stored record. It is an upper bound: previewBytes
+	// shrinks it further so the placeholder itself always fits inside the
+	// configured cap, which a fixed 2KB head would blow through on a cap of,
+	// say, 1KB.
 	toolCallPreviewBytes = 2048
+
+	// toolCallEnvelopeBytes reserves room for the placeholder's other fields
+	// (truncated, original_bytes, note and the JSON punctuation) so the whole
+	// object stays under the cap, not just its preview.
+	toolCallEnvelopeBytes = 512
 
 	// serverIdentitiesBucket holds the ServerIdentity records that map a
 	// server NAME to the SHA-256 id its tool-call bucket is keyed by.
@@ -95,6 +103,7 @@ func boundToolCallResponse(record *ToolCallRecord, maxBytes int) *ToolCallRecord
 	if args := boundToolCallArguments(record.Arguments, maxBytes); args != nil {
 		copied := *record
 		copied.Arguments = args
+		copied.ArgumentsTruncated = true
 		bounded = &copied
 	}
 	if record.Response == nil {
@@ -118,7 +127,7 @@ func boundToolCallResponse(record *ToolCallRecord, maxBytes int) *ToolCallRecord
 	bounded.Response = map[string]interface{}{
 		"truncated":      true,
 		"original_bytes": len(encoded),
-		"preview":        truncateUTF8(string(encoded), toolCallPreviewBytes),
+		"preview":        truncateUTF8(string(encoded), previewBytes(maxBytes)),
 		"note": "response omitted: exceeded tool_call_max_response_size. " +
 			"The full response was delivered to the caller; only this stored copy is shortened.",
 	}
@@ -146,10 +155,24 @@ func boundToolCallArguments(args map[string]interface{}, maxBytes int) map[strin
 	return map[string]interface{}{
 		"truncated":      true,
 		"original_bytes": len(encoded),
-		"preview":        truncateUTF8(string(encoded), toolCallPreviewBytes),
+		"preview":        truncateUTF8(string(encoded), previewBytes(maxBytes)),
 		"note": "arguments omitted: exceeded tool_call_max_response_size. " +
 			"The full arguments were sent to the upstream server; only this stored copy is shortened.",
 	}
+}
+
+// previewBytes is how much of the payload the placeholder may carry, given the
+// cap the whole record has to fit inside. A truncation marker that is itself
+// over the limit would defeat the point of configuring a small one.
+func previewBytes(maxBytes int) int {
+	room := maxBytes - toolCallEnvelopeBytes
+	if room < 0 {
+		room = 0
+	}
+	if room < toolCallPreviewBytes {
+		return room
+	}
+	return toolCallPreviewBytes
 }
 
 // truncateUTF8 cuts s to at most maxBytes without splitting a rune, so the
@@ -166,8 +189,14 @@ func truncateUTF8(s string, maxBytes int) string {
 }
 
 // pruneToolCallBucket evicts the oldest records until at most maxRecords
-// remain. Keys are "<unix nanos>_<id>", so cursor order is chronological and
-// the oldest are at the front.
+// remain.
+//
+// Keys are "<unix nanos>_<id>" and bbolt orders them BYTEWISE, which matches
+// chronological order only because UnixNano is a fixed 19 digits for every
+// timestamp between 2001 and 2262 — so all real keys have equal width and
+// compare digit by digit. Change the key format (a shorter unit, a prefix, a
+// synthetic timestamp) and this stops holding: "9_x" sorts after "10_y"
+// bytewise, and the eviction would drop the record it just wrote.
 //
 // It walks BACKWARDS from the newest key and stops after maxRecords+1 steps,
 // so the cost of the common case (a bucket already at its cap) is bounded by
@@ -240,7 +269,13 @@ func (m *Manager) PruneOrphanToolCalls(configuredServers []string) (int, error) 
 
 	removed := 0
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
-		keep, identitiesKnown, err := liveToolCallOwners(tx, configured)
+		keep, identitiesKnown, err := liveToolCallOwners(tx, configured, func(id string) {
+			// Report it: an identity that cannot be read pins its history
+			// bucket forever, because no later sweep can decide whose it is.
+			// Silence would make that look like normal growth.
+			m.logger.Warnw("Server identity record is unreadable; keeping its tool-call history and skipping it in the orphan sweep",
+				"server_id", id, "bucket", toolCallsBucketName(id))
+		})
 		if err != nil {
 			return err
 		}
@@ -281,7 +316,7 @@ func (m *Manager) PruneOrphanToolCalls(configuredServers []string) (int, error) 
 // kept under every identity it has ever had (its attributes change over time,
 // and each variant hashes to a different id) and under its bare name, which is
 // what a caller that never registered an identity would have written.
-func liveToolCallOwners(tx *bbolt.Tx, configured map[string]bool) (keep map[string]bool, identitiesKnown bool, err error) {
+func liveToolCallOwners(tx *bbolt.Tx, configured map[string]bool, onUnreadable func(id string)) (keep map[string]bool, identitiesKnown bool, err error) {
 	keep = map[string]bool{codeExecutionServerID: true}
 	for name := range configured {
 		keep[name] = true
@@ -292,14 +327,22 @@ func liveToolCallOwners(tx *bbolt.Tx, configured map[string]bool) (keep map[stri
 		return keep, false, nil
 	}
 
-	err = bucket.ForEach(func(_, value []byte) error {
+	err = bucket.ForEach(func(key, value []byte) error {
+		identitiesKnown = true
+
 		var identity ServerIdentity
 		if uerr := json.Unmarshal(value, &identity); uerr != nil {
-			// An unreadable identity is a reason to keep data, not delete it.
-			identitiesKnown = true
+			// An unreadable identity is a reason to KEEP data, not delete it —
+			// and keeping it is possible because the bucket key IS the identity
+			// id (saveServerIdentity does Put([]byte(identity.ID), …)), so the
+			// history bucket can be spared without being able to read the
+			// record's server name.
+			keep[string(key)] = true
+			if onUnreadable != nil {
+				onUnreadable(string(key))
+			}
 			return nil
 		}
-		identitiesKnown = true
 		if configured[identity.ServerName] {
 			keep[identity.ID] = true
 		}
@@ -336,6 +379,11 @@ func (m *Manager) deleteToolCallHistoryForName(name string) error {
 			if err := bucket.ForEach(func(_, value []byte) error {
 				var identity ServerIdentity
 				if err := json.Unmarshal(value, &identity); err != nil {
+					// Cannot read the name, so cannot rule this identity out.
+					// Deleting a stranger's history would be worse than leaving
+					// one behind, so this only widens the delete when the id
+					// looks like this server's own: the ONLY safe use of an
+					// unreadable record here is none.
 					return nil //nolint:nilerr // an unreadable identity is not a reason to fail a delete
 				}
 				if identity.ServerName == name {

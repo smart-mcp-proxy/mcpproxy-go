@@ -966,6 +966,10 @@ type ToolCallRecord struct {
 	// cut.
 	ResponseTruncated bool  `json:"response_truncated,omitempty"` // Stored copy was shortened
 	ResponseBytes     int64 `json:"response_bytes,omitempty"`     // Marshalled response size before truncation
+	// ArgumentsTruncated marks Arguments as a placeholder rather than the
+	// arguments the tool was called with. Replaying such a record without
+	// supplying arguments explicitly is refused.
+	ArgumentsTruncated bool `json:"arguments_truncated,omitempty"`
 }
 
 // GetToolCallsResponse is the response for GET /api/v1/tool-calls
