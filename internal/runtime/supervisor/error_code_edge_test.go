@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -50,6 +51,66 @@ func edgeTestServerState(name string, err error, retryCount int) *ServerState {
 			LastError:  err,
 			RetryCount: retryCount,
 		},
+	}
+}
+
+func edgeTestServerStateAt(name string, err error, retryCount int, attempt time.Time) *ServerState {
+	st := edgeTestServerState(name, err, retryCount)
+	st.ConnectionInfo.LastRetryTime = attempt
+	return st
+}
+
+// TestUpdateStateView_OAuthRetriesReNotifyDespiteFrozenRetryCount pins the
+// hole a cross-model review found in the first cut of the edge gate.
+//
+// types.StateManager.SetOAuthError increments oauthRetryCount and NOT
+// retryCount (upstream/types/types.go:726). A server failing OAuth over and
+// over therefore holds (same classified code, same ConnectionInfo.RetryCount)
+// across every attempt, so a gate keyed on those two alone fired exactly once
+// and then went silent forever — unbounded coalescing, not the
+// observation-cadence-bounded coalescing the comment claimed. What DOES move
+// on each attempt is LastRetryTime, which every failure setter stamps and
+// which a re-observation of a sticky error never touches.
+//
+// Without the LastRetryTime term this fails with got=1.
+func TestUpdateStateView_OAuthRetriesReNotifyDespiteFrozenRetryCount(t *testing.T) {
+	sup, codes := newEdgeTestSupervisor(t)
+
+	oauthErr := fmt.Errorf("all authentication strategies failed: oauth token exchange rejected")
+	base := time.Now()
+
+	// Three distinct failed attempts. RetryCount is frozen at 0 throughout,
+	// exactly as SetOAuthError leaves it.
+	sup.updateStateView("srv", edgeTestServerStateAt("srv", oauthErr, 0, base))
+	sup.updateStateView("srv", edgeTestServerStateAt("srv", oauthErr, 0, base.Add(30*time.Second)))
+	sup.updateStateView("srv", edgeTestServerStateAt("srv", oauthErr, 0, base.Add(90*time.Second)))
+
+	if len(*codes) != 3 {
+		t.Fatalf("three OAuth attempts with a frozen RetryCount produced %d notifications (%v), want 3", len(*codes), *codes)
+	}
+	for i, c := range *codes {
+		if c != (*codes)[0] {
+			t.Fatalf("attempt %d reclassified: %v", i, *codes)
+		}
+	}
+}
+
+// TestUpdateStateView_StickyAttemptTimeDoesNotReNotify is the other half of
+// the guard above: adding LastRetryTime to the basis must not re-open the
+// level-triggering it replaced. reconcile() re-observes the SAME sticky
+// ConnectionInfo every 30s, attempt time included, so nothing about the
+// timestamp changes and the pass must stay silent.
+func TestUpdateStateView_StickyAttemptTimeDoesNotReNotify(t *testing.T) {
+	sup, codes := newEdgeTestSupervisor(t)
+
+	stuck := fmt.Errorf("dial tcp 127.0.0.1:1: %w", syscall.ECONNREFUSED)
+	attempt := time.Now()
+	for i := 0; i < 10; i++ {
+		sup.updateStateView("srv", edgeTestServerStateAt("srv", stuck, 3, attempt))
+	}
+
+	if len(*codes) != 1 {
+		t.Fatalf("10 reconcile passes over one unchanged failure produced %d notifications (%v), want exactly 1", len(*codes), *codes)
 	}
 }
 

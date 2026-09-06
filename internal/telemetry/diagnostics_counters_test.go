@@ -332,3 +332,55 @@ var allTestCodes = []string{
 	// 30th entry (one over 29 for cap test)
 	"MCPX_HTTP_401", // duplicate deliberately reused for pad; cap test uses index 0-24
 }
+
+// TestDiagnosticsCounterStore_LegacyLevelTriggeredCountsAreNotAdopted pins the
+// v10 -> v11 namespace change (MCP-2967). Under v10 these per-code counters
+// were LEVEL-triggered — the supervisor re-counted every standing failure on
+// its 30s reconcile ticker — and they live in a 24h sliding window that
+// survives a restart. If v11 kept reading the v10 keys, the first day after an
+// upgrade would report v10 polling volume (~2880/day/server) as v11 event
+// volume, under the v11 schema label. Fresh namespace, fresh start.
+func TestDiagnosticsCounterStore_LegacyLevelTriggeredCountsAreNotAdopted(t *testing.T) {
+	db, cleanup := newTestDiagDB(t)
+	defer cleanup()
+
+	const legacyPrefix = "code_count_24h_" // the v10 namespace, verbatim
+	code := "MCPX_OAUTH_LOGIN_REQUIRED"
+
+	// A live (non-decayed) v10 record, of the magnitude level-triggering
+	// actually produced.
+	err := db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(DiagnosticsCountersBucketName))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(legacyPrefix+code), encodeCounter(2880, time.Now().Add(-time.Hour).Unix()))
+	})
+	if err != nil {
+		t.Fatalf("seeding legacy counter: %v", err)
+	}
+
+	var s bboltDiagnosticsCounterStore
+	snap, err := s.Snapshot(db)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if got := snap.ErrorCodeCounts24h[code]; got != 0 {
+		t.Fatalf("v10 level-triggered count leaked into the v11 payload: %s=%d, want absent", code, got)
+	}
+	if len(snap.ErrorCodeCounts24h) != 0 {
+		t.Fatalf("v11 snapshot adopted legacy keys: %v", snap.ErrorCodeCounts24h)
+	}
+
+	// And the new namespace still works.
+	if err := s.RecordErrorCode(db, code); err != nil {
+		t.Fatalf("RecordErrorCode: %v", err)
+	}
+	snap, err = s.Snapshot(db)
+	if err != nil {
+		t.Fatalf("Snapshot after record: %v", err)
+	}
+	if got := snap.ErrorCodeCounts24h[code]; got != 1 {
+		t.Fatalf("post-upgrade count = %d, want 1 (a single edge)", got)
+	}
+}

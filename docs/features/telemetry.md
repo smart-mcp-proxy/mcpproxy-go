@@ -63,6 +63,8 @@ Both are keyed exclusively by the fixed `MCPX_*` catalog and valued by non-negat
 
 **Schema v11 changed the meaning of `error_code_counts_24h`, so v10-and-earlier volumes are not comparable with v11 ones.** Through v10 the counter was level-triggered: the supervisor re-counted every *standing* failure on its 30-second reconcile tick, so a server parked awaiting an OAuth login emitted ~2,880 "events" a day while making zero connection attempts, and the number measured failing-server count times uptime rather than anything a user experienced. From v11 it is edge-triggered. `current_error_codes` was added in the same change because edge-triggering alone would have removed the "how many installs are affected right now" signal: the 24-hour window decays, so a permanently broken install would emit once and then vanish from the payload — and an absent field reads as zero.
 
+The per-code counters also start from **zero** on the upgrade to v11 rather than carrying the previous day forward: they persist in a 24-hour sliding window, so an install upgrading mid-window would otherwise have spent its first post-upgrade day reporting v10 polling volume under the v11 label. The v11 counters are stored under a separate key namespace, and the leftover v10 records are never read.
+
 ## When heartbeats are sent
 
 A heartbeat goes out 5 minutes after start (so short-lived processes stay quiet), then once every 24 hours, and **once more on graceful shutdown**.

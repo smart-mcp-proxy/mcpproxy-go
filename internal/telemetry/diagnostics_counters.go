@@ -18,7 +18,19 @@ const (
 	diagKeyFixAttempted24h = "fix_attempted_24h"
 	diagKeyFixSucceeded24h = "fix_succeeded_24h"
 	diagKeyUniqueCodesEver = "unique_codes_ever"
-	diagKeyCodePrefix      = "code_count_24h_"
+	// diagKeyCodePrefix namespaces the per-code 24h counters. It changed with
+	// telemetry schema v11 (MCP-2967), and the change is the point: under v10
+	// these counts were LEVEL-triggered (the supervisor re-counted every
+	// standing failure on its 30s reconcile ticker), and they persist across
+	// an upgrade in a 24h sliding window. Reading the old keys would have let
+	// v10's ~2880/day/server polling counts keep accruing v11 edge increments
+	// under the v11 schema label, contaminating the first day of post-upgrade
+	// data with exactly the inflation this schema bump exists to remove. A
+	// fresh namespace makes v11 start at zero. Neither prefix is a prefix of
+	// the other, so the cursor scan below cannot pick up a legacy key; the
+	// orphaned v10 keys are inert, bounded by the MCPX_ catalog (~44 entries),
+	// and decay-stale within a day.
+	diagKeyCodePrefix = "code_edge_count_24h_"
 )
 
 // maxDiagCodeEntries is the cardinality cap for ErrorCodeCounts24h in

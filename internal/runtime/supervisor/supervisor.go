@@ -711,7 +711,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		// hands us the PREVIOUS status, so these two reads (taken before any
 		// mutation below) are the state as of the last pass. See
 		// shouldNotifyErrorCode for why they gate the telemetry notification.
-		prevCode, prevRetryCount := errorCodeEdgeBasis(status)
+		prevCode, prevRetryCount, prevErrorTime := errorCodeEdgeBasis(status)
 
 		oldState := status.State
 		status.Config = state.Config
@@ -782,7 +782,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				// times a day per server.
 				if status.Diagnostic != nil {
 					code := string(status.Diagnostic.Code)
-					if shouldNotifyErrorCode(prevCode, code, prevRetryCount, state.ConnectionInfo.RetryCount) {
+					if shouldNotifyErrorCode(prevCode, code, prevRetryCount, state.ConnectionInfo.RetryCount, prevErrorTime, state.ConnectionInfo.LastRetryTime) {
 						classifiedCode = code
 					}
 				}
@@ -829,14 +829,17 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 // View.UpdateServer callback, before any mutation: View.UpdateServer clones
 // the snapshot and passes the PREVIOUS status in, so these are last-pass
 // values only until the callback starts writing.
-func errorCodeEdgeBasis(status *stateview.ServerStatus) (code string, retryCount int) {
+func errorCodeEdgeBasis(status *stateview.ServerStatus) (code string, retryCount int, errorTime time.Time) {
 	if status == nil {
-		return "", 0
+		return "", 0, time.Time{}
 	}
 	if status.Diagnostic != nil {
 		code = string(status.Diagnostic.Code)
 	}
-	return code, status.RetryCount
+	if status.LastErrorTime != nil {
+		errorTime = *status.LastErrorTime
+	}
+	return code, status.RetryCount, errorTime
 }
 
 // shouldNotifyErrorCode reports whether a freshly classified diagnostic is a
@@ -852,7 +855,7 @@ func errorCodeEdgeBasis(status *stateview.ServerStatus) (code string, retryCount
 // install-days above the tick cadence averaged 3.89x it, on installs averaging
 // 18.8 configured servers.
 //
-// The edge is either of:
+// The edge is any of:
 //   - a different classified code — a new failure, or the first failure after
 //     a recovery that cleared the standing diagnostic;
 //   - a changed ConnectionInfo.RetryCount — the count advances on each failed
@@ -860,6 +863,19 @@ func errorCodeEdgeBasis(status *stateview.ServerStatus) (code string, retryCount
 //     so a DECREASE marks a new failure episode after a recovery that no
 //     stateview pass happened to observe. Either direction is a real event,
 //     which is why this compares != rather than >.
+//   - a changed ConnectionInfo.LastRetryTime — the timestamp every failure
+//     setter stamps with time.Now() (upstream/types.SetError:347,
+//     SetTerminalError:400, SetPendingAuth:465, SetOAuthError:726) and that
+//     nothing else advances, so a fresh value is a fresh ATTEMPT. Without this
+//     term, OAuth failures coalesced without bound rather than within an
+//     observation window: SetOAuthError increments oauthRetryCount and NOT
+//     retryCount, so a server failing OAuth over and over held (same code,
+//     same RetryCount) and edged exactly once, ever. It also closes two ABA
+//     routes that need no dropped event — a Reset()+Connect() that returns to
+//     the same (code, RetryCount), and a recover-then-refail observed through
+//     a state fetched after the queued connected event.
+//     Re-observing a STICKY error does not advance it, which is the whole
+//     point; reconcile never writes it.
 //
 // The standing condition itself is not lost: classifyAndAttach still runs on
 // every pass (so the UI, REST API and CLI keep rendering the diagnostic), and
@@ -869,32 +885,42 @@ func errorCodeEdgeBasis(status *stateview.ServerStatus) (code string, retryCount
 // observations, not an event log tapped at the failure site, so it can alias:
 //   - Coalescing (under-count): several attempts failing between two
 //     observations collapse into one notification, and a transient different
-//     code that has already reverted is not seen at all.
-//   - ABA (under-count): a recovery that resets RetryCount to 0 followed by a
-//     new failure back to the same (code, RetryCount) pair, with neither the
-//     30s reconcile pass nor a connection event observing the Ready state in
-//     between, reads as no change. Requires a dropped event AND a flap inside
-//     one tick.
+//     code that has already reverted is not seen at all. Bounded by the
+//     observation cadence.
+//   - ABA (under-count): a recovery followed by a new failure that returns to
+//     the identical (code, RetryCount, LastRetryTime) triple with no
+//     observation in between. Needs all three to match, so in practice it
+//     needs a clock that did not move.
+//   - Double-stamping (over-count): one attempt routed through two failure
+//     setters (SetError then SetPendingAuth, say) stamps LastRetryTime twice
+//     and can edge twice. Bounded at a small constant per attempt.
 //   - Stale-observation replay (over-count): reconcile pre-fetches upstream
 //     states BEFORE taking stateMu (a deliberate lock-ordering choice, see
 //     reconcile), so it can publish a state older than one the event writer
 //     already applied, clearing the diagnostic and letting the same standing
 //     failure edge a second time.
 //
-// All three are bounded by the observation cadence and are orders of magnitude
-// smaller than the ~2880/day/server they replace. Closing them means giving
-// failures a monotonic identity at the source rather than diffing two sampled
-// projections, which is a supervisor-wide change and deliberately out of scope
-// here. Treat the counter as "roughly how often something newly broke", and
-// read CurrentErrorCodes for an exact right-now number.
-func shouldNotifyErrorCode(prevCode, code string, prevRetryCount, retryCount int) bool {
+// All are bounded by the observation cadence or by a small constant, and are
+// orders of magnitude smaller than the ~2880/day/server they replace. Closing
+// them means giving failures a monotonic identity at the source rather than
+// diffing sampled projections, which is a supervisor-wide change and
+// deliberately out of scope here. Treat the counter as "roughly how often
+// something newly broke", and read CurrentErrorCodes for an exact right-now
+// number.
+func shouldNotifyErrorCode(prevCode, code string, prevRetryCount, retryCount int, prevErrorTime, errorTime time.Time) bool {
 	if code == "" {
 		return false
 	}
 	if code != prevCode {
 		return true
 	}
-	return retryCount != prevRetryCount
+	if retryCount != prevRetryCount {
+		return true
+	}
+	// Zero means the state manager never stamped an attempt time (a synthesised
+	// ConnectionInfo, or one built before the failure setters ran); fall back to
+	// the two counter terms rather than inventing an edge.
+	return !errorTime.IsZero() && !errorTime.Equal(prevErrorTime)
 }
 
 // CurrentErrorCodes returns the standing diagnostic state of this install:
@@ -1149,7 +1175,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			s.stateView.UpdateServer(event.ServerName, func(status *stateview.ServerStatus) {
 				// Edge-trigger basis, read before any mutation — same
 				// contract as updateStateView above (MCP-2967).
-				prevCode, prevRetryCount := errorCodeEdgeBasis(status)
+				prevCode, prevRetryCount, prevErrorTime := errorCodeEdgeBasis(status)
 
 				oldState := status.State
 				status.Connected = connected
@@ -1233,7 +1259,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						// MCP-2967: edge-triggered, see shouldNotifyErrorCode.
 						if status.Diagnostic != nil {
 							code := string(status.Diagnostic.Code)
-							if shouldNotifyErrorCode(prevCode, code, prevRetryCount, connInfo.RetryCount) {
+							if shouldNotifyErrorCode(prevCode, code, prevRetryCount, connInfo.RetryCount, prevErrorTime, connInfo.LastRetryTime) {
 								classifiedCode = code
 							}
 						}
