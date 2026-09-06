@@ -3148,6 +3148,19 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 					// caller holds stateMu.
 					_ = diagStore.RecordErrorCode(db, code)
 				})
+
+				// MCP-2967: the notifier above is now EDGE-triggered inside
+				// the supervisor, so error_code_counts_24h counts new
+				// failures instead of re-counting standing ones every 30s
+				// reconcile tick. That alone would delete the "installs
+				// currently affected" signal — the 24h window decays and the
+				// whole diagnostics object is omitempty — so pair it with the
+				// standing state, recomputed from the live stateview at each
+				// heartbeat. No DB involved; codes only, no server names.
+				sup := r.supervisor
+				r.telemetryService.SetCurrentErrorCodesProvider(func() map[string]int {
+					return sup.CurrentErrorCodes()
+				})
 			}
 
 			// Spec 080 (US3): hand the startup-derived previous_shutdown value

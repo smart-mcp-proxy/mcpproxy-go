@@ -94,7 +94,8 @@ type anonymityScanEnvelope struct {
 	TPAScanner json.RawMessage `json:"tpa_scanner"`
 
 	// Spec 095 structural check: the diagnostics counter sub-object, whose
-	// error_code_counts_24h map must be cataloged codes → non-negative counts.
+	// error_code_counts_24h map — and, since schema v11 (MCP-2967), whose
+	// current_error_codes map — must be cataloged codes → non-negative counts.
 	// Same not-a-pointer reasoning as TPAScanner.
 	Diagnostics json.RawMessage `json:"diagnostics"`
 
@@ -383,21 +384,38 @@ func scanDiagnosticsCounters(raw json.RawMessage) *AnonymityViolation {
 		return diagFieldViolation("diagnostics", "must be an object")
 	}
 
-	rawCounts, ok := obj["error_code_counts_24h"]
+	// Both code-keyed maps carry the same contract. current_error_codes
+	// (schema v11, MCP-2967) is the standing-state companion to the now
+	// edge-triggered 24h counter; it is filled from a provider OUTSIDE this
+	// package (a closure over the supervisor's stateview), so the wire-form
+	// backstop matters at least as much for it as for the BBolt-backed map.
+	for _, field := range []string{"error_code_counts_24h", "current_error_codes"} {
+		if viol := scanDiagCodeMap(obj, field); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// scanDiagCodeMap asserts obj[field], if present, is a map of
+// catalog-registered MCPX_* codes to non-negative integers.
+func scanDiagCodeMap(obj map[string]json.RawMessage, field string) *AnonymityViolation {
+	rawCounts, ok := obj[field]
 	if !ok {
 		return nil
 	}
+	label := "diagnostics." + field
 	var counts map[string]json.RawMessage
 	if err := json.Unmarshal(rawCounts, &counts); err != nil || counts == nil {
-		return diagFieldViolation("diagnostics.error_code_counts_24h", "must be an object")
+		return diagFieldViolation(label, "must be an object")
 	}
 	for code, v := range counts {
 		if !isValidMCPXCode(code) {
-			return diagFieldViolation("diagnostics.error_code_counts_24h",
+			return diagFieldViolation(label,
 				"carries a key that is not a cataloged MCPX_* diagnostic code")
 		}
 		msg := json.RawMessage(v)
-		if viol := scanNonNegativeInt(&msg, "diagnostics.error_code_counts_24h", diagFieldViolation); viol != nil {
+		if viol := scanNonNegativeInt(&msg, label, diagFieldViolation); viol != nil {
 			return viol
 		}
 	}
@@ -529,8 +547,9 @@ func isPreflightAllowedKey(key string) bool {
 //  5. tpa_scanner (schema v8), if present, is not an object of whitelisted
 //     keys holding non-negative integer counts, with a findings map keyed
 //     exclusively by the fixed severity enum.
-//  6. diagnostics.error_code_counts_24h, if present, is not a map of
-//     catalog-registered MCPX_* codes to non-negative integer counts.
+//  6. diagnostics.error_code_counts_24h or diagnostics.current_error_codes
+//     (schema v11), if present, is not a map of catalog-registered MCPX_*
+//     codes to non-negative integer counts.
 //  7. preflight (issue #969), if present, is not a CLOSED object of
 //     non-negative integer counts (keys drawn from preflightAllowedKeys) whose
 //     availability_block_reasons_24h map is keyed exclusively by the closed

@@ -707,6 +707,12 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 func (s *Supervisor) updateStateView(name string, state *ServerState) {
 	var classifiedCode string
 	s.stateView.UpdateServer(name, func(status *stateview.ServerStatus) {
+		// Edge-trigger basis. View.UpdateServer deep-clones the snapshot and
+		// hands us the PREVIOUS status, so these two reads (taken before any
+		// mutation below) are the state as of the last pass. See
+		// shouldNotifyErrorCode for why they gate the telemetry notification.
+		prevCode, prevRetryCount := errorCodeEdgeBasis(status)
+
 		oldState := status.State
 		status.Config = state.Config
 		status.Enabled = state.Enabled
@@ -769,9 +775,16 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				classifyAndAttach(status, state.ConnectionInfo.LastError, s.classifierHints(state.Config, transport))
 				// Spec 044 Phase H / Spec 080 FR-012: capture the classified
 				// code; delivered synchronously after the stateview lock is
-				// released (see notifyErrorCode).
+				// released (see notifyErrorCode). MCP-2967: only on an EDGE —
+				// reconcile() runs this for every configured server every 30s
+				// and ConnectionInfo.LastError is sticky, so propagating
+				// unconditionally counted the same standing failure ~2880
+				// times a day per server.
 				if status.Diagnostic != nil {
-					classifiedCode = string(status.Diagnostic.Code)
+					code := string(status.Diagnostic.Code)
+					if shouldNotifyErrorCode(prevCode, code, prevRetryCount, state.ConnectionInfo.RetryCount) {
+						classifiedCode = code
+					}
 				}
 
 				// Set last error time if available
@@ -809,6 +822,120 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		}
 	})
 	s.notifyErrorCode(classifiedCode)
+}
+
+// errorCodeEdgeBasis extracts the previous diagnostic code and retry count
+// from a ServerStatus. It must be called at the very top of a
+// View.UpdateServer callback, before any mutation: View.UpdateServer clones
+// the snapshot and passes the PREVIOUS status in, so these are last-pass
+// values only until the callback starts writing.
+func errorCodeEdgeBasis(status *stateview.ServerStatus) (code string, retryCount int) {
+	if status == nil {
+		return "", 0
+	}
+	if status.Diagnostic != nil {
+		code = string(status.Diagnostic.Code)
+	}
+	return code, status.RetryCount
+}
+
+// shouldNotifyErrorCode reports whether a freshly classified diagnostic is a
+// new EVENT rather than the same standing condition re-observed.
+//
+// MCP-2967. The telemetry counter behind diagnostics.error_code_counts_24h was
+// level-triggered: reconcile() calls updateStateView for EVERY configured
+// server on a 30s ticker, and ConnectionInfo.LastError is sticky (cleared only
+// on a transition to Ready, see upstream/types.SetState). A server parked
+// awaiting OAuth login therefore emitted 86400/30 = 2880 "events" a day while
+// making zero connection attempts, and the number tracked failing-server count
+// times uptime rather than anything a user did. Field data corroborated:
+// install-days above the tick cadence averaged 3.89x it, on installs averaging
+// 18.8 configured servers.
+//
+// The edge is either of:
+//   - a different classified code — a new failure, or the first failure after
+//     a recovery that cleared the standing diagnostic;
+//   - a changed ConnectionInfo.RetryCount — the count advances on each failed
+//     attempt, and the state machine resets it to 0 on a transition to Ready,
+//     so a DECREASE marks a new failure episode after a recovery that no
+//     stateview pass happened to observe. Either direction is a real event,
+//     which is why this compares != rather than >.
+//
+// The standing condition itself is not lost: classifyAndAttach still runs on
+// every pass (so the UI, REST API and CLI keep rendering the diagnostic), and
+// Supervisor.CurrentErrorCodes reports the standing set for telemetry.
+//
+// Known and accepted imprecision — this is a SAMPLED predicate over two
+// observations, not an event log tapped at the failure site, so it can alias:
+//   - Coalescing (under-count): several attempts failing between two
+//     observations collapse into one notification, and a transient different
+//     code that has already reverted is not seen at all.
+//   - ABA (under-count): a recovery that resets RetryCount to 0 followed by a
+//     new failure back to the same (code, RetryCount) pair, with neither the
+//     30s reconcile pass nor a connection event observing the Ready state in
+//     between, reads as no change. Requires a dropped event AND a flap inside
+//     one tick.
+//   - Stale-observation replay (over-count): reconcile pre-fetches upstream
+//     states BEFORE taking stateMu (a deliberate lock-ordering choice, see
+//     reconcile), so it can publish a state older than one the event writer
+//     already applied, clearing the diagnostic and letting the same standing
+//     failure edge a second time.
+//
+// All three are bounded by the observation cadence and are orders of magnitude
+// smaller than the ~2880/day/server they replace. Closing them means giving
+// failures a monotonic identity at the source rather than diffing two sampled
+// projections, which is a supervisor-wide change and deliberately out of scope
+// here. Treat the counter as "roughly how often something newly broke", and
+// read CurrentErrorCodes for an exact right-now number.
+func shouldNotifyErrorCode(prevCode, code string, prevRetryCount, retryCount int) bool {
+	if code == "" {
+		return false
+	}
+	if code != prevCode {
+		return true
+	}
+	return retryCount != prevRetryCount
+}
+
+// CurrentErrorCodes returns the standing diagnostic state of this install:
+// stable MCPX_* code -> number of configured servers currently in that state.
+// Returns nil when nothing is failing.
+//
+// This is the companion to the edge-triggered counter above and exists because
+// edge-triggering alone would DELETE the "installs currently affected" signal:
+// diagnostics.error_code_counts_24h decays over a 24h window, carries
+// omitempty, and the whole Diagnostics object is omitted when isZero(). A
+// permanently parked install would emit one event and then vanish from the
+// payload — trading an inflated number for a missing one, which reads as zero.
+//
+// Anonymity: the map is keyed exclusively by the fixed MCPX_ catalog (~30
+// codes, prefix-checked here as defense in depth) and valued by a count. It
+// carries no server name, URL, command, or free text. Only enabled,
+// non-quarantined servers are counted — a server the user disabled or
+// quarantined is not "currently affected".
+func (s *Supervisor) CurrentErrorCodes() map[string]int {
+	snap := s.stateView.Snapshot()
+	if snap == nil || len(snap.Servers) == 0 {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, status := range snap.Servers {
+		if status == nil || status.Diagnostic == nil {
+			continue
+		}
+		if !status.Enabled || status.Quarantined {
+			continue
+		}
+		code := string(status.Diagnostic.Code)
+		if !strings.HasPrefix(code, "MCPX_") {
+			continue
+		}
+		counts[code]++
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	return counts
 }
 
 // notifyErrorCode delivers a freshly classified MCPX_* code to the registered
@@ -1020,6 +1147,10 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			// Update stateview
 			var classifiedCode string
 			s.stateView.UpdateServer(event.ServerName, func(status *stateview.ServerStatus) {
+				// Edge-trigger basis, read before any mutation — same
+				// contract as updateStateView above (MCP-2967).
+				prevCode, prevRetryCount := errorCodeEdgeBasis(status)
+
 				oldState := status.State
 				status.Connected = connected
 
@@ -1099,8 +1230,12 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						// Spec 044 Phase H / Spec 080 FR-012: capture the
 						// classified code; delivered synchronously after the
 						// stateview lock is released (see notifyErrorCode).
+						// MCP-2967: edge-triggered, see shouldNotifyErrorCode.
 						if status.Diagnostic != nil {
-							classifiedCode = string(status.Diagnostic.Code)
+							code := string(status.Diagnostic.Code)
+							if shouldNotifyErrorCode(prevCode, code, prevRetryCount, connInfo.RetryCount) {
+								classifiedCode = code
+							}
 						}
 
 						if !connInfo.LastRetryTime.IsZero() {
