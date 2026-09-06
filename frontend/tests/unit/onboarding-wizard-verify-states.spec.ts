@@ -145,6 +145,35 @@ describe('OnboardingWizard verify states (F13)', () => {
     expect(row.attributes('data-state')).toBe('pending')
   })
 
+  // Round-2 cross-model review, two defects in the pending row's copy.
+  //
+  // 1. "No upstream tool call yet" is a claim about the USER, and even under
+  //    retrieve_tools the flag cannot back it. That mode still exposes
+  //    code_execution (mcp_routing.go: "available but not the primary
+  //    workflow"), whose sub-calls do not stamp the flag, and /mcp/all and
+  //    /mcp/code are mounted unconditionally — "regardless of config"
+  //    (internal/server/server.go) — so a client aimed at the direct surface
+  //    makes real upstream calls that never reach the stamping handler. The row
+  //    may only report what mcpproxy RECORDED.
+  // 2. It told the user "the prompts below search and inspect mcpproxy itself"
+  //    while the very same change added a first prompt that dispatches to an
+  //    upstream — so it disclaimed the one prompt that satisfies the milestone.
+  it('reports what was recorded, and points at the prompt that satisfies it', async () => {
+    const wrapper = await openVerifyTab({
+      resolved: { success: true, data: { routing_mode: 'retrieve_tools', activation: { first_real_tool_call_ever: false } } },
+    })
+    const text = wrapper.find('[data-test="verify-first-upstream-call"]').text()
+    // A statement about mcpproxy's records, not about what the user did.
+    expect(text).toContain('recorded')
+    // Must not disclaim the upstream-dispatching prompt it just added.
+    expect(text).not.toContain('the prompts below search and inspect mcpproxy itself')
+    expect(text).toMatch(/first prompt/i)
+    // And that prompt really is first in the list.
+    const prompts = wrapper.findAll('[data-test="verify-sample-prompts"] li')
+    expect(prompts.length).toBeGreaterThan(1)
+    expect(prompts[0].text()).toContain('call_tool_read')
+  })
+
   it('shows the upstream-call milestone as satisfied when first_real_tool_call_ever is true', async () => {
     const wrapper = await openVerifyTab({
       resolved: { success: true, data: { routing_mode: 'retrieve_tools', activation: { first_real_tool_call_ever: true } } },
@@ -158,7 +187,7 @@ describe('OnboardingWizard verify states (F13)', () => {
     expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
     // The rest of the panel still rendered — the failure must not abort onOpened().
     expect(wrapper.find('[data-test="verify-sample-prompts"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="panel-verify"]').text()).not.toContain('No upstream tool call yet')
+    expect(wrapper.find('[data-test="panel-verify"]').text()).not.toContain('No upstream tool call')
   })
 
   // The core stamps first_real_tool_call_ever at exactly one site: the
@@ -171,7 +200,7 @@ describe('OnboardingWizard verify states (F13)', () => {
       })
       expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
       const panel = wrapper.find('[data-test="panel-verify"]')
-      expect(panel.text()).not.toContain('No upstream tool call yet')
+      expect(panel.text()).not.toContain('No upstream tool call')
       expect(panel.text()).not.toContain('does not yet mean a tool has run')
     })
   }

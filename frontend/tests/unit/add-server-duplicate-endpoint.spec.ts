@@ -133,6 +133,32 @@ describe('AddServerModal — duplicate endpoint observation (F09)', () => {
     expect(note.text()).toContain('already configured at this endpoint')
   })
 
+  // Round-2 cross-model review. The note used to promise the consequences
+  // outright — "their tools will appear twice, and the security scan WILL flag
+  // each as a possible clone of the other" — and endpoint equality establishes
+  // neither. A second entry may carry different credentials or a different
+  // OAuth identity (the legitimate reason to add one) and expose a different
+  // toolset entirely; and even on identical tools the clone check needs three
+  // tokens in BOTH descriptions plus 85%/70% token overlap to fire
+  // (internal/security/detect/checks/shadowing.go cloneDescriptions), so short
+  // or empty descriptions never match. A form that cannot run the scanner must
+  // not predict its verdict.
+  it('states the consequences conditionally — it cannot predict the scan', async () => {
+    seedServers([HTTP_SERVER])
+    const wrapper = mountModal()
+    await selectHttp(wrapper)
+    await wrapper.find('input[type="url"]').setValue('https://mcp.context7.com/mcp')
+
+    const text = wrapper.get(NOTE).text()
+    // The one thing endpoint equality DOES establish.
+    expect(text).toContain('both will be listed')
+    // Hedged, not promised.
+    expect(text).toMatch(/if they/i)
+    expect(text).toContain('may flag')
+    expect(text).not.toContain('will flag')
+    expect(text).not.toContain('their tools will appear twice')
+  })
+
   it('keeps the note advisory: submit stays enabled and it is not an error', async () => {
     seedServers([HTTP_SERVER])
     const wrapper = mountModal()

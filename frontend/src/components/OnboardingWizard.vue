@@ -447,7 +447,7 @@
               <template v-else>
                 <span class="opacity-50">📡</span>
                 <span class="opacity-70">
-                  <span class="font-semibold">No upstream tool call yet</span> — the prompts below search and inspect mcpproxy itself. Ask your agent to actually call a tool on one of your servers.
+                  <span class="font-semibold">No upstream tool call recorded yet</span> — try the first prompt below, which calls a tool on one of your servers; the rest search and inspect mcpproxy itself.
                 </span>
               </template>
             </div>
@@ -720,9 +720,14 @@ const loadingActivity = ref(false)
 // would silently regress.
 //
 // Tri-state on purpose. `null` is "we cannot tell" — an absent activation
-// block (early startup, telemetry unwired, a core that predates it) or a
-// failed fetch. Rendering that as "no tool call yet" would be exactly the
-// unfounded claim this whole change exists to remove.
+// block (early startup, telemetry unwired, a core that predates it), or a
+// fetch that has not yet succeeded even once. Rendering that as "no tool call
+// yet" would be exactly the unfounded claim this whole change exists to remove.
+//
+// A LATER fetch that fails keeps the last known value rather than reverting to
+// null (see fetchActivation's catch): the row would otherwise flicker off on
+// every dropped poll, and the 5s poll re-converges on its own. Stale-for-a-few-
+// seconds beats blinking, and the state is not a gate.
 const firstRealToolCallEver = ref<boolean | null>(null)
 
 // Resolved by the backend (servedRoutingMode), so it is always one of
@@ -737,6 +742,16 @@ const routingMode = ref('')
 //   pending   — flag false AND we are on the mode that actually stamps it.
 //   unknown   — anything else; the row stays off rather than assert a
 //               negative we cannot back.
+//
+// `pending` is still not a proof of absence, and the copy is worded for that
+// (round-2 review). Even under retrieve_tools the flag has blind spots: that
+// mode also exposes `code_execution` (mcp_routing.go: "available but not the
+// primary workflow"), whose sub-calls do not stamp it, and /mcp/all and
+// /mcp/code are mounted unconditionally — "regardless of config"
+// (internal/server/server.go) — so a client aimed at the direct surface makes
+// real upstream calls that never reach the stamping handler. Hence "No upstream
+// tool call RECORDED yet": a statement about what mcpproxy measured, which is
+// true, rather than about what the user did, which we cannot see.
 const upstreamCallState = computed<'satisfied' | 'pending' | 'unknown'>(() => {
   if (firstRealToolCallEver.value === true) return 'satisfied'
   if (firstRealToolCallEver.value === false && routingMode.value === 'retrieve_tools') return 'pending'

@@ -169,6 +169,43 @@ describe('ServerDetail — Tools tab empty state on a quarantined server (F08)',
     expect(text).not.toMatch(/not connected|cannot connect/i)
   })
 
+  // Round-2 cross-model review. The caveat above was first keyed on
+  // `!connected`, which is the DESIGNED state of a quarantined server, not a
+  // fault: the supervisor disconnects any quarantined server without an active
+  // inspection exemption and refuses to dial it
+  // (internal/runtime/supervisor/supervisor.go). So the "check the connection
+  // error" advice fired on EVERY quarantined server — including the default,
+  // perfectly healthy quarantined-on-add case this whole screen exists to
+  // serve — and sent the user hunting for an error that does not exist, while
+  // approval genuinely was their entire remedy.
+  //
+  // This is the exact shape `quarantined()` builds: connected false, no
+  // last_error. It is therefore also the shape of the two tests above it, which
+  // is why nothing caught this.
+  it('does not invent a connection error for a healthy quarantined server that is simply not dialled', async () => {
+    const wrapper = await mountDetail(quarantined({ connected: false }))
+    const text = wrapper.find('[data-test="server-tools-empty"]').text()
+    expect(text).toContain('withheld')
+    // Approval IS the whole remedy here.
+    expect(text).toContain('approve the server')
+    // And no fault may be asserted, because none was reported.
+    expect(text).not.toMatch(/connection error|not connected|cannot connect/i)
+  })
+
+  // The other half of the same boundary: an observed fault is what earns the
+  // caveat, and the caveat stays hedged ("may not be enough") because a stale
+  // error from an earlier dial is not proof that approval will fail.
+  it('names the fault only when the server actually reported one', async () => {
+    const wrapper = await mountDetail(
+      quarantined({ connected: false, last_error: 'failed to connect: command not found' })
+    )
+    const text = wrapper.find('[data-test="server-tools-empty"]').text()
+    expect(text).toMatch(/connection error/i)
+    expect(text).toMatch(/may not be enough/i)
+    // Never the categorical claim it replaced.
+    expect(text).not.toMatch(/will not list tools/i)
+  })
+
   it('keeps the original wording for a disconnected server that is NOT quarantined', async () => {
     const wrapper = await mountDetail({
       name: 'probe',

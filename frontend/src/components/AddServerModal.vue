@@ -198,7 +198,19 @@
                expose byte-identical tool names and descriptions and
                detect.shadowing.cross_server reads that as impersonation.
                This is the observation that should have come first: neutral,
-               non-blocking, and naming the server it collides with. -->
+               non-blocking, and naming the server it collides with.
+
+               The consequences are stated CONDITIONALLY, and that is not
+               hedging for its own sake — neither is guaranteed by endpoint
+               equality. A second entry may carry different credentials or a
+               different OAuth identity (the legitimate reason to make one) and
+               so expose a different toolset entirely; and even on identical
+               tools the clone check needs three tokens in BOTH descriptions
+               plus 85%/70% token overlap to fire
+               (internal/security/detect/checks/shadowing.go cloneDescriptions),
+               so short or empty descriptions never match. Promising a scanner
+               verdict this form cannot compute would be the same unfounded
+               claim this whole change exists to remove. -->
           <p
             v-if="duplicateEndpointServer"
             data-test="addserver-duplicate-endpoint"
@@ -208,8 +220,8 @@
             <span>
               <code class="font-mono">{{ duplicateEndpointServer.name }}</code> is already
               configured at this endpoint. Adding a second entry is allowed — both will be
-              listed, their tools will appear twice, and the security scan will flag each as
-              a possible clone of the other.
+              listed. If they turn out to expose the same tools, those tools will appear
+              twice and the security scan may flag each as a possible clone of the other.
             </span>
           </p>
 

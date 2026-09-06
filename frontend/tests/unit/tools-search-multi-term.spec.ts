@@ -179,6 +179,32 @@ describe('Tools search empty state says what was searched (audit F11)', () => {
     expect(empty.text()).not.toContain('Searched 0 tools')
   })
 
+  // Round-2 cross-model review. Zero scope has TWO causes and the branch above
+  // assumed only one of them. With an EMPTY catalogue — every server
+  // quarantined, or none connected, both of which return no tools from
+  // GET /api/v1/tools — searching produced "the other active filters excluded
+  // every tool ... Clear them to search the full list" while no filter was set
+  // at all. Clearing filters cannot fix it, so the advice was both false and
+  // unfollowable: the same defect class this file exists to close.
+  it('does not blame filters for an empty catalogue when no filter is set', async () => {
+    const api = (await import('@/services/api')).default
+    vi.mocked(api.getGlobalTools).mockResolvedValueOnce({
+      success: true,
+      data: {
+        tools: [],
+        stats: { total: 0, enabled: 0, disabled: 0, pending_approval: 0 },
+      },
+    } as never)
+
+    const wrapper = await mountTools('/tools?q=kubernetes')
+    const empty = wrapper.find('[data-test="tools-empty-search"]')
+    expect(empty.exists()).toBe(true)
+    expect(empty.text()).toContain('There are no tools to search')
+    // The two claims that would be false here.
+    expect(empty.text()).not.toContain('active filters excluded')
+    expect(empty.text()).not.toContain('try fewer words')
+  })
+
   it('drops the "disabled included" claim when a status filter excludes them', async () => {
     const wrapper = await mountTools('/tools?q=kubernetes')
     expect(wrapper.find('[data-test="tools-empty-search"]').text()).toContain('disabled tools included')

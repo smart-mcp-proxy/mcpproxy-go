@@ -1742,15 +1742,28 @@ const toolsEmptyBody = computed(() => {
       ? 'This server has no tools available.'
       : 'Server must be connected to view tools.'
   }
-  // Integrated-review finding. Approval is the whole remedy only for a
-  // quarantined server that actually connects. mcpproxy still dials a
-  // quarantined server so the scanner can export its definitions, and every
-  // fault alert on this page is suppressed while quarantined (issue #1076) --
-  // so a server whose command does not even exist rendered this sentence and
-  // nothing else, and approving it just produces a second failure. Name the
-  // connection blocker instead of promising approval will list the tools.
-  if (!server.value?.connected) {
-    return "This server's tools are withheld while it is quarantined, and it is not connected right now — so approving it will not list tools on its own. Check the connection error under Configuration, then review the findings on the Security tab."
+  // Integrated-review finding: a quarantined server whose command does not even
+  // exist rendered "approve the server to list them" and nothing else, because
+  // every fault alert on this page is suppressed while quarantined (#1076).
+  // Approving it just produces a second failure, so the observed fault has to
+  // be named.
+  //
+  // Keyed on `last_error`, NOT on `connected`. Round-2 review caught that:
+  // `connected: false` is the DESIGNED state of a quarantined server, not
+  // evidence of a fault. The supervisor disconnects any quarantined server
+  // without an active inspection exemption and refuses to dial it
+  // (internal/runtime/supervisor/supervisor.go — ActionDisconnect on
+  // `Quarantined && !IsInspectionExempted`, and ActionConnect gated on the
+  // same), so keying on `!connected` fired this sentence on EVERY quarantined
+  // server and sent healthy ones hunting for a connection error that does not
+  // exist — while approval genuinely was their whole remedy.
+  //
+  // Hedged to "may not be enough" for the same reason the condition moved: a
+  // stale error from an earlier dial is not proof that approval will fail.
+  // Configuration is the right pointer because it renders `last_error` verbatim
+  // and unconditionally, which is exactly where the suppressed fault is legible.
+  if (server.value?.last_error) {
+    return "This server's tools are withheld while it is quarantined, and it last reported a connection error — so approving it may not be enough on its own. Check the error under Configuration, then review the findings on the Security tab."
   }
   return "This server's tools are withheld while the server is quarantined. Review the findings on the Security tab, then approve the server to list them."
 })

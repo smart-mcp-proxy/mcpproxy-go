@@ -251,10 +251,15 @@
                and a next step. -->
           <div v-if="searchQuery" data-test="tools-empty-search">
             <p class="text-lg">No tools match "{{ searchQuery }}"</p>
-            <!-- With another filter already down to nothing, no wording of the
-                 query can help; saying "try fewer words" points at the wrong
-                 control. Name the real cause instead. -->
-            <p v-if="searchScope.length === 0" class="text-sm mt-1">
+            <!-- Zero scope has TWO causes and they need opposite advice.
+                 "Clear your filters" is itself a false claim when there was
+                 nothing to filter: with every server quarantined or none
+                 connected, GET /api/v1/tools returns an empty catalogue and no
+                 filter is responsible for it. Split on allTools. -->
+            <p v-if="allTools.length === 0" class="text-sm mt-1">
+              There are no tools to search — no connected server is currently exposing any.
+            </p>
+            <p v-else-if="searchScope.length === 0" class="text-sm mt-1">
               Nothing was in scope to search — the other active filters excluded every
               tool before the query ran. Clear them to search the full list.
             </p>
