@@ -412,16 +412,40 @@
         <!-- Tab: Verify -->
         <!-- ============================ -->
         <section v-else-if="activeTab === 'verify'" data-test="panel-verify">
+          <!-- Two milestones, deliberately separate (UX audit F13). The MCP
+               `initialize` handshake behind firstMCPClientEver proves the
+               wiring only; the value the product exists for is an upstream
+               tool actually running, which is first_real_tool_call_ever. -->
           <template v-if="onboarding.firstMCPClientEver">
-            <div class="flex flex-col items-center gap-2 py-6 text-center">
+            <div class="flex flex-col items-center gap-2 pt-6 pb-4 text-center" data-test="verify-client-connected" data-state="satisfied">
               <div class="text-4xl">✅</div>
-              <div class="font-semibold text-lg">Round-trip verified</div>
+              <div class="font-semibold text-lg">AI client connected</div>
               <div class="text-sm opacity-70 max-w-md">
-                We've seen at least one MCP request from your AI client(s). mcpproxy is wired up correctly.
+                Your AI client completed an MCP handshake with mcpproxy, so the wiring is right.<span v-if="!firstRealToolCallEver"> It does not yet mean a tool has run.</span>
               </div>
               <div v-if="onboarding.mcpClientsSeenEver.length > 0" class="text-xs opacity-60 mt-2">
                 Recognized: <span class="font-medium">{{ onboarding.mcpClientsSeenEver.join(', ') }}</span>
               </div>
+            </div>
+            <!-- Pending is a neutral next step, never an error: nothing here
+                 gates the wizard, and an install that only proxies is fine. -->
+            <div
+              class="flex items-start justify-center gap-2 pb-4 text-sm text-center max-w-md mx-auto"
+              data-test="verify-first-upstream-call"
+              :data-state="firstRealToolCallEver ? 'satisfied' : 'pending'"
+            >
+              <template v-if="firstRealToolCallEver">
+                <span>✅</span>
+                <span>
+                  <span class="font-semibold">First upstream tool call</span> — a tool on one of your MCP servers ran through mcpproxy and returned a result.
+                </span>
+              </template>
+              <template v-else>
+                <span class="opacity-50">📡</span>
+                <span class="opacity-70">
+                  <span class="font-semibold">No upstream tool call yet</span> — the prompts below search and inspect mcpproxy itself. Ask your agent to actually call a tool on one of your servers.
+                </span>
+              </template>
             </div>
           </template>
           <template v-else>
@@ -438,12 +462,16 @@
             </div>
           </template>
 
-          <!-- Quick prompt suggestions: each one exercises a different built-
-               in mcpproxy tool so the user can see the proxy's value surface
-               immediately. -->
+          <!-- Quick prompt suggestions. The first dispatches to an upstream
+               server (the milestone above); the rest exercise a different
+               built-in mcpproxy tool each. -->
           <div class="mt-4 border-t border-base-300 pt-4">
             <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Try one of these prompts</div>
             <ul class="space-y-1.5" data-test="verify-sample-prompts">
+              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
+                "Find a filesystem tool with mcpproxy, then call it to list my home directory."
+                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools + call_tool_read</span>
+              </li>
               <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
                 "Search for MCP filesystem tools."
                 <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools</span>
@@ -681,6 +709,13 @@ const loadingImportSources = ref(false)
 const recentActivity = ref<ActivityRecord[]>([])
 const loadingActivity = ref(false)
 
+// Verify tab — second milestone (UX audit F13). Lifetime flag from the
+// Spec 044 activation bucket, read off `GET /api/v1/status`, which already
+// serves the whole block to an admin caller. The activity log cannot answer
+// this: it is pruned at 7 days / 10 000 records, so a state derived from it
+// would silently regress.
+const firstRealToolCallEver = ref(false)
+
 // Selection: keyed by `${path}::${serverName}`. Default unchecked.
 const selection = ref<Set<string>>(new Set())
 const bulkImportBusy = ref<'' | 'quarantine' | 'active'>('')
@@ -862,6 +897,7 @@ async function onOpened() {
     fetchDockerStatus(),
     fetchImportSources(),
     fetchRecentActivity(),
+    fetchActivation(),
   ])
   // Superseded (or closed) while we were loading — leave the wizard alone.
   if (seq !== openSeq || !props.show) return
@@ -928,6 +964,7 @@ function startPolling() {
     void onboarding.fetchState()
     if (activeTab.value === 'verify') {
       void fetchRecentActivity()
+      void fetchActivation()
     }
   }, 5000)
 }
@@ -974,6 +1011,20 @@ async function fetchRecentActivity() {
     // graceful — keep prior list
   } finally {
     loadingActivity.value = false
+  }
+}
+
+// Never surfaces an error: a missing `activation` block (early startup, or a
+// core that does not send one) reads as "not yet", which is the honest and
+// harmless direction for a row that gates nothing.
+async function fetchActivation() {
+  try {
+    const res = await api.getStatus()
+    if (res.success) {
+      firstRealToolCallEver.value = res.data?.activation?.first_real_tool_call_ever === true
+    }
+  } catch {
+    // graceful — keep prior value
   }
 }
 
