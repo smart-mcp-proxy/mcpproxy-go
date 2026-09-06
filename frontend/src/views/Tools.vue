@@ -245,12 +245,31 @@
           <svg class="w-16 h-16 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
           </svg>
-          <p class="text-lg">
-            {{ hasActiveFilters ? 'No matching tools' : 'No tools available' }}
-          </p>
-          <p class="text-sm mt-1">
-            {{ hasActiveFilters ? 'Try adjusting your filters or search query' : 'Connect MCP servers to see their tools here.' }}
-          </p>
+          <!-- Audit F11: a bare "No matching tools" cannot be told apart from a
+               typo, an empty catalogue, or a server still waiting in quarantine.
+               When a search ran, name the query, the scope it actually covered,
+               and a next step. -->
+          <div v-if="searchQuery" data-test="tools-empty-search">
+            <p class="text-lg">No tools match "{{ searchQuery }}"</p>
+            <p class="text-sm mt-1">
+              Searched {{ searchScope.length }} tool{{ searchScope.length === 1 ? '' : 's' }}
+              across {{ searchScopeServerCount }} server{{ searchScopeServerCount === 1 ? '' : 's' }}<template v-if="!filterStatus">, disabled tools included</template>.
+              Every word has to match — try fewer words.
+            </p>
+            <p v-if="quarantinedServerCount > 0" class="text-sm mt-1">
+              {{ quarantinedServerCount }} quarantined server{{ quarantinedServerCount === 1 ? '' : 's' }}
+              {{ quarantinedServerCount === 1 ? 'is' : 'are' }} not listed here —
+              <router-link to="/servers" class="link">review in Servers</router-link>.
+            </p>
+          </div>
+          <template v-else>
+            <p class="text-lg">
+              {{ hasActiveFilters ? 'No matching tools' : 'No tools available' }}
+            </p>
+            <p class="text-sm mt-1">
+              {{ hasActiveFilters ? 'Try adjusting your filters' : 'Connect MCP servers to see their tools here.' }}
+            </p>
+          </template>
           <div class="mt-4 space-x-2">
             <button v-if="hasActiveFilters" @click="clearFilters" class="btn btn-outline btn-sm">Clear Filters</button>
             <router-link v-else to="/servers" class="btn btn-primary btn-sm">Manage Servers</router-link>
@@ -520,8 +539,15 @@ import type { GlobalTool, GlobalToolsStats } from '@/types/api'
 import { parseHoldEvidence, displaySignals, reasonPresentation, verdictPresentation } from '@/utils/holdEvidence'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
+import { useServersStore } from '@/stores/servers'
 
 const systemStore = useSystemStore()
+const serversStore = useServersStore()
+
+// Quarantined servers contribute no tools to GET /api/v1/tools (#1064), so they
+// are silently outside every search on this page. App.vue already fetches the
+// server list app-wide; this only reads the count so the empty state can say so.
+const quarantinedServerCount = computed(() => serversStore.serverCount.quarantined)
 // Undefined when the view is mounted without a router — several unit suites do
 // exactly that, and a query prefill is not worth making them install one.
 const route = useRoute() as ReturnType<typeof useRoute> | undefined
@@ -857,17 +883,12 @@ function holdEvidenceFor(tool: GlobalTool): CompactHoldEvidence | undefined {
 }
 
 // ---- Computed: filtering ----
-const filteredTools = computed(() => {
+// The population the search runs against: every filter EXCEPT the search box.
+// Split out so the empty state can name a scope that is literally true even when
+// a stat card or dropdown is also narrowing the list. All the filters are ANDed,
+// so pulling the search to the end leaves the result identical.
+const searchScope = computed(() => {
   let tools = allTools.value
-
-  if (searchQuery.value) {
-    const q = searchQuery.value.toLowerCase()
-    tools = tools.filter(t =>
-      t.name.toLowerCase().includes(q) ||
-      (t.description || '').toLowerCase().includes(q) ||
-      t.server_name.toLowerCase().includes(q)
-    )
-  }
 
   if (filterServer.value) {
     tools = tools.filter(t => t.server_name === filterServer.value)
@@ -895,6 +916,33 @@ const filteredTools = computed(() => {
 
   return tools
 })
+
+const filteredTools = computed(() => {
+  // Audit F11: the whole query used to have to appear as one contiguous
+  // substring of a single field, so "react documentation" matched nothing while
+  // "documentation" matched Context7. Match each whitespace-separated term
+  // independently instead (AND across terms, OR across fields). This is a strict
+  // superset of the old behaviour -- if the whole query was a substring of a
+  // field, so is every one of its terms -- so no result that matched before can
+  // disappear. Still a substring filter, not BM25: this page is an inventory,
+  // and the ranked index search is a separate surface.
+  if (!searchQuery.value) return searchScope.value
+
+  const terms = searchQuery.value.toLowerCase().split(/\s+/).filter(Boolean)
+  return searchScope.value.filter(t => {
+    const name = t.name.toLowerCase()
+    const description = (t.description || '').toLowerCase()
+    const server = t.server_name.toLowerCase()
+    return terms.every(term =>
+      name.includes(term) || description.includes(term) || server.includes(term)
+    )
+  })
+})
+
+// Scope actually covered by the search, for the empty state.
+const searchScopeServerCount = computed(
+  () => new Set(searchScope.value.map(t => t.server_name)).size
+)
 
 // ---- Computed: sorting ----
 const sortedTools = computed(() => {
