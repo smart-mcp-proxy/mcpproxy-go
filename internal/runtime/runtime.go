@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -3408,7 +3409,30 @@ func (r *Runtime) GetConnectedServerCount() int {
 }
 
 // GetToolCount returns the total number of indexed tools (implements telemetry.RuntimeStats).
+//
+// This reads the Bleve index document count — one document per tool, durable
+// across restarts — rather than the upstream manager's per-client tool-count
+// cache. Reading that cache made the telemetry heartbeat report tool_count=0 for
+// installs that held a fully populated index: every indexing pass calls
+// InvalidateAllToolCountCaches() as its LAST step (see lifecycle.go), and the
+// only paths that refill the cache without re-zeroing it are UI/API-triggered
+// ListTools calls. The field metric was therefore biased toward installs whose
+// owner had opened the dashboard, which is not what "indexed tools" means.
+//
+// Per-profile indexes are not double-counted: RebuildProfileFromShared derives
+// each of them from this shared index, so the shared count is the superset.
+//
+// The cache remains the fallback for the case where no index manager is wired
+// (unit tests and early startup).
 func (r *Runtime) GetToolCount() int {
+	if r.indexManager != nil {
+		if count, err := r.indexManager.GetDocumentCount(); err == nil {
+			if count > uint64(math.MaxInt32) {
+				return math.MaxInt32
+			}
+			return int(count)
+		}
+	}
 	if r.upstreamManager == nil {
 		return 0
 	}
