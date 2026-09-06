@@ -8,7 +8,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // Spec 044's self-heal buttons are backed by fixers registered in
@@ -164,38 +163,50 @@ func (s *Server) fixShowLastServerLogs(_ context.Context, req diagnostics.FixReq
 
 // fixOAuthReauth implements the "Sign in" / "Log in again" button.
 //
-// It goes through the management service's TriggerOAuthLoginQuick — byte for
-// byte the call POST /api/v1/servers/{id}/login makes
-// (internal/httpapi/server.go handleServerLogin) — and NOT Runtime's method
-// directly. That distinction is the whole point of this indirection:
+// It calls Runtime.TriggerOAuthLogin (async, hands off to
+// Manager.StartManualOAuth, returns as soon as the flow's goroutine is
+// launched) behind an explicit read_only_mode / disable_management check.
 //
-//   - The management service applies checkWriteGates first
-//     (internal/management/service.go), which refuses when read_only_mode or
-//     disable_management is set. Calling the Runtime directly skipped both, so
-//     a one-click button could start an OAuth flow on an install whose owner
-//     had turned management off — the diagnostics route's own middleware only
-//     checks caller authorization, not those config gates.
-//   - It returns an OAuthStartResult carrying BrowserOpened / BrowserError, so
-//     the success message can say what actually happened instead of asserting
-//     that a browser window opened. The old wording claimed the window had
-//     opened even when the launch failed, which is the same "a success that
-//     means nothing" defect this whole file exists to remove.
+// Both halves of that are deliberate, and each was wrong on its own:
 //
-// Duplicate clicks behave exactly as the REST login button does — no better,
-// no worse — because it is now the same call. An earlier version of this
-// comment claimed a stronger guarantee (that a second click "surfaces as an
-// error string rather than a second browser tab") than the code provides:
-// Manager.StartManualOAuth builds a fresh core client per invocation, so the
-// isOAuthInProgress check is per-client. Whatever that path's real duplicate
-// behaviour is, it is a pre-existing property of the login route and is not
-// changed here.
+//   - WITHOUT the gate check, a one-click button started an OAuth flow on an
+//     install whose owner had turned management off. POST
+//     /api/v1/servers/{id}/login cannot: it goes through the management
+//     service, whose checkWriteGates refuses both settings
+//     (internal/management/service.go). The diagnostics route's middleware
+//     checks caller authorization, not those config gates, so nothing else
+//     was applying them here. The predicate is duplicated rather than called
+//     because checkWriteGates is unexported and the only exported entry point
+//     behind it is TriggerOAuthLoginQuick — which is the other half:
+//   - Routing through TriggerOAuthLoginQuick to inherit the gate looked
+//     tidier and is WRONG for this caller. StartManualOAuthQuick runs startup
+//     synchronously under its own 30-minute background context, so the fix
+//     endpoint's 15s deadline stops bounding the call; its watcher cancels
+//     the callback context after ~120s, so a slow 2FA loses the flow it was
+//     told had started; HasRecentOAuthCompletion can make that watcher exit
+//     on its FIRST poll when the same server signed in within five minutes;
+//     and it drops the SSE dispatch that ForceOAuthFlowWithResult performs,
+//     so an OAuth-protected legacy SSE endpoint fails to initialize instead
+//     of opening its flow. The REST login route accepts all of that; a
+//     one-click fixer with a 15s budget must not.
+//
+// The message therefore does not claim a browser window opened — nothing on
+// this path reports whether one did, and the placeholder this file replaced is
+// exactly what asserting an unverified success looks like.
+//
+// Duplicate clicks: Manager.StartManualOAuth builds a fresh core client per
+// invocation, so the isOAuthInProgress check is per-client. An earlier version
+// of this comment claimed a second click "surfaces as an error string rather
+// than a second browser tab"; that guarantee is stronger than the code
+// provides. Whatever the real behaviour is, it is a pre-existing property of
+// StartManualOAuth and is not changed here.
 //
 // Gating is unchanged: every catalog entry that offers this fixer marks the
 // step Destructive (except MCPX_OAUTH_LOGIN_REQUIRED's first-time "Sign in",
 // where there is no stored credential to lose), so handleInvokeFix still
 // demands an explicit mode (409 otherwise) and the Web UI's ErrorPanel still
 // gates Execute behind window.confirm().
-func (s *Server) fixOAuthReauth(ctx context.Context, req diagnostics.FixRequest) (diagnostics.FixResult, error) {
+func (s *Server) fixOAuthReauth(_ context.Context, req diagnostics.FixRequest) (diagnostics.FixResult, error) {
 	if req.ServerID == "" {
 		return diagnostics.FixResult{
 			Outcome:    diagnostics.OutcomeFailed,
@@ -212,49 +223,41 @@ func (s *Server) fixOAuthReauth(ctx context.Context, req diagnostics.FixRequest)
 		}, nil
 	}
 
-	// Fail closed if the gated path is unavailable rather than falling back to
-	// the ungated Runtime call: "the write gates could not be applied" is not a
-	// reason to skip them.
-	mgmtSvc, ok := s.GetManagementService().(interface {
-		TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error)
-	})
-	if !ok {
+	// Fail closed: if the config cannot be read, the gates cannot be applied,
+	// and "I could not check" is not a reason to proceed.
+	cfg, err := s.GetConfig()
+	if err != nil || cfg == nil {
 		return diagnostics.FixResult{
 			Outcome:    diagnostics.OutcomeFailed,
-			FailureMsg: "the management service is not available, so sign-in cannot be started from here",
+			FailureMsg: "could not read the configuration, so sign-in cannot be started from here",
+		}, nil
+	}
+	// Same two gates, same wording as management.checkWriteGates, so an
+	// operator sees one answer whichever surface they used.
+	if cfg.DisableManagement {
+		return diagnostics.FixResult{
+			Outcome:    diagnostics.OutcomeFailed,
+			FailureMsg: "management operations are disabled (disable_management=true)",
+		}, nil
+	}
+	if cfg.ReadOnlyMode {
+		return diagnostics.FixResult{
+			Outcome:    diagnostics.OutcomeFailed,
+			FailureMsg: "management operations are disabled (read_only_mode=true)",
 		}, nil
 	}
 
-	result, err := mgmtSvc.TriggerOAuthLoginQuick(ctx, req.ServerID)
-	if err != nil {
+	if err := s.runtime.TriggerOAuthLogin(req.ServerID); err != nil {
 		return diagnostics.FixResult{
 			Outcome:    diagnostics.OutcomeFailed,
 			FailureMsg: scrubUpstreamText(err.Error()),
 		}, nil
 	}
 
-	// Say what happened, not what usually happens. A failed browser launch is
-	// still a started flow — the URL is valid and the user can finish it — so
-	// this is a success with an instruction, not a failure.
-	msg := fmt.Sprintf(
-		"Sign-in started for server %q. Complete it in the browser window that just opened; the server reconnects on its own once you do.",
-		req.ServerID)
-	if result != nil && !result.BrowserOpened {
-		msg = fmt.Sprintf(
-			"Sign-in started for server %q, but the browser could not be opened%s. Open this URL yourself to finish:\n%s",
-			req.ServerID, browserErrSuffix(result.BrowserError), result.AuthURL)
-	}
-
 	return diagnostics.FixResult{
 		Outcome: diagnostics.OutcomeSuccess,
-		Preview: msg,
+		Preview: fmt.Sprintf(
+			"Sign-in started for server %q. Finish it in the browser window mcpproxy opens; the server reconnects on its own once you do. If no window appears, the authorization URL is in that server's log — use \"Show last server log lines\".",
+			req.ServerID),
 	}, nil
-}
-
-// browserErrSuffix renders the launcher's own error, scrubbed, when it gave one.
-func browserErrSuffix(browserErr string) string {
-	if strings.TrimSpace(browserErr) == "" {
-		return ""
-	}
-	return " (" + scrubUpstreamText(browserErr) + ")"
 }
