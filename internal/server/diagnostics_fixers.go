@@ -41,6 +41,17 @@ import (
 // (GET /api/v1/servers/{id}/logs) and of the tail_log MCP tool.
 const diagnosticsLogTailLines = 50
 
+// diagnosticsPreviewMaxBytes bounds the rendered log tail.
+//
+// diagnosticsLogTailLines bounds the line COUNT, not the byte size, and a child
+// MCP server is free to print a 60KB JSON blob on a single line (bufio.Scanner's
+// default 64KB token limit is the only ceiling GetServerLogs imposes). This
+// Preview is delivered as a Web-UI notification, not into a log viewer, so 50
+// such lines would be a multi-megabyte toast. The cap keeps the NEWEST lines —
+// a tail is read bottom-up — and the fixer states plainly what it dropped, so
+// nothing goes missing silently.
+const diagnosticsPreviewMaxBytes = 8 * 1024
+
 // registerDiagnosticFixers installs the runtime-backed fixer implementations
 // over the package-level placeholders. Called from NewServerWithConfigPath,
 // where both dependencies (this *Server for logs, the Runtime for OAuth) are
@@ -99,14 +110,31 @@ func (s *Server) fixShowLastServerLogs(_ context.Context, req diagnostics.FixReq
 	// exists to show — so echoing those fields back would fabricate data. For
 	// an unparsed line Message is the whole original line, so nothing is lost.
 	//
-	// Not truncated, deliberately: scrubUpstreamText drops the activity-store
-	// cap for live reads for this exact reason — a long line is often precisely
-	// what an operator opened the log for. The 50-line tail is the bound.
+	// Individual lines are never truncated: scrubUpstreamText drops the
+	// activity-store cap for live reads for this exact reason — a long line is
+	// often precisely what an operator opened the log for. What IS bounded is
+	// the total payload (diagnosticsPreviewMaxBytes), by dropping the OLDEST
+	// lines, because the newest line is the one that explains the failure. The
+	// newest line always survives whole, however long it is.
+	start := 0
+	size := 0
+	for i := len(entries) - 1; i >= 0; i-- {
+		size += len(entries[i].Message) + 1
+		if size > diagnosticsPreviewMaxBytes && i != len(entries)-1 {
+			start = i + 1
+			break
+		}
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "Last %d log line(s) for %q:\n", len(entries), req.ServerID)
-	for i := range entries {
+	fmt.Fprintf(&b, "Last %d log line(s) for %q:\n", len(entries)-start, req.ServerID)
+	for i := start; i < len(entries); i++ {
 		b.WriteString(entries[i].Message)
 		b.WriteByte('\n')
+	}
+	if start > 0 {
+		fmt.Fprintf(&b, "\n(%d older line(s) omitted to keep this readable — run `mcpproxy upstream logs %s` for the full log.)\n",
+			start, req.ServerID)
 	}
 
 	return diagnostics.FixResult{

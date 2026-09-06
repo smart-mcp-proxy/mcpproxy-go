@@ -57,7 +57,19 @@
         <!-- Content -->
         <div class="flex-1">
           <div class="font-bold">{{ toast.title }}</div>
-          <div v-if="toast.message" class="text-sm opacity-90">{{ toast.message }}</div>
+          <!--
+            whitespace-pre-wrap: some toasts carry multi-line payloads — the
+            diagnostics "Show last server log lines" fix returns a 50-line tail.
+            Default HTML whitespace handling collapsed every newline, so the tail
+            arrived as one run-on paragraph. break-words stops an unbroken token
+            (a URL, a base64 blob) from overflowing the toast horizontally, and
+            the bounded height keeps a long payload scrollable instead of letting
+            it run off the viewport.
+          -->
+          <div
+            v-if="toast.message"
+            class="text-sm opacity-90 whitespace-pre-wrap break-words max-w-md max-h-60 overflow-y-auto"
+          >{{ toast.message }}</div>
         </div>
 
         <!-- Close button -->

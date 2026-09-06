@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -84,10 +86,67 @@ func TestDiagnosticFixer_StdioShowLastLogs_ReturnsRealTail(t *testing.T) {
 
 	// The preview crosses the REST API, so it must carry the same masking
 	// GET /api/v1/servers/{id}/logs applies (issue #1148).
+	//
+	// The absence assertions alone would pass VACUOUSLY for an implementation
+	// that simply never rendered the two secret-bearing lines (cross-model
+	// review, round 1). Pin the non-secret remainder of BOTH of them first, so
+	// "the secret is gone" can only mean the scrubber removed it.
+	assert.Contains(t, res.Preview, "connect failed",
+		"the mcpproxy-written line carrying the URL credential never reached the preview — "+
+			"the redaction assertion below would pass for the wrong reason")
+	assert.Contains(t, res.Preview, "child said:",
+		"the child line carrying the vendor credential never reached the preview — "+
+			"the redaction assertion below would pass for the wrong reason")
+
 	assert.NotContains(t, res.Preview, leakySecrets["url"],
 		"the preview leaks the URL credential mcpproxy itself logged")
 	assert.NotContains(t, res.Preview, "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
 		"the preview leaks a vendor credential the child printed")
+}
+
+// TestDiagnosticFixer_StdioShowLastLogs_BoundsThePayload covers the byte cap.
+//
+// diagnosticsLogTailLines bounds the line COUNT only. A child MCP server that
+// prints a large blob per line would otherwise produce a multi-megabyte Preview,
+// and this Preview is rendered as a Web-UI notification. The cap must drop the
+// OLDEST lines — the newest line is the one that explains the failure — and must
+// say what it dropped rather than silently swallowing it.
+func TestDiagnosticFixer_StdioShowLastLogs_BoundsThePayload(t *testing.T) {
+	const serverName = "chatty-stdio"
+	logDir := t.TempDir()
+
+	// 40 lines of 1KB each = ~40KB, comfortably over diagnosticsPreviewMaxBytes,
+	// while every individual line stays under bufio.Scanner's 64KB token limit.
+	const newest = "FINAL: the line that explains the failure"
+	var content strings.Builder
+	for i := 0; i < 40; i++ {
+		content.WriteString(fmt.Sprintf("line-%02d ", i))
+		content.WriteString(strings.Repeat("x", 1024))
+		content.WriteByte('\n')
+	}
+	content.WriteString(newest + "\n")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(logDir, logs.ServerLogFilename(serverName)),
+		[]byte(content.String()), 0o600))
+
+	srv := newFixerTestServer(t, serverName, logDir)
+	require.NotNil(t, srv)
+
+	res, err := diagnostics.InvokeFixer(context.Background(), "stdio_show_last_logs", diagnostics.FixRequest{
+		ServerID: serverName,
+		Mode:     diagnostics.ModeExecute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, diagnostics.OutcomeSuccess, res.Outcome, res.FailureMsg)
+
+	assert.Contains(t, res.Preview, newest,
+		"the cap dropped the NEWEST line — a tail is read bottom-up")
+	assert.NotContains(t, res.Preview, "line-00 ",
+		"the oldest line survived, so the payload was not bounded at all")
+	assert.Contains(t, res.Preview, "older line(s) omitted",
+		"lines were dropped without telling the operator anything was missing")
+	assert.Less(t, len(res.Preview), 3*diagnosticsPreviewMaxBytes,
+		"the bounded preview is still far larger than the cap")
 }
 
 // TestDiagnosticFixer_StdioShowLastLogs_MissingLogIsAFailure asserts the honest

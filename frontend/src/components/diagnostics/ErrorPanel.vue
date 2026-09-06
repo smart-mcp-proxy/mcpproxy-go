@@ -236,13 +236,19 @@ async function runFixer(step: DiagnosticFixStep, mode: 'dry_run' | 'execute') {
     if (response.success && response.data) {
       const outcome = response.data.outcome
       const titleMode = mode === 'dry_run' ? 'Dry-run' : 'Executed'
+      const message =
+        response.data.preview ||
+        response.data.failure_msg ||
+        `Outcome: ${outcome} (${response.data.duration_ms}ms)`
+      // A fixer whose whole product is text to READ — stdio_show_last_logs
+      // returns a 50-line log tail — cannot be delivered in the default 5s
+      // toast. Give a multi-line payload long enough to actually read.
+      const multiLine = message.includes('\n')
       systemStore.addToast({
         type: outcome === 'success' ? 'success' : outcome === 'failed' ? 'error' : 'warning',
         title: `${titleMode}: ${step.label}`,
-        message:
-          response.data.preview ||
-          response.data.failure_msg ||
-          `Outcome: ${outcome} (${response.data.duration_ms}ms)`,
+        message,
+        ...(multiLine ? { duration: 60000 } : {}),
       })
       emit('fixed', { fixerKey: key, mode })
     } else {
