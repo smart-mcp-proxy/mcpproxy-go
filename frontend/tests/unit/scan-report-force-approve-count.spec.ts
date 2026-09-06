@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
+import { useSystemStore } from '@/stores/system'
 
 // UX audit F09. The Force Approve confirmation counted a DIFFERENT number from
 // the one the gate is built on.
@@ -65,7 +66,10 @@ vi.mock('@/services/api', () => {
         ok({ servers: [{ name: SERVER, health: { admin_state: 'quarantined' } }] })
       ),
       getScanFiles: vi.fn(() => ok({ files: [], total_files: 0, has_more: false })),
-      securityApproveServer: vi.fn(() => ok({})),
+      // NOTE: the api service method is `securityApprove` (the STORE action is
+      // `securityApproveServer`); mocking the store's name leaves the real call
+      // undefined and the toast never fires.
+      securityApprove: vi.fn(() => ok({})),
     },
   }
 })
@@ -116,5 +120,23 @@ describe('ScanReport — Force Approve names the number the gate blocks on', () 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]).toContain('2 dangerous finding(s)')
     expect(prompts[0]).not.toContain('0 critical')
+  })
+
+  // Review round 1: the confirm was corrected to the gate's noun but the
+  // success toast three lines below it still read "despite critical findings"
+  // — the same severity bucket the gate does not consult, and the same word
+  // this change removed everywhere else. Two sentences about one action have
+  // to agree.
+  it('the success toast uses the same noun as the confirmation', async () => {
+    const wrapper = await mountReport()
+    window.confirm = vi.fn(() => true) as unknown as typeof window.confirm
+
+    await wrapper.get('[data-test="scan-report-force-approve"]').trigger('click')
+    await flushPromises()
+
+    const toast = useSystemStore().toasts.find(t => t.title === 'Server Force-Approved')
+    expect(toast).toBeTruthy()
+    expect(toast!.message).not.toContain('critical')
+    expect(toast!.message).toContain('dangerous')
   })
 })

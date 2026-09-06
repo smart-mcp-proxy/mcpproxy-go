@@ -678,6 +678,12 @@ let previewTimer: ReturnType<typeof setTimeout> | null = null
 
 // Computed
 
+// Protocol values the backend accepts are `stdio | http | sse |
+// streamable-http | auto` (config.go validProtocols) and the REST payload
+// echoes the configured string verbatim, so it may also be absent. Only the
+// http FAMILY is enumerated; everything else stays eligible for a stdio match.
+const HTTP_FAMILY_PROTOCOLS = new Set<string>(['http', 'sse', 'streamable-http'])
+
 // UX audit F09. The endpoint the manual form currently describes, already
 // belongs to a configured server — or null. Advisory only: nothing here gates
 // submit, merges, or reuses an existing entry.
@@ -696,6 +702,12 @@ let previewTimer: ReturnType<typeof setTimeout> | null = null
 // It can MISS: the server list masks credential-shaped url/command/args values
 // (internal/oauth/serverfields.go), so a secret-bearing endpoint never matches.
 // A hint, not a guarantee — which is why the copy claims nothing more.
+//
+// The endpoint is the WHOLE launch identity, not just the head of it: url for
+// http, and command + the full args list + working_dir for stdio. Review
+// round 1 caught both halves of that being too loose — a stdio entry with a
+// stale `url` matched an http form and named the wrong server, and two
+// same-command entries in different directories read as duplicates.
 const duplicateEndpointServer = computed(() => {
   // `servers` starts empty, so without `loaded` an unfetched list is
   // indistinguishable from "no duplicates" and the note would be silently
@@ -705,15 +717,33 @@ const duplicateEndpointServer = computed(() => {
   if (formData.type === 'http') {
     const url = formData.url.trim()
     if (!url) return null
-    return serversStore.servers.find(s => (s.url ?? '').trim() === url) ?? null
+    // The transport guard is NEGATIVE on purpose: it excludes the opposite
+    // family only, so `sse`, `streamable-http`, `auto` and an absent protocol
+    // all stay eligible. A positive `protocol === formData.type` filter would
+    // MISS the case this whole note exists for — the existing entry is
+    // commonly recorded as `streamable-http` while this modal always sends
+    // `http` (handleSubmit: `protocol: formData.type`).
+    return (
+      serversStore.servers.find(
+        s => s.protocol !== 'stdio' && (s.url ?? '').trim() === url,
+      ) ?? null
+    )
   }
 
   const command = (formData.command === 'custom' ? formData.customCommand : formData.command).trim()
   if (!command) return null
   const args = parseArgs()
+  // working_dir is part of the endpoint this form describes — handleSubmit
+  // sends it on every stdio add — so `node server.js` in two different
+  // directories is two different programs with two different toolsets, not a
+  // duplicate. Comparing trimmed strings makes an absent value equal to a
+  // blank field, which is the same endpoint.
+  const workingDir = formData.workingDir.trim()
   return (
     serversStore.servers.find(s => {
+      if (HTTP_FAMILY_PROTOCOLS.has(s.protocol)) return false
       if ((s.command ?? '').trim() !== command) return false
+      if ((s.working_dir ?? '').trim() !== workingDir) return false
       const existing = s.args ?? []
       return existing.length === args.length && existing.every((a, i) => a === args[i])
     }) ?? null

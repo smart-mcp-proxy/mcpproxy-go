@@ -187,6 +187,50 @@ describe('AddServerModal — duplicate endpoint observation (F09)', () => {
     expect(wrapper.find(NOTE).exists()).toBe(false)
   })
 
+  // The modal itself SENDS working_dir on every stdio add (handleSubmit builds
+  // `serverData.working_dir`), so it is part of the endpoint this form
+  // describes. `node server.js` in /projects/a and the same line in
+  // /projects/b are two different programs exposing two different toolsets —
+  // naming one as "already configured at this endpoint" is the false
+  // accusation the exact-match rule exists to avoid, and the copy's claim that
+  // "the security scan will flag each as a possible clone" would be wrong too.
+  it('treats a different working directory as a different endpoint', async () => {
+    seedServers([{ ...STDIO_SERVER, working_dir: '/projects/a' }])
+    const wrapper = mountModal()
+
+    await wrapper.find('select').setValue('npx')
+    await wrapper
+      .find('textarea')
+      .setValue('@modelcontextprotocol/server-filesystem\n/tmp')
+    await wrapper.find('input[placeholder="/path/to/project"]').setValue('/projects/b')
+    expect(wrapper.find(NOTE).exists()).toBe(false)
+
+    await wrapper.find('input[placeholder="/path/to/project"]').setValue('/projects/a')
+    expect(wrapper.get(NOTE).text()).toContain('files')
+  })
+
+  // A hand-edited config can leave the other transport's fields populated on a
+  // server (converting an entry from http to stdio and not deleting `url`, or
+  // the reverse). Matching a populated-but-inactive field would name a server
+  // that is not at the typed endpoint at all. The guard is deliberately
+  // NEGATIVE — it excludes the opposite family only — so `streamable-http`,
+  // `sse`, `auto` and an absent protocol all stay eligible for a URL match,
+  // which is exactly the shape the real repro has (an existing entry recorded
+  // as `streamable-http` while this modal always sends `http`).
+  it('ignores a field left over from the other transport', async () => {
+    seedServers([
+      { ...STDIO_SERVER, url: 'https://mcp.context7.com/mcp' },
+      { ...HTTP_SERVER, name: 'ctx-streamable', protocol: 'streamable-http' },
+    ])
+    const wrapper = mountModal()
+    await selectHttp(wrapper)
+    await wrapper.find('input[type="url"]').setValue('https://mcp.context7.com/mcp')
+
+    // The stdio server's stale `url` must not match; the streamable-http one must.
+    expect(wrapper.get(NOTE).text()).toContain('ctx-streamable')
+    expect(wrapper.get(NOTE).text()).not.toContain('files')
+  })
+
   it('does not match an http server against a stdio form, or vice versa', async () => {
     seedServers([HTTP_SERVER, STDIO_SERVER])
     const wrapper = mountModal()

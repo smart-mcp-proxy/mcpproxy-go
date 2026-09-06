@@ -1029,7 +1029,9 @@ async function forceApproveServer() {
     systemStore.addToast({
       type: 'success',
       title: 'Server Force-Approved',
-      message: `${report.value.server_name} was force-approved despite critical findings`,
+      // Same noun as the confirmation the user just accepted and as the 409
+      // this bypassed — "critical" is a severity bucket the gate never reads.
+      message: `${report.value.server_name} was force-approved despite ${blockingFindingCount.value} dangerous finding(s)`,
     })
     await loadServerStatus()
   } catch (err) {
