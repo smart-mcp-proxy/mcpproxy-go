@@ -3470,9 +3470,18 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 		return nil, fmt.Errorf("invalid server name: %s", serverName)
 	}
 
-	// Check if file exists
+	// UX audit F12: an absent per-server log file means "nothing logged yet",
+	// NOT "the server never ran". The file is created lazily by lumberjack and
+	// is level-gated (internal/logs/logger.go), so a healthy, connected server
+	// that logged nothing at or above the configured level has no file at all —
+	// on any transport. Reporting that as an error made the Logs tab claim the
+	// server may not have run seconds after a verified successful tool call
+	// through it. Return an empty (non-nil, so it marshals as []) result and let
+	// the caller render its normal "no entries" state. Every genuinely broken
+	// case — unknown server, path escape, unreadable file — still errors.
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {
-		return nil, fmt.Errorf("log file not found: %s (server may not have run yet)", logFile)
+		s.logger.Debug("No per-server log file yet", zap.String("server", serverName), zap.String("file", logFile))
+		return []contracts.LogEntry{}, nil
 	}
 
 	// Read last N lines from file
