@@ -117,7 +117,18 @@ import (
 // keys only. ScanForPII re-asserts both shapes on the wire form (rules
 // "v8_field_invalid" for the widened tpa_scanner whitelist and
 // "trust_mode_field_invalid" for the histogram).
-const SchemaVersion = 10
+//
+// v11 (MCP-2967) adds diagnostics.current_error_codes and, more importantly,
+// changes the MEANING of diagnostics.error_code_counts_24h: it is now
+// edge-triggered (one count per new failure or new failed attempt) where v10
+// and earlier re-counted every standing failure on the supervisor's 30s
+// reconcile ticker. v10-and-earlier error-code volumes are therefore NOT
+// comparable with v11 ones and must not be graphed on a single series —
+// v10 counted roughly failing-servers x uptime/30s, not user-visible events.
+// current_error_codes carries the standing-state signal that edge-triggering
+// would otherwise have removed. Anonymity posture unchanged: fixed MCPX_ enum
+// keys, non-negative integer counts.
+const SchemaVersion = 11
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -452,6 +463,13 @@ type Service struct {
 	// onboarding fields are simply omitted from the heartbeat.
 	onboardingProvider func() *OnboardingSnapshot
 
+	// MCP-2967: optional provider for the STANDING diagnostic state —
+	// classified MCPX_* code -> number of configured servers currently in
+	// that state. Wired by the runtime with a closure over the supervisor's
+	// stateview. nil-safe: when unset, diagnostics.current_error_codes is
+	// simply omitted (short-lived CLI commands have no supervisor).
+	currentErrorCodesProvider func() map[string]int
+
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
 	heartbeatInterval time.Duration
@@ -771,6 +789,16 @@ func (s *Service) SetAutostartReader(r *AutostartReader) {
 // between heartbeats. Returning nil omits the onboarding fields entirely.
 func (s *Service) SetOnboardingProvider(fn func() *OnboardingSnapshot) {
 	s.onboardingProvider = fn
+}
+
+// SetCurrentErrorCodesProvider wires a function that returns the standing
+// diagnostic state for the next heartbeat (MCP-2967): stable MCPX_* code ->
+// number of configured servers currently in that state. Typically supplied by
+// supervisor.Supervisor.CurrentErrorCodes. Each call must return fresh data —
+// the whole point of the field is that it reflects RIGHT NOW rather than a
+// decaying window. Returning nil omits diagnostics.current_error_codes.
+func (s *Service) SetCurrentErrorCodesProvider(fn func() map[string]int) {
+	s.currentErrorCodesProvider = fn
 }
 
 // resolveLaunchSource returns the LaunchSource to emit in the current
@@ -1433,14 +1461,26 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	// Spec 044 Phase H: diagnostics counter snapshot. Load from BBolt (decay
 	// applied at read time); omit entirely when counters are all zero or the
 	// store is not wired (short-lived CLI commands).
+	//
+	// MCP-2967: the persisted counters are joined with the STANDING state from
+	// the supervisor before the isZero() check, so an install whose only
+	// signal is "N servers are broken right now" still emits a diagnostics
+	// object. Without that ordering, edge-triggering error_code_counts_24h
+	// would make a permanently parked install vanish from the payload once its
+	// 24h window decayed — absent, which downstream reads as zero.
+	var diagSnap DiagnosticsCounters
 	if s.diagCounterStore != nil && s.diagCounterDB != nil {
 		if snap, err := s.diagCounterStore.Snapshot(s.diagCounterDB); err == nil {
-			if !snap.isZero() {
-				payload.Diagnostics = &snap
-			}
+			diagSnap = snap
 		} else {
 			s.logger.Debug("Failed to load diagnostics counters for heartbeat", zap.Error(err))
 		}
+	}
+	if s.currentErrorCodesProvider != nil {
+		diagSnap.CurrentErrorCodes = sanitizeMCPXCodeMap(s.currentErrorCodesProvider())
+	}
+	if !diagSnap.isZero() {
+		payload.Diagnostics = &diagSnap
 	}
 
 	// Issue #969 (Phase 0): preflight baseline counters. Same flush shape as

@@ -17,8 +17,8 @@ func TestSchemaVersionIsAtLeastV7(t *testing.T) {
 	if SchemaVersion < 7 {
 		t.Fatalf("SchemaVersion = %d, want >= 7 (Spec 080 FR-014)", SchemaVersion)
 	}
-	if SchemaVersion != 10 {
-		t.Fatalf("SchemaVersion = %d, want 10 (v10 serialization-mode axes)", SchemaVersion)
+	if SchemaVersion != 11 {
+		t.Fatalf("SchemaVersion = %d, want 11 (v11 edge-triggered error codes + current_error_codes)", SchemaVersion)
 	}
 }
 
@@ -80,7 +80,7 @@ func TestPayloadV7_FullyPopulatedPassesScanner(t *testing.T) {
 	}
 
 	for _, required := range []string{
-		`"schema_version":10`,
+		`"schema_version":11`,
 		`"wizard_shown":true`,
 		`"wizard_connect_step":"completed_external"`,
 		`"web_ui_opened":3`,
@@ -111,8 +111,8 @@ func TestPayloadV7_ZeroNewFieldsShapeCompatibleWithV6(t *testing.T) {
 	}
 	js := string(data)
 
-	if !strings.Contains(js, `"schema_version":10`) {
-		t.Errorf("expected schema_version:9 even on a zero-valued payload, got:\n%s", js)
+	if !strings.Contains(js, `"schema_version":11`) {
+		t.Errorf("expected schema_version:11 even on a zero-valued payload, got:\n%s", js)
 	}
 	for _, forbidden := range []string{
 		`"wizard_shown"`,

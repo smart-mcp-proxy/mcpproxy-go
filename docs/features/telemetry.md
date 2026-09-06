@@ -10,7 +10,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 9** (`schema_version: 9` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 11** (`schema_version: 11` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -38,6 +38,7 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `active_days_30d` | `5` | Distinct UTC days with process activity in the trailing 30 days (schema v7). Only the count — never the per-day breakdown |
 | `previous_shutdown` | `clean` | How the previous process instance ended — fixed enum `clean` / `crash`, absent on first run (schema v7) |
 | `last_error_code` | `MCPX_DOCKER_CLI_NOT_FOUND` | Most recent stable `MCPX_*` diagnostic code (schema v7). Enum code only, never error text |
+| `diagnostics.current_error_codes` | `{"MCPX_OAUTH_LOGIN_REQUIRED":2}` | How many configured servers are in each failure state **right now** (schema v11) — fixed `MCPX_*` enum keys, counts only. Never server names. Omitted when nothing is failing. See below |
 | `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2},"tool_change_gate_scans":6,"prompt_scans":11}` | Security/TPA scanner activity (schema v8, extended in v9) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan of any kind ran |
 | `trust_mode_distribution` | `{"auto":1,"scan":3,"manual":8}` | Configured servers per effective trust tier (schema v9) — fixed enum keys `auto`/`scan`/`manual`, counts only. Never server names |
 | `feature_flags.deep_scan_enabled` | `false` | Whether the opt-in deep-scan layer is turned on (schema v8) |
@@ -48,6 +49,19 @@ The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`,
 The `docker_cli_source` field is likewise a **fixed enum** (`path`, `bundled`, `login_shell`, `absent`); the resolved path is never transmitted.
 
 Docker isolation failures surface in `error_code_counts_24h` via three stable diagnostic codes (schema v5): `MCPX_DOCKER_CLI_NOT_FOUND` (isolation requested but the `docker` binary is unresolved — issue #696), `MCPX_DOCKER_EXEC_NOT_FOUND` (the image lacks the interpreter the server needs, e.g. `uvx` missing in `python:3.11`), and `MCPX_DOCKER_OCI_RUNTIME` (OCI runtime / architecture-mismatch failures).
+
+### Diagnostic error codes: events vs standing state (schema v11)
+
+The `diagnostics` object carries two `MCPX_*`-keyed maps, and they answer different questions:
+
+| Field | Meaning |
+|-------|---------|
+| `error_code_counts_24h` | **Events.** How many times something *newly* broke in the trailing 24 hours — a new failure classification, or a new failed connection attempt for a failure that was already standing. |
+| `current_error_codes` | **Standing state.** How many configured servers are in each failure state *right now*, recomputed at heartbeat time. Only enabled, non-quarantined servers are counted. |
+
+Both are keyed exclusively by the fixed `MCPX_*` catalog and valued by non-negative integers — never a server name, URL, command, or any free text — and the whole `diagnostics` object is omitted when there is nothing to report.
+
+**Schema v11 changed the meaning of `error_code_counts_24h`, so v10-and-earlier volumes are not comparable with v11 ones.** Through v10 the counter was level-triggered: the supervisor re-counted every *standing* failure on its 30-second reconcile tick, so a server parked awaiting an OAuth login emitted ~2,880 "events" a day while making zero connection attempts, and the number measured failing-server count times uptime rather than anything a user experienced. From v11 it is edge-triggered. `current_error_codes` was added in the same change because edge-triggering alone would have removed the "how many installs are affected right now" signal: the 24-hour window decays, so a permanently broken install would emit once and then vanish from the payload — and an absent field reads as zero.
 
 ## When heartbeats are sent
 

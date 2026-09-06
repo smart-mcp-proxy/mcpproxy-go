@@ -33,6 +33,25 @@ type DiagnosticsCounters struct {
 	// Safe: only MCPX_* enum constants are stored here, never free text, paths,
 	// server names, or user-entered values.
 	ErrorCodeCounts24h map[string]int `json:"error_code_counts_24h,omitempty"`
+	// CurrentErrorCodes is the STANDING state at heartbeat time: stable MCPX_
+	// code -> number of configured servers currently in that state. It is not
+	// a counter and is never persisted — it is recomputed each heartbeat from
+	// the supervisor's live stateview.
+	//
+	// Schema v11 (MCP-2967). It exists because error_code_counts_24h became
+	// edge-triggered in the same change: previously the supervisor re-counted
+	// every standing failure on its 30s reconcile ticker, so a parked install
+	// inflated the counter by ~2880/day/server. Edge-triggering alone would
+	// have swung the error to the other side — the 24h window decays, this
+	// struct is omitempty via isZero(), so a permanently broken install would
+	// emit once and then disappear from the payload entirely, and absent reads
+	// as zero. The two fields answer different questions and are only correct
+	// together: "how often did something newly break" and "how many servers
+	// are broken right now".
+	//
+	// Safe: only MCPX_* enum constants as keys, never server names, URLs,
+	// commands, or free text; values are non-negative server counts.
+	CurrentErrorCodes map[string]int `json:"current_error_codes,omitempty"`
 	// FixAttempted24h counts POST /api/v1/diagnostics/fix calls in the last 24h.
 	FixAttempted24h int `json:"fix_attempted_24h"`
 	// FixSucceeded24h counts fix invocations with outcome="success" in the last 24h.
@@ -46,42 +65,76 @@ type DiagnosticsCounters struct {
 // parent struct pointer — the struct itself has no omitempty on int fields).
 func (d DiagnosticsCounters) isZero() bool {
 	return len(d.ErrorCodeCounts24h) == 0 &&
+		len(d.CurrentErrorCodes) == 0 &&
 		d.FixAttempted24h == 0 &&
 		d.FixSucceeded24h == 0 &&
 		d.UniqueCodesEver == 0
 }
 
-// MarshalJSON caps ErrorCodeCounts24h to top-20 entries before serialising.
-func (d DiagnosticsCounters) MarshalJSON() ([]byte, error) {
-	counts := d.ErrorCodeCounts24h
-	if len(counts) > maxDiagCodeEntries {
-		type kv struct {
-			k string
-			v int
-		}
-		entries := make([]kv, 0, len(counts))
-		for k, v := range counts {
-			entries = append(entries, kv{k, v})
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].v != entries[j].v {
-				return entries[i].v > entries[j].v // higher count first
-			}
-			return entries[i].k < entries[j].k // tie-break by code asc
-		})
-		counts = make(map[string]int, maxDiagCodeEntries)
-		for _, e := range entries[:maxDiagCodeEntries] {
-			counts[e.k] = e.v
-		}
+// sanitizeMCPXCodeMap re-asserts the anonymity contract on a code->count map
+// supplied by a provider outside this package (MCP-2967). Only keys matching
+// the stable MCPX_* enum shape and strictly positive counts survive, so a
+// server name, URL, or any other free text can never reach the wire even if a
+// future caller passes one. Returns nil when nothing survives, so omitempty
+// drops the field rather than emitting an empty object.
+func sanitizeMCPXCodeMap(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
 	}
+	out := make(map[string]int, len(in))
+	for code, n := range in {
+		if n <= 0 || len(code) > maxLastErrorCodeLen || !mcpxCodePattern.MatchString(code) {
+			continue
+		}
+		out[code] = n
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// capDiagCodeMap bounds a code->count map to maxDiagCodeEntries entries,
+// keeping the highest counts (ties broken by code ascending so the wire form
+// is deterministic). Returns the input untouched when it already fits.
+func capDiagCodeMap(counts map[string]int) map[string]int {
+	if len(counts) <= maxDiagCodeEntries {
+		return counts
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	entries := make([]kv, 0, len(counts))
+	for k, v := range counts {
+		entries = append(entries, kv{k, v})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].v != entries[j].v {
+			return entries[i].v > entries[j].v // higher count first
+		}
+		return entries[i].k < entries[j].k // tie-break by code asc
+	})
+	capped := make(map[string]int, maxDiagCodeEntries)
+	for _, e := range entries[:maxDiagCodeEntries] {
+		capped[e.k] = e.v
+	}
+	return capped
+}
+
+// MarshalJSON caps ErrorCodeCounts24h and CurrentErrorCodes to top-20 entries
+// each before serialising.
+func (d DiagnosticsCounters) MarshalJSON() ([]byte, error) {
 	type wire struct {
 		ErrorCodeCounts24h map[string]int `json:"error_code_counts_24h,omitempty"`
+		CurrentErrorCodes  map[string]int `json:"current_error_codes,omitempty"`
 		FixAttempted24h    int            `json:"fix_attempted_24h"`
 		FixSucceeded24h    int            `json:"fix_succeeded_24h"`
 		UniqueCodesEver    int            `json:"unique_codes_ever"`
 	}
 	return json.Marshal(wire{
-		ErrorCodeCounts24h: counts,
+		ErrorCodeCounts24h: capDiagCodeMap(d.ErrorCodeCounts24h),
+		CurrentErrorCodes:  capDiagCodeMap(d.CurrentErrorCodes),
 		FixAttempted24h:    d.FixAttempted24h,
 		FixSucceeded24h:    d.FixSucceeded24h,
 		UniqueCodesEver:    d.UniqueCodesEver,
