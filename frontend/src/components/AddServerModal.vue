@@ -867,10 +867,14 @@ async function handleSubmit() {
       message: `${formData.name} has been added successfully`
     })
 
-    // ORDER MATTERS: handleClose() resets the form and blanks formData.name.
-    // Moving this emit below it would silently publish '' and send consumers to
-    // "/servers/".
-    emit('added', formData.name)
+    // Emit the name that was SENT (the serverData snapshot), never the live
+    // formData.name. Two reasons, both real:
+    //  - The name input carries no disabled binding and Cancel stays live while
+    //    `loading` is true, so the field is editable across the await above.
+    //    Re-reading it here can name a server that was never created and strand
+    //    the consumer on ServerDetail's "Server not found".
+    //  - handleClose() below blanks formData.name outright.
+    emit('added', serverData.name)
     handleClose()
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to add server'

@@ -18,8 +18,9 @@ import api from '@/services/api'
 //     modal now names the server it added so the CONSUMER can hand off; the
 //     bulk/import path stays payload-free so it keeps its list-refresh flow.
 //
-// The name payload is order-sensitive: handleClose() blanks formData.name, so
-// `emit('added', formData.name)` must stay above it.
+// The name payload is the serverData snapshot, never the live formData.name:
+// the name input is not disabled while the add is in flight, so re-reading the
+// reactive field after the await can publish a name that was never sent.
 
 vi.mock('@/services/api', () => ({
   default: {
@@ -139,16 +140,46 @@ describe('AddServerModal — protocol-conditional isolation + post-add hand-off 
     expect(added![0]).toEqual(['remote-mcp'])
   })
 
-  it('emits the name BEFORE the form is reset (handleClose blanks it)', async () => {
+  it('never publishes a blank name that the form reset left behind', async () => {
     const wrapper = mountModal()
-    await wrapper.find('input[type="text"]').setValue('order-sensitive')
+    await wrapper.find('input[type="text"]').setValue('survives-the-reset')
     await wrapper.find('select').setValue('npx')
     await submitManual(wrapper)
 
-    // A regression that moved the emit below handleClose() would silently
-    // publish '' here and push consumers at "/servers/".
-    expect(wrapper.emitted('added')![0][0]).toBe('order-sensitive')
+    // handleSubmit emits the serverData snapshot, so handleClose() blanking
+    // formData.name cannot reach the payload. This guards the regression class
+    // where the emit goes back to reading the live field: reading it after
+    // handleClose() publishes '', which every consumer's `if (serverName)`
+    // then swallows, losing the hand-off silently rather than loudly.
+    expect(wrapper.emitted('added')![0][0]).toBe('survives-the-reset')
     expect(wrapper.emitted('added')![0][0]).not.toBe('')
+  })
+
+  it('emits the name that was SENT, not one edited while the add was in flight', async () => {
+    let release!: (value: unknown) => void
+    mockedApi.callTool.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+
+    const wrapper = mountModal()
+    await wrapper.find('input[type="text"]').setValue('alpha')
+    await wrapper.find('select').setValue('npx')
+    await wrapper.find('[data-test="add-server-modal-box"] form').trigger('submit')
+
+    // The add is in flight. Only the submit button is :disabled by `loading` --
+    // the name input carries no disabled binding and Cancel is live -- so the
+    // field is still editable across the await.
+    await wrapper.find('input[type="text"]').setValue('beta')
+    release({ success: true })
+    await flushPromises()
+
+    // Re-reading the reactive formData.name after the await would publish
+    // 'beta' and strand the consumer on ServerDetail's "Server not found" for
+    // a server that was never created: the request carried 'alpha'.
+    expect(mockedApi.callTool.mock.calls[0][1].name).toBe('alpha')
+    expect(wrapper.emitted('added')![0]).toEqual(['alpha'])
   })
 
   it('leaves the bulk/import path payload-free so consumers keep the list view', async () => {
