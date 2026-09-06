@@ -501,7 +501,18 @@ func TestCopyFileReplacesTheDestinationInsteadOfTruncatingIt(t *testing.T) {
 // path. A review found the sequence: someone deletes A's stale-looking lock, B
 // creates a fresh one, A finishes and removes the pathname — which is now B's —
 // and a third compaction starts alongside B.
+//
+// The clock is frozen so the two acquisitions share a timestamp. That is the
+// Windows condition — its clock granularity is ~0.5-15ms and these calls are
+// back-to-back — which made this test fail intermittently there while passing
+// on nanosecond-resolution platforms. Frozen, it exercises the collision on
+// every platform instead of by luck.
 func TestCompactLockReleaseDoesNotRemoveSomeoneElsesLock(t *testing.T) {
+	frozen := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	restore := compactLockNow
+	compactLockNow = func() time.Time { return frozen }
+	t.Cleanup(func() { compactLockNow = restore })
+
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, dbFileName+".compact.lock")
 
@@ -528,5 +539,45 @@ func TestCompactLockReleaseDoesNotRemoveSomeoneElsesLock(t *testing.T) {
 	releaseB()
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Error("B's own release must remove B's lock")
+	}
+}
+
+// The lock token is what tells OUR lock from a successor's, so two acquisitions
+// in the same process must never produce the same one. Before the nonce the
+// token was pid+timestamp: on Windows the clock granularity is coarse (~0.5-15ms)
+// and two back-to-back acquisitions could land on the same instant, making A's
+// release delete B's lock. Freezing the clock reproduces that collision window
+// deterministically on every platform.
+func TestCompactLockTokenIsUniqueWithoutClockAdvance(t *testing.T) {
+	frozen := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	restore := compactLockNow
+	compactLockNow = func() time.Time { return frozen }
+	t.Cleanup(func() { compactLockNow = restore })
+
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, dbFileName+".compact.lock")
+
+	releaseA, err := acquireCompactLock(dir)
+	if err != nil {
+		t.Fatalf("acquire A: %v", err)
+	}
+	tokenA, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseA()
+
+	releaseB, err := acquireCompactLock(dir)
+	if err != nil {
+		t.Fatalf("acquire B: %v", err)
+	}
+	defer releaseB()
+	tokenB, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(tokenA) == string(tokenB) {
+		t.Fatalf("two acquisitions produced the same lock token %q; one run's release would delete the other's lock", tokenA)
 	}
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -291,6 +293,10 @@ func runDBStats(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// compactLockNow is a seam so tests can freeze the clock and prove the token
+// stays unique when the timestamp cannot distinguish two acquisitions.
+var compactLockNow = time.Now
+
 // compactDatabase rewrites srcPath in place via a temp file + atomic rename.
 //
 // The rename is what makes this safe to interrupt: until it succeeds the
@@ -325,7 +331,18 @@ func acquireCompactLock(dir string) (release func(), err error) {
 	// a successor's. Without it: someone deletes A's stale-looking lock, B
 	// creates a fresh one, A finishes and removes the pathname — which is now
 	// B's lock — and a third compaction starts alongside B.
-	token := fmt.Sprintf("pid=%d\nstarted=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+	//
+	// The nonce is what actually makes the token unique. pid+timestamp does not:
+	// Windows' clock granularity is coarse (~0.5-15ms), so two acquisitions in
+	// one process can share an instant and therefore a token. pid and started
+	// stay for the human reading a stale lock file.
+	nonce := make([]byte, 16)
+	if _, rerr := rand.Read(nonce); rerr != nil {
+		os.Remove(lockPath)
+		return nil, fmt.Errorf("failed to generate compaction lock token: %w", rerr)
+	}
+	token := fmt.Sprintf("pid=%d\nstarted=%s\nnonce=%s\n",
+		os.Getpid(), compactLockNow().UTC().Format(time.RFC3339Nano), hex.EncodeToString(nonce))
 	_, writeErr := f.WriteString(token)
 	closeErr := f.Close()
 	if writeErr != nil || closeErr != nil {
