@@ -31,21 +31,42 @@ CONCLUSION_TXT="$(textutil -convert txt -stdout "$CONCLUSION")" || { echo "FAIL 
 
 # 1. Nothing reaches the user as literal markup. RTF renders no Markdown, and a
 #    leaked control word means a malformed pane.
+#
+#    The control-word alternatives are terminated by a non-[a-z] character (or
+#    end of string), which is what an RTF control word actually looks like when
+#    it leaks. Without that terminator the pattern both over- and under-fires:
+#    an ordinary rendered path like "C:\party" matched \par, while a leaked
+#    "\b0." was missed because the old \b0 arm demanded whitespace after it.
+MARKUP_RE='\*\*|\\(b|b0|i|i0|ul|ulnone|par|pard|line|tab|f[0-9]+|fs[0-9]+)([^a-z]|$)'
 for pane in welcome conclusion; do
   txt="$WELCOME_TXT"; [ "$pane" = conclusion ] && txt="$CONCLUSION_TXT"
-  if printf '%s' "$txt" | grep -qE '\*\*|\\b0?([[:space:]]|$)|\\f[0-9]|\\par'; then
-    bad "$pane pane renders literal markup: $(printf '%s' "$txt" | grep -oE '\*\*|\\b0?|\\f[0-9]|\\par' | sort -u | tr '\n' ' ')"
+  # Capture, then branch on grep's own status. `if grep ...; then bad; else ok`
+  # reads any non-zero status as "clean", so a grep ERROR (exit >1) would have
+  # reported ok and let the script exit 0 with the check never having run.
+  markup="$(printf '%s' "$txt" | grep -oE "$MARKUP_RE")"
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    bad "$pane pane: markup scan could not run (grep exit $rc)"
+  elif [ -n "$markup" ]; then
+    bad "$pane pane renders literal markup: $(printf '%s' "$markup" | sort -u | tr '\n' ' ')"
   else
     ok "$pane pane renders no literal markup"
   fi
 done
 
 # 2. The minimum macOS version the welcome pane promises must match the app's own.
+#    Anchored to the requirement line ("... or later") rather than the first
+#    mention of macOS anywhere in the pane, and compared on the full version
+#    rather than the major, so neither an unrelated sentence nor a 13.0 -> 13.5
+#    bump can slip through.
+norm_ver() { case "$1" in *.*) printf '%s' "$1";; *) printf '%s.0' "$1";; esac; }
 PLIST_MIN="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$INFO_PLIST" 2>/dev/null)"
-CLAIMED="$(printf '%s' "$WELCOME_TXT" | grep -oE 'macOS [0-9]+(\.[0-9]+)?' | head -1 | awk '{print $2}')"
+CLAIMED="$(printf '%s' "$WELCOME_TXT" \
+  | grep -E 'macOS [0-9]+(\.[0-9]+)?.*or later' \
+  | grep -oE 'macOS [0-9]+(\.[0-9]+)?' | head -1 | awk '{print $2}')"
 if [ -z "$PLIST_MIN" ] || [ -z "$CLAIMED" ]; then
-  bad "could not read minimum macOS version (plist='$PLIST_MIN' pane='$CLAIMED')"
-elif [ "${CLAIMED%%.*}" = "${PLIST_MIN%%.*}" ]; then
+  bad "could not read minimum macOS version (plist='$PLIST_MIN' pane='$CLAIMED'); the welcome pane needs a 'macOS <version> ... or later' line"
+elif [ "$(norm_ver "$CLAIMED")" = "$(norm_ver "$PLIST_MIN")" ]; then
   ok "welcome pane's minimum macOS ($CLAIMED) matches LSMinimumSystemVersion ($PLIST_MIN)"
 else
   bad "welcome pane claims macOS $CLAIMED but the app requires $PLIST_MIN"
@@ -54,7 +75,10 @@ fi
 # 3. Every command shown to the user must exist in the binary that ships with it.
 BIN="${MCPPROXY_BIN:-}"
 if [ -z "$BIN" ]; then
-  BIN="$(mktemp -d)/mcpproxy"
+  BUILD_DIR="$(mktemp -d)"
+  # Remove it on every exit path, including the build-failure one below.
+  trap 'rm -rf "$BUILD_DIR"' EXIT
+  BIN="$BUILD_DIR/mcpproxy"
   (cd "$ROOT" && go build -o "$BIN" ./cmd/mcpproxy) || { echo "FAIL - could not build mcpproxy to check CLI mentions"; exit 1; }
 fi
 
