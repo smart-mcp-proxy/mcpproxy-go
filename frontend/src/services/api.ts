@@ -251,8 +251,12 @@ class APIService {
   // `default_instructions` is the resolved built-in MCP instructions default
   // (MCP-2175) — present once the backend exposes it; optional so the Web UI
   // degrades gracefully against older cores.
-  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string }>> {
-    return this.request<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string }>('/api/v1/status')
+  //
+  // `activation` is the Spec 044 activation funnel snapshot the endpoint
+  // already serves to an admin caller (omitted for scoped agent tokens, and
+  // absent when telemetry is not yet wired) — hence optional all the way down.
+  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string; activation?: { first_real_tool_call_ever?: boolean } }>> {
+    return this.request<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string; activation?: { first_real_tool_call_ever?: boolean } }>('/api/v1/status')
   }
 
   // Routing mode endpoint
