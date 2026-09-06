@@ -2094,24 +2094,20 @@ jobs:
           cache: 'npm'
           cache-dependency-path: website/package-lock.json
 
-      - name: Set version for docs
-        run: |
-          VERSION="${{ github.ref_name }}"
-          # Extract minor version: v0.11.2 → 0.11
-          MINOR_VERSION=$(echo "$VERSION" | sed 's/^v//' | cut -d. -f1,2)
-          echo "MCPPROXY_VERSION=$MINOR_VERSION" >> $GITHUB_ENV
-          echo "Documentation version: $MINOR_VERSION"
-
       - name: Install dependencies
         working-directory: website
         run: npm ci
 
+      # DOCS_VERSION, not the old `sed s/__VERSION__/.../`: the navbar badge is
+      # now built from that env var (website/docusaurus.config.js), and the
+      # placeholder it used to rewrite no longer exists in the config. Without
+      # this the release deploy would overwrite the site docs.yml published with
+      # a badge-less build.
       - name: Build docs with version
         working-directory: website
-        run: |
-          # Inject version into config
-          sed -i "s/__VERSION__/$MCPPROXY_VERSION/g" docusaurus.config.js
-          npm run build
+        env:
+          DOCS_VERSION: ${{ github.ref_name }}
+        run: npm run build
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0

@@ -41,12 +41,19 @@ jobs:
 
       # The navbar version badge reads DOCS_VERSION. Without it the config
       # falls back to hiding the badge, which is why the site used to render
-      # the literal string "v__VERSION__": the `sed` that substitutes it lives
-      # in release.yml, which does not deploy this site.
+      # the literal string "v__VERSION__": the `sed` that substitutes it runs
+      # only in release.yml's deploy-docs job, never in this one — and this one
+      # deploys the same mcpproxy-docs project on every push to main.
+      #
+      # --exclude '*-*' keeps prerelease tags out. RCs are tagged on main
+      # (v0.65.0-rc.1), they match 'v[0-9]*', and `git describe` picks the
+      # nearest tag reachable from HEAD — so without this a docs deploy from
+      # main would badge the stable site with an RC. release.yml's deploy-docs
+      # job applies the same rule via `!contains(github.ref_name, '-')`.
       - name: Resolve docs version
         id: docs_version
         run: |
-          VERSION="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          VERSION="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || true)"
           echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Docs version badge: ${VERSION:-<hidden>}"
 
