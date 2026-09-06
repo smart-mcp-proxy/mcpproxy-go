@@ -156,6 +156,9 @@ const systemStore = useSystemStore()
 
 const expanded = ref(true)
 const runningFixers = ref<Set<string>>(new Set())
+// Id of the last long-lived (multi-line) fix preview this panel raised, so the
+// next one can supersede it instead of stacking on top of it.
+const lastPreviewToastId = ref<string | null>(null)
 
 const severityAlertClass = computed(() => {
   const sev = props.diagnostic?.severity
@@ -244,12 +247,22 @@ async function runFixer(step: DiagnosticFixStep, mode: 'dry_run' | 'execute') {
       // returns a 50-line log tail — cannot be delivered in the default 5s
       // toast. Give a multi-line payload long enough to actually read.
       const multiLine = message.includes('\n')
-      systemStore.addToast({
+      // A long-lived toast must not accumulate. The toast stack is anchored to
+      // the bottom of the viewport and grows upward with no height bound, so a
+      // few tall 60s previews would push the earlier ones — and their close
+      // buttons — off the top of the screen. Keep at most one long-lived
+      // preview alive per panel: a new tail supersedes the one it replaces.
+      if (lastPreviewToastId.value) {
+        systemStore.removeToast(lastPreviewToastId.value)
+        lastPreviewToastId.value = null
+      }
+      const toastId = systemStore.addToast({
         type: outcome === 'success' ? 'success' : outcome === 'failed' ? 'error' : 'warning',
         title: `${titleMode}: ${step.label}`,
         message,
         ...(multiLine ? { duration: 60000 } : {}),
       })
+      if (multiLine) lastPreviewToastId.value = toastId
       emit('fixed', { fixerKey: key, mode })
     } else {
       systemStore.addToast({

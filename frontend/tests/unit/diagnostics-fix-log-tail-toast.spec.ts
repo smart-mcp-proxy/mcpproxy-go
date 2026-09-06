@@ -100,6 +100,24 @@ describe('diagnostics log-tail fix delivery', () => {
     expect(store.toasts[0].duration).toBe(5000)
   })
 
+  it('supersedes its own long-lived preview instead of stacking tall toasts', async () => {
+    const store = useSystemStore()
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: DIAGNOSTIC, serverName: 'flaky-stdio' },
+    })
+
+    // Three clicks inside the 60s dwell. Without superseding, all three tall
+    // previews stay up; the stack is anchored to the bottom of the viewport and
+    // grows upward, so the earliest ones leave the screen — close button and all.
+    for (let i = 0; i < 3; i++) {
+      await wrapper.find('[data-testid="error-panel-execute-button-0"]').trigger('click')
+      await flushPromises()
+    }
+
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].message).toBe(LOG_TAIL)
+  })
+
   it('renders a multi-line toast message with its line breaks preserved', () => {
     const store = useSystemStore()
     store.addToast({ type: 'success', title: 'Executed: Show last server log lines', message: LOG_TAIL })
