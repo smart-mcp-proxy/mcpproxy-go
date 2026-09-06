@@ -421,20 +421,24 @@
               <div class="text-4xl">✅</div>
               <div class="font-semibold text-lg">AI client connected</div>
               <div class="text-sm opacity-70 max-w-md">
-                Your AI client completed an MCP handshake with mcpproxy, so the wiring is right.<span v-if="!firstRealToolCallEver"> It does not yet mean a tool has run.</span>
+                Your AI client completed an MCP handshake with mcpproxy, so the wiring is right.<span v-if="upstreamCallState === 'pending'"> It does not yet mean a tool has run.</span>
               </div>
               <div v-if="onboarding.mcpClientsSeenEver.length > 0" class="text-xs opacity-60 mt-2">
                 Recognized: <span class="font-medium">{{ onboarding.mcpClientsSeenEver.join(', ') }}</span>
               </div>
             </div>
             <!-- Pending is a neutral next step, never an error: nothing here
-                 gates the wizard, and an install that only proxies is fine. -->
+                 gates the wizard, and an install that only proxies is fine.
+                 Hidden entirely while the state is unknown — see
+                 upstreamCallState; a row we cannot substantiate is worse than
+                 no row. -->
             <div
+              v-if="upstreamCallState !== 'unknown'"
               class="flex items-start justify-center gap-2 pb-4 text-sm text-center max-w-md mx-auto"
               data-test="verify-first-upstream-call"
-              :data-state="firstRealToolCallEver ? 'satisfied' : 'pending'"
+              :data-state="upstreamCallState"
             >
-              <template v-if="firstRealToolCallEver">
+              <template v-if="upstreamCallState === 'satisfied'">
                 <span>✅</span>
                 <span>
                   <span class="font-semibold">First upstream tool call</span> — a tool on one of your MCP servers ran through mcpproxy and returned a result.
@@ -714,7 +718,30 @@ const loadingActivity = ref(false)
 // serves the whole block to an admin caller. The activity log cannot answer
 // this: it is pruned at 7 days / 10 000 records, so a state derived from it
 // would silently regress.
-const firstRealToolCallEver = ref(false)
+//
+// Tri-state on purpose. `null` is "we cannot tell" — an absent activation
+// block (early startup, telemetry unwired, a core that predates it) or a
+// failed fetch. Rendering that as "no tool call yet" would be exactly the
+// unfounded claim this whole change exists to remove.
+const firstRealToolCallEver = ref<boolean | null>(null)
+
+// Resolved by the backend (servedRoutingMode), so it is always one of
+// retrieve_tools | direct | code_execution — never blank — once fetched.
+const routingMode = ref('')
+
+// `first_real_tool_call_ever` is stamped at EXACTLY ONE site in the core: the
+// call_tool_read/write/destructive handler. The direct tool surface and
+// code_execution sub-calls dispatch upstream without stamping it, so under
+// those routing modes a false flag means "not tracked", not "never happened".
+//   satisfied — the flag latched; a truthful lifetime fact under ANY mode.
+//   pending   — flag false AND we are on the mode that actually stamps it.
+//   unknown   — anything else; the row stays off rather than assert a
+//               negative we cannot back.
+const upstreamCallState = computed<'satisfied' | 'pending' | 'unknown'>(() => {
+  if (firstRealToolCallEver.value === true) return 'satisfied'
+  if (firstRealToolCallEver.value === false && routingMode.value === 'retrieve_tools') return 'pending'
+  return 'unknown'
+})
 
 // Selection: keyed by `${path}::${serverName}`. Default unchecked.
 const selection = ref<Set<string>>(new Set())
@@ -1014,15 +1041,20 @@ async function fetchRecentActivity() {
   }
 }
 
-// Never surfaces an error: a missing `activation` block (early startup, or a
-// core that does not send one) reads as "not yet", which is the honest and
-// harmless direction for a row that gates nothing.
+// Never surfaces an error: a missing `activation` block leaves the milestone
+// unknown, and the row simply does not render. It must not read as "not yet"
+// — that is an assertion about the user's install we have no basis for.
 async function fetchActivation() {
   try {
     const res = await api.getStatus()
-    if (res.success) {
-      firstRealToolCallEver.value = res.data?.activation?.first_real_tool_call_ever === true
-    }
+    if (!res.success || !res.data) return
+    routingMode.value = res.data.routing_mode ?? ''
+    // The flag is monotonic in the core: it latches on and never clears. Once
+    // we have seen it true, a later poll that omits the activation block means
+    // the block went away, not that the tool call un-happened.
+    if (firstRealToolCallEver.value === true) return
+    const flag = res.data.activation?.first_real_tool_call_ever
+    firstRealToolCallEver.value = typeof flag === 'boolean' ? flag : null
   } catch {
     // graceful — keep prior value
   }

@@ -61,9 +61,11 @@ function makeRouter() {
 }
 
 /** Mount the wizard, land on Verify, with `getStatus` behaving as given. */
-async function openVerifyTab(status: { resolved?: unknown; rejects?: boolean }) {
+async function openVerifyTab(status: { resolved?: unknown; rejects?: boolean; impl?: () => any }) {
   if (status.rejects) {
     ;(api.getStatus as any).mockRejectedValue(new Error('boom'))
+  } else if (status.impl) {
+    ;(api.getStatus as any).mockImplementation(status.impl)
   } else {
     ;(api.getStatus as any).mockResolvedValue(status.resolved)
   }
@@ -101,7 +103,7 @@ describe('OnboardingWizard verify states (F13)', () => {
 
   it('never claims the handshake was a verified round-trip', async () => {
     const wrapper = await openVerifyTab({
-      resolved: { success: true, data: { activation: { first_real_tool_call_ever: true } } },
+      resolved: { success: true, data: { routing_mode: 'retrieve_tools', activation: { first_real_tool_call_ever: true } } },
     })
     const panel = wrapper.find('[data-test="panel-verify"]')
     expect(panel.exists()).toBe(true)
@@ -113,7 +115,9 @@ describe('OnboardingWizard verify states (F13)', () => {
   })
 
   it('reports the handshake as its own milestone, naming the client', async () => {
-    const wrapper = await openVerifyTab({ resolved: { success: true, data: {} } })
+    const wrapper = await openVerifyTab({
+      resolved: { success: true, data: { routing_mode: 'retrieve_tools', activation: { first_real_tool_call_ever: false } } },
+    })
     const row = wrapper.find('[data-test="verify-client-connected"]')
     expect(row.exists()).toBe(true)
     expect(row.attributes('data-state')).toBe('satisfied')
@@ -121,16 +125,21 @@ describe('OnboardingWizard verify states (F13)', () => {
     expect(row.text()).toContain('does not yet mean a tool has run')
   })
 
-  it('shows the upstream-call milestone as pending when the activation block is absent', async () => {
-    const wrapper = await openVerifyTab({ resolved: { success: true, data: {} } })
-    const row = wrapper.find('[data-test="verify-first-upstream-call"]')
-    expect(row.exists()).toBe(true)
-    expect(row.attributes('data-state')).toBe('pending')
+  it('hides the upstream-call milestone when the activation block is absent', async () => {
+    // Absent means "we cannot tell" (early startup / telemetry unwired), not
+    // "no call happened". Asserting the negative would be the same class of
+    // untruth as the "Round-trip verified" copy this change removes.
+    const wrapper = await openVerifyTab({
+      resolved: { success: true, data: { routing_mode: 'retrieve_tools' } },
+    })
+    expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="verify-client-connected"]').text())
+      .not.toContain('does not yet mean a tool has run')
   })
 
   it('shows the upstream-call milestone as pending when first_real_tool_call_ever is false', async () => {
     const wrapper = await openVerifyTab({
-      resolved: { success: true, data: { activation: { first_real_tool_call_ever: false } } },
+      resolved: { success: true, data: { routing_mode: 'retrieve_tools', activation: { first_real_tool_call_ever: false } } },
     })
     const row = wrapper.find('[data-test="verify-first-upstream-call"]')
     expect(row.attributes('data-state')).toBe('pending')
@@ -138,19 +147,66 @@ describe('OnboardingWizard verify states (F13)', () => {
 
   it('shows the upstream-call milestone as satisfied when first_real_tool_call_ever is true', async () => {
     const wrapper = await openVerifyTab({
-      resolved: { success: true, data: { activation: { first_real_tool_call_ever: true } } },
+      resolved: { success: true, data: { routing_mode: 'retrieve_tools', activation: { first_real_tool_call_ever: true } } },
     })
     const row = wrapper.find('[data-test="verify-first-upstream-call"]')
     expect(row.attributes('data-state')).toBe('satisfied')
   })
 
-  it('degrades to pending (never an error) when the status call fails', async () => {
+  it('degrades silently (never an error, never a false negative) when the status call fails', async () => {
     const wrapper = await openVerifyTab({ rejects: true })
-    const row = wrapper.find('[data-test="verify-first-upstream-call"]')
-    expect(row.exists()).toBe(true)
-    expect(row.attributes('data-state')).toBe('pending')
+    expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
     // The rest of the panel still rendered — the failure must not abort onOpened().
     expect(wrapper.find('[data-test="verify-sample-prompts"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="panel-verify"]').text()).not.toContain('No upstream tool call yet')
+  })
+
+  // The core stamps first_real_tool_call_ever at exactly one site: the
+  // call_tool_* handler. routing_mode=direct and code_execution dispatch
+  // upstream WITHOUT stamping it, so a false flag there means "not tracked".
+  for (const mode of ['direct', 'code_execution']) {
+    it(`never claims "no upstream tool call yet" under routing_mode=${mode}, where the flag is blind`, async () => {
+      const wrapper = await openVerifyTab({
+        resolved: { success: true, data: { routing_mode: mode, activation: { first_real_tool_call_ever: false } } },
+      })
+      expect(wrapper.find('[data-test="verify-first-upstream-call"]').exists()).toBe(false)
+      const panel = wrapper.find('[data-test="panel-verify"]')
+      expect(panel.text()).not.toContain('No upstream tool call yet')
+      expect(panel.text()).not.toContain('does not yet mean a tool has run')
+    })
+  }
+
+  it('still reports the milestone reached under a non-stamping routing mode once the flag has latched', async () => {
+    // The flag is a lifetime fact. If it is true it IS true, whatever surface
+    // is serving /mcp now — so the positive is safe to show in any mode.
+    const wrapper = await openVerifyTab({
+      resolved: { success: true, data: { routing_mode: 'direct', activation: { first_real_tool_call_ever: true } } },
+    })
+    expect(wrapper.find('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('satisfied')
+  })
+
+  it('does not un-latch a reached milestone when a later poll omits the activation block', async () => {
+    vi.useFakeTimers()
+    try {
+      let call = 0
+      const wrapper = await openVerifyTab({
+        impl: () => {
+          call++
+          return Promise.resolve(
+            call === 1
+              ? { success: true, data: { routing_mode: 'retrieve_tools', activation: { first_real_tool_call_ever: true } } }
+              : { success: true, data: { routing_mode: 'retrieve_tools' } },
+          )
+        },
+      })
+      expect(wrapper.find('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('satisfied')
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+      expect(call).toBeGreaterThan(1)
+      expect(wrapper.find('[data-test="verify-first-upstream-call"]').attributes('data-state')).toBe('satisfied')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('suggests at least one prompt that actually dispatches to an upstream server', async () => {
