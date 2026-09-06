@@ -72,18 +72,27 @@ func (d DiagnosticsCounters) isZero() bool {
 }
 
 // sanitizeMCPXCodeMap re-asserts the anonymity contract on a code->count map
-// supplied by a provider outside this package (MCP-2967). Only keys matching
-// the stable MCPX_* enum shape and strictly positive counts survive, so a
-// server name, URL, or any other free text can never reach the wire even if a
-// future caller passes one. Returns nil when nothing survives, so omitempty
-// drops the field rather than emitting an empty object.
+// supplied by a provider outside this package (MCP-2967). Only keys accepted
+// by isValidMCPXCode — bounded length, stable MCPX_* enum shape, AND
+// membership in the fixed diagnostics catalog — with strictly positive counts
+// survive, so a server name, URL, or any other free text can never reach the
+// wire even if a future caller passes one. Returns nil when nothing survives,
+// so omitempty drops the field rather than emitting an empty object.
+//
+// The catalog term is load-bearing, not belt-and-braces: ScanForPII applies
+// exactly this predicate to the wire form, and a violation there drops the
+// ENTIRE heartbeat rather than the offending key. A shape-only filter here
+// would therefore let an MCPX_-shaped but uncataloged code (the supervisor
+// provider prefix-matches only) silently destroy every heartbeat for as long
+// as the standing state persists. Producer-side and wire-side predicates must
+// match, or the backstop becomes the outage.
 func sanitizeMCPXCodeMap(in map[string]int) map[string]int {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make(map[string]int, len(in))
 	for code, n := range in {
-		if n <= 0 || len(code) > maxLastErrorCodeLen || !mcpxCodePattern.MatchString(code) {
+		if n <= 0 || !isValidMCPXCode(code) {
 			continue
 		}
 		out[code] = n

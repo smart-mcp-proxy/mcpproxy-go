@@ -3,6 +3,7 @@ package telemetry
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -154,6 +155,10 @@ func TestSanitizeMCPXCodeMap(t *testing.T) {
 		"MCPX_HTTP_DNS_FAILED":       -3,
 		"mcpx_lowercase":             1,
 		strings.Repeat("MCPX_A", 40): 1, // over the length bound
+		// Correctly SHAPED but not in the diagnostics catalog. A shape-only
+		// filter keeps this, and ScanForPII then drops the whole heartbeat
+		// (not just the key) — so the producer must reject it here.
+		"MCPX_TOTALLY_MADE_UP": 1,
 	})
 	want := map[string]int{"MCPX_HTTP_CONN_REFUSED": 2}
 	if len(got) != len(want) {
@@ -170,6 +175,52 @@ func TestSanitizeMCPXCodeMap(t *testing.T) {
 	if got := sanitizeMCPXCodeMap(map[string]int{"nope": 1}); got != nil {
 		t.Fatalf("all-invalid in, want nil out, got %v", got)
 	}
+	if got := sanitizeMCPXCodeMap(map[string]int{"MCPX_TOTALLY_MADE_UP": 4}); got != nil {
+		t.Fatalf("uncataloged MCPX_-shaped key survived sanitize: %v", got)
+	}
+}
+
+// TestSanitizeMCPXCodeMap_MatchesScannerPredicate pins the invariant that the
+// producer-side filter is at least as strict as the wire-side gate. ScanForPII
+// drops the ENTIRE heartbeat on one bad key, so any code sanitizeMCPXCodeMap
+// admits must also be a code scanDiagCodeMap accepts — otherwise a single
+// uncataloged standing code silently kills all telemetry for that install.
+func TestSanitizeMCPXCodeMap_MatchesScannerPredicate(t *testing.T) {
+	candidates := []string{
+		"MCPX_HTTP_CONN_REFUSED",
+		"MCPX_OAUTH_LOGIN_REQUIRED",
+		"MCPX_TOTALLY_MADE_UP",
+		"MCPX_",
+		"MCPX_lower_case",
+		"my-server",
+		"https://internal.example.com/mcp",
+		strings.Repeat("MCPX_A", 40),
+	}
+	for _, code := range candidates {
+		kept := len(sanitizeMCPXCodeMap(map[string]int{code: 1})) == 1
+		if !kept {
+			continue
+		}
+		payload := []byte(`{"diagnostics":{"current_error_codes":{` +
+			strconv.Quote(code) + `:1}}}`)
+		if viol := scanDiagnosticsCounters(json.RawMessage(
+			mustDiagObject(t, payload))); viol != nil {
+			t.Fatalf("sanitize kept %q but the wire scanner rejects it (%s): the "+
+				"whole heartbeat would be dropped", code, viol.Rule)
+		}
+	}
+}
+
+// mustDiagObject extracts the "diagnostics" sub-object from a payload literal.
+func mustDiagObject(t *testing.T, payload []byte) json.RawMessage {
+	t.Helper()
+	var env struct {
+		Diagnostics json.RawMessage `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	return env.Diagnostics
 }
 
 // TestPayloadV11_CurrentErrorCodesReachTheWire is the assembly test: with only

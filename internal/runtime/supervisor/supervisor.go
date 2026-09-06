@@ -864,6 +864,29 @@ func errorCodeEdgeBasis(status *stateview.ServerStatus) (code string, retryCount
 // The standing condition itself is not lost: classifyAndAttach still runs on
 // every pass (so the UI, REST API and CLI keep rendering the diagnostic), and
 // Supervisor.CurrentErrorCodes reports the standing set for telemetry.
+//
+// Known and accepted imprecision — this is a SAMPLED predicate over two
+// observations, not an event log tapped at the failure site, so it can alias:
+//   - Coalescing (under-count): several attempts failing between two
+//     observations collapse into one notification, and a transient different
+//     code that has already reverted is not seen at all.
+//   - ABA (under-count): a recovery that resets RetryCount to 0 followed by a
+//     new failure back to the same (code, RetryCount) pair, with neither the
+//     30s reconcile pass nor a connection event observing the Ready state in
+//     between, reads as no change. Requires a dropped event AND a flap inside
+//     one tick.
+//   - Stale-observation replay (over-count): reconcile pre-fetches upstream
+//     states BEFORE taking stateMu (a deliberate lock-ordering choice, see
+//     reconcile), so it can publish a state older than one the event writer
+//     already applied, clearing the diagnostic and letting the same standing
+//     failure edge a second time.
+//
+// All three are bounded by the observation cadence and are orders of magnitude
+// smaller than the ~2880/day/server they replace. Closing them means giving
+// failures a monotonic identity at the source rather than diffing two sampled
+// projections, which is a supervisor-wide change and deliberately out of scope
+// here. Treat the counter as "roughly how often something newly broke", and
+// read CurrentErrorCodes for an exact right-now number.
 func shouldNotifyErrorCode(prevCode, code string, prevRetryCount, retryCount int) bool {
 	if code == "" {
 		return false

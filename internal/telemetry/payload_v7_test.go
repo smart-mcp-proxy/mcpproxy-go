@@ -8,11 +8,11 @@ import (
 )
 
 // TestSchemaVersionIsAtLeastV7 pins FR-014: the Spec 080 payload contract
-// shipped at v7 and may only move forward. The current version is 10 (v8's
+// shipped at v7 and may only move forward. The current version is 11 (v8's
 // additive tpa_scanner / deep_scan_enabled bump, v9's TPA funnel counters +
-// trust_mode_distribution, then v10's tool_response_mode /
-// direct_tool_response_mode); a downgrade below 7 would drop the Spec 080
-// fields.
+// trust_mode_distribution, v10's tool_response_mode /
+// direct_tool_response_mode, then v11's edge-triggered error_code_counts_24h +
+// current_error_codes); a downgrade below 7 would drop the Spec 080 fields.
 func TestSchemaVersionIsAtLeastV7(t *testing.T) {
 	if SchemaVersion < 7 {
 		t.Fatalf("SchemaVersion = %d, want >= 7 (Spec 080 FR-014)", SchemaVersion)
