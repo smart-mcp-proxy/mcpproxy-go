@@ -261,6 +261,54 @@ func seedHTTP() {
 		},
 		DocsURL: docsURL(HTTPTimeout),
 	})
+	// The four codes below are deliberately NOT RetryPermanent. A rate limit
+	// clears, a reset connection re-dials, a cancellation was ours, and even the
+	// generic 4xx bucket holds 408 (request timeout). Omitting Retry leaves them
+	// on the zero RetryClass — exactly what MCPX_UNKNOWN_UNCLASSIFIED carried
+	// before this change, so naming these failures changes the message a user
+	// reads and nothing about whether mcpproxy keeps retrying them (GH #1145).
+	register(CatalogEntry{
+		Code:        HTTPConnReset,
+		Severity:    SeverityWarn,
+		UserMessage: "The connection to the server was reset before a reply arrived. This is usually transient.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Retry the request and watch the connection", Command: "curl -v --max-time 30 <server-url>"},
+			{Type: FixStepCommand, Label: "Check for an intercepting proxy", Command: "env | grep -i proxy"},
+			{Type: FixStepLink, Label: "Connectivity checklist", URL: docsURL(HTTPConnReset)},
+		},
+		DocsURL: docsURL(HTTPConnReset),
+	})
+	register(CatalogEntry{
+		Code:        HTTPRateLimited,
+		Severity:    SeverityWarn,
+		UserMessage: "The server is rate-limiting mcpproxy (429 Too Many Requests). It will retry after the wait the server asked for.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Read the server's Retry-After header", Command: "curl -sS -o /dev/null -D - <server-url>"},
+			{Type: FixStepLink, Label: "Rate limits and back-off", URL: docsURL(HTTPRateLimited)},
+		},
+		DocsURL: docsURL(HTTPRateLimited),
+	})
+	register(CatalogEntry{
+		Code:        HTTPClientErr,
+		Severity:    SeverityError,
+		UserMessage: "The server rejected the request with a 4xx status. The exact status is in the error detail below.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Reproduce the request and read the status and body", Command: "curl -v <server-url>"},
+			{Type: FixStepCommand, Label: "Check the configured URL", Command: "mcpproxy upstream list -o json"},
+			{Type: FixStepLink, Label: "HTTP status troubleshooting", URL: docsURL(HTTPClientErr)},
+		},
+		DocsURL: docsURL(HTTPClientErr),
+	})
+	register(CatalogEntry{
+		Code:        HTTPCanceled,
+		Severity:    SeverityInfo,
+		UserMessage: "The connection attempt was canceled — usually a shutdown, a config reload, or a manual disconnect. No action needed unless it repeats.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Check the server's current state", Command: "mcpproxy upstream list"},
+			{Type: FixStepLink, Label: "Connection lifecycle", URL: docsURL(HTTPCanceled)},
+		},
+		DocsURL: docsURL(HTTPCanceled),
+	})
 	// NOT RetryPermanent, however deterministic the name sounds: mcp-go returns
 	// its ErrLegacySSEServer sentinel for ANY 4xx on the initialize POST except
 	// 401 (client/transport/streamable_http.go). A 429 from a rate-limited

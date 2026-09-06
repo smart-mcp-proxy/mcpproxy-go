@@ -596,7 +596,7 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 	// Context deadline during handshake → handshake timeout. Only when the
 	// hints say we're on the stdio transport (otherwise a generic timeout
 	// would be misclassified).
-	if hints.Transport == "stdio" && errors.Is(err, context.DeadlineExceeded) {
+	if hints.Transport == TransportStdio && errors.Is(err, context.DeadlineExceeded) {
 		return STDIOHandshakeTimeout
 	}
 
@@ -615,7 +615,7 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 	// before completing the MCP initialize handshake", "did not respond to MCP
 	// initialize") on MCPX_UNKNOWN_UNCLASSIFIED and its "file a bug report"
 	// CTA, with the loose docker arms as the only thing that could fire.
-	if hints.Transport == "stdio" || hints.DockerIsolated {
+	if hints.Transport == TransportStdio || hints.DockerIsolated {
 		msg := err.Error()
 		lmsg := strings.ToLower(msg)
 
@@ -685,12 +685,62 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 	return ""
 }
 
+// Canonical transport families the classifier reasons about.
+//
+// ClassifierHints.Transport carries whatever the resolver produced, and that is
+// NOT a closed set: transport.DetermineTransportType returns config.Protocol
+// VERBATIM when it is set, and "streamable-http" when it is not. Config
+// validation accepts "http", "sse", "streamable-http" and "auto"
+// (internal/config/config.go), and all of them are live in the field — the
+// registry add path, the Claude Code and Gemini config importers and the
+// Add-Server modal write "http", while a URL server added without an explicit
+// protocol resolves to "streamable-http". One transport, four spellings.
+const (
+	TransportStdio = "stdio"
+	TransportHTTP  = "http"
+)
+
+// CanonicalTransport folds every spelling of the HTTP transport family down to
+// TransportHTTP, and passes anything else through lower-cased.
+//
+// It is the single definition of "this failure came over HTTP", used by
+// hints.For (so every production consumer is normalized at the source) and by
+// classifyHTTP itself (so a hand-built ClassifierHints cannot reintroduce the
+// bug). Gating the HTTP arms on the exact string "http" meant a server whose
+// protocol happened to be "streamable-http" — the default for a URL server with
+// no explicit protocol — had its status, timeout and status-text arms switched
+// off, and those failures landed in MCPX_UNKNOWN_UNCLASSIFIED.
+//
+// The empty string joins the family because it reaches hints.For only when the
+// server's config is unavailable, i.e. when nothing at all is known about the
+// transport. That is safe here: every arm this unlocks needs positive evidence
+// of an HTTP exchange (a status number in the text, a typed net error), so a
+// stdio-shaped failure still matches none of them. Predicates on the same HTTP
+// family already exist elsewhere in the codebase (config.auth_broker,
+// oauth.config) and agree on the member set.
+func CanonicalTransport(t string) string {
+	normalized := strings.ToLower(strings.TrimSpace(t))
+	switch normalized {
+	case "", "auto", "http", "https", "sse", "streamable-http", "streamable_http", "streamablehttp":
+		return TransportHTTP
+	default:
+		return normalized
+	}
+}
+
 // classifyHTTP handles HTTP/SSE transport errors including TLS, DNS, and
 // structured HTTP status errors. HTTP status classification prefers a typed
 // statusError (DiagnoseHTTPStatus below) but also falls back to a string match
 // because the upstream layer commonly stringifies the error before bubbling it
 // up.
 func classifyHTTP(err error, hints ClassifierHints) Code {
+	// One canonicalization for the whole function. Every arm below that used to
+	// compare hints.Transport to the literal "http" reads this instead: the
+	// literal silently switched itself off for "sse", "streamable-http" and
+	// "auto" — the same transport under a different spelling — and sent those
+	// servers' status and timeout failures to MCPX_UNKNOWN_UNCLASSIFIED.
+	httpFamily := CanonicalTransport(hints.Transport) == TransportHTTP
+
 	// DNS lookup errors are reported as *net.DNSError.
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
@@ -710,17 +760,49 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 		return HTTPConnRefuse
 	}
 
+	// Connection reset by peer. Ungated, exactly like the ECONNREFUSED arm
+	// above: a socket errno is positive evidence of a socket, and the stdio
+	// path has none to reset. Deliberately NOT paired with an EOF/EPIPE arm —
+	// core.enrichTransportClosedError already rewrites those into the
+	// "exited before completing the MCP initialize handshake" shape that
+	// classifyStdio owns, and a second reading of them here would only
+	// double-classify the same failure.
+	if errors.Is(err, syscall.ECONNRESET) {
+		return HTTPConnReset
+	}
+
 	// HTTP request timeouts. The upstream HTTP transport bubbles
 	// context.DeadlineExceeded up wrapped in a free-text "transport error: ...
 	// context deadline exceeded" string. Try the typed errors.Is path first
 	// (cheap, exact); fall back to substring on the http transport hint to
 	// catch the stringified form. Without this, hf.co/mcp slowdowns surface
 	// to the UI as MCPX_UNKNOWN_UNCLASSIFIED.
-	if errors.Is(err, context.DeadlineExceeded) && hints.Transport == "http" {
+	if errors.Is(err, context.DeadlineExceeded) && httpFamily {
 		return HTTPTimeout
 	}
-	if hints.Transport == "http" && strings.Contains(lmsg, "context deadline exceeded") {
+	if httpFamily && strings.Contains(lmsg, "context deadline exceeded") {
 		return HTTPTimeout
+	}
+
+	// The OTHER timeout shape, which neither arm above can see: a socket
+	// deadline (`read tcp …: i/o timeout`) and an http.Client Timeout are
+	// net.Error values reporting Timeout()==true, and neither is
+	// context.DeadlineExceeded. Checked after the DNS and refused/reset errnos
+	// so a more specific typed cause keeps its own code (those report
+	// Timeout()==false in any case).
+	var netErr net.Error
+	if httpFamily && errors.As(err, &netErr) && netErr.Timeout() {
+		return HTTPTimeout
+	}
+
+	// Cancellation is mcpproxy's OWN decision to stop waiting — shutdown, a
+	// config reload swapping the client, a manual disconnect. It is a lifecycle
+	// event, not a fault, so it gets an info-severity code of its own rather
+	// than the "please file a bug report" CTA that MCPX_UNKNOWN_UNCLASSIFIED
+	// carries. Typed only: context.Canceled has no stable stringification worth
+	// matching, and errors.Is cannot confuse it with DeadlineExceeded.
+	if httpFamily && errors.Is(err, context.Canceled) {
+		return HTTPCanceled
 	}
 
 	// A 4xx on the streamable-HTTP `initialize` POST is the legacy-SSE
@@ -745,7 +827,7 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 	// as a plain string ("transport error: request failed with status 504: ...").
 	// The typed statusError path used by DiagnoseHTTPStatus() never fires for
 	// those, so we substring-match the canonical phrasing here.
-	if hints.Transport == "http" {
+	if httpFamily {
 		if code := matchHTTPStatusText(lmsg); code != "" {
 			return code
 		}
@@ -754,12 +836,32 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 	return ""
 }
 
-// matchHTTPStatusText extracts a status code from the canonical
-// "request failed with status NNN" / "notification failed with status NNN"
-// phrasing emitted by the HTTP transport adapter. Returns empty when no
-// recognised status appears.
+// statusTextMarkers are the phrasings mcp-go puts a status code behind. Both
+// are verbatim from the pinned client (mcp-go v1.0.0):
+//
+//   - "status " covers `request failed with status %d: %s`
+//     (streamable_http.go:641, sse.go:630) and `notification failed with
+//     status %d: %s` (streamable_http.go:963, sse.go:806).
+//   - "status code: " covers `unexpected status code: %d` (sse.go:293) — the
+//     SSE CONNECT path, where the digits do NOT follow "status ". Without this
+//     marker an SSE server's 401 or 502 at connect time matched nothing and
+//     fell through to MCPX_UNKNOWN_UNCLASSIFIED.
+var statusTextMarkers = [...]string{"status ", "status code: "}
+
+// matchHTTPStatusText extracts a status code from the phrasings above. Returns
+// empty when no recognised status appears.
 func matchHTTPStatusText(lmsg string) Code {
-	const marker = "status "
+	for _, marker := range statusTextMarkers {
+		if c := matchStatusMarker(lmsg, marker); c != "" {
+			return c
+		}
+	}
+	return ""
+}
+
+// matchStatusMarker scans every occurrence of one marker, because the message
+// may mention a status more than once and only one of them need be recognised.
+func matchStatusMarker(lmsg, marker string) Code {
 	idx := strings.Index(lmsg, marker)
 	for idx != -1 {
 		rest := lmsg[idx+len(marker):]
@@ -796,6 +898,14 @@ func classifyNetwork(err error, hints ClassifierHints) Code {
 
 // DiagnoseHTTPStatus maps an HTTP status code to a Code. Returns empty if
 // the status is not a known failure.
+//
+// The 4xx set is enumerated rather than ranged. A blanket `status >= 400 &&
+// status < 500` would swallow statuses whose remediation is genuinely
+// different — and, more importantly, would claim the ones an upstream layer
+// resolves better than a status number can (a 401 that is really a deferred
+// OAuth sign-in, a 4xx on the initialize POST that is really a legacy-SSE
+// server). Each status listed here is one whose only honest advice is "read the
+// status and the body"; the rest keep falling through.
 func DiagnoseHTTPStatus(status int) Code {
 	switch {
 	case status == 401:
@@ -804,6 +914,15 @@ func DiagnoseHTTPStatus(status int) Code {
 		return HTTPForbidden
 	case status == 404:
 		return HTTPNotFound
+	case status == 429:
+		return HTTPRateLimited
+	// 400 Bad Request, 408 Request Timeout, 409 Conflict, 410 Gone,
+	// 451 Unavailable For Legal Reasons. All name a real server verdict, and
+	// all used to land in MCPX_UNKNOWN_UNCLASSIFIED with its "file a bug
+	// report" CTA. The status itself reaches the user in
+	// DiagnosticError.Cause, which carries the raw error text.
+	case status == 400, status == 408, status == 409, status == 410, status == 451:
+		return HTTPClientErr
 	case status >= 500 && status <= 599:
 		return HTTPServerErr
 	}
