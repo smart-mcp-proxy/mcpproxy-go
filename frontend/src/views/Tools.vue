@@ -256,8 +256,16 @@
                  nothing to filter: with every server quarantined or none
                  connected, GET /api/v1/tools returns an empty catalogue and no
                  filter is responsible for it. Split on allTools. -->
+            <!-- States the OBSERVED catalogue and nothing else. Round-3 review:
+                 "no connected server is exposing any" was itself unsupportable —
+                 GET /api/v1/tools returns success with an empty list and
+                 `partial: true` when a server's tool fetch FAILED
+                 (internal/httpapi/server.go), which is "we could not read them",
+                 not "there are none". That case gets its own clause instead of a
+                 wrong cause. -->
             <p v-if="allTools.length === 0" class="text-sm mt-1">
-              There are no tools to search — no connected server is currently exposing any.
+              There are no tools in this list to search.<template v-if="partial"> Some servers
+              could not be read, so their tools are missing from it — see the warning above.</template>
             </p>
             <p v-else-if="searchScope.length === 0" class="text-sm mt-1">
               Nothing was in scope to search — the other active filters excluded every

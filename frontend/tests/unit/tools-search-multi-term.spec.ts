@@ -199,10 +199,39 @@ describe('Tools search empty state says what was searched (audit F11)', () => {
     const wrapper = await mountTools('/tools?q=kubernetes')
     const empty = wrapper.find('[data-test="tools-empty-search"]')
     expect(empty.exists()).toBe(true)
-    expect(empty.text()).toContain('There are no tools to search')
+    expect(empty.text()).toContain('There are no tools in this list to search')
     // The two claims that would be false here.
     expect(empty.text()).not.toContain('active filters excluded')
     expect(empty.text()).not.toContain('try fewer words')
+    // And no cause is invented for an unremarkable empty catalogue.
+    expect(empty.text()).not.toContain('could not be read')
+  })
+
+  // Round-3 cross-model review. The first attempt at the branch above said
+  // "no connected server is currently exposing any", which is its own
+  // unsupportable claim: GET /api/v1/tools returns success with an empty list
+  // and `partial: true` when a server's tool fetch FAILED
+  // (internal/httpapi/server.go sets Partial/FailedServers on a genuine fetch
+  // error and returns everything it could gather). That is "we could not read
+  // them", not "there are none" — the opposite diagnosis, on the same payload.
+  it('does not claim an empty catalogue is empty when the fetch partially failed', async () => {
+    const api = (await import('@/services/api')).default
+    vi.mocked(api.getGlobalTools).mockResolvedValueOnce({
+      success: true,
+      data: {
+        tools: [],
+        stats: { total: 0, enabled: 0, disabled: 0, pending_approval: 0 },
+        partial: true,
+        failed_servers: ['context7'],
+      },
+    } as never)
+
+    const wrapper = await mountTools('/tools?q=kubernetes')
+    const empty = wrapper.find('[data-test="tools-empty-search"]')
+    expect(empty.exists()).toBe(true)
+    expect(empty.text()).toContain('could not be read')
+    // Still never blames the filters, which is the round-2 guarantee.
+    expect(empty.text()).not.toContain('active filters excluded')
   })
 
   it('drops the "disabled included" claim when a status filter excludes them', async () => {
