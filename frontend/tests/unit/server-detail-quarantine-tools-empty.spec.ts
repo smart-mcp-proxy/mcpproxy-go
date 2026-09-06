@@ -142,6 +142,33 @@ describe('ServerDetail — Tools tab empty state on a quarantined server (F08)',
     expect(wrapper.find('[data-test="security-tab"]').classes()).toContain('tab-active')
   })
 
+  // Integrated-review finding. The withheld copy told the user to "approve the
+  // server to list them" — true for a quarantined server that connects fine,
+  // and misleading for one that cannot start at all. A live probe on a
+  // quarantined stdio server whose command does not exist returned
+  // status="error", connected=false, last_error="Command ... not found on the
+  // spawn PATH" — and the page still offered approval as the whole remedy,
+  // while the fault alert and diagnostic panel are deliberately suppressed for
+  // every quarantined server (issue #1076). Approving that server hands the
+  // user a second failure. Say so instead.
+  it('does not promise that approval alone will list tools when the server is not connected', async () => {
+    const wrapper = await mountDetail(
+      quarantined({ connected: false, status: 'error', last_error: 'failed to connect: command not found' })
+    )
+    const text = wrapper.find('[data-test="server-tools-empty"]').text()
+    expect(text).toContain('withheld')
+    expect(text).toMatch(/not connected|cannot connect|connection/i)
+  })
+
+  // The control: when the quarantined server IS connected, approval really is
+  // the whole remedy and the copy must not acquire a connection caveat.
+  it('keeps approval as the whole remedy when the quarantined server is connected', async () => {
+    const wrapper = await mountDetail(quarantined({ connected: true }))
+    const text = wrapper.find('[data-test="server-tools-empty"]').text()
+    expect(text).toContain('approve the server')
+    expect(text).not.toMatch(/not connected|cannot connect/i)
+  })
+
   it('keeps the original wording for a disconnected server that is NOT quarantined', async () => {
     const wrapper = await mountDetail({
       name: 'probe',

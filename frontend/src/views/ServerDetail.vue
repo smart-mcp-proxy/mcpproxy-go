@@ -1735,6 +1735,16 @@ const toolsEmptyBody = computed(() => {
       ? 'This server has no tools available.'
       : 'Server must be connected to view tools.'
   }
+  // Integrated-review finding. Approval is the whole remedy only for a
+  // quarantined server that actually connects. mcpproxy still dials a
+  // quarantined server so the scanner can export its definitions, and every
+  // fault alert on this page is suppressed while quarantined (issue #1076) --
+  // so a server whose command does not even exist rendered this sentence and
+  // nothing else, and approving it just produces a second failure. Name the
+  // connection blocker instead of promising approval will list the tools.
+  if (!server.value?.connected) {
+    return "This server's tools are withheld while it is quarantined, and it is not connected right now — so approving it will not list tools on its own. Check the connection error under Configuration, then review the findings on the Security tab."
+  }
   return "This server's tools are withheld while the server is quarantined. Review the findings on the Security tab, then approve the server to list them."
 })
 

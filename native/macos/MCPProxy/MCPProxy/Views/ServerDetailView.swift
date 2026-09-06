@@ -1067,7 +1067,19 @@ struct ServerDetailView: View {
         isLoadingLogs = true
         defer { isLoadingLogs = false }
         do {
-            logLines = try await client.serverLogs(server.name, tail: 100)
+            let lines = try await client.serverLogs(server.name, tail: 100)
+            if lines.isEmpty {
+                // The core now answers 200 with an empty list when a server has
+                // no process log file, instead of erroring (that error read
+                // "server may not have run yet" and was shown as a red alert on
+                // remote servers that had in fact run fine). This branch used to
+                // be reached only via `catch`, so the empty answer would have
+                // silently skipped the on-disk fallback and dropped historical
+                // local logs from this view.
+                loadLogsFromFile()
+            } else {
+                logLines = lines
+            }
         } catch {
             // Fall back to reading the log file directly
             loadLogsFromFile()
