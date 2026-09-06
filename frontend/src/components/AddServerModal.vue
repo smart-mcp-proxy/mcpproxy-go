@@ -190,6 +190,29 @@
             </div>
           </div>
 
+          <!-- UX audit F09: adding a second entry for an endpoint that is
+               already configured is legitimate (different headers, a different
+               OAuth identity) but is usually a mistake — and until now nothing
+               said so. The first the user heard of it was the scanner calling
+               the NEW server dangerous, because two entries on one endpoint
+               expose byte-identical tool names and descriptions and
+               detect.shadowing.cross_server reads that as impersonation.
+               This is the observation that should have come first: neutral,
+               non-blocking, and naming the server it collides with. -->
+          <p
+            v-if="duplicateEndpointServer"
+            data-test="addserver-duplicate-endpoint"
+            class="text-sm text-base-content/70 flex items-start gap-2 mt-2"
+          >
+            <span aria-hidden="true">ℹ</span>
+            <span>
+              <code class="font-mono">{{ duplicateEndpointServer.name }}</code> is already
+              configured at this endpoint. Adding a second entry is allowed — both will be
+              listed, their tools will appear twice, and the security scan will flag each as
+              a possible clone of the other.
+            </span>
+          </p>
+
           <!-- Toggles Section -->
           <div class="divider mt-6">Options</div>
 
@@ -654,6 +677,49 @@ const lineNumbersRef = ref<HTMLDivElement | null>(null)
 let previewTimer: ReturnType<typeof setTimeout> | null = null
 
 // Computed
+
+// UX audit F09. The endpoint the manual form currently describes, already
+// belongs to a configured server — or null. Advisory only: nothing here gates
+// submit, merges, or reuses an existing entry.
+//
+// Every "duplicate" guard in the backend keys on the server NAME
+// (internal/server/server.go, internal/config/config.go, internal/configimport),
+// so a second entry on one endpoint is accepted in silence and only surfaces
+// later as a hard-tier detect.shadowing.cross_server "possible impersonation"
+// finding on the new server. This covers the Web-UI door only; the MCP
+// `upstream_servers add`, CLI and import doors still say nothing.
+//
+// Matching is exact string equality after trim, deliberately. Case folding,
+// trailing-slash normalisation and query stripping are each a judgement call
+// about what "the same endpoint" means, and none has been made; exact match
+// catches the real case (a copy-pasted URL) and cannot accuse the wrong server.
+// It can MISS: the server list masks credential-shaped url/command/args values
+// (internal/oauth/serverfields.go), so a secret-bearing endpoint never matches.
+// A hint, not a guarantee — which is why the copy claims nothing more.
+const duplicateEndpointServer = computed(() => {
+  // `servers` starts empty, so without `loaded` an unfetched list is
+  // indistinguishable from "no duplicates" and the note would be silently
+  // wrong on a cold open.
+  if (!serversStore.loaded) return null
+
+  if (formData.type === 'http') {
+    const url = formData.url.trim()
+    if (!url) return null
+    return serversStore.servers.find(s => (s.url ?? '').trim() === url) ?? null
+  }
+
+  const command = (formData.command === 'custom' ? formData.customCommand : formData.command).trim()
+  if (!command) return null
+  const args = parseArgs()
+  return (
+    serversStore.servers.find(s => {
+      if ((s.command ?? '').trim() !== command) return false
+      const existing = s.args ?? []
+      return existing.length === args.length && existing.every((a, i) => a === args[i])
+    }) ?? null
+  )
+})
+
 const lineCount = computed(() => {
   if (!importContent.value) return 10 // Show at least 10 lines for placeholder
   return Math.max(importContent.value.split('\n').length, 10)

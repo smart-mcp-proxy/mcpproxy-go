@@ -639,7 +639,7 @@
                 @click="approveServer"
                 :disabled="actionLoading || hasUnresolvedCritical"
                 class="btn btn-success btn-sm"
-                :title="hasUnresolvedCritical ? 'Unresolved critical findings — use Force Approve' : 'Approve and unquarantine this server'"
+                :title="hasUnresolvedCritical ? 'Unresolved dangerous findings — use Force Approve' : 'Approve and unquarantine this server'"
               >
                 <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
                 Approve Server
@@ -648,8 +648,9 @@
                 v-if="serverAdminState === 'quarantined' && hasUnresolvedCritical"
                 @click="forceApproveServer"
                 :disabled="actionLoading"
+                data-test="scan-report-force-approve"
                 class="btn btn-error btn-sm"
-                title="Bypass the scanner gate and approve despite critical findings"
+                title="Unquarantine this server despite its dangerous findings"
               >
                 <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
                 Force Approve
@@ -982,11 +983,19 @@ async function quarantineServer() {
 // or a non-blocking soft finding with "critical" severity must not lock the
 // Approve button when the backend would accept. Raw summary.critical is only
 // a fallback for payloads that predate finding_counts.
-const hasUnresolvedCritical = computed(() => {
+//
+// UX audit F09: the Force Approve confirmation used to count raw
+// summary.critical while this predicate counted finding_counts.dangerous, so a
+// server the backend was refusing on two hard-tier findings was offered up as
+// "despite 0 critical finding(s)". One number now, shared, and worded with the
+// backend's own noun ("dangerous (hard-tier)", the 409 text).
+const blockingFindingCount = computed(() => {
   const fc = report.value?.finding_counts
-  if (fc) return (fc.dangerous ?? 0) > 0
-  return (report.value?.summary?.critical ?? 0) > 0
+  if (fc) return fc.dangerous ?? 0
+  return report.value?.summary?.critical ?? 0
 })
+
+const hasUnresolvedCritical = computed(() => blockingFindingCount.value > 0)
 
 async function approveServer() {
   if (!report.value?.server_name) return
@@ -1013,7 +1022,7 @@ async function approveServer() {
 
 async function forceApproveServer() {
   if (!report.value?.server_name) return
-  if (!confirm(`Force-approve ${report.value.server_name}? This bypasses the scanner gate despite ${report.value.summary?.critical ?? 0} critical finding(s).`)) return
+  if (!confirm(`Force-approve ${report.value.server_name}? This unquarantines the server despite ${blockingFindingCount.value} dangerous finding(s).`)) return
   actionLoading.value = true
   try {
     await serversStore.securityApproveServer(report.value.server_name, true)
