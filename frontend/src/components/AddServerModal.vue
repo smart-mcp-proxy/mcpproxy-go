@@ -211,14 +211,21 @@
               </label>
             </div>
 
-            <!-- Isolated (Docker) -->
-            <div class="form-control">
+            <!--
+              Isolated (Docker) — stdio only. Isolation is structurally
+              impossible for a URL upstream (internal/config/isolation_resolve.go
+              resolves IsolationSourceNotStdio when Command is empty), so the
+              control is noise rather than a choice there. This v-if is
+              PRESENTATION ONLY: the watcher on formData.type still clears
+              `isolated`, and handleSubmit still only writes isolation_json in
+              the stdio branch. Both guards stay.
+            -->
+            <div v-if="formData.type === 'stdio'" class="form-control">
               <label class="flex items-center gap-3 cursor-pointer py-1">
                 <input
                   type="checkbox"
                   v-model="formData.isolated"
                   class="toggle toggle-info"
-                  :disabled="formData.type !== 'stdio'"
                 />
                 <span class="label-text font-semibold">Docker Isolation</span>
                 <div class="tooltip tooltip-right before:whitespace-normal before:w-56 before:max-w-[14rem]" data-tip="Run stdio server in isolated Docker container for enhanced security (stdio only)">
@@ -227,25 +234,6 @@
                   </svg>
                 </div>
               </label>
-            </div>
-
-            <!-- Idle on Inactivity -->
-            <div class="form-control">
-              <label class="flex items-center gap-3 cursor-pointer py-1">
-                <input
-                  type="checkbox"
-                  v-model="formData.idleOnInactivity"
-                  class="toggle toggle-success"
-                  disabled
-                />
-                <span class="label-text font-semibold opacity-50">Idle on Inactivity</span>
-                <div class="tooltip tooltip-right before:whitespace-normal before:w-56 before:max-w-[14rem]" data-tip="Future feature: Automatically stop server after period of inactivity to save resources">
-                  <svg class="w-4 h-4 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-              </label>
-              <span class="text-xs opacity-50 ml-12">Coming soon</span>
             </div>
 
             <!--
@@ -601,7 +589,11 @@ interface Props {
 
 interface Emits {
   (e: 'close'): void
-  (e: 'added'): void
+  // The single-server add names what it created so the consumer can hand off to
+  // that server's detail view — where connect/scan/review/approve actually
+  // happens. The bulk/import path emits no name (there is no single
+  // destination), which is what keeps consumers on the list they were reading.
+  (e: 'added', serverName?: string): void
 }
 
 const props = defineProps<Props>()
@@ -630,8 +622,7 @@ const formData = reactive({
   enabled: true,
   // Manual = the secure default (quarantined on add, every tool change held).
   trustMode: 'manual' as TrustMode,
-  isolated: false,
-  idleOnInactivity: false
+  isolated: false
 })
 
 const loading = ref(false)
@@ -876,7 +867,14 @@ async function handleSubmit() {
       message: `${formData.name} has been added successfully`
     })
 
-    emit('added')
+    // Emit the name that was SENT (the serverData snapshot), never the live
+    // formData.name. Two reasons, both real:
+    //  - The name input carries no disabled binding and Cancel stays live while
+    //    `loading` is true, so the field is editable across the await above.
+    //    Re-reading it here can name a server that was never created and strand
+    //    the consumer on ServerDetail's "Server not found".
+    //  - handleClose() below blanks formData.name outright.
+    emit('added', serverData.name)
     handleClose()
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to add server'
@@ -1124,7 +1122,6 @@ function handleClose() {
   formData.enabled = true
   formData.trustMode = 'manual'
   formData.isolated = false
-  formData.idleOnInactivity = false
   error.value = ''
 
   // Reset import state
