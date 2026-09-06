@@ -68,12 +68,11 @@ If you installed via **Homebrew** or **manual binary download**, start MCPProxy 
 mcpproxy serve
 ```
 
-You should see output like:
+MCPProxy logs its startup to the console and keeps running in the foreground. To
+confirm it came up, ask it from a second terminal:
 
-```
-MCPProxy server started
-Listening on http://127.0.0.1:8080
-Web UI available at http://127.0.0.1:8080/ui/
+```bash
+mcpproxy status
 ```
 
 :::note Running Both
@@ -82,7 +81,27 @@ If you're using the tray app, you don't need to run `mcpproxy serve` manually - 
 
 ## 2. Open the Web UI
 
-Open your browser to [http://127.0.0.1:8080/ui/](http://127.0.0.1:8080/ui/) to access the management dashboard.
+The dashboard lives at `http://127.0.0.1:8080/ui/`, but the REST API behind it
+**always requires an API key** (auto-generated on first run). Opening that bare
+URL loads the page and then raises a **🔒 Authentication Required** modal: *"The
+API key is invalid or missing."*
+
+Ask the CLI for the URL with your key already in it:
+
+```bash
+mcpproxy status --web-url
+```
+
+```
+http://127.0.0.1:8080/ui/?apikey=your-generated-api-key
+```
+
+Open that. The Web UI remembers the key, so later visits to `/ui/` work without it.
+
+:::tip Tray users
+The tray menu's **Open Web UI in Browser** entry opens the dashboard with the key
+already attached - no key handling needed.
+:::
 
 ## 3. Connect Your AI Client
 
@@ -180,10 +199,15 @@ You can manage your entire MCPProxy setup through natural conversation with your
 
 ### Via Web UI
 
-1. Open [http://127.0.0.1:8080/ui/](http://127.0.0.1:8080/ui/)
-2. Click **"Add Server"**
-3. Enter the server details
-4. Click **"Save"**
+1. Open the Web UI (see [step 2](#2-open-the-web-ui)) and click **Add Server** in
+   the top bar. The dialog is titled **Add New Server**.
+2. Under **Server Type**, pick **HTTP/HTTPS (Remote)**. The **URL** field only
+   appears once you do - the default, **stdio (Local Command)**, asks for a
+   command instead.
+3. **Server Name**: `context7` - **URL**: `https://mcp.context7.com/mcp`
+4. Leave **Trust Mode** on **Manual**: *"At add time the server is quarantined
+   until you approve it — the secure default."*
+5. Click **Add Server**.
 
 ### Via Configuration File
 
@@ -209,11 +233,175 @@ Edit `~/.mcpproxy/mcp_config.json`:
 }
 ```
 
-## 5. Verify Connection
+## 5. Approve It Out of Quarantine
 
-In your AI client, ask it to list available tools. You should see tools from all your configured MCP servers.
+However you added it, the server is now **quarantined** - its tools are withheld
+from your AI agent until you approve them. This is the point of MCPProxy's
+security model, and nothing works until you pass this gate. The transcripts below
+follow the Web UI path, so they show only `context7`; if you took the
+configuration-file route, `filesystem` is listed alongside it and needs the same
+approval.
 
-**Example:** *"What tools do I have available?"*
+```bash
+mcpproxy upstream list
+```
+
+```
+   NAME      PROTOCOL  TOOLS  STATUS                  ACTION
+🔒  context7  http      0      Quarantined for review  Approve in Web UI
+```
+
+Note the `0` tools: they exist, but are not exposed yet.
+
+### Review before approving
+
+Open the server's page in the Web UI. It shows the badge **Quarantined for
+review**, an **Awaiting manual review** banner, and the buttons **View report**
+and **Approve**. The **Security** tab holds the offline scan that ran on add -
+for `context7` it reports `Risk Score 0/100`, "2 tool definitions exported for
+analysis", and **No findings**.
+
+The same report from the CLI (abbreviated - the real output also carries a
+`Scan ID`, a `Scanned` timestamp, a per-scanner `Scanner timing` block, and the
+`Path` the tool definitions were exported to):
+
+```bash
+mcpproxy security report context7
+```
+
+```
+Security Report: context7
+Risk Score:  0/100
+Scanners:    1 run, 0 failed of 1
+
+Scan Context
+  Source:           tool_definitions_only
+  Protocol:         http
+  Docker isolation: false
+  Tools analyzed:   2
+
+=== Security Scan (Pass 1) ===
+  0 findings
+
+=== Supply Chain Audit (Pass 2) ===
+  Not started
+```
+
+### Approve
+
+Click **Approve** on the server page - it applies immediately, with no
+confirmation dialog - or from the CLI:
+
+```bash
+mcpproxy security approve context7
+```
+
+```
+Server "context7" approved.
+```
+
+The header flips to `Connected (2 tools)` and **Admin state** to **Enabled**.
+The Tools tab does not refill on its own: use **Actions** → **Refresh**, or
+reload the page, to see it go from `Tools (0)` to `Tools (2)`.
+
+```bash
+mcpproxy upstream list
+```
+
+```
+   NAME      PROTOCOL  TOOLS  STATUS               ACTION
+✅  context7  http      2      Connected (2 tools)  -
+```
+
+:::info Undo any of this
+- **Turn it off, keep the config:** server page → **Actions** → **Disable**.
+- **Put it back behind the gate:** **Actions** → **Quarantine** (the same menu
+  entry reads **Approve** while the server is quarantined).
+- **Remove it entirely:** the server page's **Actions** menu has no Delete. Go to
+  **Servers**, and on the server's card click **Delete** → confirm in the
+  **Delete Server** dialog.
+- **Unhook the AI client:** see [Connect Clients](/features/connect-clients).
+:::
+
+See [Security Quarantine](/features/security-quarantine) for what the scanner
+checks and how to keep servers gated permanently.
+
+## 6. Make a Real Tool Call
+
+Now have your agent actually use the server. In your AI client:
+
+> *"Search my mcpproxy tools for a way to resolve a library ID, then call it for Vue Router."*
+
+Your agent calls `retrieve_tools` first, which searches every upstream server and
+returns only the matching tools (abbreviated - each entry also carries the
+description, input schema and a relevance score):
+
+```json
+{"total":2,"tools":[
+  {"name":"context7:query-docs","server":"context7","call_with":"call_tool_read"},
+  {"name":"context7:resolve-library-id","server":"context7","call_with":"call_tool_read"}]}
+```
+
+The `call_with` field tells the agent which intent variant to use. It then calls
+`call_tool_read` on `context7:resolve-library-id`, which returns real data:
+
+```
+Available Libraries:
+
+- Title: Vue Router
+- Context7-compatible library ID: /websites/router_vuejs
+- Description: Vue Router is the official client-side routing solution for Vue that enables navigation between components in single-page applications.
+- Code Snippets: 863
+- Source Reputation: High
+- Benchmark Score: 85.45
+```
+
+:::note A first wrong guess is normal
+If the agent omits a required argument, MCPProxy rejects the call *before* it
+reaches the upstream server and hands back the schema so the agent can retry -
+`"error_type":"invalid_params"`, `missing property 'query'`, plus the full
+`input_schema`. That is the self-healing path working, not a failure.
+:::
+
+### Confirm it in the audit trail
+
+Every call is recorded. Both blocks below are abbreviated: `activity list` also
+prints the startup and scan rows and a `Showing N of N records` footer, and
+`activity show` opens with an `Activity Details` banner and also prints `ID`,
+`Timestamp`, `Session ID`, `Request ID` and the full `Arguments` block.
+
+```bash
+mcpproxy activity list
+```
+
+```
+ID                          SRC  TYPE          SERVER    TOOL                INTENT  SENSITIVE  STATUS              DURATION  TIME
+01M1V7SR7357R7NS5M3W33GV0N  MCP  tool_call     context7  resolve-library-id  📖       -          success             1.3s      just now
+01M1V7RXY0WRE2KF4XKYPH9QD1  MCP  internal_too            retrieve_tools      -       -          success             0ms       just now
+01M1V7QQA2NR500ZMRQMKSZN6C  MCP  tool_quarant  context7  resolve-library-id  -       -          tool_auto_approved  0ms       1 minute ago
+01M1V7QPN9WFWR9TTAQ28KN9AD  MCP  quarantine_c  context7                      -       -          enabled             0ms       1 minute ago
+```
+
+```bash
+mcpproxy activity show 01M1V7SR7357R7NS5M3W33GV0N
+```
+
+```
+Type:         tool_call
+Source:       MCP (AI agent via MCP protocol)
+Server:       context7
+Tool:         resolve-library-id
+Status:       success
+Duration:     1.3s
+
+Intent Declaration:
+  Tool Variant:      call_tool_read
+  Operation Type:    📖 read
+  Data Sensitivity:  public
+```
+
+The Web UI's **Activity Log** shows the same rows. You now have a server that was
+reviewed, approved, discovered and called - end to end.
 
 ## Next Steps
 
