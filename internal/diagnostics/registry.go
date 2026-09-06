@@ -281,7 +281,7 @@ func seedHTTP() {
 	register(CatalogEntry{
 		Code:        HTTPRateLimited,
 		Severity:    SeverityWarn,
-		UserMessage: "The server is rate-limiting mcpproxy (429 Too Many Requests). It will retry after the wait the server asked for.",
+		UserMessage: "The server is rate-limiting mcpproxy (429 Too Many Requests). mcpproxy backs off before retrying, and waits out the server's Retry-After header when it sends one.",
 		FixSteps: []FixStep{
 			{Type: FixStepCommand, Label: "Read the server's Retry-After header", Command: "curl -sS -o /dev/null -D - <server-url>"},
 			{Type: FixStepLink, Label: "Rate limits and back-off", URL: docsURL(HTTPRateLimited)},

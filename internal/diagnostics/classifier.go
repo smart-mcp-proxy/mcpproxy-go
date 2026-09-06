@@ -711,17 +711,23 @@ const (
 // no explicit protocol — had its status, timeout and status-text arms switched
 // off, and those failures landed in MCPX_UNKNOWN_UNCLASSIFIED.
 //
-// The empty string joins the family because it reaches hints.For only when the
-// server's config is unavailable, i.e. when nothing at all is known about the
-// transport. That is safe here: every arm this unlocks needs positive evidence
-// of an HTTP exchange (a status number in the text, a typed net error), so a
-// stdio-shaped failure still matches none of them. Predicates on the same HTTP
-// family already exist elsewhere in the codebase (config.auth_broker,
-// oauth.config) and agree on the member set.
+// The EMPTY string is deliberately NOT a member. It reaches hints.For only on
+// the supervisor's config-unavailable path, where nothing at all is known about
+// the transport — and "unknown" must not be spelled "HTTP", because three of
+// the four arms this gate unlocks carry no HTTP-specific evidence at all:
+// context.DeadlineExceeded, its stringified form, and context.Canceled are
+// transport-agnostic, and the status-text arm reads a stdio child's stderr TAIL,
+// which routinely quotes an HTTP status the CHILD saw. Folding "" in therefore
+// turned a stdio handshake timeout into MCPX_HTTP_TIMEOUT and a stdio exit whose
+// stderr mentioned "status 503" into MCPX_HTTP_5XX. Passing "" through leaves
+// those on MCPX_UNKNOWN_UNCLASSIFIED — exactly where they were before this
+// change — while the four HTTP spellings still fold together, which is the whole
+// point. Predicates on the same HTTP family already exist elsewhere in the
+// codebase (config.auth_broker, oauth.config) and agree on the member set.
 func CanonicalTransport(t string) string {
 	normalized := strings.ToLower(strings.TrimSpace(t))
 	switch normalized {
-	case "", "auto", "http", "https", "sse", "streamable-http", "streamable_http", "streamablehttp":
+	case "auto", "http", "https", "sse", "streamable-http", "streamable_http", "streamablehttp":
 		return TransportHTTP
 	default:
 		return normalized
@@ -846,39 +852,65 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 //     SSE CONNECT path, where the digits do NOT follow "status ". Without this
 //     marker an SSE server's 401 or 502 at connect time matched nothing and
 //     fell through to MCPX_UNKNOWN_UNCLASSIFIED.
-var statusTextMarkers = [...]string{"status ", "status code: "}
+//
+// Order matters only as a tie-break: "status " is a strict PREFIX of
+// "status code: ", so at a position where both match, the longer marker is the
+// one that describes the message. See statusAt.
+var statusTextMarkers = [...]string{"status code: ", "status "}
 
 // matchHTTPStatusText extracts a status code from the phrasings above. Returns
 // empty when no recognised status appears.
+//
+// The scan is POSITIONAL — left to right through the message, trying every
+// marker at each position — and it stops at the FIRST status token it can
+// parse, whether or not that status has a code. Both rules matter, because
+// mcp-go interpolates the raw response BODY into `request failed with status
+// %d: %s` (streamable_http.go:641, sse.go:630) and a body is free to quote a
+// status of its own. The first token is the transport's; everything after it
+// came out of the body and must never outrank it.
+//
+//   - Scanning one whole MARKER at a time let a later mention win, because the
+//     entire "status " sweep ran before "status code: " was tried at all:
+//     `unexpected status code: 503; body: upstream request failed with status
+//     401` answered MCPX_HTTP_401.
+//   - Continuing past an UNRECOGNISED status did the same thing one level down:
+//     `request failed with status 402: status 401` answered MCPX_HTTP_401, i.e.
+//     "fix your credentials" for a 402 billing failure. 402 has no code on
+//     purpose (see DiagnoseHTTPStatus) and the honest answer is none.
 func matchHTTPStatusText(lmsg string) Code {
-	for _, marker := range statusTextMarkers {
-		if c := matchStatusMarker(lmsg, marker); c != "" {
-			return c
+	for i := 0; i < len(lmsg); i++ {
+		if code, found := statusAt(lmsg, i); found {
+			return code
 		}
 	}
 	return ""
 }
 
-// matchStatusMarker scans every occurrence of one marker, because the message
-// may mention a status more than once and only one of them need be recognised.
-func matchStatusMarker(lmsg, marker string) Code {
-	idx := strings.Index(lmsg, marker)
-	for idx != -1 {
-		rest := lmsg[idx+len(marker):]
-		// Need at least three digits.
-		if len(rest) >= 3 && isDigit(rest[0]) && isDigit(rest[1]) && isDigit(rest[2]) {
+// statusAt reads the status token at exactly position i. found reports whether
+// a well-formed status token starts here at all; code is its Code, which is
+// empty for a status DiagnoseHTTPStatus deliberately does not map.
+//
+// Markers are tried longest-first so the "status code: " reading wins over the
+// "status " prefix reading of the same position ("status " is a strict prefix
+// of "status code: ", and at a shared position only the longer one describes
+// the message).
+func statusAt(lmsg string, i int) (code Code, found bool) {
+	for _, marker := range statusTextMarkers {
+		if !strings.HasPrefix(lmsg[i:], marker) {
+			continue
+		}
+		rest := lmsg[i+len(marker):]
+		// Exactly three digits: at least three, and NOT followed by a fourth.
+		// Without the trailing boundary "status 4011" read as 401 and
+		// "status 5000" as a 5xx — neither string holds an HTTP status, so
+		// neither is a token and the scan must keep going.
+		if len(rest) >= 3 && isDigit(rest[0]) && isDigit(rest[1]) && isDigit(rest[2]) &&
+			(len(rest) == 3 || !isDigit(rest[3])) {
 			status := int(rest[0]-'0')*100 + int(rest[1]-'0')*10 + int(rest[2]-'0')
-			if c := DiagnoseHTTPStatus(status); c != "" {
-				return c
-			}
+			return DiagnoseHTTPStatus(status), true
 		}
-		next := strings.Index(lmsg[idx+1:], marker)
-		if next == -1 {
-			break
-		}
-		idx += 1 + next
 	}
-	return ""
+	return "", false
 }
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }

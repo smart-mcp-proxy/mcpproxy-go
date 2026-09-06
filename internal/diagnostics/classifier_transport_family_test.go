@@ -199,19 +199,88 @@ func TestClassify_StdioTransportUnaffected(t *testing.T) {
 func TestCanonicalTransport(t *testing.T) {
 	http := map[string]bool{
 		"http": true, "https": true, "sse": true, "streamable-http": true,
-		"streamable_http": true, "auto": true, "": true, "Streamable-HTTP": true,
+		"streamable_http": true, "auto": true, "Streamable-HTTP": true,
 	}
 	for in := range http {
 		if got := CanonicalTransport(in); got != TransportHTTP {
 			t.Errorf("CanonicalTransport(%q) = %q, want %q", in, got, TransportHTTP)
 		}
 	}
-	for _, in := range []string{"stdio", "STDIO", "docker"} {
+	// "" is UNKNOWN, not HTTP. See TestClassify_UnknownTransportStaysUnknown.
+	for _, in := range []string{"stdio", "STDIO", "docker", "", "   "} {
 		if got := CanonicalTransport(in); got == TransportHTTP {
 			t.Errorf("CanonicalTransport(%q) = %q, must not join the HTTP family", in, got)
 		}
 	}
 	if got := CanonicalTransport("STDIO"); got != TransportStdio {
 		t.Errorf("CanonicalTransport(%q) = %q, want %q", "STDIO", got, TransportStdio)
+	}
+}
+
+// TestClassify_UnknownTransportStaysUnknown is the guard for the review finding
+// this change originally carried: folding the empty transport into the HTTP
+// family made "unknown" mean "HTTP".
+//
+// The empty transport is reachable in production — internal/runtime/supervisor
+// passes transport=="" whenever state.Config is nil — and three of the four arms
+// the family gate unlocks have nothing HTTP about them: a wrapped
+// context.DeadlineExceeded, its stringified form, and context.Canceled are
+// transport-agnostic, while the status-text arm reads mcpproxy's stdio exit
+// wrapper, whose attached stderr TAIL routinely quotes a status the CHILD
+// process saw. Each row below therefore classified as an MCPX_HTTP_* code
+// against a stdio-shaped failure, which is worse than admitting we do not know.
+func TestClassify_UnknownTransportStaysUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"wrapped deadline", fmt.Errorf("failed to list tools: %w", context.DeadlineExceeded)},
+		{"stringified deadline", errors.New("failed to list tools: context deadline exceeded")},
+		{"wrapped cancel", fmt.Errorf("connect aborted: %w", context.Canceled)},
+		{"stderr tail quoting a status", errors.New(
+			"server exited before completing the MCP initialize handshake; recent stderr: request failed with status 503")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(tc.err, ClassifierHints{})
+			if got != UnknownUnclassified {
+				t.Errorf("Classify(%q, unknown transport) = %q, want %q", tc.err, got, UnknownUnclassified)
+			}
+		})
+	}
+}
+
+// TestMatchHTTPStatusText_PositionalScan pins the two status-text parsing bugs
+// the cross-model review found: marker-at-a-time scanning let a status quoted
+// LATER in the message outrank the one the transport reported, and a run of four
+// digits was read as a three-digit status.
+//
+// Both phrasings can share one message because mcp-go interpolates the raw
+// response BODY into `request failed with status %d: %s`, and a body is free to
+// quote a status of its own.
+func TestMatchHTTPStatusText_PositionalScan(t *testing.T) {
+	cases := map[string]Code{
+		// The reported status is the FIRST one; a body quoting another must not win.
+		"unexpected status code: 503; body: upstream request failed with status 401":   HTTPServerErr,
+		"request failed with status 502: {\"detail\":\"unexpected status code: 401\"}": HTTPServerErr,
+		// The plain readings still work, in both phrasings.
+		"unexpected status code: 502":              HTTPServerErr,
+		"request failed with status 429":           HTTPRateLimited,
+		"notification failed with status 404: n/a": HTTPNotFound,
+		// The FIRST status token wins even when it has no code of its own: it is
+		// the one the transport reported, and anything after it came out of the
+		// response body. 402 and 200 are unmapped on purpose.
+		"request failed with status 402: status 401":                        "",
+		"unexpected status code: 200; body: request failed with status 401": "",
+		// Four digits are not an HTTP status.
+		"request failed with status 4011": "",
+		"http/1.1 status 5000":            "",
+		// ...and a real status followed by a delimiter still parses.
+		"request failed with status 401: unauthorized": HTTPUnauth,
+	}
+	for msg, want := range cases {
+		if got := matchHTTPStatusText(msg); got != want {
+			t.Errorf("matchHTTPStatusText(%q) = %q, want %q", msg, got, want)
+		}
 	}
 }

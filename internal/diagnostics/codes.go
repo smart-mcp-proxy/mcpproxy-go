@@ -58,10 +58,12 @@ const (
 	// down", never "fix your config" — and mcpproxy already honours the
 	// Retry-After header on this status (internal/transport/retry_after.go).
 	HTTPRateLimited Code = "MCPX_HTTP_RATE_LIMITED"
-	// HTTPClientErr: a 4xx that is not one of the specific codes above (400,
-	// 408, 409, 410, 451). The catch-all exists so a named status stops landing
-	// in MCPX_UNKNOWN_UNCLASSIFIED with its "file a bug report" CTA: the exact
-	// status travels in DiagnosticError.Cause, which is the raw error text.
+	// HTTPClientErr: the enumerated client-error statuses that have no more
+	// specific code of their own — 400, 408, 409, 410 and 451. (401, 403, 404
+	// and 429 each keep their own code; every other 4xx still falls through
+	// deliberately, see DiagnoseHTTPStatus.) The bucket exists so a named status
+	// stops landing in MCPX_UNKNOWN_UNCLASSIFIED with its "file a bug report"
+	// CTA: the exact status travels in DiagnosticError.Cause, the raw error text.
 	HTTPClientErr Code = "MCPX_HTTP_4XX"
 	// HTTPCanceled: the attempt was canceled before it finished — shutdown, a
 	// config reload replacing the client, or a user-initiated disconnect. Not a

@@ -50,9 +50,15 @@ func TestFor_CanonicalizesTransport(t *testing.T) {
 }
 
 // TestFor_CanonicalizesTransportWithoutServer covers the supervisor's
-// config-unavailable path, which passes an empty transport with a nil server.
+// config-unavailable path (supervisor.go passes transport=="" when
+// state.Config is nil). It must stay EMPTY, not become "http": three of the
+// four classifier arms the HTTP family unlocks — context.DeadlineExceeded, its
+// stringified form, and context.Canceled — carry no HTTP-specific evidence, and
+// the fourth reads a stdio child's stderr tail, which can quote a status the
+// CHILD saw. Calling an unknown transport "http" therefore turned stdio
+// failures into MCPX_HTTP_* codes.
 func TestFor_CanonicalizesTransportWithoutServer(t *testing.T) {
-	if got := hints.For(nil, nil, "").Transport; got != diagnostics.TransportHTTP {
-		t.Errorf("For(nil, nil, \"\").Transport = %q, want %q", got, diagnostics.TransportHTTP)
+	if got := hints.For(nil, nil, "").Transport; got != "" {
+		t.Errorf("For(nil, nil, \"\").Transport = %q, want %q (unknown must not be spelled HTTP)", got, "")
 	}
 }
