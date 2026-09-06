@@ -20,7 +20,16 @@ import (
 // newFixerTestServer builds a real Server through the production constructor —
 // the ONLY thing that installs the runtime-backed diagnostics fixers — with a
 // scratch data dir and a scratch log dir, plus one upstream client registered
-// (without connecting) so GetServerLogs can resolve it.
+// so GetServerLogs can resolve it.
+//
+// The server goes into cfg.Servers, NOT just into the upstream manager. An
+// earlier version called only UpstreamManager().AddServerConfig, which adds a
+// client the supervisor never asked for: reconcile diffs DESIRED (cfg.Servers)
+// against ACTUAL (the manager) and removes the difference, so the client
+// vanished and GetServerLogs answered "server not found: <name>". Locally the
+// test finished first and passed; on a slower CI runner reconcile won, and
+// two of these tests failed there while passing on every developer machine.
+// Making the server desired removes the race rather than outrunning it.
 func newFixerTestServer(t *testing.T, serverName, logDir string) *Server {
 	t.Helper()
 	return newFixerTestServerWithConfig(t, serverName, logDir, nil)
@@ -38,6 +47,7 @@ func newFixerTestServerWithConfig(t *testing.T, serverName, logDir string, tweak
 	cfg.Logging.LogDir = logDir
 	// Keep the heartbeat off: this test has no business talking to the network.
 	cfg.Telemetry = &config.TelemetryConfig{Enabled: &disabled}
+
 	if tweak != nil {
 		tweak(cfg)
 	}
@@ -46,13 +56,35 @@ func newFixerTestServerWithConfig(t *testing.T, serverName, logDir string, tweak
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown() })
 
+	ensureFixerClient(t, srv, serverName)
+	return srv
+}
+
+// ensureFixerClient registers the upstream client GetServerLogs resolves, and
+// must be called IMMEDIATELY before invoking a fixer.
+//
+// The supervisor reconciles DESIRED (cfg.Servers) against ACTUAL (the upstream
+// manager) and deletes the difference, so a client added out of band survives
+// only until the next reconcile pass. Registering once at construction was
+// enough on a developer machine and NOT on CI, where the gap between
+// construction and the fixer call is long enough under -race for a pass to
+// land: two of these tests failed there with "server not found: <name>" while
+// passing everywhere else. Re-registering at the call site closes the window
+// to the few microseconds before InvokeFixer.
+//
+// Putting the server in cfg.Servers instead does not work: reconcile removes
+// the client for a DISABLED entry too (verified), and an ENABLED entry spawns
+// a child and a per-server log writer that outlive Shutdown and then race
+// t.TempDir()'s RemoveAll ("directory not empty"). Disabled + re-register is
+// the combination with no background goroutine and no race.
+func ensureFixerClient(t *testing.T, srv *Server, serverName string) {
+	t.Helper()
 	require.NoError(t, srv.runtime.UpstreamManager().AddServerConfig(serverName, &config.ServerConfig{
 		Name:     serverName,
 		Protocol: "stdio",
 		Command:  "definitely-not-on-path",
 		Enabled:  false,
 	}))
-	return srv
 }
 
 // TestDiagnosticFixer_StdioShowLastLogs_ReturnsRealTail is the falsifier for the
@@ -82,6 +114,7 @@ func TestDiagnosticFixer_StdioShowLastLogs_ReturnsRealTail(t *testing.T) {
 	srv := newFixerTestServer(t, serverName, logDir)
 	require.NotNil(t, srv)
 
+	ensureFixerClient(t, srv, serverName)
 	res, err := diagnostics.InvokeFixer(context.Background(), "stdio_show_last_logs", diagnostics.FixRequest{
 		ServerID: serverName,
 		Mode:     diagnostics.ModeExecute,
@@ -142,6 +175,7 @@ func TestDiagnosticFixer_StdioShowLastLogs_BoundsThePayload(t *testing.T) {
 	srv := newFixerTestServer(t, serverName, logDir)
 	require.NotNil(t, srv)
 
+	ensureFixerClient(t, srv, serverName)
 	res, err := diagnostics.InvokeFixer(context.Background(), "stdio_show_last_logs", diagnostics.FixRequest{
 		ServerID: serverName,
 		Mode:     diagnostics.ModeExecute,
@@ -172,6 +206,7 @@ func TestDiagnosticFixer_StdioShowLastLogs_MissingLogIsAFailure(t *testing.T) {
 	srv := newFixerTestServer(t, serverName, logDir)
 	require.NotNil(t, srv)
 
+	ensureFixerClient(t, srv, serverName)
 	res, err := diagnostics.InvokeFixer(context.Background(), "stdio_show_last_logs", diagnostics.FixRequest{
 		ServerID: serverName,
 		Mode:     diagnostics.ModeExecute,
@@ -291,6 +326,7 @@ func TestDiagnosticFixer_StdioShowLastLogs_CapCountsItsOwnFraming(t *testing.T) 
 	srv := newFixerTestServer(t, serverName, logDir)
 	require.NotNil(t, srv)
 
+	ensureFixerClient(t, srv, serverName)
 	res, err := diagnostics.InvokeFixer(context.Background(), "stdio_show_last_logs", diagnostics.FixRequest{
 		ServerID: serverName,
 		Mode:     diagnostics.ModeExecute,
