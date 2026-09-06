@@ -4,6 +4,13 @@
 const {themes: prismThemes} = require('prism-react-renderer');
 
 /** @type {import('@docusaurus/types').Config} */
+// Version shown in the navbar badge. Supplied by CI (docs.yml derives it from
+// the latest release tag); empty locally, which hides the badge rather than
+// rendering a placeholder.
+const rawVersion = (process.env.DOCS_VERSION || '').trim();
+const siteVersion =
+  rawVersion && !rawVersion.includes('__') ? (rawVersion.startsWith('v') ? rawVersion : `v${rawVersion}`) : '';
+
 const config = {
   title: 'MCPProxy Documentation',
   tagline: 'Smart MCP Proxy for AI Agents',
@@ -140,11 +147,21 @@ const config = {
             label: 'GitHub',
             position: 'right',
           },
-          {
-            type: 'html',
-            position: 'right',
-            value: '<span class="badge badge--primary">v__VERSION__</span>',
-          },
+          // Version badge. Rendered only when a real version is available:
+          // the docs site is deployed by .github/workflows/docs.yml, which
+          // does NOT run the `sed s/__VERSION__/.../` step that release.yml
+          // applies, so a hard-coded placeholder shipped to production as the
+          // literal string "v__VERSION__". Omitting the badge is better than
+          // showing a placeholder, and docs.yml now supplies DOCS_VERSION.
+          ...(siteVersion
+            ? [
+                {
+                  type: 'html',
+                  position: 'right',
+                  value: `<span class="badge badge--primary">${siteVersion}</span>`,
+                },
+              ]
+            : []),
         ],
       },
       footer: {

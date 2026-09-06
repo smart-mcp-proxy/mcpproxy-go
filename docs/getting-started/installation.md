@@ -13,11 +13,51 @@ MCPProxy can be installed on macOS, Windows, and Linux. Choose the installation 
 
 ## macOS
 
-### DMG Installer (Recommended)
+### Installer DMG (Recommended)
 
-Download the latest `.dmg` file from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and drag MCPProxy to your Applications folder.
+Download `mcpproxy-<version>-darwin-arm64-installer.dmg` (Apple Silicon) or
+`-darwin-amd64-installer.dmg` (Intel) from the
+[releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases).
 
-The DMG installers are signed and notarized by Apple.
+**There is nothing to drag.** The disk image contains a `.pkg` installer and a
+`README.txt`:
+
+1. Open the DMG and double-click the `.pkg` file.
+2. macOS asks for an administrator password — the package installs for all
+   users, so this is required.
+3. Follow the installer. There are no components to choose.
+4. Launch **mcpproxy** from Applications. It appears in the menu bar.
+
+Both the disk image and the package are signed and notarized by Apple.
+
+#### What the installer puts on your machine
+
+| Path | What it is |
+|------|------------|
+| `/Applications/mcpproxy.app` | The menu-bar app, with the headless core bundled inside it |
+| `/usr/local/bin/mcpproxy` | Symlink to the core binary, so `mcpproxy` works in a terminal |
+| `~/.mcpproxy/` | Your config, database, index and logs |
+| `~/.mcpproxy/certs/ca.pem` | A local CA certificate, copied to disk only |
+
+**The installer does not change your system's certificate trust.** The bundled
+`ca.pem` exists so that the optional HTTPS mode has a certificate available; it
+is only added to the login keychain if you later run `mcpproxy trust-cert`
+yourself. The default mode is plain HTTP on `127.0.0.1:8080` and needs no
+certificate at all.
+
+The installer also removes a stale `LaunchAgent` left behind by pre-0.5x
+builds. It does **not** configure auto-start — that is a per-user toggle in the
+tray menu ("Launch at Login").
+
+#### Uninstalling
+
+```bash
+sudo rm -rf /Applications/mcpproxy.app /usr/local/bin/mcpproxy
+rm -rf ~/.mcpproxy          # only if you also want to discard your config
+```
+
+If you ran `mcpproxy trust-cert`, remove the certificate from **Keychain
+Access → login → Certificates** as well.
 
 ### Homebrew
 
