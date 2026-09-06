@@ -6,7 +6,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 )
 
 // GetToolCount feeds the telemetry heartbeat's tool_count, which is the field
@@ -47,4 +50,39 @@ func TestGetToolCount_ReadsIndexDocumentCount(t *testing.T) {
 func TestGetToolCount_NoIndexManagerIsZero(t *testing.T) {
 	r := &Runtime{}
 	assert.Equal(t, 0, r.GetToolCount())
+}
+
+// TestGetToolCount_ClosedIndexKeepsLastKnownCount pins the shutdown case a
+// cross-model review found. Runtime.Close() performs a final graceful
+// telemetry flush, and that heartbeat reads tool_count from here. The index
+// used to be closed BEFORE that flush, so GetDocumentCount failed and the call
+// fell through to the upstream-cache path — which by then has disconnected
+// clients and answers 0. An install with a fully populated durable index would
+// therefore have signed off with tool_count=0, which is the very confound this
+// function was changed to remove.
+//
+// Close() now closes the index after the flush; this test pins the second,
+// order-independent guard: once the index has answered, a later failure to
+// answer reports the last true value rather than a structural zero.
+func TestGetToolCount_ClosedIndexKeepsLastKnownCount(t *testing.T) {
+	// Own index manager, not newProfileTestRuntime's: that helper closes on
+	// cleanup, and index.Manager.Close is not idempotent (Bleve panics on the
+	// second call), so this test has to be the only closer.
+	dataDir := t.TempDir()
+	mgr, err := index.NewManager(dataDir, zap.NewNop())
+	require.NoError(t, err)
+
+	r := &Runtime{logger: zap.NewNop(), cfg: &config.Config{DataDir: dataDir}, indexManager: mgr}
+
+	require.NoError(t, mgr.BatchIndexTools([]*config.ToolMetadata{
+		toolMeta("github", "create_issue"),
+		toolMeta("github", "list_repos"),
+		toolMeta("slack", "post_message"),
+	}))
+	require.Equal(t, 3, r.GetToolCount(), "precondition: the index answered")
+
+	require.NoError(t, mgr.Close())
+
+	assert.Equal(t, 3, r.GetToolCount(),
+		"a closed index sent tool_count down the upstream-cache fallback, which reports 0")
 }

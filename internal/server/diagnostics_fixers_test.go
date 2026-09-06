@@ -23,6 +23,13 @@ import (
 // (without connecting) so GetServerLogs can resolve it.
 func newFixerTestServer(t *testing.T, serverName, logDir string) *Server {
 	t.Helper()
+	return newFixerTestServerWithConfig(t, serverName, logDir, nil)
+}
+
+// newFixerTestServerWithConfig is newFixerTestServer with a hook to mutate the
+// config before construction, for the gate cases.
+func newFixerTestServerWithConfig(t *testing.T, serverName, logDir string, tweak func(*config.Config)) *Server {
+	t.Helper()
 
 	disabled := false
 	cfg := config.DefaultConfig()
@@ -31,6 +38,9 @@ func newFixerTestServer(t *testing.T, serverName, logDir string) *Server {
 	cfg.Logging.LogDir = logDir
 	// Keep the heartbeat off: this test has no business talking to the network.
 	cfg.Telemetry = &config.TelemetryConfig{Enabled: &disabled}
+	if tweak != nil {
+		tweak(cfg)
+	}
 
 	srv, err := NewServer(cfg, zap.NewNop())
 	require.NoError(t, err)
@@ -145,8 +155,12 @@ func TestDiagnosticFixer_StdioShowLastLogs_BoundsThePayload(t *testing.T) {
 		"the oldest line survived, so the payload was not bounded at all")
 	assert.Contains(t, res.Preview, "older line(s) omitted",
 		"lines were dropped without telling the operator anything was missing")
-	assert.Less(t, len(res.Preview), 3*diagnosticsPreviewMaxBytes,
-		"the bounded preview is still far larger than the cap")
+	// The real bound, not a slack multiple of it. Every retained line here is
+	// ~1KB, so the newest-line exemption cannot be what carries this: the
+	// assertion fails if the header and the omission notice are left out of
+	// the budget, which is exactly the defect a cross-model review found.
+	assert.LessOrEqual(t, len(res.Preview), diagnosticsPreviewMaxBytes,
+		"the rendered preview exceeded the cap the constant advertises")
 }
 
 // TestDiagnosticFixer_StdioShowLastLogs_MissingLogIsAFailure asserts the honest
@@ -211,4 +225,81 @@ func TestDiagnosticFixer_OAuthReauth_DryRunDoesNotSignIn(t *testing.T) {
 	assert.NotEmpty(t, res.Preview)
 	assert.Empty(t, res.FailureMsg,
 		"dry_run must not have called the coordinator (a call would fail: server not found)")
+}
+
+// TestDiagnosticFixer_OAuthReauth_RespectsWriteGates pins the gate the fixer
+// used to skip. POST /api/v1/servers/{id}/login goes through the management
+// service, whose checkWriteGates refuses when read_only_mode or
+// disable_management is set. The fixer called Runtime.TriggerOAuthLogin
+// directly and therefore honoured neither — an authorized diagnostics request
+// could start an OAuth flow on an install whose owner had turned management
+// off. The diagnostics route's own middleware checks caller authorization,
+// not these config gates.
+func TestDiagnosticFixer_OAuthReauth_RespectsWriteGates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*config.Config)
+		want  string
+	}{
+		{"read_only_mode", func(c *config.Config) { c.ReadOnlyMode = true }, "read_only_mode"},
+		{"disable_management", func(c *config.Config) { c.DisableManagement = true }, "disable_management"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFixerTestServerWithConfig(t, "some-registered-server", t.TempDir(), tc.apply)
+			require.NotNil(t, srv)
+
+			res, err := diagnostics.InvokeFixer(context.Background(), "oauth_reauth", diagnostics.FixRequest{
+				ServerID: "some-registered-server",
+				Mode:     diagnostics.ModeExecute,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, diagnostics.OutcomeFailed, res.Outcome,
+				"the fixer started a sign-in while %s was set", tc.want)
+			assert.Contains(t, res.FailureMsg, tc.want,
+				"the refusal must name the gate that refused, as the REST login route does")
+		})
+	}
+}
+
+// TestDiagnosticFixer_StdioShowLastLogs_CapCountsItsOwnFraming pins the second
+// half of the byte cap, which a cross-model review showed was missing: the line
+// loop measured only the log lines, while the rendered payload also carries a
+// header and an "older lines omitted" notice, both interpolating the server
+// name. A tail whose lines filled the cap therefore shipped a payload LARGER
+// than the cap the constant advertises.
+//
+// The fixture is sized so the two behaviours differ by exactly one line: every
+// line costs 180 bytes, so an unbudgeted loop keeps 45 of them (8100 bytes,
+// under 8192) and the framing pushes the result past the cap, while a budgeted
+// loop keeps 44 and lands inside it. The newest-line exemption cannot mask this
+// — no single line here is anywhere near the cap.
+func TestDiagnosticFixer_StdioShowLastLogs_CapCountsItsOwnFraming(t *testing.T) {
+	const serverName = "framed-stdio"
+	logDir := t.TempDir()
+
+	var content strings.Builder
+	for i := 0; i < 60; i++ {
+		// 8 + 171 = 179 bytes of message, 180 with the newline the loop adds.
+		content.WriteString(fmt.Sprintf("line-%02d ", i))
+		content.WriteString(strings.Repeat("y", 171))
+		content.WriteByte('\n')
+	}
+	require.NoError(t, os.WriteFile(
+		filepath.Join(logDir, logs.ServerLogFilename(serverName)),
+		[]byte(content.String()), 0o600))
+
+	srv := newFixerTestServer(t, serverName, logDir)
+	require.NotNil(t, srv)
+
+	res, err := diagnostics.InvokeFixer(context.Background(), "stdio_show_last_logs", diagnostics.FixRequest{
+		ServerID: serverName,
+		Mode:     diagnostics.ModeExecute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, diagnostics.OutcomeSuccess, res.Outcome, res.FailureMsg)
+	require.Contains(t, res.Preview, "older line(s) omitted",
+		"fixture no longer exceeds the cap, so this test proves nothing")
+
+	assert.LessOrEqual(t, len(res.Preview), diagnosticsPreviewMaxBytes,
+		"header and omission notice are not counted against the cap (got %d bytes)", len(res.Preview))
 }

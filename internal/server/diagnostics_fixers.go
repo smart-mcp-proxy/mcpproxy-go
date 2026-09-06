@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // Spec 044's self-heal buttons are backed by fixers registered in
@@ -50,6 +51,11 @@ const diagnosticsLogTailLines = 50
 // such lines would be a multi-megabyte toast. The cap keeps the NEWEST lines —
 // a tail is read bottom-up — and the fixer states plainly what it dropped, so
 // nothing goes missing silently.
+//
+// One documented exemption: the single newest line is never dropped or
+// truncated, so a payload can exceed this when that one line does. That is
+// deliberate (it is the line that explains the failure) and it is the ONLY way
+// past the cap — the header and the omission notice are budgeted for.
 const diagnosticsPreviewMaxBytes = 8 * 1024
 
 // registerDiagnosticFixers installs the runtime-backed fixer implementations
@@ -116,11 +122,24 @@ func (s *Server) fixShowLastServerLogs(_ context.Context, req diagnostics.FixReq
 	// the total payload (diagnosticsPreviewMaxBytes), by dropping the OLDEST
 	// lines, because the newest line is the one that explains the failure. The
 	// newest line always survives whole, however long it is.
+	//
+	// The budget subtracts the framing the line loop does not measure — the
+	// header and the omission notice, both of which interpolate the server
+	// name. Without that, a tail whose lines exactly filled the cap shipped a
+	// payload larger than the cap the constant advertises.
+	overhead := len(fmt.Sprintf("Last %d log line(s) for %q:\n", len(entries), req.ServerID)) +
+		len(fmt.Sprintf("\n(%d older line(s) omitted to keep this readable — run `mcpproxy upstream logs %s` for the full log.)\n",
+			len(entries), req.ServerID))
+	budget := diagnosticsPreviewMaxBytes - overhead
+	if budget < 0 {
+		budget = 0
+	}
+
 	start := 0
 	size := 0
 	for i := len(entries) - 1; i >= 0; i-- {
 		size += len(entries[i].Message) + 1
-		if size > diagnosticsPreviewMaxBytes && i != len(entries)-1 {
+		if size > budget && i != len(entries)-1 {
 			start = i + 1
 			break
 		}
@@ -145,24 +164,38 @@ func (s *Server) fixShowLastServerLogs(_ context.Context, req diagnostics.FixReq
 
 // fixOAuthReauth implements the "Sign in" / "Log in again" button.
 //
-// It calls Runtime.TriggerOAuthLogin — the same call POST
-// /api/v1/servers/{name}/login makes — which clears the user-logged-out flag
-// and hands off to Manager.StartManualOAuth. StartManualOAuth returns as soon
-// as the flow's goroutine is launched, so this stays well inside the fix
-// endpoint's 15s timeout.
+// It goes through the management service's TriggerOAuthLoginQuick — byte for
+// byte the call POST /api/v1/servers/{id}/login makes
+// (internal/httpapi/server.go handleServerLogin) — and NOT Runtime's method
+// directly. That distinction is the whole point of this indirection:
 //
-// Concurrency is already handled upstream and is NOT re-implemented here:
-// Client.handleOAuthAuthorization stands down when a manual sign-in is already
-// in flight (internal/upstream/core/connection_oauth.go, issue #975) and
-// refuses a duplicate flow via isOAuthInProgress, so a second click surfaces as
-// an error string rather than a second browser tab.
+//   - The management service applies checkWriteGates first
+//     (internal/management/service.go), which refuses when read_only_mode or
+//     disable_management is set. Calling the Runtime directly skipped both, so
+//     a one-click button could start an OAuth flow on an install whose owner
+//     had turned management off — the diagnostics route's own middleware only
+//     checks caller authorization, not those config gates.
+//   - It returns an OAuthStartResult carrying BrowserOpened / BrowserError, so
+//     the success message can say what actually happened instead of asserting
+//     that a browser window opened. The old wording claimed the window had
+//     opened even when the launch failed, which is the same "a success that
+//     means nothing" defect this whole file exists to remove.
+//
+// Duplicate clicks behave exactly as the REST login button does — no better,
+// no worse — because it is now the same call. An earlier version of this
+// comment claimed a stronger guarantee (that a second click "surfaces as an
+// error string rather than a second browser tab") than the code provides:
+// Manager.StartManualOAuth builds a fresh core client per invocation, so the
+// isOAuthInProgress check is per-client. Whatever that path's real duplicate
+// behaviour is, it is a pre-existing property of the login route and is not
+// changed here.
 //
 // Gating is unchanged: every catalog entry that offers this fixer marks the
 // step Destructive (except MCPX_OAUTH_LOGIN_REQUIRED's first-time "Sign in",
 // where there is no stored credential to lose), so handleInvokeFix still
 // demands an explicit mode (409 otherwise) and the Web UI's ErrorPanel still
 // gates Execute behind window.confirm().
-func (s *Server) fixOAuthReauth(_ context.Context, req diagnostics.FixRequest) (diagnostics.FixResult, error) {
+func (s *Server) fixOAuthReauth(ctx context.Context, req diagnostics.FixRequest) (diagnostics.FixResult, error) {
 	if req.ServerID == "" {
 		return diagnostics.FixResult{
 			Outcome:    diagnostics.OutcomeFailed,
@@ -179,17 +212,49 @@ func (s *Server) fixOAuthReauth(_ context.Context, req diagnostics.FixRequest) (
 		}, nil
 	}
 
-	if err := s.runtime.TriggerOAuthLogin(req.ServerID); err != nil {
+	// Fail closed if the gated path is unavailable rather than falling back to
+	// the ungated Runtime call: "the write gates could not be applied" is not a
+	// reason to skip them.
+	mgmtSvc, ok := s.GetManagementService().(interface {
+		TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error)
+	})
+	if !ok {
+		return diagnostics.FixResult{
+			Outcome:    diagnostics.OutcomeFailed,
+			FailureMsg: "the management service is not available, so sign-in cannot be started from here",
+		}, nil
+	}
+
+	result, err := mgmtSvc.TriggerOAuthLoginQuick(ctx, req.ServerID)
+	if err != nil {
 		return diagnostics.FixResult{
 			Outcome:    diagnostics.OutcomeFailed,
 			FailureMsg: scrubUpstreamText(err.Error()),
 		}, nil
 	}
 
+	// Say what happened, not what usually happens. A failed browser launch is
+	// still a started flow — the URL is valid and the user can finish it — so
+	// this is a success with an instruction, not a failure.
+	msg := fmt.Sprintf(
+		"Sign-in started for server %q. Complete it in the browser window that just opened; the server reconnects on its own once you do.",
+		req.ServerID)
+	if result != nil && !result.BrowserOpened {
+		msg = fmt.Sprintf(
+			"Sign-in started for server %q, but the browser could not be opened%s. Open this URL yourself to finish:\n%s",
+			req.ServerID, browserErrSuffix(result.BrowserError), result.AuthURL)
+	}
+
 	return diagnostics.FixResult{
 		Outcome: diagnostics.OutcomeSuccess,
-		Preview: fmt.Sprintf(
-			"Sign-in started for server %q. Complete it in the browser window that just opened; the server reconnects on its own once you do.",
-			req.ServerID),
+		Preview: msg,
 	}, nil
+}
+
+// browserErrSuffix renders the launcher's own error, scrubbed, when it gave one.
+func browserErrSuffix(browserErr string) string {
+	if strings.TrimSpace(browserErr) == "" {
+		return ""
+	}
+	return " (" + scrubUpstreamText(browserErr) + ")"
 }

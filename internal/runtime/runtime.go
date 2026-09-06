@@ -69,6 +69,12 @@ type Runtime struct {
 	mu      sync.RWMutex
 	running bool
 
+	// lastToolCount is the most recent SUCCESSFUL index document count, used by
+	// GetToolCount when the index cannot answer. See the note there: the
+	// upstream tool-count cache is not a usable fallback, so a stale-but-true
+	// value beats falling through to a structural zero.
+	lastToolCount atomic.Int64
+
 	// desiredCfg is the configuration as it stands ON DISK — what the next
 	// start will use. It differs from r.cfg only while a restart-gated field
 	// (listen, routing_mode, data_dir, api_key, tls, the HTTP deadlines) has
@@ -840,12 +846,6 @@ func (r *Runtime) Close() error {
 		r.cacheManager.Close()
 	}
 
-	if r.indexManager != nil {
-		if err := r.indexManager.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close index manager: %w", err))
-		}
-	}
-
 	// Spec 080 (FR-010, review round 4): the ActivityService owns BBolt
 	// writers — activity records, retention pruning, usage-snapshot flushes,
 	// async sensitive-data detection. The appCancel at the top of Close
@@ -883,6 +883,20 @@ func (r *Runtime) Close() error {
 	// resolves below — because its buildHeartbeat writes funnel activity.
 	if r.telemetryService != nil {
 		r.telemetryService.Stop()
+	}
+
+	// The index closes AFTER the telemetry flush above, not before it. That
+	// flush builds one last heartbeat, and tool_count is read from this index
+	// (GetToolCount). Closing first made GetDocumentCount fail, which sent the
+	// final heartbeat down the upstream-cache fallback — and by this point the
+	// upstream clients are disconnected, so it would have reported tool_count=0
+	// for an install with a full index. Nothing between the old position and
+	// here touches the index: cacheManager.Close, activityService.Stop and
+	// telemetryService.Stop are all BBolt/HTTP work.
+	if r.indexManager != nil {
+		if err := r.indexManager.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close index manager: %w", err))
+		}
 	}
 
 	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
@@ -3435,15 +3449,28 @@ func (r *Runtime) GetConnectedServerCount() int {
 // Per-profile indexes are not double-counted: RebuildProfileFromShared derives
 // each of them from this shared index, so the shared count is the superset.
 //
-// The cache remains the fallback for the case where no index manager is wired
-// (unit tests and early startup).
+// When the index CANNOT answer — it is closed, mid-reopen, or returned an
+// error — the last successful count is reported instead of falling through to
+// the upstream cache. That matters most at shutdown: Close() performs a final
+// graceful heartbeat flush (telemetryService.Stop), and the upstream clients
+// are disconnected by then, so the cache path would answer 0 for an install
+// with a fully populated durable index — reintroducing the exact structural
+// zero this function was changed to remove. Close() also now closes the index
+// AFTER that flush, so this is defence in depth rather than the only guard.
+//
+// The upstream cache remains the fallback only for the case it is actually
+// right for: no index manager wired at all (unit tests, early startup).
 func (r *Runtime) GetToolCount() int {
 	if r.indexManager != nil {
 		if count, err := r.indexManager.GetDocumentCount(); err == nil {
 			if count > uint64(math.MaxInt32) {
-				return math.MaxInt32
+				count = math.MaxInt32
 			}
+			r.lastToolCount.Store(int64(count))
 			return int(count)
+		}
+		if last := r.lastToolCount.Load(); last > 0 {
+			return int(last)
 		}
 	}
 	if r.upstreamManager == nil {
