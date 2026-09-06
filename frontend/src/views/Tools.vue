@@ -251,7 +251,14 @@
                and a next step. -->
           <div v-if="searchQuery" data-test="tools-empty-search">
             <p class="text-lg">No tools match "{{ searchQuery }}"</p>
-            <p class="text-sm mt-1">
+            <!-- With another filter already down to nothing, no wording of the
+                 query can help; saying "try fewer words" points at the wrong
+                 control. Name the real cause instead. -->
+            <p v-if="searchScope.length === 0" class="text-sm mt-1">
+              Nothing was in scope to search — the other active filters excluded every
+              tool before the query ran. Clear them to search the full list.
+            </p>
+            <p v-else class="text-sm mt-1">
               Searched {{ searchScope.length }} tool{{ searchScope.length === 1 ? '' : 's' }}
               across {{ searchScopeServerCount }} server{{ searchScopeServerCount === 1 ? '' : 's' }}<template v-if="!filterStatus">, disabled tools included</template>.
               Every word has to match — try fewer words.
@@ -919,8 +926,8 @@ const searchScope = computed(() => {
 
 const filteredTools = computed(() => {
   // Audit F11: the whole query used to have to appear as one contiguous
-  // substring of a single field, so "react documentation" matched nothing while
-  // "documentation" matched Context7. Match each whitespace-separated term
+  // substring of a single field, so "context7 documentation" matched nothing
+  // while "documentation" matched it. Match each whitespace-separated term
   // independently instead (AND across terms, OR across fields). This is a strict
   // superset of the old behaviour -- if the whole query was a substring of a
   // field, so is every one of its terms -- so no result that matched before can

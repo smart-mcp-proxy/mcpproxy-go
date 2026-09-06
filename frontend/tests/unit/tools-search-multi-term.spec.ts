@@ -5,8 +5,8 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 
 // Audit F11: the Tools page search matched the WHOLE query as one contiguous
-// substring of a single field, so "react documentation" found nothing while
-// "documentation" found Context7. The box looks like natural-language discovery
+// substring of a single field, so "context7 documentation" found nothing while
+// "documentation" found the same tool. The box looks like natural-language discovery
 // and behaves like a phrase match, then says only "No matching tools" — with no
 // hint of what was searched, or that quarantined servers were never in scope.
 
@@ -87,6 +87,11 @@ describe('Tools search matches each term separately (audit F11)', () => {
 
     expect(wrapper.find('[data-test="tools-table"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('get-library-docs')
+    // The headline scenario: a multi-word query that finds nothing must still
+    // reach the explanatory empty state, not just render an empty page.
+    const empty = wrapper.find('[data-test="tools-empty-search"]')
+    expect(empty.exists()).toBe(true)
+    expect(empty.text()).toContain('"context7 kubernetes"')
   })
 })
 
@@ -158,6 +163,20 @@ describe('Tools search empty state says what was searched (audit F11)', () => {
     const empty = wrapper.find('[data-test="tools-empty-search"]')
     expect(empty.exists()).toBe(true)
     expect(empty.text()).toContain('1 tool across 1 server')
+  })
+
+  it('does not blame the query when the other filters left nothing to search', async () => {
+    // Click the "Disabled" stat card on an all-enabled catalogue, then search:
+    // the search never ran against anything, so "try fewer words" is advice for
+    // the wrong control.
+    const wrapper = await mountTools('/tools?q=kubernetes')
+    await wrapper.find('[data-test="filter-status"]').setValue('disabled')
+
+    const empty = wrapper.find('[data-test="tools-empty-search"]')
+    expect(empty.exists()).toBe(true)
+    expect(empty.text()).toContain('Nothing was in scope to search')
+    expect(empty.text()).not.toContain('try fewer words')
+    expect(empty.text()).not.toContain('Searched 0 tools')
   })
 
   it('drops the "disabled included" claim when a status filter excludes them', async () => {
