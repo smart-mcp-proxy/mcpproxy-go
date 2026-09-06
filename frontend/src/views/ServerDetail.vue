@@ -1763,7 +1763,7 @@ const toolsEmptyBody = computed(() => {
   // Configuration is the right pointer because it renders `last_error` verbatim
   // and unconditionally, which is exactly where the suppressed fault is legible.
   if (server.value?.last_error) {
-    return "This server's tools are withheld while it is quarantined, and it last reported a connection error — so approving it may not be enough on its own. Check the error under Configuration, then review the findings on the Security tab."
+    return "This server's tools are withheld while it is quarantined, and it last reported a connection error — so approving it may not be enough on its own. The error is shown above; review the findings on the Security tab as well."
   }
   return "This server's tools are withheld while the server is quarantined. Review the findings on the Security tab, then approve the server to list them."
 })
@@ -1970,7 +1970,17 @@ const healthLevelTone = computed(() => {
 // facts arrive in one payload. The quarantine banner below already states the
 // situation and the action, so every red fault alert is suppressed here — the
 // same rule the tray applies via ServerStatus.isBadgeExempt.
-const quarantineSuppressesFaultAlerts = computed(() => !!server.value?.quarantined)
+//
+// Narrowed: suppress the NOISE, not a real fault. The backend now separates the
+// two — internal/health/calculator.go leaves an ordinary quarantined server at
+// level "healthy" and marks one with an actual transport fault "unhealthy",
+// keeping admin_state=quarantined and action=approve in both cases. Blanket
+// suppression meant a quarantined stdio server pointed at a command that does
+// not exist looked calm and approvable, and approving it produced a second
+// failure. Follow the level rather than hiding everything.
+const quarantineSuppressesFaultAlerts = computed(
+  () => !!server.value?.quarantined && server.value?.health?.level !== 'unhealthy'
+)
 
 // Spec 044 — render the structured diagnostic panel whenever a warn/error
 // diagnostic is attached. Info-level diagnostics are ignored (shown only in
