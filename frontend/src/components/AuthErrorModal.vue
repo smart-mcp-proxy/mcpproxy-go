@@ -19,7 +19,18 @@
             <ol class="list-decimal list-inside space-y-1 text-sm">
               <li><strong>From the CLI:</strong> run <code class="bg-base-200 px-1 rounded">mcpproxy status</code> — its "Web UI" line is a ready-to-open URL with the key embedded (<code class="bg-base-200 px-1 rounded">mcpproxy status --web-url</code> prints just that URL), or read <code class="bg-base-200 px-1 rounded">api_key</code> in <code class="bg-base-200 px-1 rounded">~/.mcpproxy/mcp_config.json</code></li>
               <li><strong>From logs:</strong> the key is logged in full only by the start that generated it — later starts log a masked prefix</li>
-              <li><strong>Using the tray</strong> (desktop installs): click the MCPProxy tray icon and choose "Open Web UI in Browser" (Windows: "Open Web Control Panel") — it opens an already-authenticated window</li>
+              <!-- The label is NOT an OS split. "Open Web UI in Browser" is
+                   the Swift app bundle (native/macos, shipped in the DMG);
+                   "Open Web Control Panel" is the Go tray
+                   (internal/tray/tray.go:594), whose build tag is
+                   `!nogui && !headless && !linux` — so it ships on Windows AND
+                   on macOS via the darwin tarball and Homebrew
+                   (`bin.install "mcpproxy-tray" if OS.mac?`). Naming one of
+                   them "Windows:" would put a fresh false statement on the
+                   screen this modal exists to make honest. Both trays fetch
+                   the URL from /api/v1/info over the socket, which answers
+                   with an admin context, so both get the key appended. -->
+              <li><strong>Using the tray</strong> (desktop installs): click the MCPProxy tray icon and choose "Open Web UI in Browser" or "Open Web Control Panel" (the wording depends on which tray build you have) — either opens an already-authenticated window</li>
             </ol>
           </div>
         </div>
