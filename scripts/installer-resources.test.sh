@@ -37,7 +37,12 @@ CONCLUSION_TXT="$(textutil -convert txt -stdout "$CONCLUSION")" || { echo "FAIL 
 #    it leaks. Without that terminator the pattern both over- and under-fires:
 #    an ordinary rendered path like "C:\party" matched \par, while a leaked
 #    "\b0." was missed because the old \b0 arm demanded whitespace after it.
-MARKUP_RE='\*\*|\\(b|b0|i|i0|ul|ulnone|par|pard|line|tab|f[0-9]+|fs[0-9]+)([^a-z]|$)'
+#    The numeric controls (\fN, \fsNN) carry NO such terminator: an RTF numeric
+#    parameter ends at the first non-digit, so a leaked "\f0hello" is a font
+#    control followed by text and must still be caught. They need no boundary
+#    because "\f" or "\fs" immediately followed by a digit is not something
+#    ordinary prose contains.
+MARKUP_RE='\*\*|\\fs?[0-9]|\\(b|b0|i|i0|ul|ulnone|par|pard|line|tab)([^a-z]|$)'
 for pane in welcome conclusion; do
   txt="$WELCOME_TXT"; [ "$pane" = conclusion ] && txt="$CONCLUSION_TXT"
   # Capture, then branch on grep's own status. `if grep ...; then bad; else ok`
@@ -60,12 +65,19 @@ done
 #    rather than the major, so neither an unrelated sentence nor a 13.0 -> 13.5
 #    bump can slip through.
 norm_ver() { case "$1" in *.*) printf '%s' "$1";; *) printf '%s.0' "$1";; esac; }
+# Match the version that is BOUND to "or later" — optionally through a codename
+# parenthetical — rather than the first macOS mention on a line that happens to
+# contain the phrase. "Unlike macOS 13, macOS 14 or later is required" must
+# yield 14, not 13. Any number of dotted components is captured, so a promise of
+# 13.0.1 is compared as 13.0.1 and not silently truncated to 13.0; anything that
+# is not a dotted number ("macOS 13.garbage or later") matches nothing and is
+# reported as unreadable rather than passing on its leading digits.
 PLIST_MIN="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$INFO_PLIST" 2>/dev/null)"
 CLAIMED="$(printf '%s' "$WELCOME_TXT" \
-  | grep -E 'macOS [0-9]+(\.[0-9]+)?.*or later' \
-  | grep -oE 'macOS [0-9]+(\.[0-9]+)?' | head -1 | awk '{print $2}')"
+  | grep -oE 'macOS [0-9]+(\.[0-9]+)*[[:space:]]*(\([^)]*\))?[[:space:]]*or later' \
+  | head -1 | awk '{print $2}')"
 if [ -z "$PLIST_MIN" ] || [ -z "$CLAIMED" ]; then
-  bad "could not read minimum macOS version (plist='$PLIST_MIN' pane='$CLAIMED'); the welcome pane needs a 'macOS <version> ... or later' line"
+  bad "could not read minimum macOS version (plist='$PLIST_MIN' pane='$CLAIMED'); the welcome pane needs a 'macOS <version> [(codename)] or later' line"
 elif [ "$(norm_ver "$CLAIMED")" = "$(norm_ver "$PLIST_MIN")" ]; then
   ok "welcome pane's minimum macOS ($CLAIMED) matches LSMinimumSystemVersion ($PLIST_MIN)"
 else
