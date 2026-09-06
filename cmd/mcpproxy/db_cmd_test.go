@@ -530,3 +530,52 @@ func TestCompactLockReleaseDoesNotRemoveSomeoneElsesLock(t *testing.T) {
 		t.Error("B's own release must remove B's lock")
 	}
 }
+
+// The token is what separates "my lock" from "a successor's lock", so it must
+// be unique even when the clock cannot tell two acquisitions apart. Windows'
+// system clock is coarse (~0.5-15ms), and two back-to-back acquisitions in one
+// process land in the same tick: same pid + same timestamp = identical tokens,
+// and A's release then deletes B's lock.
+//
+// Asserting "the two files differ" would pass vacuously on a nanosecond clock,
+// so this strips the clock-derived line and requires what remains to still
+// differ — the same thing Windows sees.
+func TestCompactLockTokenIsUniqueWithinOneClockTick(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, dbFileName+".compact.lock")
+
+	readToken := func() string {
+		t.Helper()
+		b, err := os.ReadFile(lockPath)
+		if err != nil {
+			t.Fatalf("read lock: %v", err)
+		}
+		var kept []string
+		for _, line := range strings.Split(string(b), "\n") {
+			if line == "" || strings.HasPrefix(line, "started=") {
+				continue // clock-derived: assume it collides
+			}
+			kept = append(kept, line)
+		}
+		return strings.Join(kept, "\n")
+	}
+
+	releaseA, err := acquireCompactLock(dir)
+	if err != nil {
+		t.Fatalf("acquire A: %v", err)
+	}
+	tokenA := readToken()
+	releaseA()
+
+	releaseB, err := acquireCompactLock(dir)
+	if err != nil {
+		t.Fatalf("acquire B: %v", err)
+	}
+	defer releaseB()
+	tokenB := readToken()
+
+	if tokenA == tokenB {
+		t.Fatalf("two acquisitions produced the same clock-independent token %q; "+
+			"on a coarse clock A's release would delete B's lock", tokenA)
+	}
+}
