@@ -154,7 +154,9 @@ describe('ServerDetail — flagged tools on the Tools tab', () => {
     const wrapper = await mountDetail()
     const panel = wrapper.get('[data-test="flagged-tools-panel"]')
     expect(panel.text()).toContain('create_user')
-    expect(panel.text()).toContain('Informational')
+    // F09: was toContain('Informational'). The subtitle now names the gate a
+    // hard-tier finding actually holds instead of claiming it holds none.
+    expect(panel.text()).toContain('block server approval')
     // The file-path finding is not a tool and must not appear as a row.
     expect(wrapper.find('[data-test="flagged-tool-row-target/dist/index.js"]').exists()).toBe(false)
   })

@@ -190,6 +190,29 @@
             </div>
           </div>
 
+          <!-- UX audit F09: adding a second entry for an endpoint that is
+               already configured is legitimate (different headers, a different
+               OAuth identity) but is usually a mistake — and until now nothing
+               said so. The first the user heard of it was the scanner calling
+               the NEW server dangerous, because two entries on one endpoint
+               expose byte-identical tool names and descriptions and
+               detect.shadowing.cross_server reads that as impersonation.
+               This is the observation that should have come first: neutral,
+               non-blocking, and naming the server it collides with. -->
+          <p
+            v-if="duplicateEndpointServer"
+            data-test="addserver-duplicate-endpoint"
+            class="text-sm text-base-content/70 flex items-start gap-2 mt-2"
+          >
+            <span aria-hidden="true">ℹ</span>
+            <span>
+              <code class="font-mono">{{ duplicateEndpointServer.name }}</code> is already
+              configured at this endpoint. Adding a second entry is allowed — both will be
+              listed, their tools will appear twice, and the security scan will flag each as
+              a possible clone of the other.
+            </span>
+          </p>
+
           <!-- Toggles Section -->
           <div class="divider mt-6">Options</div>
 
@@ -654,6 +677,79 @@ const lineNumbersRef = ref<HTMLDivElement | null>(null)
 let previewTimer: ReturnType<typeof setTimeout> | null = null
 
 // Computed
+
+// Protocol values the backend accepts are `stdio | http | sse |
+// streamable-http | auto` (config.go validProtocols) and the REST payload
+// echoes the configured string verbatim, so it may also be absent. Only the
+// http FAMILY is enumerated; everything else stays eligible for a stdio match.
+const HTTP_FAMILY_PROTOCOLS = new Set<string>(['http', 'sse', 'streamable-http'])
+
+// UX audit F09. The endpoint the manual form currently describes, already
+// belongs to a configured server — or null. Advisory only: nothing here gates
+// submit, merges, or reuses an existing entry.
+//
+// Every "duplicate" guard in the backend keys on the server NAME
+// (internal/server/server.go, internal/config/config.go, internal/configimport),
+// so a second entry on one endpoint is accepted in silence and only surfaces
+// later as a hard-tier detect.shadowing.cross_server "possible impersonation"
+// finding on the new server. This covers the Web-UI door only; the MCP
+// `upstream_servers add`, CLI and import doors still say nothing.
+//
+// Matching is exact string equality after trim, deliberately. Case folding,
+// trailing-slash normalisation and query stripping are each a judgement call
+// about what "the same endpoint" means, and none has been made; exact match
+// catches the real case (a copy-pasted URL) and cannot accuse the wrong server.
+// It can MISS: the server list masks credential-shaped url/command/args values
+// (internal/oauth/serverfields.go), so a secret-bearing endpoint never matches.
+// A hint, not a guarantee — which is why the copy claims nothing more.
+//
+// The endpoint is the WHOLE launch identity, not just the head of it: url for
+// http, and command + the full args list + working_dir for stdio. Review
+// round 1 caught both halves of that being too loose — a stdio entry with a
+// stale `url` matched an http form and named the wrong server, and two
+// same-command entries in different directories read as duplicates.
+const duplicateEndpointServer = computed(() => {
+  // `servers` starts empty, so without `loaded` an unfetched list is
+  // indistinguishable from "no duplicates" and the note would be silently
+  // wrong on a cold open.
+  if (!serversStore.loaded) return null
+
+  if (formData.type === 'http') {
+    const url = formData.url.trim()
+    if (!url) return null
+    // The transport guard is NEGATIVE on purpose: it excludes the opposite
+    // family only, so `sse`, `streamable-http`, `auto` and an absent protocol
+    // all stay eligible. A positive `protocol === formData.type` filter would
+    // MISS the case this whole note exists for — the existing entry is
+    // commonly recorded as `streamable-http` while this modal always sends
+    // `http` (handleSubmit: `protocol: formData.type`).
+    return (
+      serversStore.servers.find(
+        s => s.protocol !== 'stdio' && (s.url ?? '').trim() === url,
+      ) ?? null
+    )
+  }
+
+  const command = (formData.command === 'custom' ? formData.customCommand : formData.command).trim()
+  if (!command) return null
+  const args = parseArgs()
+  // working_dir is part of the endpoint this form describes — handleSubmit
+  // sends it on every stdio add — so `node server.js` in two different
+  // directories is two different programs with two different toolsets, not a
+  // duplicate. Comparing trimmed strings makes an absent value equal to a
+  // blank field, which is the same endpoint.
+  const workingDir = formData.workingDir.trim()
+  return (
+    serversStore.servers.find(s => {
+      if (HTTP_FAMILY_PROTOCOLS.has(s.protocol)) return false
+      if ((s.command ?? '').trim() !== command) return false
+      if ((s.working_dir ?? '').trim() !== workingDir) return false
+      const existing = s.args ?? []
+      return existing.length === args.length && existing.every((a, i) => a === args[i])
+    }) ?? null
+  )
+})
+
 const lineCount = computed(() => {
   if (!importContent.value) return 10 // Show at least 10 lines for placeholder
   return Math.max(importContent.value.split('\n').length, 10)

@@ -14,11 +14,23 @@
             <span aria-hidden="true">🔎</span>
             <span>Flagged tool descriptions ({{ groups.length }})</span>
           </h3>
-          <!-- Non-goal 9 / scan_informational.go: the informational scan path
-               drives NO gating whatsoever, and the panel has to say so or it
-               reads as a block the operator cannot find the release for. -->
+          <!-- UX audit F09. This used to read "Informational — these findings
+               do not block the tool.", from non-goal 9 of
+               docs/research/tpa-scanner-inline-ui-design.md. That was a
+               misreading: scan_informational.go's "drives NO gating whatsoever"
+               is about the TRIGGER (the baseline scan neither quarantines nor
+               auto-approves), and the same comment says the verdict is stored
+               "through the normal scan-summary path" — which is exactly what
+               ApproveServer blocks on. A hard-tier finding on a quarantined
+               server DOES block, at the server-approval gate (409, "server has
+               N dangerous (hard-tier) finding(s)"), and under trust_mode: scan
+               a non-clean verdict holds the individual tool too.
+               The panel has no prop for either state, so it makes no claim
+               about this server's current state — only the one thing that is
+               unconditionally true about the tier. -->
           <p class="text-xs text-base-content/60 mt-0.5" data-test="flagged-tools-informational">
-            Informational — these findings do not block the tool.
+            Findings on this server's tool descriptions. Dangerous (hard-tier) findings block
+            server approval.
           </p>
         </div>
         <slot name="actions" />
