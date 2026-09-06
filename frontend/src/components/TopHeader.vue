@@ -158,6 +158,7 @@ import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
 import AddServerModal from './AddServerModal.vue'
+import { serverDetailPath } from '@/utils/serverRoute'
 import ProfileSwitcher from './ProfileSwitcher.vue'
 import ModeSwitcher from './ModeSwitcher.vue'
 
@@ -237,8 +238,14 @@ function handleSearch() {
   router.push(q ? { path: '/tools', query: { q } } : { path: '/tools' })
 }
 
-function handleServerAdded() {
+function handleServerAdded(serverName?: string) {
   // Refresh servers list after adding
   serversStore.fetchServers()
+  // UX audit F07: a single add hands off to that server's detail view, where
+  // connect/scan/review/approve is already on screen. The bulk/import path
+  // emits no name and keeps the old refresh-in-place behaviour.
+  if (serverName) {
+    void router.push(serverDetailPath(serverName))
+  }
 }
 </script>

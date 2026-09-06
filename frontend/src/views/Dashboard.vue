@@ -946,9 +946,18 @@ const triggerServerAction = async (serverName: string, action: string) => {
 }
 
 // --- Add Server handler ---
-const handleServerAdded = () => {
+const handleServerAdded = (serverName?: string) => {
   showAddServer.value = false
   serversStore.fetchServers()
+  // UX audit F07: a single add hands off to that server's detail view, where
+  // connect/scan/review/approve is already on screen. The bulk/import path
+  // emits no name and keeps the old refresh-in-place behaviour.
+  if (serverName) {
+    // The modal already toasted "<name> has been added successfully"; the
+    // generic toast below would be a second one for the same add.
+    void router.push(serverDetailPath(serverName))
+    return
+  }
   systemStore.addToast({ type: 'success', title: 'Server Added', message: 'New server has been added successfully' })
 }
 
