@@ -60,7 +60,11 @@ describe('Authentication error surfaces (audit F28)', () => {
     })
 
     const text = wrapper.text()
-    expect(text).toContain('mcpproxy doctor')
+    // Audit F06: this used to name `mcpproxy doctor`, which never prints the
+    // key — grep `cmd/mcpproxy/doctor_cmd.go` for it and there are no hits.
+    // `mcpproxy status` does, and its "Web UI" line is directly openable.
+    expect(text).toContain('mcpproxy status')
+    expect(text).not.toContain('mcpproxy doctor')
     expect(text).toContain('mcp_config.json')
   })
 

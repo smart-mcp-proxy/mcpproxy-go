@@ -17,9 +17,9 @@
                  tray route can't be the only one. The config file and the CLI
                  work everywhere. -->
             <ol class="list-decimal list-inside space-y-1 text-sm">
-              <li><strong>From the CLI:</strong> run <code class="bg-base-200 px-1 rounded">mcpproxy doctor</code>, or read <code class="bg-base-200 px-1 rounded">api_key</code> in <code class="bg-base-200 px-1 rounded">~/.mcpproxy/mcp_config.json</code></li>
-              <li><strong>From logs:</strong> the key is printed in the mcpproxy startup log</li>
-              <li><strong>Using the tray</strong> (desktop installs): right-click the MCPProxy tray icon and select "Open Web UI" — it opens an already-authenticated window</li>
+              <li><strong>From the CLI:</strong> run <code class="bg-base-200 px-1 rounded">mcpproxy status</code> — its "Web UI" line is a ready-to-open URL with the key embedded (<code class="bg-base-200 px-1 rounded">mcpproxy status --web-url</code> prints just that URL), or read <code class="bg-base-200 px-1 rounded">api_key</code> in <code class="bg-base-200 px-1 rounded">~/.mcpproxy/mcp_config.json</code></li>
+              <li><strong>From logs:</strong> the key is logged in full only by the start that generated it — later starts log a masked prefix</li>
+              <li><strong>Using the tray</strong> (desktop installs): click the MCPProxy tray icon and choose "Open Web UI in Browser" (Windows: "Open Web Control Panel") — it opens an already-authenticated window</li>
             </ol>
           </div>
         </div>
