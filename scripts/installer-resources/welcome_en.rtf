@@ -37,7 +37,7 @@ MCP Proxy connects AI agents to multiple MCP servers:
 \
 \
 
-- macOS 10.15 (Catalina) or later
+- macOS 13 (Ventura) or later
 \
 
 - Intel or Apple Silicon Mac
@@ -65,13 +65,25 @@ MCP Proxy connects AI agents to multiple MCP servers:
 \
 \
 
-- mcpproxy.app - System tray application
+- /Applications/mcpproxy.app - System tray application
 \
 
-- mcpproxy CLI - Command-line interface
+- /usr/local/bin/mcpproxy - Command-line interface
 \
 
-- CA Certificate - For optional HTTPS mode
+- A CA certificate, for optional HTTPS mode
+\
+\
+
+\b Why Administrator Privileges\b0
+\
+\
+
+MCP Proxy installs into /Applications and /usr/local/bin, which are shared by all users of this Mac, so macOS asks for your password.
+\
+\
+
+The certificate is only copied to disk - it is NOT added to your system trust store. MCP Proxy runs on plain HTTP at 127.0.0.1:8080 and needs no certificate. To use HTTPS later, you run "mcpproxy trust-cert" yourself.
 \
 \
 
