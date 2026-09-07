@@ -1158,10 +1158,21 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 			// message that reads as their own quota sends them to delete tokens
 			// that will not free a slot — or to look for tokens they are not
 			// allowed to see. Say whose limit it is and who can act on it.
-			// A per-owner quota, which would make this the caller's own
-			// problem to fix, is issue #1177.
+			// The per-owner quota that makes an exhausted pool the caller's
+			// own problem to fix is ErrAgentTokenOwnerLimitReached, handled
+			// in the case below (issue #1177). Reaching THIS case now means
+			// the deployment total is full even though the caller is within
+			// their own quota, so the "ask an administrator" wording still
+			// stands.
 			writeError(w, http.StatusConflict,
 				fmt.Sprintf("This deployment has reached its limit of %d agent tokens. The limit is shared by all users, so deleting your own tokens may not free a slot; ask an administrator.", auth.MaxTokens))
+		case errors.Is(err, storage.ErrAgentTokenOwnerLimitReached):
+			// The caller's OWN quota (issue #1177). Unlike the deployment cap
+			// above, this one is entirely actionable by the caller, and the
+			// count is of live tokens — revoking really does free a slot — so
+			// say so rather than sending them to an administrator.
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("You have reached your limit of %d agent tokens. Revoke one you no longer use to free a slot.", auth.MaxTokensPerOwner))
 		default:
 			writeError(w, http.StatusInternalServerError, "Failed to create token")
 		}

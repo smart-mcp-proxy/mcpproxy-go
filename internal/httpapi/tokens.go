@@ -224,6 +224,14 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("Maximum number of agent tokens (%d) reached", auth.MaxTokens))
 			return
 		}
+		// Unreachable on this surface today — the personal edition's tokens are
+		// ownerless and auth.MaxTokensPerOwner deliberately exempts them — but
+		// map it rather than let a future owned-token path fall through to a
+		// 500 that tells the caller nothing (issue #1177).
+		if errors.Is(err, storage.ErrAgentTokenOwnerLimitReached) {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("Maximum number of agent tokens for this owner (%d) reached", auth.MaxTokensPerOwner))
+			return
+		}
 		s.logger.Errorf("Failed to create agent token: %v", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to create token")
 		return

@@ -55,6 +55,12 @@ var (
 	// is reached.
 	ErrAgentTokenLimitReached = errors.New("maximum number of agent tokens reached")
 
+	// ErrAgentTokenOwnerLimitReached is returned when a single owner has
+	// reached its own quota (auth.MaxTokensPerOwner). Distinct from the
+	// deployment-wide error so the caller can say "your quota" rather than
+	// "the deployment is full" — the remedy differs.
+	ErrAgentTokenOwnerLimitReached = errors.New("maximum number of agent tokens for this owner reached")
+
 	// ErrAgentTokenOwnerInactive is returned by ValidateAgentToken when a
 	// token's OWNER is no longer allowed to authenticate — disabled, or gone
 	// from the user store entirely. The token record itself may be perfectly
@@ -102,6 +108,49 @@ var (
 // resolving, so its management operations answer not-found, and every other
 // token keeps working. The skip is logged at WARN with the bucket key so an
 // operator can find the row; that key is an HMAC hash, not a credential.
+// countLiveAgentTokensLocked counts non-revoked agent tokens in one pass:
+// the deployment-wide total and the subset belonging to userID.
+//
+// Revoked tokens are excluded deliberately. Revocation is a soft delete, so a
+// key count would let revoked tokens hold slots permanently.
+//
+// A scan is correct and cheap here for the same reason the sibling name lookup
+// scans: the bucket is bounded by auth.MaxTokens. Callers must already hold
+// m.mu and pass an open transaction.
+func (m *Manager) countLiveAgentTokensLocked(tx *bbolt.Tx, userID string) (total, forOwner int, err error) {
+	tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+	if tokenBucket == nil {
+		return 0, 0, nil
+	}
+
+	err = tokenBucket.ForEach(func(k, v []byte) error {
+		var token auth.AgentToken
+		if uerr := json.Unmarshal(v, &token); uerr != nil {
+			// An unparseable record still occupies a slot, so count it toward
+			// the deployment total rather than silently raising the ceiling.
+			// It cannot be attributed to an owner.
+			if m.logger != nil {
+				m.logger.Warnw("counting unparseable agent token record toward the deployment cap",
+					"bucket", AgentTokensBucket, "key", string(k), "error", uerr)
+			}
+			total++
+			return nil
+		}
+		if token.Revoked {
+			return nil
+		}
+		total++
+		if token.UserID == userID {
+			forOwner++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return total, forOwner, nil
+}
+
 func (m *Manager) findAgentTokenHashLocked(tx *bbolt.Tx, userID, name string) ([]byte, *auth.AgentToken, error) {
 	tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
 	if tokenBucket == nil {
@@ -190,9 +239,26 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 			return ErrAgentTokenNameExists
 		}
 
-		// Enforce max token limit
-		count := tokenBucket.Stats().KeyN
-		if count >= auth.MaxTokens {
+		// Enforce the token limits. Both counts are of LIVE tokens: revocation
+		// is a soft delete (RevokeAgentToken sets Revoked and re-Puts under the
+		// same key), so counting bucket keys — which is what this used to do
+		// via tokenBucket.Stats().KeyN — meant a revoked token occupied its
+		// slot forever. There is no API path to hard-delete another owner's
+		// tokens, so that turned a full bucket into an unrecoverable state.
+		//
+		// The per-owner quota is the fix for issue #1177: the deployment-wide
+		// cap alone is a shared pool, and in the server edition every
+		// authenticated tenant can reach POST /api/v1/user/tokens, so one
+		// tenant could exhaust every other tenant AND the operator. Ownerless
+		// tokens are exempt from the per-owner quota — see auth.MaxTokensPerOwner.
+		liveTotal, liveForOwner, err := m.countLiveAgentTokensLocked(tx, token.UserID)
+		if err != nil {
+			return err
+		}
+		if token.UserID != "" && liveForOwner >= auth.MaxTokensPerOwner {
+			return ErrAgentTokenOwnerLimitReached
+		}
+		if liveTotal >= auth.MaxTokens {
 			return ErrAgentTokenLimitReached
 		}
 

@@ -28,8 +28,19 @@ var validPermissions = map[string]bool{
 	PermDestructive: true,
 }
 
-// MaxTokens is the maximum number of agent tokens allowed.
+// MaxTokens is the maximum number of agent tokens allowed deployment-wide.
 const MaxTokens = 100
+
+// MaxTokensPerOwner caps how many LIVE (non-revoked) agent tokens a single
+// owner may hold in the server edition, where every authenticated tenant can
+// reach the token-minting endpoint. Without it MaxTokens is a shared pool and
+// one tenant can exhaust the whole deployment, including the operator's own
+// ability to mint (issue #1177).
+//
+// It deliberately does NOT apply to ownerless tokens: the personal edition has
+// a single principal, and applying a per-owner quota there would silently
+// lower a long-standing limit. Those keep MaxTokens.
+const MaxTokensPerOwner = 25
 
 // AgentToken represents a stored agent token record.
 type AgentToken struct {

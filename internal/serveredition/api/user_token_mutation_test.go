@@ -105,15 +105,27 @@ func TestUserTokenMutators_NotFoundLeaksNoStorageSentinel(t *testing.T) {
 // malformed body or an unwired store.
 //
 // BITES: restore http.StatusServiceUnavailable in createUserToken.
+// seedDeploymentFiller fills n slots WITHOUT tripping any single owner's
+// per-owner quota (auth.MaxTokensPerOwner, issue #1177). These tests are about
+// the DEPLOYMENT-wide cap and its wording, so the filler has to come from many
+// owners — piling it all on one tenant now hits the owner quota first and the
+// test would be exercising the wrong branch.
+func seedDeploymentFiller(t *testing.T, rig *tokenTestRig, n int) {
+	t.Helper()
+	perOwner := auth.MaxTokensPerOwner - 1 // stay strictly under the owner quota
+	for i := 0; i < n; i++ {
+		owner := fmt.Sprintf("filler-owner-%02d", i/perOwner)
+		rig.seedToken(t, owner, fmt.Sprintf("filler-%03d", i))
+	}
+}
+
 func TestCreateUserToken_CapExhaustionIsConflict(t *testing.T) {
 	rig := newTokenTestRig(t)
 	rig.actAs(userACtx())
 
 	// Fill to one below the cap through storage, which is far faster than the
 	// HTTP route and exercises the same counter.
-	for i := 0; i < auth.MaxTokens-1; i++ {
-		rig.seedToken(t, tokenUserA, fmt.Sprintf("filler-%03d", i))
-	}
+	seedDeploymentFiller(t, rig, auth.MaxTokens-1)
 
 	// Positive control: the last slot below the cap still mints.
 	last := rig.createToken(t, "last-slot", nil)
@@ -161,10 +173,10 @@ func TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller(t *testing.T) {
 	require.Equal(t, http.StatusCreated, ctrl.Code,
 		"positive control: user B must be able to mint before the cap fills (%s)", ctrl.Body.String())
 
-	// User A fills the rest of the DEPLOYMENT-wide cap.
-	for i := 0; i < auth.MaxTokens-1; i++ {
-		rig.seedToken(t, tokenUserA, fmt.Sprintf("a-filler-%03d", i))
-	}
+	// Other tenants fill the rest of the DEPLOYMENT-wide cap. Spread across
+	// owners so the blocked caller (user B) meets the deployment cap and not
+	// somebody's per-owner quota.
+	seedDeploymentFiller(t, rig, auth.MaxTokens-1)
 
 	over := rig.createToken(t, "b-second", nil)
 	require.Equal(t, http.StatusConflict, over.Code,
