@@ -198,7 +198,7 @@ unavailable they are skipped without changing the baseline verdict.
 
 **Web UI:**
 1. Open the dashboard
-2. Click "Quarantine" in the navigation
+2. Go to **Servers** and select the **Quarantined** filter tab
 3. Review pending servers
 
 **CLI:**
