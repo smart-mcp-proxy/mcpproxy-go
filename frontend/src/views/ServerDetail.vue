@@ -140,7 +140,10 @@
             </div>
             <div class="stat-title">Admin state</div>
             <div class="stat-value text-sm" data-test="server-admin-state">{{ adminStateLabel }}</div>
-            <div class="stat-desc">set by you</div>
+            <!-- Audit F10: quarantine-on-add is the DEFAULT for a newly added
+                 server, so "set by you" was false in exactly the case where the
+                 user most needs to know why their client cannot reach it. -->
+            <div class="stat-desc" data-test="server-admin-state-desc">{{ adminStateDesc }}</div>
           </div>
         </div>
 
@@ -318,7 +321,14 @@
             No security scan has been run for <strong>{{ server.name }}</strong>. We strongly recommend running a scan first.
           </p>
           <p class="text-sm text-base-content/70 mb-6">
-            The security scanner is an experimental heuristic. Force-approving bypasses the scanner gate.
+            <!-- UX audit F09: "the scanner gate" was never defined anywhere in
+                 the UI, while the flagged-tools panel on the same screen called
+                 the very findings behind the 409 informational. Name what force
+                 approval actually does. This line is shared by BOTH dialog
+                 modes, so it must not mention findings — the no_scan mode has
+                 none, and force skips that refusal ("no scan results found")
+                 just as it skips the hard-tier one. -->
+            The security scanner is an experimental heuristic. Force-approving skips the scan-based approval gate and unquarantines this server.
           </p>
           <div class="modal-action">
             <button
@@ -410,14 +420,27 @@
             <button @click="loadTools" class="btn btn-sm">Retry</button>
           </div>
 
-          <div v-else-if="serverTools.length === 0" class="text-center py-8">
+          <!-- UX audit F08: this list is empty for three different reasons and
+               used to say the same thing for all of them. A quarantined
+               server's tool definitions are WITHHELD by design (kept out of the
+               state snapshot and the search index — internal/runtime/tool_quarantine.go),
+               not absent, and blaming the disconnection is doubly misleading
+               because the disconnection is itself part of the quarantine. The
+               Security tab meanwhile asks the operator to review those very
+               definitions, so "blocked" must stop reading as "empty". -->
+          <div v-else-if="serverTools.length === 0" data-test="server-tools-empty" class="text-center py-8">
             <svg class="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
             </svg>
-            <h3 class="text-xl font-semibold mb-2">No tools available</h3>
-            <p class="text-base-content/70">
-              {{ server.connected ? 'This server has no tools available.' : 'Server must be connected to view tools.' }}
-            </p>
+            <h3 class="text-xl font-semibold mb-2">{{ toolsEmptyHeading }}</h3>
+            <p class="text-base-content/70">{{ toolsEmptyBody }}</p>
+            <button
+              v-if="server.quarantined"
+              type="button"
+              data-test="server-tools-empty-security"
+              class="btn btn-sm btn-outline mt-4"
+              @click="openSecurityTab"
+            >View security findings</button>
           </div>
 
           <div v-else class="space-y-4">
@@ -810,7 +833,15 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
             <h3 class="text-xl font-semibold mb-2">No logs available</h3>
-            <p class="text-base-content/70">No log entries found for this server.</p>
+            <!-- UX audit F12: an absent per-server log file used to arrive here
+                 as a red error claiming the server "may not have run yet",
+                 seconds after a verified successful tool call. It is now a
+                 plain empty state, and the sentence says what this file
+                 actually holds so the emptiness is not read as a fault. -->
+            <p class="text-base-content/70">
+              No log entries yet. This file holds only what mcpproxy and the server itself wrote at
+              or above the configured log level — individual tool calls are recorded in Activity.
+            </p>
           </div>
 
           <!--
@@ -1687,6 +1718,56 @@ const toolsError = ref<string | null>(null)
 const toolSearch = ref('')
 const selectedToolSchema = ref<Tool | null>(null)
 
+// Audit F08 — the Tools tab's empty state. `serverTools` is read from the live
+// state snapshot with the search index as fallback, and BOTH are empty by
+// design for a quarantined server, so the tab said "no tools available / server
+// must be connected" while the Security tab asked the operator to review that
+// server's tool definitions. Say withheld when it is withheld.
+//
+// Deliberately UNCOUNTED. `quarantine.pending_count` is the count of tools
+// awaiting review, which is NOT the count of tools being withheld: quarantining
+// a previously trusted server keeps its existing approval records
+// (internal/runtime/lifecycle.go QuarantineServer only purges the index), so a
+// server with 20 approved tools and 2 newly discovered ones reports
+// pending_count 2 while all 22 are withheld. No payload field carries the
+// withheld total for a quarantined server, and a sentence naming the wrong
+// number is the exact class of bug this fix exists to remove.
+const toolsEmptyHeading = computed(() =>
+  server.value?.quarantined ? 'Tools withheld for review' : 'No tools available'
+)
+
+const toolsEmptyBody = computed(() => {
+  if (!server.value?.quarantined) {
+    return server.value?.connected
+      ? 'This server has no tools available.'
+      : 'Server must be connected to view tools.'
+  }
+  // Integrated-review finding: a quarantined server whose command does not even
+  // exist rendered "approve the server to list them" and nothing else, because
+  // every fault alert on this page is suppressed while quarantined (#1076).
+  // Approving it just produces a second failure, so the observed fault has to
+  // be named.
+  //
+  // Keyed on `last_error`, NOT on `connected`. Round-2 review caught that:
+  // `connected: false` is the DESIGNED state of a quarantined server, not
+  // evidence of a fault. The supervisor disconnects any quarantined server
+  // without an active inspection exemption and refuses to dial it
+  // (internal/runtime/supervisor/supervisor.go — ActionDisconnect on
+  // `Quarantined && !IsInspectionExempted`, and ActionConnect gated on the
+  // same), so keying on `!connected` fired this sentence on EVERY quarantined
+  // server and sent healthy ones hunting for a connection error that does not
+  // exist — while approval genuinely was their whole remedy.
+  //
+  // Hedged to "may not be enough" for the same reason the condition moved: a
+  // stale error from an earlier dial is not proof that approval will fail.
+  // Configuration is the right pointer because it renders `last_error` verbatim
+  // and unconditionally, which is exactly where the suppressed fault is legible.
+  if (server.value?.last_error) {
+    return "This server's tools are withheld while it is quarantined, and it last reported a connection error — so approving it may not be enough on its own. The error is shown above; review the findings on the Security tab as well."
+  }
+  return "This server's tools are withheld while the server is quarantined. Review the findings on the Security tab, then approve the server to list them."
+})
+
 // Tool quarantine (Spec 032)
 const toolApprovals = ref<ToolApproval[]>([])
 const approvalLoading = ref(false)
@@ -1830,7 +1911,27 @@ const adminStateTone = computed(() => {
   }
 })
 
+// Audit F10: "set by you" is a hard-coded claim that is false for the default
+// quarantine-on-add path — nobody chose it, it is the admission policy.
+const adminStateDesc = computed(() =>
+  adminStateLabel.value === 'Quarantined' ? 'awaiting your review' : 'set by you'
+)
+
 const healthLevelLabel = computed(() => {
+  // Audit F10: this tile has one word to answer "can my client use it?", and it
+  // was answering a different question. The backend deliberately reports a
+  // quarantined or disabled server as level `healthy` — being off is intentional,
+  // not a fault (internal/health/calculator.go) — so the tile rendered a green
+  // "Healthy" on precisely the servers no client can reach, and could pair it
+  // with a "Sign-in required" sub-line. A non-enabled admin state therefore wins
+  // the tile's word; the observed health keeps its own vocabulary on the
+  // sub-line below ("Quarantined for review", "Disabled", "Sign-in required").
+  switch (adminStateLabel.value) {
+    case 'Quarantined':
+      return 'Blocked'
+    case 'Disabled':
+      return 'Off'
+  }
   const level = server.value?.health?.level
   switch (level) {
     case 'healthy':
@@ -1869,7 +1970,17 @@ const healthLevelTone = computed(() => {
 // facts arrive in one payload. The quarantine banner below already states the
 // situation and the action, so every red fault alert is suppressed here — the
 // same rule the tray applies via ServerStatus.isBadgeExempt.
-const quarantineSuppressesFaultAlerts = computed(() => !!server.value?.quarantined)
+//
+// Narrowed: suppress the NOISE, not a real fault. The backend now separates the
+// two — internal/health/calculator.go leaves an ordinary quarantined server at
+// level "healthy" and marks one with an actual transport fault "unhealthy",
+// keeping admin_state=quarantined and action=approve in both cases. Blanket
+// suppression meant a quarantined stdio server pointed at a command that does
+// not exist looked calm and approvable, and approving it produced a second
+// failure. Follow the level rather than hiding everything.
+const quarantineSuppressesFaultAlerts = computed(
+  () => !!server.value?.quarantined && server.value?.health?.level !== 'unhealthy'
+)
 
 // Spec 044 — render the structured diagnostic panel whenever a warn/error
 // diagnostic is attached. Info-level diagnostics are ignored (shown only in

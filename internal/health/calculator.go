@@ -124,12 +124,36 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 	}
 
 	if input.Quarantined {
-		return &contracts.HealthStatus{
+		status := &contracts.HealthStatus{
 			Level:      LevelHealthy, // Quarantined is intentional, not broken
 			AdminState: StateQuarantined,
 			Summary:    "Quarantined for review",
 			Action:     ActionApprove,
 		}
+		// ...but a quarantined server that cannot START is broken, and this
+		// early return used to discard that. Being disconnected is NOT the
+		// signal: the supervisor deliberately disconnects a quarantined server
+		// and refuses to dial it (ActionDisconnect on
+		// `Quarantined && !IsInspectionExempted`), so `connected: false` is the
+		// designed state. A transport FAULT is different — the scanner dials
+		// quarantined servers under an inspection exemption, so a missing
+		// binary or a dead host is genuinely observable.
+		//
+		// Observed live: a quarantined stdio server pointed at a nonexistent
+		// command reported state="error" with a full spawn failure, while this
+		// function answered healthy/approve. Approving it hands the user a
+		// second failure.
+		//
+		// The admin contract is unchanged — still quarantined, and approval is
+		// still the operator's next step — so the review flow and the tray's
+		// quarantine handling keep working. Only the level and the summary
+		// stop claiming the server is fine.
+		if strings.EqualFold(input.State, "error") && input.LastError != "" {
+			status.Level = LevelUnhealthy
+			status.Summary = "Quarantined — " + formatErrorSummary(input.LastError)
+			status.Detail = input.LastError
+		}
+		return status
 	}
 
 	// 2. Missing secret check

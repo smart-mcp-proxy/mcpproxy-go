@@ -412,16 +412,44 @@
         <!-- Tab: Verify -->
         <!-- ============================ -->
         <section v-else-if="activeTab === 'verify'" data-test="panel-verify">
+          <!-- Two milestones, deliberately separate (UX audit F13). The MCP
+               `initialize` handshake behind firstMCPClientEver proves the
+               wiring only; the value the product exists for is an upstream
+               tool actually running, which is first_real_tool_call_ever. -->
           <template v-if="onboarding.firstMCPClientEver">
-            <div class="flex flex-col items-center gap-2 py-6 text-center">
+            <div class="flex flex-col items-center gap-2 pt-6 pb-4 text-center" data-test="verify-client-connected" data-state="satisfied">
               <div class="text-4xl">✅</div>
-              <div class="font-semibold text-lg">Round-trip verified</div>
+              <div class="font-semibold text-lg">AI client connected</div>
               <div class="text-sm opacity-70 max-w-md">
-                We've seen at least one MCP request from your AI client(s). mcpproxy is wired up correctly.
+                Your AI client completed an MCP handshake with mcpproxy, so the wiring is right.<span v-if="upstreamCallState === 'pending'"> It does not yet mean a tool has run.</span>
               </div>
               <div v-if="onboarding.mcpClientsSeenEver.length > 0" class="text-xs opacity-60 mt-2">
                 Recognized: <span class="font-medium">{{ onboarding.mcpClientsSeenEver.join(', ') }}</span>
               </div>
+            </div>
+            <!-- Pending is a neutral next step, never an error: nothing here
+                 gates the wizard, and an install that only proxies is fine.
+                 Hidden entirely while the state is unknown — see
+                 upstreamCallState; a row we cannot substantiate is worse than
+                 no row. -->
+            <div
+              v-if="upstreamCallState !== 'unknown'"
+              class="flex items-start justify-center gap-2 pb-4 text-sm text-center max-w-md mx-auto"
+              data-test="verify-first-upstream-call"
+              :data-state="upstreamCallState"
+            >
+              <template v-if="upstreamCallState === 'satisfied'">
+                <span>✅</span>
+                <span>
+                  <span class="font-semibold">First upstream tool call</span> — a tool on one of your MCP servers ran through mcpproxy and returned a result.
+                </span>
+              </template>
+              <template v-else>
+                <span class="opacity-50">📡</span>
+                <span class="opacity-70">
+                  <span class="font-semibold">No upstream tool call recorded yet</span> — try the first prompt below, which calls a tool on one of your servers; the rest search and inspect mcpproxy itself.
+                </span>
+              </template>
             </div>
           </template>
           <template v-else>
@@ -438,12 +466,16 @@
             </div>
           </template>
 
-          <!-- Quick prompt suggestions: each one exercises a different built-
-               in mcpproxy tool so the user can see the proxy's value surface
-               immediately. -->
+          <!-- Quick prompt suggestions. The first dispatches to an upstream
+               server (the milestone above); the rest exercise a different
+               built-in mcpproxy tool each. -->
           <div class="mt-4 border-t border-base-300 pt-4">
             <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Try one of these prompts</div>
             <ul class="space-y-1.5" data-test="verify-sample-prompts">
+              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
+                "Find a filesystem tool with mcpproxy, then call it to list my home directory."
+                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools + call_tool_read</span>
+              </li>
               <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
                 "Search for MCP filesystem tools."
                 <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools</span>
@@ -681,6 +713,51 @@ const loadingImportSources = ref(false)
 const recentActivity = ref<ActivityRecord[]>([])
 const loadingActivity = ref(false)
 
+// Verify tab — second milestone (UX audit F13). Lifetime flag from the
+// Spec 044 activation bucket, read off `GET /api/v1/status`, which already
+// serves the whole block to an admin caller. The activity log cannot answer
+// this: it is pruned at 7 days / 10 000 records, so a state derived from it
+// would silently regress.
+//
+// Tri-state on purpose. `null` is "we cannot tell" — an absent activation
+// block (early startup, telemetry unwired, a core that predates it), or a
+// fetch that has not yet succeeded even once. Rendering that as "no tool call
+// yet" would be exactly the unfounded claim this whole change exists to remove.
+//
+// A LATER fetch that fails keeps the last known value rather than reverting to
+// null (see fetchActivation's catch): the row would otherwise flicker off on
+// every dropped poll, and the 5s poll re-converges on its own. Stale-for-a-few-
+// seconds beats blinking, and the state is not a gate.
+const firstRealToolCallEver = ref<boolean | null>(null)
+
+// Resolved by the backend (servedRoutingMode), so it is always one of
+// retrieve_tools | direct | code_execution — never blank — once fetched.
+const routingMode = ref('')
+
+// `first_real_tool_call_ever` is stamped at EXACTLY ONE site in the core: the
+// call_tool_read/write/destructive handler. The direct tool surface and
+// code_execution sub-calls dispatch upstream without stamping it, so under
+// those routing modes a false flag means "not tracked", not "never happened".
+//   satisfied — the flag latched; a truthful lifetime fact under ANY mode.
+//   pending   — flag false AND we are on the mode that actually stamps it.
+//   unknown   — anything else; the row stays off rather than assert a
+//               negative we cannot back.
+//
+// `pending` is still not a proof of absence, and the copy is worded for that
+// (round-2 review). Even under retrieve_tools the flag has blind spots: that
+// mode also exposes `code_execution` (mcp_routing.go: "available but not the
+// primary workflow"), whose sub-calls do not stamp it, and /mcp/all and
+// /mcp/code are mounted unconditionally — "regardless of config"
+// (internal/server/server.go) — so a client aimed at the direct surface makes
+// real upstream calls that never reach the stamping handler. Hence "No upstream
+// tool call RECORDED yet": a statement about what mcpproxy measured, which is
+// true, rather than about what the user did, which we cannot see.
+const upstreamCallState = computed<'satisfied' | 'pending' | 'unknown'>(() => {
+  if (firstRealToolCallEver.value === true) return 'satisfied'
+  if (firstRealToolCallEver.value === false && routingMode.value === 'retrieve_tools') return 'pending'
+  return 'unknown'
+})
+
 // Selection: keyed by `${path}::${serverName}`. Default unchecked.
 const selection = ref<Set<string>>(new Set())
 const bulkImportBusy = ref<'' | 'quarantine' | 'active'>('')
@@ -862,6 +939,7 @@ async function onOpened() {
     fetchDockerStatus(),
     fetchImportSources(),
     fetchRecentActivity(),
+    fetchActivation(),
   ])
   // Superseded (or closed) while we were loading — leave the wizard alone.
   if (seq !== openSeq || !props.show) return
@@ -928,6 +1006,7 @@ function startPolling() {
     void onboarding.fetchState()
     if (activeTab.value === 'verify') {
       void fetchRecentActivity()
+      void fetchActivation()
     }
   }, 5000)
 }
@@ -974,6 +1053,25 @@ async function fetchRecentActivity() {
     // graceful — keep prior list
   } finally {
     loadingActivity.value = false
+  }
+}
+
+// Never surfaces an error: a missing `activation` block leaves the milestone
+// unknown, and the row simply does not render. It must not read as "not yet"
+// — that is an assertion about the user's install we have no basis for.
+async function fetchActivation() {
+  try {
+    const res = await api.getStatus()
+    if (!res.success || !res.data) return
+    routingMode.value = res.data.routing_mode ?? ''
+    // The flag is monotonic in the core: it latches on and never clears. Once
+    // we have seen it true, a later poll that omits the activation block means
+    // the block went away, not that the tool call un-happened.
+    if (firstRealToolCallEver.value === true) return
+    const flag = res.data.activation?.first_real_tool_call_ever
+    firstRealToolCallEver.value = typeof flag === 'boolean' ? flag : null
+  } catch {
+    // graceful — keep prior value
   }
 }
 

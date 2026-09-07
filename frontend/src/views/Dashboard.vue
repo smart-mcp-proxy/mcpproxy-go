@@ -339,7 +339,12 @@
             <div class="text-xs font-bold uppercase tracking-wider" :class="systemStore.isRunning ? 'text-primary' : 'text-base-content/60'">
               MCPProxy
             </div>
-            <div class="text-xs font-medium" :class="systemStore.isRunning ? 'text-success' : 'text-error'">
+            <!-- Audit F06: hidden until a status has arrived. `isRunning`
+                 falls back to false while `status` is null, which labelled a
+                 running proxy "stopped" in error red behind the auth modal.
+                 Same gate as the Docker/quarantine rows below. -->
+            <div v-if="systemStore.status !== null" class="text-xs font-medium" :class="systemStore.isRunning ? 'text-success' : 'text-error'"
+                 data-test="overview-proxy-state">
               {{ systemStore.isRunning ? 'active' : 'stopped' }}
             </div>
             <div v-if="uptime" class="text-[10px] text-base-content/60">{{ uptime }}</div>
@@ -391,11 +396,15 @@
           <div class="card-body py-3 px-4">
             <div class="flex items-center gap-2">
               <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
-              <span class="text-2xl font-bold leading-none">{{ serversStore.serverCount.connected }}</span>
+              <!-- Audit F06: `servers` starts empty, so an unfetched list read
+                   as a confident "0 connected / 0 tools available". `loaded` is
+                   set in the single applyServerList funnel, which both the
+                   fetch and the SSE path go through. -->
+              <span class="text-2xl font-bold leading-none" data-test="overview-connected-count">{{ serversStore.loaded ? serversStore.serverCount.connected : '—' }}</span>
               <span class="text-sm opacity-60">connected</span>
             </div>
             <div class="text-sm mt-1">
-              <span class="font-bold">{{ serversStore.totalTools }}</span>
+              <span class="font-bold" data-test="overview-tool-count">{{ serversStore.loaded ? serversStore.totalTools : '—' }}</span>
               <span class="opacity-60"> tools available</span>
             </div>
             <div
@@ -946,9 +955,18 @@ const triggerServerAction = async (serverName: string, action: string) => {
 }
 
 // --- Add Server handler ---
-const handleServerAdded = () => {
+const handleServerAdded = (serverName?: string) => {
   showAddServer.value = false
   serversStore.fetchServers()
+  // UX audit F07: a single add hands off to that server's detail view, where
+  // connect/scan/review/approve is already on screen. The bulk/import path
+  // emits no name and keeps the old refresh-in-place behaviour.
+  if (serverName) {
+    // The modal already toasted "<name> has been added successfully"; the
+    // generic toast below would be a second one for the same add.
+    void router.push(serverDetailPath(serverName))
+    return
+  }
   systemStore.addToast({ type: 'success', title: 'Server Added', message: 'New server has been added successfully' })
 }
 

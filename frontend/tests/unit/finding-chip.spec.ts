@@ -82,10 +82,15 @@ describe('FindingChip', () => {
     expect(chip.text()).toContain('⟳')
   })
 
-  it('explains that the finding is informational and does not block the tool', () => {
+  // F09: the tooltip used to end '…Informational — it does not block the
+  // tool.' Hard tier is precisely the tier scanner/service.go isBlockingFinding
+  // gates server approval on, so that clause was false on this branch. The
+  // soft-tier branch keeps its review-only reassurance (scanner-gate-wording.spec.ts).
+  it('says a hard-tier finding blocks server approval', () => {
     const chip = mountChip({ state: 'dangerous', count: 1 }).get(
       '[data-test="finding-chip-dangerous"]',
     )
-    expect(chip.attributes('title')).toContain('does not block the tool')
+    expect(chip.attributes('title')).toContain('block server approval')
+    expect(chip.attributes('title')).not.toContain('does not block the tool')
   })
 })
