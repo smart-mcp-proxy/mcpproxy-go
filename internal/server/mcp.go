@@ -1705,6 +1705,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// profile that may no longer exist. The post-filter below returns the same
 	// empty result set from the shared index.
 	profileName, profileScope := p.resolveActiveProfile(ctx)
+	// Spec 104 FR-016a: the cache stamp is the authorization THIS search runs
+	// under, captured now rather than re-resolved when the response is cut.
+	producer := p.cacheAuthorizationWith(ctx, profileName, profileScope)
 	searchIndex := p.index
 	if profileName != "" && !profileScope.DeniesAll() {
 		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
@@ -2074,7 +2077,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			len(mcpTools),
 			"tools",
 			p.currentTruncator(),
-			p.cacheManager,
+			p.cacheStoreAs(producer),
 			p.logger,
 		)
 	}
@@ -2259,7 +2262,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 057 / Profiles v2: profile filter — runs independently of agent-scope
 	// so that unauthenticated /mcp/p/<slug> connections (AdminContext) are still
 	// filtered, and so a base /mcp session that ran set_profile is bounded too.
-	if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+	// The same resolution is the read_cache producer stamp (Spec 104
+	// FR-016a), captured here — at authorization time, before the upstream
+	// call — so a profile deleted or narrowed while the call is in flight
+	// cannot re-stamp a response that was authorized under the wider scope.
+	profileSlug, profileScope := p.resolveActiveProfile(ctx)
+	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope)
+	if profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
 		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
 		return mcp.NewToolResultError(errMsg), nil
@@ -2342,10 +2351,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// requestID was minted above the first policy gate, near the top of this
 	// handler — every activity event below shares that one value.
 
-	// Spec 057 FR-011 / Profiles v2: effective profile slug (token pin > URL >
-	// session set_profile) tagged on every activity record (success AND error
-	// paths) at top-level metadata["profile"].
-	profileSlug, _ := p.resolveActiveProfile(ctx)
+	// Spec 057 FR-011 / Profiles v2: profileSlug (resolved above with the
+	// profile filter; token pin > URL > session set_profile) is tagged on every
+	// activity record (success AND error paths) at top-level metadata["profile"].
 
 	// Spec 028: Inject auth identity into a separate copy for activity logging only.
 	// The original args must not be mutated — upstream servers reject unknown fields
@@ -2679,7 +2687,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
 	}
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheManager, p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -2906,6 +2914,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
+	// Spec 104 FR-016a: read_cache producer stamp, captured before the
+	// upstream call (see handleCallToolVariant for why not at truncation time).
+	producer := p.cacheAuthorization(ctx)
+
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
 		p.logger.Debug("handleCallTool: client found",
@@ -3121,7 +3133,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	legacyResponseBytes := rawByteSize(result)
 	legacyRequestBytes := rawByteSize(activityArgs)
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheManager, p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -5603,28 +5615,39 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		"offset": offset,
 		"limit":  limit,
 	}
+	// Spec 028: auth identity on the activity record only (never in the
+	// cache-key derivation input, which stays `args`).
+	activityArgs := injectAuthMetadata(ctx, args)
 
 	// Validate parameters
 	if offset < 0 {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Offset must be non-negative", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Offset must be non-negative", time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
 		return mcp.NewToolResultError("Offset must be non-negative"), nil
 	}
 	if limit <= 0 || limit > 1000 {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Limit must be between 1 and 1000", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Limit must be between 1 and 1000", time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
 		return mcp.NewToolResultError("Limit must be between 1 and 1000"), nil
 	}
 
-	// Retrieve cached data
-	response, err := p.cacheManager.GetRecords(key, offset, limit)
+	// Retrieve cached data. The read is gated on the authorization the entry
+	// was produced under (Spec 104 FR-016a): a cache key is a hash, not a
+	// credential, and the MCP session is shared by whichever tokens present
+	// on it, so a narrower token must not page a payload a broader one
+	// generated. The gate runs here, on every page.
+	reader := p.cacheAuthorization(ctx)
+	response, err := p.cacheManager.GetRecordsAs(key, offset, limit, reader)
 	if err != nil {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
+		if errors.Is(err, cache.ErrUnauthorizedRead) {
+			return mcp.NewToolResultError("Cache entry is not readable with this credential: it was produced under a broader authorization (server scope, permission tier or profile) than this request holds. Re-run the original tool call with this credential to obtain your own cache key."), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to retrieve cached data: %v", err)), nil
 	}
 
 	// Serialize response
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
 	}
 
@@ -5641,7 +5664,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		args,
 		len(response.Records),
 		p.currentTruncator(),
-		p.cacheManager,
+		p.cacheStoreAs(reader),
 		p.logger,
 	)
 
@@ -5661,7 +5684,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	}
 
 	// Spec 024: Emit success event with args and response
-	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
+	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
 
 	return mcp.NewToolResultText(text), nil
 }
