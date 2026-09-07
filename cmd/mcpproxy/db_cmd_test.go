@@ -501,7 +501,15 @@ func TestCopyFileReplacesTheDestinationInsteadOfTruncatingIt(t *testing.T) {
 // path. A review found the sequence: someone deletes A's stale-looking lock, B
 // creates a fresh one, A finishes and removes the pathname — which is now B's —
 // and a third compaction starts alongside B.
+//
+// The clock is frozen so both acquisitions share a timestamp. That is the
+// Windows condition — a ~0.5-15ms granularity with these calls back-to-back —
+// which made this test fail intermittently on windows-latest while passing on
+// nanosecond-resolution platforms. Frozen, it exercises the collision
+// everywhere instead of by luck.
 func TestCompactLockReleaseDoesNotRemoveSomeoneElsesLock(t *testing.T) {
+	freezeCompactLockClock(t)
+
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, dbFileName+".compact.lock")
 
@@ -538,9 +546,10 @@ func TestCompactLockReleaseDoesNotRemoveSomeoneElsesLock(t *testing.T) {
 // and A's release then deletes B's lock.
 //
 // Asserting "the two files differ" would pass vacuously on a nanosecond clock,
-// so this strips the clock-derived line and requires what remains to still
-// differ — the same thing Windows sees.
+// so the clock is frozen — what Windows does by accident, this does on purpose.
 func TestCompactLockTokenIsUniqueWithinOneClockTick(t *testing.T) {
+	freezeCompactLockClock(t)
+
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, dbFileName+".compact.lock")
 
@@ -550,14 +559,7 @@ func TestCompactLockTokenIsUniqueWithinOneClockTick(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read lock: %v", err)
 		}
-		var kept []string
-		for _, line := range strings.Split(string(b), "\n") {
-			if line == "" || strings.HasPrefix(line, "started=") {
-				continue // clock-derived: assume it collides
-			}
-			kept = append(kept, line)
-		}
-		return strings.Join(kept, "\n")
+		return string(b)
 	}
 
 	releaseA, err := acquireCompactLock(dir)
@@ -575,7 +577,17 @@ func TestCompactLockTokenIsUniqueWithinOneClockTick(t *testing.T) {
 	tokenB := readToken()
 
 	if tokenA == tokenB {
-		t.Fatalf("two acquisitions produced the same clock-independent token %q; "+
+		t.Fatalf("two acquisitions produced the same token %q; "+
 			"on a coarse clock A's release would delete B's lock", tokenA)
 	}
+}
+
+// freezeCompactLockClock pins compactLockNow so every acquisition in a test
+// reads the same instant, reproducing Windows' coarse clock on any platform.
+func freezeCompactLockClock(t *testing.T) {
+	t.Helper()
+	frozen := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	restore := compactLockNow
+	compactLockNow = func() time.Time { return frozen }
+	t.Cleanup(func() { compactLockNow = restore })
 }

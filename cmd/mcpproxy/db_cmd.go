@@ -292,6 +292,11 @@ func runDBStats(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// compactLockNow is a seam so tests can freeze the clock. A frozen clock is
+// exactly the Windows condition this token guards against, which is what lets
+// the lock tests reproduce it on every platform instead of by luck.
+var compactLockNow = time.Now
+
 // compactDatabase rewrites srcPath in place via a temp file + atomic rename.
 //
 // The rename is what makes this safe to interrupt: until it succeeds the
@@ -339,7 +344,7 @@ func acquireCompactLock(dir string) (release func(), err error) {
 		return nil, fmt.Errorf("failed to generate compaction lock token: %w", errors.Join(rerr, cerr))
 	}
 	token := fmt.Sprintf("pid=%d\nstarted=%s\nnonce=%x\n",
-		os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano), nonce)
+		os.Getpid(), compactLockNow().UTC().Format(time.RFC3339Nano), nonce)
 	_, writeErr := f.WriteString(token)
 	closeErr := f.Close()
 	if writeErr != nil || closeErr != nil {
