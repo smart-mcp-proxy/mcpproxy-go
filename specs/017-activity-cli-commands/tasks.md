@@ -190,7 +190,7 @@ scripts/
 
 **Purpose**: Documentation, cleanup, and cross-story improvements
 
-- [ ] T055 [P] Update docs/cli-management-commands.md with activity commands
+- [x] T055 [P] Update docs/cli-management-commands.md with activity commands
 - [x] T056 [P] Update CLAUDE.md with activity command examples
 - [x] T057 [P] Add activity command examples to docs/features/activity-log.md
 - [ ] T058 Run quickstart.md validation scenarios
