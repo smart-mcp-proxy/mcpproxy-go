@@ -794,3 +794,122 @@ func TestToolGate_MergedApprovalRecordsKeepIndependentLocks(t *testing.T) {
 		assert.False(t, gate.callable())
 	})
 }
+
+// The StateView lookup behind the tier gate accepts two spellings of a tool:
+// the raw name and the legacy "server:tool"-prefixed form. With foreign
+// prefixes now preserved, a raw tool literally named "a:ns:erase" also
+// satisfies the prefixed spelling for the dispatched pair (a, "ns:erase"),
+// so which tool classified the call used to depend on StateView order. The
+// exact raw name — the identity that is actually dispatched — must always
+// win; the prefixed spelling is only a fallback when no exact tool exists.
+func TestLookupToolPermission_ExactRawNameOutranksPrefixedAlternative(t *testing.T) {
+	prefixedRead := stateview.ToolInfo{
+		Name: "a:ns:erase", Description: "Raw name that happens to carry the server prefix",
+		Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+	}
+	rawDestructive := stateview.ToolInfo{
+		Name: "ns:erase", Description: "Erase for real",
+		Annotations: &config.ToolAnnotations{DestructiveHint: boolPtr(true)},
+	}
+	require.Equal(t, contracts.ToolVariantRead, contracts.DeriveCallWith(prefixedRead.Annotations))
+	require.Equal(t, contracts.ToolVariantDestructive, contracts.DeriveCallWith(rawDestructive.Annotations))
+
+	for name, tools := range map[string][]stateview.ToolInfo{
+		"prefixed listed first": {prefixedRead, rawDestructive},
+		"raw listed first":      {rawDestructive, prefixedRead},
+	} {
+		t.Run(name, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			probe := watchPolicyDecisions(t, rt)
+			seedTargetTierServer(t, proxy, rt, "a", tools)
+
+			annotations, found := proxy.lookupToolAnnotationsFound("a", "ns:erase")
+			require.True(t, found)
+			assert.Equal(t, rawDestructive.Annotations, annotations,
+				"the exact raw name must be resolved, whatever the StateView order")
+			assert.Equal(t, contracts.OperationTypeDestructive, proxy.lookupToolPermission("a", "ns:erase"))
+
+			text := callToolReadOn(t, proxy, readOnlyAgentCtx("a"), "a:ns:erase")
+			assert.Contains(t, text, "Permission denied: token does not have 'destructive' permission required for tool 'a:ns:erase'")
+			assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
+
+			payload := probe.awaitOne(t)
+			assert.Equal(t, "blocked", payload["decision"])
+			assert.Equal(t, "ns:erase", payload["tool_name"])
+		})
+	}
+
+	t.Run("prefixed spelling still resolves when no exact tool exists", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedTargetTierServer(t, proxy, rt, "a", []stateview.ToolInfo{prefixedRead})
+		annotations, found := proxy.lookupToolAnnotationsFound("a", "ns:erase")
+		require.True(t, found)
+		assert.Equal(t, prefixedRead.Annotations, annotations)
+	})
+}
+
+// runtime.checkToolApprovals keys every record it writes under
+// extractToolName(raw) — everything after the first colon — so a raw tool
+// whose name ENDS in a colon ("ns:") is filed under the EMPTY tool name
+// (storage accepts the key "a:"). The merge reader must read that record
+// like any other collapsed key: skipping it turned a pending lock the
+// rug-pull detector wrote for "ns:" into an implicit approval, where the
+// pre-Spec-105 collapse had at least refused the pair outright.
+func TestToolGate_TrailingColonRawName_ReadsProducersEmptyKeyRecord(t *testing.T) {
+	trailing := stateview.ToolInfo{
+		Name: "ns:", Description: "Raw name ending in a colon",
+		Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+	}
+	seed := func(t *testing.T, record storage.ToolApprovalRecord) (*MCPProxyServer, *runtime.Runtime) {
+		t.Helper()
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
+		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+			s.Name, s.Enabled, s.Connected = "a", true, true
+			s.Tools = []stateview.ToolInfo{trailing}
+		})
+		// Exactly what checkToolApprovals writes for the raw name "ns:".
+		record.ServerName, record.ToolName = "a", ""
+		require.NoError(t, proxy.storage.SaveToolApproval(&record))
+		_, err := proxy.storage.GetToolApproval("a", "ns:")
+		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no exact-name record may exist")
+		return proxy, rt
+	}
+	fullToken := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "full", TokenPrefix: "mcp_agt_f",
+		AllowedServers: []string{"a"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+
+	t.Run("pending record under the empty key locks the tool", func(t *testing.T) {
+		proxy, rt := seed(t, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending})
+		probe := watchPolicyDecisions(t, rt)
+
+		gate := proxy.evaluateToolGate("a", "ns:")
+		require.NotNil(t, gate.approval, "the gate must read the record the producer filed under the empty key")
+		assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
+		assert.False(t, gate.callable())
+
+		req := mcp.CallToolRequest{}
+		req.Params.Name = contracts.ToolVariantRead
+		req.Params.Arguments = map[string]interface{}{"name": "a:ns:"}
+		result, err := proxy.handleCallToolVariant(fullToken, req, contracts.ToolVariantRead)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		text := result.Content[0].(mcp.TextContent).Text
+		assert.Contains(t, text, "TOOL_QUARANTINED")
+		assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
+
+		payload := probe.awaitOne(t)
+		assert.Equal(t, "blocked", payload["decision"])
+		assert.Equal(t, "ns:", payload["tool_name"])
+	})
+
+	t.Run("disabled record under the empty key hides the tool", func(t *testing.T) {
+		proxy, _ := seed(t, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true})
+		assert.False(t, proxy.isToolCallable("a", "ns:"))
+		assert.Equal(t, preflight.ToolClassBlockedByUser, proxy.evaluateToolGate("a", "ns:").class)
+	})
+}

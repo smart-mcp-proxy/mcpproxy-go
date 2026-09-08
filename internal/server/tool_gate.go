@@ -178,8 +178,11 @@ func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*stora
 	if exactErr != nil && !errors.Is(exactErr, storage.ErrToolApprovalNotFound) {
 		return nil, exactErr
 	}
+	// The collapsed key may be EMPTY: the producer files a raw name that ends
+	// in a colon ("ns:") under (server, "") and storage accepts that key, so
+	// it is read like any other collapsed record rather than skipped.
 	_, collapsed, ok := strings.Cut(toolName, ":")
-	if !ok || collapsed == "" {
+	if !ok {
 		return exact, exactErr
 	}
 	legacy, legacyErr := p.storage.GetToolApproval(serverName, collapsed)

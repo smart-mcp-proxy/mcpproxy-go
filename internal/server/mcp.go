@@ -6705,12 +6705,26 @@ func (p *MCPProxyServer) lookupToolAnnotationsFound(serverName, toolName string)
 		return nil, false
 	}
 
-	for _, tool := range serverStatus.Tools {
-		// tool.Name may be in "server:tool" format (from ToolMetadata.Name),
-		// while toolName is just the tool part. Match both formats.
-		if tool.Name == toolName || tool.Name == serverName+":"+toolName {
+	// tool.Name may be in "server:tool" format (from ToolMetadata.Name),
+	// while toolName is just the tool part. Both spellings are accepted, but
+	// the EXACT raw name — the identity that is dispatched (Spec 105
+	// FR-009) — always wins: with foreign prefixes preserved, a raw tool
+	// literally named "a:ns:erase" also satisfies the prefixed spelling for
+	// the pair (a, "ns:erase"), and letting StateView order decide between
+	// the two made the classified tier depend on discovery order.
+	prefixedName := serverName + ":" + toolName
+	prefixedIdx := -1
+	for i := range serverStatus.Tools {
+		tool := &serverStatus.Tools[i]
+		if tool.Name == toolName {
 			return tool.Annotations, true
 		}
+		if prefixedIdx < 0 && tool.Name == prefixedName {
+			prefixedIdx = i
+		}
+	}
+	if prefixedIdx >= 0 {
+		return serverStatus.Tools[prefixedIdx].Annotations, true
 	}
 
 	return nil, false
