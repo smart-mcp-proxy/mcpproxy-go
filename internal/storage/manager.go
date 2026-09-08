@@ -512,6 +512,17 @@ func (m *Manager) GetToolApproval(serverName, toolName string) (*ToolApprovalRec
 	return m.db.GetToolApproval(serverName, toolName)
 }
 
+// GetToolApprovals retrieves the approval records for several tools of one
+// server as one consistent snapshot: a single manager read lock and a single
+// storage read transaction cover every key, so no SaveToolApproval can
+// interleave between them. Tools without a record are absent from the map.
+func (m *Manager) GetToolApprovals(serverName string, toolNames ...string) (map[string]*ToolApprovalRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetToolApprovals(serverName, toolNames...)
+}
+
 // ListToolApprovals returns all tool approval records for a server.
 // If serverName is empty, returns all records across all servers.
 func (m *Manager) ListToolApprovals(serverName string) ([]*ToolApprovalRecord, error) {

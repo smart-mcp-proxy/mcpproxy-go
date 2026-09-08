@@ -63,7 +63,7 @@ The default mode uses BM25 full-text search to help AI agents discover relevant 
 - `call_tool_read` — Execute read-only tool calls
 - `call_tool_write` — Execute write tool calls
 - `call_tool_destructive` — Execute destructive tool calls
-- `read_cache` — Access paginated responses
+- `read_cache` — Access paginated responses. Each cached page is stamped with the authorization that produced it (agent-token server scope, permission tier, profile pin, effective profile, caller kind); a request whose own authorization could not have produced the entry is refused on every page, so a narrower token sharing an MCP session cannot read a broader token's response.
 
 **How it works:**
 1. AI agent calls `retrieve_tools` with a natural language query

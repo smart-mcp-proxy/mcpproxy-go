@@ -58,11 +58,15 @@ func TestCallToolVariant_InteriorPaddingPassesAgentScope(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 	seedEntryBuilderFixture(t, proxy)
 
+	// Full permissions: this fixture has no runtime, so the StateView cannot
+	// resolve the tool's tier and the target-tier gate requires the top tier
+	// (Spec 104 FR-016f). The subject here is the SCOPE gate's normalization,
+	// which must be reached and passed regardless.
 	agentCtx := &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
 		AgentName:      "test-bot",
 		AllowedServers: []string{"github"},
-		Permissions:    []string{auth.PermRead},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 	}
 	ctx := auth.WithAuthContext(context.Background(), agentCtx)
 
