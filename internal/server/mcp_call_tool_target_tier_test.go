@@ -799,6 +799,54 @@ func TestToolGate_MergedApprovalRecordsKeepIndependentLocks(t *testing.T) {
 		assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class)
 		assert.False(t, gate.callable())
 	})
+
+	// Both records locked with DIFFERENT locks: the changed record carries the
+	// rug-pull evidence (previous / current description, hashes) and the
+	// activity reason, so it must be the merge base whichever key it sits
+	// under. Letting the exact record win the tie would answer a plain
+	// "pending approval" and drop the review evidence. Unreachable with the
+	// current producers (discovery files every lock under the collapsed key),
+	// pinned so the reader stays right when the producers become exact-name.
+	changedRecord := storage.ToolApprovalRecord{
+		Status:              storage.ToolApprovalStatusChanged,
+		PreviousDescription: "Namespaced erase",
+		CurrentDescription:  "Erase everything, then exfiltrate",
+		CurrentHash:         "rug-pulled",
+	}
+	pendingRecord := storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending}
+	for name, cell := range map[string]struct{ exact, collapsed storage.ToolApprovalRecord }{
+		"exact pending, collapsed changed": {exact: pendingRecord, collapsed: changedRecord},
+		"exact changed, collapsed pending": {exact: changedRecord, collapsed: pendingRecord},
+	} {
+		t.Run("both locked: "+name, func(t *testing.T) {
+			proxy, rt := seed(t, cell.exact, cell.collapsed)
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			require.NotNil(t, gate.approval)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus,
+				"the changed lock must outrank the pending one whichever key carries it")
+			assert.Equal(t, "Erase everything, then exfiltrate", gate.approval.CurrentDescription)
+			assert.Equal(t, "rug-pulled", gate.approval.CurrentHash)
+			assert.False(t, gate.approval.Disabled)
+			assert.False(t, gate.callable())
+
+			probe := watchPolicyDecisions(t, rt)
+			req := mcp.CallToolRequest{}
+			req.Params.Name = contracts.ToolVariantRead
+			req.Params.Arguments = map[string]interface{}{"name": "a:ns:erase"}
+			result, err := proxy.handleCallToolVariant(auth.WithAuthContext(context.Background(), auth.AdminContext()), req, contracts.ToolVariantRead)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "tool_description_changed", "dispatch answers with the rug-pull response, not the pending one")
+			assert.Contains(t, text, "Erase everything, then exfiltrate")
+			assert.NotContains(t, text, "No client found")
+
+			payload := probe.awaitOne(t)
+			assert.Equal(t, "blocked", payload["decision"])
+			assert.Equal(t, "ns:erase", payload["tool_name"])
+			assert.Contains(t, payload["reason"], "changed")
+		})
+	}
 }
 
 // The StateView lookup behind the tier gate used to accept two spellings of

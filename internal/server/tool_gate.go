@@ -231,12 +231,17 @@ func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*stora
 // responses consume. The record that carries a quarantine lock (pending or
 // changed) is the base, so Status and the review evidence that goes with it
 // (previous / current description, hashes) come from the producer that wrote
-// the lock; the exact record is the base when neither or both are locked. The
-// user's Disabled flag is OR'd across both, so a toggle filed under either key
-// keeps blocking. The result is a copy — the stored records are never mutated.
+// the lock. When BOTH are locked, the changed record is the base whichever
+// key it sits under: it is the one carrying the rug-pull evidence, and letting
+// the exact record win the tie would answer a plain "pending approval" and
+// drop that evidence from the dispatch response and the activity reason. The
+// exact record is the base when neither is locked or both carry the same
+// lock. The user's Disabled flag is OR'd across both, so a toggle filed under
+// either key keeps blocking. The result is a copy — the stored records are
+// never mutated.
 func mergeApprovalRecords(exact, legacy *storage.ToolApprovalRecord) *storage.ToolApprovalRecord {
 	base := exact
-	if approvalLocked(legacy) && !approvalLocked(exact) {
+	if approvalLockRank(legacy) > approvalLockRank(exact) {
 		base = legacy
 	}
 	merged := *base
@@ -244,9 +249,16 @@ func mergeApprovalRecords(exact, legacy *storage.ToolApprovalRecord) *storage.To
 	return &merged
 }
 
-// approvalLocked reports whether a record carries the tool-level quarantine
-// lock (pending or changed) that preflight.ClassifyTool and the dispatch paths
-// honour while the quarantine gate applies.
-func approvalLocked(record *storage.ToolApprovalRecord) bool {
-	return record.Status == storage.ToolApprovalStatusPending || record.Status == storage.ToolApprovalStatusChanged
+// approvalLockRank orders the quarantine locks for mergeApprovalRecords:
+// unlocked < pending < changed. A changed record outranks a pending one
+// because it carries the review evidence the rug-pull response is built from.
+func approvalLockRank(record *storage.ToolApprovalRecord) int {
+	switch record.Status {
+	case storage.ToolApprovalStatusChanged:
+		return 2
+	case storage.ToolApprovalStatusPending:
+		return 1
+	default:
+		return 0
+	}
 }
