@@ -19,6 +19,11 @@ type Record struct {
 	AccessCount  int                    `json:"access_count"`
 	LastAccessed time.Time              `json:"last_accessed"`
 	CreatedAt    time.Time              `json:"created_at"`
+	// Producer is the authorization the entry was produced under (Spec 104
+	// FR-016a). nil on entries persisted before stamping existed or written
+	// through Store by internal callers; those are readable only by
+	// unrestricted callers.
+	Producer *Authorization `json:"producer,omitempty"`
 }
 
 // Stats represents cache statistics

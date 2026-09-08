@@ -595,15 +595,25 @@ func NewMCPProxyServer(
 	// Register proxy tools for the default (retrieve_tools) server
 	proxy.registerTools(debugSearch)
 
+	// Attach the aggregated-prompt auth filter to the default retrieve_tools
+	// server. It closes over `proxy` (needed by resolveActiveProfile), which
+	// did not exist when mcpServer was constructed above; ServerOption is
+	// just func(*MCPServer), so invoking it here is identical to having
+	// passed it to NewMCPServer. Enforced on prompts/list AND prompts/get
+	// (PR #973 review, finding F1).
+	//
+	// Bound UNCONDITIONALLY, not under EnablePrompts: RefreshPrompts publishes
+	// from the LIVE config snapshot on every servers.changed / config.reloaded
+	// / prompts-changed event, and mcp-go registers the prompts capability
+	// implicitly on the first SetPrompts. A server built with prompts off and
+	// enabled at runtime would otherwise serve every upstream prompt with no
+	// scope filter and with the internal owner stamp on the wire (Spec 105
+	// FR-006, cross-review round 2). With no prompts registered the filter is
+	// never invoked, so binding it early changes nothing while prompts are off.
+	mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
+
 	// Register prompts if enabled
 	if config.EnablePrompts {
-		// Attach the aggregated-prompt auth filter to the default retrieve_tools
-		// server. It closes over `proxy` (needed by resolveActiveProfile), which
-		// did not exist when mcpServer was constructed above; ServerOption is
-		// just func(*MCPServer), so invoking it here is identical to having
-		// passed it to NewMCPServer. Enforced on prompts/list AND prompts/get
-		// (PR #973 review, finding F1).
-		mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
 		proxy.registerPrompts()
 	}
 
@@ -1705,6 +1715,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// profile that may no longer exist. The post-filter below returns the same
 	// empty result set from the shared index.
 	profileName, profileScope := p.resolveActiveProfile(ctx)
+	// Spec 104 FR-016a: the cache stamp is the authorization THIS search runs
+	// under, captured now rather than re-resolved when the response is cut.
+	producer := p.cacheAuthorizationWith(ctx, profileName, profileScope)
 	searchIndex := p.index
 	if profileName != "" && !profileScope.DeniesAll() {
 		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
@@ -2074,7 +2087,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			len(mcpTools),
 			"tools",
 			p.currentTruncator(),
-			p.cacheManager,
+			p.cacheStoreAs(producer),
 			p.logger,
 		)
 	}
@@ -2259,11 +2272,27 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 057 / Profiles v2: profile filter — runs independently of agent-scope
 	// so that unauthenticated /mcp/p/<slug> connections (AdminContext) are still
 	// filtered, and so a base /mcp session that ran set_profile is bounded too.
-	if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+	// The same resolution is the read_cache producer stamp (Spec 104
+	// FR-016a), captured here — at authorization time, before the upstream
+	// call — so a profile deleted or narrowed while the call is in flight
+	// cannot re-stamp a response that was authorized under the wider scope.
+	profileSlug, profileScope := p.resolveActiveProfile(ctx)
+	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope)
+	if profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
 		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
 		return mcp.NewToolResultError(errMsg), nil
 	}
+
+	// Look up the target's annotations from the StateView ONCE. The same read
+	// serves the target-tier gate below and the intent validation after it, so
+	// the tier a token was authorized against and the annotations the variant
+	// is validated against can never come from two different snapshots
+	// (Spec 105 FR-009). found=false means the proxy holds no metadata for the
+	// pair (server unknown, tool undiscovered, or no runtime). The pair was
+	// split from the canonical id above, so it is read EXACTLY: a raw name
+	// that starts with the server's own prefix must not be normalized again.
+	annotations, annotationsFound := p.lookupExactToolAnnotations(serverName, actualToolName)
 
 	// Spec 028: Enforce agent token scope restrictions
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
@@ -2288,6 +2317,21 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
+		// Spec 104 FR-016f / Spec 105 FR-009: the variant is the CALLER's
+		// choice, so it is not the tier that matters. Authorize against the
+		// TARGET tool's annotation-derived tier, through the same classifier
+		// direct mode and code execution use (lookupToolPermission), and do
+		// it before intent validation so that a token lacking the tier is
+		// refused on permission grounds whether or not strict server
+		// validation would have let the variant mismatch through. A read-only
+		// token could otherwise drive a write tool via call_tool_read
+		// (always) and a destructive one (strict off).
+		targetPerm := tierForAnnotations(annotations, annotationsFound)
+		if targetPerm != "" && !authCtx.HasPermission(targetPerm) {
+			errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", targetPerm, serverName, actualToolName)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+			return mcp.NewToolResultError(errMsg), nil
+		}
 	}
 
 	p.logger.Debug("handleCallToolVariant: processing request",
@@ -2295,9 +2339,6 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		zap.String("tool_name", toolName),
 		zap.String("server_name", serverName),
 		zap.String("intent_operation", intent.OperationType))
-
-	// Look up tool annotations from StateView for server annotation validation
-	annotations := p.lookupToolAnnotations(serverName, actualToolName)
 
 	// Spec 035: Determine content trust level based on openWorldHint annotation
 	contentTrust := contracts.ContentTrustForTool(annotations)
@@ -2342,10 +2383,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// requestID was minted above the first policy gate, near the top of this
 	// handler — every activity event below shares that one value.
 
-	// Spec 057 FR-011 / Profiles v2: effective profile slug (token pin > URL >
-	// session set_profile) tagged on every activity record (success AND error
-	// paths) at top-level metadata["profile"].
-	profileSlug, _ := p.resolveActiveProfile(ctx)
+	// Spec 057 FR-011 / Profiles v2: profileSlug (resolved above with the
+	// profile filter; token pin > URL > session set_profile) is tagged on every
+	// activity record (success AND error paths) at top-level metadata["profile"].
 
 	// Spec 028: Inject auth identity into a separate copy for activity logging only.
 	// The original args must not be mutated — upstream servers reject unknown fields
@@ -2357,7 +2397,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// same classifier the preflight evaluator uses, so a tool dispatch refuses
 	// can never preflight as `ready`. The response SELECTION below keeps the
 	// long-standing dispatch order (quarantine → approval lock → generic block).
-	gate := p.evaluateToolGate(serverName, actualToolName)
+	// The split pair is gated exactly, like the tier read above.
+	gate := p.evaluateExactToolGate(serverName, actualToolName)
 
 	if gate.serverQuarantined() {
 		p.logger.Debug("handleCallToolVariant: server is quarantined",
@@ -2679,7 +2720,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
 	}
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheManager, p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -2871,8 +2912,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	activityArgs := injectAuthMetadata(ctx, args)
 
 	// Shared policy gates (Spec 098 FR-002), same primitive as every other
-	// dispatch path.
-	gate := p.evaluateToolGate(serverName, actualToolName)
+	// dispatch path, on the pair split above (never re-normalized).
+	gate := p.evaluateExactToolGate(serverName, actualToolName)
 	serverConfig := gate.serverConfig
 
 	if gate.serverQuarantined() {
@@ -2905,6 +2946,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 		return mcp.NewToolResultError(errMsg), nil
 	}
+
+	// Spec 104 FR-016a: read_cache producer stamp, captured before the
+	// upstream call (see handleCallToolVariant for why not at truncation time).
+	producer := p.cacheAuthorization(ctx)
 
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
@@ -3121,7 +3166,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	legacyResponseBytes := rawByteSize(result)
 	legacyRequestBytes := rawByteSize(activityArgs)
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheManager, p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -3876,7 +3921,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			if toolCount == 0 {
 				if tools, err := client.ListTools(context.Background()); err == nil {
 					for _, tool := range tools {
-						if p.isToolCallable(server.Name, tool.Name) {
+						if p.isExactToolCallable(server.Name, tool.Name) {
 							toolCount++
 						}
 					}
@@ -5603,28 +5648,39 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		"offset": offset,
 		"limit":  limit,
 	}
+	// Spec 028: auth identity on the activity record only (never in the
+	// cache-key derivation input, which stays `args`).
+	activityArgs := injectAuthMetadata(ctx, args)
 
 	// Validate parameters
 	if offset < 0 {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Offset must be non-negative", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Offset must be non-negative", time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
 		return mcp.NewToolResultError("Offset must be non-negative"), nil
 	}
 	if limit <= 0 || limit > 1000 {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Limit must be between 1 and 1000", time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", "Limit must be between 1 and 1000", time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
 		return mcp.NewToolResultError("Limit must be between 1 and 1000"), nil
 	}
 
-	// Retrieve cached data
-	response, err := p.cacheManager.GetRecords(key, offset, limit)
+	// Retrieve cached data. The read is gated on the authorization the entry
+	// was produced under (Spec 104 FR-016a): a cache key is a hash, not a
+	// credential, and the MCP session is shared by whichever tokens present
+	// on it, so a narrower token must not page a payload a broader one
+	// generated. The gate runs here, on every page.
+	reader := p.cacheAuthorization(ctx)
+	response, err := p.cacheManager.GetRecordsAs(key, offset, limit, reader)
 	if err != nil {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
+		if errors.Is(err, cache.ErrUnauthorizedRead) {
+			return mcp.NewToolResultError("Cache entry is not readable with this credential: it was produced under a broader authorization (server scope, permission tier or profile) than this request holds. Re-run the original tool call with this credential to obtain your own cache key."), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to retrieve cached data: %v", err)), nil
 	}
 
 	// Serialize response
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
-		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
 	}
 
@@ -5641,7 +5697,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		args,
 		len(response.Records),
 		p.currentTruncator(),
-		p.cacheManager,
+		p.cacheStoreAs(reader),
 		p.logger,
 	)
 
@@ -5661,16 +5717,45 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	}
 
 	// Spec 024: Emit success event with args and response
-	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
+	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
 
 	return mcp.NewToolResultText(text), nil
 }
 
+// tailLogNotFound is the single refusal shape for tail_log. It is shared by
+// the "no such server" path and the "server outside the caller's scope" path
+// so that an agent token cannot use the difference between the two as an
+// existence oracle for servers it is not allowed to see (Spec 104 FR-016h).
+func tailLogNotFound(name string) *mcp.CallToolResult {
+	return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found: %v", name, storage.ErrUpstreamNotFound))
+}
+
 // handleTailLog implements the tail_log functionality
-func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
+	}
+
+	// Spec 104 FR-016h: tail_log is a per-server READ that agent tokens may
+	// invoke (it is deliberately absent from auth.agentDeniedServerOps), so the
+	// named server must be authorized against the token's AllowedServers AND
+	// the effective profile (pin > URL > session) BEFORE the storage lookup —
+	// the same scope predicate `list` filters by and call_tool_* enforces.
+	// Administrators (API key / OS socket / no AuthContext) skip the
+	// AllowedServers check but NOT the profile check: an explicit URL profile
+	// (/mcp/p/<slug>) or a session set_profile bounds every caller here exactly
+	// as it already does for `list` (handleListUpstreams) and call_tool_*
+	// (handleCallToolVariant's profile gate) — Spec 057 FR-004, "profile
+	// filtering is independent of agent scope". Pre-feature tail_log ignored
+	// its context entirely, so this is an administrator-visible change on
+	// profile-scoped connections; unscoped administrators are unaffected. The
+	// refusal is rendered by the same function as the nonexistent-server case
+	// so the response discloses neither existence, status nor logs.
+	authCtx := auth.AuthContextFromContext(ctx)
+	_, profileScope := p.resolveActiveProfile(ctx)
+	if !p.serverInScope(authCtx, profileScope, name) {
+		return tailLogNotFound(name), nil
 	}
 
 	// Get optional lines parameter
@@ -5696,6 +5781,9 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 	// Check if server exists
 	serverConfig, err := p.storage.GetUpstreamServer(name)
 	if err != nil {
+		if errors.Is(err, storage.ErrUpstreamNotFound) {
+			return tailLogNotFound(name), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found: %v", name, err)), nil
 	}
 
@@ -6260,7 +6348,7 @@ func (p *MCPProxyServer) getVisibleToolCount(serverName string) int {
 
 	visible := 0
 	for _, tool := range serverStatus.Tools {
-		if p.isToolCallable(serverName, tool.Name) {
+		if p.isExactToolCallable(serverName, tool.Name) {
 			visible++
 		}
 	}
@@ -6377,16 +6465,18 @@ func (p *MCPProxyServer) serverToolNames(serverName string) []string {
 }
 
 func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
-	if strings.Contains(toolName, ":") {
-		parts := strings.SplitN(toolName, ":", 2)
-		if len(parts) == 2 {
-			if serverName == "" {
-				serverName = parts[0]
-			}
-			toolName = parts[1]
-		}
-	}
+	// Same prefix rule as every other gate (Spec 105 FR-009): only the
+	// server's own indexing prefix is stripped; a foreign "ns:" segment is
+	// part of the raw tool name and keys config denial / approval as itself.
+	serverName, toolName = normalizeServerTool(serverName, toolName)
+	return p.isExactToolCallable(serverName, toolName)
+}
 
+// isExactToolCallable is isToolCallable for a pair that is already split into
+// server and RAW tool name (a live ListTools / StateView name, or a pair a
+// resolver normalized once). It never re-normalizes, so a raw name carrying
+// the server's own prefix keys config denial and approval as itself.
+func (p *MCPProxyServer) isExactToolCallable(serverName, toolName string) bool {
 	if serverName == "" || toolName == "" {
 		return false
 	}
@@ -6415,7 +6505,7 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 		}
 	}
 
-	approval, err := p.storage.GetToolApproval(serverName, toolName)
+	approval, err := p.lookupToolApproval(serverName, toolName)
 	switch {
 	case err == nil:
 		if approval != nil && approval.Disabled {
@@ -6660,35 +6750,67 @@ func toolNameMatchesQuery(toolName string, tokens []string) bool {
 }
 
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
-	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil
-	}
+	annotations, _ := p.lookupToolAnnotationsFound(serverName, toolName)
+	return annotations
+}
 
-	// Callers now pass the canonical "server:tool" identity (#871), while the
-	// StateView stores bare tool names on the live path — strip the prefix so
-	// the name match below cannot silently miss (Issue #306 regression guard).
+// lookupToolAnnotationsFound is lookupToolAnnotations that also reports whether
+// the StateView knows the tool at all. A nil result with found=true is a
+// discovered tool that publishes no annotations; found=false means the proxy
+// has no metadata for it (server unknown, not yet discovered, or no runtime)
+// and no tier can be established from it.
+//
+// Callers pass the canonical "server:tool" identity (#871), while the
+// StateView stores bare tool names on the live path — the prefix is stripped
+// so the name match cannot silently miss (Issue #306 regression guard). A
+// caller that already holds a SPLIT pair must use lookupExactToolAnnotations
+// instead: normalizing it again would strip a raw name's own leading segment.
+func (p *MCPProxyServer) lookupToolAnnotationsFound(serverName, toolName string) (*config.ToolAnnotations, bool) {
 	serverName, toolName = normalizeServerTool(serverName, toolName)
+	return p.lookupExactToolAnnotations(serverName, toolName)
+}
+
+// lookupExactToolAnnotations is lookupToolAnnotationsFound for a pair that is
+// ALREADY split into server and raw tool name — handleCallToolVariant's and
+// handleCallTool's parsed id, the sandbox's callTool(server, tool) arguments.
+// It never re-normalizes: a raw tool name may itself begin with the server's
+// own prefix ("a:ns:erase" on server "a"), and normalizeServerTool would
+// strip that segment and classify the pair as the suffix tool "ns:erase"
+// while dispatch still targets "a:ns:erase" (Spec 105 FR-009).
+func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string) (*config.ToolAnnotations, bool) {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return nil, false
+	}
 
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
-		return nil
+		return nil, false
 	}
 
 	snapshot := supervisor.StateView().Snapshot()
 	serverStatus, exists := snapshot.Servers[serverName]
 	if !exists {
-		return nil
+		return nil, false
 	}
 
-	for _, tool := range serverStatus.Tools {
-		// tool.Name may be in "server:tool" format (from ToolMetadata.Name),
-		// while toolName is just the tool part. Match both formats.
-		if tool.Name == toolName || tool.Name == serverName+":"+toolName {
-			return tool.Annotations
+	// Only the EXACT raw name — the identity that is dispatched (Spec 105
+	// FR-009) — is matched. The StateView holds the name the upstream
+	// published, verbatim (internal/upstream/core/client.go copies tool.Name
+	// into ToolMetadata.Name, and the supervisor copies that into ToolInfo),
+	// so the legacy "server:tool" spelling this lookup once also accepted
+	// never matched a real entry on the live path. What it did match was a
+	// raw tool literally named "a:ns:erase": with foreign prefixes now
+	// preserved, that alternative resolved the UNDISCOVERED pair
+	// (a, "ns:erase") to the prefixed tool's annotations with found=true, so
+	// the tier gate classified a name the proxy holds no metadata for by a
+	// different tool's hints instead of failing closed.
+	for i := range serverStatus.Tools {
+		if serverStatus.Tools[i].Name == toolName {
+			return serverStatus.Tools[i].Annotations, true
 		}
 	}
 
-	return nil
+	return nil, false
 }
 
 // lookupOutputSchema returns the declared output schema (raw JSON) for a tool,

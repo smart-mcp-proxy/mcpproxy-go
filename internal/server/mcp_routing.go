@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -951,14 +953,21 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// unreachable over Streamable HTTP (PR #973 review, P1).
 	if p.config.EnablePrompts {
 		opts = append(opts, mcpserver.WithPromptCapabilities(true))
-		// Enforce agent-token + profile scope on aggregated prompts across every
-		// routing-mode server. mcp-go applies this on BOTH prompts/list and
-		// prompts/get (passesPromptFilters), closing the F1 get-time auth bypass.
-		// Added to the shared opts (before directOpts copies it) so directServer,
-		// codeExecServer and callToolServer all inherit it; p.server gets the
-		// same filter in NewMCPProxyServer, where proxy exists.
-		opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
 	}
+	// Enforce agent-token + profile scope on aggregated prompts across every
+	// routing-mode server. mcp-go applies this on BOTH prompts/list and
+	// prompts/get (passesPromptFilters), closing the F1 get-time auth bypass.
+	// Added to the shared opts (before directOpts copies it) so directServer,
+	// codeExecServer and callToolServer all inherit it; p.server gets the
+	// same filter in NewMCPProxyServer, where proxy exists.
+	//
+	// Bound regardless of EnablePrompts: RefreshPrompts publishes from the LIVE
+	// snapshot, so a server built with prompts off can still receive upstream
+	// prompts after a runtime enable, and mcp-go then serves prompts/list from
+	// the implicitly-registered capability. Only the filter makes that listing
+	// scoped and stamp-free (Spec 105 FR-006, cross-review round 2). It is a
+	// no-op while no prompts are registered.
+	opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
 	// discovery filters and belong only on the direct server (not the shared
@@ -1241,14 +1250,44 @@ func (p *MCPProxyServer) RefreshCodeExecutionAvailability() {
 // client-facing "__" name is needed since the handler closure already knows
 // which server it came from. Upstream prompts with a malformed (unqualified)
 // name are skipped.
+//
+// Each published upstream prompt carries its canonical owning server — the
+// server its handler dispatches to — in the registered Prompt's _meta under
+// aggregatedPromptServerMetaKey (see stampAggregatedPromptServer).
+// filterAggregatedPromptsForAuth authorizes against THAT stamp, never against
+// a re-parse of the display name: "a__b__c" re-parsed on the first "__" claims
+// owner "a", while its handler dispatches to "a__b" (Spec 104 FR-016g).
+// Riding inside the registered mcp.Prompt binds the owner PER PROMPT rather
+// than in a side table: mcp-go's SetPrompts is not atomic as a whole (it
+// clears the maps, unlocks, then AddPrompts re-locks per batch, so a
+// concurrent list can observe an empty or partially repopulated set, and
+// overlapping refreshes can interleave), but every prompt a list does observe
+// carries the owner its own handler dispatches to, so a refresh that changes
+// a collision winner can never pair an old prompt with a new owner. The stamp
+// is stripped from client-visible output by the filter.
+//
+// authorize, when non-nil, is invoked by every upstream prompt handler with the
+// prompt's canonical server BEFORE getPrompt; a non-nil error is returned to
+// the caller and the upstream is never contacted. It is the handler-side half
+// of the FR-016g gate (see authorizeAggregatedPromptServer) and must not be
+// nil in production.
 func buildAggregatedServerPrompts(
 	builtins []mcpserver.ServerPrompt,
 	upstreamPrompts []mcp.Prompt,
 	getPrompt func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error),
+	authorize func(ctx context.Context, serverName string) error,
 	logger *zap.Logger,
 ) []mcpserver.ServerPrompt {
 	all := make([]mcpserver.ServerPrompt, 0, len(builtins)+len(upstreamPrompts))
 	all = append(all, builtins...)
+
+	// Upstream ListPrompts iterates a map, so its order — and therefore the
+	// collision winner below — would otherwise change from refresh to refresh.
+	// Sort by qualified name so the same (server,prompt) wins every time.
+	upstreamPrompts = slices.Clone(upstreamPrompts)
+	slices.SortStableFunc(upstreamPrompts, func(x, y mcp.Prompt) int {
+		return strings.Compare(x.Name, y.Name)
+	})
 
 	// F7: two distinct (server,prompt) pairs can flatten to the same "__" display
 	// name (server "a__b"+prompt "c" and "a"+prompt "b__c" both -> "a__b__c").
@@ -1285,16 +1324,91 @@ func buildAggregatedServerPrompts(
 		qualifiedName := qualified.Name
 		display := qualified
 		display.Name = displayName
+		display.Meta = stampAggregatedPromptServer(display.Meta, serverName)
 
 		all = append(all, mcpserver.ServerPrompt{
 			Prompt: display,
 			Handler: func(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				if authorize != nil {
+					if err := authorize(ctx, serverName); err != nil {
+						// Same wording mcp-go emits for an unregistered name.
+						return nil, fmt.Errorf("prompt '%s' not found: %w", request.Params.Name, err)
+					}
+				}
 				return getPrompt(ctx, qualifiedName, request.Params.Arguments)
 			},
 		})
 	}
 
 	return all
+}
+
+// aggregatedPromptServerMetaKey is the _meta key under which a published
+// upstream prompt records its canonical owning server. Namespaced per the MCP
+// _meta convention (reverse-DNS prefix) so it cannot collide with protocol or
+// upstream keys. It is internal: the auth filter strips it before the prompt
+// reaches a client.
+const aggregatedPromptServerMetaKey = "app.mcpproxy/server"
+
+// aggregatedPromptStamp is the value stored under aggregatedPromptServerMetaKey.
+// It is a private struct rather than a bare string so an upstream that itself
+// sends our key (a string) can never be mistaken for a stamp, and so the
+// upstream's own _meta — nil, `{}`, a progress token, or even its own value
+// for our key — travels with the registered prompt and is handed back
+// verbatim by stripAggregatedPromptServer. Marshalling it (which only an
+// unfiltered path could do) yields `{}`: the fields are unexported.
+type aggregatedPromptStamp struct {
+	server   string
+	upstream *mcp.Meta
+}
+
+// stampAggregatedPromptServer returns a fresh Meta carrying serverName under
+// aggregatedPromptServerMetaKey. Upstream-supplied fields are mirrored into it
+// (so an unfiltered reader still sees them), while the upstream Meta itself is
+// kept inside the stamp so the strip can restore exactly what the upstream
+// sent. An upstream value under our key never wins — the owner is what
+// mcpproxy dispatches to, never what the upstream claims — but it is restored
+// on the client-visible copy along with the rest of the upstream _meta.
+func stampAggregatedPromptServer(upstream *mcp.Meta, serverName string) *mcp.Meta {
+	meta := &mcp.Meta{AdditionalFields: map[string]any{}}
+	if upstream != nil {
+		meta.ProgressToken = upstream.ProgressToken
+		maps.Copy(meta.AdditionalFields, upstream.AdditionalFields)
+	}
+	meta.AdditionalFields[aggregatedPromptServerMetaKey] = aggregatedPromptStamp{server: serverName, upstream: upstream}
+	return meta
+}
+
+// aggregatedPromptServer reads the canonical owner stamped by
+// stampAggregatedPromptServer. ok is false for a prompt that carries no stamp
+// (a built-in, anything not published by buildAggregatedServerPrompts, or an
+// upstream-supplied string under our key).
+func aggregatedPromptServer(prompt mcp.Prompt) (serverName string, ok bool) {
+	stamp, ok := aggregatedPromptStampOf(prompt)
+	return stamp.server, ok && stamp.server != ""
+}
+
+func aggregatedPromptStampOf(prompt mcp.Prompt) (aggregatedPromptStamp, bool) {
+	if prompt.Meta == nil {
+		return aggregatedPromptStamp{}, false
+	}
+	stamp, ok := prompt.Meta.AdditionalFields[aggregatedPromptServerMetaKey].(aggregatedPromptStamp)
+	return stamp, ok
+}
+
+// stripAggregatedPromptServer returns prompt with the internal owner stamp
+// removed and its _meta restored to exactly the value the upstream sent —
+// nil stays nil, an empty `{}` stays `{}` — so administrator-visible output is
+// byte-identical to the pre-stamp wire format (Spec 105 SC-005). The
+// registered prompt is never mutated: mcp-go hands filters the stored value
+// and a shared Meta pointer, and only the copy's Meta pointer is replaced.
+func stripAggregatedPromptServer(prompt mcp.Prompt) mcp.Prompt {
+	stamp, ok := aggregatedPromptStampOf(prompt)
+	if !ok {
+		return prompt
+	}
+	prompt.Meta = stamp.upstream
+	return prompt
 }
 
 // RefreshPrompts rebuilds every routing-mode server's prompt set: the built-in
@@ -1342,7 +1456,7 @@ func (p *MCPProxyServer) RefreshPrompts() {
 		// prompts/get natively; there is no runtime get-time gate.
 		approval := p.checkPromptApprovals(upstreamPrompts)
 		upstreamPrompts = filterBlockedPrompts(upstreamPrompts, approval.blocked)
-		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated, p.logger)
+		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated, p.authorizeAggregatedPromptServer, p.logger)
 		p.logger.Info("refreshed prompts",
 			zap.Int("upstream_prompt_count", len(upstreamPrompts)),
 			zap.Int("total_prompt_count", len(all)),
@@ -1351,7 +1465,7 @@ func (p *MCPProxyServer) RefreshPrompts() {
 	} else {
 		// nil upstreamPrompts: the aggregation loop never runs, so the nil
 		// getPrompt is never invoked.
-		all = buildAggregatedServerPrompts(builtins, nil, nil, p.logger)
+		all = buildAggregatedServerPrompts(builtins, nil, nil, nil, p.logger)
 		p.logger.Debug("refreshed prompts (upstream aggregation disabled, built-ins only)",
 			zap.Int("total_prompt_count", len(all)))
 	}

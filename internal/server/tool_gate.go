@@ -2,6 +2,8 @@ package server
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
@@ -77,8 +79,21 @@ func (g toolGate) blockedMessage() string {
 // preflight glue — which reads the same live config — cannot drift from it. In
 // unit tests, where no runtime is wired, currentConfig() is the construction
 // config, so behavior is unchanged there.
+//
+// The pair is normalized here for callers that hold a canonical "server:tool"
+// id. A caller that already holds a SPLIT pair (every dispatch path, and a
+// resolver that normalized once itself) must use evaluateExactToolGate.
 func (p *MCPProxyServer) evaluateToolGate(serverName, toolName string) toolGate {
 	serverName, toolName = normalizeServerTool(serverName, toolName)
+	return p.evaluateExactToolGate(serverName, toolName)
+}
+
+// evaluateExactToolGate is evaluateToolGate for a pair that is already split
+// into server and RAW tool name. It never re-normalizes: a raw name that
+// begins with the server's own prefix ("a:ns:erase" on "a") would otherwise
+// be approval- and config-gated as the suffix tool "ns:erase" while dispatch
+// targets "a:ns:erase" (Spec 105 FR-009).
+func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) toolGate {
 	gate := toolGate{serverName: serverName, toolName: toolName}
 
 	if serverName == "" || toolName == "" {
@@ -102,7 +117,7 @@ func (p *MCPProxyServer) evaluateToolGate(serverName, toolName string) toolGate 
 	gate.serverConfig = serverConfig
 	gate.configDenied = p.isToolConfigDenied(serverName, toolName, serverConfig)
 
-	approval, approvalErr := p.storage.GetToolApproval(serverName, toolName)
+	approval, approvalErr := p.lookupToolApproval(serverName, toolName)
 	switch {
 	case approvalErr == nil:
 		gate.approval = approval
@@ -148,5 +163,102 @@ func approvalStateFor(record *storage.ToolApprovalRecord) *preflight.ApprovalSta
 		Disabled:          record.Disabled,
 		CurrentHash:       record.CurrentHash,
 		HashSchemaVersion: record.HashSchemaVersion,
+	}
+}
+
+// lookupToolApproval reads the Spec-032 approval record for one (server, tool)
+// pair, already normalized by normalizeServerTool.
+//
+// Two producers file records for a raw name that carries a ":" segment, and
+// they key it differently: runtime's discovery producer (checkToolApprovals)
+// writes every pending / changed / baseline record under extractToolName —
+// everything after the first colon, so "ns:erase" lands under "erase" — while
+// the user toggle (setToolEnabledNoEmit, reached from the tools REST endpoint
+// and the Web UI with the raw StateView name) reads and synthesizes an
+// approved record under the EXACT name. Neither producer ever sees the other's
+// record. Trusting either one alone therefore fails open in one direction:
+// exact-only turns a discovered tool's pending / changed lock into an implicit
+// approval, and exact-first lets an approved record left behind by a toggle
+// shadow a later "changed" mark the rug-pull detector wrote under the
+// collapsed key. So both records are read and MERGED (mergeApprovalRecords):
+// the two carry independent facts — the toggle's Disabled flag and the
+// detector's pending / changed lock — and each must reach the classifier,
+// which lets the user block outrank the lock for callability while dispatch
+// keeps answering with the lock's review response (the toolGate.lockStatus
+// contract). This is the conservative reader rule until the producers are
+// made exact-name as well (Spec 105 FR-009 follow-up).
+//
+// Both keys are read in ONE storage snapshot (Manager.GetToolApprovals: a
+// single read lock and a single read transaction). Two independent reads would
+// let a pair of operator writes land between them — the exact record read
+// while still approved and enabled, the collapsed one read after its lock was
+// lifted — and merge into approved+enabled although the tool was locked or
+// disabled at every instant. The absence of both records is reported as
+// storage.ErrToolApprovalNotFound, the same contract GetToolApproval keeps.
+func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	keys := []string{toolName}
+	// The collapsed key may be EMPTY: the producer files a raw name that ends
+	// in a colon ("ns:") under (server, "") and storage accepts that key, so
+	// it is read like any other collapsed record rather than skipped.
+	collapsed, hasCollapsed := "", false
+	if _, rest, ok := strings.Cut(toolName, ":"); ok {
+		collapsed, hasCollapsed = rest, true
+		keys = append(keys, collapsed)
+	}
+	records, err := p.storage.GetToolApprovals(serverName, keys...)
+	if err != nil {
+		return nil, err
+	}
+	exact := records[toolName]
+	var legacy *storage.ToolApprovalRecord
+	if hasCollapsed {
+		legacy = records[collapsed]
+	}
+	switch {
+	case exact == nil && legacy == nil:
+		return nil, fmt.Errorf("%w: %s", storage.ErrToolApprovalNotFound, storage.ToolApprovalKey(serverName, toolName))
+	case exact == nil:
+		return legacy, nil
+	case legacy == nil:
+		return exact, nil
+	default:
+		return mergeApprovalRecords(exact, legacy), nil
+	}
+}
+
+// mergeApprovalRecords folds the exact-name and collapsed-name records for one
+// raw tool into the single view preflight.ClassifyTool and the dispatch
+// responses consume. The record that carries a quarantine lock (pending or
+// changed) is the base, so Status and the review evidence that goes with it
+// (previous / current description, hashes) come from the producer that wrote
+// the lock. When BOTH are locked, the changed record is the base whichever
+// key it sits under: it is the one carrying the rug-pull evidence, and letting
+// the exact record win the tie would answer a plain "pending approval" and
+// drop that evidence from the dispatch response and the activity reason. The
+// exact record is the base when neither is locked or both carry the same
+// lock. The user's Disabled flag is OR'd across both, so a toggle filed under
+// either key keeps blocking. The result is a copy — the stored records are
+// never mutated.
+func mergeApprovalRecords(exact, legacy *storage.ToolApprovalRecord) *storage.ToolApprovalRecord {
+	base := exact
+	if approvalLockRank(legacy) > approvalLockRank(exact) {
+		base = legacy
+	}
+	merged := *base
+	merged.Disabled = exact.Disabled || legacy.Disabled
+	return &merged
+}
+
+// approvalLockRank orders the quarantine locks for mergeApprovalRecords:
+// unlocked < pending < changed. A changed record outranks a pending one
+// because it carries the review evidence the rug-pull response is built from.
+func approvalLockRank(record *storage.ToolApprovalRecord) int {
+	switch record.Status {
+	case storage.ToolApprovalStatusChanged:
+		return 2
+	case storage.ToolApprovalStatusPending:
+		return 1
+	default:
+		return 0
 	}
 }

@@ -765,3 +765,49 @@ func TestProfile_EndpointReachability(t *testing.T) {
 			"profile endpoint %s must be reachable; got %d", url, resp.StatusCode)
 	}
 }
+
+// TestProfile_DeletedPinDoesNotEnumerateProfiles is the Spec 104 FR-016b
+// regression (cross-model review): after the profile an agent token is pinned
+// to is deleted, a request to /mcp/p/<pin> passes the pin check and fell into
+// the generic "unknown profile" branch, whose "available" list enumerated
+// every remaining profile — profiles the token may never select (the resolver
+// treats a deleted pin as deny-all). The error must not list them.
+func TestProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := env.mintPinnedToken("pinned-research", "research")
+
+	// Delete the pinned profile; "deploy" remains configured.
+	old := env.proxyServer.runtime.Config()
+	cfgCopy := *old
+	cfg := &cfgCopy
+	cfg.Profiles = []config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv"}}}
+	env.proxyServer.runtime.UpdateConfig(cfg, "")
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	const initBody = `{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/mcp/p/research", strings.NewReader(initBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, "unknown profile 'research'", body["error"])
+	_, enumerated := body["available"]
+	assert.False(t, enumerated, "a pinned agent token must not be told which other profiles exist: %v", body)
+
+	// Administrator behaviour is unchanged: an unauthenticated (admin-context)
+	// caller on an unknown slug still gets the list.
+	adminResp, err := http.Post(baseURL+"/mcp/p/research", "application/json", strings.NewReader(initBody))
+	require.NoError(t, err)
+	defer adminResp.Body.Close()
+	require.Equal(t, http.StatusNotFound, adminResp.StatusCode)
+	var adminBody map[string]interface{}
+	require.NoError(t, json.NewDecoder(adminResp.Body).Decode(&adminBody))
+	available, _ := adminBody["available"].([]interface{})
+	assert.Equal(t, []interface{}{"deploy"}, available, "admin still sees the available list")
+}

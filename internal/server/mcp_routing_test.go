@@ -182,9 +182,14 @@ func TestBuildAggregatedServerPrompts(t *testing.T) {
 		return &mcp.GetPromptResult{Description: "from upstream"}, nil
 	}
 
-	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt, zap.NewNop())
+	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt, nil, zap.NewNop())
 
 	require.Len(t, all, 2)
+	_, builtinStamped := aggregatedPromptServer(all[0].Prompt)
+	assert.False(t, builtinStamped, "built-ins carry no owner stamp")
+	owner, stamped := aggregatedPromptServer(all[1].Prompt)
+	require.True(t, stamped, "published upstream prompt carries its canonical owner")
+	assert.Equal(t, "server-a", owner)
 	assert.Equal(t, "setup-new-mcp-server", all[0].Prompt.Name)
 	assert.Equal(t, "server-a__greeting", all[1].Prompt.Name)
 	assert.Equal(t, "hi", all[1].Prompt.Description)
@@ -202,7 +207,7 @@ func TestBuildAggregatedServerPrompts(t *testing.T) {
 
 func TestBuildAggregatedServerPrompts_SkipsMalformedNames(t *testing.T) {
 	upstreamPrompts := []mcp.Prompt{{Name: "no-colon-here"}}
-	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil, zap.NewNop())
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil, nil, zap.NewNop())
 	assert.Empty(t, all)
 }
 
@@ -1172,29 +1177,42 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 // TestBuildAggregatedServerPrompts_CollisionKeepsFirst covers Finding F7: two
 // distinct (server,prompt) pairs that flatten to the same "server__prompt"
 // display name must be resolved deterministically (first-writer-wins), not
-// silently overwritten, and the drop must be logged.
+// silently overwritten, and the drop must be logged. The winner must be the
+// same whichever order the upstream manager hands the prompts over in —
+// ListPrompts iterates a map — so both input orders are exercised (Spec 105
+// FR-006 "collisions in both input orders").
 func TestBuildAggregatedServerPrompts_CollisionKeepsFirst(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-
 	// "gh" + "issue__create" and "gh__issue" + "create" both flatten to
 	// "gh__issue__create".
-	upstreamPrompts := []mcp.Prompt{
-		{Name: "gh:issue__create", Description: "first"},
-		{Name: "gh__issue:create", Description: "second (collides)"},
-	}
+	first := mcp.Prompt{Name: "gh:issue__create", Description: "first"}
+	second := mcp.Prompt{Name: "gh__issue:create", Description: "second (collides)"}
 	fakeGetPrompt := func(_ context.Context, _ string, _ map[string]string) (*mcp.GetPromptResult, error) {
 		return &mcp.GetPromptResult{}, nil
 	}
 
-	all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, logger)
+	for name, upstreamPrompts := range map[string][]mcp.Prompt{
+		"sorted order":   {first, second},
+		"reversed order": {second, first},
+	} {
+		t.Run(name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			logger := zap.New(core)
 
-	names := make([]string, len(all))
-	for i, p := range all {
-		names[i] = p.Prompt.Name
+			all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, nil, logger)
+			require.Len(t, all, 1)
+			owner, _ := aggregatedPromptServer(all[0].Prompt)
+			assert.Equal(t, "gh", owner, "the lexically-first qualified name owns the display name regardless of input order")
+			assert.Equal(t, "gh__issue__create", all[0].Prompt.Name, "colliding display name must appear once (first kept)")
+			assert.Equal(t, "first", all[0].Prompt.Description)
+
+			entries := logs.FilterMessage("dropping upstream prompt: display-name collision (kept first)").All()
+			require.Len(t, entries, 1, "the dropped collision must be logged exactly once")
+			fields := entries[0].ContextMap()
+			assert.Equal(t, "gh__issue", fields["server"])
+			assert.Equal(t, "create", fields["prompt"])
+			assert.Equal(t, "gh__issue__create", fields["display_name"])
+		})
 	}
-	assert.Equal(t, []string{"gh__issue__create"}, names, "colliding display name must appear once (first kept)")
-	require.Equal(t, 1, logs.FilterMessage("dropping upstream prompt: display-name collision (kept first)").Len())
 }
 
 // Spec 102 FR-007 / D11 / D16 (T034): the direct server carries instructions on
@@ -1287,4 +1305,39 @@ func TestDirectDeferralLegend_ExplainsTheMarkers(t *testing.T) {
 	assert.Contains(t, directDeferralLegend, "~")
 	assert.Contains(t, directDeferralLegend, "describe_tool")
 	assert.Contains(t, directDeferralLegend, "placeholder")
+}
+
+// TestBuildAggregatedServerPrompts_HandlerAuthorizesCanonicalServer (Spec 104
+// FR-016g, cross-review P1): every upstream prompt handler must consult the
+// authorize hook with its OWN canonical server before contacting the upstream,
+// so a stale owner record or a mid-refresh window can never turn a filter
+// pass into an unauthorized fetch.
+func TestBuildAggregatedServerPrompts_HandlerAuthorizesCanonicalServer(t *testing.T) {
+	var fetched []string
+	fakeGetPrompt := func(_ context.Context, name string, _ map[string]string) (*mcp.GetPromptResult, error) {
+		fetched = append(fetched, name)
+		return &mcp.GetPromptResult{}, nil
+	}
+	var asked []string
+	authorize := func(_ context.Context, serverName string) error {
+		asked = append(asked, serverName)
+		if serverName == "a__b" {
+			return errPromptNotFound
+		}
+		return nil
+	}
+
+	all := buildAggregatedServerPrompts(nil, []mcp.Prompt{{Name: "a:greeting"}, {Name: "a__b:greeting"}}, fakeGetPrompt, authorize, zap.NewNop())
+	byName := map[string]mcpserver.ServerPrompt{}
+	for _, sp := range all {
+		byName[sp.Prompt.Name] = sp
+	}
+
+	_, err := byName["a__b__greeting"].Handler(context.Background(), mcp.GetPromptRequest{})
+	require.ErrorIs(t, err, errPromptNotFound)
+	_, err = byName["a__greeting"].Handler(context.Background(), mcp.GetPromptRequest{})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"a__b", "a"}, asked, "each handler asks about its canonical server, not a re-parse of the display name")
+	assert.Equal(t, []string{"a:greeting"}, fetched, "a denied handler never contacts the upstream")
 }

@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -15,12 +17,15 @@ import (
 )
 
 // setProfileCtx builds a request context carrying a stable session id and an
-// optional agent-token profile_pin.
+// optional agent-token profile_pin. The pinned token carries the "*" server
+// wildcard that REST minting defaults to (internal/httpapi/tokens.go) — an
+// agent token with NO allowed_servers grants nothing under CanAccessServer, so
+// a pin-only fixture would model a token that cannot see any server.
 func setProfileCtx(sessionID, pin string) context.Context {
 	helper := mcpserver.NewMCPServer("test", "1.0.0")
 	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: sessionID})
 	if pin != "" {
-		ctx = auth.WithAuthContext(ctx, &auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: pin})
+		ctx = auth.WithAuthContext(ctx, &auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: pin, AllowedServers: []string{"*"}})
 	}
 	return ctx
 }
@@ -34,6 +39,7 @@ func newSetProfileTestServer() *MCPProxyServer {
 		Profiles: []config.ProfileConfig{
 			{Name: "research", Servers: []string{"research-srv"}},
 			{Name: "deploy", Servers: []string{"deploy-srv"}},
+			{Name: "mixed", Servers: []string{"research-srv", "deploy-srv"}},
 		},
 	}
 	return &MCPProxyServer{
@@ -105,4 +111,370 @@ func TestHandleSetProfile_UnpinnedUnchanged(t *testing.T) {
 	res := callSetProfileTool(t, p, ctx, "deploy")
 	require.False(t, res.IsError, "unpinned token must switch freely: %s", setProfileResultText(t, res))
 	require.Equal(t, "deploy", p.sessionStore.GetActiveProfile("sess-free"))
+}
+
+// TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles is the Spec 104
+// FR-016b regression on the MCP surface (cross-review finding): a token pinned
+// to a profile that has since been deleted passes the pin check for its own
+// slug and fell into the "unknown profile (available: ...)" error, which listed
+// every remaining profile — profiles the pin makes unselectable. The error must
+// not enumerate them; an unpinned caller still gets the list.
+func TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
+	p := newSetProfileTestServer()
+	p.config.Profiles = []config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv"}}}
+
+	res := callSetProfileTool(t, p, setProfileCtx("sess-deleted-pin", "research"), "research")
+	require.True(t, res.IsError)
+	text := setProfileResultText(t, res)
+	require.Contains(t, text, "unknown profile 'research'")
+	require.NotContains(t, text, "deploy", "a pinned token must not learn the other profiles' names: %s", text)
+
+	// Unpinned callers keep the discovery affordance — proven with an actual
+	// unpinned AGENT identity (ProfilePin ""), not merely the absence of an
+	// auth context, which is administrator-shaped and would leave the agent
+	// contract unproven (cross-review round 2).
+	unpinnedAgent := auth.WithAuthContext(setProfileCtx("sess-unpinned", ""), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "unpinned-bot",
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead},
+	})
+	res = callSetProfileTool(t, p, unpinnedAgent, "research")
+	require.True(t, res.IsError)
+	require.Contains(t, setProfileResultText(t, res), "available: deploy")
+
+	// And an administrator-shaped caller (no auth context) likewise.
+	res = callSetProfileTool(t, p, setProfileCtx("sess-admin", ""), "research")
+	require.True(t, res.IsError)
+	require.Contains(t, setProfileResultText(t, res), "available: deploy")
+}
+
+// setProfileScopedCtx builds a request context for an UNPINNED agent token
+// whose AllowedServers is restricted to the given servers (Spec 104 FR-016b).
+func setProfileScopedCtx(sessionID string, allowed ...string) context.Context {
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: sessionID})
+	return auth.WithAuthContext(ctx, &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: allowed})
+}
+
+// setProfileAdminCtx builds a request context for an API-key / socket admin.
+func setProfileAdminCtx(sessionID string) context.Context {
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: sessionID})
+	return auth.WithAuthContext(ctx, auth.AdminContext())
+}
+
+func setProfileScopedPayload(t *testing.T, res *mcp.CallToolResult) (string, []string) {
+	t.Helper()
+	require.False(t, res.IsError, "unexpected set_profile error: %s", setProfileResultText(t, res))
+	var payload struct {
+		ActiveProfile string   `json:"active_profile"`
+		Servers       []string `json:"servers"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(setProfileResultText(t, res)), &payload))
+	return payload.ActiveProfile, payload.Servers
+}
+
+// TestHandleSetProfile_ScopedTokenClearReportsOnlyAllowedServers: an unpinned
+// agent token restricted to one server that clears its selection must be told
+// about THAT server only — not every configured server (Spec 104 FR-016b).
+func TestHandleSetProfile_ScopedTokenClearReportsOnlyAllowedServers(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileScopedCtx("sess-scoped-clear", "research-srv")
+
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.Equal(t, "", active)
+	require.ElementsMatch(t, []string{"research-srv"}, servers,
+		"clearing the selection must not enumerate servers outside the token's AllowedServers")
+}
+
+// TestHandleSetProfile_ScopedTokenSelectIntersectsAllowedServers: selecting a
+// profile returns the profile's servers INTERSECTED with the token's
+// AllowedServers, never the profile's complete set (Spec 104 FR-016b).
+func TestHandleSetProfile_ScopedTokenSelectIntersectsAllowedServers(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileScopedCtx("sess-scoped-select", "research-srv")
+
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "mixed"))
+	require.Equal(t, "mixed", active)
+	require.ElementsMatch(t, []string{"research-srv"}, servers,
+		"a profile's servers outside the token's AllowedServers must not be reported")
+	require.Equal(t, "mixed", p.sessionStore.GetActiveProfile("sess-scoped-select"))
+
+}
+
+// TestHandleSetProfile_ScopedTokenDisjointProfileIndistinguishableFromUnknown:
+// a profile entirely outside the token's reach must not be confirmable by
+// probing its name — selecting it yields the SAME error as a nonexistent slug,
+// and the session is not mutated (Spec 104 FR-016b, cross-review finding).
+func TestHandleSetProfile_ScopedTokenDisjointProfileIndistinguishableFromUnknown(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileScopedCtx("sess-scoped-disjoint", "research-srv")
+
+	// Start from a REAL prior selection so "no state change" is not satisfied
+	// vacuously by an implementation that clears the session before refusing.
+	require.False(t, callSetProfileTool(t, p, ctx, "research").IsError)
+	require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-scoped-disjoint"))
+
+	disjoint := callSetProfileTool(t, p, ctx, "deploy")
+	unknown := callSetProfileTool(t, p, ctx, "nope")
+	require.True(t, disjoint.IsError, "a disjoint profile must not be selectable")
+	require.True(t, unknown.IsError)
+	require.Equal(t,
+		strings.ReplaceAll(setProfileResultText(t, unknown), "'nope'", "'deploy'"),
+		setProfileResultText(t, disjoint),
+		"disjoint and unknown slugs must produce the same error shape")
+	require.NotContains(t, setProfileResultText(t, disjoint), "deploy-srv")
+	require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-scoped-disjoint"),
+		"a refused selection must leave the prior session selection untouched")
+}
+
+// TestHandleSetProfile_ScopedTokenDisjointProfilePresentVsAbsentIdentical is
+// the differential form of the non-disclosure rule: the SAME slug, requested by
+// the SAME scoped token, yields a byte-identical refusal whether the disjoint
+// profile is configured or has been removed — so probing cannot confirm the
+// operator has (or still has) a profile of that name.
+func TestHandleSetProfile_ScopedTokenDisjointProfilePresentVsAbsentIdentical(t *testing.T) {
+	withDeploy := newSetProfileTestServer()
+	withoutDeploy := newSetProfileTestServer()
+	withoutDeploy.config.Profiles = slices.DeleteFunc(slices.Clone(withoutDeploy.config.Profiles), func(pc config.ProfileConfig) bool {
+		return pc.Name == "deploy"
+	})
+	require.Len(t, withoutDeploy.config.Profiles, len(withDeploy.config.Profiles)-1)
+
+	ctx := setProfileScopedCtx("sess-scoped-differential", "research-srv")
+	for _, p := range []*MCPProxyServer{withDeploy, withoutDeploy} {
+		require.False(t, callSetProfileTool(t, p, ctx, "research").IsError)
+	}
+
+	present := callSetProfileTool(t, withDeploy, ctx, "deploy")
+	absent := callSetProfileTool(t, withoutDeploy, ctx, "deploy")
+	require.True(t, present.IsError)
+	require.True(t, absent.IsError)
+	require.Equal(t, setProfileResultText(t, absent), setProfileResultText(t, present),
+		"a configured-but-unreachable profile must be refused exactly like an absent one")
+	for _, p := range []*MCPProxyServer{withDeploy, withoutDeploy} {
+		require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-scoped-differential"))
+	}
+}
+
+// TestHandleSetProfile_EmptyAllowlistTokenSeesNothing: an agent token whose
+// AllowedServers is EMPTY grants nothing under CanAccessServer (the predicate
+// serverInScope applies to retrieve_tools), so set_profile must report the
+// same empty reach rather than read "empty" as "unrestricted".
+func TestHandleSetProfile_EmptyAllowlistTokenSeesNothing(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileScopedCtx("sess-empty-allow")
+
+	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.Empty(t, servers)
+
+	// An EXISTING profile is just as unselectable as a nonexistent one for a
+	// token that can reach no server: same refusal, nothing disclosed, no
+	// session mutation.
+	existing := callSetProfileTool(t, p, ctx, "research")
+	unknown := callSetProfileTool(t, p, ctx, "nope")
+	require.True(t, existing.IsError, "an empty-allowlist token must not select any profile")
+	require.True(t, unknown.IsError)
+	require.Equal(t,
+		strings.ReplaceAll(setProfileResultText(t, unknown), "'nope'", "'research'"),
+		setProfileResultText(t, existing))
+	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-empty-allow"))
+	text := setProfileResultText(t, unknown)
+	for _, name := range []string{"research", "deploy", "mixed"} {
+		require.NotContains(t, text, name)
+	}
+}
+
+// TestHandleSetProfile_ServerEditionUserScopedLikeVisibility: a server-edition
+// "user" context with a server allowlist is scoped by serverInScope exactly
+// like an agent token, so set_profile applies the same bound.
+func TestHandleSetProfile_ServerEditionUserScopedLikeVisibility(t *testing.T) {
+	p := newSetProfileTestServer()
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-user"})
+	ctx = auth.WithAuthContext(ctx, &auth.AuthContext{Type: auth.AuthTypeUser, AllowedServers: []string{"deploy-srv"}})
+
+	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.ElementsMatch(t, []string{"deploy-srv"}, servers)
+}
+
+// TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles: the
+// invalid-selection error for an agent token names only the profiles the token
+// may select — never profiles entirely outside its reach (Spec 104 FR-016b).
+func TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileScopedCtx("sess-scoped-unknown", "research-srv")
+	require.False(t, callSetProfileTool(t, p, ctx, "mixed").IsError)
+
+	res := callSetProfileTool(t, p, ctx, "nope")
+	require.True(t, res.IsError)
+	text := setProfileResultText(t, res)
+	require.Contains(t, text, "unknown profile 'nope'")
+	require.Contains(t, text, "research", "profiles overlapping the token's scope stay selectable")
+	require.NotContains(t, text, "deploy", "a profile fully outside the token's scope must not be disclosed")
+	require.Equal(t, "mixed", p.sessionStore.GetActiveProfile("sess-scoped-unknown"),
+		"a refused selection must leave the prior session selection untouched")
+}
+
+// TestHandleSetProfile_StalePinUnknownSlugDisclosesNoProfiles: a token pinned
+// to a profile that has since been removed reaches the unknown-slug branch
+// (slug == pin passes the pin guard); the error must not enumerate the
+// configured profiles it can never select.
+func TestHandleSetProfile_StalePinUnknownSlugDisclosesNoProfiles(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileCtx("sess-stale-pin", "gone")
+	// A selection recorded before the pin went stale must survive the refusal.
+	p.sessionStore.SetActiveProfile("sess-stale-pin", "gone")
+
+	res := callSetProfileTool(t, p, ctx, "gone")
+	require.True(t, res.IsError)
+	text := setProfileResultText(t, res)
+	require.Contains(t, text, "unknown profile 'gone'")
+	require.NotContains(t, text, "available: gone", "a removed pin is not a selectable profile")
+	for _, name := range []string{"research", "deploy", "mixed"} {
+		require.NotContains(t, text, name)
+	}
+	require.Equal(t, "gone", p.sessionStore.GetActiveProfile("sess-stale-pin"),
+		"a refused selection must leave the prior session selection untouched")
+}
+
+// TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers: a pinned token
+// whose AllowedServers is narrower than its pin sees the intersection.
+func TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers(t *testing.T) {
+	p := newSetProfileTestServer()
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-pin-narrow"})
+	ctx = auth.WithAuthContext(ctx, &auth.AuthContext{
+		Type: auth.AuthTypeAgent, ProfilePin: "mixed", AllowedServers: []string{"deploy-srv"},
+	})
+
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.Equal(t, "mixed", active)
+	require.ElementsMatch(t, []string{"deploy-srv"}, servers)
+}
+
+// TestHandleSetProfile_AdminUnchanged pins the administrator (API-key / socket)
+// behaviour: full server list on clear, the profile's complete set on select,
+// and every configured profile in the unknown-slug error.
+func TestHandleSetProfile_AdminUnchanged(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileAdminCtx("sess-admin")
+
+	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
+
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "mixed"))
+	require.Equal(t, "mixed", active)
+	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
+
+	res := callSetProfileTool(t, p, ctx, "nope")
+	require.True(t, res.IsError)
+	text := setProfileResultText(t, res)
+	for _, name := range []string{"research", "deploy", "mixed"} {
+		require.Contains(t, text, name)
+	}
+}
+
+// TestHandleSetProfile_WildcardTokenUnchanged: an agent token with the "*"
+// wildcard is unrestricted by servers and keeps the full listings.
+func TestHandleSetProfile_WildcardTokenUnchanged(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileScopedCtx("sess-wild", "*")
+
+	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
+
+	res := callSetProfileTool(t, p, ctx, "nope")
+	require.True(t, res.IsError)
+	require.Contains(t, setProfileResultText(t, res), "deploy")
+}
+
+// TestHandleSetProfile_PinnedTokenSelectsDisjointPin locks the admission
+// decision: a configured pin is always selectable by its own token (the token
+// already knows its pin exists), even when the pin's servers are disjoint from
+// the token's AllowedServers — the reach is then correctly empty.
+func TestHandleSetProfile_PinnedTokenSelectsDisjointPin(t *testing.T) {
+	p := newSetProfileTestServer()
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-pin-disjoint"})
+	ctx = auth.WithAuthContext(ctx, &auth.AuthContext{
+		Type: auth.AuthTypeAgent, ProfilePin: "deploy", AllowedServers: []string{"research-srv"},
+	})
+
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "deploy"))
+	require.Equal(t, "deploy", active)
+	require.Empty(t, servers)
+	require.Equal(t, "deploy", p.sessionStore.GetActiveProfile("sess-pin-disjoint"))
+}
+
+// TestSetProfileFixtureIsLoadable guards the shared fixture against slugs that
+// config.ValidateProfiles rejects at load time (reserved names such as "all"):
+// direct handler construction bypasses validation, so without this check the
+// suite could exercise a configuration no real deployment can load.
+func TestSetProfileFixtureIsLoadable(t *testing.T) {
+	p := newSetProfileTestServer()
+	warnings, err := config.ValidateProfiles(p.config)
+	require.NoError(t, err, "the set_profile fixture must be a loadable profile configuration")
+	require.Empty(t, warnings)
+}
+
+// newSetProfileTestServerWithEmptyProfiles extends the shared fixture with the
+// two ways a profile ends up with an empty effective server set: `empty`
+// declares no servers (the deny-all placeholder ValidateProfiles allows with a
+// warning) and `ghost` names only a server that is not configured, so
+// warn-and-skip leaves EffectiveServers empty. Both load in a real deployment.
+func newSetProfileTestServerWithEmptyProfiles(t *testing.T) *MCPProxyServer {
+	t.Helper()
+	p := newSetProfileTestServer()
+	p.config.Profiles = append(slices.Clone(p.config.Profiles),
+		config.ProfileConfig{Name: "empty"},
+		config.ProfileConfig{Name: "ghost", Servers: []string{"missing-srv"}},
+	)
+	warnings, err := config.ValidateProfiles(p.config)
+	require.NoError(t, err, "an empty profile is a legal (warned) configuration")
+	require.Len(t, warnings, 2)
+	return p
+}
+
+// TestHandleSetProfile_WildcardTokenRefusesEmptyProfileAdminSelectsIt locks
+// the Spec 105 "Unrestricted agent tokens" exception (1): an unpinned agent
+// token with the "*" wildcard is still a scoped caller, so a profile whose
+// effective server set is empty intersects nothing it can reach and is refused
+// exactly like an unknown slug — non-disclosing, prior selection preserved —
+// while an administrator keeps selecting it (deny-all placeholder). A shortcut
+// that admits every configured profile to wildcard tokens would fail here.
+func TestHandleSetProfile_WildcardTokenRefusesEmptyProfileAdminSelectsIt(t *testing.T) {
+	for _, slug := range []string{"empty", "ghost"} {
+		t.Run(slug, func(t *testing.T) {
+			p := newSetProfileTestServerWithEmptyProfiles(t)
+
+			agent := setProfileScopedCtx("sess-wild-"+slug, "*")
+			require.False(t, callSetProfileTool(t, p, agent, "research").IsError)
+
+			refused := callSetProfileTool(t, p, agent, slug)
+			require.True(t, refused.IsError, "a wildcard agent must not select a profile with no reachable servers")
+			unknown := callSetProfileTool(t, p, agent, "nope")
+			require.True(t, unknown.IsError)
+			require.Equal(t,
+				strings.ReplaceAll(setProfileResultText(t, unknown), "'nope'", "'"+slug+"'"),
+				setProfileResultText(t, refused),
+				"an empty profile must be refused exactly like a nonexistent one")
+			// The error echoes the caller's own slug; non-disclosure is about
+			// the `available:` list, which must name neither empty profile.
+			_, available, found := strings.Cut(setProfileResultText(t, refused), "available:")
+			require.True(t, found)
+			for _, name := range []string{"empty", "ghost"} {
+				require.NotContains(t, available, name)
+			}
+			require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-wild-"+slug),
+				"a refused selection must leave the prior session selection untouched")
+
+			admin := setProfileAdminCtx("sess-admin-" + slug)
+			active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, admin, slug))
+			require.Equal(t, slug, active)
+			require.Empty(t, servers)
+			require.Equal(t, slug, p.sessionStore.GetActiveProfile("sess-admin-"+slug))
+		})
+	}
 }
