@@ -2303,6 +2303,12 @@ func withHSTS(next http.Handler) http.Handler {
 // 404 responses:
 //   - No profiles configured at all → {"error":"no profiles configured"}
 //   - Slug not found               → {"error":"unknown profile '<slug>'","available":[...]}
+//
+// "available" is an administrator affordance. A profile-pinned agent token
+// reaches this branch only when its pinned profile has been deleted, and the
+// resolver treats that pin as deny-all (resolveActiveProfile) — so the error
+// omits the list rather than enumerate profiles the token may never select
+// (Spec 104 FR-016b).
 func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.runtime.Config()
@@ -2346,16 +2352,19 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 
 		// FR-009: slug not found.
 		if found == nil {
-			available := make([]string, 0, len(cfg.Profiles))
-			for _, p := range cfg.Profiles {
-				available = append(available, p.Name)
+			body := map[string]interface{}{
+				"error": fmt.Sprintf("unknown profile '%s'", slug),
+			}
+			if profilePinFromContext(r.Context()) == "" {
+				available := make([]string, 0, len(cfg.Profiles))
+				for _, p := range cfg.Profiles {
+					available = append(available, p.Name)
+				}
+				body["available"] = available
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":     fmt.Sprintf("unknown profile '%s'", slug),
-				"available": available,
-			})
+			_ = json.NewEncoder(w).Encode(body)
 			return
 		}
 

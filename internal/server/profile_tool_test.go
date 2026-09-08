@@ -113,6 +113,42 @@ func TestHandleSetProfile_UnpinnedUnchanged(t *testing.T) {
 	require.Equal(t, "deploy", p.sessionStore.GetActiveProfile("sess-free"))
 }
 
+// TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles is the Spec 104
+// FR-016b regression on the MCP surface (cross-review finding): a token pinned
+// to a profile that has since been deleted passes the pin check for its own
+// slug and fell into the "unknown profile (available: ...)" error, which listed
+// every remaining profile — profiles the pin makes unselectable. The error must
+// not enumerate them; an unpinned caller still gets the list.
+func TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
+	p := newSetProfileTestServer()
+	p.config.Profiles = []config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv"}}}
+
+	res := callSetProfileTool(t, p, setProfileCtx("sess-deleted-pin", "research"), "research")
+	require.True(t, res.IsError)
+	text := setProfileResultText(t, res)
+	require.Contains(t, text, "unknown profile 'research'")
+	require.NotContains(t, text, "deploy", "a pinned token must not learn the other profiles' names: %s", text)
+
+	// Unpinned callers keep the discovery affordance — proven with an actual
+	// unpinned AGENT identity (ProfilePin ""), not merely the absence of an
+	// auth context, which is administrator-shaped and would leave the agent
+	// contract unproven (cross-review round 2).
+	unpinnedAgent := auth.WithAuthContext(setProfileCtx("sess-unpinned", ""), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "unpinned-bot",
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead},
+	})
+	res = callSetProfileTool(t, p, unpinnedAgent, "research")
+	require.True(t, res.IsError)
+	require.Contains(t, setProfileResultText(t, res), "available: deploy")
+
+	// And an administrator-shaped caller (no auth context) likewise.
+	res = callSetProfileTool(t, p, setProfileCtx("sess-admin", ""), "research")
+	require.True(t, res.IsError)
+	require.Contains(t, setProfileResultText(t, res), "available: deploy")
+}
+
 // setProfileScopedCtx builds a request context for an UNPINNED agent token
 // whose AllowedServers is restricted to the given servers (Spec 104 FR-016b).
 func setProfileScopedCtx(sessionID string, allowed ...string) context.Context {

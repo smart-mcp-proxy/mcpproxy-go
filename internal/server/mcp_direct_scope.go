@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -152,20 +154,25 @@ var builtinPromptNames = map[string]struct{}{
 
 // filterAggregatedPromptsForAuth filters prompts/list AND prompts/get for scoped
 // agent tokens and for any request with an active profile. It is the prompt
-// analogue of filterDirectModeToolsForAuth and the ONLY access check on the
-// aggregated-prompt get path: buildAggregatedServerPrompts wires each prompt
-// handler straight to Manager.GetPrompt with zero auth checks, so without this
-// filter a scoped agent token could fetch any upstream server's prompt over
-// prompts/get even when the tool filters hid that server (PR #973 review,
-// finding F1). mcp-go enforces this on both list and get (server.go
-// filteredPrompts / passesPromptFilters, v0.57.0), so a prompt dropped here is
-// neither discoverable nor retrievable.
+// analogue of filterDirectModeToolsForAuth and the list-side half of the
+// aggregated-prompt gate (the handler-side half is
+// authorizeAggregatedPromptServer): without it a scoped agent token could
+// discover any upstream server's prompt even when the tool filters hid that
+// server (PR #973 review, finding F1). mcp-go enforces this on both list and
+// get (server.go filteredPrompts / passesPromptFilters, v1.0.0), so a prompt
+// dropped here is neither discoverable nor retrievable.
 //
-// Built-in prompts are always kept. A display name that does not parse into
-// server__prompt is also kept rather than dropped: the reverse mapping is
-// best-effort (a server or prompt name that itself contains "__" can mis-split;
-// that pre-existing ambiguity is out of scope for F1) and must never panic or
-// blackhole a prompt whose owner cannot be identified.
+// Built-in prompts are always kept. The owning server of an upstream prompt is
+// the canonical name stamped into the registered prompt's _meta at publication
+// (Spec 104 FR-016g) — the same server its handler dispatches to, read from
+// the same snapshot mcp-go is filtering. It is NOT re-parsed from the display
+// name: "a__b__c" splits on the first "__" into owner "a", while the handler
+// dispatches to "a__b", so a token scoped to "a" alone could list and fetch
+// "a__b"'s prompt. An upstream prompt with no stamp cannot have come from
+// buildAggregatedServerPrompts and is dropped for scoped callers (fail closed).
+//
+// The internal stamp is stripped from every prompt returned, for every caller,
+// so the client-visible _meta is exactly what the upstream sent.
 //
 // Unlike the tool filter there is no permission-tier check: prompts have no
 // read/write/destructive variant, so server scope (CanAccessServer) plus profile
@@ -178,9 +185,8 @@ func (p *MCPProxyServer) filterAggregatedPromptsForAuth(ctx context.Context, pro
 	authCtx := auth.AuthContextFromContext(ctx)
 	_, profileScope := p.resolveActiveProfile(ctx)
 	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
-	if !isScopedAgent && profileScope == nil {
-		return prompts
-	}
+	enforce := isScopedAgent || profileScope != nil
+	allowed := promptServerAllowed(authCtx, profileScope)
 
 	filtered := make([]mcp.Prompt, 0, len(prompts))
 	for _, prompt := range prompts {
@@ -189,25 +195,78 @@ func (p *MCPProxyServer) filterAggregatedPromptsForAuth(ctx context.Context, pro
 			continue
 		}
 
-		serverName, _, ok := ParseDirectToolName(prompt.Name)
-		if !ok {
-			// Unidentifiable owner — keep rather than break (see doc comment).
-			filtered = append(filtered, prompt)
-			continue
+		serverName, stamped := aggregatedPromptServer(prompt)
+		if enforce {
+			if !stamped {
+				if p.logger != nil {
+					p.logger.Warn("dropping aggregated prompt with no canonical-owner stamp for scoped caller",
+						zap.String("prompt", prompt.Name))
+				}
+				continue
+			}
+			if !allowed(serverName) {
+				continue
+			}
 		}
 
-		// profileScope.Allows tolerates a nil receiver (returns true), so the
-		// scoped-agent-without-profile case falls through correctly.
-		if !profileScope.Allows(serverName) {
-			continue
-		}
-
-		if isScopedAgent && !authCtx.CanAccessServer(serverName) {
-			continue
-		}
-
-		filtered = append(filtered, prompt)
+		filtered = append(filtered, stripAggregatedPromptServer(prompt))
 	}
 
 	return filtered
 }
+
+// promptServerAllowed returns the per-server access predicate for one caller:
+// profile scope (Allows) plus, for scoped agent tokens, server scope
+// (CanAccessServer). profileScope.Allows tolerates a nil receiver (returns
+// true), so the scoped-agent-without-profile case falls through correctly.
+// It is the ONE definition of "may this caller touch prompts on server X",
+// shared by the list/get filter and by every aggregated prompt handler.
+func promptServerAllowed(authCtx *auth.AuthContext, profileScope *profile.ProfileScope) func(serverName string) bool {
+	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	return func(serverName string) bool {
+		if !profileScope.Allows(serverName) {
+			return false
+		}
+		return !isScopedAgent || authCtx.CanAccessServer(serverName)
+	}
+}
+
+// authorizeAggregatedPromptServer is the handler-side gate every aggregated
+// prompt handler runs against its OWN canonical server before dispatching
+// (Spec 104 FR-016g, cross-review P1). The list/get filter authorizes against
+// the owner record; that record and the registered handlers are published in
+// two steps, and a display-name collision winner can differ between refreshes
+// (upstream ListPrompts iterates a map), so a filter-only design has a window
+// in which a caller allowed for the RECORDED owner invokes a handler that
+// dispatches to a different server. Binding the check to the handler closure,
+// which knows its server by construction, closes that window regardless of
+// what the record says.
+//
+// Reachability: the list/get filter reads the owner from the SAME registered
+// prompt (see filterAggregatedPromptsForAuth), so an owner mismatch can no
+// longer get past the filter. What CAN reach this gate is a scope change
+// between the two checks of one request — an administrator deleting the
+// caller's pinned profile, or dropping this server from it, in that
+// millisecond window — because scope is resolved per check, not per request.
+// Dispatch is still blocked. The residual is cosmetic: mcp-go maps a handler
+// error to INTERNAL_ERROR, and that code is not controllable from a handler,
+// so a probe timed inside such a window could tell "registered but hidden"
+// from "absent" by the error code even though the message is identical.
+func (p *MCPProxyServer) authorizeAggregatedPromptServer(ctx context.Context, serverName string) error {
+	authCtx := auth.AuthContextFromContext(ctx)
+	_, profileScope := p.resolveActiveProfile(ctx)
+	if promptServerAllowed(authCtx, profileScope)(serverName) {
+		return nil
+	}
+	if p.logger != nil {
+		p.logger.Warn("aggregated prompt handler denied: caller not authorized for the prompt's canonical server",
+			zap.String("server", serverName))
+	}
+	return errPromptNotFound
+}
+
+// errPromptNotFound is the sentinel an aggregated prompt handler returns for a
+// caller that may not reach its server. The handler wraps it in the exact
+// message mcp-go uses for an unregistered name ("prompt '<name>' not found:
+// prompt not found"), so the message cannot separate "hidden" from "absent".
+var errPromptNotFound = mcpserver.ErrPromptNotFound
