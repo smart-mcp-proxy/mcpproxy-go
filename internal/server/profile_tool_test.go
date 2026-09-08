@@ -106,3 +106,25 @@ func TestHandleSetProfile_UnpinnedUnchanged(t *testing.T) {
 	require.False(t, res.IsError, "unpinned token must switch freely: %s", setProfileResultText(t, res))
 	require.Equal(t, "deploy", p.sessionStore.GetActiveProfile("sess-free"))
 }
+
+// TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles is the Spec 104
+// FR-016b regression on the MCP surface (cross-review finding): a token pinned
+// to a profile that has since been deleted passes the pin check for its own
+// slug and fell into the "unknown profile (available: ...)" error, which listed
+// every remaining profile — profiles the pin makes unselectable. The error must
+// not enumerate them; an unpinned caller still gets the list.
+func TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
+	p := newSetProfileTestServer()
+	p.config.Profiles = []config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv"}}}
+
+	res := callSetProfileTool(t, p, setProfileCtx("sess-deleted-pin", "research"), "research")
+	require.True(t, res.IsError)
+	text := setProfileResultText(t, res)
+	require.Contains(t, text, "unknown profile 'research'")
+	require.NotContains(t, text, "deploy", "a pinned token must not learn the other profiles' names: %s", text)
+
+	// Unpinned callers keep the discovery affordance.
+	res = callSetProfileTool(t, p, setProfileCtx("sess-unpinned", ""), "research")
+	require.True(t, res.IsError)
+	require.Contains(t, setProfileResultText(t, res), "available: deploy")
+}

@@ -91,6 +91,13 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		}
 	}
 	if match == nil {
+		// A pinned token only gets here when its own pinned profile has been
+		// deleted; the resolver treats that pin as deny-all, so the remaining
+		// profiles are not selectable by it and must not be enumerated
+		// (Spec 104 FR-016b). Unpinned callers keep the discovery list.
+		if pin != "" {
+			return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(profileNames(cfg), ", "))), nil
 	}
 

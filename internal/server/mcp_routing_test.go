@@ -182,9 +182,14 @@ func TestBuildAggregatedServerPrompts(t *testing.T) {
 		return &mcp.GetPromptResult{Description: "from upstream"}, nil
 	}
 
-	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt, zap.NewNop())
+	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt, nil, zap.NewNop())
 
 	require.Len(t, all, 2)
+	_, builtinStamped := aggregatedPromptServer(all[0].Prompt)
+	assert.False(t, builtinStamped, "built-ins carry no owner stamp")
+	owner, stamped := aggregatedPromptServer(all[1].Prompt)
+	require.True(t, stamped, "published upstream prompt carries its canonical owner")
+	assert.Equal(t, "server-a", owner)
 	assert.Equal(t, "setup-new-mcp-server", all[0].Prompt.Name)
 	assert.Equal(t, "server-a__greeting", all[1].Prompt.Name)
 	assert.Equal(t, "hi", all[1].Prompt.Description)
@@ -202,7 +207,7 @@ func TestBuildAggregatedServerPrompts(t *testing.T) {
 
 func TestBuildAggregatedServerPrompts_SkipsMalformedNames(t *testing.T) {
 	upstreamPrompts := []mcp.Prompt{{Name: "no-colon-here"}}
-	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil, zap.NewNop())
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil, nil, zap.NewNop())
 	assert.Empty(t, all)
 }
 
@@ -1187,7 +1192,10 @@ func TestBuildAggregatedServerPrompts_CollisionKeepsFirst(t *testing.T) {
 		return &mcp.GetPromptResult{}, nil
 	}
 
-	all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, logger)
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, nil, logger)
+	require.Len(t, all, 1)
+	owner, _ := aggregatedPromptServer(all[0].Prompt)
+	assert.Equal(t, "gh", owner, "the kept (first) writer owns the display name")
 
 	names := make([]string, len(all))
 	for i, p := range all {
@@ -1287,4 +1295,39 @@ func TestDirectDeferralLegend_ExplainsTheMarkers(t *testing.T) {
 	assert.Contains(t, directDeferralLegend, "~")
 	assert.Contains(t, directDeferralLegend, "describe_tool")
 	assert.Contains(t, directDeferralLegend, "placeholder")
+}
+
+// TestBuildAggregatedServerPrompts_HandlerAuthorizesCanonicalServer (Spec 104
+// FR-016g, cross-review P1): every upstream prompt handler must consult the
+// authorize hook with its OWN canonical server before contacting the upstream,
+// so a stale owner record or a mid-refresh window can never turn a filter
+// pass into an unauthorized fetch.
+func TestBuildAggregatedServerPrompts_HandlerAuthorizesCanonicalServer(t *testing.T) {
+	var fetched []string
+	fakeGetPrompt := func(_ context.Context, name string, _ map[string]string) (*mcp.GetPromptResult, error) {
+		fetched = append(fetched, name)
+		return &mcp.GetPromptResult{}, nil
+	}
+	var asked []string
+	authorize := func(_ context.Context, serverName string) error {
+		asked = append(asked, serverName)
+		if serverName == "a__b" {
+			return errPromptNotFound
+		}
+		return nil
+	}
+
+	all := buildAggregatedServerPrompts(nil, []mcp.Prompt{{Name: "a:greeting"}, {Name: "a__b:greeting"}}, fakeGetPrompt, authorize, zap.NewNop())
+	byName := map[string]mcpserver.ServerPrompt{}
+	for _, sp := range all {
+		byName[sp.Prompt.Name] = sp
+	}
+
+	_, err := byName["a__b__greeting"].Handler(context.Background(), mcp.GetPromptRequest{})
+	require.ErrorIs(t, err, errPromptNotFound)
+	_, err = byName["a__greeting"].Handler(context.Background(), mcp.GetPromptRequest{})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"a__b", "a"}, asked, "each handler asks about its canonical server, not a re-parse of the display name")
+	assert.Equal(t, []string{"a:greeting"}, fetched, "a denied handler never contacts the upstream")
 }
