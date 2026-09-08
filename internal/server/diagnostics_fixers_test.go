@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,21 +57,42 @@ func newFixerTestServerWithConfig(t *testing.T, serverName, logDir string, tweak
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown() })
 
+	// Let background initialization FINISH before the fixture client exists.
+	// NewServer kicks off backgroundInitialization, whose LoadConfiguredServers
+	// snapshots the manager's clients and schedules `go RemoveServer(name)`
+	// for every one not in cfg.Servers (lifecycle.go). A client registered
+	// before that snapshot is therefore marked for an asynchronous removal
+	// that can land at any later moment — including after a re-registration
+	// at the call site, which only narrows the window. A client registered
+	// after the snapshot is never scheduled for removal by that pass at all.
+	// The "Server is ready" message is published immediately after
+	// LoadConfiguredServers returns (backgroundInitialization), so waiting for
+	// it orders the registration after the snapshot.
+	require.Eventually(t, func() bool {
+		return strings.Contains(srv.runtime.CurrentStatus().Message, "Server is ready")
+	}, 10*time.Second, 10*time.Millisecond, "background initialization did not finish")
+
 	ensureFixerClient(t, srv, serverName)
 	return srv
 }
 
 // ensureFixerClient registers the upstream client GetServerLogs resolves, and
-// must be called IMMEDIATELY before invoking a fixer.
+// is called again IMMEDIATELY before invoking a fixer.
 //
-// The supervisor reconciles DESIRED (cfg.Servers) against ACTUAL (the upstream
-// manager) and deletes the difference, so a client added out of band survives
-// only until the next reconcile pass. Registering once at construction was
-// enough on a developer machine and NOT on CI, where the gap between
-// construction and the fixer call is long enough under -race for a pass to
-// land: two of these tests failed there with "server not found: <name>" while
-// passing everywhere else. Re-registering at the call site closes the window
-// to the few microseconds before InvokeFixer.
+// Two removers exist for a client that is not in cfg.Servers, and the fixture
+// handles them differently:
+//
+//   - LoadConfiguredServers, run once by background initialization, schedules
+//     an ASYNCHRONOUS removal for every out-of-band client it snapshots. That
+//     one cannot be outrun, only avoided: newFixerTestServerWithConfig waits
+//     for initialization to finish before the first registration, so the
+//     snapshot never contains the fixture client.
+//   - The supervisor's periodic reconcile (30s ticker) diffs DESIRED
+//     (cfg.Servers) against ACTUAL (the manager) and deletes the difference.
+//     Re-registering at the call site closes that window to the few
+//     microseconds before InvokeFixer. This is the race CI hit before the
+//     wait above existed: two of these tests failed under -race with "server
+//     not found: <name>" while passing on every developer machine.
 //
 // Putting the server in cfg.Servers instead does not work: reconcile removes
 // the client for a DISABLED entry too (verified), and an ENABLED entry spawns
@@ -260,6 +282,27 @@ func TestDiagnosticFixer_OAuthReauth_DryRunDoesNotSignIn(t *testing.T) {
 	assert.NotEmpty(t, res.Preview)
 	assert.Empty(t, res.FailureMsg,
 		"dry_run must not have called the coordinator (a call would fail: server not found)")
+}
+
+// TestDiagnosticFixer_OAuthReauth_StartedMessageIsFollowable pins the recovery
+// path the success message offers. A cross-model review caught the first
+// wording pointing a browserless user at "Show last server log lines": that
+// button reads the per-server log file, the authorization URL is written by
+// the client's main logger and never reaches that file, and the OAuth catalog
+// entries do not offer the log-tail button anyway. The message must name a
+// path that produces the URL — the CLI login command does.
+func TestDiagnosticFixer_OAuthReauth_StartedMessageIsFollowable(t *testing.T) {
+	msg := oauthReauthStartedMessage("sentry-2")
+
+	assert.Contains(t, msg, `"sentry-2"`)
+	assert.Contains(t, msg, "mcpproxy auth login --server=sentry-2",
+		"the fallback must be a command that prints the authorization URL")
+	assert.NotContains(t, msg, "Show last server log lines",
+		"the log-tail button reads the per-server log, which never holds the authorization URL")
+	assert.NotContains(t, msg, "server's log",
+		"the per-server log never holds the authorization URL")
+	// Nothing on the async path reports whether a browser launched.
+	assert.NotContains(t, strings.ToLower(msg), "window opened")
 }
 
 // TestDiagnosticFixer_OAuthReauth_RespectsWriteGates pins the gate the fixer

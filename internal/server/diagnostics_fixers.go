@@ -256,8 +256,29 @@ func (s *Server) fixOAuthReauth(_ context.Context, req diagnostics.FixRequest) (
 
 	return diagnostics.FixResult{
 		Outcome: diagnostics.OutcomeSuccess,
-		Preview: fmt.Sprintf(
-			"Sign-in started for server %q. Finish it in the browser window mcpproxy opens; the server reconnects on its own once you do. If no window appears, the authorization URL is in that server's log — use \"Show last server log lines\".",
-			req.ServerID),
+		Preview: oauthReauthStartedMessage(req.ServerID),
 	}, nil
+}
+
+// oauthReauthStartedMessage is what the Sign in button reports once the
+// asynchronous flow has been handed off. It must not claim a browser window
+// opened — nothing on this path reports whether one did — and its fallback
+// must be one the user can actually follow.
+//
+// An earlier wording sent a user with no browser window to "Show last server
+// log lines". That button reads the PER-SERVER log file (GetServerLogs), but
+// the authorization URL and the browser-launch failure are written by the
+// client's main logger (connection_oauth.go, c.logger), which does not feed
+// that file — and the OAuth catalog entries do not offer the log-tail button
+// in the first place. The instruction pointed at a log that never held the
+// URL, behind a button the user could not press.
+//
+// `mcpproxy auth login --server=<name>` is the path that works headless: it
+// drives the same flow from a terminal and prints the authorization URL when
+// the browser cannot be opened.
+func oauthReauthStartedMessage(serverID string) string {
+	return fmt.Sprintf(
+		"Sign-in started for server %q. Finish it in the browser window mcpproxy opens; the server reconnects on its own once you do. "+
+			"If no window appears, run `mcpproxy auth login --server=%s` from a terminal — it prints the authorization URL when the browser cannot be opened.",
+		serverID, serverID)
 }

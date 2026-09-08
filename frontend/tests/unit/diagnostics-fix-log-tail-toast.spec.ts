@@ -118,6 +118,26 @@ describe('diagnostics log-tail fix delivery', () => {
     expect(store.toasts[0].message).toBe(LOG_TAIL)
   })
 
+  it('removes its long-lived preview when the panel unmounts', async () => {
+    const store = useSystemStore()
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: DIAGNOSTIC, serverName: 'flaky-stdio' },
+    })
+
+    await wrapper.find('[data-testid="error-panel-execute-button-0"]').trigger('click')
+    await flushPromises()
+    expect(store.toasts).toHaveLength(1)
+
+    // The superseding id lives in the component, the 60s toast in the global
+    // store. ServerDetail unmounts this panel on every navigation between
+    // servers, so without disposal the id is lost, the toast stays, and the
+    // next server's preview stacks on top of it — the accumulation the
+    // superseding guard was meant to prevent.
+    wrapper.unmount()
+
+    expect(store.toasts).toHaveLength(0)
+  })
+
   it('renders a multi-line toast message with its line breaks preserved', () => {
     const store = useSystemStore()
     store.addToast({ type: 'success', title: 'Executed: Show last server log lines', message: LOG_TAIL })

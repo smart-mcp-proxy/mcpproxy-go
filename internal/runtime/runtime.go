@@ -3450,16 +3450,26 @@ func (r *Runtime) GetConnectedServerCount() int {
 // each of them from this shared index, so the shared count is the superset.
 //
 // When the index CANNOT answer — it is closed, mid-reopen, or returned an
-// error — the last successful count is reported instead of falling through to
-// the upstream cache. That matters most at shutdown: Close() performs a final
-// graceful heartbeat flush (telemetryService.Stop), and the upstream clients
-// are disconnected by then, so the cache path would answer 0 for an install
-// with a fully populated durable index — reintroducing the exact structural
-// zero this function was changed to remove. Close() also now closes the index
-// AFTER that flush, so this is defence in depth rather than the only guard.
+// error — the last successful POSITIVE count is reported instead of falling
+// through to the upstream cache. That matters most at shutdown: Close()
+// performs a final graceful heartbeat flush (telemetryService.Stop), and the
+// upstream clients are disconnected by then, so the cache path would answer 0
+// for an install with a fully populated durable index — reintroducing the
+// exact structural zero this function was changed to remove. Close() also now
+// closes the index AFTER that flush, so this is defence in depth rather than
+// the only guard.
 //
-// The upstream cache remains the fallback only for the case it is actually
-// right for: no index manager wired at all (unit tests, early startup).
+// A memoised ZERO is deliberately not preferred over the cache. Zero is only
+// ever memoised when the index genuinely held no tools at the last successful
+// read, and in that state the cache cannot produce the structural zero this
+// guard exists for — it can only report MORE (tools held by live clients that
+// the index has not caught up with yet), which is the closer answer. So the
+// guard protects the one value that is expensive to lose and lets the cache
+// arbitrate the empty case.
+//
+// The upstream cache is otherwise the fallback only for the case it is
+// actually right for: no index manager wired at all (unit tests, early
+// startup).
 func (r *Runtime) GetToolCount() int {
 	if r.indexManager != nil {
 		if count, err := r.indexManager.GetDocumentCount(); err == nil {

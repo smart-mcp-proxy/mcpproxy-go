@@ -136,7 +136,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import type { Diagnostic, DiagnosticFixStep } from '@/types'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
@@ -159,6 +159,19 @@ const runningFixers = ref<Set<string>>(new Set())
 // Id of the last long-lived (multi-line) fix preview this panel raised, so the
 // next one can supersede it instead of stacking on top of it.
 const lastPreviewToastId = ref<string | null>(null)
+
+// The superseding id above lives in this component, but the 60s toast it
+// names lives in the global store. ServerDetail unmounts this panel on every
+// navigation between servers, which would drop the id and leave the toast
+// behind — so a preview opened on each of several servers still stacked past
+// the top of the viewport. Dispose of the preview with the panel that raised
+// it: a tail belongs to the server it was read from.
+onBeforeUnmount(() => {
+  if (lastPreviewToastId.value) {
+    systemStore.removeToast(lastPreviewToastId.value)
+    lastPreviewToastId.value = null
+  }
+})
 
 const severityAlertClass = computed(() => {
   const sev = props.diagnostic?.severity
