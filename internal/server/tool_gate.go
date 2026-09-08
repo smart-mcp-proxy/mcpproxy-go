@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
@@ -102,7 +103,7 @@ func (p *MCPProxyServer) evaluateToolGate(serverName, toolName string) toolGate 
 	gate.serverConfig = serverConfig
 	gate.configDenied = p.isToolConfigDenied(serverName, toolName, serverConfig)
 
-	approval, approvalErr := p.storage.GetToolApproval(serverName, toolName)
+	approval, approvalErr := p.lookupToolApproval(serverName, toolName)
 	switch {
 	case approvalErr == nil:
 		gate.approval = approval
@@ -149,4 +150,27 @@ func approvalStateFor(record *storage.ToolApprovalRecord) *preflight.ApprovalSta
 		CurrentHash:       record.CurrentHash,
 		HashSchemaVersion: record.HashSchemaVersion,
 	}
+}
+
+// lookupToolApproval reads the Spec-032 approval record for one (server, tool)
+// pair, already normalized by normalizeServerTool. The exact raw name is
+// authoritative. When it has no record and the name carries a ":" segment, the
+// record filed under the COLLAPSED name is read instead: runtime's discovery
+// producer (checkToolApprovals) still keys every record it writes by
+// extractToolName(tool.Name) — everything after the first colon — so a
+// discovered "ns:erase" has its pending / changed / user-disabled state stored
+// under "erase". Reading the pair by its exact name only would turn that
+// record's tool into an implicitly-approved one the moment the reader stopped
+// collapsing, which is exactly the fail-open a missing record must not cause.
+// The fallback is the conservative legacy rule until the producer is made
+// exact-name as well (Spec 105 FR-009 follow-up).
+func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	approval, err := p.storage.GetToolApproval(serverName, toolName)
+	if err == nil || !errors.Is(err, storage.ErrToolApprovalNotFound) {
+		return approval, err
+	}
+	if _, collapsed, ok := strings.Cut(toolName, ":"); ok && collapsed != "" {
+		return p.storage.GetToolApproval(serverName, collapsed)
+	}
+	return approval, err
 }

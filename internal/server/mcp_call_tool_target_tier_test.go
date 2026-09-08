@@ -460,3 +460,92 @@ func TestCallToolRead_TargetTierGate_UpstreamCallOracle(t *testing.T) {
 	assert.Equal(t, []string{"erase", "ns:erase"}, calls.dispatched(),
 		"the upstream must receive the exact raw tool names, the namespaced one uncollapsed")
 }
+
+// Production discovery still files every approval record under the COLLAPSED
+// name: runtime.checkToolApprovals keys GetToolApproval(server,
+// extractToolName(tool.Name)), which drops everything before the first colon,
+// while ToolMetadata.Name is the raw upstream name. A raw "ns:erase" on
+// server "a" therefore lands under (a, "erase"). The exact-name readers must
+// keep honouring that legacy key when no exact record exists: a pending or
+// user-disabled tool must not become implicitly callable — for a full-tier
+// agent token or an API-key administrator, who correctly skips the tier gate —
+// because its record was filed under the collapsed name.
+func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
+	nsErase := stateview.ToolInfo{
+		Name: "ns:erase", Description: "Namespaced erase",
+		Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+	}
+	fullToken := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "full", TokenPrefix: "mcp_agt_f",
+		AllowedServers: []string{"a"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+	adminCtx := context.Background() // API-key administrator: no agent AuthContext
+
+	seedCollapsedRecord := func(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, record storage.ToolApprovalRecord) {
+		t.Helper()
+		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
+		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+			s.Name, s.Enabled, s.Connected = "a", true, true
+			s.Tools = []stateview.ToolInfo{nsErase}
+		})
+		// Exactly what checkToolApprovals writes for the raw name "ns:erase".
+		record.ServerName, record.ToolName = "a", "erase"
+		require.NoError(t, proxy.storage.SaveToolApproval(&record))
+		_, err := proxy.storage.GetToolApproval("a", "ns:erase")
+		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no exact-name record may exist")
+	}
+
+	for name, ctx := range map[string]context.Context{"full-tier token": fullToken, "api-key admin": adminCtx} {
+		t.Run("pending collapsed record refuses "+name, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending})
+			probe := watchPolicyDecisions(t, rt)
+
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			require.NotNil(t, gate.approval, "the gate must fall back to the collapsed record the producer wrote")
+			assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
+			assert.False(t, gate.callable())
+
+			req := mcp.CallToolRequest{}
+			req.Params.Name = contracts.ToolVariantRead
+			req.Params.Arguments = map[string]interface{}{"name": "a:ns:erase"}
+			result, err := proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			// The pending lock answers with the TOOL_QUARANTINED policy
+			// result (IsError=false by design), never with a dispatch.
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "TOOL_QUARANTINED")
+			assert.Contains(t, text, "new_unapproved_tool")
+			assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
+
+			payload := probe.awaitOne(t)
+			assert.Equal(t, "blocked", payload["decision"])
+			assert.Equal(t, "ns:erase", payload["tool_name"])
+			assert.Contains(t, payload["reason"], "pending approval")
+		})
+	}
+
+	t.Run("disabled collapsed record hides the tool from search", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true})
+		assert.False(t, proxy.isToolCallable("a", "ns:erase"),
+			"isToolCallable must read the Disabled flag off the collapsed record")
+	})
+
+	t.Run("an exact record outranks the collapsed one", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending})
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved,
+		}))
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.Equal(t, "ns:erase", gate.approval.ToolName, "the exact-name record is authoritative when present")
+		assert.Empty(t, gate.lockStatus)
+		assert.True(t, gate.callable())
+		assert.True(t, proxy.isToolCallable("a", "ns:erase"))
+	})
+}

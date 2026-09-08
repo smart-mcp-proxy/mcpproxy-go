@@ -6430,7 +6430,7 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 		}
 	}
 
-	approval, err := p.storage.GetToolApproval(serverName, toolName)
+	approval, err := p.lookupToolApproval(serverName, toolName)
 	switch {
 	case err == nil:
 		if approval != nil && approval.Disabled {
