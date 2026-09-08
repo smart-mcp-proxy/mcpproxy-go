@@ -258,6 +258,19 @@ Server scoping is enforced at three levels:
 
    Admin subscribers — the API key, the Web UI, the tray over the unix socket —
    receive every event unchanged; the stream is rendered per connection.
+4. **Cached responses** (`read_cache`) — a truncated response is parked behind
+   a cache key, and the key is a hash, not a credential. Every entry is stamped
+   with the authorization that produced it (server scope, permission tier,
+   profile pin, effective profile, caller kind). `read_cache` refuses, on every
+   page, any request whose own authorization could not have produced the entry,
+   so a narrower token sharing the same MCP session cannot page a broader
+   token's response. An unrestricted admin may read any entry; a token may read
+   its own entries and those of tokens at least as narrow as itself. Profile
+   scope is compared as a server set, so deleting or narrowing a profile after
+   the entry was produced revokes cached access as well (a stale pin resolves to
+   a deny-all scope and reads nothing). An unauthenticated `/mcp` caller ranks
+   below an authenticated admin: it cannot page an entry an API-key admin
+   produced.
 
 ## Administrative Operations Are Admin-Only
 

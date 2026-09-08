@@ -105,9 +105,22 @@ func NextUniqueTimestamp() time.Time {
 
 var lastKeyNano atomic.Int64
 
-// Store saves a tool response to cache
+// Store saves a tool response to cache with no producer authorization. Such an
+// entry is readable only by unrestricted callers; production callers stamp the
+// producer via StoreAs.
 func (m *Manager) Store(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int) error {
+	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, nil)
+}
+
+// StoreAs saves a tool response to cache stamped with the authorization it was
+// produced under. GetRecordsAs refuses readers that could not have produced it.
+func (m *Manager) StoreAs(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer Authorization) error {
+	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, &producer)
+}
+
+func (m *Manager) storeRecord(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer *Authorization) error {
 	record := &Record{
+		Producer:     producer,
 		Key:          key,
 		ToolName:     toolName,
 		Args:         args,
@@ -143,6 +156,13 @@ func (m *Manager) Store(key, toolName string, args map[string]interface{}, conte
 
 // Get retrieves a cached tool response
 func (m *Manager) Get(key string) (*Record, error) {
+	return m.getGuarded(key, nil)
+}
+
+// getGuarded is Get with an optional read gate. The gate runs after the
+// expiry check and BEFORE the access-stats update, so a refused read neither
+// counts as a hit nor marks the entry as accessed.
+func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, error) {
 	var record *Record
 
 	err := m.db.Update(func(tx *bbolt.Tx) error {
@@ -169,6 +189,13 @@ func (m *Manager) Get(key string) (*Record, error) {
 			return fmt.Errorf("cache key expired")
 		}
 
+		if guard != nil {
+			if err := guard(record); err != nil {
+				record = nil
+				return err
+			}
+		}
+
 		// Update access stats
 		record.AccessCount++
 		record.LastAccessed = time.Now()
@@ -189,9 +216,33 @@ func (m *Manager) Get(key string) (*Record, error) {
 	return record, err
 }
 
-// GetRecords retrieves paginated records from a cached response
+// GetRecords retrieves paginated records from a cached response without a
+// read gate. Callers serving a credentialed request use GetRecordsAs.
 func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse, error) {
-	record, err := m.Get(key)
+	return m.getRecords(key, offset, limit, nil)
+}
+
+// GetRecordsAs retrieves paginated records from a cached response, refusing
+// with ErrUnauthorizedRead when reader could not have produced the entry
+// (Spec 104 FR-016a). The gate runs on every page. An entry with no recorded
+// producer (persisted before stamping existed, or written through Store by an
+// internal caller) is treated as produced by an unrestricted caller with no
+// identity — readable by any unrestricted kind, never by an agent or user.
+func (m *Manager) GetRecordsAs(key string, offset, limit int, reader Authorization) (*ReadCacheResponse, error) {
+	return m.getRecords(key, offset, limit, func(r *Record) error {
+		producer := Authorization{CallerKind: CallerKindAnonymous}
+		if r.Producer != nil {
+			producer = *r.Producer
+		}
+		if !producer.CouldHaveProduced(reader) {
+			return ErrUnauthorizedRead
+		}
+		return nil
+	})
+}
+
+func (m *Manager) getRecords(key string, offset, limit int, guard func(*Record) error) (*ReadCacheResponse, error) {
+	record, err := m.getGuarded(key, guard)
 	if err != nil {
 		return nil, err
 	}
