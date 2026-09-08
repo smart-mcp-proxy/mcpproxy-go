@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
@@ -75,14 +77,18 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		// reach the resolver denies.
 		if pin != "" {
 			pinnedName, pinnedScope := p.resolveActiveProfile(ctx)
-			return setProfileResult(pinnedName, pinnedScope.AllowedServerNames())
+			return setProfileResult(pinnedName, callerVisibleServers(ctx, pinnedScope.AllowedServerNames()))
 		}
-		return setProfileResult("", allServerNames(cfg))
+		return setProfileResult("", callerVisibleServers(ctx, allServerNames(cfg)))
 	}
 
-	// Validate the slug matches a configured profile.
+	// Validate the slug names a configured profile the caller may select. The
+	// selectable set is computed BEFORE any session mutation or success log, so
+	// a profile outside the caller's reach is indistinguishable from an unknown
+	// one (FR-016b): same error, same `available:` list, no state change.
+	selectable := selectableProfileNames(ctx, cfg)
 	var match *config.ProfileConfig
-	if cfg != nil {
+	if cfg != nil && slices.Contains(selectable, slug) {
 		for i := range cfg.Profiles {
 			if cfg.Profiles[i].Name == slug {
 				match = &cfg.Profiles[i]
@@ -91,7 +97,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		}
 	}
 	if match == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(profileNames(cfg), ", "))), nil
+		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(selectable, ", "))), nil
 	}
 
 	p.sessionStore.SetActiveProfile(sessionID, slug)
@@ -99,7 +105,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		zap.String("session_id", sessionID),
 		zap.String("profile", slug),
 	)
-	return setProfileResult(slug, match.EffectiveServers(cfg))
+	return setProfileResult(slug, callerVisibleServers(ctx, match.EffectiveServers(cfg)))
 }
 
 // setProfileResult renders the standard set_profile success payload.
@@ -140,6 +146,64 @@ func allServerNames(cfg *config.Config) []string {
 	for _, s := range cfg.Servers {
 		if s != nil {
 			names = append(names, s.Name)
+		}
+	}
+	return names
+}
+
+// callerVisibleServers filters a server list through the caller's credential.
+// set_profile's payload advertises what the session can reach, so a token
+// restricted to server A must never be told about server B — whether the list
+// is "all servers" (cleared selection), a profile's full set, or a pinned
+// profile's scope (Spec 104 FR-016b).
+//
+// The predicate is auth.CanEnumerateServer — the same CanAccessServer rule
+// serverInScope applies to retrieve_tools / describe_tool — so this surface
+// cannot disagree with visibility: admin (API-key / socket / anonymous
+// back-compat) and absent contexts pass everything through untouched; any
+// non-admin context (agent token, server-edition user) keeps only the servers
+// its AllowedServers names, "*" allows all, and an EMPTY list grants nothing.
+func callerVisibleServers(ctx context.Context, servers []string) []string {
+	if !auth.IsScopedCaller(ctx) {
+		return servers
+	}
+	out := make([]string, 0, len(servers))
+	for _, s := range servers {
+		if auth.CanEnumerateServer(ctx, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// selectableProfileNames returns the profile slugs the caller may select. An
+// unrestricted caller may select any configured profile; a profile-pinned
+// token only its pin (and nothing when the pin no longer exists); a scoped
+// caller only the profiles that overlap the servers it can enumerate.
+//
+// This is both the `available:` list of the unknown-slug error and the
+// admission rule for a selection: a profile entirely outside the caller's
+// reach is treated exactly like a nonexistent one, so the error text cannot be
+// used to confirm which profiles the operator has configured (FR-016b).
+func selectableProfileNames(ctx context.Context, cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	if pin := profilePinFromContext(ctx); pin != "" {
+		for i := range cfg.Profiles {
+			if cfg.Profiles[i].Name == pin {
+				return []string{pin}
+			}
+		}
+		return nil
+	}
+	if !auth.IsScopedCaller(ctx) {
+		return profileNames(cfg)
+	}
+	names := make([]string, 0, len(cfg.Profiles))
+	for i := range cfg.Profiles {
+		if len(callerVisibleServers(ctx, cfg.Profiles[i].EffectiveServers(cfg))) > 0 {
+			names = append(names, cfg.Profiles[i].Name)
 		}
 	}
 	return names
