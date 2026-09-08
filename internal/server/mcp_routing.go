@@ -953,14 +953,21 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// unreachable over Streamable HTTP (PR #973 review, P1).
 	if p.config.EnablePrompts {
 		opts = append(opts, mcpserver.WithPromptCapabilities(true))
-		// Enforce agent-token + profile scope on aggregated prompts across every
-		// routing-mode server. mcp-go applies this on BOTH prompts/list and
-		// prompts/get (passesPromptFilters), closing the F1 get-time auth bypass.
-		// Added to the shared opts (before directOpts copies it) so directServer,
-		// codeExecServer and callToolServer all inherit it; p.server gets the
-		// same filter in NewMCPProxyServer, where proxy exists.
-		opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
 	}
+	// Enforce agent-token + profile scope on aggregated prompts across every
+	// routing-mode server. mcp-go applies this on BOTH prompts/list and
+	// prompts/get (passesPromptFilters), closing the F1 get-time auth bypass.
+	// Added to the shared opts (before directOpts copies it) so directServer,
+	// codeExecServer and callToolServer all inherit it; p.server gets the
+	// same filter in NewMCPProxyServer, where proxy exists.
+	//
+	// Bound regardless of EnablePrompts: RefreshPrompts publishes from the LIVE
+	// snapshot, so a server built with prompts off can still receive upstream
+	// prompts after a runtime enable, and mcp-go then serves prompts/list from
+	// the implicitly-registered capability. Only the filter makes that listing
+	// scoped and stamp-free (Spec 105 FR-006, cross-review round 2). It is a
+	// no-op while no prompts are registered.
+	opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
 	// discovery filters and belong only on the direct server (not the shared
@@ -1250,10 +1257,14 @@ func (p *MCPProxyServer) RefreshCodeExecutionAvailability() {
 // filterAggregatedPromptsForAuth authorizes against THAT stamp, never against
 // a re-parse of the display name: "a__b__c" re-parsed on the first "__" claims
 // owner "a", while its handler dispatches to "a__b" (Spec 104 FR-016g).
-// Riding inside the registered prompt means the owner and the prompt are
-// published in ONE SetPrompts step and filtered from ONE snapshot, so a
-// refresh that changes a collision winner can never pair an old prompt with a
-// new owner. The stamp is stripped from client-visible output by the filter.
+// Riding inside the registered mcp.Prompt binds the owner PER PROMPT rather
+// than in a side table: mcp-go's SetPrompts is not atomic as a whole (it
+// clears the maps, unlocks, then AddPrompts re-locks per batch, so a
+// concurrent list can observe an empty or partially repopulated set, and
+// overlapping refreshes can interleave), but every prompt a list does observe
+// carries the owner its own handler dispatches to, so a refresh that changes
+// a collision winner can never pair an old prompt with a new owner. The stamp
+// is stripped from client-visible output by the filter.
 //
 // authorize, when non-nil, is invoked by every upstream prompt handler with the
 // prompt's canonical server BEFORE getPrompt; a non-nil error is returned to

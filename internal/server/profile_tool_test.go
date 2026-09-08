@@ -123,8 +123,22 @@ func TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
 	require.Contains(t, text, "unknown profile 'research'")
 	require.NotContains(t, text, "deploy", "a pinned token must not learn the other profiles' names: %s", text)
 
-	// Unpinned callers keep the discovery affordance.
-	res = callSetProfileTool(t, p, setProfileCtx("sess-unpinned", ""), "research")
+	// Unpinned callers keep the discovery affordance — proven with an actual
+	// unpinned AGENT identity (ProfilePin ""), not merely the absence of an
+	// auth context, which is administrator-shaped and would leave the agent
+	// contract unproven (cross-review round 2).
+	unpinnedAgent := auth.WithAuthContext(setProfileCtx("sess-unpinned", ""), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "unpinned-bot",
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead},
+	})
+	res = callSetProfileTool(t, p, unpinnedAgent, "research")
+	require.True(t, res.IsError)
+	require.Contains(t, setProfileResultText(t, res), "available: deploy")
+
+	// And an administrator-shaped caller (no auth context) likewise.
+	res = callSetProfileTool(t, p, setProfileCtx("sess-admin", ""), "research")
 	require.True(t, res.IsError)
 	require.Contains(t, setProfileResultText(t, res), "available: deploy")
 }

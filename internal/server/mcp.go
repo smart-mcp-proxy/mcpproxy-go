@@ -595,15 +595,25 @@ func NewMCPProxyServer(
 	// Register proxy tools for the default (retrieve_tools) server
 	proxy.registerTools(debugSearch)
 
+	// Attach the aggregated-prompt auth filter to the default retrieve_tools
+	// server. It closes over `proxy` (needed by resolveActiveProfile), which
+	// did not exist when mcpServer was constructed above; ServerOption is
+	// just func(*MCPServer), so invoking it here is identical to having
+	// passed it to NewMCPServer. Enforced on prompts/list AND prompts/get
+	// (PR #973 review, finding F1).
+	//
+	// Bound UNCONDITIONALLY, not under EnablePrompts: RefreshPrompts publishes
+	// from the LIVE config snapshot on every servers.changed / config.reloaded
+	// / prompts-changed event, and mcp-go registers the prompts capability
+	// implicitly on the first SetPrompts. A server built with prompts off and
+	// enabled at runtime would otherwise serve every upstream prompt with no
+	// scope filter and with the internal owner stamp on the wire (Spec 105
+	// FR-006, cross-review round 2). With no prompts registered the filter is
+	// never invoked, so binding it early changes nothing while prompts are off.
+	mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
+
 	// Register prompts if enabled
 	if config.EnablePrompts {
-		// Attach the aggregated-prompt auth filter to the default retrieve_tools
-		// server. It closes over `proxy` (needed by resolveActiveProfile), which
-		// did not exist when mcpServer was constructed above; ServerOption is
-		// just func(*MCPServer), so invoking it here is identical to having
-		// passed it to NewMCPServer. Enforced on prompts/list AND prompts/get
-		// (PR #973 review, finding F1).
-		mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
 		proxy.registerPrompts()
 	}
 

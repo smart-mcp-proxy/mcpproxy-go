@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	servertest "github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -309,4 +310,98 @@ func TestAggregatedPrompt_ScopeUsesCanonicalOwner(t *testing.T) {
 		assert.NotContains(t, entry, "_meta", "owner stamp must be stripped for admins too: %v", entry)
 	}
 	assert.Subset(t, adminNames, []string{"a__greeting", "a__b__greeting"})
+}
+
+// TestAggregatedPrompt_LateEnableStillFiltered (Spec 105 FR-006, cross-review
+// round 2): the prompt filter used to be installed only when enable_prompts
+// was true at CONSTRUCTION, while RefreshPrompts publishes from the LIVE
+// snapshot on every servers.changed / config.reloaded / prompts-changed event.
+// Boot with prompts off, flip enable_prompts + aggregate_upstream_prompts at
+// runtime, and every routing-mode server received the upstream prompts with
+// no scope filter at all — and, since the filter is also what strips the
+// internal owner stamp, the wire carried `"_meta":{"app.mcpproxy/server":{}}`
+// for every caller. The filter must be bound to every server unconditionally
+// so late-published prompts are scoped and stamp-free exactly like boot-time
+// ones.
+func TestAggregatedPrompt_LateEnableStillFiltered(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
+		cfg.EnablePrompts = false
+		cfg.AggregateUpstreamPrompts = false
+	})
+	require.Empty(t, proxy.server.ListPrompts(), "precondition: nothing registered while prompts are disabled")
+
+	// Hot-reload: both flags flip in the live snapshot the refresh reads.
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true
+	qOff := false
+	proxy.config.QuarantineEnabled = &qOff
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	for _, name := range []string{"a", "hidden"} {
+		testServer := servertest.NewTestStreamableHTTPServer(newTestRefreshPromptsUpstream(t))
+		t.Cleanup(testServer.Close)
+		require.NoError(t, um.AddServerConfig(name, &config.ServerConfig{
+			Name: name, Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
+		}))
+		client, ok := um.GetClient(name)
+		require.True(t, ok)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		require.NoError(t, client.Connect(ctx))
+		cancel()
+	}
+	proxy.upstreamManager = um
+	proxy.RefreshPrompts()
+	require.Contains(t, proxy.server.ListPrompts(), "hidden__greeting", "precondition: the late-enabled prompts were published")
+
+	scoped := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "a-only",
+		AllowedServers: []string{"a"},
+		Permissions:    []string{auth.PermRead},
+	})
+	admin := auth.WithAuthContext(context.Background(), auth.AdminContext())
+
+	servers := map[string]*mcpserver.MCPServer{
+		"retrieve":  proxy.server,
+		"direct":    proxy.directServer,
+		"code-exec": proxy.codeExecServer,
+		"call-tool": proxy.callToolServer,
+	}
+	for label, srv := range servers {
+		require.NotNil(t, srv, label)
+		t.Run(label, func(t *testing.T) {
+			list := func(ctx context.Context) []map[string]interface{} {
+				t.Helper()
+				require.NotNil(t, srv.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`)))
+				encoded, err := json.Marshal(srv.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"prompts/list","params":{}}`)))
+				require.NoError(t, err)
+				var envelope map[string]interface{}
+				require.NoError(t, json.Unmarshal(encoded, &envelope))
+				require.Nil(t, envelope["error"], "prompts/list must succeed: %v", envelope)
+				var entries []map[string]interface{}
+				for _, pr := range envelope["result"].(map[string]interface{})["prompts"].([]interface{}) {
+					entries = append(entries, pr.(map[string]interface{}))
+				}
+				return entries
+			}
+
+			var scopedNames []string
+			for _, entry := range list(scoped) {
+				scopedNames = append(scopedNames, entry["name"].(string))
+				assert.NotContains(t, entry, "_meta", "owner stamp must not reach the wire: %v", entry)
+			}
+			assert.Contains(t, scopedNames, "a__greeting")
+			assert.NotContains(t, scopedNames, "hidden__greeting", "a token scoped to 'a' must not see 'hidden' after a late enable")
+
+			var adminNames []string
+			for _, entry := range list(admin) {
+				adminNames = append(adminNames, entry["name"].(string))
+				assert.NotContains(t, entry, "_meta", "owner stamp must be stripped for admins too: %v", entry)
+			}
+			assert.Subset(t, adminNames, []string{"a__greeting", "hidden__greeting"})
+		})
+	}
 }
