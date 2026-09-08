@@ -36,9 +36,16 @@ func newTailLogScopeProxy(t *testing.T) *MCPProxyServer {
 	cfg.DataDir = t.TempDir()
 	cfg.Listen = "127.0.0.1:0"
 	cfg.Logging.LogDir = logDir
+	// The main server's config must carry both names so profile "gh" expands
+	// (ProfileConfig.EffectiveServers keeps only configured servers), but the
+	// entries are DISABLED: an enabled entry makes the runtime connect in a
+	// background goroutine that keeps writing server-<name>.log after Shutdown
+	// returns, and on Linux CI that write lands after t.TempDir's RemoveAll
+	// ("directory not empty"). The enabled flag a served response reports comes
+	// from proxy.storage below, not from this config.
 	cfg.Servers = []*config.ServerConfig{
-		{Name: "github", Protocol: "http", Enabled: true},
-		{Name: "secret", Protocol: "http", Enabled: true},
+		{Name: "github", Protocol: "http", Enabled: false},
+		{Name: "secret", Protocol: "http", Enabled: false},
 	}
 	cfg.Profiles = []config.ProfileConfig{{Name: "gh", Servers: []string{"github"}}}
 	mainSrv, err := NewServer(cfg, zap.NewNop())
