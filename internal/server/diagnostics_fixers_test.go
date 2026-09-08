@@ -290,17 +290,26 @@ func TestDiagnosticFixer_OAuthReauth_DryRunDoesNotSignIn(t *testing.T) {
 // button reads the per-server log file, the authorization URL is written by
 // the client's main logger and never reaches that file, and the OAuth catalog
 // entries do not offer the log-tail button anyway. The message must name a
-// path that produces the URL — the CLI login command does.
+// path the user can actually take — the CLI login command restarts the flow.
+//
+// A second review round then caught the replacement over-promising: it said
+// the CLI "prints the authorization URL", which is true only in standalone
+// mode. In daemon mode — the normal case when this button is visible —
+// cliclient.TriggerOAuthLogin discards the auth_url the REST response
+// carries. So the message may name the command and what it does (start the
+// sign-in again), and must not claim a URL will be shown anywhere.
 func TestDiagnosticFixer_OAuthReauth_StartedMessageIsFollowable(t *testing.T) {
 	msg := oauthReauthStartedMessage("sentry-2")
 
 	assert.Contains(t, msg, `"sentry-2"`)
 	assert.Contains(t, msg, "mcpproxy auth login --server=sentry-2",
-		"the fallback must be a command that prints the authorization URL")
+		"the fallback must be a command the user can run to retry the flow")
 	assert.NotContains(t, msg, "Show last server log lines",
 		"the log-tail button reads the per-server log, which never holds the authorization URL")
 	assert.NotContains(t, msg, "server's log",
 		"the per-server log never holds the authorization URL")
+	assert.NotContains(t, strings.ToLower(msg), "authorization url",
+		"nothing on this path, nor the daemon-mode CLI, shows the user the URL; do not promise it")
 	// Nothing on the async path reports whether a browser launched.
 	assert.NotContains(t, strings.ToLower(msg), "window opened")
 }

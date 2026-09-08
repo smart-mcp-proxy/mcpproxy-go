@@ -166,7 +166,15 @@ const lastPreviewToastId = ref<string | null>(null)
 // behind — so a preview opened on each of several servers still stacked past
 // the top of the viewport. Dispose of the preview with the panel that raised
 // it: a tail belongs to the server it was read from.
+//
+// `disposed` covers the other ordering: a click whose request is still in
+// flight when the panel unmounts. The hook then has no id to remove, and the
+// resumed runFixer would raise a 60s toast that nothing owns any more — the
+// same accumulation, one navigation later. A result that arrives after
+// disposal is dropped instead of delivered.
+let disposed = false
 onBeforeUnmount(() => {
+  disposed = true
   if (lastPreviewToastId.value) {
     systemStore.removeToast(lastPreviewToastId.value)
     lastPreviewToastId.value = null
@@ -249,6 +257,9 @@ async function runFixer(step: DiagnosticFixStep, mode: 'dry_run' | 'execute') {
       fixer_key: key,
       mode,
     })
+    // The panel that asked is gone; there is no one to deliver this to, and a
+    // toast raised now would outlive its owner (see onBeforeUnmount).
+    if (disposed) return
     if (response.success && response.data) {
       const outcome = response.data.outcome
       const titleMode = mode === 'dry_run' ? 'Dry-run' : 'Executed'

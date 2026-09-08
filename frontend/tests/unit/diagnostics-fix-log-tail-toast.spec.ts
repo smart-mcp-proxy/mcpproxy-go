@@ -138,6 +138,37 @@ describe('diagnostics log-tail fix delivery', () => {
     expect(store.toasts).toHaveLength(0)
   })
 
+  it('drops a preview whose request resolves only after the panel unmounted', async () => {
+    const api = (await import('@/services/api')).default as unknown as {
+      invokeDiagnosticFix: ReturnType<typeof vi.fn>
+    }
+    let resolveFix: (value: unknown) => void = () => {}
+    api.invokeDiagnosticFix.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFix = resolve
+      }),
+    )
+
+    const store = useSystemStore()
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: DIAGNOSTIC, serverName: 'flaky-stdio' },
+    })
+
+    // Click, then navigate away while the request is still in flight. The
+    // unmount hook runs with no preview id to dispose of; without a guard the
+    // resumed request would then raise a 60s toast nobody owns.
+    await wrapper.find('[data-testid="error-panel-execute-button-0"]').trigger('click')
+    wrapper.unmount()
+
+    resolveFix({
+      success: true,
+      data: { outcome: 'success', duration_ms: 12, mode: 'execute', preview: LOG_TAIL },
+    })
+    await flushPromises()
+
+    expect(store.toasts).toHaveLength(0)
+  })
+
   it('renders a multi-line toast message with its line breaks preserved', () => {
     const store = useSystemStore()
     store.addToast({ type: 'success', title: 'Executed: Show last server log lines', message: LOG_TAIL })

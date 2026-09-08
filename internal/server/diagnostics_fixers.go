@@ -273,12 +273,19 @@ func (s *Server) fixOAuthReauth(_ context.Context, req diagnostics.FixRequest) (
 // in the first place. The instruction pointed at a log that never held the
 // URL, behind a button the user could not press.
 //
-// `mcpproxy auth login --server=<name>` is the path that works headless: it
-// drives the same flow from a terminal and prints the authorization URL when
-// the browser cannot be opened.
+// `mcpproxy auth login --server=<name>` is the fallback: it starts the same
+// flow again from a terminal, which is the right retry for a browser launch
+// that failed transiently. It is NOT promised to print the authorization URL:
+// with the daemon running the CLI takes daemon mode, and although the REST
+// login response carries auth_url and browser_opened
+// (httpapi/server.go handleServerLogin), cliclient.TriggerOAuthLogin discards
+// both and cmd/mcpproxy/auth_cmd.go prints a generic success line. Only the
+// standalone path prints the URL. Surfacing auth_url through the CLI is a
+// separate change; until it lands, the message claims only what the command
+// does.
 func oauthReauthStartedMessage(serverID string) string {
 	return fmt.Sprintf(
 		"Sign-in started for server %q. Finish it in the browser window mcpproxy opens; the server reconnects on its own once you do. "+
-			"If no window appears, run `mcpproxy auth login --server=%s` from a terminal — it prints the authorization URL when the browser cannot be opened.",
+			"If no window appears, run `mcpproxy auth login --server=%s` from a terminal to start the sign-in again.",
 		serverID, serverID)
 }
