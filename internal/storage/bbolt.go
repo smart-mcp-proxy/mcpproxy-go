@@ -394,6 +394,37 @@ func (b *BoltDB) GetToolApproval(serverName, toolName string) (*ToolApprovalReco
 	return record, err
 }
 
+// GetToolApprovals reads the approval records for several tools of ONE server
+// inside a single read transaction, so the result is a consistent snapshot: no
+// write can land between the individual key reads the way it can between
+// consecutive GetToolApproval calls. Tools without a record are simply absent
+// from the returned map (there is no ErrToolApprovalNotFound for a partial
+// miss); a decode failure on any key fails the whole read.
+func (b *BoltDB) GetToolApprovals(serverName string, toolNames ...string) (map[string]*ToolApprovalRecord, error) {
+	records := make(map[string]*ToolApprovalRecord, len(toolNames))
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		for _, toolName := range toolNames {
+			data := bucket.Get([]byte(ToolApprovalKey(serverName, toolName)))
+			if data == nil {
+				continue
+			}
+			record := &ToolApprovalRecord{}
+			if err := record.UnmarshalBinary(data); err != nil {
+				return err
+			}
+			records[toolName] = record
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return records, nil
+}
+
 // ListToolApprovals returns all tool approval records for a server.
 // If serverName is empty, returns all records across all servers.
 func (b *BoltDB) ListToolApprovals(serverName string) ([]*ToolApprovalRecord, error) {

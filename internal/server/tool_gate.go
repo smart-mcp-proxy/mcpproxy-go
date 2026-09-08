@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -173,26 +174,39 @@ func approvalStateFor(record *storage.ToolApprovalRecord) *preflight.ApprovalSta
 // keeps answering with the lock's review response (the toolGate.lockStatus
 // contract). This is the conservative reader rule until the producers are
 // made exact-name as well (Spec 105 FR-009 follow-up).
+//
+// Both keys are read in ONE storage snapshot (Manager.GetToolApprovals: a
+// single read lock and a single read transaction). Two independent reads would
+// let a pair of operator writes land between them — the exact record read
+// while still approved and enabled, the collapsed one read after its lock was
+// lifted — and merge into approved+enabled although the tool was locked or
+// disabled at every instant. The absence of both records is reported as
+// storage.ErrToolApprovalNotFound, the same contract GetToolApproval keeps.
 func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
-	exact, exactErr := p.storage.GetToolApproval(serverName, toolName)
-	if exactErr != nil && !errors.Is(exactErr, storage.ErrToolApprovalNotFound) {
-		return nil, exactErr
-	}
+	keys := []string{toolName}
 	// The collapsed key may be EMPTY: the producer files a raw name that ends
 	// in a colon ("ns:") under (server, "") and storage accepts that key, so
 	// it is read like any other collapsed record rather than skipped.
-	_, collapsed, ok := strings.Cut(toolName, ":")
-	if !ok {
-		return exact, exactErr
+	collapsed, hasCollapsed := "", false
+	if _, rest, ok := strings.Cut(toolName, ":"); ok {
+		collapsed, hasCollapsed = rest, true
+		keys = append(keys, collapsed)
 	}
-	legacy, legacyErr := p.storage.GetToolApproval(serverName, collapsed)
-	if legacyErr != nil && !errors.Is(legacyErr, storage.ErrToolApprovalNotFound) {
-		return nil, legacyErr
+	records, err := p.storage.GetToolApprovals(serverName, keys...)
+	if err != nil {
+		return nil, err
+	}
+	exact := records[toolName]
+	var legacy *storage.ToolApprovalRecord
+	if hasCollapsed {
+		legacy = records[collapsed]
 	}
 	switch {
-	case exactErr != nil:
-		return legacy, legacyErr
-	case legacyErr != nil:
+	case exact == nil && legacy == nil:
+		return nil, fmt.Errorf("%w: %s", storage.ErrToolApprovalNotFound, storage.ToolApprovalKey(serverName, toolName))
+	case exact == nil:
+		return legacy, nil
+	case legacy == nil:
 		return exact, nil
 	default:
 		return mergeApprovalRecords(exact, legacy), nil

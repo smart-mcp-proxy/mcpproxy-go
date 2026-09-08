@@ -913,3 +913,72 @@ func TestToolGate_TrailingColonRawName_ReadsProducersEmptyKeyRecord(t *testing.T
 		assert.Equal(t, preflight.ToolClassBlockedByUser, proxy.evaluateToolGate("a", "ns:").class)
 	})
 }
+
+// lookupToolApproval reads the exact-name and collapsed-name records of one
+// raw tool as ONE storage snapshot (Manager.GetToolApprovals). Two independent
+// reads would let a pair of operator writes land between them — the exact
+// record observed while still approved and enabled, the collapsed one after
+// its lock was lifted — and merge into a callable view of a tool that was
+// locked or disabled at every instant. This pins the reader's outcome table
+// over the snapshot: which record answers, and that the absence of both keeps
+// the GetToolApproval not-found contract the callers switch on.
+func TestLookupToolApproval_ReadsBothKeysFromOneSnapshot(t *testing.T) {
+	seed := func(t *testing.T, records ...storage.ToolApprovalRecord) *MCPProxyServer {
+		t.Helper()
+		proxy, _ := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		for i := range records {
+			records[i].ServerName = "a"
+			require.NoError(t, proxy.storage.SaveToolApproval(&records[i]))
+		}
+		return proxy
+	}
+
+	t.Run("no record under either key is not-found", func(t *testing.T) {
+		proxy := seed(t, storage.ToolApprovalRecord{ToolName: "unrelated", Status: storage.ToolApprovalStatusPending})
+		record, err := proxy.lookupToolApproval("a", "ns:erase")
+		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound)
+		assert.Contains(t, err.Error(), storage.ToolApprovalKey("a", "ns:erase"))
+		assert.Nil(t, record)
+	})
+
+	t.Run("exact record only", func(t *testing.T) {
+		proxy := seed(t, storage.ToolApprovalRecord{ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, Disabled: true})
+		record, err := proxy.lookupToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		assert.Equal(t, "ns:erase", record.ToolName)
+		assert.True(t, record.Disabled)
+	})
+
+	t.Run("collapsed record only", func(t *testing.T) {
+		proxy := seed(t, storage.ToolApprovalRecord{ToolName: "erase", Status: storage.ToolApprovalStatusChanged, CurrentHash: "rug"})
+		record, err := proxy.lookupToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		assert.Equal(t, "erase", record.ToolName)
+		assert.Equal(t, storage.ToolApprovalStatusChanged, record.Status)
+	})
+
+	t.Run("both records merge, base is the locked one", func(t *testing.T) {
+		proxy := seed(t,
+			storage.ToolApprovalRecord{ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, Disabled: true},
+			storage.ToolApprovalRecord{ToolName: "erase", Status: storage.ToolApprovalStatusPending, CurrentHash: "h-pending"})
+		record, err := proxy.lookupToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
+		assert.Equal(t, "h-pending", record.CurrentHash)
+		assert.True(t, record.Disabled, "the exact record's user block is OR'd in")
+		for _, key := range []string{"ns:erase", "erase"} {
+			stored, err := proxy.storage.GetToolApproval("a", key)
+			require.NoError(t, err)
+			assert.Equal(t, key == "ns:erase", stored.Disabled, "the merge must not write back into the stored %q record", key)
+		}
+	})
+
+	t.Run("a raw name without a colon reads the exact key alone", func(t *testing.T) {
+		proxy := seed(t, storage.ToolApprovalRecord{ToolName: "", Status: storage.ToolApprovalStatusPending})
+		_, err := proxy.lookupToolApproval("a", "erase")
+		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "there is no collapsed spelling to fall back to")
+	})
+}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 )
 
@@ -272,4 +273,59 @@ func TestToolApprovalRecord_MarshalUnmarshal(t *testing.T) {
 	assert.Equal(t, record.CurrentDescription, result.CurrentDescription)
 	assert.Equal(t, record.PreviousSchema, result.PreviousSchema)
 	assert.Equal(t, record.CurrentSchema, result.CurrentSchema)
+}
+
+func TestToolApprovalRecord_GetToolApprovals_OneSnapshot(t *testing.T) {
+	manager, cleanup := setupTestStorageForToolApproval(t)
+	defer cleanup()
+
+	for _, r := range []*ToolApprovalRecord{
+		{ServerName: "a", ToolName: "ns:erase", Status: ToolApprovalStatusApproved, Disabled: true},
+		{ServerName: "a", ToolName: "erase", Status: ToolApprovalStatusPending, CurrentHash: "h-pending"},
+		{ServerName: "a", ToolName: "", Status: ToolApprovalStatusChanged},
+		{ServerName: "b", ToolName: "erase", Status: ToolApprovalStatusApproved},
+	} {
+		require.NoError(t, manager.SaveToolApproval(r))
+	}
+
+	t.Run("returns every stored key of the server, keyed by tool name", func(t *testing.T) {
+		records, err := manager.GetToolApprovals("a", "ns:erase", "erase")
+		require.NoError(t, err)
+		require.Len(t, records, 2)
+		require.NotNil(t, records["ns:erase"])
+		assert.True(t, records["ns:erase"].Disabled)
+		assert.Equal(t, ToolApprovalStatusApproved, records["ns:erase"].Status)
+		require.NotNil(t, records["erase"])
+		assert.Equal(t, ToolApprovalStatusPending, records["erase"].Status)
+		assert.Equal(t, "h-pending", records["erase"].CurrentHash)
+	})
+
+	t.Run("a missing key is absent, not an error", func(t *testing.T) {
+		records, err := manager.GetToolApprovals("a", "ns:erase", "nope")
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		_, found := records["nope"]
+		assert.False(t, found)
+
+		records, err = manager.GetToolApprovals("zzz", "ns:erase")
+		require.NoError(t, err)
+		assert.Empty(t, records, "another server's records never leak in")
+	})
+
+	t.Run("the empty tool name is a readable key", func(t *testing.T) {
+		records, err := manager.GetToolApprovals("a", "ns:", "")
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		require.NotNil(t, records[""])
+		assert.Equal(t, ToolApprovalStatusChanged, records[""].Status)
+	})
+
+	t.Run("a corrupt record fails the whole read", func(t *testing.T) {
+		require.NoError(t, manager.db.db.Update(func(tx *bbolt.Tx) error {
+			return tx.Bucket([]byte(ToolApprovalBucket)).Put([]byte(ToolApprovalKey("a", "broken")), []byte("{not json"))
+		}))
+		records, err := manager.GetToolApprovals("a", "ns:erase", "broken")
+		require.Error(t, err)
+		assert.Nil(t, records, "a partial map must not be handed back as if it were a snapshot")
+	})
 }
