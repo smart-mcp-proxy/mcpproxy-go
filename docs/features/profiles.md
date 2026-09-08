@@ -68,7 +68,8 @@ The `set_profile` MCP tool switches the active profile **inside a live session**
 - The selection is keyed by the MCP session id (stable per streamable-HTTP / SSE connection) and persists for the lifetime of that session.
 - It applies to subsequent `retrieve_tools`, `call_tool_*`, `code_execution` and direct-mode (`server__tool`) calls on the base `/mcp` endpoint — `retrieve_tools` searches the profile's per-profile index directly.
 - Passing an empty string (`""`) clears the selection and returns to all servers (the result lists every configured server). A token with a [`profile_pin`](./agent-tokens.md#profile-pinning) keeps its pin — the result then lists the pinned profile's servers, since that is what the session can still reach.
-- An unknown slug is rejected: `unknown profile '<slug>' (available: research, deploy)`.
+- The `servers` list is always bounded by the caller's credential, using the same rule that scopes `retrieve_tools`: for an [agent token](./agent-tokens.md) scoped to specific servers it is the intersection of the selection (all servers, the chosen profile, or the pin) with the token's `allowed_servers`, so a token restricted to one server is never told about the others. API-key and socket callers see the full lists.
+- An unknown slug is rejected: `unknown profile '<slug>' (available: research, deploy)`. For an agent token the `available:` list names only the profiles that token may select — its pin, or the profiles overlapping its `allowed_servers` — not the whole catalogue, and a profile entirely outside the token's reach is rejected with that same error rather than confirmed as existing.
 - Session state is cleared automatically on session close.
 
 `set_profile` is available on the default `/mcp` server and the `call_tool` / `code_execution` routing-mode servers.
