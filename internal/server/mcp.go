@@ -6728,26 +6728,21 @@ func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string)
 		return nil, false
 	}
 
-	// tool.Name may be in "server:tool" format (from ToolMetadata.Name),
-	// while toolName is just the tool part. Both spellings are accepted, but
-	// the EXACT raw name — the identity that is dispatched (Spec 105
-	// FR-009) — always wins: with foreign prefixes preserved, a raw tool
-	// literally named "a:ns:erase" also satisfies the prefixed spelling for
-	// the pair (a, "ns:erase"), and letting StateView order decide between
-	// the two made the classified tier depend on discovery order.
-	prefixedName := serverName + ":" + toolName
-	prefixedIdx := -1
+	// Only the EXACT raw name — the identity that is dispatched (Spec 105
+	// FR-009) — is matched. The StateView holds the name the upstream
+	// published, verbatim (internal/upstream/core/client.go copies tool.Name
+	// into ToolMetadata.Name, and the supervisor copies that into ToolInfo),
+	// so the legacy "server:tool" spelling this lookup once also accepted
+	// never matched a real entry on the live path. What it did match was a
+	// raw tool literally named "a:ns:erase": with foreign prefixes now
+	// preserved, that alternative resolved the UNDISCOVERED pair
+	// (a, "ns:erase") to the prefixed tool's annotations with found=true, so
+	// the tier gate classified a name the proxy holds no metadata for by a
+	// different tool's hints instead of failing closed.
 	for i := range serverStatus.Tools {
-		tool := &serverStatus.Tools[i]
-		if tool.Name == toolName {
-			return tool.Annotations, true
+		if serverStatus.Tools[i].Name == toolName {
+			return serverStatus.Tools[i].Annotations, true
 		}
-		if prefixedIdx < 0 && tool.Name == prefixedName {
-			prefixedIdx = i
-		}
-	}
-	if prefixedIdx >= 0 {
-		return serverStatus.Tools[prefixedIdx].Annotations, true
 	}
 
 	return nil, false

@@ -801,13 +801,14 @@ func TestToolGate_MergedApprovalRecordsKeepIndependentLocks(t *testing.T) {
 	})
 }
 
-// The StateView lookup behind the tier gate accepts two spellings of a tool:
-// the raw name and the legacy "server:tool"-prefixed form. With foreign
-// prefixes now preserved, a raw tool literally named "a:ns:erase" also
-// satisfies the prefixed spelling for the dispatched pair (a, "ns:erase"),
-// so which tool classified the call used to depend on StateView order. The
-// exact raw name — the identity that is actually dispatched — must always
-// win; the prefixed spelling is only a fallback when no exact tool exists.
+// The StateView lookup behind the tier gate used to accept two spellings of
+// a tool: the raw name and the legacy "server:tool"-prefixed form. With
+// foreign prefixes now preserved, a raw tool literally named "a:ns:erase"
+// also satisfied the prefixed spelling for the dispatched pair
+// (a, "ns:erase"), so which tool classified the call depended on StateView
+// order. Only the exact raw name — the identity that is actually dispatched
+// — may resolve, whatever the order, and a pair with no exact entry must
+// stay unresolved even when a self-prefixed sibling exists.
 func TestLookupToolPermission_ExactRawNameOutranksPrefixedAlternative(t *testing.T) {
 	prefixedRead := stateview.ToolInfo{
 		Name: "a:ns:erase", Description: "Raw name that happens to carry the server prefix",
@@ -846,12 +847,44 @@ func TestLookupToolPermission_ExactRawNameOutranksPrefixedAlternative(t *testing
 		})
 	}
 
-	t.Run("prefixed spelling still resolves when no exact tool exists", func(t *testing.T) {
+	// The StateView only ever holds the raw name the upstream published
+	// (internal/upstream/core/client.go copies tool.Name verbatim), so the
+	// legacy "server:tool" spelling never matches a real entry — it can only
+	// match a raw tool literally named "a:ns:erase". Resolving THAT tool for
+	// the pair (a, "ns:erase") when no raw "ns:erase" exists reported
+	// found=true with the prefixed tool's read-only annotations for a name
+	// that is undiscovered, so a read-only token passed the tier gate and
+	// dispatch went to the raw "ns:erase" the proxy holds no metadata for.
+	// An undiscovered pair must classify as not found (fail-closed to
+	// destructive), and the exact prefixed raw name must stay reachable
+	// under its own identity.
+	t.Run("undiscovered raw name is not resolved through a self-prefixed sibling", func(t *testing.T) {
 		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
-		seedTargetTierServer(t, proxy, rt, "a", []stateview.ToolInfo{prefixedRead})
-		annotations, found := proxy.lookupToolAnnotationsFound("a", "ns:erase")
-		require.True(t, found)
-		assert.Equal(t, prefixedRead.Annotations, annotations)
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		calls := startCountingTargetTierUpstream(t, proxy, rt, "a", []stateview.ToolInfo{prefixedRead})
+
+		_, found := proxy.lookupExactToolAnnotations("a", "ns:erase")
+		assert.False(t, found, "the pair (a, ns:erase) has no StateView entry and must not borrow a:ns:erase's")
+		assert.Equal(t, contracts.OperationTypeDestructive, proxy.lookupToolPermission("a", "ns:erase"),
+			"an undiscovered raw name must fail closed, exactly as it does without a prefixed sibling")
+		assert.Equal(t, contracts.OperationTypeRead, proxy.lookupToolPermission("a", "a:ns:erase"),
+			"control: the exact prefixed raw name still resolves to its own tier")
+
+		text := callToolReadOn(t, proxy, readOnlyAgentCtx("a"), "a:ns:erase")
+		assert.Contains(t, text, "Permission denied: token does not have 'destructive' permission required for tool 'a:ns:erase'")
+		assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
+		assert.Equal(t, int64(0), calls.count.Load(), "a refused call must never reach the upstream")
+
+		// Control: the prefixed raw name is dispatched under its exact identity.
+		req := mcp.CallToolRequest{}
+		req.Params.Name = contracts.ToolVariantRead
+		req.Params.Arguments = map[string]interface{}{"name": "a:a:ns:erase"}
+		result, err := proxy.handleCallToolVariant(readOnlyAgentCtx("a"), req, contracts.ToolVariantRead)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.False(t, result.IsError, "control: the read-tier prefixed raw name stays reachable: %s", result.Content[0].(mcp.TextContent).Text)
+		assert.Equal(t, []string{"a:ns:erase"}, calls.dispatched(),
+			"the upstream must receive exactly the raw name that was authorized")
 	})
 }
 
