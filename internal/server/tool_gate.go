@@ -79,8 +79,21 @@ func (g toolGate) blockedMessage() string {
 // preflight glue — which reads the same live config — cannot drift from it. In
 // unit tests, where no runtime is wired, currentConfig() is the construction
 // config, so behavior is unchanged there.
+//
+// The pair is normalized here for callers that hold a canonical "server:tool"
+// id. A caller that already holds a SPLIT pair (every dispatch path, and a
+// resolver that normalized once itself) must use evaluateExactToolGate.
 func (p *MCPProxyServer) evaluateToolGate(serverName, toolName string) toolGate {
 	serverName, toolName = normalizeServerTool(serverName, toolName)
+	return p.evaluateExactToolGate(serverName, toolName)
+}
+
+// evaluateExactToolGate is evaluateToolGate for a pair that is already split
+// into server and RAW tool name. It never re-normalizes: a raw name that
+// begins with the server's own prefix ("a:ns:erase" on "a") would otherwise
+// be approval- and config-gated as the suffix tool "ns:erase" while dispatch
+// targets "a:ns:erase" (Spec 105 FR-009).
+func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) toolGate {
 	gate := toolGate{serverName: serverName, toolName: toolName}
 
 	if serverName == "" || toolName == "" {

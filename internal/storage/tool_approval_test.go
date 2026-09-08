@@ -320,6 +320,22 @@ func TestToolApprovalRecord_GetToolApprovals_OneSnapshot(t *testing.T) {
 		assert.Equal(t, ToolApprovalStatusChanged, records[""].Status)
 	})
 
+	t.Run("every key is read inside one read transaction", func(t *testing.T) {
+		db := manager.db.db
+		before := db.Stats().TxN
+		records, err := manager.GetToolApprovals("a", "ns:erase", "erase", "")
+		require.NoError(t, err)
+		require.Len(t, records, 3)
+		assert.Equal(t, 1, db.Stats().TxN-before, "three keys, one snapshot")
+
+		before = db.Stats().TxN
+		_, err = manager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		_, err = manager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.Equal(t, 2, db.Stats().TxN-before, "control: per-key reads are one transaction each, so the oracle bites")
+	})
+
 	t.Run("a corrupt record fails the whole read", func(t *testing.T) {
 		require.NoError(t, manager.db.db.Update(func(tx *bbolt.Tx) error {
 			return tx.Bucket([]byte(ToolApprovalBucket)).Put([]byte(ToolApprovalKey("a", "broken")), []byte("{not json"))

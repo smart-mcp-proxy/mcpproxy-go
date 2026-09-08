@@ -65,7 +65,7 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 	if gateReason := p.describeGateReason(serverName, toolName); gateReason != "" {
 		return false, gateReason
 	}
-	if !p.isToolCallable(serverName, toolName) {
+	if !p.isExactToolCallable(serverName, toolName) {
 		return false, visReasonToolNotCallable
 	}
 	return true, ""
@@ -91,7 +91,8 @@ func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileSc
 	}
 
 	// Callability: disabled/blocked tools are non-existent for discovery.
-	if !p.isToolCallable(serverName, toolName) {
+	// The pair was normalized once above and is consulted exactly from here.
+	if !p.isExactToolCallable(serverName, toolName) {
 		return false, visReasonToolNotCallable
 	}
 
@@ -114,8 +115,11 @@ func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileSc
 // describe_tool, dispatch and the preflight evaluator consult exactly one
 // evaluation of the quarantine/approval state. The gate order (server
 // quarantine, then the tool-level lock) is unchanged.
+//
+// The pair arrives already normalized by toolVisibleToSession, so the gate is
+// read exactly rather than normalized a second time.
 func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string {
-	gate := p.evaluateToolGate(serverName, toolName)
+	gate := p.evaluateExactToolGate(serverName, toolName)
 	if gate.serverQuarantined() {
 		return visReasonServerQuarantined
 	}

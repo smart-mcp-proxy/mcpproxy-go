@@ -422,7 +422,8 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	if len(toolCallRecords) > 0 {
 		hasOpenWorldTool := false
 		for _, tc := range toolCallRecords {
-			toolAnnotations := p.lookupToolAnnotations(tc.ServerName, tc.ToolName)
+			// tc carries the split pair the script called; read it exactly.
+			toolAnnotations, _ := p.lookupExactToolAnnotations(tc.ServerName, tc.ToolName)
 			if contracts.IsOpenWorldTool(toolAnnotations) {
 				hasOpenWorldTool = true
 				break
@@ -916,7 +917,9 @@ func (u *upstreamToolCaller) policyRefusal(serverName, toolName string) error {
 	if u.proxy == nil || u.proxy.storage == nil {
 		return nil
 	}
-	gate := u.proxy.evaluateToolGate(serverName, toolName)
+	// The script named the server and the raw tool separately, so the pair
+	// is already split and is gated exactly (never re-normalized).
+	gate := u.proxy.evaluateExactToolGate(serverName, toolName)
 	if gate.serverConfig == nil {
 		if gate.storageErr != nil {
 			// The record exists as far as anyone knows — it just could not be
@@ -1177,8 +1180,12 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // consulted: it stores no annotations (and a "server:tool" query returns no
 // hits), so the former index fallback never resolved anything. A discovered
 // tool that publishes no annotations still derives to read via DeriveCallWith.
+//
+// The sandbox hands over the pair a script wrote — callTool(server, tool) —
+// which is already split, so the raw name is read exactly rather than
+// normalized a second time (a raw name may start with the server's prefix).
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
-	return tierForAnnotations(p.lookupToolAnnotationsFound(serverName, toolName))
+	return tierForAnnotations(p.lookupExactToolAnnotations(serverName, toolName))
 }
 
 // tierForAnnotations maps one lookupToolAnnotationsFound result to the

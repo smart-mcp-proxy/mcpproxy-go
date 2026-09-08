@@ -481,7 +481,11 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 		AllowedServers: []string{"a"},
 		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 	})
-	adminCtx := context.Background() // API-key administrator: no agent AuthContext
+	// API-key administrator: an IsAdmin() AuthContext, which the agent block
+	// skips explicitly. The nil-auth path (no AuthContext at all) is the
+	// other way past that block and is driven as its own cell.
+	adminCtx := auth.WithAuthContext(context.Background(), auth.AdminContext())
+	noAuthCtx := context.Background()
 
 	seedCollapsedRecord := func(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, record storage.ToolApprovalRecord) {
 		t.Helper()
@@ -497,7 +501,7 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no exact-name record may exist")
 	}
 
-	for name, ctx := range map[string]context.Context{"full-tier token": fullToken, "api-key admin": adminCtx} {
+	for name, ctx := range map[string]context.Context{"full-tier token": fullToken, "api-key admin": adminCtx, "no auth context": noAuthCtx} {
 		t.Run("pending collapsed record refuses "+name, func(t *testing.T) {
 			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
 			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
@@ -667,7 +671,8 @@ func TestToolGate_StaleExactApprovalCannotShadowCollapsedChange(t *testing.T) {
 			AllowedServers: []string{"a"},
 			Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 		}),
-		"api-key admin": context.Background(),
+		"api-key admin":   auth.WithAuthContext(context.Background(), auth.AdminContext()),
+		"no auth context": context.Background(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			probe := watchPolicyDecisions(t, rt)
@@ -745,7 +750,8 @@ func TestToolGate_MergedApprovalRecordsKeepIndependentLocks(t *testing.T) {
 				AllowedServers: []string{"a"},
 				Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 			}),
-			"api-key admin": context.Background(),
+			"api-key admin":   auth.WithAuthContext(context.Background(), auth.AdminContext()),
+			"no auth context": context.Background(),
 		} {
 			t.Run(name, func(t *testing.T) {
 				probe := watchPolicyDecisions(t, rt)
@@ -980,5 +986,148 @@ func TestLookupToolApproval_ReadsBothKeysFromOneSnapshot(t *testing.T) {
 		proxy := seed(t, storage.ToolApprovalRecord{ToolName: "", Status: storage.ToolApprovalStatusPending})
 		_, err := proxy.lookupToolApproval("a", "erase")
 		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "there is no collapsed spelling to fall back to")
+	})
+
+	// The snapshot property itself, not just the merge table: bbolt counts
+	// every started read transaction (Stats().TxN), so the reader is proven
+	// to consult both keys inside ONE transaction — two independent
+	// GetToolApproval reads (the shape the fix replaced) open two, which the
+	// control below shows the oracle sees.
+	t.Run("both keys are read in one storage transaction", func(t *testing.T) {
+		proxy := seed(t,
+			storage.ToolApprovalRecord{ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved},
+			storage.ToolApprovalRecord{ToolName: "erase", Status: storage.ToolApprovalStatusPending})
+		db := proxy.storage.GetDB()
+
+		before := db.Stats().TxN
+		record, err := proxy.lookupToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		assert.Equal(t, 1, db.Stats().TxN-before, "the exact and collapsed keys must come from a single read transaction")
+
+		before = db.Stats().TxN
+		_, err = proxy.storage.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		_, err = proxy.storage.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.Equal(t, 2, db.Stats().TxN-before, "control: two independent reads are two transactions, so the oracle bites")
+	})
+}
+
+// A raw tool name may itself begin with the SERVER's own prefix ("a:ns:erase"
+// on server "a"). handleCallToolVariant splits the canonical id exactly once
+// ("a:a:ns:erase" → (a, "a:ns:erase")) and dispatches that raw name, so every
+// gate it feeds must evaluate that same pair. Re-running normalizeServerTool
+// on an already-split pair strips the server prefix a second time, and the
+// destructive "a:ns:erase" was then classified, tier-gated, intent-validated
+// and approval-gated as the read-only "ns:erase" — the mirror image of the
+// prefixed-spelling collision, reached from the dispatch side. The split-pair
+// readers (the tier gate, the sandbox's permission bridge, the shared policy
+// gate) must take the parsed pair untouched.
+func TestCallToolRead_ServerPrefixedRawName_IsNotReNormalized(t *testing.T) {
+	prefixedDestructive := stateview.ToolInfo{
+		Name: "a:ns:erase", Description: "Raw name that starts with the server's own prefix",
+		Annotations: &config.ToolAnnotations{DestructiveHint: boolPtr(true)},
+	}
+	rawRead := stateview.ToolInfo{
+		Name: "ns:erase", Description: "Read-only erase preview",
+		Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+	}
+	require.Equal(t, contracts.ToolVariantDestructive, contracts.DeriveCallWith(prefixedDestructive.Annotations))
+	require.Equal(t, contracts.ToolVariantRead, contracts.DeriveCallWith(rawRead.Annotations))
+
+	for _, strict := range []bool{true, false} {
+		for order, tools := range map[string][]stateview.ToolInfo{
+			"destructive listed first": {prefixedDestructive, rawRead},
+			"read listed first":        {rawRead, prefixedDestructive},
+		} {
+			t.Run("strict="+map[bool]string{true: "on", false: "off"}[strict]+"/"+order, func(t *testing.T) {
+				proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+				proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: strict}
+				probe := watchPolicyDecisions(t, rt)
+				seedTargetTierServer(t, proxy, rt, "a", tools)
+
+				// The sandbox bridge (jsruntime ToolAnnotationFunc) hands over
+				// the split pair a script wrote: callTool("a", "a:ns:erase").
+				assert.Equal(t, contracts.OperationTypeDestructive, proxy.lookupToolPermission("a", "a:ns:erase"),
+					"the split pair must classify the raw name that is dispatched, not its suffix")
+				assert.Equal(t, contracts.OperationTypeRead, proxy.lookupToolPermission("a", "ns:erase"))
+
+				text := callToolReadOn(t, proxy, readOnlyAgentCtx("a"), "a:a:ns:erase")
+				assert.Contains(t, text, "Permission denied: token does not have 'destructive' permission required for tool 'a:a:ns:erase'")
+				assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
+
+				payload := probe.awaitOne(t)
+				assert.Equal(t, "blocked", payload["decision"])
+				assert.Equal(t, "a:ns:erase", payload["tool_name"], "the activity record must carry the raw dispatched name")
+			})
+		}
+	}
+
+	t.Run("upstream oracle: refused with zero calls, admitted under the raw name", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		calls := startCountingTargetTierUpstream(t, proxy, rt, "a", []stateview.ToolInfo{rawRead, prefixedDestructive})
+		call := func(t *testing.T, ctx context.Context, name string) *mcp.CallToolResult {
+			t.Helper()
+			req := mcp.CallToolRequest{}
+			req.Params.Name = contracts.ToolVariantRead
+			req.Params.Arguments = map[string]interface{}{"name": name}
+			result, err := proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			return result
+		}
+		text := func(result *mcp.CallToolResult) string { return result.Content[0].(mcp.TextContent).Text }
+
+		readOnly := readOnlyAgentCtx("a")
+		result := call(t, readOnly, "a:a:ns:erase")
+		require.True(t, result.IsError, "a read-only token must not reach the destructive raw name")
+		assert.Contains(t, text(result), "Permission denied: token does not have 'destructive' permission required for tool 'a:a:ns:erase'")
+		assert.Equal(t, int64(0), calls.count.Load(), "a refused call must never reach the upstream")
+
+		result = call(t, readOnly, "a:ns:erase")
+		require.False(t, result.IsError, "control: the read-tier suffix tool stays reachable: %s", text(result))
+		full := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type: auth.AuthTypeAgent, AgentName: "full", TokenPrefix: "mcp_agt_f",
+			AllowedServers: []string{"a"},
+			Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+		})
+		result = call(t, full, "a:a:ns:erase")
+		require.False(t, result.IsError, "control: a token holding destructive reaches the prefixed raw name: %s", text(result))
+		assert.Equal(t, []string{"ns:erase", "a:ns:erase"}, calls.dispatched(),
+			"the upstream must receive exactly the raw names that were authorized")
+	})
+
+	// The approval gate reads the same split pair: a pending record filed
+	// under the exact raw "a:ns:erase" must lock it for every dispatch path
+	// (the retrieve surface and the sandbox bridge alike) even though the
+	// suffix tool "ns:erase" is approved and callable.
+	t.Run("approval lock keyed on the exact raw name", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedTargetTierServer(t, proxy, rt, "a", []stateview.ToolInfo{rawRead, prefixedDestructive})
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "a:ns:erase", Status: storage.ToolApprovalStatusPending, CurrentHash: "h-pending",
+		}))
+		require.True(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "control: the suffix tool stays callable")
+
+		caller := &upstreamToolCaller{proxy: proxy}
+		require.Nil(t, caller.policyRefusal("a", "ns:erase"), "control: the sandbox admits the approved suffix tool")
+		require.Error(t, caller.policyRefusal("a", "a:ns:erase"), "the sandbox must refuse the pending raw name")
+
+		full := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type: auth.AuthTypeAgent, AgentName: "full", TokenPrefix: "mcp_agt_f",
+			AllowedServers: []string{"a"},
+			Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+		})
+		req := mcp.CallToolRequest{}
+		req.Params.Name = contracts.ToolVariantDestructive
+		req.Params.Arguments = map[string]interface{}{"name": "a:a:ns:erase"}
+		result, err := proxy.handleCallToolVariant(full, req, contracts.ToolVariantDestructive)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		text := result.Content[0].(mcp.TextContent).Text
+		assert.Contains(t, text, "TOOL_QUARANTINED", "the pending lock under the exact raw name must answer")
+		assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
 	})
 }
