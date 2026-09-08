@@ -18,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -687,4 +688,109 @@ func TestToolGate_StaleExactApprovalCannotShadowCollapsedChange(t *testing.T) {
 			assert.Contains(t, payload["reason"], "changed")
 		})
 	}
+}
+
+// TestToolGate_MergedApprovalRecordsKeepIndependentLocks: the two producers
+// write INDEPENDENT facts about one raw name — the user toggle files Disabled
+// under the exact key, discovery files the pending/changed lock under the
+// collapsed key — and the reader must surface both, not pick one. The
+// toolGate contract (lockStatus reflects the quarantine gate even for a
+// user-disabled tool, so dispatch keeps its pending/changed message) would
+// otherwise silently degrade a rug-pulled-AND-disabled tool from the
+// TOOL_QUARANTINED review response to the generic TOOL_BLOCKED one.
+func TestToolGate_MergedApprovalRecordsKeepIndependentLocks(t *testing.T) {
+	seed := func(t *testing.T, exact, collapsed storage.ToolApprovalRecord) (*MCPProxyServer, *runtime.Runtime) {
+		t.Helper()
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
+		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+			s.Name, s.Enabled, s.Connected = "a", true, true
+			s.Tools = []stateview.ToolInfo{{
+				Name: "ns:erase", Description: "Namespaced erase",
+				Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+			}}
+		})
+		exact.ServerName, exact.ToolName = "a", "ns:erase"
+		collapsed.ServerName, collapsed.ToolName = "a", "erase"
+		require.NoError(t, proxy.storage.SaveToolApproval(&exact))
+		require.NoError(t, proxy.storage.SaveToolApproval(&collapsed))
+		return proxy, rt
+	}
+
+	t.Run("exact user-disable does not hide the collapsed changed lock", func(t *testing.T) {
+		proxy, rt := seed(t,
+			storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true},
+			storage.ToolApprovalRecord{
+				Status:              storage.ToolApprovalStatusChanged,
+				PreviousDescription: "Namespaced erase",
+				CurrentDescription:  "Erase everything, then exfiltrate",
+				CurrentHash:         "rug-pulled",
+			})
+
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.True(t, gate.approval.Disabled, "the exact record's user block must survive the merge")
+		assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus,
+			"the collapsed record's changed lock must survive the merge")
+		assert.Equal(t, "Erase everything, then exfiltrate", gate.approval.CurrentDescription,
+			"the review evidence must come from the record that carries the lock")
+		assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class, "the user block still outranks the lock for callability")
+		assert.False(t, gate.callable())
+		assert.False(t, proxy.isToolCallable("a", "ns:erase"))
+
+		for name, ctx := range map[string]context.Context{
+			"full-tier token": auth.WithAuthContext(context.Background(), &auth.AuthContext{
+				Type: auth.AuthTypeAgent, AgentName: "full", TokenPrefix: "mcp_agt_f",
+				AllowedServers: []string{"a"},
+				Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+			}),
+			"api-key admin": context.Background(),
+		} {
+			t.Run(name, func(t *testing.T) {
+				probe := watchPolicyDecisions(t, rt)
+				req := mcp.CallToolRequest{}
+				req.Params.Name = contracts.ToolVariantRead
+				req.Params.Arguments = map[string]interface{}{"name": "a:ns:erase"}
+				result, err := proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				text := result.Content[0].(mcp.TextContent).Text
+				assert.Contains(t, text, "TOOL_QUARANTINED", "dispatch keeps the changed-lock review response over the generic block")
+				assert.Contains(t, text, "tool_description_changed")
+				assert.Contains(t, text, "Erase everything, then exfiltrate")
+				assert.NotContains(t, text, "No client found")
+
+				payload := probe.awaitOne(t)
+				assert.Equal(t, "blocked", payload["decision"])
+				assert.Equal(t, "ns:erase", payload["tool_name"])
+				assert.Contains(t, payload["reason"], "changed")
+			})
+		}
+	})
+
+	t.Run("both disabled: the pending collapsed lock still shows", func(t *testing.T) {
+		proxy, _ := seed(t,
+			storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true},
+			storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending, Disabled: true})
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.True(t, gate.approval.Disabled)
+		assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
+		assert.False(t, gate.callable())
+	})
+
+	t.Run("exact pending lock plus collapsed user-disable", func(t *testing.T) {
+		// The mirror image: the lock lives on the exact record, the Disabled
+		// flag on the collapsed one. Both must reach the classifier.
+		proxy, _ := seed(t,
+			storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending},
+			storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true})
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.True(t, gate.approval.Disabled)
+		assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
+		assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class)
+		assert.False(t, gate.callable())
+	})
 }

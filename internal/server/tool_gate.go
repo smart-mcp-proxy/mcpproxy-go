@@ -166,10 +166,13 @@ func approvalStateFor(record *storage.ToolApprovalRecord) *preflight.ApprovalSta
 // exact-only turns a discovered tool's pending / changed lock into an implicit
 // approval, and exact-first lets an approved record left behind by a toggle
 // shadow a later "changed" mark the rug-pull detector wrote under the
-// collapsed key. So both records are read and the MORE RESTRICTIVE one is
-// returned (see approvalRestriction); the exact record wins ties. This is the
-// conservative reader rule until the producers are made exact-name as well
-// (Spec 105 FR-009 follow-up).
+// collapsed key. So both records are read and MERGED (mergeApprovalRecords):
+// the two carry independent facts — the toggle's Disabled flag and the
+// detector's pending / changed lock — and each must reach the classifier,
+// which lets the user block outrank the lock for callability while dispatch
+// keeps answering with the lock's review response (the toolGate.lockStatus
+// contract). This is the conservative reader rule until the producers are
+// made exact-name as well (Spec 105 FR-009 follow-up).
 func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	exact, exactErr := p.storage.GetToolApproval(serverName, toolName)
 	if exactErr != nil && !errors.Is(exactErr, storage.ErrToolApprovalNotFound) {
@@ -188,24 +191,32 @@ func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*stora
 		return legacy, legacyErr
 	case legacyErr != nil:
 		return exact, nil
-	case approvalRestriction(legacy) > approvalRestriction(exact):
-		return legacy, nil
 	default:
-		return exact, nil
+		return mergeApprovalRecords(exact, legacy), nil
 	}
 }
 
-// approvalRestriction ranks a record by how preflight.ClassifyTool treats it:
-// 0 admits the tool, 1 locks it while the quarantine gate applies (pending or
-// changed), 2 blocks it unconditionally (user-disabled). A record that carries
-// both a lock and the Disabled flag ranks as the unconditional block.
-func approvalRestriction(record *storage.ToolApprovalRecord) int {
-	switch {
-	case record.Disabled:
-		return 2
-	case record.Status == storage.ToolApprovalStatusPending, record.Status == storage.ToolApprovalStatusChanged:
-		return 1
-	default:
-		return 0
+// mergeApprovalRecords folds the exact-name and collapsed-name records for one
+// raw tool into the single view preflight.ClassifyTool and the dispatch
+// responses consume. The record that carries a quarantine lock (pending or
+// changed) is the base, so Status and the review evidence that goes with it
+// (previous / current description, hashes) come from the producer that wrote
+// the lock; the exact record is the base when neither or both are locked. The
+// user's Disabled flag is OR'd across both, so a toggle filed under either key
+// keeps blocking. The result is a copy — the stored records are never mutated.
+func mergeApprovalRecords(exact, legacy *storage.ToolApprovalRecord) *storage.ToolApprovalRecord {
+	base := exact
+	if approvalLocked(legacy) && !approvalLocked(exact) {
+		base = legacy
 	}
+	merged := *base
+	merged.Disabled = exact.Disabled || legacy.Disabled
+	return &merged
+}
+
+// approvalLocked reports whether a record carries the tool-level quarantine
+// lock (pending or changed) that preflight.ClassifyTool and the dispatch paths
+// honour while the quarantine gate applies.
+func approvalLocked(record *storage.ToolApprovalRecord) bool {
+	return record.Status == storage.ToolApprovalStatusPending || record.Status == storage.ToolApprovalStatusChanged
 }
