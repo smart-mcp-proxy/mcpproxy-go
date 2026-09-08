@@ -2265,6 +2265,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
+	// Look up the target's annotations from the StateView ONCE. The same read
+	// serves the target-tier gate below and the intent validation after it, so
+	// the tier a token was authorized against and the annotations the variant
+	// is validated against can never come from two different snapshots
+	// (Spec 105 FR-009). found=false means the proxy holds no metadata for the
+	// pair (server unknown, tool undiscovered, or no runtime).
+	annotations, annotationsFound := p.lookupToolAnnotationsFound(serverName, actualToolName)
+
 	// Spec 028: Enforce agent token scope restrictions
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		// Check server scope
@@ -2288,15 +2296,16 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
-		// Spec 104 FR-016f: the variant is the CALLER's choice, so it is not
-		// the tier that matters. Authorize against the TARGET tool's
-		// annotation-derived tier, through the same lookup direct mode and
-		// code execution use, and do it before intent validation so that a
-		// token lacking the tier is refused on permission grounds whether or
-		// not strict server validation would have let the variant mismatch
-		// through. A read-only token could otherwise drive a write tool via
-		// call_tool_read (always) and a destructive one (strict off).
-		targetPerm := p.lookupToolPermission(serverName, actualToolName)
+		// Spec 104 FR-016f / Spec 105 FR-009: the variant is the CALLER's
+		// choice, so it is not the tier that matters. Authorize against the
+		// TARGET tool's annotation-derived tier, through the same classifier
+		// direct mode and code execution use (lookupToolPermission), and do
+		// it before intent validation so that a token lacking the tier is
+		// refused on permission grounds whether or not strict server
+		// validation would have let the variant mismatch through. A read-only
+		// token could otherwise drive a write tool via call_tool_read
+		// (always) and a destructive one (strict off).
+		targetPerm := tierForAnnotations(annotations, annotationsFound)
 		if targetPerm != "" && !authCtx.HasPermission(targetPerm) {
 			errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", targetPerm, serverName, actualToolName)
 			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
@@ -2309,9 +2318,6 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		zap.String("tool_name", toolName),
 		zap.String("server_name", serverName),
 		zap.String("intent_operation", intent.OperationType))
-
-	// Look up tool annotations from StateView for server annotation validation
-	annotations := p.lookupToolAnnotations(serverName, actualToolName)
 
 	// Spec 035: Determine content trust level based on openWorldHint annotation
 	contentTrust := contracts.ContentTrustForTool(annotations)
@@ -6391,15 +6397,10 @@ func (p *MCPProxyServer) serverToolNames(serverName string) []string {
 }
 
 func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
-	if strings.Contains(toolName, ":") {
-		parts := strings.SplitN(toolName, ":", 2)
-		if len(parts) == 2 {
-			if serverName == "" {
-				serverName = parts[0]
-			}
-			toolName = parts[1]
-		}
-	}
+	// Same prefix rule as every other gate (Spec 105 FR-009): only the
+	// server's own indexing prefix is stripped; a foreign "ns:" segment is
+	// part of the raw tool name and keys config denial / approval as itself.
+	serverName, toolName = normalizeServerTool(serverName, toolName)
 
 	if serverName == "" || toolName == "" {
 		return false

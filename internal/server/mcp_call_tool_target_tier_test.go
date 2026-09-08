@@ -2,7 +2,13 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -245,4 +251,212 @@ func TestCallToolRead_UndiscoveredTool_RequiresDestructiveTier(t *testing.T) {
 		assert.NotContains(t, text, "Permission denied")
 		assert.Contains(t, text, "No client found")
 	})
+}
+
+// Spec 105 FR-009: the tier is classified from exactly the canonical
+// server / raw tool pair that is dispatched. A tool whose raw name carries
+// its own namespace prefix ("ns:erase") must never be classified — or
+// approval-gated — as the suffix tool ("erase"). Before the fix,
+// normalizeServerTool stripped the first ":"-segment of the raw name even
+// when it was not the server name, so a read-only token could drive the
+// destructive "a:ns:erase" through call_tool_read on the read-tier "erase"'s
+// annotations while dispatch kept the full raw name.
+func TestCallToolRead_NamespacedToolName_IsNotClassifiedAsItsSuffix(t *testing.T) {
+	readTool := stateview.ToolInfo{
+		Name: "erase", Description: "Read-only erase preview",
+		Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+	}
+	namespacedDestructive := stateview.ToolInfo{
+		Name: "ns:erase", Description: "Erase for real",
+		Annotations: &config.ToolAnnotations{DestructiveHint: boolPtr(true)},
+	}
+	require.Equal(t, contracts.ToolVariantRead, contracts.DeriveCallWith(readTool.Annotations))
+	require.Equal(t, contracts.ToolVariantDestructive, contracts.DeriveCallWith(namespacedDestructive.Annotations))
+
+	for _, strict := range []bool{true, false} {
+		t.Run("strict="+map[bool]string{true: "on", false: "off"}[strict], func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: strict}
+			probe := watchPolicyDecisions(t, rt)
+			seedTargetTierServer(t, proxy, rt, "a", []stateview.ToolInfo{readTool, namespacedDestructive})
+
+			assert.Equal(t, contracts.OperationTypeRead, proxy.lookupToolPermission("a", "erase"))
+			assert.Equal(t, contracts.OperationTypeDestructive, proxy.lookupToolPermission("a", "ns:erase"),
+				"the namespaced tool must be classified by its own raw name, not by its suffix")
+
+			text := callToolReadOn(t, proxy, readOnlyAgentCtx("a"), "a:ns:erase")
+			assert.Contains(t, text, "Permission denied: token does not have 'destructive' permission required for tool 'a:ns:erase'")
+			assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
+
+			payload := probe.awaitOne(t)
+			assert.Equal(t, "blocked", payload["decision"])
+			assert.Equal(t, "a", payload["server_name"])
+			assert.Equal(t, "ns:erase", payload["tool_name"], "the activity record must carry the raw dispatched name")
+		})
+	}
+}
+
+// The approval/config gate reads the same raw pair: an approval record for
+// "erase" alone must not admit "ns:erase" (a pending record under its own
+// name keeps it locked), and the search-visibility predicate agrees.
+func TestToolGate_NamespacedToolName_KeysOnRawName(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	seedTargetTierServer(t, proxy, rt, "a", []stateview.ToolInfo{{Name: "erase"}})
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusPending, Disabled: true,
+	}))
+
+	eraseGate := proxy.evaluateToolGate("a", "erase")
+	require.NotNil(t, eraseGate.approval)
+	assert.Equal(t, "erase", eraseGate.approval.ToolName)
+	assert.Empty(t, eraseGate.lockStatus)
+	nsGate := proxy.evaluateToolGate("a", "ns:erase")
+	require.NotNil(t, nsGate.approval, "the gate must find the record stored under the raw name")
+	assert.Equal(t, "ns:erase", nsGate.approval.ToolName)
+	assert.Equal(t, storage.ToolApprovalStatusPending, nsGate.lockStatus,
+		"the gate must look up 'ns:erase' by its own name, not inherit 'erase's approval")
+	assert.True(t, proxy.isToolCallable("a", "erase"))
+	assert.False(t, proxy.isToolCallable("a", "ns:erase"),
+		"the search filter must read 'ns:erase's own Disabled record, not 'erase's")
+
+	// The indexed form ("server:tool" with the server set) still normalizes.
+	s, tool := normalizeServerTool("a", "a:ns:erase")
+	assert.Equal(t, "a", s)
+	assert.Equal(t, "ns:erase", tool)
+	s, tool = normalizeServerTool("", "a:ns:erase")
+	assert.Equal(t, "a", s)
+	assert.Equal(t, "ns:erase", tool)
+	s, tool = normalizeServerTool("a", "ns:erase")
+	assert.Equal(t, "a", s)
+	assert.Equal(t, "ns:erase", tool, "a prefix that is not the server name is part of the raw tool name")
+}
+
+// upstreamCalls is the zero-upstream-call witness: every invocation the stub
+// upstream actually receives, with the raw tool name it was dispatched under.
+type upstreamCalls struct {
+	count atomic.Int64
+	mu    sync.Mutex
+	names []string
+}
+
+func (c *upstreamCalls) record(name string) {
+	c.count.Add(1)
+	c.mu.Lock()
+	c.names = append(c.names, name)
+	c.mu.Unlock()
+}
+
+func (c *upstreamCalls) dispatched() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.names...)
+}
+
+// startCountingTargetTierUpstream is seedTargetTierServer with a REAL
+// in-process streamable-HTTP upstream behind it (the same pattern as
+// startCountingStubUpstream in mcp_input_validation_test.go): the StateView
+// carries the tools' annotations, storage holds the server and its approvals,
+// and the proxy's upstream manager is connected to a stub that exposes every
+// tool and records each call it receives. Refusals are then proven by an
+// invocation count of zero rather than by the absence of a dispatch error,
+// and an admitted call is proven by the count AND the raw name it arrived
+// under.
+func startCountingTargetTierUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, server string, tools []stateview.ToolInfo) *upstreamCalls {
+	t.Helper()
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	calls := &upstreamCalls{}
+	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true))
+	for _, tool := range tools {
+		mcpSrv.AddTool(mcp.Tool{Name: tool.Name, Description: tool.Description, InputSchema: mcp.ToolInputSchema{Type: "object"}},
+			func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				calls.record(request.Params.Name)
+				return mcp.NewToolResultText("ok"), nil
+			})
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = httpSrv.Serve(ln) }()
+	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+
+	serverCfg := &config.ServerConfig{
+		Name: server, URL: fmt.Sprintf("http://%s", ln.Addr().String()), Protocol: "streamable-http", Enabled: true,
+	}
+	require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
+	rt.Supervisor().StateView().UpdateServer(server, func(s *stateview.ServerStatus) {
+		s.Name = server
+		s.Enabled = true
+		s.Connected = true
+		s.Tools = tools
+	})
+	for _, tool := range tools {
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: server, ToolName: tool.Name, Status: storage.ToolApprovalStatusApproved,
+		}))
+	}
+	require.NoError(t, proxy.upstreamManager.AddServerConfig(server, serverCfg))
+	require.NoError(t, proxy.upstreamManager.ConnectAll(context.Background()))
+	require.Eventually(t, func() bool {
+		client, ok := proxy.upstreamManager.GetClient(server)
+		return ok && client.IsConnected()
+	}, 10*time.Second, 50*time.Millisecond, "stub upstream must connect")
+	return calls
+}
+
+// Spec 105 FR-009 / SC-002 oracles on the retrieve surface: a permission-
+// disallowed cell makes ZERO upstream calls, and the positive control — the
+// same handler, a token that holds the tier — reaches the upstream exactly
+// once under the exact raw name that was authorized, including a namespaced
+// one ("ns:erase" is dispatched as "ns:erase", never as "erase").
+func TestCallToolRead_TargetTierGate_UpstreamCallOracle(t *testing.T) {
+	tools := []stateview.ToolInfo{
+		{Name: "erase", Description: "Read-only erase preview", Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}},
+		{Name: "ns:erase", Description: "Erase for real", Annotations: &config.ToolAnnotations{DestructiveHint: boolPtr(true)}},
+		{Name: "delete_repo", Description: "Delete a repository", Annotations: &config.ToolAnnotations{DestructiveHint: boolPtr(true)}},
+	}
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	// strict off: intent validation lets a read variant through to a
+	// destructive target, so ONLY the target-tier gate stands between a
+	// read-only token and the upstream.
+	proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+	calls := startCountingTargetTierUpstream(t, proxy, rt, "a", tools)
+
+	call := func(t *testing.T, ctx context.Context, name string) *mcp.CallToolResult {
+		t.Helper()
+		req := mcp.CallToolRequest{}
+		req.Params.Name = contracts.ToolVariantRead
+		req.Params.Arguments = map[string]interface{}{"name": name}
+		result, err := proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		return result
+	}
+	text := func(result *mcp.CallToolResult) string { return result.Content[0].(mcp.TextContent).Text }
+
+	readOnly := readOnlyAgentCtx("a")
+	full := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "full", TokenPrefix: "mcp_agt_f",
+		AllowedServers: []string{"a"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+
+	// Permission-disallowed cells: refused, zero upstream calls.
+	for _, name := range []string{"a:ns:erase", "a:delete_repo"} {
+		result := call(t, readOnly, name)
+		require.True(t, result.IsError, "%s must be refused for a read-only token", name)
+		assert.Contains(t, text(result), "Permission denied: token does not have 'destructive' permission required for tool '"+name+"'")
+	}
+	assert.Equal(t, int64(0), calls.count.Load(), "a refused call must never reach the upstream")
+
+	// Positive controls: the same handler admits a caller holding the tier,
+	// and the upstream sees exactly the raw name that was authorized.
+	result := call(t, readOnly, "a:erase")
+	require.False(t, result.IsError, "a read-only token must reach the read-tier tool: %s", text(result))
+	result = call(t, full, "a:ns:erase")
+	require.False(t, result.IsError, "a token holding destructive must reach the namespaced tool: %s", text(result))
+	assert.Equal(t, int64(2), calls.count.Load())
+	assert.Equal(t, []string{"erase", "ns:erase"}, calls.dispatched(),
+		"the upstream must receive the exact raw tool names, the namespaced one uncollapsed")
 }

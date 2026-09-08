@@ -1178,7 +1178,15 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // hits), so the former index fallback never resolved anything. A discovered
 // tool that publishes no annotations still derives to read via DeriveCallWith.
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
-	annotations, found := p.lookupToolAnnotationsFound(serverName, toolName)
+	return tierForAnnotations(p.lookupToolAnnotationsFound(serverName, toolName))
+}
+
+// tierForAnnotations maps one lookupToolAnnotationsFound result to the
+// permission tier it requires. It is split from lookupToolPermission so a
+// caller that already holds the StateView read (handleCallToolVariant, which
+// needs the same annotations for intent validation) classifies the tier from
+// THAT read rather than taking a second, independent snapshot.
+func tierForAnnotations(annotations *config.ToolAnnotations, found bool) string {
 	if !found {
 		return contracts.OperationTypeDestructive
 	}
