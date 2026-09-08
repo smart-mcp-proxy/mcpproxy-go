@@ -5666,11 +5666,33 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	return mcp.NewToolResultText(text), nil
 }
 
+// tailLogNotFound is the single refusal shape for tail_log. It is shared by
+// the "no such server" path and the "server outside the caller's scope" path
+// so that an agent token cannot use the difference between the two as an
+// existence oracle for servers it is not allowed to see (Spec 104 FR-016h).
+func tailLogNotFound(name string) *mcp.CallToolResult {
+	return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found: %v", name, storage.ErrUpstreamNotFound))
+}
+
 // handleTailLog implements the tail_log functionality
-func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
+	}
+
+	// Spec 104 FR-016h: tail_log is a per-server READ that agent tokens may
+	// invoke (it is deliberately absent from auth.agentDeniedServerOps), so the
+	// named server must be authorized against the token's AllowedServers AND
+	// the effective profile (pin > URL > session) BEFORE the storage lookup —
+	// the same scope predicate `list` filters by and call_tool_* enforces.
+	// Admin / OS-socket callers carry no restriction and are unaffected. The
+	// refusal is rendered by the same function as the nonexistent-server case
+	// so the response discloses neither existence, status nor logs.
+	authCtx := auth.AuthContextFromContext(ctx)
+	_, profileScope := p.resolveActiveProfile(ctx)
+	if !p.serverInScope(authCtx, profileScope, name) {
+		return tailLogNotFound(name), nil
 	}
 
 	// Get optional lines parameter
@@ -5696,6 +5718,9 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 	// Check if server exists
 	serverConfig, err := p.storage.GetUpstreamServer(name)
 	if err != nil {
+		if errors.Is(err, storage.ErrUpstreamNotFound) {
+			return tailLogNotFound(name), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found: %v", name, err)), nil
 	}
 
