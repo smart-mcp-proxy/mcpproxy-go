@@ -24,8 +24,16 @@ import (
 //
 // The enrichment fields (command, image override, default images) only feed
 // MCP-2909's runtime-aware remediation text; they never change classification.
+//
+// The transport is canonicalized HERE, at the one place every production hint
+// is built, rather than at each of the classifier's gates. Callers pass
+// transport.DetermineTransportType's output, which returns config.Protocol
+// VERBATIM — so the same HTTP server arrives as "http", "sse",
+// "streamable-http" or "auto" depending only on how it was added, and the
+// classifier's HTTP arms (gated on the literal "http") were switched off for
+// every spelling but one. See diagnostics.CanonicalTransport.
 func For(global *config.Config, srv *config.ServerConfig, transport string) diagnostics.ClassifierHints {
-	h := diagnostics.ClassifierHints{Transport: transport}
+	h := diagnostics.ClassifierHints{Transport: diagnostics.CanonicalTransport(transport)}
 	if srv == nil {
 		return h
 	}

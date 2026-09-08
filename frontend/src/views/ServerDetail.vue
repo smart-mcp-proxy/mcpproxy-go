@@ -1982,14 +1982,27 @@ const quarantineSuppressesFaultAlerts = computed(
   () => !!server.value?.quarantined && server.value?.health?.level !== 'unhealthy'
 )
 
-// Spec 044 — render the structured diagnostic panel whenever a warn/error
-// diagnostic is attached. Info-level diagnostics are ignored (shown only in
-// verbose/admin views, per spec).
+// Spec 044 — render the structured diagnostic panel whenever a diagnostic is
+// attached, at any severity.
+//
+// This used to exclude severity=info, on the stated grounds that info
+// diagnostics belong in "verbose/admin views, per spec". Spec 044 says no such
+// thing (FR-002 just requires a severity; FR-011 is about the TRAY), and the
+// exclusion did not hide anything — it fell through to the generic red
+// "Server Error" box below, which prints the raw last_error with no
+// explanation, no fix steps and no docs link. So an info diagnostic was
+// rendered LOUDER than a warn one, and lost its content on the way.
+//
+// MCPX_HTTP_CANCELED (a shutdown, config reload or manual disconnect) is the
+// first and so far only info-severity code in the catalog, which is why this
+// never bit before. ErrorPanel already styles info calmly — alert-info,
+// badge-info, the neutral "Diagnostic" header — so it just works, and the
+// generic box is a v-else-if, so the red duplicate goes away.
 const showDiagnosticPanel = computed(() => {
   const d = server.value?.diagnostic
   if (!d || !d.code) return false
   if (quarantineSuppressesFaultAlerts.value) return false
-  return d.severity === 'warn' || d.severity === 'error'
+  return d.severity === 'info' || d.severity === 'warn' || d.severity === 'error'
 })
 
 function handleDiagnosticFixed(_payload: { fixerKey: string; mode: 'dry_run' | 'execute' }) {

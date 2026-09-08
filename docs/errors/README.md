@@ -61,8 +61,12 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 - [`MCPX_HTTP_401`](MCPX_HTTP_401.md) — Unauthorized
 - [`MCPX_HTTP_403`](MCPX_HTTP_403.md) — Forbidden
 - [`MCPX_HTTP_404`](MCPX_HTTP_404.md) — Not Found
+- [`MCPX_HTTP_4XX`](MCPX_HTTP_4XX.md) — other client-error status (400, 408, 409, 410, 451)
 - [`MCPX_HTTP_5XX`](MCPX_HTTP_5XX.md) — Server error
+- [`MCPX_HTTP_RATE_LIMITED`](MCPX_HTTP_RATE_LIMITED.md) — 429 Too Many Requests
 - [`MCPX_HTTP_CONN_REFUSED`](MCPX_HTTP_CONN_REFUSED.md) — Connection refused
+- [`MCPX_HTTP_CONN_RESET`](MCPX_HTTP_CONN_RESET.md) — connection reset by the peer
+- [`MCPX_HTTP_CANCELED`](MCPX_HTTP_CANCELED.md) — the attempt was canceled by mcpproxy itself
 - [`MCPX_HTTP_LEGACY_SSE`](MCPX_HTTP_LEGACY_SSE.md) — endpoint only speaks the legacy SSE transport
 
 ## Docker

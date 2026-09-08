@@ -282,6 +282,13 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// first server a fresh install adds still counts as new.
 	server.seedKnownServers(cfg.Servers)
 
+	// Replace the diagnostics package's placeholder fixers with the real,
+	// runtime-backed ones (see diagnostics_fixers.go). builtin_fixers.go has
+	// always said a higher layer registers these at startup; this is that
+	// layer, and until it existed the self-heal buttons were no-ops that still
+	// reported success.
+	server.registerDiagnosticFixers()
+
 	mcpProxy := NewMCPProxyServer(
 		rt.StorageManager(),
 		rt.IndexManager(),
