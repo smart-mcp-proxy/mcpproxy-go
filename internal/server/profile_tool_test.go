@@ -382,3 +382,63 @@ func TestSetProfileFixtureIsLoadable(t *testing.T) {
 	require.NoError(t, err, "the set_profile fixture must be a loadable profile configuration")
 	require.Empty(t, warnings)
 }
+
+// newSetProfileTestServerWithEmptyProfiles extends the shared fixture with the
+// two ways a profile ends up with an empty effective server set: `empty`
+// declares no servers (the deny-all placeholder ValidateProfiles allows with a
+// warning) and `ghost` names only a server that is not configured, so
+// warn-and-skip leaves EffectiveServers empty. Both load in a real deployment.
+func newSetProfileTestServerWithEmptyProfiles(t *testing.T) *MCPProxyServer {
+	t.Helper()
+	p := newSetProfileTestServer()
+	p.config.Profiles = append(slices.Clone(p.config.Profiles),
+		config.ProfileConfig{Name: "empty"},
+		config.ProfileConfig{Name: "ghost", Servers: []string{"missing-srv"}},
+	)
+	warnings, err := config.ValidateProfiles(p.config)
+	require.NoError(t, err, "an empty profile is a legal (warned) configuration")
+	require.Len(t, warnings, 2)
+	return p
+}
+
+// TestHandleSetProfile_WildcardTokenRefusesEmptyProfileAdminSelectsIt locks
+// the Spec 105 "Unrestricted agent tokens" exception (1): an unpinned agent
+// token with the "*" wildcard is still a scoped caller, so a profile whose
+// effective server set is empty intersects nothing it can reach and is refused
+// exactly like an unknown slug — non-disclosing, prior selection preserved —
+// while an administrator keeps selecting it (deny-all placeholder). A shortcut
+// that admits every configured profile to wildcard tokens would fail here.
+func TestHandleSetProfile_WildcardTokenRefusesEmptyProfileAdminSelectsIt(t *testing.T) {
+	for _, slug := range []string{"empty", "ghost"} {
+		t.Run(slug, func(t *testing.T) {
+			p := newSetProfileTestServerWithEmptyProfiles(t)
+
+			agent := setProfileScopedCtx("sess-wild-"+slug, "*")
+			require.False(t, callSetProfileTool(t, p, agent, "research").IsError)
+
+			refused := callSetProfileTool(t, p, agent, slug)
+			require.True(t, refused.IsError, "a wildcard agent must not select a profile with no reachable servers")
+			unknown := callSetProfileTool(t, p, agent, "nope")
+			require.True(t, unknown.IsError)
+			require.Equal(t,
+				strings.ReplaceAll(setProfileResultText(t, unknown), "'nope'", "'"+slug+"'"),
+				setProfileResultText(t, refused),
+				"an empty profile must be refused exactly like a nonexistent one")
+			// The error echoes the caller's own slug; non-disclosure is about
+			// the `available:` list, which must name neither empty profile.
+			_, available, found := strings.Cut(setProfileResultText(t, refused), "available:")
+			require.True(t, found)
+			for _, name := range []string{"empty", "ghost"} {
+				require.NotContains(t, available, name)
+			}
+			require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-wild-"+slug),
+				"a refused selection must leave the prior session selection untouched")
+
+			admin := setProfileAdminCtx("sess-admin-" + slug)
+			active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, admin, slug))
+			require.Equal(t, slug, active)
+			require.Empty(t, servers)
+			require.Equal(t, slug, p.sessionStore.GetActiveProfile("sess-admin-"+slug))
+		})
+	}
+}
