@@ -1177,32 +1177,42 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 // TestBuildAggregatedServerPrompts_CollisionKeepsFirst covers Finding F7: two
 // distinct (server,prompt) pairs that flatten to the same "server__prompt"
 // display name must be resolved deterministically (first-writer-wins), not
-// silently overwritten, and the drop must be logged.
+// silently overwritten, and the drop must be logged. The winner must be the
+// same whichever order the upstream manager hands the prompts over in —
+// ListPrompts iterates a map — so both input orders are exercised (Spec 105
+// FR-006 "collisions in both input orders").
 func TestBuildAggregatedServerPrompts_CollisionKeepsFirst(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-
 	// "gh" + "issue__create" and "gh__issue" + "create" both flatten to
 	// "gh__issue__create".
-	upstreamPrompts := []mcp.Prompt{
-		{Name: "gh:issue__create", Description: "first"},
-		{Name: "gh__issue:create", Description: "second (collides)"},
-	}
+	first := mcp.Prompt{Name: "gh:issue__create", Description: "first"}
+	second := mcp.Prompt{Name: "gh__issue:create", Description: "second (collides)"}
 	fakeGetPrompt := func(_ context.Context, _ string, _ map[string]string) (*mcp.GetPromptResult, error) {
 		return &mcp.GetPromptResult{}, nil
 	}
 
-	all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, nil, logger)
-	require.Len(t, all, 1)
-	owner, _ := aggregatedPromptServer(all[0].Prompt)
-	assert.Equal(t, "gh", owner, "the kept (first) writer owns the display name")
+	for name, upstreamPrompts := range map[string][]mcp.Prompt{
+		"sorted order":   {first, second},
+		"reversed order": {second, first},
+	} {
+		t.Run(name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			logger := zap.New(core)
 
-	names := make([]string, len(all))
-	for i, p := range all {
-		names[i] = p.Prompt.Name
+			all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, nil, logger)
+			require.Len(t, all, 1)
+			owner, _ := aggregatedPromptServer(all[0].Prompt)
+			assert.Equal(t, "gh", owner, "the lexically-first qualified name owns the display name regardless of input order")
+			assert.Equal(t, "gh__issue__create", all[0].Prompt.Name, "colliding display name must appear once (first kept)")
+			assert.Equal(t, "first", all[0].Prompt.Description)
+
+			entries := logs.FilterMessage("dropping upstream prompt: display-name collision (kept first)").All()
+			require.Len(t, entries, 1, "the dropped collision must be logged exactly once")
+			fields := entries[0].ContextMap()
+			assert.Equal(t, "gh__issue", fields["server"])
+			assert.Equal(t, "create", fields["prompt"])
+			assert.Equal(t, "gh__issue__create", fields["display_name"])
+		})
 	}
-	assert.Equal(t, []string{"gh__issue__create"}, names, "colliding display name must appear once (first kept)")
-	require.Equal(t, 1, logs.FilterMessage("dropping upstream prompt: display-name collision (kept first)").Len())
 }
 
 // Spec 102 FR-007 / D11 / D16 (T034): the direct server carries instructions on

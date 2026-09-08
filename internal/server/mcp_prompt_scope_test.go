@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,23 +153,50 @@ func TestFilterAggregatedPromptsForAuth_UnstampedFailsClosed(t *testing.T) {
 
 // TestStripAggregatedPromptServer_PreservesUpstreamMeta verifies the stamp is
 // removed without disturbing upstream-supplied _meta and without mutating the
-// registered prompt (mcp-go hands filters a shared Meta pointer).
+// registered prompt (mcp-go hands filters a shared Meta pointer), and that the
+// client-visible _meta is byte-identical to what the upstream sent — nil stays
+// absent, an empty `{}` stays `{}`, a progress token survives, and even an
+// upstream value under our own key comes back (Spec 105 SC-005: administrator
+// output must not change for prompts the feature does not withhold).
 func TestStripAggregatedPromptServer_PreservesUpstreamMeta(t *testing.T) {
-	upstream := &mcp.Meta{AdditionalFields: map[string]any{"vendor/x": "keep"}}
-	registered := mcp.Prompt{Name: "srv__p", Meta: stampAggregatedPromptServer(upstream, "srv")}
+	wire := func(pr mcp.Prompt) string {
+		t.Helper()
+		b, err := json.Marshal(pr)
+		require.NoError(t, err)
+		return string(b)
+	}
 
-	owner, ok := aggregatedPromptServer(registered)
-	require.True(t, ok)
-	assert.Equal(t, "srv", owner)
+	cases := map[string]*mcp.Meta{
+		"nil":            nil,
+		"empty":          {AdditionalFields: map[string]any{}},
+		"fields":         {AdditionalFields: map[string]any{"vendor/x": "keep"}},
+		"progress token": {ProgressToken: "tok-1", AdditionalFields: map[string]any{}},
+		"our key":        {AdditionalFields: map[string]any{aggregatedPromptServerMetaKey: "upstream-claims-this"}},
+	}
+	for name, upstream := range cases {
+		t.Run(name, func(t *testing.T) {
+			asSent := mcp.Prompt{Name: "srv__p", Meta: upstream}
+			registered := mcp.Prompt{Name: "srv__p", Meta: stampAggregatedPromptServer(upstream, "srv")}
 
-	stripped := stripAggregatedPromptServer(registered)
-	require.NotNil(t, stripped.Meta)
-	assert.Equal(t, map[string]any{"vendor/x": "keep"}, stripped.Meta.AdditionalFields)
-	_, stillStamped := aggregatedPromptServer(registered)
-	assert.True(t, stillStamped, "the registered prompt must not be mutated by stripping a copy")
+			owner, ok := aggregatedPromptServer(registered)
+			require.True(t, ok)
+			assert.Equal(t, "srv", owner, "the owner is what mcpproxy dispatches to, never an upstream claim")
 
-	bare := stripAggregatedPromptServer(mcp.Prompt{Name: "srv__q", Meta: stampAggregatedPromptServer(nil, "srv")})
-	assert.Nil(t, bare.Meta, "a stamp-only _meta is removed entirely")
+			stripped := stripAggregatedPromptServer(registered)
+			assert.Equal(t, wire(asSent), wire(stripped), "client-visible _meta must be exactly what the upstream sent")
+			_, stillStamped := aggregatedPromptServer(registered)
+			assert.True(t, stillStamped, "the registered prompt must not be mutated by stripping a copy")
+			_, leaked := aggregatedPromptServer(stripped)
+			assert.False(t, leaked)
+		})
+	}
+
+	// An upstream that sends a bare string under our key is not a stamp: the
+	// filter must not trust it as an owner.
+	forged := mcp.Prompt{Name: "srv__p", Meta: &mcp.Meta{AdditionalFields: map[string]any{aggregatedPromptServerMetaKey: "srv"}}}
+	_, ok := aggregatedPromptServer(forged)
+	assert.False(t, ok, "an upstream-supplied string under the stamp key is not a registration identity")
+	assert.Equal(t, forged, stripAggregatedPromptServer(forged), "an unstamped prompt is returned untouched")
 }
 
 // TestAggregatedPrompt_ScopeUsesCanonicalOwner is the Spec 104 FR-016g
@@ -242,7 +270,33 @@ func TestAggregatedPrompt_ScopeUsesCanonicalOwner(t *testing.T) {
 	okGet := handle(3, "prompts/get", `{"name":"a__greeting"}`)
 	assert.Nil(t, okGet["error"], "in-scope prompts/get must succeed: %v", okGet)
 	denied := handle(4, "prompts/get", `{"name":"a__b__greeting"}`)
-	assert.NotNil(t, denied["error"], "a token scoped to server 'a' must not fetch a__b's prompt: %v", denied)
+	require.NotNil(t, denied["error"], "a token scoped to server 'a' must not fetch a__b's prompt: %v", denied)
+
+	// Non-disclosing refusal (FR-010): the hidden prompt's error must have the
+	// same code and the same message (modulo the caller's own echoed name) as
+	// a prompt that does not exist at all.
+	absent := handle(6, "prompts/get", `{"name":"a__nonexistent"}`)
+	require.NotNil(t, absent["error"], "precondition: %v", absent)
+	deniedErr := denied["error"].(map[string]interface{})
+	absentErr := absent["error"].(map[string]interface{})
+	assert.Equal(t, absentErr["code"], deniedErr["code"], "hidden vs absent must share the JSON-RPC error code")
+	assert.Equal(t,
+		strings.ReplaceAll(absentErr["message"].(string), "a__nonexistent", "<name>"),
+		strings.ReplaceAll(deniedErr["message"].(string), "a__b__greeting", "<name>"),
+		"hidden vs absent must share the error message")
+
+	// The handler-side gate is wired in production, not only in the unit test
+	// with a fake hook: invoking the REGISTERED handler directly (bypassing
+	// mcp-go's filter) still refuses the scoped caller with the not-found
+	// sentinel and never contacts the upstream, while an admin gets through.
+	hiddenHandler := registered["a__b__greeting"].Handler
+	_, err := hiddenHandler(ctx, mcp.GetPromptRequest{Params: mcp.GetPromptParams{Name: "a__b__greeting"}})
+	require.ErrorIs(t, err, errPromptNotFound, "production RefreshPrompts must wire authorizeAggregatedPromptServer into every upstream handler")
+	assert.Equal(t, "prompt 'a__b__greeting' not found: prompt not found", err.Error())
+	res, err := hiddenHandler(auth.WithAuthContext(context.Background(), auth.AdminContext()),
+		mcp.GetPromptRequest{Params: mcp.GetPromptParams{Name: "a__b__greeting"}})
+	require.NoError(t, err)
+	require.NotNil(t, res)
 
 	// The same session as an admin sees everything, with no stamp on the wire.
 	ctx = auth.WithAuthContext(context.Background(), auth.AdminContext())

@@ -1339,46 +1339,64 @@ func buildAggregatedServerPrompts(
 // reaches a client.
 const aggregatedPromptServerMetaKey = "app.mcpproxy/server"
 
+// aggregatedPromptStamp is the value stored under aggregatedPromptServerMetaKey.
+// It is a private struct rather than a bare string so an upstream that itself
+// sends our key (a string) can never be mistaken for a stamp, and so the
+// upstream's own _meta — nil, `{}`, a progress token, or even its own value
+// for our key — travels with the registered prompt and is handed back
+// verbatim by stripAggregatedPromptServer. Marshalling it (which only an
+// unfiltered path could do) yields `{}`: the fields are unexported.
+type aggregatedPromptStamp struct {
+	server   string
+	upstream *mcp.Meta
+}
+
 // stampAggregatedPromptServer returns a fresh Meta carrying serverName under
-// aggregatedPromptServerMetaKey. Upstream-supplied additional fields are
-// preserved, but an upstream that itself sent our key is overwritten — the
-// owner is what mcpproxy dispatches to, never what the upstream claims.
+// aggregatedPromptServerMetaKey. Upstream-supplied fields are mirrored into it
+// (so an unfiltered reader still sees them), while the upstream Meta itself is
+// kept inside the stamp so the strip can restore exactly what the upstream
+// sent. An upstream value under our key never wins — the owner is what
+// mcpproxy dispatches to, never what the upstream claims — but it is restored
+// on the client-visible copy along with the rest of the upstream _meta.
 func stampAggregatedPromptServer(upstream *mcp.Meta, serverName string) *mcp.Meta {
 	meta := &mcp.Meta{AdditionalFields: map[string]any{}}
 	if upstream != nil {
 		meta.ProgressToken = upstream.ProgressToken
 		maps.Copy(meta.AdditionalFields, upstream.AdditionalFields)
 	}
-	meta.AdditionalFields[aggregatedPromptServerMetaKey] = serverName
+	meta.AdditionalFields[aggregatedPromptServerMetaKey] = aggregatedPromptStamp{server: serverName, upstream: upstream}
 	return meta
 }
 
 // aggregatedPromptServer reads the canonical owner stamped by
 // stampAggregatedPromptServer. ok is false for a prompt that carries no stamp
-// (a built-in, or anything not published by buildAggregatedServerPrompts).
+// (a built-in, anything not published by buildAggregatedServerPrompts, or an
+// upstream-supplied string under our key).
 func aggregatedPromptServer(prompt mcp.Prompt) (serverName string, ok bool) {
+	stamp, ok := aggregatedPromptStampOf(prompt)
+	return stamp.server, ok && stamp.server != ""
+}
+
+func aggregatedPromptStampOf(prompt mcp.Prompt) (aggregatedPromptStamp, bool) {
 	if prompt.Meta == nil {
-		return "", false
+		return aggregatedPromptStamp{}, false
 	}
-	serverName, ok = prompt.Meta.AdditionalFields[aggregatedPromptServerMetaKey].(string)
-	return serverName, ok && serverName != ""
+	stamp, ok := prompt.Meta.AdditionalFields[aggregatedPromptServerMetaKey].(aggregatedPromptStamp)
+	return stamp, ok
 }
 
 // stripAggregatedPromptServer returns prompt with the internal owner stamp
-// removed, leaving every other _meta field intact. The registered prompt is
-// never mutated: mcp-go hands filters the stored value and a shared Meta
-// pointer, so the Meta is copied before the key is dropped.
+// removed and its _meta restored to exactly the value the upstream sent —
+// nil stays nil, an empty `{}` stays `{}` — so administrator-visible output is
+// byte-identical to the pre-stamp wire format (Spec 105 SC-005). The
+// registered prompt is never mutated: mcp-go hands filters the stored value
+// and a shared Meta pointer, and only the copy's Meta pointer is replaced.
 func stripAggregatedPromptServer(prompt mcp.Prompt) mcp.Prompt {
-	if _, ok := aggregatedPromptServer(prompt); !ok {
+	stamp, ok := aggregatedPromptStampOf(prompt)
+	if !ok {
 		return prompt
 	}
-	fields := maps.Clone(prompt.Meta.AdditionalFields)
-	delete(fields, aggregatedPromptServerMetaKey)
-	if len(fields) == 0 && prompt.Meta.ProgressToken == nil {
-		prompt.Meta = nil
-		return prompt
-	}
-	prompt.Meta = &mcp.Meta{ProgressToken: prompt.Meta.ProgressToken, AdditionalFields: fields}
+	prompt.Meta = stamp.upstream
 	return prompt
 }
 
