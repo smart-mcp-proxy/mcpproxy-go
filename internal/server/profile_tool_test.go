@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func newSetProfileTestServer() *MCPProxyServer {
 		Profiles: []config.ProfileConfig{
 			{Name: "research", Servers: []string{"research-srv"}},
 			{Name: "deploy", Servers: []string{"deploy-srv"}},
-			{Name: "all", Servers: []string{"research-srv", "deploy-srv"}},
+			{Name: "mixed", Servers: []string{"research-srv", "deploy-srv"}},
 		},
 	}
 	return &MCPProxyServer{
@@ -158,11 +159,11 @@ func TestHandleSetProfile_ScopedTokenSelectIntersectsAllowedServers(t *testing.T
 	p := newSetProfileTestServer()
 	ctx := setProfileScopedCtx("sess-scoped-select", "research-srv")
 
-	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "all"))
-	require.Equal(t, "all", active)
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "mixed"))
+	require.Equal(t, "mixed", active)
 	require.ElementsMatch(t, []string{"research-srv"}, servers,
 		"a profile's servers outside the token's AllowedServers must not be reported")
-	require.Equal(t, "all", p.sessionStore.GetActiveProfile("sess-scoped-select"))
+	require.Equal(t, "mixed", p.sessionStore.GetActiveProfile("sess-scoped-select"))
 
 }
 
@@ -174,6 +175,11 @@ func TestHandleSetProfile_ScopedTokenDisjointProfileIndistinguishableFromUnknown
 	p := newSetProfileTestServer()
 	ctx := setProfileScopedCtx("sess-scoped-disjoint", "research-srv")
 
+	// Start from a REAL prior selection so "no state change" is not satisfied
+	// vacuously by an implementation that clears the session before refusing.
+	require.False(t, callSetProfileTool(t, p, ctx, "research").IsError)
+	require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-scoped-disjoint"))
+
 	disjoint := callSetProfileTool(t, p, ctx, "deploy")
 	unknown := callSetProfileTool(t, p, ctx, "nope")
 	require.True(t, disjoint.IsError, "a disjoint profile must not be selectable")
@@ -183,7 +189,37 @@ func TestHandleSetProfile_ScopedTokenDisjointProfileIndistinguishableFromUnknown
 		setProfileResultText(t, disjoint),
 		"disjoint and unknown slugs must produce the same error shape")
 	require.NotContains(t, setProfileResultText(t, disjoint), "deploy-srv")
-	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-scoped-disjoint"))
+	require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-scoped-disjoint"),
+		"a refused selection must leave the prior session selection untouched")
+}
+
+// TestHandleSetProfile_ScopedTokenDisjointProfilePresentVsAbsentIdentical is
+// the differential form of the non-disclosure rule: the SAME slug, requested by
+// the SAME scoped token, yields a byte-identical refusal whether the disjoint
+// profile is configured or has been removed — so probing cannot confirm the
+// operator has (or still has) a profile of that name.
+func TestHandleSetProfile_ScopedTokenDisjointProfilePresentVsAbsentIdentical(t *testing.T) {
+	withDeploy := newSetProfileTestServer()
+	withoutDeploy := newSetProfileTestServer()
+	withoutDeploy.config.Profiles = slices.DeleteFunc(slices.Clone(withoutDeploy.config.Profiles), func(pc config.ProfileConfig) bool {
+		return pc.Name == "deploy"
+	})
+	require.Len(t, withoutDeploy.config.Profiles, len(withDeploy.config.Profiles)-1)
+
+	ctx := setProfileScopedCtx("sess-scoped-differential", "research-srv")
+	for _, p := range []*MCPProxyServer{withDeploy, withoutDeploy} {
+		require.False(t, callSetProfileTool(t, p, ctx, "research").IsError)
+	}
+
+	present := callSetProfileTool(t, withDeploy, ctx, "deploy")
+	absent := callSetProfileTool(t, withoutDeploy, ctx, "deploy")
+	require.True(t, present.IsError)
+	require.True(t, absent.IsError)
+	require.Equal(t, setProfileResultText(t, absent), setProfileResultText(t, present),
+		"a configured-but-unreachable profile must be refused exactly like an absent one")
+	for _, p := range []*MCPProxyServer{withDeploy, withoutDeploy} {
+		require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-scoped-differential"))
+	}
 }
 
 // TestHandleSetProfile_EmptyAllowlistTokenSeesNothing: an agent token whose
@@ -197,10 +233,19 @@ func TestHandleSetProfile_EmptyAllowlistTokenSeesNothing(t *testing.T) {
 	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
 	require.Empty(t, servers)
 
-	res := callSetProfileTool(t, p, ctx, "nope")
-	require.True(t, res.IsError)
-	text := setProfileResultText(t, res)
-	for _, name := range []string{"research", "deploy", "all"} {
+	// An EXISTING profile is just as unselectable as a nonexistent one for a
+	// token that can reach no server: same refusal, nothing disclosed, no
+	// session mutation.
+	existing := callSetProfileTool(t, p, ctx, "research")
+	unknown := callSetProfileTool(t, p, ctx, "nope")
+	require.True(t, existing.IsError, "an empty-allowlist token must not select any profile")
+	require.True(t, unknown.IsError)
+	require.Equal(t,
+		strings.ReplaceAll(setProfileResultText(t, unknown), "'nope'", "'research'"),
+		setProfileResultText(t, existing))
+	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-empty-allow"))
+	text := setProfileResultText(t, unknown)
+	for _, name := range []string{"research", "deploy", "mixed"} {
 		require.NotContains(t, text, name)
 	}
 }
@@ -224,6 +269,7 @@ func TestHandleSetProfile_ServerEditionUserScopedLikeVisibility(t *testing.T) {
 func TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles(t *testing.T) {
 	p := newSetProfileTestServer()
 	ctx := setProfileScopedCtx("sess-scoped-unknown", "research-srv")
+	require.False(t, callSetProfileTool(t, p, ctx, "mixed").IsError)
 
 	res := callSetProfileTool(t, p, ctx, "nope")
 	require.True(t, res.IsError)
@@ -231,7 +277,8 @@ func TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles(t *t
 	require.Contains(t, text, "unknown profile 'nope'")
 	require.Contains(t, text, "research", "profiles overlapping the token's scope stay selectable")
 	require.NotContains(t, text, "deploy", "a profile fully outside the token's scope must not be disclosed")
-	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-scoped-unknown"))
+	require.Equal(t, "mixed", p.sessionStore.GetActiveProfile("sess-scoped-unknown"),
+		"a refused selection must leave the prior session selection untouched")
 }
 
 // TestHandleSetProfile_StalePinUnknownSlugDisclosesNoProfiles: a token pinned
@@ -241,16 +288,19 @@ func TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles(t *t
 func TestHandleSetProfile_StalePinUnknownSlugDisclosesNoProfiles(t *testing.T) {
 	p := newSetProfileTestServer()
 	ctx := setProfileCtx("sess-stale-pin", "gone")
+	// A selection recorded before the pin went stale must survive the refusal.
+	p.sessionStore.SetActiveProfile("sess-stale-pin", "gone")
 
 	res := callSetProfileTool(t, p, ctx, "gone")
 	require.True(t, res.IsError)
 	text := setProfileResultText(t, res)
 	require.Contains(t, text, "unknown profile 'gone'")
 	require.NotContains(t, text, "available: gone", "a removed pin is not a selectable profile")
-	for _, name := range []string{"research", "deploy", "all"} {
+	for _, name := range []string{"research", "deploy", "mixed"} {
 		require.NotContains(t, text, name)
 	}
-	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-stale-pin"))
+	require.Equal(t, "gone", p.sessionStore.GetActiveProfile("sess-stale-pin"),
+		"a refused selection must leave the prior session selection untouched")
 }
 
 // TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers: a pinned token
@@ -260,11 +310,11 @@ func TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers(t *testing.T)
 	helper := mcpserver.NewMCPServer("test", "1.0.0")
 	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-pin-narrow"})
 	ctx = auth.WithAuthContext(ctx, &auth.AuthContext{
-		Type: auth.AuthTypeAgent, ProfilePin: "all", AllowedServers: []string{"deploy-srv"},
+		Type: auth.AuthTypeAgent, ProfilePin: "mixed", AllowedServers: []string{"deploy-srv"},
 	})
 
 	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
-	require.Equal(t, "all", active)
+	require.Equal(t, "mixed", active)
 	require.ElementsMatch(t, []string{"deploy-srv"}, servers)
 }
 
@@ -278,14 +328,14 @@ func TestHandleSetProfile_AdminUnchanged(t *testing.T) {
 	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
 	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
 
-	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "all"))
-	require.Equal(t, "all", active)
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "mixed"))
+	require.Equal(t, "mixed", active)
 	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
 
 	res := callSetProfileTool(t, p, ctx, "nope")
 	require.True(t, res.IsError)
 	text := setProfileResultText(t, res)
-	for _, name := range []string{"research", "deploy", "all"} {
+	for _, name := range []string{"research", "deploy", "mixed"} {
 		require.Contains(t, text, name)
 	}
 }
@@ -320,4 +370,15 @@ func TestHandleSetProfile_PinnedTokenSelectsDisjointPin(t *testing.T) {
 	require.Equal(t, "deploy", active)
 	require.Empty(t, servers)
 	require.Equal(t, "deploy", p.sessionStore.GetActiveProfile("sess-pin-disjoint"))
+}
+
+// TestSetProfileFixtureIsLoadable guards the shared fixture against slugs that
+// config.ValidateProfiles rejects at load time (reserved names such as "all"):
+// direct handler construction bypasses validation, so without this check the
+// suite could exercise a configuration no real deployment can load.
+func TestSetProfileFixtureIsLoadable(t *testing.T) {
+	p := newSetProfileTestServer()
+	warnings, err := config.ValidateProfiles(p.config)
+	require.NoError(t, err, "the set_profile fixture must be a loadable profile configuration")
+	require.Empty(t, warnings)
 }
