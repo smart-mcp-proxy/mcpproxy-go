@@ -169,6 +169,41 @@ describe('diagnostics log-tail fix delivery', () => {
     expect(store.toasts).toHaveLength(0)
   })
 
+  it('still reports a failure whose request resolves after the panel unmounted', async () => {
+    const api = (await import('@/services/api')).default as unknown as {
+      invokeDiagnosticFix: ReturnType<typeof vi.fn>
+    }
+    let resolveFix: (value: unknown) => void = () => {}
+    api.invokeDiagnosticFix.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFix = resolve
+      }),
+    )
+
+    const store = useSystemStore()
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: DIAGNOSTIC, serverName: 'flaky-stdio' },
+    })
+
+    await wrapper.find('[data-testid="error-panel-execute-button-0"]').trigger('click')
+    wrapper.unmount()
+
+    // The user submitted an action and it did not work. Dropping late
+    // previews must not also drop this — api.ts folds transport errors into
+    // resolved {success:false} responses too, so nothing else would tell them.
+    resolveFix({
+      success: true,
+      data: { outcome: 'failed', duration_ms: 3, mode: 'execute', failure_msg: 'server not found' },
+    })
+    await flushPromises()
+
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].type).toBe('error')
+    expect(store.toasts[0].message).toBe('server not found')
+    // Ordinary dwell: there is no panel left to supersede a long-lived toast.
+    expect(store.toasts[0].duration).toBe(5000)
+  })
+
   it('renders a multi-line toast message with its line breaks preserved', () => {
     const store = useSystemStore()
     store.addToast({ type: 'success', title: 'Executed: Show last server log lines', message: LOG_TAIL })

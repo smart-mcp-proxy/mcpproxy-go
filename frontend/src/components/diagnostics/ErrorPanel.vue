@@ -257,9 +257,6 @@ async function runFixer(step: DiagnosticFixStep, mode: 'dry_run' | 'execute') {
       fixer_key: key,
       mode,
     })
-    // The panel that asked is gone; there is no one to deliver this to, and a
-    // toast raised now would outlive its owner (see onBeforeUnmount).
-    if (disposed) return
     if (response.success && response.data) {
       const outcome = response.data.outcome
       const titleMode = mode === 'dry_run' ? 'Dry-run' : 'Executed'
@@ -267,10 +264,21 @@ async function runFixer(step: DiagnosticFixStep, mode: 'dry_run' | 'execute') {
         response.data.preview ||
         response.data.failure_msg ||
         `Outcome: ${outcome} (${response.data.duration_ms}ms)`
+      // The panel that asked is gone. The one thing that must not be raised
+      // now is a long-lived PREVIEW — a successful multi-line payload whose
+      // 60s toast would outlive the server view it belongs to, with nothing
+      // left to supersede or dispose of it (see onBeforeUnmount). Everything
+      // else the user submitted is still reported at the default dwell: a
+      // failure (api.ts folds transport errors into resolved {success:false}
+      // responses too, so this branch and the one below are the only places
+      // a failure can surface) and a one-line success such as "Sign-in
+      // started".
+      if (disposed && outcome === 'success' && message.includes('\n')) return
       // A fixer whose whole product is text to READ — stdio_show_last_logs
       // returns a 50-line log tail — cannot be delivered in the default 5s
-      // toast. Give a multi-line payload long enough to actually read.
-      const multiLine = message.includes('\n')
+      // toast. Give a multi-line payload long enough to actually read. Never
+      // after disposal: nothing would remove it.
+      const multiLine = message.includes('\n') && !disposed
       // A long-lived toast must not accumulate. The toast stack is anchored to
       // the bottom of the viewport and grows upward with no height bound, so a
       // few tall 60s previews would push the earlier ones — and their close
@@ -287,7 +295,7 @@ async function runFixer(step: DiagnosticFixStep, mode: 'dry_run' | 'execute') {
         ...(multiLine ? { duration: 60000 } : {}),
       })
       if (multiLine) lastPreviewToastId.value = toastId
-      emit('fixed', { fixerKey: key, mode })
+      if (!disposed) emit('fixed', { fixerKey: key, mode })
     } else {
       systemStore.addToast({
         type: 'error',
