@@ -164,7 +164,7 @@
                   ></span>
                 </span>
                 <span v-show="!collapsed" class="flex-1">
-                  <span v-if="setupIncomplete">Setup</span>
+                  <span v-if="setupIncomplete || !setupStateKnown">Setup</span>
                   <span v-else class="inline-flex items-center gap-1">
                     <span>Setup</span>
                     <span class="text-success text-xs">✓</span>
@@ -502,11 +502,23 @@ const setupCount = computed(() => onboardingStore.incompleteTabCount)
 const setupIncomplete = computed(
   () => setupCount.value > 0 && !onboardingStore.isEngaged
 )
-const setupTitleAttr = computed(() =>
-  setupIncomplete.value
-    ? `Setup (${setupCount.value} step${setupCount.value === 1 ? '' : 's'} remaining)`
-    : 'Setup ✓'
-)
+
+// Audit F06: `incompleteTabCount` reads `state?.incomplete_tab_count ?? 0`, so
+// "we were never told" and "nothing left to do" both arrive here as 0. Behind
+// the auth modal (or any failed/pending fetch) that painted a green "Setup ✓"
+// over an install with steps outstanding — and because nothing ever moves
+// `state` off null, it stayed there rather than flashing. The store's own
+// `loading` cannot stand in: it is false both before the first fetch and after
+// a failed one. Unknown gets the plain label the incomplete branch already
+// uses; the pulse and badge are gated on `setupIncomplete` and stay off.
+const setupStateKnown = computed(() => onboardingStore.state !== null)
+
+const setupTitleAttr = computed(() => {
+  if (setupIncomplete.value) {
+    return `Setup (${setupCount.value} step${setupCount.value === 1 ? '' : 's'} remaining)`
+  }
+  return setupStateKnown.value ? 'Setup ✓' : 'Setup'
+})
 
 function onClickSetup() {
   // Open the wizard via the store. If the user is on a deep route, they stay

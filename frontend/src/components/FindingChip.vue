@@ -75,8 +75,14 @@ const presentation = computed<ChipPresentation | null>(() => {
         label: n > 0 ? `${n} ${plural}` : 'Flagged',
         icon: '▲',
         badgeClass: 'badge-error',
+        // UX audit F09: the trailing "Informational — it does not block the
+        // tool." was inherited from the panel's misreading of non-goal 9 and is
+        // false for exactly this branch — hard tier IS the tier that blocks
+        // server approval (scanner/service.go isBlockingFinding). The soft-tier
+        // branch below keeps its review-only reassurance, which is where the
+        // reassurance was actually needed.
         title:
-          'The security scan flagged this tool description with a hard-tier signal. Informational — it does not block the tool.',
+          'The security scan flagged this tool description with a hard-tier signal. Hard-tier findings block server approval.',
       }
     case 'warning':
       return {

@@ -303,6 +303,7 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
 import ServerCard from '@/components/ServerCard.vue'
 import AddServerModal from '@/components/AddServerModal.vue'
+import { serverDetailPath } from '@/utils/serverRoute'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
@@ -329,9 +330,15 @@ const hasServers = computed(() => serversStore.servers.length > 0)
 // yet" — `servers` starts empty either way.
 const isFirstRun = computed(() => serversStore.loaded && serversStore.servers.length === 0)
 
-function onServerAdded() {
+function onServerAdded(serverName?: string) {
   showAddServer.value = false
   void serversStore.fetchServers()
+  // UX audit F07: a single add hands off to that server's detail view, where
+  // connect/scan/review/approve is already on screen. The bulk/import path
+  // emits no name and keeps the old refresh-in-place behaviour.
+  if (serverName) {
+    void router.push(serverDetailPath(serverName))
+  }
 }
 
 // The setup wizard is mounted by Dashboard.vue, so opening it from here means

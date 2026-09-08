@@ -25,14 +25,14 @@ Single Go project. Backend paths are repo-relative: `internal/`, `cmd/`, `bench/
 
 **Purpose**: get the tree compiling on v1.0.0 with no behaviour change.
 
-- [ ] T001 Bump the library to v1.0.0 in `go.mod`/`go.sum` via `go get github.com/mark3labs/mcp-go@v1.0.0 && go mod tidy`, and confirm no new module is added
-- [ ] T002 [P] Swap `NewTestStreamableHTTPServer` to the new `servertest` package in `bench/mcpcall_test.go` (3 sites)
-- [ ] T003 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/server/mcp_routing_test.go` (5 sites)
-- [ ] T004 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/listtools_logging_test.go` (2 sites) and drop the orphaned `mcpserver` import
-- [ ] T005 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/manager_prompts_test.go` (2 sites)
-- [ ] T006 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/managed/prompts_test.go` (5 sites)
-- [ ] T007 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/core/prompts_test.go` (15 sites)
-- [ ] T008 Verify `go build ./...`, `go build -tags server -o /dev/null ./cmd/mcpproxy`, `go vet ./...` and `go vet -tags server ./...` all exit 0
+- [x] T001 Bump the library to v1.0.0 in `go.mod`/`go.sum` via `go get github.com/mark3labs/mcp-go@v1.0.0 && go mod tidy`, and confirm no new module is added
+- [x] T002 [P] Swap `NewTestStreamableHTTPServer` to the new `servertest` package in `bench/mcpcall_test.go` (3 sites)
+- [x] T003 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/server/mcp_routing_test.go` (5 sites)
+- [x] T004 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/listtools_logging_test.go` (2 sites) and drop the orphaned `mcpserver` import
+- [x] T005 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/manager_prompts_test.go` (2 sites)
+- [x] T006 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/managed/prompts_test.go` (5 sites)
+- [x] T007 [P] Swap `NewTestStreamableHTTPServer` to `servertest` in `internal/upstream/core/prompts_test.go` (15 sites)
+- [x] T008 Verify `go build ./...`, `go build -tags server -o /dev/null ./cmd/mcpproxy`, `go vet ./...` and `go vet -tags server ./...` all exit 0
 
 **Checkpoint**: tree compiles; `internal/server` fails only `TestProfile_SetProfileSessionScoped` and `TestProfile_SetProfileUnknown`.
 
@@ -42,17 +42,17 @@ Single Go project. Backend paths are repo-relative: `internal/`, `cmd/`, `bench/
 
 **Purpose**: make the bump provably inert on the wire, and build the harness that stops later tests from passing vacuously. **No user story may start before this phase completes.**
 
-- [ ] T009 Write a failing wire-capture test asserting an unpinned client still negotiates `2025-11-25` against mcpproxy, in `internal/server/protocol_era_test.go`
-- [ ] T010 Write a failing wire-capture test asserting mcpproxy's upstream `initialize` still requests `2025-11-25`, in `internal/upstream/core/protocol_pin_test.go`
-- [ ] T011 Add a `clientFacingStreamableOptions()` helper applying `server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...)` as a constant, and route all five `NewStreamableHTTPServer` sites through it in `internal/server/server.go`
-- [ ] T012 Pin the upstream-facing handshake to `mcp.LATEST_LEGACY_PROTOCOL_VERSION` in `internal/upstream/core/connection_lifecycle.go`
-- [ ] T013 Build the `forEachEra` test helper that pins the client era explicitly on both sides, in `internal/server/era_harness_test.go`
-- [ ] T014 Prove the harness bites: assert a deliberately mis-pinned era makes an era assertion fail, in `internal/server/era_harness_test.go`
-- [ ] T015 [P] Write four failing hash-stability fixtures (draft-07 refs, plain schema, native `$defs`, refs without a `definitions` block) in `internal/hash/schema_ref_test.go`
-- [ ] T016 [P] Canonicalize `#/definitions/` to `#/$defs/` inside `NormalizeJSON` in `internal/hash/hash.go`, widening its doc comment to say it normalizes schema refs as well as key order
-- [ ] T017 [P] Write a failing test that an upstream result envelope is not copied wholesale, in `internal/server/content_forward_test.go`
-- [ ] T018 [P] Copy result fields explicitly instead of assigning the embedded envelope in `internal/server/content_forward.go` and `internal/server/mcp_routing.go` (FR-016b)
-- [ ] T019 Verify the three frozen tool-surface goldens are byte-identical, and record in the PR that they were checked rather than regenerated
+- [x] T009 Write a failing wire-capture test asserting an unpinned client still negotiates `2025-11-25` against mcpproxy, in `internal/server/protocol_era_test.go`
+- [x] T010 Write a failing wire-capture test asserting mcpproxy's upstream `initialize` still requests `2025-11-25`, in `internal/upstream/core/protocol_pin_test.go`
+- [x] T011 Add a `clientFacingStreamableOptions()` helper applying `server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...)` as a constant, and route all five `NewStreamableHTTPServer` sites through it in `internal/server/server.go`
+- [x] T012 Pin the upstream-facing handshake to `mcp.LATEST_LEGACY_PROTOCOL_VERSION` in `internal/upstream/core/connection_lifecycle.go`
+- [x] T013 Build the `forEachEra` test helper that pins the client era explicitly on both sides, in `internal/server/era_harness_test.go`
+- [x] T014 Prove the harness bites: assert a deliberately mis-pinned era makes an era assertion fail, in `internal/server/era_harness_test.go`
+- [x] T015 [P] Write four failing hash-stability fixtures (draft-07 refs, plain schema, native `$defs`, refs without a `definitions` block) in `internal/hash/schema_ref_test.go`
+- [x] T016 [P] Canonicalize `#/definitions/` to `#/$defs/` inside `NormalizeJSON` in `internal/hash/hash.go`, widening its doc comment to say it normalizes schema refs as well as key order
+- [x] T017 [P] Write a failing test that an upstream result envelope is not copied wholesale, in `internal/server/content_forward_test.go`
+- [x] T018 [P] Copy result fields explicitly instead of assigning the embedded envelope in `internal/server/content_forward.go` and `internal/server/mcp_routing.go` (FR-016b)
+- [x] T019 Verify the three frozen tool-surface goldens are byte-identical, and record in the PR that they were checked rather than regenerated
 
 **Checkpoint**: full suite green on both editions; negotiated version unchanged in both directions.
 

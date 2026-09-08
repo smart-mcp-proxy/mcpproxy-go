@@ -60,8 +60,20 @@ describe('Authentication error surfaces (audit F28)', () => {
     })
 
     const text = wrapper.text()
-    expect(text).toContain('mcpproxy doctor')
+    // Audit F06: this used to name `mcpproxy doctor`, which never prints the
+    // key — grep `cmd/mcpproxy/doctor_cmd.go` for it and there are no hits.
+    // `mcpproxy status` does, and its "Web UI" line is directly openable.
+    expect(text).toContain('mcpproxy status')
+    expect(text).not.toContain('mcpproxy doctor')
     expect(text).toContain('mcp_config.json')
+    // Both tray menu labels, because which one you see depends on the tray
+    // BUILD, not the OS: the Go tray ("Open Web Control Panel") is
+    // `!nogui && !headless && !linux`, so it ships on macOS tarball/Homebrew
+    // installs as well as Windows. Naming one of them as the Windows label
+    // would put a fresh false statement on the honesty modal itself.
+    expect(text).toContain('Open Web UI in Browser')
+    expect(text).toContain('Open Web Control Panel')
+    expect(text).not.toContain('Windows:')
   })
 
   it('suppresses the reconnect toast while the auth modal owns the screen', async () => {

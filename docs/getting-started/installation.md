@@ -13,11 +13,67 @@ MCPProxy can be installed on macOS, Windows, and Linux. Choose the installation 
 
 ## macOS
 
-### DMG Installer (Recommended)
+### Installer DMG (Recommended)
 
-Download the latest `.dmg` file from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and drag MCPProxy to your Applications folder.
+**Requires macOS 13 (Ventura) or later** (`LSMinimumSystemVersion` in the app
+bundle). On anything older the package installs but the app will not launch.
 
-The DMG installers are signed and notarized by Apple.
+Download `mcpproxy-<version>-darwin-arm64-installer.dmg` (Apple Silicon) or
+`-darwin-amd64-installer.dmg` (Intel) from the
+[releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases).
+
+**There is nothing to drag.** The disk image contains a `.pkg` installer and a
+`README.txt`:
+
+1. Open the DMG and double-click the `.pkg` file.
+2. macOS asks for an administrator password — the package installs for all
+   users, so this is required.
+3. Follow the installer. There are no components to choose.
+4. **The installer launches mcpproxy for you** when it finishes — look for the
+   icon in your menu bar. If it is not there, open it from Applications.
+
+Both the disk image and the package are signed and notarized by Apple.
+
+#### What the installer puts on your machine
+
+| Path | What it is |
+|------|------------|
+| `/Applications/mcpproxy.app` | The menu-bar app, with the headless core bundled inside it |
+| `/usr/local/bin/mcpproxy` | Symlink to the core binary, so `mcpproxy` works in a terminal |
+| `~/.mcpproxy/` | Your config, database and search index |
+| `~/Library/Logs/mcpproxy/` | Logs (the macOS standard location, not `~/.mcpproxy/`) |
+| `~/.mcpproxy/certs/ca.pem` | A local CA certificate, copied to disk only — see below |
+
+The `ca.pem` row is conditional: `postinstall.sh` copies it only when it can
+resolve a non-root `$USER` and the build actually bundled a certificate, and it
+has no console-user fallback, so the file may simply be absent. Nothing depends
+on it — `mcpproxy trust-cert` generates a certificate itself when none exists.
+
+**The installer does not change your system's certificate trust.** The bundled
+`ca.pem` exists so that the optional HTTPS mode has a certificate available;
+trust is modified only if you later run `mcpproxy trust-cert` yourself, which
+defaults to the **System** keychain (`--keychain=system`) and asks for your
+password. The default mode is plain HTTP on `127.0.0.1:8080` and needs no
+certificate at all.
+
+The installer also removes a stale `LaunchAgent` left behind by pre-0.5x
+builds. It does **not** configure auto-start — that is a per-user toggle in the
+tray menu ("Launch at Login").
+
+#### Uninstalling
+
+Quit the app first — from the tray menu, or `pkill -x mcpproxy`. Deleting the
+bundle does not stop a running process, and the tray is what shuts the core
+down cleanly.
+
+```bash
+sudo rm -rf /Applications/mcpproxy.app /usr/local/bin/mcpproxy
+rm -rf ~/.mcpproxy ~/Library/Logs/mcpproxy   # config, database, index and logs
+```
+
+If you ran `mcpproxy trust-cert`, remove the certificate as well. It is in the
+**System** keychain unless you passed `--keychain=login`: open **Keychain
+Access → System → Certificates** and delete the MCPProxy CA.
 
 ### Homebrew
 

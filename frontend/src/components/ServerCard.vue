@@ -352,7 +352,13 @@
           No security scan has been run for <strong>{{ server.name }}</strong>. We strongly recommend running a scan first.
         </p>
         <p class="text-sm text-base-content/70 mb-6">
-          The security scanner is an experimental heuristic. Force-approving a server bypasses the scanner gate and is irreversible from this dialog.
+          <!-- UX audit F09: "the scanner gate" was never defined anywhere in
+               the UI, while the same screen carried findings claiming to be
+               informational. Name what force approval actually does. Shared by
+               BOTH dialog modes, so it must not mention findings — the no_scan
+               mode has none, and force skips that refusal ("no scan results
+               found") just as it skips the hard-tier one. -->
+          The security scanner is an experimental heuristic. Force-approving skips the scan-based approval gate and unquarantines this server; it is irreversible from this dialog.
         </p>
         <div class="modal-action">
           <button

@@ -4,6 +4,20 @@
 const {themes: prismThemes} = require('prism-react-renderer');
 
 /** @type {import('@docusaurus/types').Config} */
+// Version shown in the navbar badge. Supplied by CI: docs.yml derives it from
+// the latest stable release tag reachable from main, and release.yml's
+// deploy-docs job passes the tag it is releasing. Empty locally, which hides
+// the badge rather than rendering a placeholder.
+//
+// The value is interpolated into a RAW HTML navbar item and originates in a git
+// tag, which may contain almost any byte, so it is validated rather than
+// escaped: only a plain vN[.N...] string is accepted. That also rejects the old
+// `__VERSION__` placeholder and any prerelease suffix, both of which hide the
+// badge instead of shipping something wrong.
+const rawVersion = (process.env.DOCS_VERSION || '').trim();
+const normalizedVersion = rawVersion && !rawVersion.startsWith('v') ? `v${rawVersion}` : rawVersion;
+const siteVersion = /^v[0-9]+(\.[0-9]+){0,3}$/.test(normalizedVersion) ? normalizedVersion : '';
+
 const config = {
   title: 'MCPProxy Documentation',
   tagline: 'Smart MCP Proxy for AI Agents',
@@ -140,11 +154,24 @@ const config = {
             label: 'GitHub',
             position: 'right',
           },
-          {
-            type: 'html',
-            position: 'right',
-            value: '<span class="badge badge--primary">v__VERSION__</span>',
-          },
+          // Version badge. Rendered only when a real version is available.
+          // This used to be a hard-coded item containing the literal
+          // "v__VERSION__": the `sed` that substitutes that placeholder runs
+          // only in release.yml's deploy-docs job, and docs.yml — which
+          // deploys the same Cloudflare Pages project on every push to main —
+          // never substituted anything, so main's deploy shipped the raw
+          // placeholder to production. Both workflows now set DOCS_VERSION and
+          // the placeholder is gone. Omitting the badge is better than showing
+          // a placeholder, so an unset or malformed value renders nothing.
+          ...(siteVersion
+            ? [
+                {
+                  type: 'html',
+                  position: 'right',
+                  value: `<span class="badge badge--primary">${siteVersion}</span>`,
+                },
+              ]
+            : []),
         ],
       },
       footer: {

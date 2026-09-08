@@ -89,10 +89,16 @@ describe('FlaggedToolsPanel — flagged state', () => {
     expect(row.find('[data-test="finding-chip-dangerous"]').exists()).toBe(false)
   })
 
-  it('says the findings are informational and do not block the tool', () => {
+  // F09: this used to pin 'Informational — these findings do not block the
+  // tool.', which is false whenever a hard-tier finding sits on a quarantined
+  // server (ApproveServer returns 409 on exactly these) and false again under
+  // trust_mode: scan. The panel receives neither fact, so it now states only
+  // what is unconditionally true about the tier. Full reasoning and the
+  // deliberately-untaken conditional variant: scanner-gate-wording.spec.ts.
+  it('names the gate a hard-tier finding holds, without claiming this one does not block', () => {
     const wrapper = mountPanel({ groups })
     expect(wrapper.get('[data-test="flagged-tools-informational"]').text()).toBe(
-      'Informational — these findings do not block the tool.',
+      "Findings on this server's tool descriptions. Dangerous (hard-tier) findings block server approval.",
     )
   })
 

@@ -779,7 +779,7 @@ graph LR
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
-| MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 0/81 (0%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
+| MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 19/81 (23%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
@@ -817,7 +817,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 
 | # | Status | Progress |
 | --- | --- | --- |
-| [001-code-execution](./specs/001-code-execution/) | `in-flight` | 74/127 (58%) |
+| [001-code-execution](./specs/001-code-execution/) | `in-flight` | 78/127 (61%) |
 | [001-fix-skipped-auth-tests](./specs/001-fix-skipped-auth-tests/) | — | — |
 | [001-oas-endpoint-documentation](./specs/001-oas-endpoint-documentation/) | `in-flight` | 36/69 (52%) |
 | [001-oauth-scope-discovery](./specs/001-oauth-scope-discovery/) | — | — |
@@ -830,7 +830,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 93/103 (90%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
 | [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 47/87 (54%) |
-| [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 24/36 (67%) |
+| [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 25/36 (69%) |
 | [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 38/39 (97%) |
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
 | [012-unified-health-status](./specs/012-unified-health-status/) | `shipped` | 44/44 (100%) |
@@ -839,7 +839,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [014-cli-output-formatting](./specs/014-cli-output-formatting/) | `in-flight` | 62/66 (94%) |
 | [015-server-management-cli](./specs/015-server-management-cli/) | `shipped` | 50/50 (100%) |
 | [016-activity-log-backend](./specs/016-activity-log-backend/) | `in-flight` | 44/50 (88%) |
-| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 50/60 (83%) |
+| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 51/60 (85%) |
 | [018-intent-declaration](./specs/018-intent-declaration/) | `shipped` | 69/69 (100%) |
 | [019-activity-webui](./specs/019-activity-webui/) | `shipped` | 72/73 (99%) |
 | [020-oauth-login-feedback](./specs/020-oauth-login-feedback/) | — | — |
@@ -880,7 +880,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [055-frontend-major-upgrades](./specs/055-frontend-major-upgrades/) | `shipped` | 23/24 (96%) |
 | [056-output-schema-validation](./specs/056-output-schema-validation/) | `in-flight` | 22/24 (92%) |
 | [057-in-proxy-profiles](./specs/057-in-proxy-profiles/) | `in-flight` | 20/25 (80%) |
-| [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | `drafted` | 0/81 (0%) |
+| [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | `in-flight` | 19/81 (23%) |
 | [059-output-sanitisation](./specs/059-output-sanitisation/) | `shipped` | 24/25 (96%) |
 | [060-settings-page](./specs/060-settings-page/) | `shipped` | 16/16 (100%) |
 | [064-glass-cockpit](./specs/064-glass-cockpit/) | — | — |

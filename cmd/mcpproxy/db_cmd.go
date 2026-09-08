@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -291,6 +292,11 @@ func runDBStats(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// compactLockNow is a seam so tests can freeze the clock. A frozen clock is
+// exactly the Windows condition this token guards against, which is what lets
+// the lock tests reproduce it on every platform instead of by luck.
+var compactLockNow = time.Now
+
 // compactDatabase rewrites srcPath in place via a temp file + atomic rename.
 //
 // The rename is what makes this safe to interrupt: until it succeeds the
@@ -325,7 +331,20 @@ func acquireCompactLock(dir string) (release func(), err error) {
 	// a successor's. Without it: someone deletes A's stale-looking lock, B
 	// creates a fresh one, A finishes and removes the pathname — which is now
 	// B's lock — and a third compaction starts alongside B.
-	token := fmt.Sprintf("pid=%d\nstarted=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+	//
+	// The nonce, not pid+timestamp, is what makes the token unique. Windows'
+	// system clock is coarse (~0.5-15ms), so two acquisitions in one process
+	// can share a timestamp and therefore a whole token. pid and started stay
+	// because they are what a human reads out of a stale lock file.
+	var nonce [16]byte
+	if _, rerr := rand.Read(nonce[:]); rerr != nil {
+		// Close before removing: Windows refuses to delete an open file.
+		cerr := f.Close()
+		os.Remove(lockPath)
+		return nil, fmt.Errorf("failed to generate compaction lock token: %w", errors.Join(rerr, cerr))
+	}
+	token := fmt.Sprintf("pid=%d\nstarted=%s\nnonce=%x\n",
+		os.Getpid(), compactLockNow().UTC().Format(time.RFC3339Nano), nonce)
 	_, writeErr := f.WriteString(token)
 	closeErr := f.Close()
 	if writeErr != nil || closeErr != nil {
