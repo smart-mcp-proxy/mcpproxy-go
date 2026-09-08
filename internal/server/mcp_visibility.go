@@ -65,7 +65,7 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 	if gateReason := p.describeGateReason(serverName, toolName); gateReason != "" {
 		return false, gateReason
 	}
-	if !p.isToolCallable(serverName, toolName) {
+	if !p.isExactToolCallable(serverName, toolName) {
 		return false, visReasonToolNotCallable
 	}
 	return true, ""
@@ -91,7 +91,8 @@ func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileSc
 	}
 
 	// Callability: disabled/blocked tools are non-existent for discovery.
-	if !p.isToolCallable(serverName, toolName) {
+	// The pair was normalized once above and is consulted exactly from here.
+	if !p.isExactToolCallable(serverName, toolName) {
 		return false, visReasonToolNotCallable
 	}
 
@@ -114,8 +115,11 @@ func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileSc
 // describe_tool, dispatch and the preflight evaluator consult exactly one
 // evaluation of the quarantine/approval state. The gate order (server
 // quarantine, then the tool-level lock) is unchanged.
+//
+// The pair arrives already normalized by toolVisibleToSession, so the gate is
+// read exactly rather than normalized a second time.
 func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string {
-	gate := p.evaluateToolGate(serverName, toolName)
+	gate := p.evaluateExactToolGate(serverName, toolName)
 	if gate.serverQuarantined() {
 		return visReasonServerQuarantined
 	}
@@ -131,13 +135,20 @@ func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string 
 // normalizeServerTool strips the indexed "server:tool" prefix from toolName
 // (result.Tool.Name keeps the prefix when ServerName is set) — exactly like
 // isToolCallable, so approval/config lookups key consistently.
+//
+// Spec 105 FR-009: only the SERVER's own prefix is an indexing artifact. When
+// serverName is already known and the first ":"-segment is something else,
+// the colon belongs to the raw tool name ("ns:erase" on server "a") and is
+// kept, so every gate keyed on this pair — tier classification, approval,
+// config denial, callability — evaluates the exact identity that is
+// dispatched instead of the suffix tool's.
 func normalizeServerTool(serverName, toolName string) (string, string) {
-	if strings.Contains(toolName, ":") {
-		if parts := strings.SplitN(toolName, ":", 2); len(parts) == 2 {
-			if serverName == "" {
-				serverName = parts[0]
-			}
-			toolName = parts[1]
+	if prefix, rest, ok := strings.Cut(toolName, ":"); ok {
+		switch {
+		case serverName == "":
+			serverName, toolName = prefix, rest
+		case prefix == serverName:
+			toolName = rest
 		}
 	}
 	return serverName, toolName

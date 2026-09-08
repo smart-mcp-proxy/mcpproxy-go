@@ -2274,6 +2274,16 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
+	// Look up the target's annotations from the StateView ONCE. The same read
+	// serves the target-tier gate below and the intent validation after it, so
+	// the tier a token was authorized against and the annotations the variant
+	// is validated against can never come from two different snapshots
+	// (Spec 105 FR-009). found=false means the proxy holds no metadata for the
+	// pair (server unknown, tool undiscovered, or no runtime). The pair was
+	// split from the canonical id above, so it is read EXACTLY: a raw name
+	// that starts with the server's own prefix must not be normalized again.
+	annotations, annotationsFound := p.lookupExactToolAnnotations(serverName, actualToolName)
+
 	// Spec 028: Enforce agent token scope restrictions
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		// Check server scope
@@ -2297,6 +2307,21 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
+		// Spec 104 FR-016f / Spec 105 FR-009: the variant is the CALLER's
+		// choice, so it is not the tier that matters. Authorize against the
+		// TARGET tool's annotation-derived tier, through the same classifier
+		// direct mode and code execution use (lookupToolPermission), and do
+		// it before intent validation so that a token lacking the tier is
+		// refused on permission grounds whether or not strict server
+		// validation would have let the variant mismatch through. A read-only
+		// token could otherwise drive a write tool via call_tool_read
+		// (always) and a destructive one (strict off).
+		targetPerm := tierForAnnotations(annotations, annotationsFound)
+		if targetPerm != "" && !authCtx.HasPermission(targetPerm) {
+			errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", targetPerm, serverName, actualToolName)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+			return mcp.NewToolResultError(errMsg), nil
+		}
 	}
 
 	p.logger.Debug("handleCallToolVariant: processing request",
@@ -2304,9 +2329,6 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		zap.String("tool_name", toolName),
 		zap.String("server_name", serverName),
 		zap.String("intent_operation", intent.OperationType))
-
-	// Look up tool annotations from StateView for server annotation validation
-	annotations := p.lookupToolAnnotations(serverName, actualToolName)
 
 	// Spec 035: Determine content trust level based on openWorldHint annotation
 	contentTrust := contracts.ContentTrustForTool(annotations)
@@ -2365,7 +2387,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// same classifier the preflight evaluator uses, so a tool dispatch refuses
 	// can never preflight as `ready`. The response SELECTION below keeps the
 	// long-standing dispatch order (quarantine → approval lock → generic block).
-	gate := p.evaluateToolGate(serverName, actualToolName)
+	// The split pair is gated exactly, like the tier read above.
+	gate := p.evaluateExactToolGate(serverName, actualToolName)
 
 	if gate.serverQuarantined() {
 		p.logger.Debug("handleCallToolVariant: server is quarantined",
@@ -2879,8 +2902,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	activityArgs := injectAuthMetadata(ctx, args)
 
 	// Shared policy gates (Spec 098 FR-002), same primitive as every other
-	// dispatch path.
-	gate := p.evaluateToolGate(serverName, actualToolName)
+	// dispatch path, on the pair split above (never re-normalized).
+	gate := p.evaluateExactToolGate(serverName, actualToolName)
 	serverConfig := gate.serverConfig
 
 	if gate.serverQuarantined() {
@@ -3888,7 +3911,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			if toolCount == 0 {
 				if tools, err := client.ListTools(context.Background()); err == nil {
 					for _, tool := range tools {
-						if p.isToolCallable(server.Name, tool.Name) {
+						if p.isExactToolCallable(server.Name, tool.Name) {
 							toolCount++
 						}
 					}
@@ -6315,7 +6338,7 @@ func (p *MCPProxyServer) getVisibleToolCount(serverName string) int {
 
 	visible := 0
 	for _, tool := range serverStatus.Tools {
-		if p.isToolCallable(serverName, tool.Name) {
+		if p.isExactToolCallable(serverName, tool.Name) {
 			visible++
 		}
 	}
@@ -6432,16 +6455,18 @@ func (p *MCPProxyServer) serverToolNames(serverName string) []string {
 }
 
 func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
-	if strings.Contains(toolName, ":") {
-		parts := strings.SplitN(toolName, ":", 2)
-		if len(parts) == 2 {
-			if serverName == "" {
-				serverName = parts[0]
-			}
-			toolName = parts[1]
-		}
-	}
+	// Same prefix rule as every other gate (Spec 105 FR-009): only the
+	// server's own indexing prefix is stripped; a foreign "ns:" segment is
+	// part of the raw tool name and keys config denial / approval as itself.
+	serverName, toolName = normalizeServerTool(serverName, toolName)
+	return p.isExactToolCallable(serverName, toolName)
+}
 
+// isExactToolCallable is isToolCallable for a pair that is already split into
+// server and RAW tool name (a live ListTools / StateView name, or a pair a
+// resolver normalized once). It never re-normalizes, so a raw name carrying
+// the server's own prefix keys config denial and approval as itself.
+func (p *MCPProxyServer) isExactToolCallable(serverName, toolName string) bool {
 	if serverName == "" || toolName == "" {
 		return false
 	}
@@ -6470,7 +6495,7 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 		}
 	}
 
-	approval, err := p.storage.GetToolApproval(serverName, toolName)
+	approval, err := p.lookupToolApproval(serverName, toolName)
 	switch {
 	case err == nil:
 		if approval != nil && approval.Disabled {
@@ -6715,35 +6740,67 @@ func toolNameMatchesQuery(toolName string, tokens []string) bool {
 }
 
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
-	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil
-	}
+	annotations, _ := p.lookupToolAnnotationsFound(serverName, toolName)
+	return annotations
+}
 
-	// Callers now pass the canonical "server:tool" identity (#871), while the
-	// StateView stores bare tool names on the live path — strip the prefix so
-	// the name match below cannot silently miss (Issue #306 regression guard).
+// lookupToolAnnotationsFound is lookupToolAnnotations that also reports whether
+// the StateView knows the tool at all. A nil result with found=true is a
+// discovered tool that publishes no annotations; found=false means the proxy
+// has no metadata for it (server unknown, not yet discovered, or no runtime)
+// and no tier can be established from it.
+//
+// Callers pass the canonical "server:tool" identity (#871), while the
+// StateView stores bare tool names on the live path — the prefix is stripped
+// so the name match cannot silently miss (Issue #306 regression guard). A
+// caller that already holds a SPLIT pair must use lookupExactToolAnnotations
+// instead: normalizing it again would strip a raw name's own leading segment.
+func (p *MCPProxyServer) lookupToolAnnotationsFound(serverName, toolName string) (*config.ToolAnnotations, bool) {
 	serverName, toolName = normalizeServerTool(serverName, toolName)
+	return p.lookupExactToolAnnotations(serverName, toolName)
+}
+
+// lookupExactToolAnnotations is lookupToolAnnotationsFound for a pair that is
+// ALREADY split into server and raw tool name — handleCallToolVariant's and
+// handleCallTool's parsed id, the sandbox's callTool(server, tool) arguments.
+// It never re-normalizes: a raw tool name may itself begin with the server's
+// own prefix ("a:ns:erase" on server "a"), and normalizeServerTool would
+// strip that segment and classify the pair as the suffix tool "ns:erase"
+// while dispatch still targets "a:ns:erase" (Spec 105 FR-009).
+func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string) (*config.ToolAnnotations, bool) {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return nil, false
+	}
 
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
-		return nil
+		return nil, false
 	}
 
 	snapshot := supervisor.StateView().Snapshot()
 	serverStatus, exists := snapshot.Servers[serverName]
 	if !exists {
-		return nil
+		return nil, false
 	}
 
-	for _, tool := range serverStatus.Tools {
-		// tool.Name may be in "server:tool" format (from ToolMetadata.Name),
-		// while toolName is just the tool part. Match both formats.
-		if tool.Name == toolName || tool.Name == serverName+":"+toolName {
-			return tool.Annotations
+	// Only the EXACT raw name — the identity that is dispatched (Spec 105
+	// FR-009) — is matched. The StateView holds the name the upstream
+	// published, verbatim (internal/upstream/core/client.go copies tool.Name
+	// into ToolMetadata.Name, and the supervisor copies that into ToolInfo),
+	// so the legacy "server:tool" spelling this lookup once also accepted
+	// never matched a real entry on the live path. What it did match was a
+	// raw tool literally named "a:ns:erase": with foreign prefixes now
+	// preserved, that alternative resolved the UNDISCOVERED pair
+	// (a, "ns:erase") to the prefixed tool's annotations with found=true, so
+	// the tier gate classified a name the proxy holds no metadata for by a
+	// different tool's hints instead of failing closed.
+	for i := range serverStatus.Tools {
+		if serverStatus.Tools[i].Name == toolName {
+			return serverStatus.Tools[i].Annotations, true
 		}
 	}
 
-	return nil
+	return nil, false
 }
 
 // lookupOutputSchema returns the declared output schema (raw JSON) for a tool,
