@@ -2288,6 +2288,20 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
+		// Spec 104 FR-016f: the variant is the CALLER's choice, so it is not
+		// the tier that matters. Authorize against the TARGET tool's
+		// annotation-derived tier, through the same lookup direct mode and
+		// code execution use, and do it before intent validation so that a
+		// token lacking the tier is refused on permission grounds whether or
+		// not strict server validation would have let the variant mismatch
+		// through. A read-only token could otherwise drive a write tool via
+		// call_tool_read (always) and a destructive one (strict off).
+		targetPerm := p.lookupToolPermission(serverName, actualToolName)
+		if targetPerm != "" && !authCtx.HasPermission(targetPerm) {
+			errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", targetPerm, serverName, actualToolName)
+			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+			return mcp.NewToolResultError(errMsg), nil
+		}
 	}
 
 	p.logger.Debug("handleCallToolVariant: processing request",
@@ -6660,8 +6674,18 @@ func toolNameMatchesQuery(toolName string, tokens []string) bool {
 }
 
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
+	annotations, _ := p.lookupToolAnnotationsFound(serverName, toolName)
+	return annotations
+}
+
+// lookupToolAnnotationsFound is lookupToolAnnotations that also reports whether
+// the StateView knows the tool at all. A nil result with found=true is a
+// discovered tool that publishes no annotations; found=false means the proxy
+// has no metadata for it (server unknown, not yet discovered, or no runtime)
+// and no tier can be established from it.
+func (p *MCPProxyServer) lookupToolAnnotationsFound(serverName, toolName string) (*config.ToolAnnotations, bool) {
 	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil
+		return nil, false
 	}
 
 	// Callers now pass the canonical "server:tool" identity (#871), while the
@@ -6671,24 +6695,24 @@ func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *con
 
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
-		return nil
+		return nil, false
 	}
 
 	snapshot := supervisor.StateView().Snapshot()
 	serverStatus, exists := snapshot.Servers[serverName]
 	if !exists {
-		return nil
+		return nil, false
 	}
 
 	for _, tool := range serverStatus.Tools {
 		// tool.Name may be in "server:tool" format (from ToolMetadata.Name),
 		// while toolName is just the tool part. Match both formats.
 		if tool.Name == toolName || tool.Name == serverName+":"+toolName {
-			return tool.Annotations
+			return tool.Annotations, true
 		}
 	}
 
-	return nil
+	return nil, false
 }
 
 // lookupOutputSchema returns the declared output schema (raw JSON) for a tool,

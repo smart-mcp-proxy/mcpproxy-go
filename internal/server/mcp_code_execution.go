@@ -1161,36 +1161,29 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 	options.AllowedServers = intersected
 }
 
-// lookupToolPermission returns the required permission tier for a tool based on its annotations.
-// This is used by the JS runtime to enforce auth context permissions during code_execution.
+// lookupToolPermission returns the required permission tier for a tool based on
+// its annotations, as the StateView holds them. It is the one tier lookup shared
+// by the retrieve surface (call_tool_*), code execution, and — through the same
+// DeriveCallWith — direct mode.
+//
+// A tool the StateView has not seen has no establishable tier. It is treated
+// as DESTRUCTIVE, the top of the documented permission ladder (agent-token
+// permissions are cumulative: write implies read, destructive implies both —
+// docs/features/agent-tokens.md), so a token reaches it only when it holds
+// that top tier; defaulting to read here authorized every undiscovered tool
+// for read-only tokens. Note auth.HasPermission is exact-match, not
+// hierarchical, so a token minted as [read, destructive] without write is
+// admitted here while call_tool_write itself would refuse it. The BM25 index is deliberately not
+// consulted: it stores no annotations (and a "server:tool" query returns no
+// hits), so the former index fallback never resolved anything. A discovered
+// tool that publishes no annotations still derives to read via DeriveCallWith.
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
-	// Primary: exact match via StateView (no BM25 fuzzy matching)
-	annotations := p.lookupToolAnnotations(serverName, toolName)
-	if annotations != nil {
-		callWith := contracts.DeriveCallWith(annotations)
-		perm := contracts.ToolVariantToOperationType[callWith]
-		if perm != "" {
-			return perm
-		}
+	annotations, found := p.lookupToolAnnotationsFound(serverName, toolName)
+	if !found {
+		return contracts.OperationTypeDestructive
 	}
-
-	// Fallback: search the index with enough candidates to find an exact match
-	if p.index != nil {
-		qualifiedName := serverName + ":" + toolName
-		results, err := p.index.Search(qualifiedName, 20)
-		if err == nil {
-			for _, r := range results {
-				if r.Tool != nil && r.Tool.ServerName == serverName && r.Tool.Name == toolName {
-					callWith := contracts.DeriveCallWith(r.Tool.Annotations)
-					perm := contracts.ToolVariantToOperationType[callWith]
-					if perm != "" {
-						return perm
-					}
-				}
-			}
-		}
+	if perm := contracts.ToolVariantToOperationType[contracts.DeriveCallWith(annotations)]; perm != "" {
+		return perm
 	}
-
-	// Default to read (safest)
 	return contracts.OperationTypeRead
 }
