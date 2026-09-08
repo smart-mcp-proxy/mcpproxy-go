@@ -5686,7 +5686,14 @@ func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallTool
 	// named server must be authorized against the token's AllowedServers AND
 	// the effective profile (pin > URL > session) BEFORE the storage lookup —
 	// the same scope predicate `list` filters by and call_tool_* enforces.
-	// Admin / OS-socket callers carry no restriction and are unaffected. The
+	// Administrators (API key / OS socket / no AuthContext) skip the
+	// AllowedServers check but NOT the profile check: an explicit URL profile
+	// (/mcp/p/<slug>) or a session set_profile bounds every caller here exactly
+	// as it already does for `list` (handleListUpstreams) and call_tool_*
+	// (handleCallToolVariant's profile gate) — Spec 057 FR-004, "profile
+	// filtering is independent of agent scope". Pre-feature tail_log ignored
+	// its context entirely, so this is an administrator-visible change on
+	// profile-scoped connections; unscoped administrators are unaffected. The
 	// refusal is rendered by the same function as the nonexistent-server case
 	// so the response discloses neither existence, status nor logs.
 	authCtx := auth.AuthContextFromContext(ctx)
