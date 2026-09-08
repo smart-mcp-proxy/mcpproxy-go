@@ -153,24 +153,59 @@ func approvalStateFor(record *storage.ToolApprovalRecord) *preflight.ApprovalSta
 }
 
 // lookupToolApproval reads the Spec-032 approval record for one (server, tool)
-// pair, already normalized by normalizeServerTool. The exact raw name is
-// authoritative. When it has no record and the name carries a ":" segment, the
-// record filed under the COLLAPSED name is read instead: runtime's discovery
-// producer (checkToolApprovals) still keys every record it writes by
-// extractToolName(tool.Name) — everything after the first colon — so a
-// discovered "ns:erase" has its pending / changed / user-disabled state stored
-// under "erase". Reading the pair by its exact name only would turn that
-// record's tool into an implicitly-approved one the moment the reader stopped
-// collapsing, which is exactly the fail-open a missing record must not cause.
-// The fallback is the conservative legacy rule until the producer is made
-// exact-name as well (Spec 105 FR-009 follow-up).
+// pair, already normalized by normalizeServerTool.
+//
+// Two producers file records for a raw name that carries a ":" segment, and
+// they key it differently: runtime's discovery producer (checkToolApprovals)
+// writes every pending / changed / baseline record under extractToolName —
+// everything after the first colon, so "ns:erase" lands under "erase" — while
+// the user toggle (setToolEnabledNoEmit, reached from the tools REST endpoint
+// and the Web UI with the raw StateView name) reads and synthesizes an
+// approved record under the EXACT name. Neither producer ever sees the other's
+// record. Trusting either one alone therefore fails open in one direction:
+// exact-only turns a discovered tool's pending / changed lock into an implicit
+// approval, and exact-first lets an approved record left behind by a toggle
+// shadow a later "changed" mark the rug-pull detector wrote under the
+// collapsed key. So both records are read and the MORE RESTRICTIVE one is
+// returned (see approvalRestriction); the exact record wins ties. This is the
+// conservative reader rule until the producers are made exact-name as well
+// (Spec 105 FR-009 follow-up).
 func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
-	approval, err := p.storage.GetToolApproval(serverName, toolName)
-	if err == nil || !errors.Is(err, storage.ErrToolApprovalNotFound) {
-		return approval, err
+	exact, exactErr := p.storage.GetToolApproval(serverName, toolName)
+	if exactErr != nil && !errors.Is(exactErr, storage.ErrToolApprovalNotFound) {
+		return nil, exactErr
 	}
-	if _, collapsed, ok := strings.Cut(toolName, ":"); ok && collapsed != "" {
-		return p.storage.GetToolApproval(serverName, collapsed)
+	_, collapsed, ok := strings.Cut(toolName, ":")
+	if !ok || collapsed == "" {
+		return exact, exactErr
 	}
-	return approval, err
+	legacy, legacyErr := p.storage.GetToolApproval(serverName, collapsed)
+	if legacyErr != nil && !errors.Is(legacyErr, storage.ErrToolApprovalNotFound) {
+		return nil, legacyErr
+	}
+	switch {
+	case exactErr != nil:
+		return legacy, legacyErr
+	case legacyErr != nil:
+		return exact, nil
+	case approvalRestriction(legacy) > approvalRestriction(exact):
+		return legacy, nil
+	default:
+		return exact, nil
+	}
+}
+
+// approvalRestriction ranks a record by how preflight.ClassifyTool treats it:
+// 0 admits the tool, 1 locks it while the quarantine gate applies (pending or
+// changed), 2 blocks it unconditionally (user-disabled). A record that carries
+// both a lock and the Disabled flag ranks as the unconditional block.
+func approvalRestriction(record *storage.ToolApprovalRecord) int {
+	switch {
+	case record.Disabled:
+		return 2
+	case record.Status == storage.ToolApprovalStatusPending, record.Status == storage.ToolApprovalStatusChanged:
+		return 1
+	default:
+		return 0
+	}
 }

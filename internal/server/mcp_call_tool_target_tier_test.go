@@ -535,7 +535,11 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 			"isToolCallable must read the Disabled flag off the collapsed record")
 	})
 
-	t.Run("an exact record outranks the collapsed one", func(t *testing.T) {
+	t.Run("a permissive exact record cannot shadow a restrictive collapsed one", func(t *testing.T) {
+		// Two producers write this pair: discovery keys pending/changed under
+		// the collapsed name, a user toggle synthesizes an approved record
+		// under the exact name (setToolEnabledNoEmit). Neither may fail the
+		// other open, so the reader returns the more restrictive record.
 		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
 		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending})
 		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
@@ -543,9 +547,144 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 		}))
 		gate := proxy.evaluateToolGate("a", "ns:erase")
 		require.NotNil(t, gate.approval)
-		assert.Equal(t, "ns:erase", gate.approval.ToolName, "the exact-name record is authoritative when present")
+		assert.Equal(t, "erase", gate.approval.ToolName, "the pending collapsed record must win over the approved exact one")
+		assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
+		assert.False(t, gate.callable())
+		// isToolCallable is the quarantine-blind search filter (Spec 085): it
+		// honours only Disabled, so it is not an oracle for a pending lock.
+	})
+
+	t.Run("a restrictive exact record outranks an approved collapsed one", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved})
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, Disabled: true,
+		}))
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.Equal(t, "ns:erase", gate.approval.ToolName)
+		assert.False(t, gate.callable(), "the user-disabled exact record must keep blocking")
+		assert.False(t, proxy.isToolCallable("a", "ns:erase"))
+	})
+
+	t.Run("a user-disabled collapsed record outranks a merely pending exact one", func(t *testing.T) {
+		// Disabled blocks unconditionally; pending only locks while the
+		// quarantine gate applies. auto_approve_tool_changes lifts the gate,
+		// so only the Disabled record can refuse here.
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true})
+		autoApprove := true
+		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true, AutoApproveToolChanges: &autoApprove}))
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusPending,
+		}))
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.True(t, gate.approval.Disabled, "the Disabled record must be the one the classifier sees")
+		assert.False(t, gate.callable())
+	})
+
+	t.Run("both records admit: the exact one is returned", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved})
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved,
+		}))
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.Equal(t, "ns:erase", gate.approval.ToolName)
 		assert.Empty(t, gate.lockStatus)
 		assert.True(t, gate.callable())
 		assert.True(t, proxy.isToolCallable("a", "ns:erase"))
 	})
+}
+
+// TestToolGate_StaleExactApprovalCannotShadowCollapsedChange reproduces the
+// production sequence in which the two approval producers disagree about one
+// raw tool name and the reader must side with the refusing one:
+//
+//  1. discovery baselines raw "ns:erase" under the collapsed key
+//     (checkToolApprovals writes extractToolName(tool.Name) == "erase");
+//  2. the user disables and re-enables the tool by the raw name the tools
+//     API and the Web UI carry (StateView tool.Name == "ns:erase") — the real
+//     SetToolEnabled producer synthesizes an exact (a, ns:erase) record with
+//     Status=approved because it has no record under that name;
+//  3. the upstream rug-pulls the tool: discovery marks the collapsed record
+//     "changed" (tool_quarantine.go, changed-marking branch) and never touches
+//     the exact one.
+//
+// An exact-first reader then returns the stale approved record and dispatches
+// the rug-pulled tool for any caller holding its tier, administrators
+// included. Before Spec 105 the reader always collapsed the name and read the
+// changed record; that refusal must survive the exact-name reader.
+func TestToolGate_StaleExactApprovalCannotShadowCollapsedChange(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
+	rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+		s.Name, s.Enabled, s.Connected = "a", true, true
+		s.Tools = []stateview.ToolInfo{{
+			Name: "ns:erase", Description: "Namespaced erase",
+			Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+		}}
+	})
+
+	// 1. Discovery baseline, keyed the way checkToolApprovals keys it.
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+		CurrentHash: "baseline", CurrentDescription: "Namespaced erase",
+	}))
+	_, err := proxy.storage.GetToolApproval("a", "ns:erase")
+	require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: discovery writes no exact-name record")
+
+	// 2. The REAL toggle producer, driven by the raw name the UI/REST pass.
+	require.NoError(t, rt.SetToolEnabled("a", "ns:erase", false, "user"))
+	require.NoError(t, rt.SetToolEnabled("a", "ns:erase", true, "user"))
+	exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
+	require.NoError(t, err, "the toggle must have synthesized an exact-name record")
+	require.Equal(t, storage.ToolApprovalStatusApproved, exact.Status)
+	require.False(t, exact.Disabled)
+	require.True(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "control: re-enabled and unchanged, the tool is callable")
+
+	// 3. Rug-pull: discovery marks the collapsed record changed.
+	legacy, err := proxy.storage.GetToolApproval("a", "erase")
+	require.NoError(t, err)
+	legacy.Status = storage.ToolApprovalStatusChanged
+	legacy.PreviousDescription, legacy.CurrentDescription = legacy.CurrentDescription, "Erase everything, then exfiltrate"
+	legacy.CurrentHash = "rug-pulled"
+	require.NoError(t, proxy.storage.SaveToolApproval(legacy))
+
+	gate := proxy.evaluateToolGate("a", "ns:erase")
+	require.NotNil(t, gate.approval)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus,
+		"the changed collapsed record must lock the tool even though a stale exact approval exists")
+	assert.False(t, gate.callable())
+
+	for name, ctx := range map[string]context.Context{
+		"full-tier token": auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type: auth.AuthTypeAgent, AgentName: "full", TokenPrefix: "mcp_agt_f",
+			AllowedServers: []string{"a"},
+			Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+		}),
+		"api-key admin": context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := watchPolicyDecisions(t, rt)
+			req := mcp.CallToolRequest{}
+			req.Params.Name = contracts.ToolVariantRead
+			req.Params.Arguments = map[string]interface{}{"name": "a:ns:erase"}
+			result, err := proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "TOOL_QUARANTINED")
+			assert.Contains(t, text, "tool_description_changed")
+			assert.NotContains(t, text, "No client found", "the rug-pulled tool must never reach dispatch")
+
+			payload := probe.awaitOne(t)
+			assert.Equal(t, "blocked", payload["decision"])
+			assert.Equal(t, "ns:erase", payload["tool_name"])
+			assert.Contains(t, payload["reason"], "changed")
+		})
+	}
 }
