@@ -15,6 +15,7 @@ import (
 // "completed_external" connect-step status reaches the wire as a distinct
 // wizard_connect_step value.
 func TestPayload_WizardConnectStepCompletedExternal(t *testing.T) {
+	withoutBlockedValues(t)
 	t.Setenv("DO_NOT_TRACK", "")
 	t.Setenv("CI", "")
 	t.Setenv("MCPPROXY_TELEMETRY", "")

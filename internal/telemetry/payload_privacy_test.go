@@ -197,9 +197,7 @@ func TestPayloadV3_PassesScanForPII(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	// Clear any stale runtime blocked values so the scan is hermetic.
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 
 	if err := ScanForPII(data); err != nil {
 		t.Fatalf("well-formed v3 payload should pass ScanForPII, got: %v\npayload:\n%s", err, string(data))
@@ -391,6 +389,7 @@ func TestPayloadV4_OnboardingDoesNotLeakUserStrings(t *testing.T) {
 // already constrains the value to these enums; this test pins the contract at
 // the wire and fails loudly if a future change widens the field.
 func TestPayloadV5_DockerCLISourceIsEnumOnly(t *testing.T) {
+	withoutBlockedValues(t)
 	t.Setenv("DO_NOT_TRACK", "")
 	t.Setenv("CI", "")
 	t.Setenv("MCPPROXY_TELEMETRY", "")

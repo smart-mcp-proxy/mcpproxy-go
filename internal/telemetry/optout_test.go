@@ -213,16 +213,30 @@ func TestNotifyConfigChanged_NoBeaconWhenAlreadyDisabled(t *testing.T) {
 func TestNotifyConfigChanged_SendFailureStillDisables(t *testing.T) {
 	clearTelemetryEnv(t)
 
-	// Point at a closed server so the beacon send fails fast.
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
+	// The endpoint accepts the connection, records the attempt, then drops the
+	// connection without a response so the beacon send fails at the transport
+	// level. Signalling the attempt lets the test join the fire-and-forget
+	// beacon goroutine below: that goroutine reads the package-global
+	// BlockedValues in ScanForPII, and returning while it is still running
+	// races any later test that resets the blocklist (a -shuffle tail).
+	attempted := make(chan struct{}, 1)
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempted <- struct{}{}
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer dead.Close()
 
 	enabled := &config.Config{Telemetry: &config.TelemetryConfig{
-		Enabled: boolPtr(true), AnonymousID: "anon-xyz", Endpoint: deadURL,
+		Enabled: boolPtr(true), AnonymousID: "anon-xyz", Endpoint: dead.URL,
 	}}
 	disabled := &config.Config{Telemetry: &config.TelemetryConfig{
-		Enabled: boolPtr(false), AnonymousID: "anon-xyz", Endpoint: deadURL,
+		Enabled: boolPtr(false), AnonymousID: "anon-xyz", Endpoint: dead.URL,
 	}}
 
 	svc := New(enabled, "", "v1.2.3", "personal", zap.NewNop())
@@ -236,6 +250,14 @@ func TestNotifyConfigChanged_SendFailureStillDisables(t *testing.T) {
 			t.Fatal("telemetry was not disabled after a failed opt-out beacon")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+
+	// Join the beacon goroutine: the failed send must have been attempted
+	// (so the failure path, not a skipped send, is what left telemetry off).
+	select {
+	case <-attempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the opt-out beacon send to be attempted")
 	}
 }
 

@@ -124,6 +124,7 @@ func TestBuildPayload_PreflightPopulated(t *testing.T) {
 // PF004: JSON round-trip — the sub-object is nested under "preflight" with the
 // documented key names, and the payload still passes the anonymity scanner.
 func TestBuildPayload_PreflightJSONRoundTrip(t *testing.T) {
+	withoutBlockedValues(t)
 	pinTelemetryEnvEnabled(t)
 	svc, _ := newPreflightService(t, enabledTelemetryConfig())
 

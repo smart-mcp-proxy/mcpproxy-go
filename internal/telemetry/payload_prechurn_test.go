@@ -123,6 +123,7 @@ func TestPayload_LastErrorCodeMostRecentPerHeartbeat(t *testing.T) {
 // fields populated serializes with enum-only values and zero anonymity
 // violations (FR-012/FR-016 posture for this slice).
 func TestPayload_PreChurnPassesAnonymityScan(t *testing.T) {
+	withoutBlockedValues(t)
 	svc := newFunnelPayloadTestService(t)
 	db, _ := openPreChurnTestDB(t)
 	store := NewPreChurnStore()
