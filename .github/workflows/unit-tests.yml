@@ -177,6 +177,83 @@ jobs:
             coverage.out
             coverage.html
 
+  # Advisory shuffle lane: the same test set as "Unit Tests" on ubuntu, run
+  # with -shuffle=on so tests that only pass because of file/declaration order
+  # fail here instead of by luck. Motivation: #1222 — two fixtures flipped the
+  # process-global registry SSRF allow-policy and never restored it, and the
+  # CWE-918 regression test passed only because its file sorted first.
+  #
+  # This job is deliberately NOT in the branch-protection required list, so a
+  # newly exposed order coupling in an unrelated package does not block a PR
+  # while the tail of such tests is being found. Promote it to required once
+  # it has a run of green results on main.
+  #
+  # Reproducing a failure: with -shuffle on, every package prints its seed as
+  # the first line of its output, e.g. `-test.shuffle 1757400000000000000`.
+  # Re-run the failing package with that exact seed to get the same order:
+  #   go test -race -count=1 -shuffle=<seed> ./internal/<pkg>/
+  # (add the -skip regex below if the failing test lives next to E2E tests).
+  # Note that -count=1 matters — the seed reproduces the order, not the
+  # cache, and a cached "ok" would hide the failure.
+  test-shuffle:
+    name: Unit Tests (shuffle)
+    needs: [build-frontend]
+    runs-on: ubuntu-latest
+
+    env:
+      GO111MODULE: "on"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # Same reason as in the "Unit Tests" job: bench/arms tscg tests hard-fail
+      # without the pinned Node shim wherever `go test ./...` runs (Spec 083).
+      - name: Set up Node.js (TSCG bench arm)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: bench/tscg/package-lock.json
+
+      - name: Install pinned TSCG shim dependencies (FR-006)
+        run: npm ci --prefix bench/tscg
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Copy frontend dist for embedding
+        run: |
+          rm -rf web/frontend
+          mkdir -p web/frontend
+          cp -r frontend/dist web/frontend/
+
+      # Same tiktoken download race as in the "Unit Tests" job; see the comment
+      # there. Warm the cache once so parallel test binaries never rename.
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      # Keep the flags identical to the required ubuntu lane except for
+      # -shuffle=on (and no coverage — Codecov already gets the ordered run).
+      - name: Run unit tests (shuffled)
+        run: go test -v -race -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
   lint:
     name: Lint
     needs: [build-frontend, verify-oas]
