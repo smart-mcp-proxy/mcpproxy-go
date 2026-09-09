@@ -1191,25 +1191,47 @@ func (c *Client) SetAllToolsEnabled(ctx context.Context, serverName string, enab
 	return apiResp.Data.Changed, nil
 }
 
+// OAuthLoginResult carries the fields of the daemon's OAuthStartResponse that the
+// CLI needs to guide a user through a headless login: whether the daemon managed to
+// open a browser and, if not, the authorization URL to visit manually.
+type OAuthLoginResult struct {
+	ServerName    string
+	CorrelationID string
+	AuthURL       string
+	BrowserOpened bool
+	BrowserError  string
+	Message       string
+}
+
 // TriggerOAuthLogin initiates OAuth authentication flow for a server.
 // Returns *contracts.OAuthFlowError for structured OAuth errors (Spec 020).
+// Use TriggerOAuthLoginWithResult when the caller needs the auth URL / browser status.
 func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error {
+	_, err := c.TriggerOAuthLoginWithResult(ctx, serverName)
+	return err
+}
+
+// TriggerOAuthLoginWithResult initiates the OAuth flow for a server and returns the
+// daemon's browser status and authorization URL so the CLI can print the URL when
+// the browser could not be opened (headless hosts, SSH sessions).
+// Returns *contracts.OAuthFlowError for structured OAuth errors (Spec 020).
+func (c *Client) TriggerOAuthLoginWithResult(ctx context.Context, serverName string) (*OAuthLoginResult, error) {
 	url := fmt.Sprintf("%s/api/v1/servers/%s/login", c.baseURL, serverName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to call login API: %w", err)
+		return nil, fmt.Errorf("failed to call login API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	// Spec 020: Check for structured OAuth errors on 400 responses
@@ -1217,44 +1239,66 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 		// Try to parse as OAuthFlowError
 		var oauthFlowErr contracts.OAuthFlowError
 		if err := json.Unmarshal(bodyBytes, &oauthFlowErr); err == nil && oauthFlowErr.ErrorType != "" {
-			return &oauthFlowErr
+			return nil, &oauthFlowErr
 		}
 
 		// Try to parse as OAuthValidationError
 		var oauthValidationErr contracts.OAuthValidationError
 		if err := json.Unmarshal(bodyBytes, &oauthValidationErr); err == nil && oauthValidationErr.ErrorType != "" {
-			return &oauthValidationErr
+			return nil, &oauthValidationErr
 		}
 
 		// Fall back to generic error
-		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var apiResp struct {
 		Success bool `json:"success"`
 		Data    struct {
+			// Legacy fields kept for older daemons that returned {server, action, success}.
 			Server  string `json:"server"`
 			Action  string `json:"action"`
 			Success bool   `json:"success"`
+			// contracts.OAuthStartResponse fields (Spec 020 phase 3).
+			ServerName    string `json:"server_name"`
+			CorrelationID string `json:"correlation_id"`
+			AuthURL       string `json:"auth_url"`
+			BrowserOpened bool   `json:"browser_opened"`
+			BrowserError  string `json:"browser_error"`
+			Message       string `json:"message"`
 		} `json:"data"`
 		Error     string `json:"error"`
 		RequestID string `json:"request_id"` // T023: Capture request_id for error correlation
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if !apiResp.Success {
 		// T023: Return APIError with request_id for CLI display
-		return parseAPIError(apiResp.Error, apiResp.RequestID)
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
-	return nil
+	result := &OAuthLoginResult{
+		ServerName:    apiResp.Data.ServerName,
+		CorrelationID: apiResp.Data.CorrelationID,
+		AuthURL:       apiResp.Data.AuthURL,
+		BrowserOpened: apiResp.Data.BrowserOpened,
+		BrowserError:  apiResp.Data.BrowserError,
+		Message:       apiResp.Data.Message,
+	}
+	if result.ServerName == "" {
+		result.ServerName = apiResp.Data.Server
+	}
+	if result.ServerName == "" {
+		result.ServerName = serverName
+	}
+	return result, nil
 }
 
 // TriggerOAuthLogout clears OAuth token and disconnects a server.
