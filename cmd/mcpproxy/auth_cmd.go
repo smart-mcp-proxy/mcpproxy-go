@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -647,7 +648,8 @@ func runAuthLoginClientMode(ctx context.Context, client *cliclient.Client, serve
 	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - coordinating OAuth with running server\n\n")
 
 	// Trigger OAuth via daemon
-	if err := client.TriggerOAuthLogin(ctx, serverName); err != nil {
+	result, err := client.TriggerOAuthLoginWithResult(ctx, serverName)
+	if err != nil {
 		// Spec 020: Check for structured OAuth errors and display rich output
 		var oauthFlowErr *contracts.OAuthFlowError
 		if errors.As(err, &oauthFlowErr) {
@@ -665,11 +667,35 @@ func runAuthLoginClientMode(ctx context.Context, client *cliclient.Client, serve
 		return cliError("failed to trigger OAuth login via daemon", err)
 	}
 
-	fmt.Printf("✅ OAuth authentication flow initiated successfully for server: %s\n", serverName)
-	fmt.Println("   The daemon will handle the OAuth callback and update server state.")
-	fmt.Println("   Check 'mcpproxy upstream list' to verify authentication status.")
+	printDaemonOAuthLoginResult(os.Stdout, serverName, result)
 
 	return nil
+}
+
+// printDaemonOAuthLoginResult reports the outcome of a daemon-mode login trigger.
+// When the daemon could not open a browser (headless host, SSH session, HEADLESS=1)
+// the authorization URL is the only way for the user to finish the flow, so it is
+// printed prominently; when the browser did open it is still printed as a fallback,
+// mirroring the standalone path in internal/upstream/core/connection_oauth.go.
+func printDaemonOAuthLoginResult(w io.Writer, serverName string, result *cliclient.OAuthLoginResult) {
+	fmt.Fprintf(w, "✅ OAuth authentication flow initiated successfully for server: %s\n", serverName)
+
+	if result != nil && result.AuthURL != "" {
+		if result.BrowserOpened {
+			fmt.Fprintln(w, "   If the browser did not open, visit:")
+		} else {
+			fmt.Fprintln(w, "⚠️  Could not open a browser automatically.")
+			if result.BrowserError != "" {
+				fmt.Fprintf(w, "   Reason: %s\n", result.BrowserError)
+			}
+			fmt.Fprintln(w, "   Open this URL in a browser to complete authentication:")
+		}
+		fmt.Fprintf(w, "   %s\n", result.AuthURL)
+		fmt.Fprintln(w)
+	}
+
+	fmt.Fprintln(w, "   The daemon will handle the OAuth callback and update server state.")
+	fmt.Fprintln(w, "   Check 'mcpproxy upstream list' to verify authentication status.")
 }
 
 // runAuthLoginStandalone executes OAuth login in standalone mode (original behavior).

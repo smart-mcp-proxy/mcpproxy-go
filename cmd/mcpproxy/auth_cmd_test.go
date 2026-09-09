@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
@@ -265,4 +267,49 @@ func TestFilterOAuthServers(t *testing.T) {
 			assert.Equal(t, tt.expected, len(result), "filterOAuthServers should return correct number of OAuth servers")
 		})
 	}
+}
+
+func TestPrintDaemonOAuthLoginResult_BrowserNotOpened(t *testing.T) {
+	var out bytes.Buffer
+	printDaemonOAuthLoginResult(&out, "github", &cliclient.OAuthLoginResult{
+		ServerName:    "github",
+		AuthURL:       "https://auth.example.com/authorize?state=abc",
+		BrowserOpened: false,
+		BrowserError:  "HEADLESS mode - browser not opened. Please open the auth_url manually.",
+	})
+
+	got := out.String()
+	assert.Contains(t, got, "OAuth authentication flow initiated successfully for server: github")
+	assert.Contains(t, got, "Could not open a browser automatically")
+	assert.Contains(t, got, "HEADLESS mode - browser not opened")
+	assert.Contains(t, got, "https://auth.example.com/authorize?state=abc")
+	assert.Contains(t, got, "mcpproxy upstream list")
+}
+
+func TestPrintDaemonOAuthLoginResult_BrowserOpened(t *testing.T) {
+	var out bytes.Buffer
+	printDaemonOAuthLoginResult(&out, "github", &cliclient.OAuthLoginResult{
+		ServerName:    "github",
+		AuthURL:       "https://auth.example.com/authorize?state=abc",
+		BrowserOpened: true,
+	})
+
+	got := out.String()
+	assert.Contains(t, got, "OAuth authentication flow initiated successfully for server: github")
+	assert.Contains(t, got, "If the browser did not open, visit:")
+	assert.Contains(t, got, "https://auth.example.com/authorize?state=abc")
+	assert.NotContains(t, got, "Could not open a browser automatically")
+}
+
+func TestPrintDaemonOAuthLoginResult_NoAuthURL(t *testing.T) {
+	var out bytes.Buffer
+	printDaemonOAuthLoginResult(&out, "github", &cliclient.OAuthLoginResult{
+		ServerName:    "github",
+		BrowserOpened: false,
+	})
+
+	got := out.String()
+	assert.Contains(t, got, "OAuth authentication flow initiated successfully for server: github")
+	assert.NotContains(t, got, "visit:")
+	assert.Contains(t, got, "mcpproxy upstream list")
 }
