@@ -255,10 +255,10 @@ epics:
         depends_on: [action-log-glance-view]
       - id: activity-storage-bounds
         title: "Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175)"
-        status: in_progress
+        status: done
         priority: P1
-        pr: "#1174"
-        note: "User report 2026-09-02 (#1173): config.db reached 940MB; activity_max_response_size existed but was never read, and server_<id>_tool_calls buckets have no size, count or age bound at all (the other ~432MB). #1174 (external contributor, CI green) wires the 64KB cap; #1176 and #1175 are the follow-ons. Retention backend (073) prunes activity records only, not the per-server buckets."
+        pr: ["#1174", "#1214"]
+        note: "User report 2026-09-02 (#1173): config.db reached 940MB; activity_max_response_size existed but was never read, and server_<id>_tool_calls buckets have no size, count or age bound at all (the other ~432MB). #1174 (external contributor) wired the 64KB cap on the write path; #1214 bounded the per-server tool_calls buckets, stopped omitempty erasing configured zeros and added `mcpproxy db compact` (closed #1175/#1176, 2026-09-05). Retention backend (073) prunes activity records only, not the per-server buckets."
         depends_on: []
 
   - id: analytics-dashboard
@@ -393,6 +393,99 @@ epics:
     pr: "#1063"
     depends_on: []
     note: "Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema, with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction). COMPLETE: all 89 tasks shipped in #1063; the settings UI for both serialization axes followed in #1082; #1083/#1084 fixed in #1086. MEASURED SAVINGS FELL WELL SHORT OF THE ~88% ORIGINALLY PROJECTED: 29.7% on the frozen 45-tool reference corpus and 34.8% on a 527-tool snapshot, with 38.9% the arithmetic ceiling even if both the schema and the signature were deleted. The projection assumed schemas dominate the payload; names, descriptions and annotations turn out to carry most of it. SC-001 was RESTATED per corpus shape (maintainer decision 2026-08-29): now >=25% on the 45-tool corpus and >=30% at fleet scale, both asserted in internal/server/mcp_routing_deferred_tokens_test.go, with the original 70% kept as an upper tripwire. Unblocks token-bench — and that measured shortfall is the first thing token-bench has to explain."
+
+  - id: agent-scope-hardening
+    title: "Agent-token scope hardening: every MCP request authorized by its own scope (spec 105)"
+    status: in_progress
+    priority: P1
+    spec: specs/105-agent-scope-hardening
+    depends_on: [schema-deferred]
+    note: "The Spec 104 cross-model review verified 'an agent token sees and uses only its granted servers, profile and tiers' against the code one surface at a time and found eight places where a legitimately narrow token could learn about or act on servers outside its grant: cached responses, set_profile and profile-URL responses, retrieve_tools metadata, direct-publication filtering, target-tier execution, aggregated prompts, per-server management ops, and refusal shapes. Spec 105 is the acceptance contract (19 astra rounds, ready-for-plan 2026-09-07). Five fix sessions ran in parallel from the review and MERGED 2026-09-08 (#1223 target tier, #1224 tail_log, #1225 set_profile, #1226 read_cache provenance, #1227 prompt owner + deleted-pin enumeration), each live-verified against a baseline binary and astra-reviewed to CLEAN. Each of those PR bodies carries a 'Follow-ups / Spec 105 gaps' checklist — the todo tasks below are those lists grouped by FR. Prerequisite for auto-routing-mode: Spec 104 FR-016 states the invariant these corrections make true."
+    tasks:
+      - id: scope-fix-target-tier
+        title: "FR-009 (dispatch half): call_tool_* requires the TARGET tool's tier, fail closed on unresolved tiers; approval records keep exact ns:name identity"
+        status: done
+        pr: "#1223"
+        depends_on: []
+      - id: scope-fix-tail-log
+        title: "FR-007 (name half): upstream_servers tail_log authorizes the server against effective scope before lookup, non-disclosing"
+        status: done
+        pr: "#1224"
+        depends_on: []
+      - id: scope-fix-set-profile
+        title: "FR-003: set_profile reports token ∩ profile, selectable-profile predicate, non-selectable == nonexistent"
+        status: done
+        pr: "#1225"
+        depends_on: []
+      - id: scope-fix-read-cache
+        title: "FR-001: cached responses carry the producer's authorization snapshot; read_cache and the REST cache branch refuse narrower readers"
+        status: done
+        pr: "#1226"
+        depends_on: []
+      - id: scope-fix-prompts-profile-url
+        title: "FR-006 + FR-004 (deleted pin): aggregated prompts authorized by canonical registration owner; profile URL / set_profile stop enumerating on a deleted pin"
+        status: done
+        pr: "#1227"
+        depends_on: []
+      - id: scope-retrieve-tools
+        title: "FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only"
+        status: todo
+        priority: P1
+        depends_on: []
+      - id: scope-direct-publication
+        title: "FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred"
+        status: todo
+        priority: P1
+        depends_on: []
+      - id: scope-refusal-shapes
+        title: "FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus"
+        status: todo
+        priority: P1
+        depends_on: [scope-retrieve-tools]
+      - id: scope-selectable-profile-predicate
+        title: "FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists)"
+        status: todo
+        priority: P1
+        depends_on: [scope-fix-set-profile, scope-fix-prompts-profile-url]
+      - id: scope-cache-legacy-invalidation
+        title: "FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list)"
+        status: todo
+        priority: P2
+        depends_on: [scope-fix-read-cache]
+      - id: scope-log-attribution
+        title: "FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list)"
+        status: todo
+        priority: P2
+        depends_on: [scope-fix-tail-log]
+      - id: scope-target-identity-producers
+        title: "FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list)"
+        status: todo
+        priority: P2
+        depends_on: [scope-fix-target-tier]
+      - id: scope-regression-suite
+        title: "FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot"
+        status: todo
+        priority: P2
+        depends_on: [scope-retrieve-tools, scope-direct-publication, scope-refusal-shapes]
+
+  - id: auto-routing-mode
+    title: "Auto routing mode: budget-fitted tool surface per session (spec 104)"
+    status: todo
+    priority: P1
+    spec: specs/104-auto-routing-mode
+    depends_on: [agent-scope-hardening, schema-deferred, token-bench]
+    note: "routing_mode: auto measures, per session and on the catalog that session will actually see, the three candidate surfaces (direct full, direct deferred, retrieve compact — the Spec 103 bench cell names) with the real tokenizer and serves the richest rung under a 12,000-token budget, so the small-fleet developer gets the whole menu with schemas and the 1,000-tool fleet stays on search — the current default is strictly worse than no proxy for the first population. Decision record (rung, three measurements, budget, counts, scope label, reason, time) surfaces in the routing API, doctor, tray, Web UI and telemetry; hysteresis so a 1% catalog change never flips a live session. Spec: 14 astra rounds, ready-for-plan 2026-09-07; its fixed-surface corrections were split out as Spec 105 (FR-016 states the invariant 105 makes true), hence the hard dependency. P1 = US1-4 (rung selection, session stability, scoped measurement, routing API + doctor); P2 = US5-6 (hysteresis reporting, tray/Web UI rendering, telemetry)."
+    tasks:
+      - id: auto-routing-p1
+        title: "P1 (US1-4): per-session measurement of the three candidates on the scoped catalog, rung selection under the budget, stable sessions, decision record in routing API + doctor"
+        status: todo
+        priority: P1
+        depends_on: []
+      - id: auto-routing-p2
+        title: "P2 (US5-6): hysteresis reporting on catalog change, tray + Web UI rendering of the decision, telemetry counters"
+        status: todo
+        priority: P2
+        depends_on: [auto-routing-p1]
 
   - id: token-bench
     title: "Token-efficiency benchmark: measured savings, published results"

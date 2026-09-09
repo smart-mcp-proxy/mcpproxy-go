@@ -44,6 +44,8 @@ graph LR
   tpa_db["tpa-db: versioned TPA signature databas…"]
   remote_access_tunnel["Remote access tunnel (feature-flagged M…"]
   schema_deferred["Deferred-schema serialization for the d…"]
+  agent_scope_hardening["Agent-token scope hardening: every MCP…"]
+  auto_routing_mode["Auto routing mode: budget-fitted tool s…"]
   token_bench["Token-efficiency benchmark: measured sa…"]
   tool_graph["Tool co-occurrence graph (experimental,…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
@@ -57,6 +59,10 @@ graph LR
   tpa_db --> remote_access_tunnel
   ux_audit --> remote_access_tunnel
   analytics_dashboard --> remote_access_tunnel
+  schema_deferred --> agent_scope_hardening
+  agent_scope_hardening --> auto_routing_mode
+  schema_deferred --> auto_routing_mode
+  token_bench --> auto_routing_mode
   schema_deferred --> token_bench
   analytics_dashboard --> tool_graph
   telemetry_identity --> telemetry_v7_churn
@@ -65,8 +71,8 @@ graph LR
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred done;
-  class ux_audit,action_log_transparency,token_bench,telemetry_identity,telemetry_v7_churn in_progress;
-  class tpa_db,remote_access_tunnel,tool_graph todo;
+  class ux_audit,action_log_transparency,agent_scope_hardening,token_bench,telemetry_identity,telemetry_v7_churn in_progress;
+  class tpa_db,remote_access_tunnel,auto_routing_mode,tool_graph todo;
 ```
 
 **Independent epics** (15) — no cross-epic prerequisites; each stands alone:
@@ -184,10 +190,8 @@ graph LR
   action_log_glance_view --> action_log_retention_tie_in
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sessions_web_ui done;
-  class activity_storage_bounds in_progress;
+  class sessions_web_ui,activity_storage_bounds done;
   class action_log_glance_view,action_log_tray_menu,tray_menu_open_telemetry,action_log_retention_tie_in todo;
 ```
 
@@ -198,7 +202,64 @@ graph LR
 | Activity in the tray menu (recent tool calls + security events, jump to full log) | ⚪ Todo | — |
 | tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
 | Tie activity retention/size into the glance view | ⚪ Todo | — |
-| Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175) | 🔵 In progress | #1174 |
+| Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175) | 🟢 Done | #1174 #1214 |
+
+</details>
+
+<details>
+<summary>🔵 Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) — In progress · P1</summary>
+
+> The Spec 104 cross-model review verified 'an agent token sees and uses only its granted servers, profile and tiers' against the code one surface at a time and found eight places where a legitimately narrow token could learn about or act on servers outside its grant: cached responses, set_profile and profile-URL responses, retrieve_tools metadata, direct-publication filtering, target-tier execution, aggregated prompts, per-server management ops, and refusal shapes. Spec 105 is the acceptance contract (19 astra rounds, ready-for-plan 2026-09-07). Five fix sessions ran in parallel from the review and MERGED 2026-09-08 (#1223 target tier, #1224 tail_log, #1225 set_profile, #1226 read_cache provenance, #1227 prompt owner + deleted-pin enumeration), each live-verified against a baseline binary and astra-reviewed to CLEAN. Each of those PR bodies carries a 'Follow-ups / Spec 105 gaps' checklist — the todo tasks below are those lists grouped by FR. Prerequisite for auto-routing-mode: Spec 104 FR-016 states the invariant these corrections make true.
+
+Spec: [105-agent-scope-hardening](./specs/105-agent-scope-hardening/)
+
+```mermaid
+graph LR
+  scope_fix_target_tier["FR-009 (dispatch half): call_tool_* requires…"]
+  scope_fix_tail_log["FR-007 (name half): upstream_servers tail_log…"]
+  scope_fix_set_profile["FR-003: set_profile reports token ∩ profile,…"]
+  scope_fix_read_cache["FR-001: cached responses carry the producer's…"]
+  scope_fix_prompts_profile_url["FR-006 + FR-004 (deleted pin): aggregated pro…"]
+  scope_retrieve_tools["FR-005: retrieve_tools filters by scope BEFOR…"]
+  scope_direct_publication["FR-008: direct-surface definitions take owner…"]
+  scope_refusal_shapes["FR-010: scope-first refusal precedence; dispa…"]
+  scope_selectable_profile_predicate["FR-003/FR-004 remainder: selectable-profile p…"]
+  scope_cache_legacy_invalidation["FR-002 + FR-001 remainder: legacy/unstamped a…"]
+  scope_log_attribution["FR-007 remainder: per-record canonical log ow…"]
+  scope_target_identity_producers["FR-009 remainder: producer-side exact-name id…"]
+  scope_regression_suite["FR-011/FR-013/FR-014: two-fixture differentia…"]
+
+  scope_retrieve_tools --> scope_refusal_shapes
+  scope_fix_set_profile --> scope_selectable_profile_predicate
+  scope_fix_prompts_profile_url --> scope_selectable_profile_predicate
+  scope_fix_read_cache --> scope_cache_legacy_invalidation
+  scope_fix_tail_log --> scope_log_attribution
+  scope_fix_target_tier --> scope_target_identity_producers
+  scope_retrieve_tools --> scope_regression_suite
+  scope_direct_publication --> scope_regression_suite
+  scope_refusal_shapes --> scope_regression_suite
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class scope_fix_target_tier,scope_fix_tail_log,scope_fix_set_profile,scope_fix_read_cache,scope_fix_prompts_profile_url done;
+  class scope_retrieve_tools,scope_direct_publication,scope_refusal_shapes,scope_selectable_profile_predicate,scope_cache_legacy_invalidation,scope_log_attribution,scope_target_identity_producers,scope_regression_suite todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| FR-009 (dispatch half): call_tool_* requires the TARGET tool's tier, fail closed on unresolved tiers; approval records keep exact ns:name identity | 🟢 Done | #1223 |
+| FR-007 (name half): upstream_servers tail_log authorizes the server against effective scope before lookup, non-disclosing | 🟢 Done | #1224 |
+| FR-003: set_profile reports token ∩ profile, selectable-profile predicate, non-selectable == nonexistent | 🟢 Done | #1225 |
+| FR-001: cached responses carry the producer's authorization snapshot; read_cache and the REST cache branch refuse narrower readers | 🟢 Done | #1226 |
+| FR-006 + FR-004 (deleted pin): aggregated prompts authorized by canonical registration owner; profile URL / set_profile stop enumerating on a deleted pin | 🟢 Done | #1227 |
+| FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only | ⚪ Todo | — |
+| FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred | ⚪ Todo | — |
+| FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus | ⚪ Todo | — |
+| FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists) | ⚪ Todo | — |
+| FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list) | ⚪ Todo | — |
+| FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list) | ⚪ Todo | — |
+| FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list) | ⚪ Todo | — |
+| FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot | ⚪ Todo | — |
 
 </details>
 
@@ -391,6 +452,31 @@ graph LR
 | Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
 | Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
 | Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Auto routing mode: budget-fitted tool surface per session (spec 104) — Todo · P1</summary>
+
+> routing_mode: auto measures, per session and on the catalog that session will actually see, the three candidate surfaces (direct full, direct deferred, retrieve compact — the Spec 103 bench cell names) with the real tokenizer and serves the richest rung under a 12,000-token budget, so the small-fleet developer gets the whole menu with schemas and the 1,000-tool fleet stays on search — the current default is strictly worse than no proxy for the first population. Decision record (rung, three measurements, budget, counts, scope label, reason, time) surfaces in the routing API, doctor, tray, Web UI and telemetry; hysteresis so a 1% catalog change never flips a live session. Spec: 14 astra rounds, ready-for-plan 2026-09-07; its fixed-surface corrections were split out as Spec 105 (FR-016 states the invariant 105 makes true), hence the hard dependency. P1 = US1-4 (rung selection, session stability, scoped measurement, routing API + doctor); P2 = US5-6 (hysteresis reporting, tray/Web UI rendering, telemetry).
+
+Spec: [104-auto-routing-mode](./specs/104-auto-routing-mode/)
+
+```mermaid
+graph LR
+  auto_routing_p1["P1 (US1-4): per-session measurement of the th…"]
+  auto_routing_p2["P2 (US5-6): hysteresis reporting on catalog c…"]
+
+  auto_routing_p1 --> auto_routing_p2
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class auto_routing_p1,auto_routing_p2 todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| P1 (US1-4): per-session measurement of the three candidates on the scoped catalog, rung selection under the budget, stable sessions, decision record in routing API + doctor | ⚪ Todo | — |
+| P2 (US5-6): hysteresis reporting on catalog change, tray + Web UI rendering of the decision, telemetry counters | ⚪ Todo | — |
 
 </details>
 
@@ -776,6 +862,7 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
+| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | In progress | P1 | — | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
@@ -783,6 +870,7 @@ graph LR
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
+| Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Tool co-occurrence graph (experimental, feature-flagged) | Todo | P2 | — |  |  |
@@ -919,3 +1007,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [101-tpa-db](./specs/101-tpa-db/) | — | — |
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
+| [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
+| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | — | — |

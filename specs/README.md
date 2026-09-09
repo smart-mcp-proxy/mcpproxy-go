@@ -80,6 +80,8 @@ Brainstormed design docs that feed future specs live under [`docs/superpowers/sp
 | [041-quarantine-invariants](./041-quarantine-invariants/) | Quarantine State Machine Invariants & Property Tests | — | — |
 | [042-telemetry-tier2](./042-telemetry-tier2/) | Telemetry Tier 2 — Privacy-Respecting Usage Signals | `drafted` | 0/91 (0%) |
 | [043-linux-package-repos](./043-linux-package-repos/) | Linux Package Repositories (apt/yum) | `shipped` | 39/41 (95%) |
+| [104-auto-routing-mode](./104-auto-routing-mode/) | Auto Routing Mode — Budget-Fitted Tool Surface Per Session | `drafted` | — |
+| [105-agent-scope-hardening](./105-agent-scope-hardening/) | Agent-Token Scope Hardening — Every MCP Request Authorized by Its Own Scope | `drafted` | — |
 
 ## Updating this index
 
