@@ -434,6 +434,7 @@ func TestPreflightCounters_IsZeroAndWireKeys(t *testing.T) {
 // P014: the store never persists anything that looks like an identity, even
 // when every enum member is exercised.
 func TestPreflightCounters_NoLeakPII(t *testing.T) {
+	withoutBlockedValues(t)
 	db, cleanup := newTestPreflightDB(t)
 	defer cleanup()
 
@@ -530,6 +531,7 @@ func TestScanForPII_RejectsUnknownPreflightKey(t *testing.T) {
 // P016c: the closed-key set is exactly what MarshalJSON emits, so a populated
 // payload can never trip the rule it is guarded by.
 func TestScanForPII_PreflightAllowedKeysMatchWireForm(t *testing.T) {
+	withoutBlockedValues(t)
 	full := PreflightCounters{
 		FilterDiagEmitted24h:           1,
 		FilterDiagMissingAnnotation24h: 2,
@@ -563,6 +565,7 @@ func TestScanForPII_PreflightAllowedKeysMatchWireForm(t *testing.T) {
 
 // P017: a well-formed preflight sub-object passes the scanner untouched.
 func TestScanForPII_AcceptsWellFormedPreflight(t *testing.T) {
+	withoutBlockedValues(t)
 	payload := []byte(`{"preflight":{"filter_diag_emitted_24h":3,` +
 		`"filter_diag_missing_annotation_24h":7,"filter_diag_explicit_24h":2,` +
 		`"filter_diag_followed_24h":1,"availability_block_24h":4,` +

@@ -270,9 +270,7 @@ func TestPayloadV9_TrustModeDistributionAndFunnelCounters(t *testing.T) {
 		}
 	}
 
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 	if scanErr := ScanForPII(data); scanErr != nil {
 		t.Fatalf("v9 payload must pass ScanForPII, got: %v\npayload:\n%s", scanErr, js)
 	}
@@ -307,9 +305,7 @@ func TestPayloadV9_TPAScannerStillOmittedWhenNoScans(t *testing.T) {
 // TestScanForPII_V9ShapeViolations pins the wire-form backstop for the two new
 // tpa_scanner counters and the trust-mode histogram.
 func TestScanForPII_V9ShapeViolations(t *testing.T) {
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 
 	clean := []string{
 		`{"anonymous_id":"abc","schema_version":9}`,

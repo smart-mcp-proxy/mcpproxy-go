@@ -213,16 +213,36 @@ func TestNotifyConfigChanged_NoBeaconWhenAlreadyDisabled(t *testing.T) {
 func TestNotifyConfigChanged_SendFailureStillDisables(t *testing.T) {
 	clearTelemetryEnv(t)
 
-	// Point at a closed server so the beacon send fails fast.
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
+	// The endpoint accepts the connection, records the attempt, then drops the
+	// connection without a response so the beacon send fails at the transport
+	// level. Signalling the attempt lets the test wait below until the
+	// fire-and-forget beacon goroutine has got as far as the HTTP send. That
+	// goroutine calls ScanForPII first, which reads the package-global
+	// BlockedValues, so returning before the send is attempted races any later
+	// test that resets the blocklist (a -shuffle tail). The send is
+	// non-blocking so a retried or duplicated request can never wedge the
+	// handler on a full channel.
+	attempted := make(chan struct{}, 1)
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case attempted <- struct{}{}:
+		default:
+		}
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer dead.Close()
 
 	enabled := &config.Config{Telemetry: &config.TelemetryConfig{
-		Enabled: boolPtr(true), AnonymousID: "anon-xyz", Endpoint: deadURL,
+		Enabled: boolPtr(true), AnonymousID: "anon-xyz", Endpoint: dead.URL,
 	}}
 	disabled := &config.Config{Telemetry: &config.TelemetryConfig{
-		Enabled: boolPtr(false), AnonymousID: "anon-xyz", Endpoint: deadURL,
+		Enabled: boolPtr(false), AnonymousID: "anon-xyz", Endpoint: dead.URL,
 	}}
 
 	svc := New(enabled, "", "v1.2.3", "personal", zap.NewNop())
@@ -236,6 +256,17 @@ func TestNotifyConfigChanged_SendFailureStillDisables(t *testing.T) {
 			t.Fatal("telemetry was not disabled after a failed opt-out beacon")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+
+	// Wait until the send has been attempted, which is past the goroutine's
+	// ScanForPII read of BlockedValues. This both proves the failure path (not
+	// a skipped send) is what left telemetry off, and keeps the blocklist read
+	// inside this test's lifetime. It does not wait for the goroutine to exit;
+	// nothing it does after the send touches BlockedValues.
+	select {
+	case <-attempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the opt-out beacon send to be attempted")
 	}
 }
 

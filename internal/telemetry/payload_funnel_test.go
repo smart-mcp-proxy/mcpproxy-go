@@ -108,6 +108,7 @@ func TestPayload_FunnelFieldsOmittedWithoutStore(t *testing.T) {
 // 0), and active_days_30d — and the serialized payload passes the anonymity
 // scanner (no timestamps, no per-day structure on the wire).
 func TestPayload_FunnelFieldsPopulated(t *testing.T) {
+	withoutBlockedValues(t)
 	svc := newFunnelPayloadTestService(t)
 	db := openFunnelTestDB(t)
 	store := NewFunnelStore()

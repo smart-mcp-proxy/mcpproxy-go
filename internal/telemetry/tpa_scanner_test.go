@@ -282,9 +282,7 @@ func TestPayloadV8_TPAScannerIncludedAndAnonymous(t *testing.T) {
 		t.Errorf("zero-valued severity leaked into findings:\n%s", js)
 	}
 
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 	if scanErr := ScanForPII(data); scanErr != nil {
 		t.Fatalf("v8 payload with tpa_scanner must pass ScanForPII, got: %v\npayload:\n%s", scanErr, js)
 	}
@@ -342,9 +340,7 @@ func TestBuildFeatureFlagSnapshot_DeepScan(t *testing.T) {
 // non-enum key, a negative count, a string count, or an unknown field is
 // rejected before transmit.
 func TestScanForPII_TPAScannerShapeViolations(t *testing.T) {
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 
 	clean := []string{
 		`{"anonymous_id":"abc","schema_version":8}`,

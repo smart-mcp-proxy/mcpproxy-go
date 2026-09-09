@@ -63,6 +63,7 @@ func TestScanForPII_BlockedValue_EnvVar(t *testing.T) {
 // TestScanForPII_CleanPayload asserts that a well-formed v3 payload with no
 // blocked prefixes passes cleanly.
 func TestScanForPII_CleanPayload(t *testing.T) {
+	withoutBlockedValues(t)
 	payload := []byte(`{"anonymous_id":"550e8400-e29b-41d4-a716-446655440000","version":"v0.25.0","os":"darwin","arch":"arm64","schema_version":3,"env_kind":"interactive","env_markers":{"has_ci_env":false,"has_cloud_ide_env":false,"is_container":false,"has_tty":true,"has_display":true}}`)
 
 	if err := ScanForPII(payload); err != nil {
@@ -97,9 +98,7 @@ func TestScanForPII_EnvMarkersNonBool(t *testing.T) {
 // appender collects hostname, home-dir basename, and sensitive env-var values
 // into BlockedValues, deduplicating and dropping entries shorter than 3 bytes.
 func TestPopulateBlockedValuesFrom(t *testing.T) {
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 
 	fakeHost := func() (string, error) { return "my-host.local", nil }
 	fakeHome := func() (string, error) { return "/Users/alice", nil }
@@ -200,11 +199,9 @@ func TestScanForPII_V7FieldViolations(t *testing.T) {
 	// hostname and home-dir basename and is never undone (sync.Once). Under
 	// -shuffle that leaks into this test: a basename such as "user" trips rule
 	// 2 ("blocked_value") on the "terminated by user" payload before rule 7
-	// gets to report v7_field_invalid. Same save-and-restore as the other
+	// gets to report v7_field_invalid. Same isolation as the other
 	// ScanForPII tests in this file.
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 
 	cases := map[string]struct {
 		payload string
@@ -287,6 +284,7 @@ func TestScanForPII_V7FieldViolations(t *testing.T) {
 // the fixed enums — including the widened wizard_connect_step and the
 // spec-allowed "unknown" previous_shutdown.
 func TestScanForPII_V7FieldValidValues(t *testing.T) {
+	withoutBlockedValues(t)
 	payloads := []string{
 		`{"anonymous_id":"abc","schema_version":7,"wizard_shown":true,"web_ui_opened":3,"days_since_install":0,"active_days_30d":30}`,
 		`{"anonymous_id":"abc","schema_version":7,"previous_shutdown":"clean"}`,

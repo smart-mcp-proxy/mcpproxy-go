@@ -71,9 +71,7 @@ func TestPayloadV7_FullyPopulatedPassesScanner(t *testing.T) {
 	js := string(data)
 
 	// Hermetic scan: no stale runtime blocked values.
-	prev := BlockedValues
-	BlockedValues = nil
-	defer func() { BlockedValues = prev }()
+	withoutBlockedValues(t)
 
 	if scanErr := ScanForPII(data); scanErr != nil {
 		t.Fatalf("fully-populated v7 payload must pass ScanForPII (SC-007), got: %v\npayload:\n%s", scanErr, js)
