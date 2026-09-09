@@ -46,8 +46,7 @@ func TestOutputServers_TableFormat(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -104,8 +103,7 @@ func TestOutputServers_JSONFormat(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format for JSON
-	globalOutputFormat = "json"
-	globalJSONOutput = false
+	setOutputGlobals(t, "json", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -138,8 +136,7 @@ func TestOutputServers_InvalidFormat(t *testing.T) {
 	}
 
 	// Use global output format for invalid format test
-	globalOutputFormat = "invalid-format"
-	globalJSONOutput = false
+	setOutputGlobals(t, "invalid-format", false)
 	err := outputServers(servers)
 
 	if err == nil {
@@ -164,8 +161,7 @@ func TestOutputServers_Sorting(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format for JSON
-	globalOutputFormat = "json"
-	globalJSONOutput = false
+	setOutputGlobals(t, "json", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -208,8 +204,7 @@ func TestOutputServers_EmptyList(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -411,8 +406,7 @@ func TestOutputServers_BooleanFields(t *testing.T) {
 			defer func() { os.Stdout = oldStdout }()
 
 			// Use global output format for table
-			globalOutputFormat = "table"
-			globalJSONOutput = false
+			setOutputGlobals(t, "table", false)
 			err := outputServers(servers)
 
 			w.Close()
@@ -459,8 +453,7 @@ func TestOutputServers_IntegerFields(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -508,8 +501,7 @@ func TestOutputServers_StatusMessages(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -1419,8 +1411,7 @@ func TestOutputError_WithRequestID(t *testing.T) {
 		defer func() { os.Stderr = oldStderr }()
 
 		// Set table format (human-readable output)
-		globalOutputFormat = "table"
-		globalJSONOutput = false
+		setOutputGlobals(t, "table", false)
 
 		// Create an APIError with request_id
 		apiErr := &cliclient.APIError{
@@ -1455,8 +1446,7 @@ func TestOutputError_WithRequestID(t *testing.T) {
 		defer func() { os.Stdout = oldStdout }()
 
 		// Set JSON format
-		globalOutputFormat = "json"
-		globalJSONOutput = true
+		setOutputGlobals(t, "json", true)
 
 		// Create an APIError with request_id
 		apiErr := &cliclient.APIError{
@@ -1498,8 +1488,7 @@ func TestOutputError_WithoutRequestID(t *testing.T) {
 		defer func() { os.Stderr = oldStderr }()
 
 		// Set table format
-		globalOutputFormat = "table"
-		globalJSONOutput = false
+		setOutputGlobals(t, "table", false)
 
 		// Create an APIError without request_id
 		apiErr := &cliclient.APIError{
@@ -1534,8 +1523,7 @@ func TestOutputError_WithoutRequestID(t *testing.T) {
 		defer func() { os.Stderr = oldStderr }()
 
 		// Set table format
-		globalOutputFormat = "table"
-		globalJSONOutput = false
+		setOutputGlobals(t, "table", false)
 
 		// Create a regular error (not APIError)
 		regularErr := os.ErrNotExist

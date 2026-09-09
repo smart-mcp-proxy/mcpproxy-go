@@ -202,8 +202,7 @@ func TestOutputGlobalTools_JSONShape(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	globalOutputFormat = "json"
-	globalJSONOutput = false
+	setOutputGlobals(t, "json", false)
 	err := outputGlobalTools(tools)
 
 	w.Close()
@@ -240,8 +239,7 @@ func TestOutputGlobalTools_TableColumns(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputGlobalTools(tools)
 
 	w.Close()
@@ -482,8 +480,7 @@ func TestOutputGlobalTools_HeldColumn(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputGlobalTools(tools)
 
 	w.Close()
