@@ -193,8 +193,11 @@ jobs:
   # Re-run the failing package with that exact seed to get the same order:
   #   go test -race -count=1 -shuffle=<seed> ./internal/<pkg>/
   # (add the -skip regex below if the failing test lives next to E2E tests).
-  # Note that -count=1 matters — the seed reproduces the order, not the
-  # cache, and a cached "ok" would hide the failure.
+  # -shuffle is not one of go test's cacheable flags, so the replay is never
+  # served from the result cache; -count=1 is only the idiomatic belt-and-
+  # braces bypass for when flags get trimmed while bisecting. The seed fixes
+  # the test ORDER only — not goroutine scheduling or map iteration — and the
+  # blocked-value tests also depend on the host (hostname, $HOME basename).
   test-shuffle:
     name: Unit Tests (shuffle)
     needs: [build-frontend]
