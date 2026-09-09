@@ -195,6 +195,17 @@ func TestScanForPII_RawMachineIDBlocked(t *testing.T) {
 // one malformed field into an otherwise-clean payload and expects the
 // v7_field_invalid rule to fire with the field name as the pattern.
 func TestScanForPII_V7FieldViolations(t *testing.T) {
+	// Isolate from the process-global BlockedValues. Any earlier test that
+	// calls Service.Start reaches PopulateBlockedValues, which appends the real
+	// hostname and home-dir basename and is never undone (sync.Once). Under
+	// -shuffle that leaks into this test: a basename such as "user" trips rule
+	// 2 ("blocked_value") on the "terminated by user" payload before rule 7
+	// gets to report v7_field_invalid. Same save-and-restore as the other
+	// ScanForPII tests in this file.
+	prev := BlockedValues
+	BlockedValues = nil
+	defer func() { BlockedValues = prev }()
+
 	cases := map[string]struct {
 		payload string
 		field   string
