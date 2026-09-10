@@ -3,11 +3,20 @@
 package launcher
 
 import (
+	"io"
 	"os/exec"
 	"syscall"
 
 	"go.uber.org/zap"
 )
+
+// createJob is a no-op on Unix: applyProcAttrs' process-group setup already
+// gives terminateProcess/killProcess a way to reach grandchildren, so there
+// is nothing extra to track here. See launcher_windows.go for the platform
+// that actually needs this.
+func createJob(_ *exec.Cmd) io.Closer {
+	return nil
+}
 
 // applyProcAttrs places the child in its own process group so we can signal
 // the entire group (including grandchildren spawned via `sh -c …` or

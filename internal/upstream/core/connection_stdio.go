@@ -260,6 +260,21 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("failed to start stdio client: %w", err)
 	}
 
+	// Extract the process group ID (Windows: assign to a Job Object) IMMEDIATELY
+	// after Start() succeeds, not after initialize() below. A restart/disconnect
+	// that interrupts an in-progress handshake (slow npx download, bulk-add
+	// contention, a timeout) previously left processGroupID at its zero value
+	// the whole time initialize() was running, so the init-failure cleanup path
+	// a few lines down (`if c.processGroupID > 0 { killProcessGroup(...) }`)
+	// silently did nothing and the spawned process (and on Windows, everything
+	// IT spawns) leaked. Setting it here means that cleanup path — and any
+	// concurrent restart that arrives before initialize() returns — has a real
+	// PID/Job Object to kill. The later extraction below is now just a no-op
+	// (its own `if c.processGroupID <= 0` guard) for the normal success path.
+	if c.processCmd != nil && c.processCmd.Process != nil {
+		c.processGroupID = extractProcessGroupID(c.processCmd, c.logger, c.config.Name)
+	}
+
 	// CRITICAL FIX: Enable stderr monitoring IMMEDIATELY after starting the process
 	// This ensures we capture startup errors (like missing API keys) even if
 	// initialization fails with timeout. Previously, stderr monitoring started
