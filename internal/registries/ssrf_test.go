@@ -52,6 +52,14 @@ func TestIsBlockedIP(t *testing.T) {
 		"::",              // unspecified v6
 		"224.0.0.1",       // multicast
 		"ff02::1",         // link-local multicast v6
+		// IPv6 transition addresses embedding a blocked IPv4.
+		"2002:a9fe:a9fe::1",        // 6to4 -> 169.254.169.254
+		"2002:7f00:1::1",           // 6to4 -> 127.0.0.1
+		"64:ff9b::a9fe:a9fe",       // NAT64 well-known prefix -> 169.254.169.254
+		"64:ff9b::7f00:1",          // NAT64 well-known prefix -> 127.0.0.1
+		"64:ff9b:1::7f00:1",        // NAT64 local-use prefix
+		"2001:0:0:0:0:0:80ff:fffe", // Teredo -> client 127.0.0.1
+		"::7f00:1",                 // deprecated IPv4-compatible -> 127.0.0.1
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)
@@ -72,6 +80,7 @@ func TestIsBlockedIP(t *testing.T) {
 		"100.63.255.255",       // just below CGNAT 100.64/10
 		"100.128.0.1",          // just above CGNAT 100.64/10
 		"2606:4700:4700::1111", // public v6 (Cloudflare)
+		"64:ff9b::808:808",     // NAT64 wrapping a public IPv4 (8.8.8.8) stays reachable
 	}
 	for _, s := range allowed {
 		ip := net.ParseIP(s)
