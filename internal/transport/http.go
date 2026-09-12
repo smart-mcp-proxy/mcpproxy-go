@@ -172,6 +172,18 @@ func (cfg *HTTPTransportConfig) needsCustomTransport() bool {
 
 // effectiveHeaders returns the outbound header set, applying brokered per-user
 // auth injection when configured (spec 074 FR-016/FR-017).
+// refuseBrokeredOAuth fails closed when a per-user brokered credential meets
+// an OAuth transport (spec 074 FR-014/FR-017). The auth ladder never pairs the
+// two — a brokered connection is headers-only — but the OAuth constructors now
+// carry static headers (GH #1271), so this guard keeps a shared OAuth token
+// from ever overwriting, or riding beside, a per-user credential.
+func (cfg *HTTPTransportConfig) refuseBrokeredOAuth() error {
+	if cfg.BrokeredAuth != nil {
+		return fmt.Errorf("brokered per-user auth cannot be combined with an OAuth transport (spec 074)")
+	}
+	return nil
+}
+
 func (cfg *HTTPTransportConfig) effectiveHeaders() map[string]string {
 	if cfg.BrokeredAuth == nil {
 		return cfg.Headers
@@ -198,6 +210,9 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
 
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
+		if err := cfg.refuseBrokeredOAuth(); err != nil {
+			return nil, err
+		}
 		// Use OAuth-enabled client with Dynamic Client Registration
 		logger.Info("Creating OAuth-enabled streamable HTTP client with Dynamic Client Registration",
 			zap.String("url", cfg.logSafeURL()),
@@ -250,9 +265,9 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		// be sent only by the headers strategy would otherwise lose them once
 		// OAuth wins the ladder. mcp-go sets Authorization from the token store
 		// AFTER these, so a stale static Authorization never wins.
-		if headers := cfg.effectiveHeaders(); len(headers) > 0 {
-			logger.Debug("Adding static headers to OAuth HTTP client", zap.Int("header_count", len(headers)))
-			oauthOpts = append(oauthOpts, transport.WithHTTPHeaders(headers))
+		if len(cfg.Headers) > 0 {
+			logger.Debug("Adding static headers to OAuth HTTP client", zap.Int("header_count", len(cfg.Headers)))
+			oauthOpts = append(oauthOpts, transport.WithHTTPHeaders(cfg.Headers))
 		}
 
 		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)
@@ -328,6 +343,9 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
 
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
+		if err := cfg.refuseBrokeredOAuth(); err != nil {
+			return nil, err
+		}
 		// Use OAuth-enabled SSE client with Dynamic Client Registration
 		logger.Info("Creating OAuth-enabled SSE client with Dynamic Client Registration",
 			zap.String("url", cfg.logSafeURL()),
@@ -370,9 +388,9 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			}))
 		}
 		// GH #1271: see the streamable-HTTP twin above.
-		if headers := cfg.effectiveHeaders(); len(headers) > 0 {
-			logger.Debug("Adding static headers to OAuth SSE client", zap.Int("header_count", len(headers)))
-			oauthOpts = append(oauthOpts, client.WithHeaders(headers))
+		if len(cfg.Headers) > 0 {
+			logger.Debug("Adding static headers to OAuth SSE client", zap.Int("header_count", len(cfg.Headers)))
+			oauthOpts = append(oauthOpts, client.WithHeaders(cfg.Headers))
 		}
 
 		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)

@@ -70,6 +70,27 @@ func (e *ErrOAuthPending) Code() diagnostics.Code {
 	return diagnostics.OAuthLoginRequired
 }
 
+// errOAuthFlowCompletedElsewhere is what a strategy returns when it waited on
+// a flow another client of the same server owned and that flow succeeded: the
+// token is in the store, this client just has to connect again. Contains
+// "authorization required" so runAuthStrategies classifies it as an OAuth
+// error (retry), and it is never nil — nil would be read as "connected".
+func errOAuthFlowCompletedElsewhere(server string) error {
+	return fmt.Errorf("OAuth flow for %s completed by another client - authorization required, retry connection to use the stored token", server)
+}
+
+// oauthPendingMessage is the operator-facing detail behind a deferred sign-in.
+// When the oauth block is what routed the connection here (GH #1271), say so:
+// the anonymous probe was skipped on purpose, no request may have been sent,
+// and removing the block is the remedy for a server that needs no sign-in.
+func (c *Client) oauthPendingMessage() string {
+	const base = "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command"
+	if c.oauthRequiredByConfig() {
+		return base + " (the server's oauth block declares OAuth, so the anonymous probe was skipped; remove the block if this server needs no sign-in)"
+	}
+	return base
+}
+
 // IsOAuthPending checks if an error is (or wraps) an ErrOAuthPending.
 //
 // It MUST unwrap: the pending error is raised inside an auth strategy and then
@@ -154,10 +175,14 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 				return fmt.Errorf("waiting for OAuth flow failed: %w", waitErr)
 			}
 
-			// Flow completed, try to connect with the new tokens
+			// Flow completed; the token the owner stored is picked up on the
+			// next attempt. This must NOT be nil: runAuthStrategies reads nil as
+			// "connected" and Connect would mark a client with no transport as
+			// ready (ghost connection). The text matches isOAuthError so the
+			// ladder continues/retries instead of aborting.
 			c.logger.Info("✅ OAuth flow completed by another goroutine, retrying connection",
 				zap.String("server", c.config.Name))
-			return nil // The caller will retry the connection
+			return errOAuthFlowCompletedElsewhere(c.config.Name)
 		}
 		return fmt.Errorf("failed to start OAuth flow: %w", err)
 	}
@@ -480,7 +505,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
 					ServerURL:  c.logSafeURL(),
-					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
+					Message:    c.oauthPendingMessage(),
 				}
 			}
 
@@ -601,10 +626,10 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 				return fmt.Errorf("waiting for SSE OAuth flow failed: %w", waitErr)
 			}
 
-			// Flow completed, try to connect with the new tokens
+			// Flow completed; see the streamable-HTTP twin — never nil here.
 			c.logger.Info("✅ SSE OAuth flow completed by another goroutine, retrying connection",
 				zap.String("server", c.config.Name))
-			return nil // The caller will retry the connection
+			return errOAuthFlowCompletedElsewhere(c.config.Name)
 		}
 		return fmt.Errorf("failed to start SSE OAuth flow: %w", err)
 	}
@@ -850,7 +875,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
 					ServerURL:  c.logSafeURL(),
-					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
+					Message:    c.oauthPendingMessage(),
 				}
 			}
 

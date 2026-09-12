@@ -573,13 +573,18 @@ OAuth explicitly:
 
 With an `oauth` block mcpproxy skips the anonymous probe: the stored token is
 attached to every request (including `tools/call`), and `mcpproxy auth login`
-always starts a sign-in even though the anonymous handshake would have succeeded.
+always starts a fresh sign-in — even when a valid token is already stored and
+even though the anonymous handshake would have succeeded.
 Static `headers` ride along with the bearer; the token store owns the
 `Authorization` header, so a static `Authorization` value is not used while an
 `oauth` block is present.
 
 Do not add an `oauth` block to a server that needs no sign-in: it will wait for
-a login instead of connecting anonymously.
+a login instead of connecting anonymously (the server's health detail says so:
+"the server's oauth block declares OAuth, so the anonymous probe was skipped").
+Because no request is sent until a token exists, an unreachable URL on such a
+server also shows as "Sign-in required" rather than a connection error until
+the first login.
 
 #### Pinning the callback port with `redirect_uri`
 
