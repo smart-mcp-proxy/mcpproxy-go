@@ -805,8 +805,9 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 // truncate), so the stub was indistinguishable from an available tool and cost
 // a wasted round trip per session before the agent fell back. The handler-level
 // gate in mcp_code_execution.go still refuses a call that arrives by name
-// through a non-listing path (REST, CallToolDirect, a client that cached the
-// old list), so dropping the stub removes an advertisement, never a defence.
+// through a non-listing path (REST, CallToolDirect), and an MCP tools/call for
+// the unregistered name is refused by mcp-go as an unknown tool — so dropping
+// the stub removes an advertisement, never a defence.
 //
 // UX audit F16: this reads the LIVE snapshot, never the construction-time
 // p.config. Settings advertises enable_code_execution as an instantly-applied

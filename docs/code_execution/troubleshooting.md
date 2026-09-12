@@ -31,7 +31,7 @@ Common issues, error messages, and solutions for the `code_execution` tool.
 Error: code_execution is disabled in configuration. Set 'enable_code_execution: true' in config file.
 ```
 
-**Cause**: The `code_execution` feature is disabled by default for security. While it is disabled the tool is not listed in `tools/list`, so an MCP client will normally not see it at all; this error appears when a call reaches the proxy by name anyway (the REST API, the CLI, or a client holding a cached tool list).
+**Cause**: The `code_execution` feature is disabled by default for security. While it is disabled the tool is not listed in `tools/list`, so an MCP client will normally not see it at all; this error appears when a call reaches the handler by name anyway (the REST API or the CLI). An MCP client that calls the name from a stale tool list gets an unknown-tool error instead.
 
 **Solution**:
 1. Edit your configuration file (`~/.mcpproxy/mcp_config.json`)
@@ -56,13 +56,12 @@ Error: code_execution is disabled in configuration. Set 'enable_code_execution: 
 
 **Symptom**: LLM agent lists available tools but `code_execution` is missing.
 
-**Cause**: Feature is not enabled or server didn't restart after configuration change.
+**Cause**: Feature is not enabled — a disabled `code_execution` is deliberately absent from `tools/list` — or the client is holding a tool list from before the flag was enabled.
 
 **Solution**:
 1. Verify configuration has `"enable_code_execution": true`
-2. Restart mcpproxy server
-3. Reconnect LLM client
-4. List tools again
+2. The change is hot-reloaded and announced with `notifications/tools/list_changed`; if the client does not honor that notification, reconnect it
+3. List tools again
 
 **Verification**:
 ```bash

@@ -459,7 +459,8 @@ func TestCodeExecutionRegistrations_ScriptParam(t *testing.T) {
 // TestCodeExecutionDisabled_NotRegisteredButScriptCallStillExplained (T005,
 // issue #1236): a disabled code_execution is registered on NO surface — there
 // is no stub for a client to pick from tools/list — while a script call that
-// still reaches the handler by name (a cached listing, REST, CallToolDirect)
+// still reaches the handler by name (REST, CallToolDirect — an MCP tools/call
+// for the unregistered name is refused by mcp-go as an unknown tool instead)
 // gets the disabled explanation rather than a schema rejection.
 func TestCodeExecutionDisabled_NotRegisteredButScriptCallStillExplained(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
