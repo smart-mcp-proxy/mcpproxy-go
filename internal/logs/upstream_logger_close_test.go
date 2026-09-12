@@ -51,13 +51,14 @@ func TestNewUpstreamServerLogger_CloserReleasesTheFileAndWritesReopen(t *testing
 }
 
 // CreateUpstreamServerLogger keeps its old shape for callers that cannot own a
-// closer, and must still hand back a usable logger.
+// closer, and must still hand back a usable logger. It deliberately never
+// writes: lumberjack opens the file on the first Write, and with no closer in
+// hand that handle would outlive the test — on Windows, failing t.TempDir()'s
+// cleanup with exactly the leak this change fixes.
 func TestCreateUpstreamServerLogger_StillWorksWithoutACloser(t *testing.T) {
 	cfg := &config.LogConfig{LogDir: t.TempDir(), Level: "info", EnableFile: true}
 	logger, err := CreateUpstreamServerLogger(cfg, "svc")
 	require.NoError(t, err)
 	require.NotNil(t, logger)
-	logger.Info("x")
-	_ = logger.Sync()
-	_ = zap.NewNop()
+	require.True(t, logger.Core().Enabled(zap.InfoLevel))
 }
