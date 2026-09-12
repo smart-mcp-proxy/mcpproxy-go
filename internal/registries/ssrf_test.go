@@ -53,13 +53,16 @@ func TestIsBlockedIP(t *testing.T) {
 		"224.0.0.1",       // multicast
 		"ff02::1",         // link-local multicast v6
 		// IPv6 transition addresses embedding a blocked IPv4.
-		"2002:a9fe:a9fe::1",        // 6to4 -> 169.254.169.254
-		"2002:7f00:1::1",           // 6to4 -> 127.0.0.1
-		"64:ff9b::a9fe:a9fe",       // NAT64 well-known prefix -> 169.254.169.254
-		"64:ff9b::7f00:1",          // NAT64 well-known prefix -> 127.0.0.1
-		"64:ff9b:1::7f00:1",        // NAT64 local-use prefix
-		"2001:0:0:0:0:0:80ff:fffe", // Teredo -> client 127.0.0.1
-		"::7f00:1",                 // deprecated IPv4-compatible -> 127.0.0.1
+		"2002:a9fe:a9fe::1",  // 6to4 -> 169.254.169.254
+		"2002:7f00:1::1",     // 6to4 -> 127.0.0.1
+		"64:ff9b::a9fe:a9fe", // NAT64 well-known prefix -> 169.254.169.254
+		"64:ff9b::7f00:1",    // NAT64 well-known prefix -> 127.0.0.1
+		"64:ff9b:1::7f00:1",  // NAT64 local-use prefix
+		// Teredo with a PUBLIC server (65.54.227.120) so only the XOR'd client
+		// field (127.0.0.1) can trigger the block; an all-zero server would be
+		// caught by IsUnspecified before the client is ever decoded.
+		"2001:0:4136:e378::80ff:fffe", // Teredo -> client 127.0.0.1
+		"::7f00:1",                    // deprecated IPv4-compatible -> 127.0.0.1
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)
@@ -72,15 +75,16 @@ func TestIsBlockedIP(t *testing.T) {
 	}
 
 	allowed := []string{
-		"8.8.8.8",              // public
-		"1.1.1.1",              // public
-		"93.184.216.34",        // example.com
-		"172.15.0.1",           // just below RFC1918 172.16/12
-		"172.32.0.1",           // just above RFC1918 172.16/12
-		"100.63.255.255",       // just below CGNAT 100.64/10
-		"100.128.0.1",          // just above CGNAT 100.64/10
-		"2606:4700:4700::1111", // public v6 (Cloudflare)
-		"64:ff9b::808:808",     // NAT64 wrapping a public IPv4 (8.8.8.8) stays reachable
+		"8.8.8.8",                     // public
+		"1.1.1.1",                     // public
+		"93.184.216.34",               // example.com
+		"172.15.0.1",                  // just below RFC1918 172.16/12
+		"172.32.0.1",                  // just above RFC1918 172.16/12
+		"100.63.255.255",              // just below CGNAT 100.64/10
+		"100.128.0.1",                 // just above CGNAT 100.64/10
+		"2606:4700:4700::1111",        // public v6 (Cloudflare)
+		"64:ff9b::808:808",            // NAT64 wrapping a public IPv4 (8.8.8.8) stays reachable
+		"2001:0:4136:e378::f7f7:f7fe", // Teredo, public server + public client (8.8.8.1) stays reachable
 	}
 	for _, s := range allowed {
 		ip := net.ParseIP(s)
