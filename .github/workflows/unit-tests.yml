@@ -137,10 +137,15 @@ jobs:
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
+      # internal/server alone takes 450-600s on windows-latest under -race with
+      # atomic coverage (the E2E workflow's -short, coverage-free run of the
+      # same package takes ~450s), so the default 10m package timeout is one
+      # slow runner away from "panic: test timed out" — which is how the leg
+      # failed on the first green-again push after #1266.
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: go test -v -race -timeout 10m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        run: go test -v -race -timeout 20m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
