@@ -323,7 +323,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				zap.String("server", c.config.Name),
 				zap.Int("pgid", c.processGroupID))
 
-			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+			if err := killProcessGroup(c.processGroupID, c.processCmd, c.logger, c.config.Name); err != nil {
 				c.logger.Error("Failed to clean up process group after initialization failure",
 					zap.String("server", c.config.Name),
 					zap.Int("pgid", c.processGroupID),

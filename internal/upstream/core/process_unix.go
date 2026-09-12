@@ -57,8 +57,10 @@ func createProcessGroupCommandFunc(client *Client, workingDir string, logger *za
 }
 
 // killProcessGroup terminates an entire process group on Unix systems
-// This is the proper way to clean up child processes and prevent zombies
-func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
+// This is the proper way to clean up child processes and prevent zombies.
+// The cmd argument is the owning process's exec.Cmd; it only matters on
+// Windows (PID-reuse identity check) and is ignored here.
+func killProcessGroup(pgid int, _ *exec.Cmd, logger *zap.Logger, serverName string) error {
 	if pgid <= 0 {
 		return nil
 	}
@@ -155,3 +157,11 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 
 	return pgid
 }
+
+// releaseProcessGroup is the platform hook DisconnectWithContext calls after
+// the graceful MCP close on every non-Docker stdio disconnect. On Unix there
+// is nothing to release: process groups are a kernel-side identifier, not a
+// handle we hold, so this is a no-op. See process_windows.go for the
+// platform that needs it (the Job Object handle + registry entry, keyed by
+// PID and disambiguated by the owning cmd).
+func releaseProcessGroup(_ int, _ *exec.Cmd, _ *zap.Logger, _ string) {}
