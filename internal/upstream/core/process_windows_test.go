@@ -125,49 +125,73 @@ func TestKillProcessGroup_ForgetsJob(t *testing.T) {
 	releaseProcessGroup(pgid, tree.cmd, logger, "test-server") // must be a harmless no-op
 }
 
-// TestReleaseProcessGroup_PIDReuseLeavesNewOwnerAlone: Disconnect captures
-// pgid+cmd, then mcp-go's Close() reaps cmd.exe, and only THEN does
-// releaseProcessGroup run. In that window Windows can hand the PID to a
-// concurrently connecting server. The old owner's release must not close
-// the new owner's Job; the takeover itself must close the old one.
-func TestReleaseProcessGroup_PIDReuseLeavesNewOwnerAlone(t *testing.T) {
+// TestPIDReuse_OldOwnerCannotKillNewOwner: Disconnect captures pgid+cmd,
+// then mcp-go's Close() reaps cmd.exe, and only THEN do
+// releaseProcessGroup / killProcessGroup run. In that window Windows can
+// hand the PID to a concurrently connecting server. Neither the old
+// owner's release nor its force-kill may touch the new owner's Job OR its
+// process; the takeover itself must close the old Job.
+//
+// The new owner is a LIVE, test-owned `ping.exe` (no grandchild, so its
+// stdout pipe reaching EOF means exactly "ping.exe died"). That is what
+// makes a forbidden PID-based fallback kill observable: an unstarted
+// oldCmd has no process handle, so a fallback could only reach the live
+// process by PID — and would close the pipe.
+func TestPIDReuse_OldOwnerCannotKillNewOwner(t *testing.T) {
 	logger := zap.NewNop()
-	const pid = 1 << 30 // never a real PID; the map does not care
-	oldCmd, newCmd := exec.Command("cmd.exe"), exec.Command("cmd.exe")
 
+	newProc := exec.Command("ping", "-n", "30", "127.0.0.1")
+	stdout, err := newProc.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, newProc.Start())
+	t.Cleanup(func() { _ = newProc.Process.Kill(); _ = newProc.Wait() })
+	pid := newProc.Process.Pid
+
+	eof := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, stdout)
+		close(eof)
+	}()
+	assertAlive := func(what string) {
+		t.Helper()
+		select {
+		case <-eof:
+			t.Fatalf("%s killed the new owner's live process", what)
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+
+	// The old owner registered first, for a process that has since exited
+	// and whose PID Windows handed to newProc.
+	oldCmd := exec.Command("cmd.exe") // never started: no handle, only the (reused) PID
 	oldJob, err := winjob.New()
 	require.NoError(t, err)
-	newJob, err := winjob.New()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = oldJob.Close(); _ = newJob.Close() })
-
+	t.Cleanup(func() { _ = oldJob.Close() })
 	registerWindowsJob(pid, oldCmd, oldJob, logger, "old-server")
-	registerWindowsJob(pid, newCmd, newJob, logger, "new-server") // PID reuse
 
-	// The takeover closed the old Job: Assign on a closed Job fails
-	// without touching Win32 (a live Job with a bogus PID would fail
-	// differently, inside OpenProcess).
-	err = oldJob.Assign(pid)
-	require.ErrorContains(t, err, "already closed")
+	// The new owner connects: the takeover closes the stale Job. Assign on
+	// a closed Job fails before touching Win32, with a distinct message.
+	require.Equal(t, pid, extractProcessGroupID(newProc, logger, "new-server"))
+	require.ErrorContains(t, oldJob.Assign(pid), "already closed", "takeover must close the stale Job")
+	require.True(t, hasWindowsJob(pid))
 
-	// The old owner's delayed release must leave the new owner's entry alone.
+	// Old owner's delayed release (Disconnect Step 5b): must be a no-op.
 	releaseProcessGroup(pid, oldCmd, logger, "old-server")
 	require.True(t, hasWindowsJob(pid), "old owner's release must not evict the new owner's Job")
+	assertAlive("releaseProcessGroup(old owner)")
 
-	// Same for the force-kill path (Disconnect Step 5 after a Close timeout):
-	// it must neither take the new owner's Job nor fall back to a PID kill.
-	// oldCmd was never started, so a fallback would hit cmd.Process == nil
-	// and os.FindProcess(1<<30); returning nil without touching the map is
-	// the only correct outcome.
+	// Old owner's force-kill (Disconnect Step 5 after a Close timeout):
+	// must neither take the Job nor fall back to a PID kill.
 	require.NoError(t, killProcessGroup(pid, oldCmd, logger, "old-server"))
 	require.True(t, hasWindowsJob(pid), "old owner's force-kill must not evict the new owner's Job")
-	// newJob must still be open: Assign on a bogus PID fails inside
-	// OpenProcess, whereas a closed Job fails earlier with "already closed".
-	err = newJob.Assign(pid)
-	require.Error(t, err)
-	require.NotContains(t, err.Error(), "already closed", "new owner's Job must not have been closed")
+	assertAlive("killProcessGroup(old owner)")
 
-	// The new owner's own release works as usual.
-	releaseProcessGroup(pid, newCmd, logger, "new-server")
+	// The new owner's own release works as usual and does kill it.
+	releaseProcessGroup(pid, newProc, logger, "new-server")
 	assert.False(t, hasWindowsJob(pid))
+	select {
+	case <-eof:
+	case <-time.After(5 * time.Second):
+		t.Fatal("new owner's release did not terminate its process")
+	}
 }
