@@ -166,7 +166,25 @@ const defaultEventBuffer = 256 // Increased from 16 to prevent event dropping wh
 func (r *Runtime) SubscribeEvents() chan Event {
 	ch := make(chan Event, defaultEventBuffer)
 	r.eventMu.Lock()
+	if r.eventSubs == nil {
+		r.eventSubs = make(map[chan Event]struct{})
+	}
 	r.eventSubs[ch] = struct{}{}
+	r.eventMu.Unlock()
+	return ch
+}
+
+// subscribeInternalEvents registers a trusted in-process subscriber. These
+// subscribers receive detector-only payload fields that must never reach SSE
+// or other ordinary event consumers. ActivityService is the only production
+// caller.
+func (r *Runtime) subscribeInternalEvents() chan Event {
+	ch := make(chan Event, defaultEventBuffer)
+	r.eventMu.Lock()
+	if r.internalEventSubs == nil {
+		r.internalEventSubs = make(map[chan Event]struct{})
+	}
+	r.internalEventSubs[ch] = struct{}{}
 	r.eventMu.Unlock()
 	return ch
 }
@@ -177,19 +195,46 @@ func (r *Runtime) UnsubscribeEvents(ch chan Event) {
 	if _, ok := r.eventSubs[ch]; ok {
 		delete(r.eventSubs, ch)
 		close(ch)
+	} else if _, ok := r.internalEventSubs[ch]; ok {
+		delete(r.internalEventSubs, ch)
+		close(ch)
 	}
 	r.eventMu.Unlock()
 }
 
 func (r *Runtime) publishEvent(evt Event) {
+	publicEvent := eventWithoutDetectorPayload(evt)
 	r.eventMu.RLock()
 	for ch := range r.eventSubs {
+		select {
+		case ch <- publicEvent:
+		default:
+		}
+	}
+	for ch := range r.internalEventSubs {
 		select {
 		case ch <- evt:
 		default:
 		}
 	}
 	r.eventMu.RUnlock()
+}
+
+// eventWithoutDetectorPayload returns the event representation safe for
+// ordinary subscribers. detection_text can contain the complete upstream
+// response beyond the activity display limit; only ActivityService needs it.
+func eventWithoutDetectorPayload(evt Event) Event {
+	if _, sensitive := evt.Payload["detection_text"]; !sensitive {
+		return evt
+	}
+	payload := make(map[string]any, len(evt.Payload)-1)
+	for key, value := range evt.Payload {
+		if key != "detection_text" {
+			payload[key] = value
+		}
+	}
+	evt.Payload = payload
+	return evt
 }
 
 // emitServersChanged signals that the server list (or any per-server stat)
@@ -728,8 +773,9 @@ func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string
 // detectionCount is the number of sensitive data detections found.
 // maxSeverity is the highest severity level among detections (e.g., "high", "medium", "low").
 // detectionTypes is a list of detection type names (e.g., "credit_card", "api_key").
-func (r *Runtime) EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string) {
+func (r *Runtime) EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string, serverName string) {
 	payload := map[string]any{
+		"server_name":     serverName,
 		"activity_id":     activityID,
 		"detection_count": detectionCount,
 		"max_severity":    maxSeverity,

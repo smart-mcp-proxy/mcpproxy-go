@@ -32,6 +32,7 @@ type Dependencies struct {
 	// an atomic pointer, so calling this is cheap and lock-free; the value it
 	// returns is READ-ONLY.
 	ConfigProvider    func() *config.Config
+	SetServerShared   func(string, bool) (*config.ServerConfig, error)
 	ManagementService interface{}      // management.Service - kept as interface{} to avoid circular imports
 	StorageManager    *storage.Manager // Shared storage manager for token operations
 }

@@ -39,6 +39,7 @@ const credentialConnectSuccessRedirect = "/ui/"
 type CredentialHandlers struct {
 	store         broker.CredentialStore
 	brokerServers []*config.ServerConfig // admin-configured shared servers; broker ones are filtered at use
+	adminServers  AdminServersProvider
 	connectors    *connectorProvider
 	logger        *zap.SugaredLogger
 }
@@ -64,6 +65,17 @@ func NewCredentialHandlers(store broker.CredentialStore, sharedServers []*config
 // REST connect/callback flow.
 func (h *CredentialHandlers) ConnectorProvider() broker.ConnectorProvider {
 	return h.connectors
+}
+
+func (h *CredentialHandlers) SetAdminServersProvider(provider AdminServersProvider) {
+	h.adminServers = provider
+}
+
+func (h *CredentialHandlers) currentAdminServers() []*config.ServerConfig {
+	if h.adminServers != nil {
+		return h.adminServers()
+	}
+	return h.brokerServers
 }
 
 // RegisterRoutes registers credential routes on the provided router.
@@ -342,8 +354,9 @@ func brokerEntitled(s *config.ServerConfig) bool {
 
 // brokerServerList returns the shared servers that carry an auth_broker block.
 func (h *CredentialHandlers) brokerServerList() []*config.ServerConfig {
-	out := make([]*config.ServerConfig, 0, len(h.brokerServers))
-	for _, s := range h.brokerServers {
+	servers := h.currentAdminServers()
+	out := make([]*config.ServerConfig, 0, len(servers))
+	for _, s := range servers {
 		if brokerEntitled(s) {
 			out = append(out, s)
 		}
@@ -353,7 +366,7 @@ func (h *CredentialHandlers) brokerServerList() []*config.ServerConfig {
 
 // brokerServerByName finds a brokered upstream by case-insensitive name.
 func (h *CredentialHandlers) brokerServerByName(name string) *config.ServerConfig {
-	for _, s := range h.brokerServers {
+	for _, s := range h.currentAdminServers() {
 		if brokerEntitled(s) && strings.EqualFold(s.Name, name) {
 			return s
 		}

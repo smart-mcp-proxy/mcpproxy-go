@@ -1256,6 +1256,7 @@ func upstreamStatsFromSnapshot(snapshot *stateview.ServerStatusSnapshot, reveal 
 		}
 
 		entry := map[string]interface{}{
+			"enabled":      status.Enabled,
 			"state":        state,
 			"connected":    status.Connected,
 			"connecting":   connecting,

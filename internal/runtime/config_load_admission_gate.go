@@ -343,11 +343,12 @@ func (r *Runtime) publishAdmissionGatedConfig(previous, gated *config.Config) {
 	if r.configSvc == nil || previous == gated {
 		return
 	}
-	if current := r.configSvc.Current(); current == nil || current.Config != previous {
+	published, err := r.configSvc.UpdateIfCurrent(previous, gated, configsvc.UpdateTypeModify, "config_load_admission_gate")
+	if err != nil {
+		r.logger.Error("Failed to publish admission-gated configuration", zap.Error(err))
 		return
 	}
-	if err := r.configSvc.Update(gated, configsvc.UpdateTypeModify, "config_load_admission_gate"); err != nil {
-		r.logger.Error("Failed to publish admission-gated configuration", zap.Error(err))
+	if !published {
 		return
 	}
 	r.mu.Lock()

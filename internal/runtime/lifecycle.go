@@ -1295,12 +1295,23 @@ func (r *Runtime) SaveConfiguration() error {
 	// user made in the quarantine UI, which QuarantineServer stamps — would be
 	// erased from the config file by the next save.
 	stated := make(map[string]bool, len(configCopy.Servers))
+	configOnly := make(map[string]*config.ServerConfig, len(snapshot.Config.Servers))
 	for _, sc := range snapshot.Config.Servers {
+		if sc != nil {
+			// Shared and AuthBroker are configuration-only; BBolt's reduced
+			// server record cannot carry them through an unrelated save.
+			configOnly[sc.Name] = sc
+		}
 		if sc != nil && sc.QuarantineExplicitlySet() {
 			stated[sc.Name] = true
 		}
 	}
 	for _, sc := range latestServers {
+		if sc != nil && configOnly[sc.Name] != nil {
+			preserved := config.CopyServerConfig(configOnly[sc.Name])
+			sc.Shared = preserved.Shared
+			sc.AuthBroker = preserved.AuthBroker
+		}
 		if sc != nil && stated[sc.Name] {
 			sc.MarkQuarantineExplicitlySet(true)
 		}

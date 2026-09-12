@@ -328,6 +328,7 @@ func TestEmitSensitiveDataDetected(t *testing.T) {
 		3,
 		"high",
 		detectionTypes,
+		"upstream",
 	)
 
 	// Wait for event

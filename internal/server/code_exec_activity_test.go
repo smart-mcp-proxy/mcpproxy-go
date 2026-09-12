@@ -183,3 +183,31 @@ func TestSubCallByteSizes_TypedNilResultIsZeroNotNull(t *testing.T) {
 	require.Equal(t, 4, rawByteSize(typedNil),
 		"guard the premise: rawByteSize alone would book \"null\" as 4 bytes")
 }
+
+func TestSubCallDetectionTextIncludesFullErrorAndResult(t *testing.T) {
+	secret := "AKIA1234567890ABCDEF"
+	longError := strings.Repeat("x", subCallActivityResponseLimit+100) + secret
+	result := mcp.NewToolResultError("partial result")
+
+	detectionText := subCallDetectionText(result, errors.New(longError))
+
+	assert.Contains(t, detectionText, "partial result")
+	assert.Contains(t, detectionText, secret,
+		"detector input must retain an error secret beyond the activity display cap")
+}
+
+func TestSubCallActivityDoesNotExposeDetectionSourceToSubscribers(t *testing.T) {
+	proxy, rt := newTruncatingRetrieveToolsProxy(t, 1024)
+	events := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(events)
+	caller := &upstreamToolCaller{proxy: proxy, parentCallID: "parent"}
+	response := strings.Repeat("x", subCallActivityResponseLimit+100) + " secret AKIA1234567890ABCDEF"
+	caller.emitSubCallActivity("github", "echo", "request", nil, mcp.NewToolResultText(response), nil, time.Now(), time.Millisecond)
+	select {
+	case event := <-events:
+		assert.NotContains(t, event.Payload["response"], "AKIA1234567890ABCDEF")
+		assert.NotContains(t, event.Payload, "detection_text")
+	case <-time.After(time.Second):
+		t.Fatal("missing completion event")
+	}
+}

@@ -130,6 +130,9 @@ type Runtime struct {
 
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
+	// internalEventSubs receive detector-only fields used by ActivityService.
+	// Ordinary subscribers, including SSE, receive a sanitized copy.
+	internalEventSubs map[chan Event]struct{}
 
 	storageManager  *storage.Manager
 	indexManager    *index.Manager
@@ -394,6 +397,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		},
 		statusCh:          make(chan Status, 10),
 		eventSubs:         make(map[chan Event]struct{}),
+		internalEventSubs: make(map[chan Event]struct{}),
 		phaseMachine:      newPhaseMachine(PhaseInitializing),
 		lastGoodTools:     make(map[string][]*config.ToolMetadata),
 		profileMembership: make(map[string][]string),
@@ -1635,7 +1639,10 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// r.cfg swap → configSvc.Update below. MUST be acquired before r.mu.
 	r.configCommitMu.Lock()
 	defer r.configCommitMu.Unlock()
+	return r.applyConfigLocked(newCfg, cfgPath)
+}
 
+func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*ConfigApplyResult, error) {
 	r.mu.Lock()
 
 	// Migrate an unrecognized per-server trust_mode to the fail-closed tier

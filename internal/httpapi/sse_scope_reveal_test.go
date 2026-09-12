@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +17,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -105,6 +108,9 @@ func sseIdentityEventFixtures(server string) []internalRuntime.Event {
 		return internalRuntime.Event{Type: t, Payload: payload, Timestamp: now}
 	}
 	return []internalRuntime.Event{
+		evt(internalRuntime.EventTypeSensitiveDataDetected, map[string]any{
+			"server_name": server, "activity_id": "detection", "detection_count": 1,
+		}),
 		// affected_entity
 		evt(internalRuntime.EventTypeActivityConfigChange, map[string]any{
 			"action":          "server_disabled",
@@ -385,6 +391,144 @@ func TestSSE_ServersChangedRenderedPerSubscriber(t *testing.T) {
 		"the shared payload must never be edited in place")
 }
 
+func TestSSE_OpenAgentStreamRefreshesScopeBeforeEachEvent(t *testing.T) {
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	tmpDir := t.TempDir()
+	_, err := auth.GetOrCreateHMACKey(tmpDir)
+	require.NoError(t, err)
+	rawToken, err := auth.GenerateToken()
+	require.NoError(t, err)
+
+	var scopeMu sync.RWMutex
+	allowed := []string{"alpha", "beta"}
+	revoked := false
+	store := &testTokenStore{validateFunc: func(token string, _ []byte) (*auth.AgentToken, error) {
+		if token != rawToken {
+			return nil, errors.New("token not found")
+		}
+		scopeMu.RLock()
+		current := append([]string(nil), allowed...)
+		isRevoked := revoked
+		scopeMu.RUnlock()
+		if isRevoked {
+			return nil, errors.New("token revoked")
+		}
+		return &auth.AgentToken{
+			Name: "live-scope", TokenPrefix: auth.TokenPrefix(rawToken), AllowedServers: current,
+			Permissions: []string{auth.PermRead}, ExpiresAt: time.Now().Add(time.Hour),
+		}, nil
+	}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	srv.SetTokenStore(store, tmpDir)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	body, closeStream := sseSubscribe(t, ts.URL, rawToken)
+	defer closeStream()
+	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 1 }, 5*time.Second, 20*time.Millisecond)
+
+	// Simulate the live resolver narrowing this already-authenticated token
+	// after an admin un-shares beta. The next frame must use the refreshed
+	// context, while an entitled sentinel still proves the stream is alive.
+	scopeMu.Lock()
+	allowed = []string{"alpha"}
+	scopeMu.Unlock()
+	now := time.Now()
+	ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeActivityToolCallCompleted,
+		Payload: map[string]any{"server_name": "beta", "tool_name": "hidden"}, Timestamp: now})
+	ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeActivityToolCallCompleted,
+		Payload: map[string]any{"server_name": "alpha", "tool_name": "sentinel"}, Timestamp: now})
+
+	frames := readSSEFramesUntil(t, body, time.Now().Add(5*time.Second), func(frame sseEvent) bool {
+		payload, _ := frame.Data["payload"].(map[string]interface{})
+		return payload["tool_name"] == "sentinel"
+	})
+	for _, frame := range frames {
+		payload, _ := frame.Data["payload"].(map[string]interface{})
+		assert.NotEqual(t, "beta", payload["server_name"])
+	}
+
+	// Revocation is stronger than narrowing: the next event closes the stream
+	// before that event can be delivered.
+	scopeMu.Lock()
+	revoked = true
+	scopeMu.Unlock()
+	ctrl.publishToAll(internalRuntime.Event{Type: internalRuntime.EventTypeActivityToolCallCompleted,
+		Payload: map[string]any{"server_name": "alpha", "tool_name": "after-revoke"}, Timestamp: time.Now()})
+	streamEnded := make(chan error, 1)
+	go func() {
+		for {
+			if _, readErr := body.ReadString('\n'); readErr != nil {
+				streamEnded <- readErr
+				return
+			}
+		}
+	}()
+	select {
+	case readErr := <-streamEnded:
+		require.Error(t, readErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("revoked agent token left its SSE stream open")
+	}
+}
+
+func TestSSE_InitialStatusRevalidatesAfterConnectionOpens(t *testing.T) {
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	tmpDir := t.TempDir()
+	_, err := auth.GetOrCreateHMACKey(tmpDir)
+	require.NoError(t, err)
+	rawToken, err := auth.GenerateToken()
+	require.NoError(t, err)
+
+	var mu sync.RWMutex
+	revoked := false
+	store := &testTokenStore{validateFunc: func(token string, _ []byte) (*auth.AgentToken, error) {
+		mu.RLock()
+		isRevoked := revoked
+		mu.RUnlock()
+		if token != rawToken || isRevoked {
+			return nil, errors.New("token revoked")
+		}
+		return &auth.AgentToken{
+			Name: "initial-status", TokenPrefix: auth.TokenPrefix(rawToken), AllowedServers: []string{"alpha"},
+			Permissions: []string{auth.PermRead}, ExpiresAt: time.Now().Add(time.Hour),
+		}, nil
+	}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	srv.SetTokenStore(store, tmpDir)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	body, closeStream := sseSubscribe(t, ts.URL, rawToken)
+	defer closeStream()
+	// sseSubscribe returns after the handler flushes its establishment comment,
+	// while the production handler deliberately waits before initial status.
+	mu.Lock()
+	revoked = true
+	mu.Unlock()
+
+	result := make(chan error, 1)
+	go func() {
+		for {
+			line, readErr := body.ReadString('\n')
+			if strings.HasPrefix(line, "event: status") {
+				result <- errors.New("initial status escaped after revocation")
+				return
+			}
+			if readErr != nil {
+				result <- nil
+				return
+			}
+		}
+	}()
+	select {
+	case readErr := <-result:
+		require.NoError(t, readErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("revoked stream neither closed nor completed initial status")
+	}
+}
+
 // TestSSE_ScopedSubscriberGetsNotifyOnlyEventWithoutTheName pins the notify-only
 // path of servers.changed — the branch where ListServers failed upstream, so
 // there is no embed to narrow and the coalescer extra IS the whole payload.
@@ -446,7 +590,6 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 		"secrets.changed":          "admin config document — dropped for a scoped caller",
 		"active_profile.changed":   "profile slug only",
 		"upstream.prompts_changed": "nil payload",
-		"sensitive_data.detected":  "activity id + severity counts, no server name",
 		"security.scanner_changed": "scanner plugin id, not a server",
 		"security.scan_started":    "never published (no-op producer)",
 		"security.scan_progress":   "never published (no-op producer)",

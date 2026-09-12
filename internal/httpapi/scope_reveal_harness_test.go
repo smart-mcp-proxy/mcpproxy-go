@@ -226,6 +226,7 @@ func (c *scopeController) GetUpstreamStats() map[string]interface{} {
 			"connecting":  false,
 			"quarantined": c.servers[i].Quarantined,
 			"tool_count":  c.servers[i].ToolCount,
+			"enabled":     c.servers[i].Enabled,
 			"url":         c.servers[i].URL,
 		}
 		if c.servers[i].Connected {

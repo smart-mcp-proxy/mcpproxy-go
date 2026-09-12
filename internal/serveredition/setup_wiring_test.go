@@ -3,6 +3,8 @@
 package serveredition
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,4 +227,83 @@ func TestSetupMultiUserOAuth_InstallsAgentTokenOwnerGate(t *testing.T) {
 	personal, err := h.tokens.ValidateAgentToken(ownerless, h.hmacKey)
 	require.NoError(t, err, "an ownerless token must be unaffected by the owner gate")
 	require.NotNil(t, personal)
+}
+
+func TestSetupRevalidatesTokenScopeAfterUnsharing(t *testing.T) {
+	h := newWiringHarness(t)
+	user := h.mkUser(t, "tenant@example.com")
+	h.setLiveServers([]*config.ServerConfig{{Name: "shared", Shared: true}, {Name: "private"}})
+	for _, scope := range [][]string{{"shared"}, {"*"}} {
+		raw, err := auth.GenerateToken()
+		require.NoError(t, err)
+		require.NoError(t, h.tokens.CreateAgentToken(auth.AgentToken{Name: scope[0], UserID: user.ID, AllowedServers: scope, Permissions: []string{auth.PermRead}}, raw, h.hmacKey))
+		before, err := h.tokens.ValidateAgentToken(raw, h.hmacKey)
+		require.NoError(t, err)
+		require.Equal(t, []string{"shared"}, before.AllowedServers)
+		h.setLiveServers([]*config.ServerConfig{{Name: "shared", Shared: false}, {Name: "private"}})
+		after, err := h.tokens.ValidateAgentToken(raw, h.hmacKey)
+		require.NoError(t, err)
+		require.Empty(t, after.AllowedServers)
+		h.setLiveServers([]*config.ServerConfig{{Name: "shared", Shared: true}, {Name: "private"}})
+	}
+}
+
+func TestSetupAuxiliarySurfacesFollowLiveSharing(t *testing.T) {
+	h := newWiringHarness(t)
+	user := h.mkUser(t, "tenant@example.com")
+	token, err := teamsauth.GenerateBearerToken(h.hmacKey, user.ID, user.Email, user.DisplayName, "user", user.Provider, time.Hour)
+	require.NoError(t, err)
+	for _, shared := range []bool{true, false, true} {
+		h.setLiveServers([]*config.ServerConfig{{Name: "sharing-sentinel", Shared: shared, AuthBroker: &config.AuthBrokerConfig{Mode: "token_exchange"}}})
+		for _, path := range []string{"/api/v1/user/credentials", "/api/v1/user/diagnostics"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Host = "localhost:8080"
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			h.router.ServeHTTP(rec, req)
+			require.Equal(t, 200, rec.Code, rec.Body.String())
+			require.Equal(t, shared, strings.Contains(rec.Body.String(), "sharing-sentinel"), path+": "+rec.Body.String())
+		}
+	}
+}
+
+func TestSetupAdminTokenRevocationUsesProductionAuth(t *testing.T) {
+	h := newWiringHarness(t)
+	admin := h.mkUser(t, "admin@example.com")
+	tenant := h.mkUser(t, "tenant@example.com")
+	raw, err := auth.GenerateToken()
+	require.NoError(t, err)
+	const tokenName = "release/保安 %25"
+	require.NoError(t, h.tokens.CreateAgentToken(auth.AgentToken{
+		Name: tokenName, UserID: tenant.ID, Permissions: []string{auth.PermRead},
+	}, raw, h.hmacKey))
+
+	call := func(identity *users.User) *httptest.ResponseRecorder {
+		t.Helper()
+		role := "user"
+		if identity.ID == admin.ID {
+			role = "admin"
+		}
+		bearer, tokenErr := teamsauth.GenerateBearerToken(
+			h.hmacKey, identity.ID, identity.Email, identity.DisplayName, role, identity.Provider, time.Hour,
+		)
+		require.NoError(t, tokenErr)
+		body, marshalErr := json.Marshal(map[string]string{"name": tokenName})
+		require.NoError(t, marshalErr)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/"+tenant.ID+"/tokens/revoke", bytes.NewReader(body))
+		req.Host = "localhost:8080"
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	require.Equal(t, http.StatusForbidden, call(tenant).Code)
+	for attempt := 0; attempt < 2; attempt++ {
+		rec := call(admin)
+		require.Equal(t, http.StatusOK, rec.Code, "attempt %d: %s", attempt, rec.Body.String())
+	}
+	_, err = h.tokens.ValidateAgentToken(raw, h.hmacKey)
+	require.Error(t, err)
 }

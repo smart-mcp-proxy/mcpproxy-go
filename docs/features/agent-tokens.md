@@ -458,3 +458,17 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | `--permissions` | Yes | — | Comma-separated: `read`, `write`, `destructive` |
 | `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
 | `--profile-pin` | No | — | Pin the token to a single profile (see [Profile Pinning](#profile-pinning)) |
+
+### Server-edition incident response
+
+Administrators authenticated through a server-edition session or bearer JWT can list safe metadata for all owners with `GET /api/v1/admin/tokens`. Each entry includes `user_id`, `name`, scope, permissions, timestamps, prefix, profile pin, and revocation state. Raw credentials and token hashes are never listed.
+
+Revoke one tenant credential with `POST /api/v1/admin/users/{user_id}/tokens/revoke` and JSON body `{"name":"exact stored name"}`. The name is body data so names containing slashes, percent signs, spaces, or Unicode remain addressable through routers and reverse proxies. The older `POST /api/v1/admin/users/{user_id}/tokens/{name}/revoke` form remains available for URL-safe names. Owner and name identify the credential together; another user's same-named token is unaffected. Revocation is durable and takes effect on the next authenticated request, including requests using an existing MCP session.
+
+Owned tokens are checked against the owner's current server entitlement on every authentication. Unsharing an administrator-configured server removes it from a tenant token's effective scope without rotation or restart. Explicit scopes never gain additional servers; historical wildcard grants are bounded by current entitlement. Current administrator owners may still access administrator-configured servers. Missing owners, disabled accounts, and entitlement lookup errors fail closed. Ownerless operator tokens retain their existing behavior.
+
+Calls already authorized and running are not cancelled. A long-lived SSE `/events` response revalidates its agent token before each status or runtime event: unsharing immediately narrows the next frame, while token revocation closes the stream before another event is delivered.
+
+### Sharing CLI status safely
+
+`mcpproxy status` masks the API key in both its key field and Web UI URL across table, JSON, and YAML output. `--show-key` reveals the key. `--web-url` deliberately prints a usable login URL containing the unmasked key; treat that output as a credential. `--reset-key` also explicitly reveals the newly generated key.

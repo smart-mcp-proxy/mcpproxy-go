@@ -2,10 +2,47 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
+
+// newSSECallerContextRefresher revalidates an agent token before each
+// identity-bearing write on a long-lived /events request. The normal auth
+// middleware validates once when the GET opens; without this refresh, a token
+// retained its old server scope until reconnect after an admin un-shared a
+// server or revoked the token.
+func (s *Server) newSSECallerContextRefresher(r *http.Request) func() (context.Context, error) {
+	base := r.Context()
+	ac := auth.AuthContextFromContext(base)
+	if ac == nil || ac.Type != auth.AuthTypeAgent {
+		return func() (context.Context, error) { return base, nil }
+	}
+	if s.tokenStore == nil || s.dataDir == "" {
+		return func() (context.Context, error) {
+			return nil, fmt.Errorf("agent token storage unavailable")
+		}
+	}
+	rawToken := ExtractToken(r)
+	if rawToken == "" {
+		return func() (context.Context, error) {
+			return nil, fmt.Errorf("agent token missing")
+		}
+	}
+	hmacKey, err := auth.GetOrCreateHMACKey(s.dataDir)
+	if err != nil {
+		return func() (context.Context, error) { return nil, err }
+	}
+	return func() (context.Context, error) {
+		token, validateErr := s.tokenStore.ValidateAgentToken(rawToken, hmacKey)
+		if validateErr != nil {
+			return nil, validateErr
+		}
+		return auth.WithAuthContext(base, token.AuthContext()), nil
+	}
+}
 
 // The /events door, second half of #1166.
 //
@@ -112,6 +149,7 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 // runtime's own constants — so a new event type must be classified in BOTH
 // places before it ships.
 var identityBearingEventTypes = map[internalRuntime.EventType]struct{}{
+	internalRuntime.EventTypeSensitiveDataDetected:        {},
 	internalRuntime.EventTypeActivityConfigChange:         {},
 	internalRuntime.EventTypeActivityInternalToolCall:     {},
 	internalRuntime.EventTypeActivityToolCallStarted:      {},

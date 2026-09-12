@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -101,7 +102,7 @@ Examples:
 	}
 
 	cmd.Flags().BoolVar(&statusShowKey, "show-key", false, "Show full unmasked API key")
-	cmd.Flags().BoolVar(&statusWebURL, "web-url", false, "Print only the Web UI URL (for piping to open)")
+	cmd.Flags().BoolVar(&statusWebURL, "web-url", false, "Print the login URL including the unmasked API key (for piping to open)")
 	cmd.Flags().BoolVar(&statusResetKey, "reset-key", false, "Regenerate API key and save to config")
 
 	return cmd
@@ -152,20 +153,35 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Apply key masking based on flags
-	if !statusShowKey {
-		info.APIKey = statusMaskAPIKey(info.APIKey)
-	}
-
 	// Handle --web-url: print only the URL and exit
 	if statusWebURL {
 		fmt.Println(info.WebUIURL)
 		return nil
 	}
+	if !statusShowKey {
+		maskStatusCredentials(info)
+	}
 
 	// Format and print output
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 	return printStatusOutput(info, format)
+}
+
+// Mask both representations before any formatter sees the status. --web-url
+// is an explicit request for a usable login URL and bypasses this function.
+func maskStatusCredentials(info *StatusInfo) {
+	info.APIKey = statusMaskAPIKey(info.APIKey)
+	parsed, err := url.Parse(info.WebUIURL)
+	if err != nil {
+		info.WebUIURL = ""
+		return
+	}
+	query := parsed.Query()
+	if query.Has("apikey") {
+		query.Set("apikey", info.APIKey)
+		parsed.RawQuery = query.Encode()
+		info.WebUIURL = parsed.String()
+	}
 }
 
 func collectStatus(cfg *config.Config, configPath string) (*StatusInfo, error) {
@@ -453,10 +469,17 @@ func statusBuildWebUIURL(listenAddr, apiKey string) string {
 	if strings.HasPrefix(addr, ":") {
 		addr = "127.0.0.1" + addr
 	}
-	if apiKey != "" {
-		return fmt.Sprintf("http://%s/ui/?apikey=%s", addr, apiKey)
+	loginURL := &url.URL{
+		Scheme: "http",
+		Host:   addr,
+		Path:   "/ui/",
 	}
-	return fmt.Sprintf("http://%s/ui/", addr)
+	if apiKey != "" {
+		query := loginURL.Query()
+		query.Set("apikey", apiKey)
+		loginURL.RawQuery = query.Encode()
+	}
+	return loginURL.String()
 }
 
 func statusFormatDuration(d time.Duration) string {

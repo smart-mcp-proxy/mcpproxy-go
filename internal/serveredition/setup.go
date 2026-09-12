@@ -67,6 +67,29 @@ func setupMultiUserOAuth(deps Dependencies) error {
 			}
 			return !user.Disabled, nil
 		})
+		// Like the owner gate, install before any fallible setup step. Every
+		// HTTP authentication receives a fresh intersection, including old
+		// wildcard credentials and requests on an existing MCP session.
+		deps.StorageManager.SetAgentTokenScopeResolver(func(userID string, granted []string) ([]string, error) {
+			live := deps.Config
+			if deps.ConfigProvider != nil {
+				live = deps.ConfigProvider()
+			}
+			if live == nil || live.ServerEdition == nil {
+				return nil, fmt.Errorf("server entitlement configuration unavailable")
+			}
+			user, err := userStore.GetUser(userID)
+			if err != nil {
+				return nil, err
+			}
+			if user == nil || user.Disabled {
+				return nil, fmt.Errorf("token owner unavailable")
+			}
+			scope := teamsapi.NewUserHandlers(userStore, func() []*config.ServerConfig {
+				return live.Servers
+			}, nil, nil, deps.Logger)
+			return scope.NarrowTokenServerScope(userID, granted, live.ServerEdition.IsAdminEmail(user.Email))
+		})
 	}
 
 	// Validate server config
@@ -164,9 +187,15 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 	configPath := config.GetConfigPath(deps.Config.DataDir)
 	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Config, configPath, deps.ManagementService, deps.Logger)
-	adminHandlers.SetTokenRevoker(deps.StorageManager)
+	adminHandlers.SetSharingUpdater(deps.SetServerShared)
+	adminHandlers.SetAdminServersProvider(adminServers)
+	if deps.StorageManager != nil {
+		adminHandlers.SetTokenRevoker(deps.StorageManager)
+		adminHandlers.SetAgentTokenStore(deps.StorageManager)
+	}
 	userHandlers := teamsapi.NewUserHandlers(userStore, adminServers, deps.StorageManager, hmacKey, deps.Logger)
 	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
+	userActivityHandlers.SetAdminServersProvider(adminServers)
 	// Per-user brokered-credential surfaces (spec 074 T8): list connection
 	// status, disconnect, and the Path B connect/callback flow. Reuses the same
 	// credential store wired into the OAuth login handler above. The audit sink
@@ -175,6 +204,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// best-effort and never blocks brokering).
 	brokerAudit := teamsapi.NewActivityAuditSink(deps.StorageManager, deps.Logger)
 	credentialHandlers := teamsapi.NewCredentialHandlers(credStore, sharedServers, brokerAudit, deps.Logger)
+	credentialHandlers.SetAdminServersProvider(adminServers)
 
 	deps.Router.Group(func(r chi.Router) {
 		r.Use(authMiddleware.Middleware())

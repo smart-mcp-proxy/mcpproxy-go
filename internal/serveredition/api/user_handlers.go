@@ -1023,6 +1023,16 @@ func narrowScopeToEntitled(current, entitled []string, isAdmin bool) []string {
 	return narrowed
 }
 
+// NarrowTokenServerScope uses the same entitlement predicate as minting and
+// rotation, but evaluates it for the current authenticated request.
+func (h *UserHandlers) NarrowTokenServerScope(userID string, current []string, isAdmin bool) ([]string, error) {
+	entitled, err := h.entitledServerNames(userID, isAdmin)
+	if err != nil {
+		return nil, err
+	}
+	return narrowScopeToEntitled(current, entitled, isAdmin), nil
+}
+
 // writeTokenMutationError classifies an owner-scoped mutator's error into the
 // response, with no preflight read in front of it.
 //
