@@ -1756,6 +1756,15 @@ func ShouldUseOAuth(serverConfig *config.ServerConfig) bool {
 		return false
 	}
 
+	// A declared oauth block is the operator's word that this upstream needs
+	// OAuth (GH #1271) — it must not be vetoed by unrelated static headers,
+	// or a manual login could never be started for such a server.
+	if serverConfig.OAuth != nil {
+		logger.Debug("oauth block configured - OAuth applies regardless of headers",
+			zap.String("server", serverConfig.Name))
+		return true
+	}
+
 	// If headers are configured, try headers first, not OAuth
 	if len(serverConfig.Headers) > 0 {
 		logger.Debug("Headers configured - will try headers first, OAuth as fallback if needed",

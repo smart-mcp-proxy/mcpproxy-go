@@ -245,6 +245,15 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 				Transport: cfg.upstreamRoundTripper(http.DefaultTransport, logger),
 			}))
 		}
+		// GH #1271: static headers ride along with the bearer. A declared-OAuth
+		// server whose non-credential headers (x-goog-user-project, …) used to
+		// be sent only by the headers strategy would otherwise lose them once
+		// OAuth wins the ladder. mcp-go sets Authorization from the token store
+		// AFTER these, so a stale static Authorization never wins.
+		if headers := cfg.effectiveHeaders(); len(headers) > 0 {
+			logger.Debug("Adding static headers to OAuth HTTP client", zap.Int("header_count", len(headers)))
+			oauthOpts = append(oauthOpts, transport.WithHTTPHeaders(headers))
+		}
 
 		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)
 		if err != nil {
@@ -359,6 +368,11 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			oauthOpts = append(oauthOpts, client.WithHTTPClient(&http.Client{
 				Transport: cfg.upstreamRoundTripper(http.DefaultTransport, logger),
 			}))
+		}
+		// GH #1271: see the streamable-HTTP twin above.
+		if headers := cfg.effectiveHeaders(); len(headers) > 0 {
+			logger.Debug("Adding static headers to OAuth SSE client", zap.Int("header_count", len(headers)))
+			oauthOpts = append(oauthOpts, client.WithHeaders(headers))
 		}
 
 		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)

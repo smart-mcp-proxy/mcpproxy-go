@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -21,10 +22,16 @@ type authStrategy struct {
 // the ONLY permitted strategy is the brokered headers. It must never fall back
 // to no-auth or shared OAuth — either would connect with the wrong identity and
 // defeat per-user isolation (FR-014/FR-017). Non-brokered connections keep the
-// historical headers -> no-auth -> OAuth chain unchanged.
+// historical headers -> no-auth -> OAuth chain, except that a configured oauth
+// block removes no-auth (see oauthRequiredByConfig).
 func (c *Client) httpAuthStrategies() []authStrategy {
 	if c.brokeredAuth != nil {
 		return []authStrategy{{"headers", c.tryHeadersAuth}}
+	}
+	if c.oauthRequiredByConfig() {
+		return c.oauthRequiredStrategies(
+			authStrategy{"headers", c.tryHeadersAuth},
+			authStrategy{"OAuth", c.tryOAuthAuth})
 	}
 	return []authStrategy{
 		{"headers", c.tryHeadersAuth},
@@ -34,16 +41,58 @@ func (c *Client) httpAuthStrategies() []authStrategy {
 }
 
 // sseAuthStrategies is the SSE counterpart of httpAuthStrategies, with the same
-// fail-closed guarantee for brokered connections.
+// fail-closed guarantee for brokered connections and the same oauth-block rule.
 func (c *Client) sseAuthStrategies() []authStrategy {
 	if c.brokeredAuth != nil {
 		return []authStrategy{{"headers", c.trySSEHeadersAuth}}
+	}
+	if c.oauthRequiredByConfig() {
+		return c.oauthRequiredStrategies(
+			authStrategy{"headers", c.trySSEHeadersAuth},
+			authStrategy{"OAuth", c.trySSEOAuthAuth})
 	}
 	return []authStrategy{
 		{"headers", c.trySSEHeadersAuth},
 		{"no-auth", c.trySSENoAuth},
 		{"OAuth", c.trySSEOAuthAuth},
 	}
+}
+
+// oauthRequiredByConfig reports whether the server config carries an oauth
+// block. The block is the operator's declaration that this upstream needs
+// OAuth (config.ServerConfig.OAuth: "keep even when empty to signal OAuth
+// requirement"), and it is only ever present when the operator wrote one —
+// nothing in the add/import/PATCH paths synthesises it.
+//
+// GH #1271: the no-auth strategy decides "no auth needed" from a successful
+// anonymous initialize. Upstreams that authorise per method (Google's Gmail
+// MCP answers initialize/tools/list anonymously and 401s only tools/call)
+// pass that probe, so no-auth used to win the ladder and the OAuth strategy —
+// with a valid token already in the store — was never reached. When the
+// operator has declared OAuth, the anonymous probe must not be allowed to win;
+// the OAuth strategy either attaches the stored token to every request or
+// surfaces the sign-in requirement, which is what the operator asked for.
+//
+// MCPPROXY_DISABLE_OAUTH keeps the historical chain: the ladder never consulted
+// oauth.ShouldUseOAuth, so the fixture gate has to be honoured here too.
+func (c *Client) oauthRequiredByConfig() bool {
+	if os.Getenv("MCPPROXY_DISABLE_OAUTH") == "true" {
+		return false
+	}
+	return c.config != nil && c.config.OAuth != nil
+}
+
+// oauthRequiredStrategies is the ladder for a declared-OAuth server. The
+// headers strategy draws the same "anonymous initialize succeeded" conclusion
+// as no-auth, so it is only kept when the headers carry a static Authorization
+// credential — a genuine auth strategy in its own right (GH #1172: mutually
+// exclusive with OAuth on the wire). Any other static headers
+// (x-goog-user-project, Notion-Version, …) are carried by the OAuth transport.
+func (c *Client) oauthRequiredStrategies(headers, oauth authStrategy) []authStrategy {
+	if c.config.HasStaticAuthorizationHeader() {
+		return []authStrategy{headers, oauth}
+	}
+	return []authStrategy{oauth}
 }
 
 // AuthStrategyOAuth is the name of the OAuth auth strategy as recorded by

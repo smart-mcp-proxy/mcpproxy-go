@@ -833,9 +833,28 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 				return fmt.Errorf("OAuth token exists in storage, retry connection to use it: %w", lastErr)
 			}
 
+			// mcp-go's SSE Start() asks the token store BEFORE opening the
+			// stream, so a declared-OAuth SSE server with no token lands here on
+			// every automatic connect (GH #1271 made that reachable; before, the
+			// anonymous probe won first). Mirror the streamable-HTTP init path:
+			// park in PendingAuth for the daemon instead of a background browser,
+			// and clear the in-progress mark set above — handleOAuthAuthorization
+			// refuses with "already in progress" otherwise.
+			if c.isDeferOAuthForTray(ctx) {
+				c.logger.Info("⏳ Deferring SSE OAuth to prevent UI blocking - will retry in background",
+					zap.String("server", c.config.Name))
+				return &ErrOAuthPending{
+					ServerName: c.config.Name,
+					ServerURL:  c.logSafeURL(),
+					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
+				}
+			}
+
 			c.logger.Info("🎯 SSE OAuth authorization required after connection attempts - starting manual OAuth flow",
 				zap.String("server", c.config.Name),
 				zap.Bool("had_refresh_token", hasRefreshToken))
+
+			c.clearOAuthState()
 
 			// Handle OAuth authorization manually using the example pattern
 			if handleErr := c.handleOAuthAuthorization(ctx, lastErr, oauthConfig, extraParams); handleErr != nil {
@@ -1904,6 +1923,32 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	return result, nil
 }
 
+// forcedAuthorizationRequired lets a manual login proceed against an upstream
+// that accepted initialize anonymously (GH #1271).
+//
+// The manual-login paths key the whole flow on the OAuthAuthorizationRequiredError
+// mcp-go returns from a 401 — the handler that builds the authorize URL rides
+// on that error. An upstream that authorises per method (Gmail MCP: initialize
+// and tools/list are anonymous, only tools/call 401s) never produces it, so
+// the login was refused with "no authentication required" — the exact remedy
+// the operator needed, turned away. When the operator declared OAuth with an
+// oauth block, synthesise the same error from the live transport's handler;
+// mcp-go's OAuth transports expose it whether or not a 401 ever happened.
+// Returns nil (keep the historical "no auth needed" conclusion) when OAuth was
+// not declared or the transport carries no handler.
+func (c *Client) forcedAuthorizationRequired() error {
+	if !c.oauthRequiredByConfig() {
+		return nil
+	}
+	handler := extractOAuthHandler(c.client)
+	if handler == nil {
+		return nil
+	}
+	c.logger.Info("🔐 Upstream accepted anonymous initialize but the server config declares OAuth - continuing manual login",
+		zap.String("server", c.config.Name))
+	return &uptransport.OAuthAuthorizationRequiredError{Handler: handler}
+}
+
 // getAuthorizationURLQuick gets the authorization URL without starting the full OAuth flow.
 // Returns the URL, OAuth handler, code verifier, and state for later use.
 func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, error) {
@@ -1927,8 +1972,15 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	// Try to initialize - this will trigger OAuth authorization requirement
 	err = c.initialize(ctx)
 	if err == nil {
-		// No OAuth needed - server connected without auth
-		return "", nil, "", "", fmt.Errorf("server connected without OAuth - no authentication required")
+		// GH #1271: a per-method-auth upstream passes this probe; honour the
+		// operator's oauth block instead of concluding "no auth needed".
+		err = c.forcedAuthorizationRequired()
+	}
+	if err == nil {
+		// No OAuth needed - server connected without auth. Name the remedy for
+		// the one case this conclusion is wrong about (GH #1271).
+		return "", nil, "", "", fmt.Errorf("server connected without OAuth - no authentication required " +
+			"(if this upstream accepts initialize anonymously but rejects tools/call, declare OAuth with an \"oauth\" block in its server config)")
 	}
 
 	// Check if this is an OAuth authorization error
@@ -2343,6 +2395,11 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 	// Now try to initialize - this will trigger OAuth authorization requirement
 	c.logger.Info("🎯 Attempting initialize to trigger OAuth authorization requirement...")
 	err = c.initialize(ctx)
+	if err == nil {
+		// GH #1271: a per-method-auth upstream passes this probe; honour the
+		// operator's oauth block instead of concluding "no OAuth needed".
+		err = c.forcedAuthorizationRequired()
+	}
 	if err != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(err) || c.isOAuthError(err) {
@@ -2410,8 +2467,12 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 		if c.isOAuthError(err) || strings.Contains(err.Error(), "authorization required") || strings.Contains(err.Error(), "no valid token") {
 			c.logger.Info("✅ OAuth authorization required from SSE Start() - triggering manual OAuth flow")
 
-			// Handle OAuth authorization manually and get result
-			result, oauthErr := c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
+			// Handle OAuth authorization manually and get result. Assign the
+			// outer result (a := here used to shadow it, so the auth URL and
+			// browser status from a Start()-triggered flow were dropped and
+			// the post-initialize check below could not tell a flow had run).
+			var oauthErr error
+			result, oauthErr = c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
 			if oauthErr != nil {
 				return result, fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
@@ -2430,6 +2491,12 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 	// Now try to initialize to ensure connection is working
 	c.logger.Info("🎯 Attempting initialize to verify connection...")
 	err = c.initialize(ctx)
+	if err == nil && result == nil {
+		// GH #1271: a per-method-auth upstream passes this probe; honour the
+		// operator's oauth block instead of concluding "no OAuth needed".
+		// (result != nil means Start() already ran the flow above.)
+		err = c.forcedAuthorizationRequired()
+	}
 	if err != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(err) || c.isOAuthError(err) {
