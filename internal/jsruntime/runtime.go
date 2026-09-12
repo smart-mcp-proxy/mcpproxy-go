@@ -276,8 +276,25 @@ func (ec *ExecutionContext) executionCtx() context.Context {
 	return context.Background()
 }
 
-// executeWithVM runs the JavaScript code in the given VM and returns the result
-func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) *Result {
+// executeWithVM runs the JavaScript code in the given VM and returns the result.
+//
+// An interrupt (Execute's timeout) that lands while RunString is running comes
+// back as its error; one that lands while value.Export() is still running
+// script code — a getter on the returned object, a toJSON — is raised by goja
+// as a PANIC carrying *goja.InterruptedError. This goroutine is the only thing
+// standing between that panic and the process, so it recovers and reports a
+// timeout instead. Execute has already answered the caller by then; the
+// recovered result only keeps the goroutine's exit orderly.
+func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (result *Result) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(*goja.InterruptedError); ok {
+				result = NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
+				return
+			}
+			result = NewErrorResult(NewJsError(ErrorCodeRuntimeError, fmt.Sprintf("script panicked: %v", r)))
+		}
+	}()
 	// Compile the code first to catch syntax errors
 	_, err := goja.Compile("", code, false)
 	if err != nil {

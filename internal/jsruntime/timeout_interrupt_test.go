@@ -48,3 +48,24 @@ func TestSingletonCallToolDispatchesUnderTheExecutionContext(t *testing.T) {
 		t.Fatal("call_tool must dispatch under the execution's own timeout context")
 	}
 }
+
+// TestExecuteTimeoutDuringExportDoesNotPanic: RunString can return before the
+// script's work is done — a getter on the returned object runs during
+// value.Export(). An interrupt landing there is raised by goja as a PANIC
+// carrying *goja.InterruptedError, not as a RunString error, and an
+// unrecovered panic in the script goroutine takes the whole process down.
+func TestExecuteTimeoutDuringExportDoesNotPanic(t *testing.T) {
+	result, ec := execute(context.Background(), newMockToolCaller(),
+		`({ get value() { for (;;) {} } })`, ExecutionOptions{TimeoutMs: 50})
+	if result.Ok {
+		t.Fatal("expected the busy getter to time out")
+	}
+	if result.Error == nil || result.Error.Code != ErrorCodeTimeout {
+		t.Fatalf("expected %s, got %+v", ErrorCodeTimeout, result.Error)
+	}
+	select {
+	case <-ec.scriptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("script goroutine did not return after the interrupt during export")
+	}
+}

@@ -61,3 +61,18 @@ func TestSubCallSanitisation_NoProxyIsANoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Same(t, in, res)
 }
+
+// A tool that publishes no annotations is open-world by the MCP spec default,
+// hence untrusted — so the untrusted-only strip policy must reach it from a
+// script exactly as it does from call_tool_* (which derives trust the same way).
+func TestSubCallSanitisation_NoAnnotationsIsUntrusted_StripApplies(t *testing.T) {
+	cfg := config.DefaultOutputSanitisationConfig()
+	cfg.StripControlChars = true
+	u := &upstreamToolCaller{logger: zap.NewNop(), proxy: newSanProxy(t, cfg, false)}
+
+	in := textResult(mcp.TextContent{Type: "text", Text: "plain\x1b[31mred\x1b[0m"})
+	res, err := u.sanitiseSubCallResult(context.Background(), "srv", "unknown-tool", "req-1", in)
+	require.NoError(t, err)
+	ctr := res.(*mcp.CallToolResult)
+	assert.NotContains(t, firstText(ctr), "\x1b[", "control sequences must be stripped from an unannotated (open-world) tool's output")
+}
