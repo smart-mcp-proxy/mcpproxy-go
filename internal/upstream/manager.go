@@ -2469,6 +2469,10 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	// Clear OAuth state for fresh flow
 	coreClient.ClearOAuthState()
 
+	// Snapshot BEFORE the flow starts so a completion can never precede it
+	// (the watcher below detects completion as a change from this value).
+	before := m.storedAccessToken(cfg)
+
 	// Start the quick OAuth flow - this returns immediately with browser status
 	result, err := coreClient.StartOAuthFlowQuick(ctx)
 	if err != nil {
@@ -2485,8 +2489,8 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	// true from an earlier sign-in (the re-login a declared-OAuth server now
 	// permits, GH #1271), and the browser callback then found nobody waiting
 	// ("mcpproxy is not waiting for this sign-in"). Completion is detected as
-	// a CHANGE of the stored access token, snapshotted before the flow.
-	before := m.storedAccessToken(cfg)
+	// a CHANGE of the stored access token, snapshotted before the flow; the
+	// watcher also ends with the manager so it never outlives a shutdown.
 	go func() {
 		defer cancel()
 		ticker := time.NewTicker(2 * time.Second)
@@ -2494,6 +2498,8 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-m.shutdownCtx.Done():
 				return
 			case <-ticker.C:
 			}
