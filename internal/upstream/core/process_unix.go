@@ -57,8 +57,10 @@ func createProcessGroupCommandFunc(client *Client, workingDir string, logger *za
 }
 
 // killProcessGroup terminates an entire process group on Unix systems
-// This is the proper way to clean up child processes and prevent zombies
-func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
+// This is the proper way to clean up child processes and prevent zombies.
+// The cmd argument is the owning process's exec.Cmd; it only matters on
+// Windows (PID-reuse identity check) and is ignored here.
+func killProcessGroup(pgid int, _ *exec.Cmd, logger *zap.Logger, serverName string) error {
 	if pgid <= 0 {
 		return nil
 	}

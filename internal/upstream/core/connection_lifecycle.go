@@ -348,7 +348,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 			zap.String("server", serverName),
 			zap.Int("pgid", pgid))
 
-		if err := killProcessGroup(pgid, c.logger, serverName); err != nil {
+		if err := killProcessGroup(pgid, processCmd, c.logger, serverName); err != nil {
 			c.logger.Error("Failed to kill process group",
 				zap.String("server", serverName),
 				zap.Int("pgid", pgid),

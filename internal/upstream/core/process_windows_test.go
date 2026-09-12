@@ -115,7 +115,7 @@ func TestKillProcessGroup_ForgetsJob(t *testing.T) {
 	require.True(t, hasWindowsJob(pgid))
 	tree.release(t)
 
-	require.NoError(t, killProcessGroup(pgid, logger, "test-server"))
+	require.NoError(t, killProcessGroup(pgid, tree.cmd, logger, "test-server"))
 	assert.False(t, hasWindowsJob(pgid))
 	select {
 	case <-tree.eof:
@@ -153,6 +153,19 @@ func TestReleaseProcessGroup_PIDReuseLeavesNewOwnerAlone(t *testing.T) {
 	// The old owner's delayed release must leave the new owner's entry alone.
 	releaseProcessGroup(pid, oldCmd, logger, "old-server")
 	require.True(t, hasWindowsJob(pid), "old owner's release must not evict the new owner's Job")
+
+	// Same for the force-kill path (Disconnect Step 5 after a Close timeout):
+	// it must neither take the new owner's Job nor fall back to a PID kill.
+	// oldCmd was never started, so a fallback would hit cmd.Process == nil
+	// and os.FindProcess(1<<30); returning nil without touching the map is
+	// the only correct outcome.
+	require.NoError(t, killProcessGroup(pid, oldCmd, logger, "old-server"))
+	require.True(t, hasWindowsJob(pid), "old owner's force-kill must not evict the new owner's Job")
+	// newJob must still be open: Assign on a bogus PID fails inside
+	// OpenProcess, whereas a closed Job fails earlier with "already closed".
+	err = newJob.Assign(pid)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "already closed", "new owner's Job must not have been closed")
 
 	// The new owner's own release works as usual.
 	releaseProcessGroup(pid, newCmd, logger, "new-server")

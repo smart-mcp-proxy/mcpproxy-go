@@ -34,7 +34,7 @@ func TestKillProcessGroup_AlreadyDead(t *testing.T) {
 	nonExistentPGID := 999999999
 
 	start := time.Now()
-	err := killProcessGroup(nonExistentPGID, logger, "test-server")
+	err := killProcessGroup(nonExistentPGID, nil, logger, "test-server")
 	elapsed := time.Since(start)
 
 	// Should return without error (process already dead is not an error)
@@ -50,7 +50,7 @@ func TestKillProcessGroup_InvalidPGID(t *testing.T) {
 
 	// Zero PGID should return immediately
 	start := time.Now()
-	err := killProcessGroup(0, logger, "test-server")
+	err := killProcessGroup(0, nil, logger, "test-server")
 	elapsed := time.Since(start)
 
 	assert.NoError(t, err)
@@ -59,7 +59,7 @@ func TestKillProcessGroup_InvalidPGID(t *testing.T) {
 
 	// Negative PGID should return immediately
 	start = time.Now()
-	err = killProcessGroup(-1, logger, "test-server")
+	err = killProcessGroup(-1, nil, logger, "test-server")
 	elapsed = time.Since(start)
 
 	assert.NoError(t, err)

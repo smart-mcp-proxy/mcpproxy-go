@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"sync"
@@ -71,24 +72,34 @@ func createProcessGroupCommandFunc(client *Client, workingDir string, logger *za
 // node.exe/python.exe/qmcp.exe processes accumulated from normal use in
 // under an hour on this host).
 //
+// cmd is the owning exec.Cmd (see releaseProcessGroup for why identity
+// matters: the PID may already belong to a newer connection). Only a Job
+// registered for this cmd is terminated. If the slot is held by someone
+// else, this connection's process is already gone and nothing is killed.
+//
 // Falls back to a plain single-process kill if no job was ever registered
 // for this PID (e.g. job-object setup itself failed) — degrades to the old
-// behaviour rather than doing nothing.
-func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
+// behaviour rather than doing nothing. The fallback goes through cmd's own
+// process handle when available (PID-reuse-proof; Windows keeps a PID
+// reserved while a handle to it is open) and only resolves by PID for the
+// legacy nil-cmd case.
+func killProcessGroup(pgid int, cmd *exec.Cmd, logger *zap.Logger, serverName string) error {
 	if pgid <= 0 {
 		return nil
 	}
 
-	job := takeWindowsJob(pgid, nil)
+	job := takeWindowsJob(pgid, cmd)
 	if job == nil {
+		if cmd != nil && windowsJobOwnedByOther(pgid, cmd) {
+			logger.Debug("PID now belongs to a newer connection's Job; nothing to kill for this one",
+				zap.String("server", serverName),
+				zap.Int("pid", pgid))
+			return nil
+		}
 		logger.Warn("No Windows Job Object tracked for this process; falling back to killing only the immediate process (any grandchildren will leak)",
 			zap.String("server", serverName),
 			zap.Int("pid", pgid))
-		proc, err := os.FindProcess(pgid)
-		if err != nil {
-			return nil // already gone
-		}
-		return proc.Kill()
+		return killImmediateProcess(pgid, cmd)
 	}
 
 	logger.Info("Terminating process tree via Windows Job Object",
@@ -204,6 +215,36 @@ func takeWindowsJob(pid int, cmd *exec.Cmd) *winjob.Job {
 	}
 	delete(windowsJobs, pid)
 	return entry.job
+}
+
+// windowsJobOwnedByOther reports whether pid has a registered Job that
+// belongs to a different cmd — i.e. Windows reused the PID for a newer
+// connection after this one's process exited.
+func windowsJobOwnedByOther(pid int, cmd *exec.Cmd) bool {
+	windowsJobsMu.Lock()
+	defer windowsJobsMu.Unlock()
+	entry, ok := windowsJobs[pid]
+	return ok && entry.cmd != cmd
+}
+
+// killImmediateProcess is the no-Job fallback: kill just the one process.
+// With a cmd we use its own process handle, which cannot alias a reused
+// PID; an already-exited child is not an error (ErrProcessDone).
+func killImmediateProcess(pid int, cmd *exec.Cmd) error {
+	if cmd != nil && cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return nil // already gone
+	}
+	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
 }
 
 // registerWindowsJob records the Job for pid. If an entry already exists —
