@@ -46,21 +46,53 @@ func (c *Client) sseAuthStrategies() []authStrategy {
 	}
 }
 
+// AuthStrategyOAuth is the name of the OAuth auth strategy as recorded by
+// AuthStrategy. The other strategies ("headers", "no-auth") are internal; only
+// OAuth is something a consumer needs to recognise, because it is the one
+// strategy whose credential lives in the oauth_tokens bucket (GH #1172).
+const AuthStrategyOAuth = "OAuth"
+
+// AuthStrategy reports the name of the auth strategy the CURRENT connection
+// was established with ("headers", "no-auth" or AuthStrategyOAuth), or "" when
+// the client is not connected over HTTP/SSE. It is a fact about the live
+// connection, not the config: a server with a stored OAuth token that
+// connected through its static headers did not use that token.
+func (c *Client) AuthStrategy() string {
+	if v, ok := c.authStrategy.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
 // connectHTTP establishes HTTP transport connection with auth fallback
 func (c *Client) connectHTTP(ctx context.Context) error {
 	// Strategy order (and, for brokered connections, the fail-closed single
 	// strategy) is decided by httpAuthStrategies.
-	authStrategies := c.httpAuthStrategies()
+	return c.runAuthStrategies(ctx, c.httpAuthStrategies(), "")
+}
 
+// connectSSE establishes SSE transport connection with auth fallback
+func (c *Client) connectSSE(ctx context.Context) error {
+	// Strategy order (and, for brokered connections, the fail-closed single
+	// strategy) is decided by sseAuthStrategies.
+	return c.runAuthStrategies(ctx, c.sseAuthStrategies(), "SSE ")
+}
+
+// runAuthStrategies attempts the strategies in order until one connects,
+// recording the winner so AuthStrategy can report it. transportLabel is "" for
+// streamable HTTP and "SSE " for SSE; it only prefixes the log and error text.
+// The returned error strings are unchanged from the two loops this replaced
+// (other packages match on "all authentication strategies failed").
+func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStrategy, transportLabel string) error {
 	var lastErr error
 	for i, strategy := range authStrategies {
-		c.logger.Debug("🔐 Trying authentication strategy",
+		c.logger.Debug("🔐 Trying "+transportLabel+"authentication strategy",
 			zap.Int("strategy_index", i),
 			zap.String("strategy", strategy.name))
 
 		if err := strategy.fn(ctx); err != nil {
 			lastErr = err
-			c.logger.Debug("🚫 Auth strategy failed",
+			c.logger.Debug("🚫 "+transportLabel+"Auth strategy failed",
 				zap.Int("strategy_index", i),
 				zap.String("strategy", strategy.name),
 				// #1148: the transport error quotes the request URL with its
@@ -83,9 +115,10 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 			}
 			continue
 		}
-		c.logger.Info("✅ Authentication successful",
+		c.logger.Info("✅ "+transportLabel+"Authentication successful",
 			zap.Int("strategy_index", i),
 			zap.String("strategy", strategy.name))
+		c.authStrategy.Store(strategy.name)
 
 		// Register notification handler for tools/list_changed
 		c.registerNotificationHandler()
@@ -93,57 +126,7 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 		return nil
 	}
 
-	return fmt.Errorf("all authentication strategies failed, last error: %w", lastErr)
-}
-
-// connectSSE establishes SSE transport connection with auth fallback
-func (c *Client) connectSSE(ctx context.Context) error {
-	// Strategy order (and, for brokered connections, the fail-closed single
-	// strategy) is decided by sseAuthStrategies.
-	authStrategies := c.sseAuthStrategies()
-
-	var lastErr error
-	for i, strategy := range authStrategies {
-		strategyName := strategy.name
-		c.logger.Debug("🔐 Trying SSE authentication strategy",
-			zap.Int("strategy_index", i),
-			zap.String("strategy", strategyName))
-
-		if err := strategy.fn(ctx); err != nil {
-			lastErr = err
-			c.logger.Debug("🚫 SSE auth strategy failed",
-				zap.Int("strategy_index", i),
-				zap.String("strategy", strategyName),
-				// #1148: see the HTTP strategy loop above.
-				logSafeErrorField(err))
-
-			// For configuration errors (like no headers), always try next strategy
-			if c.isConfigError(err) {
-				continue
-			}
-
-			// For OAuth errors, continue to OAuth strategy
-			if c.isOAuthError(err) {
-				continue
-			}
-
-			// If it's not an auth error, don't try fallback
-			if !c.isAuthError(err) {
-				return err
-			}
-			continue
-		}
-		c.logger.Info("✅ SSE Authentication successful",
-			zap.Int("strategy_index", i),
-			zap.String("strategy", strategyName))
-
-		// Register notification handler for tools/list_changed
-		c.registerNotificationHandler()
-
-		return nil
-	}
-
-	return fmt.Errorf("all SSE authentication strategies failed, last error: %w", lastErr)
+	return fmt.Errorf("all "+transportLabel+"authentication strategies failed, last error: %w", lastErr)
 }
 
 // SetBrokeredAuth sets the per-user resolved upstream credential for this

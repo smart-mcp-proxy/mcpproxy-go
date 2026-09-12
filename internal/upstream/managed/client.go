@@ -625,6 +625,16 @@ func (mc *Client) IsUserLoggedOut() bool {
 	return mc.StateManager.IsUserLoggedOut()
 }
 
+// ConnectedWithOAuth reports whether the live connection was established by
+// the OAuth auth strategy — i.e. the stored OAuth token is what authenticated
+// it. False when disconnected, when another strategy (static headers,
+// anonymous) won, or for a hand-constructed client with no core. The runtime
+// uses it to decide whether a stored token record is evidence about this
+// server at all (GH #1172).
+func (mc *Client) ConnectedWithOAuth() bool {
+	return mc.coreClient != nil && mc.coreClient.AuthStrategy() == core.AuthStrategyOAuth
+}
+
 // IsOAuthCallRequired reports whether a tools/call against this otherwise-
 // connected server returned "authorization required" / 401, indicating the
 // endpoint enforces OAuth only at call time. The runtime feeds this into the

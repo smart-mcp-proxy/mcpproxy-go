@@ -68,6 +68,13 @@ type Client struct {
 	connected  bool
 	connecting bool // Prevent concurrent connection attempts
 
+	// authStrategy holds the name of the HTTP/SSE auth strategy the current
+	// connection was established with (see AuthStrategy). Atomic rather than
+	// under c.mu because Connect holds c.mu for the whole attempt — an OAuth
+	// flow can take minutes — and the server-list projection must be able to
+	// read it without waiting on that.
+	authStrategy atomic.Value
+
 	// OAuth progress tracking (separate mutex to prevent reentrant deadlock)
 	oauthMu            sync.RWMutex
 	oauthInProgress    bool

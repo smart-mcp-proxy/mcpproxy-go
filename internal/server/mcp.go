@@ -3977,15 +3977,15 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			RetryCount:         retryCount,
 		}
 
-		// T032: Wire refresh state into health calculation (Spec 023)
+		// T032: Wire refresh state into health calculation (Spec 023).
+		// Read through the runtime seam so a stale schedule for a server that
+		// no longer uses OAuth is not reported here either (GH #1172).
 		if p.mainServer != nil && p.mainServer.runtime != nil {
-			if refreshMgr := p.mainServer.runtime.RefreshManager(); refreshMgr != nil {
-				if refreshState := refreshMgr.GetRefreshState(server.Name); refreshState != nil {
-					healthInput.RefreshState = health.RefreshState(refreshState.State)
-					healthInput.RefreshRetryCount = refreshState.RetryCount
-					healthInput.RefreshLastError = refreshState.LastError
-					healthInput.RefreshNextAttempt = refreshState.NextAttempt
-				}
+			if refreshState := p.mainServer.runtime.HealthRefreshState(server.Name, server); refreshState != nil {
+				healthInput.RefreshState = health.RefreshState(refreshState.State)
+				healthInput.RefreshRetryCount = refreshState.RetryCount
+				healthInput.RefreshLastError = refreshState.LastError
+				healthInput.RefreshNextAttempt = refreshState.NextAttempt
 			}
 		}
 

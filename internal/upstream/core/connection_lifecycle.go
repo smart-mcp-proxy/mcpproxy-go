@@ -378,6 +378,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.client = nil
 	c.serverInfo = nil
 	c.connected = false
+	c.authStrategy.Store("")
 	c.cachedTools = nil
 	c.processGroupID = 0
 	c.processCmd = nil
