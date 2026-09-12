@@ -1082,3 +1082,29 @@ func TestCalculateHealth_RetryStoppedControl(t *testing.T) {
 	assert.Equal(t, "connection reset by peer", result.Detail)
 	assert.NotContains(t, result.Summary, "Automatic reconnection stopped")
 }
+
+// GH #1172: refresh state is a property of an OAuth token. A server that is
+// not OAuth-required — it authenticates with a static Authorization header, or
+// the user logged out and the token is gone — can still carry a stale
+// RefreshManager schedule built from the old record. That schedule must not
+// judge the server as "Refresh token expired".
+func TestCalculateHealth_RefreshStateIgnoredWhenOAuthNotRequired(t *testing.T) {
+	for _, state := range []RefreshState{RefreshStateRetrying, RefreshStateFailed} {
+		input := HealthCalculatorInput{
+			Name:             "header-auth-server",
+			Enabled:          true,
+			State:            "connected",
+			Connected:        true,
+			OAuthRequired:    false,
+			ToolCount:        23,
+			RefreshState:     state,
+			RefreshLastError: "Token expired and no refresh token available",
+		}
+
+		result := CalculateHealth(input, nil)
+
+		assert.Equal(t, LevelHealthy, result.Level, "refresh state %d must not apply without OAuth", state)
+		assert.Equal(t, ActionNone, result.Action)
+		assert.Equal(t, "Connected (23 tools)", result.Summary)
+	}
+}

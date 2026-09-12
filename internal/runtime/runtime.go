@@ -2364,11 +2364,23 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 				}
 			}
 
+			// GH #1172: a server with no OAuth block that carries a static
+			// Authorization header authenticates with that header — the
+			// headers-auth strategy runs first and OAuth is never attempted
+			// while it works. A token record left behind by an earlier OAuth
+			// login (autodiscovery servers have no `oauth` block whose removal
+			// could have cleared it) is stale evidence for such a server, and
+			// consulting it used to report a connected, tool-serving upstream
+			// as unhealthy / "Token expired" / login for as long as the record
+			// existed. Leave the record alone (logout still removes it) and
+			// simply do not derive OAuth state from it.
+			staticAuthHeader := serverStatus.Config.OAuth == nil && serverStatus.Config.HasStaticAuthorizationHeader()
+
 			// Check if server has valid OAuth token in storage
 			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
 			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
 			// We need to generate the same key format: "servername_hash16"
-			if url != "" && r.storageManager != nil {
+			if url != "" && r.storageManager != nil && !staticAuthHeader {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
 					// #1158: the configured upstream URL routinely carries a
@@ -2936,6 +2948,14 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 	// Clear OAuth token from persistent storage
 	if err := r.upstreamManager.ClearOAuthToken(serverName); err != nil {
 		return fmt.Errorf("failed to clear OAuth token: %w", err)
+	}
+
+	// GH #1172: the refresh schedule rides on the token that was just removed.
+	// Left behind, a failed schedule kept reporting the logged-out server as
+	// "Refresh token expired" instead of "Logged out" — the server-removal path
+	// already does this, logout did not.
+	if r.refreshManager != nil {
+		r.refreshManager.OnTokenCleared(serverName)
 	}
 
 	// Disconnect the server to force re-authentication

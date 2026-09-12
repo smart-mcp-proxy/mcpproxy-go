@@ -2151,6 +2151,29 @@ func (sc *ServerConfig) IsAutoApproveToolChanges() bool {
 	return sc.EffectiveTrustMode() == TrustModeAuto
 }
 
+// HasStaticAuthorizationHeader reports whether the server is configured to
+// authenticate with a static credential in the `Authorization` header (name
+// matched case-insensitively, value non-blank).
+//
+// OAuth and a static Authorization header are mutually exclusive on the wire:
+// the OAuth transport populates that very header, and the headers-auth
+// strategy runs before OAuth is ever attempted. A config that declares one
+// has therefore stopped using the other, which lets the server projection
+// ignore an OAuth token record left behind by a previous OAuth login
+// (GH #1172) without a heuristic on other header names. A nil receiver has no
+// headers.
+func (sc *ServerConfig) HasStaticAuthorizationHeader() bool {
+	if sc == nil {
+		return false
+	}
+	for name, value := range sc.Headers {
+		if strings.EqualFold(name, "Authorization") && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // IsToolAllowedByConfig reports whether toolName passes the server's static
 // enabled_tools / disabled_tools filter. Returns true when neither list is set.
 func (sc *ServerConfig) IsToolAllowedByConfig(toolName string) bool {
