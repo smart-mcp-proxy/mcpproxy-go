@@ -2374,7 +2374,14 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			// as unhealthy / "Token expired" / login for as long as the record
 			// existed. Leave the record alone (logout still removes it) and
 			// simply do not derive OAuth state from it.
-			staticAuthHeader := serverStatus.Config.OAuth == nil && serverStatus.Config.HasStaticAuthorizationHeader()
+			//
+			// The live connection has the final say: if the configured header
+			// was rejected and the OAuth strategy rescued the connection with
+			// that very token, the token IS in play and its state is reported
+			// as for any other OAuth server.
+			staticAuthHeader := serverStatus.Config.OAuth == nil &&
+				serverStatus.Config.HasStaticAuthorizationHeader() &&
+				!r.serverConnectedWithOAuth(serverStatus.Name)
 
 			// Check if server has valid OAuth token in storage
 			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
@@ -2924,6 +2931,17 @@ func (r *Runtime) TriggerOAuthLoginQuick(serverName string) (*core.OAuthStartRes
 	}
 
 	return result, nil
+}
+
+// serverConnectedWithOAuth reports whether the named server's live connection
+// was authenticated by the OAuth strategy (GH #1172). False when the upstream
+// manager or the client is absent, or the client is not connected that way.
+func (r *Runtime) serverConnectedWithOAuth(name string) bool {
+	if r.upstreamManager == nil {
+		return false
+	}
+	client, exists := r.upstreamManager.GetClient(name)
+	return exists && client != nil && client.ConnectedWithOAuth()
 }
 
 // TriggerOAuthLogout implements RuntimeOperations interface for management service.

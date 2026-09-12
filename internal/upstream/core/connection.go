@@ -227,6 +227,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	// keeps the recorder it was built with instead of writing into this attempt.
 	c.beginRetryAfterGeneration()
 
+	// The strategy that wins THIS attempt is recorded by runAuthStrategies;
+	// until then nothing is known about how (or whether) we are connected.
+	c.authStrategy.Store("")
+
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("server", c.config.Name),
 		zap.String("url", c.logSafeURL()),
