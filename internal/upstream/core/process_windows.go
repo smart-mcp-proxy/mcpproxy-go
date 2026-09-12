@@ -71,14 +71,8 @@ func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
 		return nil
 	}
 
-	windowsJobsMu.Lock()
-	job, ok := windowsJobs[pgid]
-	if ok {
-		delete(windowsJobs, pgid)
-	}
-	windowsJobsMu.Unlock()
-
-	if !ok || job == nil {
+	job := takeWindowsJob(pgid)
+	if job == nil {
 		logger.Warn("No Windows Job Object tracked for this process; falling back to killing only the immediate process (any grandchildren will leak)",
 			zap.String("server", serverName),
 			zap.Int("pid", pgid))
@@ -136,9 +130,7 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 		return pid
 	}
 
-	windowsJobsMu.Lock()
-	windowsJobs[pid] = job
-	windowsJobsMu.Unlock()
+	registerWindowsJob(pid, job, logger, serverName)
 
 	logger.Debug("Process group ID extracted and assigned to Windows Job Object",
 		zap.String("server", serverName),
@@ -147,10 +139,65 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 	return pid
 }
 
-// isProcessGroupAlive checks if the process is still running on Windows.
-func isProcessGroupAlive(pgid int) bool {
+// releaseProcessGroup is the platform hook DisconnectWithContext calls on
+// EVERY non-Docker stdio disconnect, whether or not the graceful MCP close
+// succeeded. On Unix it is a no-op. Here it terminates whatever is still
+// in the Job and drops the windowsJobs entry.
+//
+// Why it must run on the graceful path too: mcp-go's Stdio.Close() only
+// ever kills the immediate child (cmd.exe — every Windows stdio command
+// is shell-wrapped) and always returns within ~8s, under the 10s
+// mcpClientCloseTimeout, so Disconnect's force-kill step (which is where
+// killProcessGroup lives) is effectively unreachable on Windows. Without
+// this hook the grandchildren a stdin-EOF-ignoring node.exe/python.exe
+// left behind survived every restart, and the Job handle + map entry
+// leaked per disconnect until mcpproxy exited (#1234 follow-up, F1).
+func releaseProcessGroup(pgid int, logger *zap.Logger, serverName string) {
 	if pgid <= 0 {
-		return false
+		return
 	}
-	return winjob.IsProcessAlive(pgid)
+	job := takeWindowsJob(pgid)
+	if job == nil {
+		// Already killed via killProcessGroup, or job setup failed at
+		// connect time (extractProcessGroupID logged a Warn then).
+		return
+	}
+	if err := job.Close(); err != nil {
+		logger.Warn("Failed to close Windows Job Object on disconnect",
+			zap.String("server", serverName),
+			zap.Int("pid", pgid),
+			zap.Error(err))
+		return
+	}
+	logger.Debug("Released Windows Job Object; any surviving grandchildren terminated",
+		zap.String("server", serverName),
+		zap.Int("pid", pgid))
+}
+
+// takeWindowsJob removes and returns the Job registered for pid, or nil.
+// Popping under the lock gives the caller sole ownership of the Close.
+func takeWindowsJob(pid int) *winjob.Job {
+	windowsJobsMu.Lock()
+	defer windowsJobsMu.Unlock()
+	job := windowsJobs[pid]
+	delete(windowsJobs, pid)
+	return job
+}
+
+// registerWindowsJob records the Job for pid. If an entry already exists —
+// only possible when Windows reused a PID whose earlier Job was never
+// released — the old Job is closed first rather than silently dropped
+// with its handle (and any straggler still inside it) left open forever.
+func registerWindowsJob(pid int, job *winjob.Job, logger *zap.Logger, serverName string) {
+	windowsJobsMu.Lock()
+	prev := windowsJobs[pid]
+	windowsJobs[pid] = job
+	windowsJobsMu.Unlock()
+
+	if prev != nil {
+		logger.Warn("Windows Job Object already registered for reused PID; closing the stale one",
+			zap.String("server", serverName),
+			zap.Int("pid", pid))
+		_ = prev.Close()
+	}
 }

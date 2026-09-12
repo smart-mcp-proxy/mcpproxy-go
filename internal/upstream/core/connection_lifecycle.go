@@ -365,6 +365,16 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		}
 	}
 
+	// Step 5b: Release the platform process-group resource regardless of
+	// how the close went. No-op on Unix. On Windows this terminates the
+	// Job Object (reaching grandchildren mcp-go's Close never touches —
+	// it only kills the immediate cmd.exe) and drops its registry entry;
+	// without it, a graceful close leaked the Job handle and left
+	// EOF-ignoring node.exe/python.exe trees alive until mcpproxy exited.
+	if !isDocker && pgid > 0 {
+		releaseProcessGroup(pgid, c.logger, serverName)
+	}
+
 	// Step 6: Stop any locally-launched HTTP/SSE upstream. We do this
 	// AFTER closing the MCP client — the child should see the network
 	// transport go away first, giving it a clean shutdown signal before

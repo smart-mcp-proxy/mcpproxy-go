@@ -56,3 +56,9 @@ func killProcess(cmd *exec.Cmd, log *zap.Logger) error {
 	}
 	return syscall.Kill(-pgid, syscall.SIGKILL)
 }
+
+// terminate and kill are the two escalation steps stopLocked drives. On
+// Unix they are the process-group signals above; the Job Object argument
+// the Windows build needs does not exist here.
+func (h *handle) terminate() error { return terminateProcess(h.cmd, h.log) }
+func (h *handle) kill() error      { return killProcess(h.cmd, h.log) }

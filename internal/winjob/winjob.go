@@ -23,55 +23,20 @@ package winjob
 
 import (
 	"fmt"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// jobObjectExtendedLimitInformation / JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-// mirror the WinAPI JobObjectInfoClass / limit-flag constants. Kept local
-// (rather than relying on x/sys/windows, which does not export the
-// Set/QueryInformationJobObject calls themselves) so this file only needs
-// the raw kernel32 procedure lookups below.
-const (
-	jobObjectExtendedLimitInformation = 9
-	jobObjectLimitKillOnJobClose      = 0x00002000
-	stillActive                       = 259 // STILL_ACTIVE, per GetExitCodeProcess docs
-)
-
-var (
-	modkernel32               = windows.NewLazySystemDLL("kernel32.dll")
-	procSetInformationJobObj  = modkernel32.NewProc("SetInformationJobObject")
-)
-
-// jobobjectBasicLimitInformation mirrors JOBOBJECT_BASIC_LIMIT_INFORMATION.
-// Only LimitFlags is meaningful here; the rest exists purely so the struct
-// has the layout Win32 expects when we hand it a pointer.
-type jobobjectBasicLimitInformation struct {
-	PerProcessUserTimeLimit int64
-	PerJobUserTimeLimit     int64
-	LimitFlags              uint32
-	MinimumWorkingSetSize   uintptr
-	MaximumWorkingSetSize   uintptr
-	ActiveProcessLimit      uint32
-	Affinity                uintptr
-	PriorityClass           uint32
-	SchedulingClass         uint32
-}
-
-// jobobjectExtendedLimitInformation mirrors JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
-type jobobjectExtendedLimitInformation struct {
-	BasicLimitInformation jobobjectBasicLimitInformation
-	IoInfo                [48]byte // IO_COUNTERS — unused, present for correct struct size
-	ProcessMemoryLimit    uintptr
-	JobMemoryLimit        uintptr
-	PeakProcessMemoryUsed uintptr
-	PeakJobMemoryUsed     uintptr
-}
-
 // Job wraps a Windows Job Object configured to kill every member process
 // (including any it spawns after joining) as soon as Close is called.
+//
+// Close may be reached from more than one goroutine at once — the
+// launcher's Stop path and its reaper both close the job — so the handle
+// is guarded by a mutex and Close is idempotent.
 type Job struct {
+	mu     sync.Mutex
 	handle windows.Handle
 }
 
@@ -82,20 +47,19 @@ func New() (*Job, error) {
 		return nil, fmt.Errorf("CreateJobObject: %w", err)
 	}
 
-	info := jobobjectExtendedLimitInformation{
-		BasicLimitInformation: jobobjectBasicLimitInformation{
-			LimitFlags: jobObjectLimitKillOnJobClose,
-		},
-	}
-	r1, _, callErr := procSetInformationJobObj.Call(
-		uintptr(handle),
-		uintptr(jobObjectExtendedLimitInformation),
+	// x/sys/windows exports the struct, the info class and the limit flag,
+	// so the layout (including the arch-specific trailing pad on 386/arm)
+	// is the library's problem, not ours.
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(
+		handle,
+		windows.JobObjectExtendedLimitInformation,
 		uintptr(unsafe.Pointer(&info)), //nolint:gosec // required shape for the Win32 call
-		unsafe.Sizeof(info),
-	)
-	if r1 == 0 {
+		uint32(unsafe.Sizeof(info)),
+	); err != nil {
 		_ = windows.CloseHandle(handle)
-		return nil, fmt.Errorf("SetInformationJobObject: %w", callErr)
+		return nil, fmt.Errorf("SetInformationJobObject: %w", err)
 	}
 
 	return &Job{handle: handle}, nil
@@ -112,6 +76,12 @@ func (j *Job) Assign(pid int) error {
 	if j == nil {
 		return fmt.Errorf("winjob: nil job")
 	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.handle == 0 {
+		return fmt.Errorf("winjob: job already closed")
+	}
+
 	proc, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(pid)) //nolint:gosec // pid is always a live PID from exec.Cmd.Process.Pid
 	if err != nil {
 		return fmt.Errorf("OpenProcess(%d): %w", pid, err)
@@ -125,9 +95,14 @@ func (j *Job) Assign(pid int) error {
 }
 
 // Close terminates every process still in the job and releases the handle.
-// Safe to call more than once and safe to call on a nil *Job.
+// Safe to call more than once, concurrently, and on a nil *Job.
 func (j *Job) Close() error {
-	if j == nil || j.handle == 0 {
+	if j == nil {
+		return nil
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.handle == 0 {
 		return nil
 	}
 	// Kill first (reaches every member immediately); closing the handle
@@ -136,21 +111,4 @@ func (j *Job) Close() error {
 	err := windows.CloseHandle(j.handle)
 	j.handle = 0
 	return err
-}
-
-// IsProcessAlive reports whether pid still exists and has not exited.
-// Used for the isProcessGroupAlive check that process_windows.go previously
-// hardcoded to false.
-func IsProcessAlive(pid int) bool {
-	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid)) //nolint:gosec
-	if err != nil {
-		return false
-	}
-	defer func() { _ = windows.CloseHandle(proc) }()
-
-	var code uint32
-	if err := windows.GetExitCodeProcess(proc, &code); err != nil {
-		return false
-	}
-	return code == stillActive
 }

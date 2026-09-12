@@ -20,9 +20,8 @@ func applyProcAttrs(_ *exec.Cmd) {}
 // createJob assigns the just-started process to a fresh Windows Job Object
 // (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) so that everything it spawns
 // afterwards — e.g. `cmd.exe /c npx ...` spawning node.exe spawning the
-// actual MCP server — dies when the returned Closer's Close is called
-// (wired into launcher.go's reap(), which runs on every exit path). Prior
-// to this, launcher_windows.go only ever reached the immediate child
+// actual MCP server — dies when the returned Closer's Close is called.
+// Prior to this, launcher_windows.go only ever reached the immediate child
 // (terminateProcess/killProcess below called cmd.Process.Kill()), so a
 // launcher-managed server on Windows leaked every grandchild it spawned —
 // the same class of leak process_windows.go had on the stdio path.
@@ -43,11 +42,35 @@ func createJob(cmd *exec.Cmd) io.Closer {
 	return job
 }
 
-// terminateProcess signals the child directly. The Job Object (if createJob
-// succeeded) is what actually reaches grandchildren — it is closed in
-// launcher.go's reap() once the child has exited, not here, since
-// terminating the job immediately would kill descendants before giving the
-// immediate child a chance to shut down gracefully.
+// terminate is stopLocked's first escalation step. On Windows there is no
+// graceful phase to protect: Process.Kill() is TerminateProcess, so the
+// immediate child gets no chance to shut down cleanly either way. What
+// matters is reaching the WHOLE tree right here, not in reap(): the
+// grandchildren inherit the child's stdout/stderr pipe handles, so if only
+// cmd.exe dies the log pumps never see EOF, reap() never runs, Done()
+// never closes and Stop() blocks until the caller's ctx expires — the Job
+// would only ever have been closed once the tree was already gone (#1234
+// follow-up, F2). Closing the job kills every member, the pipes close, the
+// pumps drain, and reap() proceeds.
+func (h *handle) terminate() error {
+	if h.job != nil {
+		return h.job.Close()
+	}
+	return terminateProcess(h.cmd, h.log)
+}
+
+// kill is the hard-kill step after the grace period. With a Job the tree is
+// already gone (terminate closed it); this only matters when createJob
+// failed and we are back to the single-process fallback.
+func (h *handle) kill() error {
+	if h.job != nil {
+		_ = h.job.Close()
+	}
+	return killProcess(h.cmd, h.log)
+}
+
+// terminateProcess kills the immediate child only. Used when no Job Object
+// could be created (see createJob) — grandchildren will leak in that case.
 func terminateProcess(cmd *exec.Cmd, _ *zap.Logger) error {
 	if cmd.Process == nil {
 		return nil
@@ -55,9 +78,7 @@ func terminateProcess(cmd *exec.Cmd, _ *zap.Logger) error {
 	return cmd.Process.Kill()
 }
 
-// killProcess is the hard-kill fallback after the grace period. Same
-// reasoning as terminateProcess: the immediate child dies here, the wider
-// tree is reaped via the Job Object in reap() once Wait() returns.
+// killProcess is the single-process fallback for the hard-kill step.
 func killProcess(cmd *exec.Cmd, _ *zap.Logger) error {
 	if cmd.Process == nil {
 		return nil

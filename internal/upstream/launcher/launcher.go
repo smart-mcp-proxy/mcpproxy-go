@@ -264,8 +264,9 @@ func (h *handle) stopLocked(ctx context.Context) error {
 		zap.Int("pid", h.Pid()),
 		zap.Duration("grace", h.stopGrace))
 
-	// SIGTERM the process group (Unix) / process (Windows fallback).
-	if err := terminateProcess(h.cmd, h.log); err != nil {
+	// SIGTERM the process group (Unix) / terminate the Job Object tree
+	// (Windows) — see the platform files for h.terminate.
+	if err := h.terminate(); err != nil {
 		h.log.Warn("terminate failed (will fall through to wait/kill)",
 			zap.Error(err))
 	}
@@ -284,7 +285,7 @@ func (h *handle) stopLocked(ctx context.Context) error {
 	h.log.Warn("child did not exit within grace period; sending SIGKILL",
 		zap.Int("pid", h.Pid()),
 		zap.Duration("grace", h.stopGrace))
-	if err := killProcess(h.cmd, h.log); err != nil {
+	if err := h.kill(); err != nil {
 		h.log.Error("kill failed", zap.Error(err))
 		// Fall through — we still wait for done.
 	}
@@ -308,13 +309,11 @@ func (h *handle) reap() {
 	h.pumpWG.Wait()
 	err := h.cmd.Wait()
 
-	// Reap any grandchildren the child spawned (Windows only — see
-	// createJob/winjob). This runs on EVERY exit path, not just Stop's
-	// SIGKILL fallback: a child that exits on its own can still leave
-	// grandchildren behind (e.g. cmd.exe returning while node.exe keeps
-	// running), and without this they leaked indefinitely (413 confirmed
-	// orphaned node.exe/python.exe processes observed from normal use on
-	// this host prior to this fix).
+	// Release the Job Object (Windows only — see createJob/winjob). By the
+	// time we get here every pipe holder has exited, so on the Stop path
+	// this is a no-op (h.terminate/h.kill already closed the job — that is
+	// what made the pumps reach EOF); it only does real work when the
+	// whole tree exited on its own. Close is idempotent and goroutine-safe.
 	if h.job != nil {
 		_ = h.job.Close()
 	}
