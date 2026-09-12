@@ -147,6 +147,13 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 	}
 	h.pid.Store(int64(cmd.Process.Pid))
 
+	// On Windows, wrap the just-started process in a Job Object so that
+	// terminateProcess/killProcess below (and the natural-exit path in
+	// reap) can reach grandchildren the process spawns — Process.Kill()
+	// alone only ever reaches this one PID. No-op on Unix, where the
+	// process-group attrs applied via applyProcAttrs already cover this.
+	h.job = createJob(cmd)
+
 	// Pump stdout+stderr to LogSink. Both streams write to the same
 	// sink, prefixed so they remain distinguishable. Discard mode is
 	// supported via io.Discard. We wrap LogSink in a small mutex so
@@ -195,6 +202,7 @@ type handle struct {
 	log       *zap.Logger
 	done      chan struct{}
 	stopGrace time.Duration
+	job       io.Closer // Windows Job Object wrapper; nil on Unix (see createJob)
 
 	pid    atomic.Int64 // 0 once exited
 	pumpWG sync.WaitGroup
@@ -299,6 +307,17 @@ func (h *handle) reap() {
 	// kernel propagates EOF — we don't need Wait() to reach that state.
 	h.pumpWG.Wait()
 	err := h.cmd.Wait()
+
+	// Reap any grandchildren the child spawned (Windows only — see
+	// createJob/winjob). This runs on EVERY exit path, not just Stop's
+	// SIGKILL fallback: a child that exits on its own can still leave
+	// grandchildren behind (e.g. cmd.exe returning while node.exe keeps
+	// running), and without this they leaked indefinitely (413 confirmed
+	// orphaned node.exe/python.exe processes observed from normal use on
+	// this host prior to this fix).
+	if h.job != nil {
+		_ = h.job.Close()
+	}
 
 	h.waitErrMu.Lock()
 	h.waitErr = err
