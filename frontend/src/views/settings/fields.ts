@@ -195,7 +195,7 @@ export const SECURITY_FIELDS: SettingField[] = [
     key: 'enable_code_execution',
     docs: '/features/code-execution',
     label: 'Enable code execution tool',
-    help: 'Adds a sandboxed JavaScript tool agents can use to orchestrate several tool calls in one request. Off by default.',
+    help: 'Adds a sandboxed JavaScript tool agents can use to orchestrate several tool calls in one request. On by default; the sandbox respects quarantine and server restrictions.',
     control: 'toggle',
   },
   {

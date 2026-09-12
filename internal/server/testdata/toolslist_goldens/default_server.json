@@ -119,6 +119,49 @@
     },
     "name": "call_tool_write"
   },
+  "code_execution": {
+    "annotations": {
+      "title": "Code Execution",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "description": "Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations that would require multiple round-trips otherwise.\n\n**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (\u003e2 minutes).\n\n**Available in code**:\n- `input` global: Your input data passed via the 'input' parameter\n- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n- `call_tools(requests, options)`: Call INDEPENDENT tools in parallel. `requests` is an array (max 100) of {server, tool, args} objects; `options` is optional and accepts `max_parallel` (1-32, defaults to the configured code_execution_max_parallel). Returns one {ok, result} / {ok, error} slot per request, in input order, so one failing call never fails the others. Malformed arguments return a single {ok:false, error} envelope and dispatch nothing.\n- Modern JavaScript (ES2020+): arrow functions, const/let, template literals, destructuring, classes, for-of, optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect (no require(), filesystem, or network access)\n\n**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. Types are automatically stripped before execution.\n\n**Stored scripts**: Instead of `code`, pass `script: \"\u003cname\u003e\"` to run a script stored server-side in the `scripts/` directory next to mcpproxy's config file — a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. Naming a script that does not exist returns the available names, which is how you discover what is stored.\n\n**Important runtime rules**:\n- `call_tool` and `call_tools` are strictly SYNCHRONOUS. Do not use `await`.\n- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n- The last evaluated expression in your script is automatically returned as the final output.\n\n**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions.",
+    "inputSchema": {
+      "properties": {
+        "code": {
+          "description": "JavaScript or TypeScript source code (ES2020+) to execute. Supports modern syntax: arrow functions, const/let, template literals, destructuring, optional chaining, nullish coalescing. Use `input` to access input data, `call_tool(serverName, toolName, args)` to invoke one upstream tool and `call_tools([{server, tool, args}, ...], {max_parallel})` to invoke independent tools in parallel. Both are SYNCHRONOUS — do not use await. Return value is the last evaluated expression and must be JSON-serializable. Example: `const res = call_tool('github', 'get_user', {username: input.username}); const data = JSON.parse(res.result.content[0].text); ({user: data, timestamp: Date.now()})`",
+          "type": "string"
+        },
+        "input": {
+          "description": "Input data accessible as global `input` variable in code (default: {})",
+          "properties": {},
+          "type": "object"
+        },
+        "language": {
+          "description": "Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'.",
+          "enum": [
+            "javascript",
+            "typescript"
+          ],
+          "type": "string"
+        },
+        "options": {
+          "description": "Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (\u003e= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed). Batch concurrency is not an execution option: call_tools() defaults to the configured code_execution_max_parallel and is overridden per batch with call_tools(requests, {max_parallel}).",
+          "properties": {},
+          "type": "object"
+        },
+        "script": {
+          "description": "Name of a STORED script to execute instead of sending `code` inline (Spec 097). Scripts live as `\u003cname\u003e.js` / `\u003cname\u003e.ts` files in the `scripts/` directory next to mcpproxy's active config file and are read fresh on every invocation, so an edited script takes effect immediately. Provide EXACTLY ONE of `code` or `script`. The name is a bare identifier (letters, digits, '-' and '_'; 1-64 chars) — never a path. The language comes from the file extension (.js → javascript, .ts → typescript); an explicit `language` that contradicts it is an error. DISCOVERY: calling with a name that does not exist returns an error listing the available script names (first 20 alphabetically, plus the total), so the current set can always be recovered from a single failed call. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code.",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "code_execution"
+  },
   "describe_tool": {
     "annotations": {
       "title": "Describe Tool",
