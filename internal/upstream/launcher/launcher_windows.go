@@ -60,11 +60,13 @@ func (h *handle) terminate() error {
 }
 
 // kill is the hard-kill step after the grace period. With a Job the tree is
-// already gone (terminate closed it); this only matters when createJob
-// failed and we are back to the single-process fallback.
+// already gone (terminate closed it, and Close is idempotent), so this is a
+// no-op there — falling through to Process.Kill() on the dead-but-unreaped
+// child would only yield a misleading "kill failed" error. It does real
+// work only when createJob failed and we are on the single-process fallback.
 func (h *handle) kill() error {
 	if h.job != nil {
-		_ = h.job.Close()
+		return h.job.Close()
 	}
 	return killProcess(h.cmd, h.log)
 }
