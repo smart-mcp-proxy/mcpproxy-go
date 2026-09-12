@@ -201,6 +201,45 @@ func TestGetAllServers_AutodiscoveryOAuthStillReportsExpiredToken(t *testing.T) 
 	assert.Equal(t, true, server["authenticated"])
 }
 
+// TestHealthRefreshState_SharedSeam pins the seam every CalculateHealth call
+// site (REST via Runtime.GetAllServers, the Go tray via Server.GetAllServers,
+// the MCP upstream_servers list) reads refresh state through: a stale schedule
+// is withheld for a header-authenticated server, and still reported for an
+// autodiscovery OAuth server whose refresh genuinely failed — the two other
+// surfaces only know OAuthRequired from an explicit `oauth` block, so a guard
+// inside the calculator would have hidden the genuine failure there.
+func TestHealthRefreshState_SharedSeam(t *testing.T) {
+	rt := newStaleTokenRuntime(t)
+
+	saveStaleOAuthToken(t, rt, staleTokenServerName, staleTokenServerURL)
+	require.NoError(t, rt.refreshManager.Start(context.Background()))
+	t.Cleanup(rt.refreshManager.Stop)
+	require.NotNil(t, rt.refreshManager.GetRefreshState(staleTokenServerName), "precondition")
+
+	t.Run("header-auth server: schedule withheld", func(t *testing.T) {
+		assert.Nil(t, rt.HealthRefreshState(staleTokenServerName, headerAuthServer()))
+		assert.False(t, rt.StoredOAuthTokenInPlay(staleTokenServerName, headerAuthServer()))
+	})
+
+	t.Run("autodiscovery OAuth server: schedule reported", func(t *testing.T) {
+		sc := &config.ServerConfig{Name: staleTokenServerName, URL: staleTokenServerURL, Protocol: "http", Enabled: true}
+		got := rt.HealthRefreshState(staleTokenServerName, sc)
+		require.NotNil(t, got)
+		assert.Equal(t, oauth.RefreshStateFailed, got.State)
+		assert.True(t, rt.StoredOAuthTokenInPlay(staleTokenServerName, sc))
+	})
+
+	t.Run("explicit oauth block wins over the header", func(t *testing.T) {
+		sc := headerAuthServer()
+		sc.OAuth = &config.OAuthConfig{ClientID: "explicit"}
+		assert.NotNil(t, rt.HealthRefreshState(staleTokenServerName, sc))
+	})
+
+	t.Run("nil config keeps the historical behaviour", func(t *testing.T) {
+		assert.NotNil(t, rt.HealthRefreshState(staleTokenServerName, nil))
+	})
+}
+
 // TestTriggerOAuthLogout_ClearsRefreshSchedule pins the issue's third
 // observation: logout removed the token record but left the in-memory refresh
 // schedule behind, so the server flipped from "Token expired" to "Refresh token

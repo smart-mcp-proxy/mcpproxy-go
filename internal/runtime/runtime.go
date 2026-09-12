@@ -2364,30 +2364,16 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 				}
 			}
 
-			// GH #1172: a server with no OAuth block that carries a static
-			// Authorization header authenticates with that header — the
-			// headers-auth strategy runs first and OAuth is never attempted
-			// while it works. A token record left behind by an earlier OAuth
-			// login (autodiscovery servers have no `oauth` block whose removal
-			// could have cleared it) is stale evidence for such a server, and
-			// consulting it used to report a connected, tool-serving upstream
-			// as unhealthy / "Token expired" / login for as long as the record
-			// existed. Leave the record alone (logout still removes it) and
-			// simply do not derive OAuth state from it.
-			//
-			// The live connection has the final say: if the configured header
-			// was rejected and the OAuth strategy rescued the connection with
-			// that very token, the token IS in play and its state is reported
-			// as for any other OAuth server.
-			staticAuthHeader := serverStatus.Config.OAuth == nil &&
-				serverStatus.Config.HasStaticAuthorizationHeader() &&
-				!r.serverConnectedWithOAuth(serverStatus.Name)
+			// GH #1172: a token record left behind by an earlier OAuth login
+			// is not evidence about a server that now authenticates with a
+			// static Authorization header — see StoredOAuthTokenInPlay.
+			tokenInPlay := r.StoredOAuthTokenInPlay(serverStatus.Name, serverStatus.Config)
 
 			// Check if server has valid OAuth token in storage
 			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
 			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
 			// We need to generate the same key format: "servername_hash16"
-			if url != "" && r.storageManager != nil && !staticAuthHeader {
+			if url != "" && r.storageManager != nil && tokenInPlay {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
 					// #1158: the configured upstream URL routinely carries a
@@ -2674,13 +2660,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		// T032: Wire refresh state into health calculation (Spec 023)
-		if r.refreshManager != nil {
-			if refreshState := r.refreshManager.GetRefreshState(serverStatus.Name); refreshState != nil {
-				healthInput.RefreshState = health.RefreshState(refreshState.State)
-				healthInput.RefreshRetryCount = refreshState.RetryCount
-				healthInput.RefreshLastError = refreshState.LastError
-				healthInput.RefreshNextAttempt = refreshState.NextAttempt
-			}
+		if refreshState := r.HealthRefreshState(serverStatus.Name, serverStatus.Config); refreshState != nil {
+			healthInput.RefreshState = health.RefreshState(refreshState.State)
+			healthInput.RefreshRetryCount = refreshState.RetryCount
+			healthInput.RefreshLastError = refreshState.LastError
+			healthInput.RefreshNextAttempt = refreshState.NextAttempt
 		}
 
 		healthStatus := health.CalculateHealth(healthInput, healthConfig)
@@ -2931,6 +2915,44 @@ func (r *Runtime) TriggerOAuthLoginQuick(serverName string) (*core.OAuthStartRes
 	}
 
 	return result, nil
+}
+
+// StoredOAuthTokenInPlay reports whether a record in the oauth_tokens bucket
+// (and the RefreshManager schedule built from it) is evidence about the named
+// server's authentication state (GH #1172).
+//
+// It is not when the server has no `oauth` block and carries a static
+// Authorization header: the headers-auth strategy runs first and OAuth is
+// never attempted while it works, and OAuth would populate that very header,
+// so a token left behind by an earlier OAuth login (autodiscovery servers have
+// no `oauth` block whose removal could have cleared it) is stale. Consulting
+// it used to report a connected, tool-serving upstream as unhealthy / "Token
+// expired" / login for as long as the record existed, and its failed refresh
+// schedule as "Refresh token expired". The record is left alone (logout still
+// removes it); it is simply not consulted.
+//
+// The live connection has the final say: if the configured header was
+// rejected and the OAuth strategy rescued the connection with that very
+// token, the token IS in play and is reported as for any other OAuth server.
+// A nil config (server known only to the state view) keeps the historical
+// behaviour of consulting the record.
+func (r *Runtime) StoredOAuthTokenInPlay(name string, cfg *config.ServerConfig) bool {
+	if cfg == nil || cfg.OAuth != nil || !cfg.HasStaticAuthorizationHeader() {
+		return true
+	}
+	return r.serverConnectedWithOAuth(name)
+}
+
+// HealthRefreshState returns the RefreshManager state to feed into the health
+// calculator for the named server, or nil when there is none or when the token
+// it rides on is not in play for this server (StoredOAuthTokenInPlay). Every
+// CalculateHealth call site must read refresh state through this, or the
+// REST, MCP and tray surfaces disagree about a header-authenticated server.
+func (r *Runtime) HealthRefreshState(name string, cfg *config.ServerConfig) *oauth.RefreshStateInfo {
+	if r.refreshManager == nil || !r.StoredOAuthTokenInPlay(name, cfg) {
+		return nil
+	}
+	return r.refreshManager.GetRefreshState(name)
 }
 
 // serverConnectedWithOAuth reports whether the named server's live connection

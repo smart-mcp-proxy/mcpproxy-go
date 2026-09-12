@@ -1485,14 +1485,14 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			healthInput.OAuthRequired = true
 		}
 
-		// T032: Wire refresh state into health calculation (Spec 023)
-		if refreshMgr := s.runtime.RefreshManager(); refreshMgr != nil {
-			if refreshState := refreshMgr.GetRefreshState(serverStatus.Name); refreshState != nil {
-				healthInput.RefreshState = health.RefreshState(refreshState.State)
-				healthInput.RefreshRetryCount = refreshState.RetryCount
-				healthInput.RefreshLastError = refreshState.LastError
-				healthInput.RefreshNextAttempt = refreshState.NextAttempt
-			}
+		// T032: Wire refresh state into health calculation (Spec 023).
+		// Read through the runtime seam so a stale schedule for a server that
+		// no longer uses OAuth is not reported here either (GH #1172).
+		if refreshState := s.runtime.HealthRefreshState(serverStatus.Name, cfg); refreshState != nil {
+			healthInput.RefreshState = health.RefreshState(refreshState.State)
+			healthInput.RefreshRetryCount = refreshState.RetryCount
+			healthInput.RefreshLastError = refreshState.LastError
+			healthInput.RefreshNextAttempt = refreshState.NextAttempt
 		}
 
 		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())

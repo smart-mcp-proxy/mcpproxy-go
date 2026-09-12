@@ -362,40 +362,30 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 	}
 
 	// 6. Refresh state checks (Spec 023)
-	// Check if refresh is in a degraded or failed state.
-	//
-	// Refresh state is a property of the OAuth token being refreshed, so it
-	// only applies to a server that requires OAuth. A server that does not —
-	// it authenticates with a static Authorization header, or the user logged
-	// out and the token is gone — can still carry a schedule the
-	// RefreshManager built from the old record; judging it by that schedule
-	// reported a healthy, connected server as "Refresh token expired" (GH
-	// #1172).
-	if input.OAuthRequired {
-		switch input.RefreshState {
-		case RefreshStateRetrying:
-			// Refresh failed but retrying - degraded status
-			detail := formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError)
-			return &contracts.HealthStatus{
-				Level:      LevelDegraded,
-				AdminState: StateEnabled,
-				Summary:    "Token refresh pending",
-				Detail:     detail,
-				Action:     ActionViewLogs,
-			}
-		case RefreshStateFailed:
-			// Refresh permanently failed - unhealthy status
-			detail := "Re-authentication required"
-			if input.RefreshLastError != "" {
-				detail = fmt.Sprintf("Re-authentication required: %s", input.RefreshLastError)
-			}
-			return &contracts.HealthStatus{
-				Level:      LevelUnhealthy,
-				AdminState: StateEnabled,
-				Summary:    "Refresh token expired",
-				Detail:     detail,
-				Action:     ActionLogin,
-			}
+	// Check if refresh is in a degraded or failed state
+	switch input.RefreshState {
+	case RefreshStateRetrying:
+		// Refresh failed but retrying - degraded status
+		detail := formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError)
+		return &contracts.HealthStatus{
+			Level:      LevelDegraded,
+			AdminState: StateEnabled,
+			Summary:    "Token refresh pending",
+			Detail:     detail,
+			Action:     ActionViewLogs,
+		}
+	case RefreshStateFailed:
+		// Refresh permanently failed - unhealthy status
+		detail := "Re-authentication required"
+		if input.RefreshLastError != "" {
+			detail = fmt.Sprintf("Re-authentication required: %s", input.RefreshLastError)
+		}
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    "Refresh token expired",
+			Detail:     detail,
+			Action:     ActionLogin,
 		}
 	}
 
