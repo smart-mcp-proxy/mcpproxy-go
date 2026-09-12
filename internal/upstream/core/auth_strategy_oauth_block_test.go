@@ -32,13 +32,11 @@ func TestAuthStrategies_OAuthBlockDropsNoAuth(t *testing.T) {
 		{"empty oauth block signals OAuth", &config.OAuthConfig{}, nil, []string{"OAuth"}},
 		{"populated oauth block signals OAuth", &config.OAuthConfig{ClientID: "id", Scopes: []string{"s"}}, nil, []string{"OAuth"}},
 		// The headers strategy makes the same "anonymous initialize succeeded"
-		// inference as no-auth, so a non-credential header (x-goog-user-project,
-		// Notion-Version, …) must not let it win ahead of OAuth either; those
-		// headers ride on the OAuth transport instead.
+		// inference as no-auth, so no static header — not even a (possibly
+		// stale) Authorization — may win ahead of OAuth; static headers ride on
+		// the OAuth transport instead, where the token store owns Authorization.
 		{"oauth block + non-auth header: OAuth only", &config.OAuthConfig{}, map[string]string{"X-Goog-User-Project": "p"}, []string{"OAuth"}},
-		// A static Authorization credential is a real auth strategy of its own
-		// (GH #1172: mutually exclusive with OAuth on the wire), so it stays first.
-		{"oauth block + static Authorization: headers then OAuth", &config.OAuthConfig{}, map[string]string{"Authorization": "Bearer static"}, []string{"headers", "OAuth"}},
+		{"oauth block + static Authorization: OAuth only", &config.OAuthConfig{}, map[string]string{"Authorization": "Bearer stale"}, []string{"OAuth"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

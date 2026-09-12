@@ -23,15 +23,13 @@ type authStrategy struct {
 // to no-auth or shared OAuth — either would connect with the wrong identity and
 // defeat per-user isolation (FR-014/FR-017). Non-brokered connections keep the
 // historical headers -> no-auth -> OAuth chain, except that a configured oauth
-// block removes no-auth (see oauthRequiredByConfig).
+// block makes OAuth the only strategy (see oauthRequiredByConfig).
 func (c *Client) httpAuthStrategies() []authStrategy {
 	if c.brokeredAuth != nil {
 		return []authStrategy{{"headers", c.tryHeadersAuth}}
 	}
 	if c.oauthRequiredByConfig() {
-		return c.oauthRequiredStrategies(
-			authStrategy{"headers", c.tryHeadersAuth},
-			authStrategy{"OAuth", c.tryOAuthAuth})
+		return []authStrategy{{"OAuth", c.tryOAuthAuth}}
 	}
 	return []authStrategy{
 		{"headers", c.tryHeadersAuth},
@@ -47,9 +45,7 @@ func (c *Client) sseAuthStrategies() []authStrategy {
 		return []authStrategy{{"headers", c.trySSEHeadersAuth}}
 	}
 	if c.oauthRequiredByConfig() {
-		return c.oauthRequiredStrategies(
-			authStrategy{"headers", c.trySSEHeadersAuth},
-			authStrategy{"OAuth", c.trySSEOAuthAuth})
+		return []authStrategy{{"OAuth", c.trySSEOAuthAuth}}
 	}
 	return []authStrategy{
 		{"headers", c.trySSEHeadersAuth},
@@ -73,6 +69,13 @@ func (c *Client) sseAuthStrategies() []authStrategy {
 // the OAuth strategy either attaches the stored token to every request or
 // surfaces the sign-in requirement, which is what the operator asked for.
 //
+// The headers strategy draws the same conclusion from a successful initialize,
+// so it is dropped too — a stale static Authorization header would otherwise
+// win the anonymous handshake and pin the connection just the same. Static
+// headers ride on the OAuth transport instead, where the token store owns the
+// Authorization header (matching the GH #1172 projection, which already treats
+// an oauth block as decisive over a static Authorization header).
+//
 // MCPPROXY_DISABLE_OAUTH keeps the historical chain: the ladder never consulted
 // oauth.ShouldUseOAuth, so the fixture gate has to be honoured here too.
 func (c *Client) oauthRequiredByConfig() bool {
@@ -80,19 +83,6 @@ func (c *Client) oauthRequiredByConfig() bool {
 		return false
 	}
 	return c.config != nil && c.config.OAuth != nil
-}
-
-// oauthRequiredStrategies is the ladder for a declared-OAuth server. The
-// headers strategy draws the same "anonymous initialize succeeded" conclusion
-// as no-auth, so it is only kept when the headers carry a static Authorization
-// credential — a genuine auth strategy in its own right (GH #1172: mutually
-// exclusive with OAuth on the wire). Any other static headers
-// (x-goog-user-project, Notion-Version, …) are carried by the OAuth transport.
-func (c *Client) oauthRequiredStrategies(headers, oauth authStrategy) []authStrategy {
-	if c.config.HasStaticAuthorizationHeader() {
-		return []authStrategy{headers, oauth}
-	}
-	return []authStrategy{oauth}
 }
 
 // AuthStrategyOAuth is the name of the OAuth auth strategy as recorded by

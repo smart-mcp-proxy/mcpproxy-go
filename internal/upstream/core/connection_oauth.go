@@ -136,7 +136,7 @@ func parseOAuthError(err error, responseBody []byte) error {
 }
 
 // tryOAuthAuth attempts OAuth authentication
-func (c *Client) tryOAuthAuth(ctx context.Context) error {
+func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 	// Use the global OAuth flow coordinator to prevent race conditions
 	coordinator := oauth.GetGlobalCoordinator()
 
@@ -162,9 +162,11 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 		return fmt.Errorf("failed to start OAuth flow: %w", err)
 	}
 
-	// We own this OAuth flow, make sure to end it when done
-	// Use named return to capture final error state
-	var oauthErr error
+	// We own this OAuth flow, make sure to end it when done. oauthErr is the
+	// NAMED return so every exit reaches EndFlow with the real outcome — the
+	// ErrOAuthPending and retry-with-stored-token returns used to leave it nil,
+	// so a concurrent waiter on the same server was told the flow succeeded and
+	// reported itself connected without ever building a transport.
 	defer func() {
 		success := oauthErr == nil
 		coordinator.EndFlow(c.config.Name, success, oauthErr)
@@ -581,7 +583,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 }
 
 // trySSEOAuthAuth attempts SSE OAuth authentication
-func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
+func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	// Use the global OAuth flow coordinator to prevent race conditions
 	coordinator := oauth.GetGlobalCoordinator()
 
@@ -607,9 +609,11 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 		return fmt.Errorf("failed to start SSE OAuth flow: %w", err)
 	}
 
-	// We own this OAuth flow, make sure to end it when done
-	// Use named return to capture final error state
-	var oauthErr error
+	// We own this OAuth flow, make sure to end it when done. oauthErr is the
+	// NAMED return so every exit reaches EndFlow with the real outcome — the
+	// ErrOAuthPending and retry-with-stored-token returns used to leave it nil,
+	// so a concurrent waiter on the same server was told the flow succeeded and
+	// reported itself connected without ever building a transport.
 	defer func() {
 		success := oauthErr == nil
 		coordinator.EndFlow(c.config.Name, success, oauthErr)
@@ -2502,8 +2506,10 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 		if client.IsOAuthAuthorizationRequiredError(err) || c.isOAuthError(err) {
 			c.logger.Info("✅ OAuth authorization requirement from initialize - starting manual OAuth flow")
 
-			// Handle OAuth authorization manually and get result
-			result, oauthErr := c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
+			// Handle OAuth authorization manually and get result (assign the
+			// outer result — see the Start() branch above).
+			var oauthErr error
+			result, oauthErr = c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
 			if oauthErr != nil {
 				return result, fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
