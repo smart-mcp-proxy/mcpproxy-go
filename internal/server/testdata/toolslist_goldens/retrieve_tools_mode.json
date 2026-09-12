@@ -119,31 +119,6 @@
     },
     "name": "call_tool_write"
   },
-  "code_execution": {
-    "annotations": {
-      "title": "Code Execution (Disabled)",
-      "readOnlyHint": true,
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": false
-    },
-    "description": "Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config.",
-    "inputSchema": {
-      "properties": {
-        "code": {
-          "description": "JavaScript source code to execute.",
-          "type": "string"
-        },
-        "script": {
-          "description": "Name of a stored script to execute.",
-          "type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "code_execution"
-  },
   "describe_tool": {
     "annotations": {
       "title": "Describe Tool",

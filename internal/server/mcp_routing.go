@@ -795,47 +795,28 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 	return tools
 }
 
-// buildCodeExecutionTool builds the code_execution tool for routing mode servers.
-// Returns a slice (either 1 tool or 1 disabled stub) for easy appending.
+// buildCodeExecutionTool builds the code_execution tool for every surface that
+// carries it. Returns a slice (the live tool, or NOTHING) for easy appending.
+//
+// Issue #1236: a disabled feature is not advertised. This used to return a
+// "disabled" stub whose handler refused every call, on the theory that a
+// descriptive refusal beats an unknown-tool error. In practice clients select
+// tools from tools/list, not from descriptions (which harnesses routinely
+// truncate), so the stub was indistinguishable from an available tool and cost
+// a wasted round trip per session before the agent fell back. The handler-level
+// gate in mcp_code_execution.go still refuses a call that arrives by name
+// through a non-listing path (REST, CallToolDirect), and an MCP tools/call for
+// the unregistered name is refused by mcp-go as an unknown tool — so dropping
+// the stub removes an advertisement, never a defence.
 //
 // UX audit F16: this reads the LIVE snapshot, never the construction-time
 // p.config. Settings advertises enable_code_execution as an instantly-applied
-// field; when this read was pinned to startup, flipping it on left the disabled
-// stub — whose handler refuses unconditionally — on the /mcp surface, so the
-// tool kept answering "Code execution is disabled" until a restart even though
-// the handler-level gate (mcp_code_execution.go) had already gone live. The
-// paired half of the fix is RefreshCallToolModeTools/RefreshCodeExecModeTools
-// being called on config.reloaded.
+// field, so every surface is re-derived from this builder on config.reloaded
+// (RefreshCodeExecutionAvailability) — a flip adds or withdraws the tool and
+// emits notifications/tools/list_changed without a restart.
 func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 	if cfg := p.currentConfig(); cfg != nil && !cfg.EnableCodeExecution {
-		// Disabled stub
-		codeExecutionTool := mcp.NewTool("code_execution",
-			mcp.WithDescription("Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config."),
-			mcp.WithTitleAnnotation("Code Execution (Disabled)"),
-			mcp.WithReadOnlyHintAnnotation(true),
-			mcp.WithDestructiveHintAnnotation(false),
-			mcp.WithOpenWorldHintAnnotation(false),
-			// Spec 097: the stub mirrors the live parameter shape — optional
-			// `code`, optional `script` — so a stored-script call reaches this
-			// handler and gets the "enable it" explanation instead of a schema
-			// rejection. Its DESCRIPTIONS stay minimal and disabled-only: a
-			// disabled tool must not advertise a contract it cannot honor.
-			mcp.WithString("code",
-				mcp.Description("JavaScript source code to execute."),
-			),
-			mcp.WithString("script",
-				mcp.Description("Name of a stored script to execute."),
-			),
-		)
-		return []mcpserver.ServerTool{{
-			Tool: codeExecutionTool,
-			Handler: func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				// Same wording, same typed identity as the handler-level gate:
-				// which surface refused must not change what the caller is told.
-				recordCodeExecRefusal(ctx, config.ErrCodeExecutionDisabled)
-				return mcp.NewToolResultError(config.CodeExecutionDisabledMessage), nil
-			},
-		}}
+		return nil
 	}
 
 	codeExecutionTool := mcp.NewTool("code_execution",
@@ -1008,12 +989,17 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	for _, st := range codeExecTools {
 		p.codeExecServer.AddTool(st.Tool, st.Handler)
 	}
+	// Seed the content guard with what was just registered, so the first
+	// config.reloaded does not re-register (and notify every client about) an
+	// identical surface merely because the fingerprint started out empty.
+	p.codeExecSurfaceFP = toolSetFingerprint(codeExecTools)
 
 	// Register tools for call tool mode
 	callToolModeTools := p.buildCallToolModeTools()
 	for _, st := range callToolModeTools {
 		p.callToolServer.AddTool(st.Tool, st.Handler)
 	}
+	p.callToolSurfaceFP = toolSetFingerprint(callToolModeTools)
 
 	// Initial direct rebuild (D15). Done by CALLING RefreshDirectModeTools so
 	// there is exactly ONE publisher and one copy of the SetTools-then-publish
@@ -1218,7 +1204,24 @@ func (p *MCPProxyServer) RefreshCallToolModeTools() {
 	serverTools := make([]mcpserver.ServerTool, len(callToolTools))
 	copy(serverTools, callToolTools)
 
+	// Guarded on content, like the code-exec surface: this refresh runs on
+	// EVERY config.reloaded, and SetTools pushes notifications/tools/list_changed
+	// to every initialized session whether or not anything moved. Without the
+	// guard an unrelated config edit looks, to a client, exactly like the tool
+	// set changing. Issue #1236 asks for list_changed on a toggle — not on
+	// every reload.
+	fp := toolSetFingerprint(serverTools)
+	p.callToolRefreshMu.Lock()
+	defer p.callToolRefreshMu.Unlock()
+	if p.callToolSurfaceFP == fp {
+		p.logger.Debug("call tool mode tools unchanged; skipping rebuild",
+			zap.Int("tool_count", len(callToolTools)))
+		return
+	}
+
 	p.callToolServer.SetTools(serverTools...)
+	p.callToolSurfaceFP = fp
+	p.callToolPublishes.Add(1)
 
 	p.logger.Info("refreshed call tool mode tools",
 		zap.Int("tool_count", len(callToolTools)))
@@ -1226,19 +1229,32 @@ func (p *MCPProxyServer) RefreshCallToolModeTools() {
 
 // RefreshCodeExecutionAvailability re-advertises code_execution on every tool
 // surface that carries it, so an enable_code_execution flip applies without a
-// restart (UX audit F16). directServer is deliberately absent — direct mode
-// does not expose code_execution at all.
+// restart (UX audit F16, issue #1236). directServer is deliberately absent —
+// direct mode does not expose code_execution at all.
 //
-// The stdio surface (p.server) is updated with AddTools rather than SetTools:
-// its tool set is assembled once by registerTools and SetTools would drop
-// everything else. AddTools replaces the entry with the same name in place, so
-// a startup-disabled server that never registered code_execution gains it, and
-// an enabled one has it swapped for the disabled stub.
+// The routing-mode surfaces are rebuilt through their content-guarded
+// refreshers, so only a real flip re-registers and notifies. The default/stdio
+// surface (p.server) is updated IN PLACE: its tool set is assembled once by
+// registerTools and SetTools would drop everything else. A flip on adds the
+// live tool with AddTools; a flip off withdraws it with DeleteTools. Both push
+// notifications/tools/list_changed, and neither runs when the surface already
+// matches the flag — mcp-go's AddTools notifies even for an empty batch, so an
+// unguarded call would announce a change on every unrelated reload.
 func (p *MCPProxyServer) RefreshCodeExecutionAvailability() {
 	p.RefreshCallToolModeTools()
 	p.RefreshCodeExecModeTools()
-	if p.server != nil {
-		p.server.AddTools(p.buildCodeExecutionTool()...)
+	if p.server == nil {
+		return
+	}
+	live := p.buildCodeExecutionTool()
+	advertised := p.server.GetTool("code_execution") != nil
+	switch {
+	case len(live) > 0 && !advertised:
+		p.server.AddTools(live...)
+		p.logger.Info("code_execution enabled at runtime; advertised on the default surface")
+	case len(live) == 0 && advertised:
+		p.server.DeleteTools("code_execution")
+		p.logger.Info("code_execution disabled at runtime; withdrawn from the default surface")
 	}
 }
 

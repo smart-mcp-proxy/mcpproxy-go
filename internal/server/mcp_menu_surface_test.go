@@ -117,29 +117,48 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 		"call_tool_mode":      {"describe_tool"},
 		"code_execution_mode": {},
 	}
+	// The ONLY removal is the "Code Execution (Disabled)" stub (issue #1236):
+	// the pre-feature snapshot was captured with enable_code_execution=false,
+	// when a disabled feature was still advertised as a refusing stub. A
+	// disabled tool is now not registered at all; the live tool (flag on) is
+	// unchanged. default_server never carried the stub.
+	wantRemoved := map[string][]string{
+		"default_server":      {},
+		"call_tool_mode":      {"code_execution"},
+		"code_execution_mode": {"code_execution"},
+	}
 
 	for surface, preTools := range pre {
 		surface, preTools := surface, preTools
 		t.Run(surface, func(t *testing.T) {
 			curTools := cur[surface]
 
-			// --- Name-set delta: exactly the expected additions, no removals.
-			var added []string
+			// --- Name-set delta: exactly the expected additions and removals.
+			var added, removed []string
 			for n := range curTools {
 				if _, ok := preTools[n]; !ok {
 					added = append(added, n)
 				}
 			}
+			for n := range preTools {
+				if _, ok := curTools[n]; !ok {
+					removed = append(removed, n)
+				}
+			}
 			sort.Strings(added)
+			sort.Strings(removed)
 			assert.Equal(t, wantAdded[surface], func() []string {
 				if added == nil {
 					return []string{}
 				}
 				return added
 			}(), "surface %s: only describe_tool may be added (FR-014/SC-007)", surface)
-			for n := range preTools {
-				assert.Contains(t, curTools, n, "surface %s: pre-feature tool %q must not be removed or renamed (FR-014)", surface, n)
-			}
+			assert.Equal(t, wantRemoved[surface], func() []string {
+				if removed == nil {
+					return []string{}
+				}
+				return removed
+			}(), "surface %s: only the disabled code_execution stub may be removed (issue #1236); nothing else may be removed or renamed (FR-014)", surface)
 
 			for _, name := range sortedNames(preTools) {
 				name := name
@@ -154,8 +173,6 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 					assertRetrieveToolsDelta(t, surface, preM, curM)
 				case callToolVariants[name]:
 					assertCallToolVariantDelta(t, surface, name, preM, curM)
-				case name == "code_execution":
-					assertCodeExecutionDelta(t, surface, preM, curM)
 				case name == "quarantine_security":
 					assertQuarantineSecurityDelta(t, surface, preM, curM)
 				case name == "upstream_servers":
@@ -429,55 +446,6 @@ func TestMenuSurface_AnnotationFilterParamsShared(t *testing.T) {
 		assert.Contains(t, desc, spec094WindowCaveat,
 			"surface %s: description must carry the candidate-window caveat verbatim (FR-009)", surface)
 	}
-}
-
-// Spec 097 widens the controlled delta on code_execution by exactly two
-// things: the added optional `script` parameter, and `code` losing its
-// schema-required status — JSON Schema cannot express "exactly one of", so the
-// handler owns that rule and the schema must accept a script-only call.
-// Everything else (annotations, the pre-feature parameter schemas, and — for
-// the disabled stub, which is what this surface registers — the description)
-// stays byte-identical.
-func assertCodeExecutionDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
-	t.Helper()
-
-	preProps, curProps := schemaProps(preM), schemaProps(curM)
-	require.NotNil(t, curProps, "surface %s: code_execution lost its inputSchema", surface)
-
-	var added []string
-	for p := range curProps {
-		if _, ok := preProps[p]; !ok {
-			added = append(added, p)
-		}
-	}
-	sort.Strings(added)
-	if added == nil {
-		added = []string{}
-	}
-	assert.Equal(t, []string{"script"}, added,
-		"surface %s: exact code_execution parameter delta (spec 097 FR-002)", surface)
-
-	for p, preSchema := range preProps {
-		assert.Equal(t, preSchema, curProps[p],
-			"surface %s: pre-feature code_execution parameter %q must be preserved unchanged", surface, p)
-	}
-
-	curSchema, _ := curM["inputSchema"].(map[string]interface{})
-	assert.Empty(t, curSchema["required"],
-		"surface %s: code must no longer be schema-required, or a script-only call is rejected before the handler can explain the rule", surface)
-
-	assert.Equal(t, preM["annotations"], curM["annotations"],
-		"surface %s: code_execution annotations unchanged", surface)
-
-	preDesc, _ := preM["description"].(string)
-	curDesc, _ := curM["description"].(string)
-	if strings.Contains(preDesc, "disabled") {
-		assert.Equal(t, preDesc, curDesc,
-			"surface %s: the disabled stub keeps ONLY its disabled description — no stored-script prose on a tool that cannot run", surface)
-		return
-	}
-	assert.Contains(t, curDesc, "script",
-		"surface %s: the live description must document stored scripts (spec 097 FR-008)", surface)
 }
 
 // assertCallToolVariantDelta: only the tool description and the 'args'

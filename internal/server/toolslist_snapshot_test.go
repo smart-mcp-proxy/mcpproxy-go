@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 
@@ -196,6 +197,22 @@ var toolsListAllowedDelta = map[string][]string{
 	"code_execution_mode": {"quarantine_security", "upstream_servers"},
 }
 
+// toolsListAllowedRemovals enumerates the tool entries a shipped fix was
+// allowed to RETIRE from a surface, measured against the same frozen capture.
+// The frozen goldens were taken with enable_code_execution=false (the fixture
+// default), so they carry the "Code Execution (Disabled)" stub that used to be
+// registered in place of the real tool.
+//
+//   - code_execution — issue #1236: a disabled feature is no longer advertised.
+//     The stub is gone from both surfaces that carried it; the live tool (with
+//     the flag on) is unchanged and still pinned by the enabled-path tests.
+//     default_server never carried the stub (registerTools always gated on the
+//     flag), which is why it is absent here.
+var toolsListAllowedRemovals = map[string][]string{
+	"retrieve_tools_mode": {"code_execution"},
+	"code_execution_mode": {"code_execution"},
+}
+
 // TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens
 // moved, and this is the enumeration of how far.
 func TestToolsListSnapshot_DeltaIsEnumerated(t *testing.T) {
@@ -205,10 +222,18 @@ func TestToolsListSnapshot_DeltaIsEnumerated(t *testing.T) {
 			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre099Dir, surface+".json"))
 			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
 
-			// The tool SET is unchanged: these features extend existing
-			// built-ins, they do not register or retire one.
-			assert.Equal(t, sortedToolNames(before), sortedToolNames(after),
-				"surface %s: no tool may be added or removed", surface)
+			// The tool SET moves only by the enumerated removals: these
+			// features extend existing built-ins, they do not register a new
+			// one, and the only retirement is the disabled code_execution stub
+			// (issue #1236).
+			wantNames := make([]string, 0, len(before))
+			for _, name := range sortedToolNames(before) {
+				if !slices.Contains(toolsListAllowedRemovals[surface], name) {
+					wantNames = append(wantNames, name)
+				}
+			}
+			assert.Equal(t, wantNames, sortedToolNames(after),
+				"surface %s: no tool may be added, and only the enumerated removals may be missing", surface)
 
 			changed := make([]string, 0, len(allowed))
 			for name, pre := range before {

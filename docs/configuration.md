@@ -1264,7 +1264,7 @@ See [Tool Quarantine](features/tool-quarantine.md) for complete details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_code_execution` | boolean | `false` | Enable JavaScript/TypeScript code execution tool (disabled by default for security) |
+| `enable_code_execution` | boolean | `false` | Enable JavaScript/TypeScript code execution tool (disabled by default for security). While `false` the `code_execution` tool is not advertised in `tools/list`. Hot-reloaded: a flip adds/removes the tool and sends `notifications/tools/list_changed` |
 | `code_execution_timeout_ms` | integer | `120000` | Default timeout in milliseconds (1-600000, max 10 minutes) |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls per execution (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | Number of JavaScript VM instances in pool (1-100) |
