@@ -31,12 +31,12 @@ Common issues, error messages, and solutions for the `code_execution` tool.
 Error: code_execution is disabled in configuration. Set 'enable_code_execution: true' in config file.
 ```
 
-**Cause**: The `code_execution` feature is disabled by default for security.
+**Cause**: The `code_execution` feature is disabled by default for security. While it is disabled the tool is not listed in `tools/list`, so an MCP client will normally not see it at all; this error appears when a call reaches the proxy by name anyway (the REST API, the CLI, or a client holding a cached tool list).
 
 **Solution**:
 1. Edit your configuration file (`~/.mcpproxy/mcp_config.json`)
 2. Add or update: `"enable_code_execution": true`
-3. Restart mcpproxy: `pkill mcpproxy && mcpproxy serve`
+3. The flag is hot-reloaded: the running proxy picks up the change, advertises the tool, and sends `notifications/tools/list_changed` to connected sessions. No restart is needed; clients that do not honor `list_changed` need to reconnect to see the tool.
 
 **Example Configuration**:
 ```json

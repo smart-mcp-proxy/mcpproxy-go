@@ -456,37 +456,28 @@ func TestCodeExecutionRegistrations_ScriptParam(t *testing.T) {
 	}
 }
 
-// TestCodeExecutionDisabledStub_AcceptsScript (T005): a script call must reach
-// the disabled handler and get the disabled explanation — so the stub takes the
-// parameter, but keeps ONLY its disabled description (no discovery prose).
-func TestCodeExecutionDisabledStub_AcceptsScript(t *testing.T) {
+// TestCodeExecutionDisabled_NotRegisteredButScriptCallStillExplained (T005,
+// issue #1236): a disabled code_execution is registered on NO surface — there
+// is no stub for a client to pick from tools/list — while a script call that
+// still reaches the handler by name (a cached listing, REST, CallToolDirect)
+// gets the disabled explanation rather than a schema rejection.
+func TestCodeExecutionDisabled_NotRegisteredButScriptCallStillExplained(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 	proxy.config.EnableCodeExecution = false
 
-	tools := proxy.buildCodeExecutionTool()
-	require.Len(t, tools, 1)
-	stub := toolAsMap(t, tools[0].Tool)
+	require.Empty(t, proxy.buildCodeExecutionTool(),
+		"a disabled code_execution must not be advertised")
+	assert.Empty(t, codeExecutionSchemas(t, proxy),
+		"no surface may list code_execution while the feature is off")
 
-	desc, _ := stub["description"].(string)
-	assert.Contains(t, desc, "disabled")
-	assert.NotContains(t, desc, codeExecutionScriptDescription,
-		"the disabled stub keeps only its disabled description")
-	assert.False(t, strings.Contains(desc, "call_tools"),
-		"the disabled stub must not advertise the executable contract")
-
-	props := schemaProps(stub)
-	require.NotNil(t, props)
-	_, hasScript := props["script"]
-	assert.True(t, hasScript, "the stub must accept script so those calls reach the disabled handler")
-	assert.NotContains(t, requiredParams(stub), "code",
-		"the stub must not require code, or a script-only call is rejected by schema instead of explained")
-
-	result, err := tools[0].Handler(context.Background(), mcp.CallToolRequest{
+	result, err := proxy.handleCodeExecution(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Name: "code_execution", Arguments: map[string]interface{}{"script": "anything"}},
 	})
 	require.NoError(t, err)
 	require.True(t, result.IsError)
 	assert.Contains(t, resultText(t, result), "disabled")
+	assert.False(t, strings.Contains(resultText(t, result), "anything"),
+		"a disabled feature must not resolve the script name")
 }
 
 // TestCodeExecution_DisabledGateCoversEveryDispatch pins enable_code_execution
@@ -530,10 +521,12 @@ func TestCodeExecution_DisabledGateCoversEveryDispatch(t *testing.T) {
 		assert.NotContains(t, err.Error(), "executed")
 	})
 
-	t.Run("the wording matches the disabled stub", func(t *testing.T) {
-		stub := proxy.buildCodeExecutionTool()
-		require.Len(t, stub, 1)
-		result, err := stub[0].Handler(context.Background(), mcp.CallToolRequest{
+	t.Run("the wording matches the MCP handler", func(t *testing.T) {
+		// Issue #1236: there is no disabled stub any more — a disabled tool is
+		// not registered — so the MCP handler itself is the reference wording
+		// every dispatch path must match.
+		require.Empty(t, proxy.buildCodeExecutionTool(), "a disabled code_execution is not advertised")
+		result, err := proxy.handleCodeExecution(context.Background(), mcp.CallToolRequest{
 			Params: mcp.CallToolParams{Name: "code_execution", Arguments: map[string]interface{}{"script": "sentinel"}},
 		})
 		require.NoError(t, err)

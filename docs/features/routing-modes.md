@@ -165,7 +165,7 @@ Code execution mode is designed for multi-step orchestration workflows. Instead 
 - Complex conditional logic that would require many round-trips in other modes
 - Data transformation pipelines (fetch from one tool, transform, send to another)
 
-**Note:** Code execution must be enabled in config (`"enable_code_execution": true`). If disabled, the `code_execution` tool appears but returns an error message directing the user to enable it.
+**Note:** Code execution must be enabled in config (`"enable_code_execution": true`). While it is disabled, the `code_execution` tool is not listed in `tools/list` on any endpoint, so clients that pick tools from the list never attempt it. A call that still reaches the proxy by name (a cached tool list, the REST API) is refused with an error directing the user to enable it. The flag is hot-reloadable: flipping it adds or removes the tool on the live surfaces and sends `notifications/tools/list_changed` to connected sessions, no restart required.
 
 ## Choosing the Right Mode
 

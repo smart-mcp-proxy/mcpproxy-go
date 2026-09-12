@@ -37,7 +37,7 @@ Enable code execution in your config:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enable_code_execution` | boolean | `false` | Enable the code execution tool |
+| `enable_code_execution` | boolean | `false` | Enable the code execution tool. While `false` the tool is not listed in `tools/list`; a flip is hot-reloaded and announced with `notifications/tools/list_changed` |
 | `code_execution_timeout_ms` | integer | `120000` | Execution timeout (2 minutes) |
 | `code_execution_max_tool_calls` | integer | `0` | Max tool calls (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | Number of VM instances to pool |

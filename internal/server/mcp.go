@@ -216,7 +216,16 @@ type MCPProxyServer struct {
 	codeExecSurfaceFP string
 	// codeExecPublishes counts rebuilds that actually re-registered, so the
 	// guard's effect is observable rather than only visible in the log.
-	codeExecPublishes       atomic.Uint64
+	codeExecPublishes atomic.Uint64
+
+	// The call-tool surface (/mcp in the default routing mode) gets the same
+	// guard: it is rebuilt on every config.reloaded, and an unguarded SetTools
+	// tells every client the tool set changed on every unrelated edit
+	// (issue #1236).
+	callToolRefreshMu sync.Mutex
+	callToolSurfaceFP string
+	callToolPublishes atomic.Uint64
+
 	directCatalogGeneration atomic.Uint64
 
 	// directRefreshMu serializes whole rebuilds so SetTools and the matching
@@ -1132,35 +1141,14 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	)
 	p.server.AddTool(readCacheTool, p.handleReadCache)
 
-	// code_execution - JavaScript/TypeScript code execution for multi-tool orchestration (feature-flagged)
-	if p.config.EnableCodeExecution {
-		codeExecutionTool := mcp.NewTool("code_execution",
-			mcp.WithDescription(codeExecutionToolDescription),
-			mcp.WithTitleAnnotation("Code Execution"),
-			mcp.WithDestructiveHintAnnotation(true),
-			mcp.WithReadOnlyHintAnnotation(false),
-			mcp.WithOpenWorldHintAnnotation(true),
-			// Spec 097: `code` is no longer schema-required — a call may supply
-			// `script` instead. JSON Schema cannot express the exactly-one-of
-			// rule, so handleCodeExecution enforces it for every surface.
-			mcp.WithString("code",
-				mcp.Description(codeExecutionCodeDescription),
-			),
-			mcp.WithString("script",
-				mcp.Description(codeExecutionScriptDescription),
-			),
-			mcp.WithString("language",
-				mcp.Description(codeExecutionLanguageDescription),
-				mcp.Enum("javascript", "typescript"),
-			),
-			mcp.WithObject("input",
-				mcp.Description(codeExecutionInputDescription),
-			),
-			mcp.WithObject("options",
-				mcp.Description(codeExecutionOptionsDescription),
-			),
-		)
-		p.server.AddTool(codeExecutionTool, p.handleCodeExecution)
+	// code_execution - JavaScript/TypeScript code execution for multi-tool
+	// orchestration (feature-flagged). One definition for every surface:
+	// buildCodeExecutionTool returns the live tool when enable_code_execution
+	// is on and nothing at all when it is off (issue #1236 — a disabled
+	// feature is not advertised). A runtime flip is applied in place by
+	// RefreshCodeExecutionAvailability.
+	for _, st := range p.buildCodeExecutionTool() {
+		p.server.AddTool(st.Tool, st.Handler)
 	}
 
 	// Management tools (shared across routing modes)
