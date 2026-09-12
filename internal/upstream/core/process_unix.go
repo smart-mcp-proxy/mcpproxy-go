@@ -160,5 +160,6 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 // the graceful MCP close on every non-Docker stdio disconnect. On Unix there
 // is nothing to release: process groups are a kernel-side identifier, not a
 // handle we hold, so this is a no-op. See process_windows.go for the
-// platform that needs it (the Job Object handle + registry entry).
-func releaseProcessGroup(_ int, _ *zap.Logger, _ string) {}
+// platform that needs it (the Job Object handle + registry entry, keyed by
+// PID and disambiguated by the owning cmd).
+func releaseProcessGroup(_ int, _ *exec.Cmd, _ *zap.Logger, _ string) {}

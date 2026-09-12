@@ -16,7 +16,7 @@ func TestReleaseProcessGroup_NothingToRelease(t *testing.T) {
 	logger := zap.NewNop()
 	for _, pgid := range []int{0, -1, 999999999} {
 		start := time.Now()
-		releaseProcessGroup(pgid, logger, "test-server")
+		releaseProcessGroup(pgid, nil, logger, "test-server")
 		assert.Less(t, time.Since(start), 100*time.Millisecond,
 			"releaseProcessGroup(%d) must return immediately when there is nothing to release", pgid)
 	}

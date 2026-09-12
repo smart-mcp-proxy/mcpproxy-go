@@ -371,8 +371,10 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	// it only kills the immediate cmd.exe) and drops its registry entry;
 	// without it, a graceful close leaked the Job handle and left
 	// EOF-ignoring node.exe/python.exe trees alive until mcpproxy exited.
+	// processCmd (captured in Step 1) identifies OUR process, so a PID
+	// that Windows has already handed to a newer connection is left alone.
 	if !isDocker && pgid > 0 {
-		releaseProcessGroup(pgid, c.logger, serverName)
+		releaseProcessGroup(pgid, processCmd, c.logger, serverName)
 	}
 
 	// Step 6: Stop any locally-launched HTTP/SSE upstream. We do this

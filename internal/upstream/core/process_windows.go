@@ -19,13 +19,21 @@ type ProcessGroup struct {
 	logger *zap.Logger
 }
 
+// windowsJob is one registered Job Object plus the identity of the
+// exec.Cmd it was created for. The cmd pointer is what lets a delayed
+// release tell "my process" from "a newer process that reused my PID".
+type windowsJob struct {
+	job *winjob.Job
+	cmd *exec.Cmd
+}
+
 // windowsJobs maps the "process group ID" mcpproxy uses on Windows (the
 // immediate child's PID — see extractProcessGroupID) to the Job Object that
 // PID was assigned to. killProcessGroup only receives that int, so this is
 // how it finds the Job to terminate.
 var (
 	windowsJobsMu sync.Mutex
-	windowsJobs   = map[int]*winjob.Job{}
+	windowsJobs   = map[int]windowsJob{}
 )
 
 // createProcessGroupCommandFunc creates a custom CommandFunc for Windows systems.
@@ -71,7 +79,7 @@ func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
 		return nil
 	}
 
-	job := takeWindowsJob(pgid)
+	job := takeWindowsJob(pgid, nil)
 	if job == nil {
 		logger.Warn("No Windows Job Object tracked for this process; falling back to killing only the immediate process (any grandchildren will leak)",
 			zap.String("server", serverName),
@@ -130,7 +138,7 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 		return pid
 	}
 
-	registerWindowsJob(pid, job, logger, serverName)
+	registerWindowsJob(pid, cmd, job, logger, serverName)
 
 	logger.Debug("Process group ID extracted and assigned to Windows Job Object",
 		zap.String("server", serverName),
@@ -152,14 +160,23 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 // this hook the grandchildren a stdin-EOF-ignoring node.exe/python.exe
 // left behind survived every restart, and the Job handle + map entry
 // leaked per disconnect until mcpproxy exited (#1234 follow-up, F1).
-func releaseProcessGroup(pgid int, logger *zap.Logger, serverName string) {
+//
+// cmd identifies the connection's own process: by the time this runs the
+// graceful close may already have reaped cmd.exe, and Windows reuses PIDs
+// eagerly, so a concurrently connecting server can have registered a NEW
+// Job under the same PID. Only the entry registered for this exact cmd is
+// released; if the slot now belongs to someone else, ours was already
+// closed by registerWindowsJob when it took the slot over. A nil cmd
+// disables the identity check (not used by production callers).
+func releaseProcessGroup(pgid int, cmd *exec.Cmd, logger *zap.Logger, serverName string) {
 	if pgid <= 0 {
 		return
 	}
-	job := takeWindowsJob(pgid)
+	job := takeWindowsJob(pgid, cmd)
 	if job == nil {
-		// Already killed via killProcessGroup, or job setup failed at
-		// connect time (extractProcessGroupID logged a Warn then).
+		// Already killed via killProcessGroup, job setup failed at connect
+		// time (extractProcessGroupID logged a Warn then), or the PID slot
+		// was taken over by a newer process (see above).
 		return
 	}
 	if err := job.Close(); err != nil {
@@ -175,29 +192,36 @@ func releaseProcessGroup(pgid int, logger *zap.Logger, serverName string) {
 }
 
 // takeWindowsJob removes and returns the Job registered for pid, or nil.
-// Popping under the lock gives the caller sole ownership of the Close.
-func takeWindowsJob(pid int) *winjob.Job {
+// When cmd is non-nil the entry is only taken if it was registered for
+// that same cmd. Popping under the lock gives the caller sole ownership
+// of the Close.
+func takeWindowsJob(pid int, cmd *exec.Cmd) *winjob.Job {
 	windowsJobsMu.Lock()
 	defer windowsJobsMu.Unlock()
-	job := windowsJobs[pid]
+	entry, ok := windowsJobs[pid]
+	if !ok || (cmd != nil && entry.cmd != cmd) {
+		return nil
+	}
 	delete(windowsJobs, pid)
-	return job
+	return entry.job
 }
 
 // registerWindowsJob records the Job for pid. If an entry already exists —
-// only possible when Windows reused a PID whose earlier Job was never
-// released — the old Job is closed first rather than silently dropped
-// with its handle (and any straggler still inside it) left open forever.
-func registerWindowsJob(pid int, job *winjob.Job, logger *zap.Logger, serverName string) {
+// Windows reused a PID whose earlier Job has not been released yet — the
+// old Job is closed first rather than silently dropped with its handle
+// (and any straggler still inside it) left open forever. The previous
+// owner's later releaseProcessGroup then finds the slot belongs to a
+// different cmd and does nothing.
+func registerWindowsJob(pid int, cmd *exec.Cmd, job *winjob.Job, logger *zap.Logger, serverName string) {
 	windowsJobsMu.Lock()
-	prev := windowsJobs[pid]
-	windowsJobs[pid] = job
+	prev, hadPrev := windowsJobs[pid]
+	windowsJobs[pid] = windowsJob{job: job, cmd: cmd}
 	windowsJobsMu.Unlock()
 
-	if prev != nil {
+	if hadPrev {
 		logger.Warn("Windows Job Object already registered for reused PID; closing the stale one",
 			zap.String("server", serverName),
 			zap.Int("pid", pid))
-		_ = prev.Close()
+		_ = prev.job.Close()
 	}
 }

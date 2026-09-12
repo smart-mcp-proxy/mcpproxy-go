@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"context"
+	"io"
 	"os/exec"
 	"testing"
 	"time"
@@ -20,13 +21,21 @@ import (
 // used to block until the caller's ctx expired. Stop must instead
 // terminate the whole Job so the pipes close and the child is reaped.
 func TestSpawn_Stop_KillsGrandchildHoldingPipe(t *testing.T) {
-	// ping.exe prints "Reply from 127.0.0.1" once per second; the launcher
-	// banner echoes argv un-expanded, so it cannot false-positive on this.
+	// cmd.exe blocks on `set /p` (one line from stdin) until we release it
+	// below, so Spawn's createJob has attached the Job BEFORE ping.exe is
+	// spawned — otherwise the grandchild could legitimately escape the job.
+	cmd := exec.Command("cmd.exe", "/c", "set /p x=& ping -n 30 127.0.0.1")
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+
+	// A reply line looks like "Reply from 127.0.0.1: bytes=32 ..."; the
+	// "127.0.0.1:" form is locale-neutral and cannot match the launcher's
+	// startup banner, which echoes argv as "... 127.0.0.1]".
 	sinkCh := make(chan struct{}, 1)
-	sink := newRegexDetector(`Reply from 127\.0\.0\.1`, sinkCh)
+	sink := newRegexDetector(`127\.0\.0\.1:`, sinkCh)
 
 	h, err := Spawn(context.Background(), &Spec{
-		Cmd:       exec.Command("cmd.exe", "/c", "ping -n 30 127.0.0.1"),
+		Cmd:       cmd,
 		LogSink:   sink,
 		Name:      "test-ping-tree",
 		StopGrace: 2 * time.Second,
@@ -34,11 +43,11 @@ func TestSpawn_Stop_KillsGrandchildHoldingPipe(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, h.Pid(), 0)
 
-	// Let cmd.exe actually spawn ping.exe before we stop it, otherwise the
-	// test could pass by killing cmd.exe before the grandchild exists.
+	_, err = io.WriteString(stdin, "\r\n")
+	require.NoError(t, err)
 	select {
 	case <-sinkCh:
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("ping.exe never produced output; grandchild not running")
 	}
 
