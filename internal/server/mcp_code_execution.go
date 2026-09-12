@@ -735,6 +735,16 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 
 	// Call the tool
 	result, err := client.CallTool(ctx, toolName, args)
+	if err == nil {
+		// Spec 054 Track B on the fourth dispatch path: redact or block
+		// BEFORE the result is recorded, stored in history, or handed to the
+		// script — a secret call_tool_* would never forward must not be
+		// readable from JavaScript either, where a script can copy it into
+		// another upstream's arguments or return it whole.
+		if _, sanErr := u.sanitiseSubCallResult(ctx, serverName, toolName, mintCorrelationIDAt(startTime, serverName, toolName), result); sanErr != nil {
+			result, err = nil, sanErr
+		}
+	}
 	duration := time.Since(startTime)
 
 	// Record the tool call with timing and result. Issue #935: code_execution
@@ -758,6 +768,38 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	}
 
 	return result, nil
+}
+
+// sanitiseSubCallResult applies the operator's output_sanitisation policy to
+// one sandboxed sub-call's upstream result, exactly as handleCallToolVariant
+// applies it to a direct call. Redact/strip mutate the result's text blocks in
+// place (the returned value is the same pointer); block returns an error so the
+// script sees a failed call ({ok:false, error}) rather than the payload. The
+// opt-out default, a nil proxy (unit fixtures), and non-CallToolResult values
+// pass through untouched.
+func (u *upstreamToolCaller) sanitiseSubCallResult(ctx context.Context, serverName, toolName, requestID string, result interface{}) (interface{}, error) {
+	if u.proxy == nil {
+		return result, nil
+	}
+	contentTrust := contracts.ContentTrustTrusted
+	if annotations, _ := u.proxy.lookupExactToolAnnotations(serverName, toolName); annotations != nil {
+		contentTrust = contracts.ContentTrustForTool(annotations)
+	}
+	if blocked := u.proxy.applyOutputSanitisation(ctx, serverName, toolName, requestID, contentTrust, result); blocked != nil {
+		return nil, errors.New(firstTextOf(blocked))
+	}
+	return result, nil
+}
+
+// firstTextOf returns the first text block of a result, or a generic
+// explanation when it carries none.
+func firstTextOf(r *mcp.CallToolResult) string {
+	for _, c := range r.Content {
+		if tc, ok := c.(mcp.TextContent); ok && tc.Text != "" {
+			return tc.Text
+		}
+	}
+	return "tool output blocked by sanitisation policy"
 }
 
 // subCallActivityResponseLimit caps the response text recorded for ONE

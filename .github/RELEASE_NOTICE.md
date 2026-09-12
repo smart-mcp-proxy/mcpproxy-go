@@ -5,10 +5,11 @@ The sandboxed JavaScript/TypeScript `code_execution` tool — one request that o
 **What changes for you**
 
 - **New installs** get `"enable_code_execution": true` in `mcp_config.json` and see the tool in `tools/list` on the default `/mcp` endpoint.
-- **Existing installs keep their current setting.** mcpproxy writes every setting explicitly when it saves the config, so an older `mcp_config.json` almost certainly contains `"enable_code_execution": false`, and an explicit value always wins over the default. To get the tool, flip it to `true` in the file or in **Settings → Enable code execution tool** — the change is hot-reloaded and connected clients receive `notifications/tools/list_changed`, no restart needed.
+- **Existing installs: an explicit value in the file wins.** mcpproxy writes every setting when it saves the config, so a `mcp_config.json` created by an earlier release carries `"enable_code_execution": false` and stays off. To get the tool, flip it to `true` in the file or in **Settings → Enable code execution tool** — the change is hot-reloaded and connected clients receive `notifications/tools/list_changed`, no restart needed.
+- **A hand-written config that omits the key turns the tool on** at the next start or hot reload. If you maintain the file yourself and want it off, add `"enable_code_execution": false` before upgrading.
 - **To keep it off**, set `"enable_code_execution": false`. As of this release a disabled tool is no longer advertised at all ([#1236](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1236)): it disappears from `tools/list` instead of being listed as a stub that refuses every call.
 
-The sandbox has no filesystem, network or `require()`; `call_tool` from inside a script goes through the same quarantine, read-only-mode and per-server restrictions as a direct `call_tool_*` request, and each run is bounded by `code_execution_timeout_ms` (default 2 min) and `code_execution_max_tool_calls`. Details: [docs/features/code-execution](https://docs.mcpproxy.app/features/code-execution/).
+The sandbox has no filesystem, network or `require()`. `call_tool` from inside a script goes through the same gates as a direct `call_tool_*` request — quarantine, agent-token scope, per-server restrictions and, as of this release, `output_sanitisation` redact/block — and each run is bounded by `code_execution_timeout_ms` (default 2 min; a script that overruns is now interrupted, not just abandoned) and `code_execution_max_tool_calls`. Details: [docs/features/code-execution](https://docs.mcpproxy.app/features/code-execution/).
 
 ## 🔒 Agent-token scope hardening
 
