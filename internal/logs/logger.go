@@ -133,10 +133,19 @@ func SetupCommandLogger(serverCommand bool, logLevel string, logToFile bool, log
 
 // createFileCore creates a file-based logging core
 func createFileCore(config *config.LogConfig, level zapcore.Level) (zapcore.Core, error) {
-	writeSyncer, err := CreateRotatingWriteSyncer(config)
+	core, _, err := createFileCoreWithCloser(config, level)
+	return core, err
+}
+
+// createFileCoreWithCloser is createFileCore plus the sink's closer, for the
+// callers that own a logger's lifetime (per-server upstream loggers, which
+// otherwise hold one file handle per server for the life of the process).
+func createFileCoreWithCloser(config *config.LogConfig, level zapcore.Level) (zapcore.Core, io.Closer, error) {
+	sink, err := newRotatingSink(config)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	writeSyncer := zapcore.WriteSyncer(sink)
 
 	// Choose encoder based on format preference
 	var encoder zapcore.Encoder
@@ -150,11 +159,28 @@ func createFileCore(config *config.LogConfig, level zapcore.Level) (zapcore.Core
 		encoder,
 		writeSyncer,
 		level,
-	), nil
+	), sink, nil
 }
 
 // CreateRotatingWriteSyncer creates a rotation-backed file sink for a log config.
 func CreateRotatingWriteSyncer(config *config.LogConfig) (zapcore.WriteSyncer, error) {
+	return newRotatingSink(config)
+}
+
+// rotatingSink is the lumberjack-backed file sink behind every file logger.
+// It is a WriteSyncer for zap and a Closer for whoever owns the logger's
+// lifetime: lumberjack opens the file lazily on the first Write and reopens
+// after Close, so closing an idle sink releases its handle at no cost to a
+// later write.
+type rotatingSink struct {
+	*lumberjack.Logger
+}
+
+// Sync satisfies zapcore.WriteSyncer; lumberjack writes through to the OS
+// file on every Write, so there is nothing buffered to flush.
+func (s *rotatingSink) Sync() error { return nil }
+
+func newRotatingSink(config *config.LogConfig) (*rotatingSink, error) {
 	// Get log file path with custom directory support
 	logFilePath, err := GetLogFilePathWithDir(config.LogDir, config.Filename)
 	if err != nil {
@@ -162,15 +188,13 @@ func CreateRotatingWriteSyncer(config *config.LogConfig) (zapcore.WriteSyncer, e
 	}
 
 	// Create lumberjack logger for log rotation
-	lumberjackLogger := &lumberjack.Logger{
+	return &rotatingSink{Logger: &lumberjack.Logger{
 		Filename:   logFilePath,
 		MaxSize:    config.MaxSize,
 		MaxBackups: config.MaxBackups,
 		MaxAge:     config.MaxAge,
 		Compress:   config.Compress,
-	}
-
-	return zapcore.AddSync(lumberjackLogger), nil
+	}}, nil
 }
 
 // getConsoleEncoder returns a console-friendly encoder
@@ -307,8 +331,20 @@ func sanitizeServerLogName(serverName string) string {
 	}, serverName)
 }
 
-// CreateUpstreamServerLogger creates a logger for a specific upstream server
+// CreateUpstreamServerLogger creates a logger for a specific upstream server.
+// The caller cannot release its file sink; prefer NewUpstreamServerLogger
+// wherever the logger has an owner with a teardown path.
 func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*zap.Logger, error) {
+	logger, _, err := NewUpstreamServerLogger(config, serverName)
+	return logger, err
+}
+
+// NewUpstreamServerLogger creates a logger for a specific upstream server and
+// returns the closer of its file sink. Close it whenever the server is torn
+// down or disconnected (issue #1266: an unclosed sink held one open handle per
+// server for the life of the process, and on Windows pinned the file); a later
+// write reopens the sink, so closing it on every disconnect is safe.
+func NewUpstreamServerLogger(config *config.LogConfig, serverName string) (*zap.Logger, io.Closer, error) {
 	if config == nil {
 		config = DefaultLogConfig()
 	}
@@ -336,9 +372,9 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 	}
 
 	// Create file core for upstream server
-	fileCore, err := createFileCore(&serverConfig, level)
+	fileCore, closer, err := createFileCoreWithCloser(&serverConfig, level)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create file core for upstream server %s: %w", serverName, err)
+		return nil, nil, fmt.Errorf("failed to create file core for upstream server %s: %w", serverName, err)
 	}
 
 	// Wrap with secret sanitizer for security
@@ -348,7 +384,7 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 	logger := zap.New(sanitizedCore, zap.AddCaller(), zap.AddCallerSkip(1))
 	logger = logger.With(zap.String("server", serverName))
 
-	return logger, nil
+	return logger, closer, nil
 }
 
 // CreateCLIUpstreamServerLogger creates a logger for CLI debugging that outputs to console

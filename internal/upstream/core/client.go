@@ -49,6 +49,10 @@ type Client struct {
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger
+	// upstreamLogCloser releases upstreamLogger's file sink. Disconnect
+	// closes it (issue #1266); the sink reopens on the next write, so a
+	// reconnecting server logs on as before. nil for console (CLI) loggers.
+	upstreamLogCloser io.Closer
 
 	// MCP client and server info
 	client     *client.Client
@@ -255,13 +259,14 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 	// Create upstream server logger if provided
 	if logConfig != nil {
 		var upstreamLogger *zap.Logger
+		var upstreamLogCloser io.Closer
 		var err error
 
 		// Use CLI logger for debugging or regular logger for daemon mode
 		if cliDebugMode {
 			upstreamLogger, err = logs.CreateCLIUpstreamServerLogger(logConfig, serverConfig.Name)
 		} else {
-			upstreamLogger, err = logs.CreateUpstreamServerLogger(logConfig, serverConfig.Name)
+			upstreamLogger, upstreamLogCloser, err = logs.NewUpstreamServerLogger(logConfig, serverConfig.Name)
 		}
 
 		if err != nil {
@@ -271,6 +276,7 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 				zap.Error(err))
 		} else {
 			c.upstreamLogger = upstreamLogger
+			c.upstreamLogCloser = upstreamLogCloser
 			if logConfig.Level == "trace" && cliDebugMode {
 				c.upstreamLogger.Debug("TRACE LEVEL ENABLED - All JSON-RPC frames will be logged to console",
 					zap.String("server", serverConfig.Name))

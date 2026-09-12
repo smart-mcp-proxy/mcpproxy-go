@@ -396,7 +396,29 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.processCmd = nil
 	c.mu.Unlock()
 
+	// Step 8: release the per-server log sink (issue #1266). Every
+	// teardown path — RemoveServer, ShutdownAll, a reconnect — comes
+	// through here, and this is the last line this Disconnect writes to it.
+	// lumberjack reopens the file on the next write, so a server that
+	// reconnects logs on exactly as before; a server that is gone stops
+	// holding a file handle (and, on Windows, the file itself) for the life
+	// of the process.
+	c.closeUpstreamLog()
+
 	c.logger.Debug("Disconnect completed successfully",
 		zap.String("server", serverName))
 	return nil
+}
+
+// closeUpstreamLog syncs and closes the upstream log sink, if the logger has
+// one. Safe to call repeatedly: the sink reopens itself on the next write.
+func (c *Client) closeUpstreamLog() {
+	if c.upstreamLogger != nil {
+		_ = c.upstreamLogger.Sync()
+	}
+	if c.upstreamLogCloser != nil {
+		if err := c.upstreamLogCloser.Close(); err != nil {
+			c.logger.Debug("Failed to close upstream log sink", zap.Error(err))
+		}
+	}
 }
