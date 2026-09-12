@@ -464,7 +464,11 @@ func TestCodeExecutionRegistrations_ScriptParam(t *testing.T) {
 // gets the disabled explanation rather than a schema rejection.
 func TestCodeExecutionDisabled_NotRegisteredButScriptCallStillExplained(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
+	// The fixture inherits the shipped default (enabled since v0.66.0), so
+	// turn the feature off through the hot-reload seam — the same path a
+	// config edit takes — rather than poking the field after registration.
 	proxy.config.EnableCodeExecution = false
+	proxy.RefreshCodeExecutionAvailability()
 
 	require.Empty(t, proxy.buildCodeExecutionTool(),
 		"a disabled code_execution must not be advertised")

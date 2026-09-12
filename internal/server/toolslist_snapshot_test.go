@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"testing"
 
@@ -191,26 +190,27 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     back can observe, so the description says so. DESCRIPTION ONLY — no
 //     parameter moves, which assertUpstreamServersDelta in
 //     mcp_menu_surface_test.go pins field by field.
+//   - code_execution       — v0.66.0 ships enable_code_execution=true. The frozen
+//     goldens were captured with the flag off, when the two routing-mode
+//     surfaces advertised a refusing "Code Execution (Disabled)" stub (retired
+//     by issue #1236), so on those surfaces the entry CHANGES from the stub to
+//     the live tool; mcp_menu_surface_test.go pins that transition field by
+//     field (assertCodeExecutionLive).
 var toolsListAllowedDelta = map[string][]string{
 	"default_server":      {"describe_tool", "quarantine_security", "upstream_servers"},
-	"retrieve_tools_mode": {"describe_tool", "quarantine_security", "upstream_servers"},
-	"code_execution_mode": {"quarantine_security", "upstream_servers"},
+	"retrieve_tools_mode": {"code_execution", "describe_tool", "quarantine_security", "upstream_servers"},
+	"code_execution_mode": {"code_execution", "quarantine_security", "upstream_servers"},
 }
 
-// toolsListAllowedRemovals enumerates the tool entries a shipped fix was
-// allowed to RETIRE from a surface, measured against the same frozen capture.
-// The frozen goldens were taken with enable_code_execution=false (the fixture
-// default), so they carry the "Code Execution (Disabled)" stub that used to be
-// registered in place of the real tool.
+// toolsListAllowedAdditions enumerates the tool entries a shipped change was
+// allowed to ADD to a surface, measured against the same frozen capture.
 //
-//   - code_execution — issue #1236: a disabled feature is no longer advertised.
-//     The stub is gone from both surfaces that carried it; the live tool (with
-//     the flag on) is unchanged and still pinned by the enabled-path tests.
-//     default_server never carried the stub (registerTools always gated on the
-//     flag), which is why it is absent here.
-var toolsListAllowedRemovals = map[string][]string{
-	"retrieve_tools_mode": {"code_execution"},
-	"code_execution_mode": {"code_execution"},
+//   - code_execution on default_server — registerTools has always gated the
+//     tool on the flag, so the frozen (flag-off) capture never carried it
+//     there. With the flag on by default (v0.66.0) the default surface now
+//     registers the live tool.
+var toolsListAllowedAdditions = map[string][]string{
+	"default_server": {"code_execution"},
 }
 
 // TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens
@@ -222,18 +222,14 @@ func TestToolsListSnapshot_DeltaIsEnumerated(t *testing.T) {
 			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre099Dir, surface+".json"))
 			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
 
-			// The tool SET moves only by the enumerated removals: these
-			// features extend existing built-ins, they do not register a new
-			// one, and the only retirement is the disabled code_execution stub
-			// (issue #1236).
-			wantNames := make([]string, 0, len(before))
-			for _, name := range sortedToolNames(before) {
-				if !slices.Contains(toolsListAllowedRemovals[surface], name) {
-					wantNames = append(wantNames, name)
-				}
-			}
+			// The tool SET moves only by the enumerated additions: these
+			// features extend existing built-ins and retire nothing; the one
+			// new registration is the live code_execution on the default
+			// surface, which the flag-off capture never carried.
+			wantNames := append(sortedToolNames(before), toolsListAllowedAdditions[surface]...)
+			sort.Strings(wantNames)
 			assert.Equal(t, wantNames, sortedToolNames(after),
-				"surface %s: no tool may be added, and only the enumerated removals may be missing", surface)
+				"surface %s: nothing may be removed, and only the enumerated additions may appear", surface)
 
 			changed := make([]string, 0, len(allowed))
 			for name, pre := range before {

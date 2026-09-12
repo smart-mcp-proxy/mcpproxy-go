@@ -174,7 +174,7 @@ The JavaScript execution environment is **heavily sandboxed** to prevent securit
 
 ```json
 {
-  "enable_code_execution": false,           // Must be explicitly enabled (default: false)
+  "enable_code_execution": true,            // On by default since v0.66.0; set false to switch off
   "code_execution_timeout_ms": 120000,      // Default: 2 minutes, max: 10 minutes
   "code_execution_max_tool_calls": 0,       // Default: unlimited
   "code_execution_pool_size": 10,           // Default: 10 concurrent VMs

@@ -130,7 +130,7 @@ func TestSubCallActivityOutcome_ClassifiesEveryExit(t *testing.T) {
 func TestEmitSubCallActivity_NoProxyIsANoOp(t *testing.T) {
 	u := &upstreamToolCaller{logger: zap.NewNop()}
 	assert.NotPanics(t, func() {
-		u.emitSubCallActivity("time", "now", nil, nil, errors.New("boom"), time.Now(), time.Millisecond)
+		u.emitSubCallActivity("time", "now", "req-test", nil, nil, errors.New("boom"), time.Now(), time.Millisecond)
 	})
 }
 

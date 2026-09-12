@@ -96,10 +96,17 @@ type ExecutionContext struct {
 	allowedServerMap  map[string]bool
 	restrictToAllowed bool // enforce allowedServerMap even when empty (Spec 057 deny-all profile)
 
-	// ctx is the execution's timeout context, wired by Execute. Batch workers
-	// dispatch under it so they are cancelled with the execution instead of
-	// outliving it; the lone call_tool() path keeps context.Background().
+	// ctx is the execution's timeout context, wired by Execute. Every upstream
+	// dispatch — the lone call_tool() and call_tools() batch workers alike —
+	// runs under it so an in-flight call is cancelled with the execution
+	// instead of outliving it.
 	ctx context.Context
+
+	// scriptDone is closed when the script goroutine returns. Execute may
+	// return before that (on timeout it interrupts the VM and comes back to
+	// the caller at once); anything that must observe the goroutine's end —
+	// tests, mostly — waits on this instead of racing it.
+	scriptDone chan struct{}
 
 	// Auth enforcement (Spec 031)
 	authInfo           *AuthInfo
@@ -155,11 +162,11 @@ func Execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 // execute is Execute plus the execution context it ran, which tests inspect for
 // state the Result does not carry (recorded tool calls, the worker context).
 //
-// After a timeout return the abandoned script goroutine may still append to
-// the returned context's ToolCalls (lone call and batch alike — there is no
-// vm.Interrupt). A test that reads the context after a timeout MUST first
-// synchronize with the script goroutine (e.g. via stub-side signalling, as the
-// cancellation tests do) or it races.
+// On timeout Execute interrupts the VM and returns without waiting for the
+// script goroutine to unwind, so that goroutine may still append to the
+// returned context's ToolCalls for a moment. A test that reads the context
+// after a timeout MUST first wait on scriptDone (or synchronize via stub-side
+// signalling, as the cancellation tests do) or it races.
 func execute(ctx context.Context, caller ToolCaller, code string, opts ExecutionOptions) (*Result, *ExecutionContext) {
 	// Generate execution ID if not provided
 	if opts.ExecutionID == "" {
@@ -224,7 +231,9 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 
 	// Run JavaScript with timeout enforcement
 	resultChan := make(chan *Result, 1)
+	execCtx.scriptDone = make(chan struct{})
 	go func() {
+		defer close(execCtx.scriptDone)
 		resultChan <- executeWithVM(vm, code, execCtx)
 	}()
 
@@ -242,7 +251,14 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 		}
 		return result, execCtx
 	case <-timeoutCtx.Done():
-		// Timeout occurred
+		// Timeout occurred. Stop the VM: without this the goroutine keeps
+		// spinning on whatever the script was doing (a busy loop burns a
+		// core for the life of the process) and the pool slot it held is
+		// released the moment this returns, so nothing else bounds it. The
+		// interrupt surfaces inside RunString as *goja.InterruptedError; an
+		// upstream call in flight is cancelled through timeoutCtx, which
+		// every dispatch path runs under.
+		vm.Interrupt("execution timed out")
 		endTime := time.Now()
 		execCtx.EndTime = &endTime
 		execCtx.Status = "timeout"
@@ -260,8 +276,25 @@ func (ec *ExecutionContext) executionCtx() context.Context {
 	return context.Background()
 }
 
-// executeWithVM runs the JavaScript code in the given VM and returns the result
-func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) *Result {
+// executeWithVM runs the JavaScript code in the given VM and returns the result.
+//
+// An interrupt (Execute's timeout) that lands while RunString is running comes
+// back as its error; one that lands while value.Export() is still running
+// script code — a getter on the returned object, a toJSON — is raised by goja
+// as a PANIC carrying *goja.InterruptedError. This goroutine is the only thing
+// standing between that panic and the process, so it recovers and reports a
+// timeout instead. Execute has already answered the caller by then; the
+// recovered result only keeps the goroutine's exit orderly.
+func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (result *Result) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(*goja.InterruptedError); ok {
+				result = NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
+				return
+			}
+			result = NewErrorResult(NewJsError(ErrorCodeRuntimeError, fmt.Sprintf("script panicked: %v", r)))
+		}
+	}()
 	// Compile the code first to catch syntax errors
 	_, err := goja.Compile("", code, false)
 	if err != nil {
@@ -418,9 +451,10 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 			StartTime:  time.Now(),
 		}
 
-		// Call the upstream tool
-		ctx := context.Background() // Note: Using background context for tool calls
-		result, err := ec.toolCaller.CallTool(ctx, serverName, toolName, args)
+		// Call the upstream tool under the execution's timeout context so a
+		// call still in flight when the script is cut off is cancelled with
+		// it, exactly as call_tools() batch workers already are.
+		result, err := ec.toolCaller.CallTool(ec.executionCtx(), serverName, toolName, args)
 
 		// Record duration
 		record.DurationMs = time.Since(record.StartTime).Milliseconds()

@@ -318,22 +318,8 @@ func TestExecutionContextFallsBackToBackground(t *testing.T) {
 	}
 }
 
-// TestLoneCallToolKeepsBackgroundContext: threading the execution context into
-// call_tool() would change when a lone call is cancelled, which is not part of
-// this feature. The lone path stays on context.Background().
-func TestLoneCallToolKeepsBackgroundContext(t *testing.T) {
-	caller := &ctxCapturingCaller{}
-	result := Execute(context.Background(), caller, `call_tool("s", "t", {})`, ExecutionOptions{TimeoutMs: 5000})
-	if !result.Ok {
-		t.Fatalf("script failed: %v", result.Error)
-	}
-	if caller.ctx == nil {
-		t.Fatal("call_tool did not dispatch")
-	}
-	if caller.ctx.Done() != nil {
-		t.Error("lone call_tool must keep dispatching on context.Background()")
-	}
-}
+// The lone call_tool() path now dispatches under the execution context too —
+// see TestSingletonCallToolDispatchesUnderTheExecutionContext.
 
 // loneCallEnvelope runs a single call_tool() through Execute and returns the
 // envelope the script saw, so batch behaviour can be compared against the

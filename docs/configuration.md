@@ -1254,7 +1254,7 @@ See [Tool Quarantine](features/tool-quarantine.md) for complete details.
 
 ```json
 {
-  "enable_code_execution": false,
+  "enable_code_execution": true,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
@@ -1264,7 +1264,7 @@ See [Tool Quarantine](features/tool-quarantine.md) for complete details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_code_execution` | boolean | `false` | Enable JavaScript/TypeScript code execution tool (disabled by default for security). While `false` the `code_execution` tool is not advertised in `tools/list`. Hot-reloaded: a flip adds/removes the tool and sends `notifications/tools/list_changed` |
+| `enable_code_execution` | boolean | `true` | Enable JavaScript/TypeScript code execution tool (on by default since v0.66.0; set `false` to switch it off). While `false` the `code_execution` tool is not advertised in `tools/list`. Hot-reloaded: a flip adds/removes the tool and sends `notifications/tools/list_changed` |
 | `code_execution_timeout_ms` | integer | `120000` | Default timeout in milliseconds (1-600000, max 10 minutes) |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls per execution (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | Number of JavaScript VM instances in pool (1-100) |
@@ -1562,7 +1562,7 @@ Here's a complete configuration example with all major sections:
     "enhance_path": false
   },
 
-  "enable_code_execution": false,
+  "enable_code_execution": true,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,

@@ -292,7 +292,9 @@ const posture = computed(() => {
     { label: 'MCP auth', on: !!w.require_mcp_auth, good: !!w.require_mcp_auth },
     { label: 'Docker isolation', on: !!(w.docker_isolation && w.docker_isolation.enabled), good: !!(w.docker_isolation && w.docker_isolation.enabled) },
     { label: 'Secret scan', on: sdd, good: sdd },
-    { label: 'Code exec', on: !!w.enable_code_execution, good: !w.enable_code_execution },
+    // on by default since v0.66.0: the sandbox honours quarantine and server
+    // restrictions, so an enabled tool is not by itself something to review.
+    { label: 'Code exec', on: !!w.enable_code_execution, good: true },
     { label: 'Read-only', on: !!w.read_only_mode, good: true },
     { label: 'Reveal headers', on: !!w.reveal_secret_headers, good: !w.reveal_secret_headers },
   ]

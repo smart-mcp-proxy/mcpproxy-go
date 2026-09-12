@@ -690,6 +690,10 @@ type upstreamToolCaller struct {
 // CallTool implements jsruntime.ToolCaller interface
 func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (interface{}, error) {
 	startTime := time.Now()
+	// One correlation id per sub-call: the sanitisation policy decision and
+	// the activity record must carry the same id, and mintCorrelationIDAt
+	// bumps a sequence on every call, so minting twice would never match.
+	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
 
 	// Spec 093 FR-012: a call issued by a sandboxed script is an INTERNAL origin,
 	// whatever surface asked for the code_execution around it. Without this the
@@ -718,7 +722,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
-		u.emitSubCallRefused(serverName, toolName, args, refusal, startTime, duration)
+		u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
 		return nil, refusal
 	}
 
@@ -729,12 +733,22 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, err.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration)
-		u.emitSubCallActivity(serverName, toolName, args, nil, err, startTime, duration)
+		u.emitSubCallActivity(serverName, toolName, requestID, args, nil, err, startTime, duration)
 		return nil, err
 	}
 
 	// Call the tool
 	result, err := client.CallTool(ctx, toolName, args)
+	if err == nil {
+		// Spec 054 Track B on the fourth dispatch path: redact or block
+		// BEFORE the result is recorded, stored in history, or handed to the
+		// script — a secret call_tool_* would never forward must not be
+		// readable from JavaScript either, where a script can copy it into
+		// another upstream's arguments or return it whole.
+		if _, sanErr := u.sanitiseSubCallResult(ctx, serverName, toolName, requestID, result); sanErr != nil {
+			result, err = nil, sanErr
+		}
+	}
 	duration := time.Since(startTime)
 
 	// Record the tool call with timing and result. Issue #935: code_execution
@@ -743,7 +757,7 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	// upstream rejection is a clean success here and an error there.
 	u.recordUpstreamCall(serverName, toolName, startTime, duration, result, err)
 	u.storeToolCallInHistory(serverName, toolName, args, result, err, startTime, duration)
-	u.emitSubCallActivity(serverName, toolName, args, result, err, startTime, duration)
+	u.emitSubCallActivity(serverName, toolName, requestID, args, result, err, startTime, duration)
 
 	u.logger.Debug("upstream tool call completed",
 		zap.String("execution_id", u.executionID),
@@ -758,6 +772,39 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	}
 
 	return result, nil
+}
+
+// sanitiseSubCallResult applies the operator's output_sanitisation policy to
+// one sandboxed sub-call's upstream result, exactly as handleCallToolVariant
+// applies it to a direct call. Redact/strip mutate the result's text blocks in
+// place (the returned value is the same pointer); block returns an error so the
+// script sees a failed call ({ok:false, error}) rather than the payload. The
+// opt-out default, a nil proxy (unit fixtures), and non-CallToolResult values
+// pass through untouched.
+func (u *upstreamToolCaller) sanitiseSubCallResult(ctx context.Context, serverName, toolName, requestID string, result interface{}) (interface{}, error) {
+	if u.proxy == nil {
+		return result, nil
+	}
+	// Same derivation as handleCallToolVariant: a tool with no annotations
+	// is open-world by the MCP spec default, hence untrusted — so strip mode
+	// applies to it here exactly as it does on a direct call.
+	annotations, _ := u.proxy.lookupExactToolAnnotations(serverName, toolName)
+	contentTrust := contracts.ContentTrustForTool(annotations)
+	if blocked := u.proxy.applyOutputSanitisation(ctx, serverName, toolName, requestID, contentTrust, result); blocked != nil {
+		return nil, errors.New(firstTextOf(blocked))
+	}
+	return result, nil
+}
+
+// firstTextOf returns the first text block of a result, or a generic
+// explanation when it carries none.
+func firstTextOf(r *mcp.CallToolResult) string {
+	for _, c := range r.Content {
+		if tc, ok := c.(mcp.TextContent); ok && tc.Text != "" {
+			return tc.Text
+		}
+	}
+	return "tool output blocked by sanitisation policy"
 }
 
 // subCallActivityResponseLimit caps the response text recorded for ONE
@@ -791,7 +838,7 @@ const subCallActivityResponseLimit = 8 * 1024
 // `started` event is emitted: for a nested call it would arrive after the work
 // already finished, and it would double the SSE traffic of a busy script for
 // nothing — started events are never persisted anyway.
-func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration) {
+func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName, requestID string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration) {
 	// nil in the unit tests that drive the caller directly (see the field
 	// comment on upstreamToolCaller.proxy) — there is no runtime to emit into.
 	if u.proxy == nil {
@@ -812,7 +859,6 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName string, ar
 
 	status, errMsg, responseText, truncated := subCallActivityOutcome(result, callErr)
 
-	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
 	requestBytes, responseBytes := subCallByteSizes(args, result)
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
@@ -855,11 +901,10 @@ func subCallByteSizes(args map[string]interface{}, result interface{}) (requestB
 // aggregate routes blocked tool_calls off the executed-call statistics
 // (Calls/latency) while still giving the attempt a failed bar in the timeline,
 // the same treatment a direct-path policy_decision gets.
-func (u *upstreamToolCaller) emitSubCallRefused(serverName, toolName string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration) {
+func (u *upstreamToolCaller) emitSubCallRefused(serverName, toolName, requestID string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration) {
 	if u.proxy == nil {
 		return
 	}
-	requestID := mintCorrelationIDAt(startTime, serverName, toolName)
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,

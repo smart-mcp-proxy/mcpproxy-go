@@ -447,7 +447,7 @@ type Config struct {
 	Tokenizer *TokenizerConfig `json:"tokenizer,omitempty" mapstructure:"tokenizer"`
 
 	// Code execution settings
-	EnableCodeExecution       bool `json:"enable_code_execution" mapstructure:"enable-code-execution"`                           // Enable JavaScript code execution tool (default: false)
+	EnableCodeExecution       bool `json:"enable_code_execution" mapstructure:"enable-code-execution"`                           // Enable JavaScript code execution tool (default: true since v0.66.0)
 	CodeExecutionTimeoutMs    int  `json:"code_execution_timeout_ms,omitempty" mapstructure:"code-execution-timeout-ms"`         // Timeout in milliseconds (default: 120000, max: 600000)
 	CodeExecutionMaxToolCalls int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
 	CodeExecutionPoolSize     int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`           // JavaScript runtime pool size (default: 10)
@@ -1797,8 +1797,8 @@ func DefaultConfig() *Config {
 			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
 		},
 
-		// Code execution defaults - disabled by default for security
-		EnableCodeExecution:       false,  // Must be explicitly enabled
+		// Code execution defaults - the sandboxed JS tool ships on (v0.66.0+)
+		EnableCodeExecution:       true,   // On by default since v0.66.0; an explicit false in the config file still wins
 		CodeExecutionTimeoutMs:    120000, // 2 minutes (120,000ms)
 		CodeExecutionMaxToolCalls: 0,      // Unlimited by default (0 = no limit)
 		CodeExecutionPoolSize:     10,     // 10 JavaScript runtime instances

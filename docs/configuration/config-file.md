@@ -34,7 +34,7 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "http_idle_timeout": "180s",
   "tools_limit": 15,
   "tool_response_limit": 20000,
-  "enable_code_execution": false,
+  "enable_code_execution": true,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
   "code_execution_pool_size": 10,
@@ -136,7 +136,7 @@ Both cadences are configurable globally, and can be overridden per server (see [
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enable_code_execution` | boolean | `false` | Enable JavaScript code execution tool |
+| `enable_code_execution` | boolean | `true` | Enable JavaScript code execution tool (on by default since v0.66.0) |
 | `code_execution_timeout_ms` | integer | `120000` | Execution timeout in milliseconds |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | VM pool size for code execution |

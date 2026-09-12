@@ -112,20 +112,26 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 
 	// describe_tool is the ONLY addition, and only on the retrieve_tools-mode
 	// surfaces (FR-011: not code_execution, not direct).
+	//
+	// code_execution is the other addition, on default_server only: the
+	// pre-feature snapshot was captured with enable_code_execution=false and
+	// registerTools has always gated on the flag, so the default surface never
+	// carried the tool. Since v0.66.0 the flag ships ON, so the fixture
+	// (DefaultConfig) now registers the live tool there.
 	wantAdded := map[string][]string{
-		"default_server":      {"describe_tool"},
+		"default_server":      {"code_execution", "describe_tool"},
 		"call_tool_mode":      {"describe_tool"},
 		"code_execution_mode": {},
 	}
-	// The ONLY removal is the "Code Execution (Disabled)" stub (issue #1236):
-	// the pre-feature snapshot was captured with enable_code_execution=false,
-	// when a disabled feature was still advertised as a refusing stub. A
-	// disabled tool is now not registered at all; the live tool (flag on) is
-	// unchanged. default_server never carried the stub.
+	// Nothing is removed. The two routing-mode surfaces carried a "Code
+	// Execution (Disabled)" stub in the pre-feature snapshot; a disabled
+	// feature is no longer advertised at all (issue #1236), but with the flag
+	// on by default the same name is now the LIVE tool, so it is a
+	// modification (assertCodeExecutionLive), not a removal.
 	wantRemoved := map[string][]string{
 		"default_server":      {},
-		"call_tool_mode":      {"code_execution"},
-		"code_execution_mode": {"code_execution"},
+		"call_tool_mode":      {},
+		"code_execution_mode": {},
 	}
 
 	for surface, preTools := range pre {
@@ -177,6 +183,8 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 					assertQuarantineSecurityDelta(t, surface, preM, curM)
 				case name == "upstream_servers":
 					assertUpstreamServersDelta(t, surface, preM, curM)
+				case name == "code_execution":
+					assertCodeExecutionLive(t, surface, preM, curM)
 				default:
 					assert.Equal(t, preM, curM,
 						"surface %s: tool %q must be byte-identical to the pre-feature snapshot (SC-003)", surface, name)
@@ -499,4 +507,49 @@ func mustRemarshal(t *testing.T, m map[string]interface{}) json.RawMessage {
 	raw, err := json.Marshal(m)
 	require.NoError(t, err)
 	return raw
+}
+
+// assertCodeExecutionLive pins the one stub→live transition the v0.66.0
+// default flip introduces. The pre-feature snapshot holds the refusing
+// "Code Execution (Disabled)" stub (readOnly, a lone required `code`
+// parameter, a description telling the agent to enable the flag). With
+// enable_code_execution on by default the surface now carries the real tool,
+// so the checks are the live tool's contract, not byte-identity with a stub
+// that could never run: the stub's `code` parameter survives, the spec-097
+// `script` alternative is present with `code` no longer schema-required, the
+// annotations say what the tool really does, and the description no longer
+// claims the feature is disabled.
+func assertCodeExecutionLive(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	preDesc, _ := preM["description"].(string)
+	require.Contains(t, preDesc, "disabled",
+		"surface %s: the pre-feature baseline is expected to hold the disabled stub — if it moved, this delta helper is measuring the wrong thing", surface)
+
+	preProps, curProps := schemaProps(preM), schemaProps(curM)
+	require.NotNil(t, curProps, "surface %s: code_execution lost its inputSchema", surface)
+	for p := range preProps {
+		assert.Contains(t, curProps, p,
+			"surface %s: stub parameter %q must survive on the live tool", surface, p)
+	}
+	for _, p := range []string{"code", "script", "input", "language", "options"} {
+		assert.Contains(t, curProps, p,
+			"surface %s: live code_execution must expose %q", surface, p)
+	}
+
+	curSchema, _ := curM["inputSchema"].(map[string]interface{})
+	assert.Empty(t, curSchema["required"],
+		"surface %s: code must not be schema-required, or a script-only call is rejected before the handler can explain the rule (spec 097)", surface)
+
+	curAnn, _ := curM["annotations"].(map[string]interface{})
+	assert.Equal(t, "Code Execution", curAnn["title"],
+		"surface %s: live tool title", surface)
+	assert.Equal(t, false, curAnn["readOnlyHint"],
+		"surface %s: the live tool executes code and must not claim to be read-only", surface)
+
+	curDesc, _ := curM["description"].(string)
+	assert.NotContains(t, curDesc, "disabled",
+		"surface %s: the live description must not claim the feature is disabled", surface)
+	assert.Contains(t, curDesc, "script",
+		"surface %s: the live description must document stored scripts (spec 097 FR-008)", surface)
 }
