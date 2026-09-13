@@ -52,7 +52,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Install swag
         run: go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
@@ -143,7 +143,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: false  # Disable built-in cache to use explicit cache step below
 
       - name: Clean Go module cache (macOS workaround)
@@ -159,9 +159,9 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
             ~/AppData/Local/go-build
-          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.25-
+            ${{ runner.os }}-go-1.26-
 
       - name: Download dependencies
         run: go mod download

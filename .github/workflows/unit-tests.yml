@@ -45,7 +45,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Install swag
         run: go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
@@ -64,11 +64,11 @@ jobs:
     strategy:
       matrix:
         # On PRs: test only ubuntu-latest. On main/push: test all OSes.
-        # Go is pinned to "1.25" because go.mod requires go 1.25.5 — older
-        # toolchains can't build the module, and auto-downloading 1.25.x under
+        # Go is pinned to "1.26" because go.mod requires go 1.26.0 — older
+        # toolchains can't build the module, and auto-downloading 1.26.x under
         # setup-go's module cache collides ("tar: ... File exists").
         os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') }}
-        go-version: ["1.25"]
+        go-version: ["1.26"]
 
     steps:
       - name: Checkout code
@@ -165,7 +165,7 @@ jobs:
         run: go tool cover -html=coverage.out -o coverage.html
 
       - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
         with:
           file: ./coverage.out
@@ -174,7 +174,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Upload coverage artifacts
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-report
@@ -218,7 +218,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download dependencies
@@ -277,7 +277,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Download frontend artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -294,7 +294,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
         with:
-          version: v2.6.2
+          version: v2.9.0
           args: --config .github/.golangci.yml --timeout=10m
           # skip-cache: the action's cross-run analysis cache produced stale
           # staticcheck facts (SA5011 on t.Fatal no-return sites) that do not
@@ -316,7 +316,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download dependencies
@@ -360,7 +360,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download frontend artifact

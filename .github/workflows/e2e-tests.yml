@@ -46,11 +46,11 @@ jobs:
     strategy:
       matrix:
         # On PRs: test only ubuntu-latest. On main/push: test all OSes.
-        # Go is pinned to "1.25" because go.mod requires go 1.25.5 — older
-        # toolchains can't build the module, and auto-downloading 1.25.x under
+        # Go is pinned to "1.26" because go.mod requires go 1.26.0 — older
+        # toolchains can't build the module, and auto-downloading 1.26.x under
         # setup-go's module cache collides ("tar: ... File exists").
         os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') }}
-        go-version: ["1.25"]
+        go-version: ["1.26"]
 
     steps:
       - name: Checkout code
@@ -168,13 +168,13 @@ jobs:
           GO_TEST_TIMEOUT: 300s
 
       - name: Run E2E tests with race detector
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
         run: go test -v -race -timeout 10m ./internal/server -run TestE2E
         env:
           GO_TEST_TIMEOUT: 600s
 
       - name: Run Logging E2E tests with race detector
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
         run: go test -v -race -timeout 10m ./internal/logs -run TestE2E
         env:
           GO_TEST_TIMEOUT: 600s
@@ -194,7 +194,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download frontend artifact
@@ -290,7 +290,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download frontend artifact
@@ -451,7 +451,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download dependencies
@@ -478,7 +478,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download frontend artifact
