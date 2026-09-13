@@ -2471,6 +2471,10 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	// Clear OAuth state for fresh flow
 	coreClient.ClearOAuthState()
 
+	// Snapshot BEFORE the flow starts so a completion can never precede it
+	// (the watcher below detects completion as a change from this value).
+	before := m.storedAccessToken(cfg)
+
 	// Start the quick OAuth flow - this returns immediately with browser status
 	result, err := coreClient.StartOAuthFlowQuick(ctx)
 	if err != nil {
@@ -2478,19 +2482,30 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 		return result, err
 	}
 
-	// Set up reconnection after OAuth completes (in background)
+	// Set up reconnection after OAuth completes (in background).
+	//
+	// The watcher owns the login context: its deferred cancel ends the
+	// callback wait. It therefore must only finish when THIS login is over —
+	// a new token landed, or the 30-minute deadline passed. It used to stop
+	// after 2 minutes, or after ~2 s when HasRecentOAuthCompletion was already
+	// true from an earlier sign-in (the re-login a declared-OAuth server now
+	// permits, GH #1271), and the browser callback then found nobody waiting
+	// ("mcpproxy is not waiting for this sign-in"). Completion is detected as
+	// a CHANGE of the stored access token, snapshotted before the flow; the
+	// watcher also ends with the manager so it never outlives a shutdown.
 	go func() {
 		defer cancel()
-
-		// Wait a bit for OAuth to complete (the callback handling runs in background)
-		// Then trigger reconnect
-		time.Sleep(2 * time.Second)
-
-		// Check if OAuth completed by looking for token
-		if m.storage != nil {
-			serverKey := oauth.GenerateServerKey(cfg.Name, cfg.URL)
-			token, _ := m.storage.GetOAuthToken(serverKey)
-			if token != nil && token.AccessToken != "" {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-m.shutdownCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			if tok := m.storedAccessToken(cfg); tok != "" && tok != before {
 				m.logger.Info("OAuth token obtained, triggering reconnect",
 					zap.String("server", cfg.Name))
 				if err := m.RetryConnection(cfg.Name); err != nil {
@@ -2498,27 +2513,25 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 						zap.String("server", cfg.Name),
 						zap.Error(err))
 				}
-			}
-		}
-
-		// Also set up a watcher for OAuth completion
-		tokenManager := oauth.GetTokenStoreManager()
-		for i := 0; i < 60; i++ { // Check for 2 minutes
-			if tokenManager.HasRecentOAuthCompletion(cfg.Name) {
-				m.logger.Info("OAuth completion detected, triggering reconnect",
-					zap.String("server", cfg.Name))
-				if err := m.RetryConnection(cfg.Name); err != nil {
-					m.logger.Warn("Failed to trigger reconnect after OAuth completion",
-						zap.String("server", cfg.Name),
-						zap.Error(err))
-				}
 				return
 			}
-			time.Sleep(2 * time.Second)
 		}
 	}()
 
 	return result, nil
+}
+
+// storedAccessToken returns the access token persisted for the server, or ""
+// when there is none (or no storage).
+func (m *Manager) storedAccessToken(cfg *config.ServerConfig) string {
+	if m.storage == nil {
+		return ""
+	}
+	record, err := m.storage.GetOAuthToken(oauth.GenerateServerKey(cfg.Name, cfg.URL))
+	if err != nil || record == nil {
+		return ""
+	}
+	return record.AccessToken
 }
 
 // StartManualOAuthWithInfo performs an in-process OAuth flow and returns the auth URL and browser status.

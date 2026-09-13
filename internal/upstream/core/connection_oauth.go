@@ -70,6 +70,27 @@ func (e *ErrOAuthPending) Code() diagnostics.Code {
 	return diagnostics.OAuthLoginRequired
 }
 
+// errOAuthFlowCompletedElsewhere is what a strategy returns when it waited on
+// a flow another client of the same server owned and that flow succeeded: the
+// token is in the store, this client just has to connect again. Contains
+// "authorization required" so runAuthStrategies classifies it as an OAuth
+// error (retry), and it is never nil — nil would be read as "connected".
+func errOAuthFlowCompletedElsewhere(server string) error {
+	return fmt.Errorf("OAuth flow for %s completed by another client - authorization required, retry connection to use the stored token", server)
+}
+
+// oauthPendingMessage is the operator-facing detail behind a deferred sign-in.
+// When the oauth block is what routed the connection here (GH #1271), say so:
+// the anonymous probe was skipped on purpose, no request may have been sent,
+// and removing the block is the remedy for a server that needs no sign-in.
+func (c *Client) oauthPendingMessage() string {
+	const base = "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command"
+	if c.oauthRequiredByConfig() {
+		return base + " (the server's oauth block declares OAuth, so the anonymous probe was skipped; remove the block if this server needs no sign-in)"
+	}
+	return base
+}
+
 // IsOAuthPending checks if an error is (or wraps) an ErrOAuthPending.
 //
 // It MUST unwrap: the pending error is raised inside an auth strategy and then
@@ -136,7 +157,7 @@ func parseOAuthError(err error, responseBody []byte) error {
 }
 
 // tryOAuthAuth attempts OAuth authentication
-func (c *Client) tryOAuthAuth(ctx context.Context) error {
+func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 	// Use the global OAuth flow coordinator to prevent race conditions
 	coordinator := oauth.GetGlobalCoordinator()
 
@@ -154,17 +175,23 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				return fmt.Errorf("waiting for OAuth flow failed: %w", waitErr)
 			}
 
-			// Flow completed, try to connect with the new tokens
+			// Flow completed; the token the owner stored is picked up on the
+			// next attempt. This must NOT be nil: runAuthStrategies reads nil as
+			// "connected" and Connect would mark a client with no transport as
+			// ready (ghost connection). The text matches isOAuthError so the
+			// ladder continues/retries instead of aborting.
 			c.logger.Info("✅ OAuth flow completed by another goroutine, retrying connection",
 				zap.String("server", c.config.Name))
-			return nil // The caller will retry the connection
+			return errOAuthFlowCompletedElsewhere(c.config.Name)
 		}
 		return fmt.Errorf("failed to start OAuth flow: %w", err)
 	}
 
-	// We own this OAuth flow, make sure to end it when done
-	// Use named return to capture final error state
-	var oauthErr error
+	// We own this OAuth flow, make sure to end it when done. oauthErr is the
+	// NAMED return so every exit reaches EndFlow with the real outcome — the
+	// ErrOAuthPending and retry-with-stored-token returns used to leave it nil,
+	// so a concurrent waiter on the same server was told the flow succeeded and
+	// reported itself connected without ever building a transport.
 	defer func() {
 		success := oauthErr == nil
 		coordinator.EndFlow(c.config.Name, success, oauthErr)
@@ -478,7 +505,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 				return &ErrOAuthPending{
 					ServerName: c.config.Name,
 					ServerURL:  c.logSafeURL(),
-					Message:    "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
+					Message:    c.oauthPendingMessage(),
 				}
 			}
 
@@ -581,7 +608,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) error {
 }
 
 // trySSEOAuthAuth attempts SSE OAuth authentication
-func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
+func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	// Use the global OAuth flow coordinator to prevent race conditions
 	coordinator := oauth.GetGlobalCoordinator()
 
@@ -599,17 +626,19 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 				return fmt.Errorf("waiting for SSE OAuth flow failed: %w", waitErr)
 			}
 
-			// Flow completed, try to connect with the new tokens
+			// Flow completed; see the streamable-HTTP twin — never nil here.
 			c.logger.Info("✅ SSE OAuth flow completed by another goroutine, retrying connection",
 				zap.String("server", c.config.Name))
-			return nil // The caller will retry the connection
+			return errOAuthFlowCompletedElsewhere(c.config.Name)
 		}
 		return fmt.Errorf("failed to start SSE OAuth flow: %w", err)
 	}
 
-	// We own this OAuth flow, make sure to end it when done
-	// Use named return to capture final error state
-	var oauthErr error
+	// We own this OAuth flow, make sure to end it when done. oauthErr is the
+	// NAMED return so every exit reaches EndFlow with the real outcome — the
+	// ErrOAuthPending and retry-with-stored-token returns used to leave it nil,
+	// so a concurrent waiter on the same server was told the flow succeeded and
+	// reported itself connected without ever building a transport.
 	defer func() {
 		success := oauthErr == nil
 		coordinator.EndFlow(c.config.Name, success, oauthErr)
@@ -833,9 +862,28 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) error {
 				return fmt.Errorf("OAuth token exists in storage, retry connection to use it: %w", lastErr)
 			}
 
+			// mcp-go's SSE Start() asks the token store BEFORE opening the
+			// stream, so a declared-OAuth SSE server with no token lands here on
+			// every automatic connect (GH #1271 made that reachable; before, the
+			// anonymous probe won first). Mirror the streamable-HTTP init path:
+			// park in PendingAuth for the daemon instead of a background browser,
+			// and clear the in-progress mark set above — handleOAuthAuthorization
+			// refuses with "already in progress" otherwise.
+			if c.isDeferOAuthForTray(ctx) {
+				c.logger.Info("⏳ Deferring SSE OAuth to prevent UI blocking - will retry in background",
+					zap.String("server", c.config.Name))
+				return &ErrOAuthPending{
+					ServerName: c.config.Name,
+					ServerURL:  c.logSafeURL(),
+					Message:    c.oauthPendingMessage(),
+				}
+			}
+
 			c.logger.Info("🎯 SSE OAuth authorization required after connection attempts - starting manual OAuth flow",
 				zap.String("server", c.config.Name),
 				zap.Bool("had_refresh_token", hasRefreshToken))
+
+			c.clearOAuthState()
 
 			// Handle OAuth authorization manually using the example pattern
 			if handleErr := c.handleOAuthAuthorization(ctx, lastErr, oauthConfig, extraParams); handleErr != nil {
@@ -1904,6 +1952,32 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	return result, nil
 }
 
+// forcedAuthorizationRequired lets a manual login proceed against an upstream
+// that accepted initialize anonymously (GH #1271).
+//
+// The manual-login paths key the whole flow on the OAuthAuthorizationRequiredError
+// mcp-go returns from a 401 — the handler that builds the authorize URL rides
+// on that error. An upstream that authorises per method (Gmail MCP: initialize
+// and tools/list are anonymous, only tools/call 401s) never produces it, so
+// the login was refused with "no authentication required" — the exact remedy
+// the operator needed, turned away. When the operator declared OAuth with an
+// oauth block, synthesise the same error from the live transport's handler;
+// mcp-go's OAuth transports expose it whether or not a 401 ever happened.
+// Returns nil (keep the historical "no auth needed" conclusion) when OAuth was
+// not declared or the transport carries no handler.
+func (c *Client) forcedAuthorizationRequired() error {
+	if !c.oauthRequiredByConfig() {
+		return nil
+	}
+	handler := extractOAuthHandler(c.client)
+	if handler == nil {
+		return nil
+	}
+	c.logger.Info("🔐 Upstream accepted anonymous initialize but the server config declares OAuth - continuing manual login",
+		zap.String("server", c.config.Name))
+	return &uptransport.OAuthAuthorizationRequiredError{Handler: handler}
+}
+
 // getAuthorizationURLQuick gets the authorization URL without starting the full OAuth flow.
 // Returns the URL, OAuth handler, code verifier, and state for later use.
 func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *client.OAuthConfig, extraParams map[string]string, correlationID string) (string, *uptransport.OAuthHandler, string, string, error) {
@@ -1927,8 +2001,15 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 	// Try to initialize - this will trigger OAuth authorization requirement
 	err = c.initialize(ctx)
 	if err == nil {
-		// No OAuth needed - server connected without auth
-		return "", nil, "", "", fmt.Errorf("server connected without OAuth - no authentication required")
+		// GH #1271: a per-method-auth upstream passes this probe; honour the
+		// operator's oauth block instead of concluding "no auth needed".
+		err = c.forcedAuthorizationRequired()
+	}
+	if err == nil {
+		// No OAuth needed - server connected without auth. Name the remedy for
+		// the one case this conclusion is wrong about (GH #1271).
+		return "", nil, "", "", fmt.Errorf("server connected without OAuth - no authentication required " +
+			"(if this upstream accepts initialize anonymously but rejects tools/call, declare OAuth with an \"oauth\" block in its server config)")
 	}
 
 	// Check if this is an OAuth authorization error
@@ -2343,6 +2424,11 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 	// Now try to initialize - this will trigger OAuth authorization requirement
 	c.logger.Info("🎯 Attempting initialize to trigger OAuth authorization requirement...")
 	err = c.initialize(ctx)
+	if err == nil {
+		// GH #1271: a per-method-auth upstream passes this probe; honour the
+		// operator's oauth block instead of concluding "no OAuth needed".
+		err = c.forcedAuthorizationRequired()
+	}
 	if err != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(err) || c.isOAuthError(err) {
@@ -2410,8 +2496,12 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 		if c.isOAuthError(err) || strings.Contains(err.Error(), "authorization required") || strings.Contains(err.Error(), "no valid token") {
 			c.logger.Info("✅ OAuth authorization required from SSE Start() - triggering manual OAuth flow")
 
-			// Handle OAuth authorization manually and get result
-			result, oauthErr := c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
+			// Handle OAuth authorization manually and get result. Assign the
+			// outer result (a := here used to shadow it, so the auth URL and
+			// browser status from a Start()-triggered flow were dropped and
+			// the post-initialize check below could not tell a flow had run).
+			var oauthErr error
+			result, oauthErr = c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
 			if oauthErr != nil {
 				return result, fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}
@@ -2430,13 +2520,21 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 	// Now try to initialize to ensure connection is working
 	c.logger.Info("🎯 Attempting initialize to verify connection...")
 	err = c.initialize(ctx)
+	if err == nil && result == nil {
+		// GH #1271: a per-method-auth upstream passes this probe; honour the
+		// operator's oauth block instead of concluding "no OAuth needed".
+		// (result != nil means Start() already ran the flow above.)
+		err = c.forcedAuthorizationRequired()
+	}
 	if err != nil {
 		// Check if this is an OAuth authorization error that we need to handle manually
 		if client.IsOAuthAuthorizationRequiredError(err) || c.isOAuthError(err) {
 			c.logger.Info("✅ OAuth authorization requirement from initialize - starting manual OAuth flow")
 
-			// Handle OAuth authorization manually and get result
-			result, oauthErr := c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
+			// Handle OAuth authorization manually and get result (assign the
+			// outer result — see the Start() branch above).
+			var oauthErr error
+			result, oauthErr = c.handleOAuthAuthorizationWithResult(ctx, err, oauthConfig, extraParams)
 			if oauthErr != nil {
 				return result, fmt.Errorf("OAuth authorization failed: %w", oauthErr)
 			}

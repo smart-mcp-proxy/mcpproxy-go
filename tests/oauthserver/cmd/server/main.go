@@ -51,6 +51,9 @@ func main() {
 	// Detection mode
 	detectionMode := flag.String("detection", "both", "OAuth detection mode: discovery, www-authenticate, explicit, both")
 
+	// Per-method MCP authorisation (GH #1271 repro)
+	perMethodAuth := flag.Bool("per-method-auth", false, "Serve initialize/tools/list on /mcp anonymously and require a token only for tools/call (Google Gmail MCP behaviour)")
+
 	// Token lifetimes
 	accessTokenTTL := flag.Duration("access-token-ttl", time.Hour, "Access token expiry duration")
 	refreshTokenTTL := flag.Duration("refresh-token-ttl", 24*time.Hour, "Refresh token expiry duration")
@@ -114,7 +117,8 @@ func main() {
 		RunlayerMode: *runlayerMode,
 
 		// Detection
-		DetectionMode: dm,
+		DetectionMode:    dm,
+		MCPPerMethodAuth: *perMethodAuth,
 
 		// Token lifetimes
 		AccessTokenExpiry:  *accessTokenTTL,

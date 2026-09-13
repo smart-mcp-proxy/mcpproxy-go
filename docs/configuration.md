@@ -544,6 +544,48 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 | `scopes` | array | No | OAuth scopes to request |
 | `pkce_enabled` | boolean | No | PKCE is always enabled for security; this flag is currently ignored |
 
+#### The `oauth` block declares that OAuth is required
+
+An `oauth` block — even an empty `{}` — tells mcpproxy the upstream needs OAuth.
+Without one, mcpproxy probes the server anonymously first and only falls back to
+OAuth when that probe is rejected. Most OAuth servers reject the anonymous
+`initialize`, so autodetection works for them.
+
+Some servers authorise **per method** instead: they answer `initialize` and
+`tools/list` anonymously and reject only `tools/call`. Google's Gmail MCP endpoint
+(`https://gmailmcp.googleapis.com/mcp/v1`) is one. For these the anonymous probe
+succeeds, so autodetection can never reach OAuth — every tool call then fails
+with `authorization required` while the server shows as connected. Declare
+OAuth explicitly:
+
+```json
+{
+  "name": "Gmail",
+  "url": "https://gmailmcp.googleapis.com/mcp/v1",
+  "protocol": "http",
+  "oauth": {
+    "client_id": "<client-id>.apps.googleusercontent.com",
+    "client_secret": "${keyring:gmail_client_secret}",
+    "scopes": ["https://mail.google.com/"]
+  }
+}
+```
+
+With an `oauth` block mcpproxy skips the anonymous probe: the stored token is
+attached to every request (including `tools/call`), and `mcpproxy auth login`
+always starts a fresh sign-in — even when a valid token is already stored and
+even though the anonymous handshake would have succeeded.
+Static `headers` ride along with the bearer; the token store owns the
+`Authorization` header, so a static `Authorization` value is not used while an
+`oauth` block is present.
+
+Do not add an `oauth` block to a server that needs no sign-in: it will wait for
+a login instead of connecting anonymously (the server's health detail says so:
+"the server's oauth block declares OAuth, so the anonymous probe was skipped").
+Because no request is sent until a token exists, an unreachable URL on such a
+server also shows as "Sign-in required" rather than a connection error until
+the first login.
+
 #### Pinning the callback port with `redirect_uri`
 
 By default mcpproxy asks the OS for a free loopback port on the first OAuth

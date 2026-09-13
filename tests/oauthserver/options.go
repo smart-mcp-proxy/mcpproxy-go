@@ -82,6 +82,13 @@ type Options struct {
 	// Detection mode
 	DetectionMode DetectionMode // Default: Discovery
 
+	// MCPPerMethodAuth makes /mcp authorise per JSON-RPC method the way
+	// Google's Gmail MCP endpoint does (GH #1271): initialize, ping,
+	// notifications/* and tools/list answer anonymously, tools/call (and every
+	// other request) still requires a valid bearer token. Default (false):
+	// every request to /mcp requires a token.
+	MCPPerMethodAuth bool
+
 	// Test credentials
 	ValidUsers map[string]string // Default: {"testuser": "testpass"}
 
@@ -92,7 +99,7 @@ type Options struct {
 // ClientConfig defines a pre-registered OAuth client.
 type ClientConfig struct {
 	ClientID      string
-	ClientSecret  string   // Empty for public clients
+	ClientSecret  string // Empty for public clients
 	RedirectURIs  []string
 	GrantTypes    []string // Default: ["authorization_code", "refresh_token"]
 	ResponseTypes []string // Default: ["code"]

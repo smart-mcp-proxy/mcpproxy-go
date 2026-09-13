@@ -42,15 +42,16 @@ type OAuthTestServer struct {
 // ServerResult contains everything needed to configure a test client.
 type ServerResult struct {
 	// Server URLs
-	IssuerURL                      string
-	AuthorizationEndpoint          string
-	TokenEndpoint                  string
-	JWKSURL                        string
-	RegistrationEndpoint           string // Empty if DCR disabled
-	DeviceAuthorizationEndpoint    string // Empty if device code disabled
-	ProtectedResourceURL           string // For WWW-Authenticate detection tests
-	MCPURL                         string // MCP endpoint URL (for resource auto-detection testing)
-	ProtectedResourceMetadataURL   string // RFC 9728 metadata URL
+	IssuerURL                    string
+	AuthorizationEndpoint        string
+	TokenEndpoint                string
+	JWKSURL                      string
+	RegistrationEndpoint         string // Empty if DCR disabled
+	DeviceAuthorizationEndpoint  string // Empty if device code disabled
+	ProtectedResourceURL         string // For WWW-Authenticate detection tests
+	MCPURL                       string // MCP endpoint URL (for resource auto-detection testing)
+	SSEURL                       string // Legacy SSE MCP endpoint (same tools, same auth middleware)
+	ProtectedResourceMetadataURL string // RFC 9728 metadata URL
 
 	// Pre-registered test client (confidential)
 	ClientID     string
@@ -146,6 +147,7 @@ func StartOnPort(t *testing.T, port int, opts Options) *ServerResult {
 		JWKSURL:                      issuerURL + "/jwks.json",
 		ProtectedResourceURL:         issuerURL + "/protected",
 		MCPURL:                       issuerURL + "/mcp",
+		SSEURL:                       issuerURL + "/sse",
 		ProtectedResourceMetadataURL: issuerURL + "/.well-known/oauth-protected-resource",
 		ClientID:                     confidentialClient.ClientID,
 		ClientSecret:                 confidentialClient.ClientSecret,
@@ -239,6 +241,7 @@ func Start(t *testing.T, opts Options) *ServerResult {
 		JWKSURL:                      issuerURL + "/jwks.json",
 		ProtectedResourceURL:         issuerURL + "/protected",
 		MCPURL:                       issuerURL + "/mcp",
+		SSEURL:                       issuerURL + "/sse",
 		ProtectedResourceMetadataURL: issuerURL + "/.well-known/oauth-protected-resource",
 		ClientID:                     confidentialClient.ClientID,
 		ClientSecret:                 confidentialClient.ClientSecret,
@@ -300,6 +303,16 @@ func (s *OAuthTestServer) setupRoutes(mux *http.ServeMux) {
 	mcpSrv := s.createMCPServer()
 	streamableServer := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithStateLess(true))
 	mux.Handle("/mcp", s.oauthMiddleware(streamableServer))
+
+	// Legacy SSE transport behind the same middleware (GH #1271 needs an SSE
+	// upstream that authorises per method): GET /sse opens the stream, POST
+	// /message carries the JSON-RPC requests.
+	sseServer := mcpserver.NewSSEServer(mcpSrv,
+		mcpserver.WithBaseURL(s.issuerURL),
+		mcpserver.WithSSEEndpoint("/sse"),
+		mcpserver.WithMessageEndpoint("/message"))
+	mux.Handle("/sse", s.oauthMiddleware(sseServer))
+	mux.Handle("/message", s.oauthMiddleware(sseServer))
 }
 
 // handleCallback handles the OAuth callback and displays the received parameters.
