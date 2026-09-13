@@ -312,16 +312,16 @@ func TestEnsureAnonymousID(t *testing.T) {
 // once the Spec 080 funnel/churn fields ship. This is a tripwire against
 // accidental downgrades.
 func TestSchemaVersionV7(t *testing.T) {
-	if SchemaVersion != 11 {
-		t.Fatalf("SchemaVersion = %d, want 11", SchemaVersion)
+	if SchemaVersion != 12 {
+		t.Fatalf("SchemaVersion = %d, want 12", SchemaVersion)
 	}
 
 	cfg := &config.Config{}
 	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
 	svc.SetRuntimeStats(&mockRuntimeStats{})
 	payload := svc.BuildPayload()
-	if payload.SchemaVersion != 11 {
-		t.Errorf("payload.SchemaVersion = %d, want 11", payload.SchemaVersion)
+	if payload.SchemaVersion != 12 {
+		t.Errorf("payload.SchemaVersion = %d, want 12", payload.SchemaVersion)
 	}
 }
 

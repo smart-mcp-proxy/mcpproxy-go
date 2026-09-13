@@ -88,8 +88,8 @@ func TestHeartbeatPayloadV2Marshal(t *testing.T) {
 
 	payload := svc.BuildPayload()
 
-	if payload.SchemaVersion != 11 {
-		t.Errorf("schema_version = %d, want 11", payload.SchemaVersion)
+	if payload.SchemaVersion != 12 {
+		t.Errorf("schema_version = %d, want 12", payload.SchemaVersion)
 	}
 	if payload.AnonymousID != "fixed-id" {
 		t.Errorf("anonymous_id = %q", payload.AnonymousID)
@@ -135,7 +135,7 @@ func TestHeartbeatPayloadV2Marshal(t *testing.T) {
 	}
 	js := string(data)
 	for _, key := range []string{
-		`"schema_version":11`,
+		`"schema_version":12`,
 		`"surface_requests"`,
 		`"builtin_tool_calls"`,
 		`"upstream_tool_call_count_bucket":"11-100"`,
@@ -279,8 +279,11 @@ func TestCountersNotResetOnFailedSend(t *testing.T) {
 	defer cancel()
 	svc.Start(ctx)
 
-	snap := svc.Registry().Snapshot()
-	if snap.SurfaceCounts["cli"] != 2 {
-		t.Errorf("counters reset despite failure: cli = %d, want 2", snap.SurfaceCounts["cli"])
+	// The failed window is detached from the live registry so events recorded
+	// while it is in flight cannot be swallowed by a later reset. BuildPayload
+	// renders that frozen delivery window until a receiver accepts it.
+	payload := svc.BuildPayload()
+	if payload.SurfaceRequests["cli"] != 2 {
+		t.Errorf("counters dropped despite failure: cli = %d, want 2", payload.SurfaceRequests["cli"])
 	}
 }

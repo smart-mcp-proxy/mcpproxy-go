@@ -24,7 +24,7 @@ import (
 //
 // The invariants these tests pin down:
 //   - flush sends exactly once and resets the counters (2xx),
-//   - a dead endpoint cannot hang shutdown, and its counters are RETAINED,
+//   - a dead endpoint cannot hang shutdown, and its delivery window is RETAINED,
 //   - opted-out / disabled installs send nothing at all,
 //   - an ACCEPTED periodic tick leaves the flush nothing to send, and an
 //     unconfirmed one is joined and re-sent (delivery is at-least-once).
@@ -179,8 +179,6 @@ func TestFlushOnStopTimeoutDoesNotBlockShutdown(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	defer unblock()
-
 	var received atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received.Add(1)
@@ -190,7 +188,10 @@ func TestFlushOnStopTimeoutDoesNotBlockShutdown(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer server.Close()
+	defer func() {
+		unblock()
+		server.Close()
+	}()
 
 	svc := newFlushTestService(t, server.URL)
 	svc.flushTimeout = 100 * time.Millisecond
@@ -219,8 +220,8 @@ func TestFlushOnStopTimeoutDoesNotBlockShutdown(t *testing.T) {
 	if received.Load() == 0 {
 		t.Fatal("shutdown flush never attempted a send")
 	}
-	if !svc.Registry().HasPendingCounters() {
-		t.Fatal("counters were dropped by a flush that was never accepted")
+	if got := svc.BuildPayload().SurfaceRequests[SurfaceMCP.String()]; got != 1 {
+		t.Fatalf("failed delivery window was not retained: mcp = %d, want 1", got)
 	}
 
 	unblock()
@@ -335,7 +336,7 @@ func TestFlushOnStopSkippedAfterAnAcceptedTick(t *testing.T) {
 	// Wait for the tick AND its post-2xx reset — that reset is what makes the
 	// rest of this test deterministic.
 	deadline := time.Now().Add(5 * time.Second)
-	for rec.count() == 0 || svc.Registry().HasPendingCounters() {
+	for rec.count() == 0 || svc.hasPendingCounterDelivery() || svc.Registry().HasPendingCounters() {
 		if time.Now().After(deadline) {
 			t.Fatal("first heartbeat never arrived (or never reset the registry)")
 		}
@@ -362,7 +363,7 @@ func TestFlushOnStopSkippedAfterAnAcceptedTick(t *testing.T) {
 //     fact accepted that aborted request, it would see the window twice — that
 //     is undecidable client-side and is the deliberate trade against the
 //     alternative, which is losing the window entirely (the bug the flush
-//     exists to fix). Receivers dedup per (anonymous_id, timestamp).
+//     exists to fix). Schema-v12 receivers deduplicate by heartbeat_id.
 //
 // The blocked first request records NOTHING, standing in for exactly that case:
 // a request the client could not confirm.
@@ -509,7 +510,7 @@ func TestFlushOnStopCapturesActivityAfterFirstHeartbeat(t *testing.T) {
 
 	// Wait for the first (initial-delay) heartbeat AND its post-2xx reset.
 	deadline := time.Now().Add(5 * time.Second)
-	for rec.count() == 0 || svc.Registry().HasPendingCounters() {
+	for rec.count() == 0 || svc.hasPendingCounterDelivery() || svc.Registry().HasPendingCounters() {
 		if time.Now().After(deadline) {
 			t.Fatal("first heartbeat never arrived (or never reset the registry)")
 		}
