@@ -10,12 +10,13 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 11** (`schema_version: 11` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 12** (`schema_version: 12` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
 | `anonymous_id` | `550e8400-...` | Random UUID for deduplication (not linked to you) |
 | `machine_id` | `9f86d081...` (64-hex) | Stable, **non-reversible** salted hash of the OS machine id — dedups ephemeral installs whose `anonymous_id` churns every run (schema v6). Empty/omitted when unreadable. Never the raw machine id |
+| `heartbeat_id` | `7e43f31d-...` | Random UUID for one reset-on-accept counter window (schema v12). Stable across retries; rotates only after an accepted heartbeat so receivers can ingest delta counters idempotently |
 | `version` | `0.21.3` | Track version adoption |
 | `edition` | `personal` | Understand edition usage |
 | `os` | `darwin` | Platform distribution |
@@ -69,9 +70,9 @@ The per-code counters also start from **zero** on the upgrade to v11 rather than
 
 A heartbeat goes out 5 minutes after start (so short-lived processes stay quiet), then once every 24 hours, and **once more on graceful shutdown**.
 
-The shutdown heartbeat exists because the windowed counters live in memory and are cleared only after the endpoint accepts a send. Without it, everything an install did after its 5-minute heartbeat was discarded whenever the process exited before the 24-hour tick — which is most desktop sessions. It is skipped when telemetry is disabled or opted out, and when nothing has been recorded since the last accepted heartbeat. It is hard-bounded to a few seconds, so an unreachable endpoint can never delay quitting, and because counters are cleared only on an accepted send, a failed shutdown flush simply leaves the counts for the next run rather than dropping them.
+The shutdown heartbeat exists because the windowed counters live in memory and are marked delivered only after the endpoint accepts a send. Without it, everything an install did after its 5-minute heartbeat was discarded whenever the process exited before the 24-hour tick — which is most desktop sessions. It is skipped when telemetry is disabled or opted out, and when nothing has been recorded since the last accepted heartbeat. It is hard-bounded to a few seconds, so an unreachable endpoint can never delay quitting. A failed send retains its frozen counter window for another attempt while the process remains alive; because counters are intentionally not persisted, a final shutdown timeout can still lose that window when the process exits.
 
-Delivery is therefore **at-least-once**, not exactly-once. If a send is cut off after the endpoint accepted it but before mcpproxy sees the response, the counts stay pending locally and are re-sent — a lost response is indistinguishable from a lost request. Receivers should treat a heartbeat as idempotent per `(anonymous_id, timestamp)`. Retrying is the deliberate choice: the alternative is silently discarding the window, which is the problem the shutdown heartbeat was added to solve.
+Delivery is therefore **at-least-once**, not exactly-once. If a send is cut off after the endpoint accepted it but before mcpproxy sees the response, the counts stay pending locally and are re-sent — a lost response is indistinguishable from a lost request. Schema v12 receivers treat the random `heartbeat_id` as a globally unique delta-counter window key, including if the anonymous install ID changes before a retry. `timestamp` is observation time and may change when a payload is rebuilt for retry; it is not an idempotency key. Retrying is the deliberate choice: the alternative is silently discarding the window, which is the problem the shutdown heartbeat was added to solve.
 
 Two housekeeping steps are deliberately *not* performed by the shutdown heartbeat — the 365-day anonymous-ID rotation and the one-shot `installer` launch-source attribution. Both are consumed when the payload is built rather than when it is accepted, so running them for a send that may never land would spend state a normal run still has. The next start performs both.
 

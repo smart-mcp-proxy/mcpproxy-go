@@ -128,7 +128,14 @@ import (
 // current_error_codes carries the standing-state signal that edge-triggering
 // would otherwise have removed. Anonymity posture unchanged: fixed MCPX_ enum
 // keys, non-negative integer counts.
-const SchemaVersion = 11
+//
+// v12 adds heartbeat_id, a random UUID that identifies one reset-on-accept
+// counter window. It stays stable across retries and rotates only after the
+// sender observes a 2xx response. Receivers can therefore INSERT counter
+// events idempotently even when a response is lost after the endpoint has
+// committed the heartbeat. The id is random, contains no machine data, and is
+// scoped to one reporting window.
+const SchemaVersion = 12
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -177,6 +184,10 @@ type HeartbeatPayload struct {
 	ToolResponseMode       string `json:"tool_response_mode,omitempty"`
 	DirectToolResponseMode string `json:"direct_tool_response_mode,omitempty"`
 	Timestamp              string `json:"timestamp"`
+	// HeartbeatID is the idempotency key for the current reset-on-accept
+	// counter window. It is stable across failed/retried sends and rotates only
+	// after a 2xx response resets the registry counters (schema v12).
+	HeartbeatID string `json:"heartbeat_id"`
 
 	// Spec 042 (Tier 2) additions
 	SchemaVersion               int                         `json:"schema_version,omitempty"`
@@ -482,6 +493,17 @@ type Service struct {
 	// (IsTelemetryEnabled — nil means enabled). Used to detect the
 	// enabled->disabled flip that fires the opt-out beacon.
 	resolvedEnabled bool
+	// heartbeatWindowID identifies the current reset-on-accept counter window.
+	// Guarded by mu because BuildPayload may inspect it while the heartbeat
+	// sender rotates it after an accepted response.
+	heartbeatWindowID string
+
+	// deliveryMu serializes heartbeat delivery and protects the immutable
+	// drained counter snapshot retried under heartbeatWindowID. New events keep
+	// accumulating in registry while a request is in flight and belong to the
+	// next window.
+	deliveryMu             sync.Mutex
+	pendingCounterSnapshot *RegistrySnapshot
 	// optedOut latches true once the opt-out beacon has fired; it gates all
 	// further heartbeat emission so no telemetry leaves after the user opts out.
 	optedOut atomic.Bool
@@ -542,6 +564,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		version:           normalizeVersion(version),
 		edition:           edition,
 		endpoint:          cfg.GetTelemetryEndpoint(),
+		heartbeatWindowID: uuid.New().String(),
 		logger:            logger,
 		startTime:         time.Now(),
 		client:            &http.Client{Timeout: 10 * time.Second},
@@ -989,8 +1012,9 @@ func (s *Service) Stop() {
 // the same window twice. That is undecidable client-side (a lost response is
 // indistinguishable from a lost request) and is the pre-existing retry semantic
 // of Reset-on-2xx; the alternative is dropping the window entirely, which is the
-// bug this flush exists to fix. Receivers must treat heartbeats as idempotent
-// per (anonymous_id, timestamp) rather than assume exactly-once.
+// bug this flush exists to fix. Schema-v12 receivers treat the immutable
+// counter window as idempotent by its globally unique heartbeat_id; timestamp
+// is only observation time and may change on a rebuilt retry.
 //
 // Skipped when: Start never armed it (telemetry disabled by env/config, dev
 // build), the user opted out, telemetry was turned off mid-run, or nothing has
@@ -1018,7 +1042,7 @@ func (s *Service) flushFinalHeartbeat() {
 		if !s.telemetryEnabledLive() {
 			return
 		}
-		if !s.registry.HasPendingCounters() {
+		if !s.hasPendingCounterDelivery() && !s.registry.HasPendingCounters() {
 			s.logger.Debug("Skipping telemetry shutdown flush: no counters recorded since the last accepted heartbeat")
 			return
 		}
@@ -1049,7 +1073,15 @@ func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots
 		return
 	}
 
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	if s.pendingCounterSnapshot == nil {
+		snap := s.registry.Drain()
+		s.pendingCounterSnapshot = &snap
+	}
+
 	payload := s.buildHeartbeatWithOneShots(consumeOneShots)
+	applyRegistrySnapshot(&payload, *s.pendingCounterSnapshot)
 
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -1104,10 +1136,12 @@ func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots
 
 	s.logger.Debug("Heartbeat sent", zap.Int("status", resp.StatusCode))
 
-	// Spec 042: only on a successful 2xx send do we (a) reset counters and
-	// (b) advance the upgrade funnel cursor. Failures preserve state for retry.
+	// Spec 042: only on a successful 2xx send do we (a) discard the frozen
+	// counter window and rotate its id, and (b) advance the upgrade funnel
+	// cursor. Failures preserve the detached snapshot for retry.
 	if resp.StatusCode/100 == 2 {
-		s.registry.Reset()
+		s.pendingCounterSnapshot = nil
+		s.rotateHeartbeatWindowID()
 		s.advanceUpgradeFunnel()
 	}
 }
@@ -1165,7 +1199,19 @@ func (s *Service) advanceUpgradeFunnelOnce() bool {
 // It is exported so the `mcpproxy telemetry show-payload` command can render
 // the same payload that would next be sent, without making a network call.
 func (s *Service) BuildPayload() HeartbeatPayload {
-	return s.buildHeartbeat()
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	payload := s.buildHeartbeat()
+	if s.pendingCounterSnapshot != nil {
+		applyRegistrySnapshot(&payload, *s.pendingCounterSnapshot)
+	}
+	return payload
+}
+
+func (s *Service) hasPendingCounterDelivery() bool {
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	return s.pendingCounterSnapshot != nil
 }
 
 // liveConfig returns the service's current *config.Config, read under s.mu.
@@ -1216,6 +1262,25 @@ func (s *Service) liveAnonymousID() string {
 		return ""
 	}
 	return s.config.GetAnonymousID()
+}
+
+// currentHeartbeatWindowID returns the idempotency key for the current
+// reset-on-accept counter window. It is deliberately independent of Timestamp:
+// a retry rebuilds the payload (and therefore gets a fresh timestamp) while
+// still carrying the same counters.
+func (s *Service) currentHeartbeatWindowID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.heartbeatWindowID
+}
+
+// rotateHeartbeatWindowID advances the idempotency key only after the sender
+// observes a 2xx response and resets the counters. A failed or ambiguous send
+// keeps the old key so the receiver can ignore an already-committed retry.
+func (s *Service) rotateHeartbeatWindowID() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartbeatWindowID = uuid.New().String()
 }
 
 // telemetryCursor reads the four cfg.Telemetry scalars the heartbeat reports,
@@ -1292,6 +1357,7 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 		GoVersion:      runtime.Version(),
 		UptimeHours:    int(time.Since(s.startTime).Hours()),
 		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		HeartbeatID:    s.currentHeartbeatWindowID(),
 		SchemaVersion:  SchemaVersion,
 		CurrentVersion: s.version,
 		// Schema v6: stable, non-reversible machine-id hash. Cached after the
@@ -1395,15 +1461,7 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	// Spec 042: counter snapshot.
 	if s.registry != nil {
 		snap := s.registry.Snapshot()
-		payload.SurfaceRequests = snap.SurfaceCounts
-		payload.BuiltinToolCalls = snap.BuiltinToolCalls
-		payload.UpstreamToolCallCountBucket = snap.UpstreamToolCallCountBucket
-		payload.RESTEndpointCalls = snap.RESTEndpointCalls
-		payload.ErrorCategoryCounts = snap.ErrorCategoryCounts
-		payload.DoctorChecks = snap.DoctorChecks
-		// Schema v8: security-scanner counters. nil (and therefore omitted)
-		// when the install never completed or failed a scan in the window.
-		payload.TPAScanner = snap.TPAScannerStats()
+		applyRegistrySnapshot(&payload, snap)
 	}
 
 	// Spec 046: onboarding funnel snapshot. Provider closes over connect.Service
@@ -1498,6 +1556,18 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	}
 
 	return payload
+}
+
+func applyRegistrySnapshot(payload *HeartbeatPayload, snap RegistrySnapshot) {
+	payload.SurfaceRequests = snap.SurfaceCounts
+	payload.BuiltinToolCalls = snap.BuiltinToolCalls
+	payload.UpstreamToolCallCountBucket = snap.UpstreamToolCallCountBucket
+	payload.RESTEndpointCalls = snap.RESTEndpointCalls
+	payload.ErrorCategoryCounts = snap.ErrorCategoryCounts
+	payload.DoctorChecks = snap.DoctorChecks
+	// Schema v8: security-scanner counters. nil (and therefore omitted) when
+	// the install never completed or failed a scan in the window.
+	payload.TPAScanner = snap.TPAScannerStats()
 }
 
 // ensureAnonymousID gives the install an anonymous id, generating and

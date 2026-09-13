@@ -500,6 +500,70 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 	return snap
 }
 
+// Drain atomically detaches the current reset-on-accept counter window and
+// returns it as an immutable snapshot. Events recorded after each atomic swap
+// or while the map lock is held land in the next window, so an in-flight send
+// can never erase work that happened after its payload was built.
+//
+// The caller owns retry policy. On a failed send it keeps this snapshot and
+// retries it unchanged; on success it discards it. Unlike Reset, Drain does not
+// require a second destructive operation after network I/O.
+func (r *CounterRegistry) Drain() RegistrySnapshot {
+	snap := RegistrySnapshot{
+		SurfaceCounts:       make(map[string]int64, surfaceCount),
+		BuiltinToolCalls:    make(map[string]int64),
+		RESTEndpointCalls:   make(map[string]map[string]int64),
+		ErrorCategoryCounts: make(map[string]int64),
+		DoctorChecks:        make(map[string]DoctorCounts),
+		TPAFindings:         make(map[string]int64, len(tpaSeverityKeys)),
+	}
+	for s := Surface(0); s < surfaceCount; s++ {
+		snap.SurfaceCounts[s.String()] = r.surfaceCounts[s].Swap(0)
+	}
+	upstream := r.upstreamTotal.Swap(0)
+	snap.UpstreamToolCallCountBucket = bucketUpstream(upstream)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, v := range r.builtinCalls {
+		snap.BuiltinToolCalls[k] = v
+	}
+	for k, inner := range r.restEndpoints {
+		copied := make(map[string]int64, len(inner))
+		for status, count := range inner {
+			copied[status] = count
+		}
+		snap.RESTEndpointCalls[k] = copied
+	}
+	for k, v := range r.errorCategories {
+		snap.ErrorCategoryCounts[string(k)] = v
+	}
+	for k, v := range r.doctorChecks {
+		snap.DoctorChecks[k] = *v
+	}
+	snap.TPAScansCompleted = r.tpaScansCompleted
+	snap.TPAScansFailed = r.tpaScansFailed
+	snap.TPAScansWithFindings = r.tpaScansWithFindings
+	snap.TPAToolChangeGateScans = r.tpaToolChangeGateScans
+	snap.TPAPromptScans = r.tpaPromptScans
+	for _, sev := range tpaSeverityKeys {
+		snap.TPAFindings[sev] = r.tpaFindings[sev]
+	}
+
+	r.builtinCalls = make(map[string]int64)
+	r.restEndpoints = make(map[string]map[string]int64)
+	r.errorCategories = make(map[ErrorCategory]int64)
+	r.doctorChecks = make(map[string]*DoctorCounts)
+	r.tpaScansCompleted = 0
+	r.tpaScansFailed = 0
+	r.tpaScansWithFindings = 0
+	r.tpaFindings = make(map[string]int64)
+	r.tpaToolChangeGateScans = 0
+	r.tpaPromptScans = 0
+
+	return snap
+}
+
 // HasPendingCounters reports whether anything has been recorded since the last
 // Reset — i.e. whether a heartbeat would carry usage data that has not yet been
 // accepted by the endpoint.
@@ -544,7 +608,9 @@ func (r *CounterRegistry) HasPendingCounters() bool {
 	return false
 }
 
-// Reset zeros all counters. Called only after a successful heartbeat send.
+// Reset zeros all counters. Kept for tests and explicit registry consumers;
+// the network sender uses Drain so events recorded while a request is in
+// flight cannot be swallowed by a later reset.
 //
 // Deliberate, registry-wide trade-off: an event recorded between Snapshot()
 // (payload build) and this Reset() (2xx received) is zeroed without ever
