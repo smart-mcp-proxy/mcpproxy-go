@@ -81,7 +81,8 @@ func filterUpstreamStatsServers(ctx context.Context, stats map[string]interface{
 	}
 	servers, ok := stats["servers"].(map[string]interface{})
 	if !ok {
-		return stats
+		// An unknown producer shape cannot be safely narrowed.
+		return map[string]interface{}{}
 	}
 
 	filtered := make(map[string]interface{}, len(servers))
@@ -104,7 +105,11 @@ func filterUpstreamStatsServers(ctx context.Context, stats map[string]interface{
 		if v, ok := entry["quarantined"].(bool); ok && v {
 			quarantined++
 		}
-		totalTools += genericToolCount(entry["tool_count"])
+		enabled, _ := entry["enabled"].(bool)
+		isQuarantined, _ := entry["quarantined"].(bool)
+		if config.ServerContributesTools(enabled, isQuarantined) {
+			totalTools += genericToolCount(entry["tool_count"])
+		}
 	}
 
 	out := make(map[string]interface{}, len(stats))

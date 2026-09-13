@@ -1736,16 +1736,18 @@ func (m *Manager) GetStats() map[string]interface{} {
 		// Read config through the thread-safe accessor to avoid racing with
 		// SetConfig on the reconcile add path (MCP-770).
 		name, url, protocol := "", "", ""
-		quarantined := false
+		quarantined, enabled := false, false
 		if cfg := client.GetConfig(); cfg != nil {
 			name, url, protocol = cfg.Name, cfg.URL, cfg.Protocol
 			quarantined = cfg.Quarantined
+			enabled = cfg.Enabled
 			if cfg.Quarantined {
 				quarantinedCount++
 			}
 		}
 
 		status := map[string]interface{}{
+			"enabled":      enabled,
 			"state":        connectionInfo.State.String(),
 			"connected":    connectionInfo.State == types.StateReady,
 			"connecting":   client.IsConnecting(),

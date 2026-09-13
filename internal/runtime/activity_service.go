@@ -33,7 +33,7 @@ const (
 // This interface is implemented by Runtime to enable event emission from ActivityService.
 type SensitiveDataEventEmitter interface {
 	// EmitSensitiveDataDetected emits an event when sensitive data is detected.
-	EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string)
+	EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string, serverName string)
 }
 
 // SessionClientResolver maps an MCP session id to the client that opened it
@@ -284,7 +284,7 @@ func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
 	s.started = true
 
 	// Subscribe to runtime events
-	eventCh := rt.SubscribeEvents()
+	eventCh := rt.subscribeInternalEvents()
 
 	// Start retention loop in a separate goroutine. Tracked in workersWG: it
 	// prunes activity records (BBolt writes), so Stop must await it.
@@ -722,7 +722,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 			s.workersWG.Add(1)
 			go func() {
 				defer s.workersWG.Done()
-				s.runAsyncDetection(record.ID, arguments, scanText)
+				s.runAsyncDetection(record.ID, arguments, scanText, record.ServerName)
 			}()
 		}
 	}
@@ -913,6 +913,7 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	// that was cut only on the way into the log was still delivered whole with
 	// an honest ResponseBytes, so setting the flag here would drop it from
 	// delivered traffic. The "...[truncated]" suffix still marks the stored text.
+	detectionSource := responseStr
 	responseStr, _ = s.truncateForStorage(responseStr)
 
 	// Spec 103: pre-truncation sizes, emitted for built-ins as well as upstream
@@ -993,6 +994,15 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		// paired tool_call.
 		if s.usage != nil {
 			s.usage.Apply(record)
+		}
+		// A script can receive or generate sensitive data without any upstream
+		// call. Scan its parent record too, using the pre-storage response.
+		if internalToolName == "code_execution" && s.detector != nil {
+			s.workersWG.Add(1)
+			go func() {
+				defer s.workersWG.Done()
+				s.runAsyncDetection(record.ID, arguments, detectionSource, record.ServerName)
+			}()
 		}
 	}
 }
@@ -1080,7 +1090,7 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 		s.workersWG.Add(1)
 		go func() {
 			defer s.workersWG.Done()
-			s.runAsyncDetection(record.ID, arguments, detectionSource)
+			s.runAsyncDetection(record.ID, arguments, detectionSource, record.ServerName)
 		}()
 	}
 }
@@ -1242,7 +1252,7 @@ func getSlicePayload(payload map[string]any, key string) []string {
 // runAsyncDetection performs sensitive data detection asynchronously (Spec 026).
 // It scans tool call arguments and responses for sensitive data, then updates
 // the activity record metadata with the detection results and emits an event.
-func (s *ActivityService) runAsyncDetection(recordID string, arguments map[string]interface{}, response string) {
+func (s *ActivityService) runAsyncDetection(recordID string, arguments map[string]interface{}, response, serverName string) {
 	if s.detector == nil {
 		return
 	}
@@ -1294,6 +1304,7 @@ func (s *ActivityService) runAsyncDetection(recordID string, arguments map[strin
 				len(result.Detections),
 				maxSeverity,
 				detectionTypes,
+				serverName,
 			)
 		}
 	} else {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -598,4 +599,49 @@ func TestCollectStatusFromConfigRoutingMode(t *testing.T) {
 // parseTestDuration is a helper to parse duration strings for tests.
 func parseTestDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
+}
+
+func TestStatusMasksKeyInURL(t *testing.T) {
+	const key = "synthetic-status-key-1234567890"
+	info := &StatusInfo{APIKey: key, WebUIURL: "http://127.0.0.1:8080/ui/?apikey=" + key + "&other=retained"}
+	maskStatusCredentials(info)
+	if strings.Contains(info.WebUIURL, key) || info.APIKey == key {
+		t.Fatal("status leaked the full credential")
+	}
+	if !strings.Contains(info.WebUIURL, "other=retained") {
+		t.Fatal("unrelated URL query lost")
+	}
+}
+
+func TestStatusMalformedURLFailsClosed(t *testing.T) {
+	info := &StatusInfo{APIKey: "synthetic-status-key-1234567890", WebUIURL: "http://[invalid/?apikey=secret"}
+	maskStatusCredentials(info)
+	if info.WebUIURL != "" {
+		t.Fatal("malformed URL must not reach output")
+	}
+}
+
+func TestStatusWebUIURLReservedCharactersAreEscapedAndMasked(t *testing.T) {
+	const key = "abcd#fragment?query&percent% space/秘密-wxyz"
+	loginURL := statusBuildWebUIURL("127.0.0.1:8080", key)
+	parsed, err := url.Parse(loginURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Fragment != "" || parsed.Query().Get("apikey") != key {
+		t.Fatalf("credential was not encoded as one query value: %q", loginURL)
+	}
+
+	info := &StatusInfo{APIKey: key, WebUIURL: loginURL}
+	maskStatusCredentials(info)
+	masked, err := url.Parse(info.WebUIURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if masked.Fragment != "" || masked.Query().Get("apikey") != statusMaskAPIKey(key) {
+		t.Fatalf("masked URL contains an unexpected credential representation: %q", info.WebUIURL)
+	}
+	if strings.Contains(info.WebUIURL, "fragment") || strings.Contains(info.WebUIURL, "秘密") {
+		t.Fatalf("masked URL leaked reserved-character credential content: %q", info.WebUIURL)
+	}
 }

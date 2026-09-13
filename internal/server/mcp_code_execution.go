@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -858,12 +859,30 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName, requestID
 	}
 
 	status, errMsg, responseText, truncated := subCallActivityOutcome(result, callErr)
+	// Detection is bounded by the detector's policy, not the activity display
+	// limit. Preserve the full upstream response and error, as direct tool calls
+	// do. Upstreams can reflect request data in an error after the 8 KiB display
+	// cap, so the error branch is as security-sensitive as a successful result.
+	detectionText := subCallDetectionText(result, callErr)
 
 	requestBytes, responseBytes := subCallByteSizes(args, result)
 	u.proxy.emitActivityToolCallCompleted(
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		status, errMsg, duration.Milliseconds(), args, responseText, truncated,
-		"", nil, "", "", requestBytes, responseBytes, "", nil, u.parentCallID)
+		"", nil, "", "", requestBytes, responseBytes, detectionText, nil, u.parentCallID)
+}
+
+func subCallDetectionText(result interface{}, callErr error) string {
+	parts := make([]string, 0, 2)
+	if result != nil {
+		if encoded, err := json.Marshal(result); err == nil {
+			parts = append(parts, string(encoded))
+		}
+	}
+	if callErr != nil {
+		parts = append(parts, callErr.Error())
+	}
+	return strings.Join(parts, "\n")
 }
 
 // subCallByteSizes returns the pre-truncation JSON byte lengths of a sandbox

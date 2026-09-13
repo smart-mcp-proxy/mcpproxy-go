@@ -59,7 +59,8 @@ var (
 	// token's OWNER is no longer allowed to authenticate — disabled, or gone
 	// from the user store entirely. The token record itself may be perfectly
 	// valid; the identity it speaks for is not.
-	ErrAgentTokenOwnerInactive = errors.New("token owner is not active")
+	ErrAgentTokenOwnerInactive    = errors.New("token owner is not active")
+	ErrAgentTokenScopeUnavailable = errors.New("token entitlement unavailable")
 
 	// ErrAgentTokenNotFound is returned by the owner-scoped mutators when the
 	// (owner, name) pair resolves to nothing. Callers MUST NOT distinguish
@@ -838,6 +839,14 @@ func (m *Manager) GetAgentTokenCount() (int, error) {
 // edition's ownerless ones.
 type agentTokenOwnerGate func(userID string) (active bool, err error)
 
+type agentTokenScopeResolver func(userID string, granted []string) ([]string, error)
+
+// SetAgentTokenScopeResolver installs the live entitlement check used on each
+// owned-token authentication. Its result can only narrow the persisted grant.
+func (m *Manager) SetAgentTokenScopeResolver(resolve agentTokenScopeResolver) {
+	m.scopeResolver.Store(resolve)
+}
+
 // SetAgentTokenOwnerGate installs the predicate ValidateAgentToken consults for
 // every OWNED agent token. Passing nil removes it. Safe to call at any time.
 //
@@ -916,6 +925,19 @@ func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.Age
 	}
 	if !active {
 		return nil, ErrAgentTokenOwnerInactive
+	}
+	if token.UserID != "" {
+		if resolve, _ := m.scopeResolver.Load().(agentTokenScopeResolver); resolve != nil {
+			granted := append([]string(nil), token.AllowedServers...)
+			allowed, err := resolve(token.UserID, append([]string(nil), granted...))
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Warnw("denying agent token: entitlement lookup failed", "user_id", token.UserID, "error", err)
+				}
+				return nil, ErrAgentTokenScopeUnavailable
+			}
+			token.AllowedServers = intersectAllowedServers(granted, allowed)
+		}
 	}
 
 	return token, nil

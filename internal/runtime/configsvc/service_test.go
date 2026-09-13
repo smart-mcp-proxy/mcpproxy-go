@@ -105,6 +105,19 @@ func TestService_Update(t *testing.T) {
 	}
 }
 
+func TestServiceUpdateIfCurrentRejectsStaleDerivedConfig(t *testing.T) {
+	initial := &config.Config{Listen: "127.0.0.1:8080"}
+	svc := NewService(initial, "/tmp/config.json", zap.NewNop())
+	newer := &config.Config{Listen: "127.0.0.1:9090"}
+	require.NoError(t, svc.Update(newer, UpdateTypeModify, "newer"))
+
+	published, err := svc.UpdateIfCurrent(initial, &config.Config{Listen: "stale"}, UpdateTypeModify, "stale-derived")
+	require.NoError(t, err)
+	require.False(t, published)
+	require.Same(t, newer, svc.Current().Config)
+	require.Equal(t, int64(1), svc.Current().Version)
+}
+
 func TestService_Subscribe(t *testing.T) {
 	cfg := &config.Config{
 		Listen: "127.0.0.1:8080",

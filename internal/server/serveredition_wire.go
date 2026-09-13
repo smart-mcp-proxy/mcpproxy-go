@@ -36,6 +36,7 @@ func wireServerEditionOAuth(s *Server, httpAPIServer *httpapi.Server) {
 		// which is load-bearing for the server edition's name-collision and
 		// entitlement checks. See Dependencies.ConfigProvider.
 		ConfigProvider:    func() *config.Config { return s.runtime.Config() },
+		SetServerShared:   s.runtime.SetServerShared,
 		ManagementService: s.runtime.GetManagementService(),
 		StorageManager:    sm,
 	}

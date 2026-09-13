@@ -5,8 +5,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -36,10 +38,13 @@ type AdminHandlers struct {
 	sessionManager *teamsauth.SessionManager
 	adminEmails    []string
 	sharedServers  []*config.ServerConfig
+	adminServers   AdminServersProvider
 	config         *config.Config
 	configPath     string
 	managementSvc  interface{} // management.Service - kept as interface{} to avoid circular imports
 	tokenRevoker   adminTokenRevoker
+	agentTokens    adminAgentTokenStore
+	sharingUpdater func(string, bool) (*config.ServerConfig, error)
 	logger         *zap.SugaredLogger
 }
 
@@ -49,6 +54,24 @@ type AdminHandlers struct {
 // burn of already-minted credentials is skipped. Passing nil clears it.
 func (h *AdminHandlers) SetTokenRevoker(revoker adminTokenRevoker) {
 	h.tokenRevoker = revoker
+}
+
+func (h *AdminHandlers) SetSharingUpdater(update func(string, bool) (*config.ServerConfig, error)) {
+	h.sharingUpdater = update
+}
+
+func (h *AdminHandlers) SetAdminServersProvider(provider AdminServersProvider) {
+	h.adminServers = provider
+}
+
+func (h *AdminHandlers) currentAdminServers() []*config.ServerConfig {
+	if h.adminServers != nil {
+		return h.adminServers()
+	}
+	if h.config != nil {
+		return h.config.Servers
+	}
+	return h.sharedServers
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
@@ -84,6 +107,9 @@ func NewAdminHandlers(
 // AdminOnly() is not used there. Every route added here MUST call requireAdmin
 // as its first statement, or it ships unguarded.
 func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
+	r.Get("/admin/tokens", h.listAgentTokens)
+	r.Post("/admin/users/{id}/tokens/revoke", h.revokeAgentTokenByBody)
+	r.Post("/admin/users/{id}/tokens/{name}/revoke", h.revokeAgentToken)
 	r.Get("/admin/users", h.listUsers)
 	r.Post("/admin/users/{id}/disable", h.disableUser)
 	r.Post("/admin/users/{id}/enable", h.enableUser)
@@ -99,6 +125,9 @@ func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
 
 // RegisterRoutesWithPrefix registers admin routes with a path prefix.
 func (h *AdminHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
+	r.Get(prefix+"/admin/tokens", h.listAgentTokens)
+	r.Post(prefix+"/admin/users/{id}/tokens/revoke", h.revokeAgentTokenByBody)
+	r.Post(prefix+"/admin/users/{id}/tokens/{name}/revoke", h.revokeAgentToken)
 	r.Get(prefix+"/admin/users", h.listUsers)
 	r.Post(prefix+"/admin/users/{id}/disable", h.disableUser)
 	r.Post(prefix+"/admin/users/{id}/enable", h.enableUser)
@@ -414,8 +443,9 @@ func (h *AdminHandlers) getDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Servers
-	resp.TotalServers = len(h.sharedServers)
-	for _, sc := range h.sharedServers {
+	servers := h.currentAdminServers()
+	resp.TotalServers = len(servers)
+	for _, sc := range servers {
 		if sc.Enabled {
 			resp.HealthyServers++
 		}
@@ -517,6 +547,23 @@ func (h *AdminHandlers) toggleSharedServer(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Find the server in the config.
+	if h.sharingUpdater != nil {
+		found, err := h.sharingUpdater(name, req.Shared)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeError(w, http.StatusNotFound, "Server not found")
+				return
+			}
+			h.logger.Errorw("failed to update server sharing", "server", name, "error", err)
+			writeError(w, http.StatusInternalServerError, "Failed to update server sharing")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message": fmt.Sprintf("Server %q shared status set to %v", name, req.Shared),
+			"server":  oauth.RedactedConfigView("", found),
+		})
+		return
+	}
 	var found *config.ServerConfig
 	for _, sc := range h.config.Servers {
 		if strings.EqualFold(sc.Name, name) {
@@ -568,7 +615,7 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 		// []*config.ServerConfig straight to JSON — the exact shape
 		// `quarantine_security list_quarantined` was fixed for in round 1,
 		// still open on the server edition's admin API. One shared view.
-		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.config.Servers))
+		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.currentAdminServers()))
 		return
 	}
 
@@ -576,13 +623,17 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		h.logger.Errorw("failed to list servers via management service", "error", err)
 		// Fallback to config-only listing on error.
-		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.config.Servers))
+		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.currentAdminServers()))
 		return
 	}
 
 	// Build a lookup for the shared flag from config (contracts.Server doesn't have it).
-	sharedMap := make(map[string]bool, len(h.config.Servers))
-	for _, sc := range h.config.Servers {
+	configured := h.currentAdminServers()
+	sharedMap := make(map[string]bool, len(configured))
+	for _, sc := range configured {
+		if sc == nil {
+			continue
+		}
 		sharedMap[sc.Name] = sc.Shared
 	}
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
@@ -75,6 +77,21 @@ func TestInfo_ScopedCallerNeverReceivesTheAdminAPIKey(t *testing.T) {
 		"the admin API key must not appear anywhere in the /info payload")
 	assert.NotContains(t, agentURL, "apikey=",
 		"no credential carrier may survive in the URL")
+}
+
+func TestInfo_AdminWebUIURLTreatsReservedKeyCharactersAsOneQueryValue(t *testing.T) {
+	const key = "abcd#fragment?query&percent% space/秘密-wxyz"
+	cfg := scopeFixtureConfig(false)
+	cfg.APIKey = key
+	srv := &Server{controller: &scopeController{cfg: cfg, servers: scopeFixtureServers()}}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), auth.AdminContext()))
+
+	loginURL := srv.buildWebUIURLWithAPIKey(cfg.Listen, req)
+	parsed, err := url.Parse(loginURL)
+	require.NoError(t, err)
+	assert.Empty(t, parsed.Fragment)
+	assert.Equal(t, key, parsed.Query().Get("apikey"))
 }
 
 // TestSSE_IdentityBearingFrameWithNoServerNameIsDropped is the P2 regression.

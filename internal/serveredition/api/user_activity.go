@@ -19,6 +19,7 @@ type UserActivityHandlers struct {
 	activityFilter *multiuser.ActivityFilter
 	userStore      *users.UserStore
 	sharedServers  []*config.ServerConfig
+	adminServers   AdminServersProvider
 	logger         *zap.SugaredLogger
 }
 
@@ -41,6 +42,17 @@ func NewUserActivityHandlers(
 func (h *UserActivityHandlers) RegisterRoutes(r chi.Router) {
 	r.Get("/user/activity", h.getUserActivity)
 	r.Get("/user/diagnostics", h.getDiagnostics)
+}
+
+func (h *UserActivityHandlers) SetAdminServersProvider(provider AdminServersProvider) {
+	h.adminServers = provider
+}
+
+func (h *UserActivityHandlers) currentAdminServers() []*config.ServerConfig {
+	if h.adminServers != nil {
+		return h.adminServers()
+	}
+	return h.sharedServers
 }
 
 // RegisterRoutesWithPrefix registers user activity routes with a path prefix.
@@ -137,7 +149,7 @@ func (h *UserActivityHandlers) getDiagnostics(w http.ResponseWriter, r *http.Req
 	// admin's whole server list — under the name `sharedServers`, so a loop
 	// without this guard reports admin upstreams the admin deliberately did not
 	// share, labelled `ownership:"shared"`, to every authenticated user.
-	for _, sc := range h.sharedServers {
+	for _, sc := range h.currentAdminServers() {
 		if sc == nil || !sc.Shared {
 			continue
 		}

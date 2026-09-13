@@ -31,7 +31,8 @@ type Manager struct {
 	// Installed by the server edition; nil (and therefore inert) in the
 	// personal edition, where every token is ownerless. See
 	// SetAgentTokenOwnerGate.
-	ownerGate atomic.Value // agentTokenOwnerGate
+	ownerGate     atomic.Value // agentTokenOwnerGate
+	scopeResolver atomic.Value // agentTokenScopeResolver
 
 	// toolCallMaxResponseBytes and toolCallMaxRecords bound the per-server
 	// tool-call history (#1176). Both are guarded by mu, set once from config

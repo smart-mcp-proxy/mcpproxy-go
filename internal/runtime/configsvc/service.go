@@ -127,6 +127,25 @@ func (s *Service) runPrePublishHook(cfg *config.Config) *config.Config {
 func (s *Service) Update(newConfig *config.Config, updateType UpdateType, source string) error {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
+	s.updateLocked(newConfig, updateType, source)
+	return nil
+}
+
+// UpdateIfCurrent atomically publishes newConfig only when expected is still
+// the active configuration pointer. It closes the check-then-update race for
+// derived snapshots such as admission/quarantine stamps: a newer config must
+// never be overwritten by a stale copy prepared before it was committed.
+func (s *Service) UpdateIfCurrent(expected, newConfig *config.Config, updateType UpdateType, source string) (bool, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	if s.Current().Config != expected {
+		return false, nil
+	}
+	s.updateLocked(newConfig, updateType, source)
+	return true, nil
+}
+
+func (s *Service) updateLocked(newConfig *config.Config, updateType UpdateType, source string) {
 
 	newConfig = s.runPrePublishHook(newConfig)
 
@@ -159,8 +178,6 @@ func (s *Service) Update(newConfig *config.Config, updateType UpdateType, source
 	}
 
 	s.notifySubscribers(update)
-
-	return nil
 }
 
 // UpdatePath updates the configuration file path.

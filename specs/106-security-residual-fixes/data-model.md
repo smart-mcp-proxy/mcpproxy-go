@@ -1,0 +1,2 @@
+# Data Model
+No persistent schema change. AgentToken remains keyed by HMAC hash internally and uniquely addressed by owner/name for administration. Effective AllowedServers is narrowed on the request's decoded copy; stored scopes remain original grants. Revoked remains a durable boolean. Detection notifications gain server_name; parent scripts without a single server carry empty identity and are admin-only. Statistics entries gain enabled without changing tool_count.

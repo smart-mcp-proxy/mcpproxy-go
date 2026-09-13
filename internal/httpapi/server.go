@@ -1511,7 +1511,14 @@ func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) str
 	// Add API key if configured
 	cfg, err := s.controller.GetConfig()
 	if err == nil && cfg != nil && cfg.APIKey != "" {
-		return baseURL + "?apikey=" + cfg.APIKey
+		parsed, parseErr := url.Parse(baseURL)
+		if parseErr != nil {
+			return ""
+		}
+		query := parsed.Query()
+		query.Set("apikey", cfg.APIKey)
+		parsed.RawQuery = query.Encode()
+		return parsed.String()
 	}
 
 	return baseURL
@@ -3834,6 +3841,7 @@ func stripServerPrefix(serverName, name string) string {
 }
 
 func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
+	refreshCallerContext := s.newSSECallerContextRefresher(r)
 	// Set SSE headers first
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -3889,12 +3897,17 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	// #1166: /events sits behind the same apiKeyAuthMiddleware as /servers, so
 	// a scoped agent token can subscribe. Scoping /servers while leaving this
 	// stream unfiltered closes the front door and leaves the window open.
-	initialLiveStats := filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats())
+	callerCtx, err := refreshCallerContext()
+	if err != nil {
+		s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
+		return
+	}
+	initialLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": initialLiveStats,
-		"status":         withLiveUpstreamStats(r.Context(), s.controller.GetStatus(), initialLiveStats),
+		"status":         withLiveUpstreamStats(callerCtx, s.controller.GetStatus(), initialLiveStats),
 		"timestamp":      time.Now().Unix(),
 		"started_at":     processStart.Unix(),
 	}
@@ -3924,16 +3937,21 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			callerCtx, err := refreshCallerContext()
+			if err != nil {
+				s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
+				return
+			}
 
 			// The channel snapshot is a point-in-time capture that never
 			// passes through GetStatus(), so without this the stream's nested
 			// stats stay stale for the life of the connection (#1084).
-			eventLiveStats := filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats())
+			eventLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 			response := map[string]interface{}{
 				"running":        s.controller.IsRunning(),
 				"listen_addr":    s.controller.GetListenAddress(),
 				"upstream_stats": eventLiveStats,
-				"status":         withLiveUpstreamStats(r.Context(), status, eventLiveStats),
+				"status":         withLiveUpstreamStats(callerCtx, status, eventLiveStats),
 				"timestamp":      time.Now().Unix(),
 				"started_at":     processStart.Unix(),
 			}
@@ -3947,18 +3965,23 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				eventsCh = nil
 				continue
 			}
+			callerCtx, err := refreshCallerContext()
+			if err != nil {
+				s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
+				return
+			}
 
 			// #1166 — most event types name a server in a scalar field
 			// rather than in the servers.changed embed, so a scoped caller
 			// learned about servers it cannot see through activity, oauth and
 			// security frames. Decided per subscriber, before rendering:
 			// nothing is written back to the shared event.
-			if !eventVisibleToCaller(r.Context(), evt) {
+			if !eventVisibleToCaller(callerCtx, evt) {
 				continue
 			}
 
 			eventPayload := map[string]interface{}{
-				"payload":   s.maskEventPayload(s.renderEventPayloadForCaller(r.Context(), evt)),
+				"payload":   s.maskEventPayload(s.renderEventPayloadForCaller(callerCtx, evt)),
 				"timestamp": evt.Timestamp.Unix(),
 			}
 
