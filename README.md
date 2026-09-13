@@ -129,7 +129,7 @@ Want to try the newest features? Download prerelease builds from the `next` bran
 
 - **macOS**: [Intel](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-amd64.tar.gz) | [Apple Silicon](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-darwin-arm64.tar.gz)
 
-Anywhere with Go 1.25+:
+Anywhere with Go 1.26+:
 ```bash
 go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest
 ```

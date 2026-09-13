@@ -24,7 +24,7 @@ Only halt and ask a human IF:
 
 MCPProxy is a Go desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP): intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
-**Stack**: Go 1.25 (backend) · TypeScript 5.9 / Vue 3.5 (frontend) · Swift 5.9 (macOS tray). Storage: BBolt (`config.db`) + Bleve (search index). Avoid new dependencies without clear need.
+**Stack**: Go 1.26 (backend) · TypeScript 5.9 / Vue 3.5 (frontend) · Swift 5.9 (macOS tray). Storage: BBolt (`config.db`) + Bleve (search index). Avoid new dependencies without clear need.
 
 ## Editions (Personal & Server)
 

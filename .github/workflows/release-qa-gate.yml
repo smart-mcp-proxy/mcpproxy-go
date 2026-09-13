@@ -45,7 +45,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26"
   NODE_VERSION: "22"
   # Shared report directory: every job writes its fragment here and uploads it;
   # the verdict job merges them against the hardcoded gatereport manifest.
