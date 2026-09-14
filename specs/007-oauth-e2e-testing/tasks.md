@@ -233,7 +233,7 @@ Based on plan.md:
 
 ### Implementation for User Story 9
 
-- [ ] T080 [US9] Enhance `auth login` to print authorization URL preview in `cmd/mcpproxy/auth_cmd.go`
+- [x] T080 [US9] Enhance `auth login` to print authorization URL preview in `cmd/mcpproxy/auth_cmd.go`
 - [x] T081 [US9] Enhance `auth status` to display endpoints, scopes, expiry, PKCE in `cmd/mcpproxy/auth_cmd.go`
 - [ ] T082 [US9] Add secret masking to auth status output in `cmd/mcpproxy/auth_cmd.go`
 - [x] T083 [US9] Add structured logging fields for OAuth operations in `internal/oauth/config.go`

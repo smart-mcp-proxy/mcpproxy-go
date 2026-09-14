@@ -161,7 +161,7 @@ Commit: `feat(diagnostics): web UI ErrorPanel + macOS tray badge (US2)`
 
 ### Implementation for US3
 
-- [ ] T090 [US3] Implement fixer `Register("stdio_show_last_logs", ...)` in `internal/diagnostics/fixers.go` (non-destructive): tails the per-server log and returns it in FixResult.Preview
+- [x] T090 [US3] Implement fixer `Register("stdio_show_last_logs", ...)` in `internal/diagnostics/fixers.go` (non-destructive): tails the per-server log and returns it in FixResult.Preview
 - [ ] T091 [US3] Implement fixer `Register("oauth_reauth", ...)`: calls existing `internal/oauth/coordinator.InitiateLogin(ctx, server)`; destructive: mutates token store
 - [x] T092 [US3] Implement `handleInvokeFix` body in `internal/httpapi/diagnostics_fix.go`: parse FixRequest, check destructive + mode, enforce rate-limit, call `fixers.Invoke`, record FixAttempt via `activity_service.RecordFixAttempt`
 - [x] T093 [P] [US3] Add `cmd/mcpproxy/doctor.go` modifications: support `--server <name>` flag; print code + user_message + fix_steps
