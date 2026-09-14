@@ -217,7 +217,7 @@ func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata
 	}
 	r.logger.Info("trust_mode scan held tool change for review (non-green verdict)",
 		zap.String("server", serverName),
-		zap.String("tool", extractToolName(tool.Name)),
+		zap.String("tool", config.RawToolName(tool)),
 		zap.String("verdict", verdict),
 		zap.Bool("coverage_ok", coverageOK),
 		zap.Strings("tpa_signals", signals))
@@ -299,6 +299,7 @@ func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*confi
 			metas = append(metas, &config.ToolMetadata{
 				ServerName:       name,
 				Name:             t.Name,
+				RawName:          t.Name, // StateView holds raw names (Spec 105 FR-009)
 				Description:      t.Description,
 				ParamsJSON:       paramsJSON,
 				OutputSchemaJSON: t.OutputSchemaJSON,
@@ -439,8 +440,25 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	migratedOutputSchemaApprovals := false
 
 	for _, tool := range tools {
-		// Extract the bare tool name (without server prefix)
-		toolName := extractToolName(tool.Name)
+		// Spec 105 FR-009: every approval record is keyed by the tool's RAW
+		// upstream name, exactly as dispatched — never by a suffix guessed from
+		// the first colon. A raw "ns:erase" is therefore filed under
+		// (server, "ns:erase") and can neither inherit nor disturb the record of
+		// a sibling "erase".
+		//
+		// Legacy collapsed records (one-shot migration story): a store written
+		// before this change holds "ns:erase" under the key "erase". Nothing
+		// rewrites that record — its raw name cannot be recovered from the
+		// collapsed key, so guessing would be a silent approval. Instead the
+		// exact keying makes the migration fall out of the first discovery after
+		// upgrade: the collapsed record is only ever looked up by a raw "erase"
+		// (approving exactly that name and nothing else), while "ns:erase"
+		// misses, takes the new-tool branch below and gets its own record —
+		// pending under an active quarantine gate, auto-approved otherwise. If
+		// the server never served a bare "erase", the collapsed record is
+		// simply orphaned; the reader side (internal/server/tool_gate.go) never
+		// hands it to another raw name.
+		toolName := config.RawToolName(tool)
 
 		// Serialize schema for hashing
 		schemaJSON := tool.ParamsJSON
@@ -1087,22 +1105,44 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	return result, nil
 }
 
-func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
+// outputSchemaHashMigrationPending reports whether any approved record still
+// carries a pre-output-schema hash, i.e. the version-gated backfill in
+// checkToolApprovals has work left. A listing failure reads as pending (fail
+// closed: callers must not advance the schema version on a guess).
+func (r *Runtime) outputSchemaHashMigrationPending() bool {
 	if r.storageManager == nil {
-		return
+		return false
 	}
 
 	records, err := r.storageManager.ListToolApprovals("")
 	if err != nil {
 		r.logger.Debug("Failed to list tool approvals for output schema hash migration",
 			zap.Error(err))
-		return
+		return true
 	}
 
 	for _, record := range records {
 		if record.Status == storage.ToolApprovalStatusApproved && record.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
-			return
+			return true
 		}
+	}
+	return false
+}
+
+// markOutputSchemaHashMigrationCompleteIfReady advances the storage schema
+// version to OutputSchemaHashSchemaVersion once every approved record has been
+// backfilled. It deliberately stamps THAT version and not CurrentSchemaVersion:
+// later version-gated migrations (the Spec 105 tool-identity index rebuild)
+// record themselves on the next start, when they observe the advanced version.
+func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
+	if r.storageManager == nil || r.outputSchemaHashMigrationPending() {
+		return
+	}
+
+	// Never move the version backwards: a database already past this
+	// migration has nothing to record here.
+	if current, err := r.storageManager.GetSchemaVersion(); err == nil && current >= storage.OutputSchemaHashSchemaVersion {
+		return
 	}
 
 	if err := r.storageManager.SetSchemaVersion(storage.OutputSchemaHashSchemaVersion); err != nil {

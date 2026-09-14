@@ -2272,18 +2272,25 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
-	// Look up the target's annotations from the StateView ONCE. The same read
-	// serves the target-tier gate below and the intent validation after it, so
-	// the tier a token was authorized against and the annotations the variant
-	// is validated against can never come from two different snapshots
-	// (Spec 105 FR-009). found=false means the proxy holds no metadata for the
-	// pair (server unknown, tool undiscovered, or no runtime). The pair was
-	// split from the canonical id above, so it is read EXACTLY: a raw name
-	// that starts with the server's own prefix must not be normalized again.
-	annotations, annotationsFound := p.lookupExactToolAnnotations(serverName, actualToolName)
+	// Resolve the target's registration identity from the StateView ONCE. The
+	// same read serves the identity gate and the target-tier gate below and
+	// the intent validation after them, so the tier a token was authorized
+	// against and the annotations the variant is validated against can never
+	// come from two different snapshots (Spec 105 FR-009). Found=false means
+	// the proxy holds no metadata for the pair (server unknown, tool
+	// undiscovered, or no runtime). The pair was split from the canonical id
+	// above, so it is read EXACTLY: a raw name that starts with the server's
+	// own prefix must not be normalized again.
+	identity := p.resolveExactToolIdentity(serverName, actualToolName)
+	annotations, annotationsFound := identity.Annotations, identity.Found
 
-	// Spec 028: Enforce agent token scope restrictions
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+	// Spec 028: Enforce agent token scope restrictions. The server-scope and
+	// variant-permission gates run before the identity gate so a scoped
+	// caller learns nothing about a server outside its scope from the shape
+	// of the refusal.
+	authCtx := auth.AuthContextFromContext(ctx)
+	scopedCaller := authCtx != nil && !authCtx.IsAdmin()
+	if scopedCaller {
 		// Check server scope
 		if !authCtx.CanAccessServer(serverName) {
 			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
@@ -2305,6 +2312,27 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
+	}
+
+	// Spec 105 FR-009 (research D4): a name the discovery snapshot of a KNOWN
+	// server does not contain has no resolvable registration identity, so no
+	// permission tier can be established for it. It is refused with the
+	// insufficient-permission body and zero upstream calls for EVERY caller —
+	// administrators included (spec Edge Case (2), SC-005's named exception):
+	// an unverified name must never reach an upstream on anyone's behalf. A
+	// server the snapshot does not hold is not this condition; the shared
+	// gate below keeps answering that with its server-existence verdict.
+	if identity.Unresolved() {
+		errMsg := unresolvedToolIdentityMessage(serverName, actualToolName)
+		p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity",
+			zap.String("server_name", serverName),
+			zap.String("tool_name", actualToolName),
+			zap.Bool("scoped_caller", scopedCaller))
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
+	if scopedCaller {
 		// Spec 104 FR-016f / Spec 105 FR-009: the variant is the CALLER's
 		// choice, so it is not the tier that matters. Authorize against the
 		// TARGET tool's annotation-derived tier, through the same classifier
@@ -6766,20 +6794,60 @@ func (p *MCPProxyServer) lookupToolAnnotationsFound(serverName, toolName string)
 // strip that segment and classify the pair as the suffix tool "ns:erase"
 // while dispatch still targets "a:ns:erase" (Spec 105 FR-009).
 func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string) (*config.ToolAnnotations, bool) {
+	identity := p.resolveExactToolIdentity(serverName, toolName)
+	return identity.Annotations, identity.Found
+}
+
+// toolIdentity is the outcome of resolving one split (server, RAW tool) pair
+// against the live discovery snapshot (Spec 105 FR-009, research D4). It is
+// the registration identity every dispatch path authorizes against: the
+// annotations feed the target-tier gate, and the two booleans tell an
+// undiscovered name on a server the proxy knows apart from a server the
+// snapshot has never held.
+type toolIdentity struct {
+	// ServerKnown reports whether the snapshot holds the server at all. False
+	// also covers a proxy with no runtime wired (pure-unit constructions),
+	// which therefore never refuses on identity grounds.
+	ServerKnown bool
+	// Found reports whether the server's snapshot lists the raw name, verbatim.
+	Found bool
+	// Description and Annotations are the snapshot's metadata for the tool;
+	// zero when Found is false.
+	Description string
+	Annotations *config.ToolAnnotations
+}
+
+// Unresolved reports the D4 refusal condition: the server is known but its
+// snapshot does not list the raw name — an undiscovered or stale name whose
+// permission tier cannot be established, so no caller may dispatch it. A
+// server the snapshot does not hold is NOT this condition: that is
+// server-existence handling and stays with the paths that own it.
+func (id toolIdentity) Unresolved() bool {
+	return id.ServerKnown && !id.Found
+}
+
+// resolveExactToolIdentity resolves a pair that is ALREADY split into server
+// and raw tool name against the StateView snapshot. It never re-normalizes:
+// a raw tool name may itself begin with the server's own prefix ("a:ns:erase"
+// on server "a"), and normalizeServerTool would strip that segment and
+// classify the pair as the suffix tool "ns:erase" while dispatch still
+// targets "a:ns:erase" (Spec 105 FR-009).
+func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) toolIdentity {
 	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil, false
+		return toolIdentity{}
 	}
 
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
-		return nil, false
+		return toolIdentity{}
 	}
 
 	snapshot := supervisor.StateView().Snapshot()
 	serverStatus, exists := snapshot.Servers[serverName]
-	if !exists {
-		return nil, false
+	if !exists || serverStatus == nil {
+		return toolIdentity{}
 	}
+	identity := toolIdentity{ServerKnown: true}
 
 	// Only the EXACT raw name — the identity that is dispatched (Spec 105
 	// FR-009) — is matched. The StateView holds the name the upstream
@@ -6794,11 +6862,25 @@ func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string)
 	// different tool's hints instead of failing closed.
 	for i := range serverStatus.Tools {
 		if serverStatus.Tools[i].Name == toolName {
-			return serverStatus.Tools[i].Annotations, true
+			identity.Found = true
+			identity.Description = serverStatus.Tools[i].Description
+			identity.Annotations = serverStatus.Tools[i].Annotations
+			return identity
 		}
 	}
 
-	return nil, false
+	return identity
+}
+
+// unresolvedToolIdentityMessage is the insufficient-permission body every
+// dispatch path answers for a name it cannot resolve on a known server
+// (Spec 105 FR-009, research D4). It is worded as a permission refusal —
+// the caller holds no tier for a tool the proxy cannot identify — and
+// deliberately does not echo any upstream answer: the upstream is never
+// asked.
+func unresolvedToolIdentityMessage(serverName, toolName string) string {
+	return fmt.Sprintf("Permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it; refresh the tool list with retrieve_tools and retry with a listed name",
+		serverName, toolName, serverName)
 }
 
 // lookupOutputSchema returns the declared output schema (raw JSON) for a tool,

@@ -142,12 +142,22 @@ type BaselineSweepState struct {
 	Findings int `json:"findings"`
 }
 
-// Current schema version
-const CurrentSchemaVersion = 3
+// Current schema version. A fresh database starts here, so none of the
+// version-gated migrations below run on it.
+const CurrentSchemaVersion = 4
 
 // OutputSchemaHashSchemaVersion is the schema version that starts including
 // MCP outputSchema in the tool approval hash baseline.
 const OutputSchemaHashSchemaVersion = 3
+
+// ToolIdentitySchemaVersion is the schema version from which the search index
+// keys every tool document by its exact raw upstream name
+// ("<server>:<raw name>", Spec 105 FR-009). Databases below this version were
+// written alongside an index whose docIDs collapsed a namespaced raw name to
+// its suffix ("ns:erase" → "<server>:erase"), so the runtime clears the index
+// once on startup and lets discovery rebuild it under the exact identity
+// (runtime.rebuildIndexForToolIdentity).
+const ToolIdentitySchemaVersion = 4
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {

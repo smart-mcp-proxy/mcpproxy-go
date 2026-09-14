@@ -365,24 +365,12 @@ func TestScopeTargetTier_RetrieveTable_ReadDestructive(t *testing.T) {
 // stageDirectCatalog renders and registers a direct catalog for the fixture's
 // tools exactly as RefreshDirectModeTools does (render → SetTools → publish),
 // with the annotations the StateView carries, so the handler mcp-go would
-// dispatch to closes over the same registration identity. Discovery through
-// the stub cannot be used here: the in-process upstream publishes no
-// annotations, so every entry would render as read tier.
+// dispatch to closes over the same registration identity. It delegates to
+// stageDirectCatalogFor (mcp_routing_test.go), the multi-upstream stager the
+// direct handler cells share.
 func (f *tierMatrixFixture) stageDirectCatalog(t *testing.T) {
 	t.Helper()
-	p := f.proxy
-	p.config.RoutingMode = config.RoutingModeDirect
-	metas := make([]*config.ToolMetadata, 0, len(f.up.Tools))
-	for _, tool := range f.up.Tools {
-		metas = append(metas, &config.ToolMetadata{
-			Name: tool.Name, ServerName: f.up.Server, Description: tool.Description,
-			ParamsJSON: `{"type":"object"}`, Hash: "h-" + tool.Name, Annotations: tool.Annotations,
-		})
-	}
-	warmFixtureSignatures(p, metas)
-	cat := directCatalogFor(p, metas)
-	p.directServer.SetTools(p.withDirectBuiltins(p.renderDirectTools(cat))...)
-	p.publishDirectCatalog(cat)
+	stageDirectCatalogFor(t, f.proxy, f.up)
 }
 
 // direct drives one raw tool through the handler registered for its display

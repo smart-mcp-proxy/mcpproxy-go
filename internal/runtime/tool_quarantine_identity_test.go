@@ -11,11 +11,12 @@ import (
 )
 
 // Spec 105 FR-009 G1 (task T004): the discovery producer must key every
-// approval record by the RAW tool name it will dispatch. checkToolApprovals
-// currently keys records by extractToolName (everything after the first
-// colon), so a raw "ns:erase" on server "a" is filed under (a, "erase") — the
-// same key as the plain "erase" tool. Two silent failures follow on a
-// manual-trust server whose baseline already approved "erase":
+// approval record by the RAW tool name it will dispatch. Before Spec 105,
+// checkToolApprovals keyed records by everything after the first colon (the
+// since-deleted extractToolName), so a raw "ns:erase" on server "a" was filed
+// under (a, "erase") — the same key as the plain "erase" tool. Two silent
+// failures followed on a manual-trust server whose baseline already approved
+// "erase":
 //
 //   - identical description + schema: "ns:erase" hashes identically (the tool
 //     name in the hash is the collapsed one and annotations are excluded), so

@@ -1233,30 +1233,42 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // by the retrieve surface (call_tool_*), code execution, and — through the same
 // DeriveCallWith — direct mode.
 //
-// A tool the StateView has not seen has no establishable tier. It is treated
-// as DESTRUCTIVE, the top of the documented permission ladder (agent-token
-// permissions are cumulative: write implies read, destructive implies both —
-// docs/features/agent-tokens.md), so a token reaches it only when it holds
-// that top tier; defaulting to read here authorized every undiscovered tool
-// for read-only tokens. Note auth.HasPermission is exact-match, not
-// hierarchical, so a token minted as [read, destructive] without write is
-// admitted here while call_tool_write itself would refuse it. The BM25 index is deliberately not
-// consulted: it stores no annotations (and a "server:tool" query returns no
-// hits), so the former index fallback never resolved anything. A discovered
-// tool that publishes no annotations still derives to read via DeriveCallWith.
+// A tool the StateView has not seen on a server it DOES hold has no
+// establishable tier (Spec 105 FR-009, research D4): the sandbox is answered
+// with jsruntime.PermissionTierUnresolved and refuses the call for every
+// caller, administrators included, so an unverified name never reaches the
+// upstream. Only when the proxy has no opinion at all — the server is not in
+// the snapshot, or no runtime is wired — does the lookup fall back to the
+// DESTRUCTIVE tier, the top of the permission ladder, so a token reaches such
+// a name only when it holds that top tier (defaulting to read there once
+// authorized every undiscovered tool for read-only tokens); the unknown-server
+// case is then answered by the bridge's own server-existence path. Note
+// auth.HasPermission is exact-match, not hierarchical, so a token minted as
+// [read, destructive] without write is admitted here while call_tool_write
+// itself would refuse it. The BM25 index is deliberately not consulted: it
+// stores no annotations (and a "server:tool" query returns no hits), so the
+// former index fallback never resolved anything. A discovered tool that
+// publishes no annotations still derives to read via DeriveCallWith.
 //
 // The sandbox hands over the pair a script wrote — callTool(server, tool) —
 // which is already split, so the raw name is read exactly rather than
 // normalized a second time (a raw name may start with the server's prefix).
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
-	return tierForAnnotations(p.lookupExactToolAnnotations(serverName, toolName))
+	identity := p.resolveExactToolIdentity(serverName, toolName)
+	if identity.Unresolved() {
+		return jsruntime.PermissionTierUnresolved
+	}
+	return tierForAnnotations(identity.Annotations, identity.Found)
 }
 
 // tierForAnnotations maps one lookupToolAnnotationsFound result to the
 // permission tier it requires. It is split from lookupToolPermission so a
 // caller that already holds the StateView read (handleCallToolVariant, which
 // needs the same annotations for intent validation) classifies the tier from
-// THAT read rather than taking a second, independent snapshot.
+// THAT read rather than taking a second, independent snapshot. found=false
+// reaches it only when the proxy holds no snapshot for the server at all —
+// an undiscovered name on a known server is refused before any tier is
+// derived (toolIdentity.Unresolved).
 func tierForAnnotations(annotations *config.ToolAnnotations, found bool) string {
 	if !found {
 		return contracts.OperationTypeDestructive

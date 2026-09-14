@@ -15,8 +15,9 @@ import (
 func toolNames(tools []*config.ToolMetadata) []string {
 	names := make([]string, len(tools))
 	for i, tool := range tools {
-		// Extract tool name without server prefix
-		names[i] = extractToolName(tool.Name)
+		// Raw name: the index returns canonical "<server>:<raw>" ids and
+		// config.RawToolName trims exactly the tool's own server prefix.
+		names[i] = config.RawToolName(tool)
 	}
 	return names
 }
@@ -517,5 +518,5 @@ func TestToolCacheInvalidation_OrphanCleanup(t *testing.T) {
 	activeIndexed, err := rt.indexManager.GetToolsByServer("active-server")
 	require.NoError(t, err)
 	assert.Len(t, activeIndexed, 1)
-	assert.Equal(t, "active_tool", extractToolName(activeIndexed[0].Name))
+	assert.Equal(t, "active_tool", config.RawToolName(activeIndexed[0]))
 }

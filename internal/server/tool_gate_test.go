@@ -24,9 +24,10 @@ import (
 //
 //   - genuinely none — reachable through the discovery fail-open paths
 //     (tool_quarantine.go / lifecycle.go) that skip record creation;
-//   - collapsed-only — the pre-migration state in which discovery keyed the
-//     raw name "ns:erase" under "erase" (extractToolName), so an approval
-//     that was granted to `erase` must not be inherited by `ns:erase`.
+//   - collapsed-only — the pre-migration state a pre-105 binary left behind,
+//     in which discovery keyed the raw name "ns:erase" under "erase"
+//     (everything after the first colon), so an approval that was granted to
+//     `erase` must not be inherited by `ns:erase`.
 //
 // Both are proven at the gate (evaluateToolGate) AND through retrieve
 // dispatch (handleCallToolVariant) against a counting upstream: a refusal is

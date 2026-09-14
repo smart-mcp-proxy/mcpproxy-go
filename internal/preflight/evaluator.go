@@ -291,12 +291,18 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 
 	// 6-9. tool_denied_by_config → tool_blocked_by_user → tool_changed →
 	//      tool_pending_approval, all from the shared classifier so preflight
-	//      and dispatch cannot disagree (FR-002).
+	//      and dispatch cannot disagree (FR-002). The indexed corpus is this
+	//      evaluator's discovery snapshot (step 5 resolved existence against
+	//      it), so an indexed tool with no approval record classifies as
+	//      pending while the quarantine gate applies to its server (Spec 105
+	//      FR-009) — exactly as the dispatch gates classify a snapshot tool
+	//      with no record.
 	class := ClassifyTool(ClassifyInputs{
 		Server:            policy,
 		QuarantineEnabled: ec.Policy.QuarantineEnabled(),
 		ConfigDenied:      configDenied,
 		Approval:          approval,
+		Discovered:        indexed != nil,
 	})
 	if !class.Callable() {
 		return unavailable(id, class.Reason(), classDetail(class, serverName, toolName)), nil

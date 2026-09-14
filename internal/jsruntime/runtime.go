@@ -73,8 +73,19 @@ func (a *AuthInfo) HasPermission(perm string) bool {
 }
 
 // ToolAnnotationLookup is a function that returns the permission tier required for a tool.
-// Returns one of "read", "write", "destructive".
+// Returns one of "read", "write", "destructive" — or PermissionTierUnresolved
+// when the tool's identity cannot be resolved on a server the proxy knows, in
+// which case the call is refused rather than authorized against any tier.
 type ToolAnnotationLookup func(serverName, toolName string) string
+
+// PermissionTierUnresolved is the ToolAnnotationLookup outcome for a name the
+// discovery snapshot of a KNOWN server does not contain (Spec 105 FR-009,
+// research D4). It is not a tier: no permission set — not even an
+// administrator's, which passes every tier check — may dispatch a tool the
+// proxy cannot identify, so checkDispatchGates refuses the call with
+// PERMISSION_DENIED and the upstream is never asked. A lookup that has no
+// opinion (server unknown, no runtime) keeps answering with a tier.
+const PermissionTierUnresolved = "unresolved"
 
 // ToolCaller is an interface for calling upstream MCP tools
 type ToolCaller interface {
@@ -402,6 +413,16 @@ func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gat
 	requiredPerm = "read" // Default to read
 	if ec.toolAnnotationFunc != nil {
 		requiredPerm = ec.toolAnnotationFunc(serverName, toolName)
+		// Spec 105 FR-009 (research D4): an identity the lookup could not
+		// resolve on a known server has no tier to hold, so the refusal is
+		// decided BEFORE HasPermission — which an administrator AuthInfo
+		// always passes — and answers with the permission envelope, never
+		// with an upstream's own "tool not found".
+		if requiredPerm == PermissionTierUnresolved {
+			return errorEnvelope(ErrorCodePermissionDenied,
+				fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
+					serverName, toolName, serverName)), ""
+		}
 	}
 
 	if !ec.authInfo.HasPermission(requiredPerm) {

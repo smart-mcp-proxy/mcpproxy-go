@@ -139,15 +139,23 @@ With this enabled:
 
 ## Permission Tiers
 
-Each token specifies which permission tiers the agent can use:
+Each token lists the permission tiers the agent holds. A tier unlocks the matching `call_tool_*` variant:
 
-| Permission | Tool Variants Allowed | Use Case |
+| Permission | Tool Variant Unlocked | Use Case |
 |------------|----------------------|----------|
 | `read` | `call_tool_read` | Monitoring, querying, status checks |
-| `write` | `call_tool_read`, `call_tool_write` | Creating issues, updating records |
-| `destructive` | All variants | Deleting resources, admin operations |
+| `write` | `call_tool_write` | Creating issues, updating records |
+| `destructive` | `call_tool_destructive` | Deleting resources, admin operations |
 
-Permissions are **cumulative** — `write` implies `read`, and `destructive` implies both. The `read` permission is always required.
+Permissions are **exact-match, not cumulative**: the token holds exactly the tiers listed, so `destructive` does not imply `write`. `mcpproxy token create` stores the list verbatim; the only rule is that the list must include `read`. A token minted as `read,destructive` can use `call_tool_read` and `call_tool_destructive` but is refused on `call_tool_write` — list every tier the agent needs.
+
+### Target tool tier
+
+Holding a tier for a *variant* is only half the check. Every dispatch path — the `call_tool_*` variants, direct-name dispatch on `/mcp/all` (see [Routing Modes](https://docs.mcpproxy.app/features/routing-modes)) and `call_tool()` inside [code execution](https://docs.mcpproxy.app/features/code-execution) — also authorizes the token against the tier of the **target tool**, derived from the tool's own MCP annotations (`readOnlyHint` / `destructiveHint`) as reported at discovery. The two checks are independent and both are exact-match: `call_tool_read` on a write-tier tool needs `write`, and a `read,destructive` token is refused on a write-tier tool on every path.
+
+- **Annotation-less tools default to `read`.** A discovered tool that publishes no annotations derives to the read tier, so a read-only token can call it. Operators who want stricter handling of unannotated tools use the [intent declaration](https://docs.mcpproxy.app/features/intent-declaration) validation rules.
+- **Unresolved identity on a known server is refused for every caller.** The tier comes from the tool's registration identity in the live discovery snapshot — the exact `server:tool` pair that will be dispatched. If the server is known but its snapshot does not list the tool (undiscovered name, stale name after a server redeployed its tool set), no tier can be established: the call is refused with the insufficient-permission body and never reaches the upstream, for agent tokens *and* for administrators. Refresh with `retrieve_tools` and retry with a listed name. A server MCPProxy does not know at all keeps its ordinary "server not found" answer.
+- **No approval record under an active quarantine gate is pending.** While tool-level quarantine applies to a server (`quarantine_enabled` on and the server not opted out via `trust_mode: auto` / `auto_approve_tool_changes`), a tool the snapshot contains that has no [approval record](https://docs.mcpproxy.app/features/security-quarantine) of its own is treated as pending approval — never as implicitly approved — at every gate: dispatch, preflight and `describe_tool`. Approval records are keyed by the exact upstream tool name, so a namespaced tool such as `ns:erase` is approved only by its own name and never inherits the approval of a sibling `erase`.
 
 ```bash
 # Read-only monitoring agent

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -93,6 +94,12 @@ func (f *preflightFixture) addServer(t *testing.T, sc *config.ServerConfig) {
 	f.cfg.Servers = append(f.cfg.Servers, sc)
 }
 
+// indexTool publishes a tool into the shared index — the evaluator's discovery
+// corpus — the way a discovery pass would have: indexed AND approved. Since
+// Spec 105 FR-009 an indexed tool with NO approval record is pending under the
+// default (active) quarantine gate, so the fixture files the approved record
+// discovery files for every tool it indexes, unless the test seeded a record
+// of its own first (a pending / changed / user-disabled cell keeps its record).
 func (f *preflightFixture) indexTool(t *testing.T, serverName, toolName string) {
 	t.Helper()
 	require.NoError(t, f.index.IndexTool(&config.ToolMetadata{
@@ -104,6 +111,13 @@ func (f *preflightFixture) indexTool(t *testing.T, serverName, toolName string) 
 		Created:     time.Now(),
 		Updated:     time.Now(),
 	}))
+	if _, err := f.storage.GetToolApproval(serverName, toolName); errors.Is(err, storage.ErrToolApprovalNotFound) {
+		require.NoError(t, f.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: serverName,
+			ToolName:   toolName,
+			Status:     storage.ToolApprovalStatusApproved,
+		}))
+	}
 }
 
 // stateSnapshot is the observable proxy state a preflight must leave untouched:

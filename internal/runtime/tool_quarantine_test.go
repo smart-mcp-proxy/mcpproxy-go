@@ -980,10 +980,13 @@ func TestSetAllToolsEnabled_NoEventOnNoOp(t *testing.T) {
 }
 
 func TestFilterBlockedTools(t *testing.T) {
+	// Canonical-named metadata (as read back from the index) must carry its
+	// ServerName: config.RawToolName trims exactly that server's prefix, never
+	// "whatever precedes the first colon" (Spec 105 FR-009).
 	tools := []*config.ToolMetadata{
-		{Name: "server:tool_a"},
-		{Name: "server:tool_b"},
-		{Name: "server:tool_c"},
+		{ServerName: "server", Name: "server:tool_a"},
+		{ServerName: "server", Name: "server:tool_b"},
+		{ServerName: "server", Name: "server:tool_c"},
 	}
 
 	blocked := map[string]bool{
@@ -995,7 +998,7 @@ func TestFilterBlockedTools(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, t := range filtered {
-		names[i] = extractToolName(t.Name)
+		names[i] = config.RawToolName(t)
 	}
 	assert.Contains(t, names, "tool_a")
 	assert.Contains(t, names, "tool_c")

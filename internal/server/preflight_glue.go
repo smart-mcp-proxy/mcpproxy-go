@@ -397,11 +397,20 @@ type preflightApprovalReader struct {
 }
 
 // ToolApproval maps the storage seam onto the evaluator's contract: "no record"
-// is the implicit-approved default and must come back as (nil, nil), while a
-// genuine BBolt failure must come back as an error so the request answers 503
-// instead of silently reporting a tool as approved.
+// must come back as (nil, nil) — the evaluator decides what it means (the
+// implicit-approved default, or pending for a discovered tool under an active
+// gate, Spec 105 FR-009) — while a genuine BBolt failure must come back as an
+// error so the request answers 503 instead of silently reporting a tool as
+// approved.
+//
+// The record is resolved through the SAME reader dispatch uses
+// (readToolApprovalRecord): the exact raw-name record wins, and a legacy
+// collapsed record — a pre-105 "ns:erase" filed under "erase" — lends the
+// namespaced name its lock or user block but never its approval. Reading the
+// exact key alone here made preflight answer `ready` for a tool the retrieve
+// gate refused as pending (gap FR009-G3).
 func (r *preflightApprovalReader) ToolApproval(serverName, toolName string) (*preflight.ApprovalState, error) {
-	record, err := r.storage.GetToolApproval(serverName, toolName)
+	record, err := readToolApprovalRecord(r.storage, serverName, toolName)
 	if err != nil {
 		if errors.Is(err, storage.ErrToolApprovalNotFound) {
 			return nil, nil

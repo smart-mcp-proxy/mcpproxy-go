@@ -117,21 +117,33 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 	gate.serverConfig = serverConfig
 	gate.configDenied = p.isToolConfigDenied(serverName, toolName, serverConfig)
 
+	cfg := p.currentConfig()
+	quarantineEnabled := cfg == nil || cfg.IsQuarantineEnabled()
+	quarantineGate := quarantineEnabled && !serverConfig.IsQuarantineSkipped()
+
+	// ONE snapshot read serves both the no-record rule below and the
+	// classifier's Discovered input, so the two cannot disagree about whether
+	// the tool is in the snapshot.
+	identity := p.resolveExactToolIdentity(serverName, toolName)
+
 	approval, approvalErr := p.lookupToolApproval(serverName, toolName)
 	switch {
 	case approvalErr == nil:
 		gate.approval = approval
 	case errors.Is(approvalErr, storage.ErrToolApprovalNotFound):
-		// No record → implicit-approved default.
+		// No record. Spec 105 FR-009 (research D4): while the tool-level
+		// quarantine gate is active for the server, a tool the discovery
+		// snapshot contains is PENDING under its own name, never ready — the
+		// implicit-approved default survives only for a tool the snapshot
+		// does not list (identity resolution's concern) or while the gate is
+		// off for the server.
+		gate.approval = implicitPendingApproval(serverName, toolName, identity, quarantineGate)
 	default:
 		// A real BBolt failure must not silently re-enable a tool the user
 		// disabled (isToolCallable's long-standing fail-closed rule).
 		gate.storageErr = approvalErr
 	}
 
-	cfg := p.currentConfig()
-	quarantineEnabled := cfg == nil || cfg.IsQuarantineEnabled()
-	quarantineGate := quarantineEnabled && !serverConfig.IsQuarantineSkipped()
 	if quarantineGate && gate.approval != nil {
 		switch gate.approval.Status {
 		case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
@@ -149,6 +161,9 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 		QuarantineEnabled: quarantineEnabled,
 		ConfigDenied:      gate.configDenied,
 		Approval:          approvalStateFor(gate.approval),
+		// Belt and braces with implicitPendingApproval above: the classifier
+		// applies the same no-record rule itself, so the two cannot drift.
+		Discovered: identity.Found,
 	})
 	return gate
 }
@@ -166,99 +181,117 @@ func approvalStateFor(record *storage.ToolApprovalRecord) *preflight.ApprovalSta
 	}
 }
 
-// lookupToolApproval reads the Spec-032 approval record for one (server, tool)
-// pair, already normalized by normalizeServerTool.
+// lookupToolApproval reads the Spec-032 approval record for one (server, RAW
+// tool) pair, already split by normalizeServerTool or held split by the
+// caller. It is the storage half of the Spec 105 FR-009 reader; the snapshot
+// half — "no record for a tool the discovery snapshot contains is pending
+// while the quarantine gate is active" — needs the live StateView and the
+// gate flag, so it lives with the callers that hold both
+// (evaluateExactToolGate, directCallabilityEvaluator.evaluate) and, for the
+// preflight evaluator, in preflight.ClassifyTool's Discovered input.
 //
-// Two producers file records for a raw name that carries a ":" segment, and
-// they key it differently: runtime's discovery producer (checkToolApprovals)
-// writes every pending / changed / baseline record under extractToolName —
-// everything after the first colon, so "ns:erase" lands under "erase" — while
-// the user toggle (setToolEnabledNoEmit, reached from the tools REST endpoint
-// and the Web UI with the raw StateView name) reads and synthesizes an
-// approved record under the EXACT name. Neither producer ever sees the other's
-// record. Trusting either one alone therefore fails open in one direction:
-// exact-only turns a discovered tool's pending / changed lock into an implicit
-// approval, and exact-first lets an approved record left behind by a toggle
-// shadow a later "changed" mark the rug-pull detector wrote under the
-// collapsed key. So both records are read and MERGED (mergeApprovalRecords):
-// the two carry independent facts — the toggle's Disabled flag and the
-// detector's pending / changed lock — and each must reach the classifier,
-// which lets the user block outrank the lock for callability while dispatch
-// keeps answering with the lock's review response (the toolGate.lockStatus
-// contract). This is the conservative reader rule until the producers are
-// made exact-name as well (Spec 105 FR-009 follow-up).
-//
-// Both keys are read in ONE storage snapshot (Manager.GetToolApprovals: a
-// single read lock and a single read transaction). Two independent reads would
-// let a pair of operator writes land between them — the exact record read
-// while still approved and enabled, the collapsed one read after its lock was
-// lifted — and merge into approved+enabled although the tool was locked or
-// disabled at every instant. The absence of both records is reported as
+// The absence of a usable record is reported as
 // storage.ErrToolApprovalNotFound, the same contract GetToolApproval keeps.
 func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	return readToolApprovalRecord(p.storage, serverName, toolName)
+}
+
+// readToolApprovalRecord resolves the approval record for one (server, RAW
+// tool) pair under the Spec 105 FR-009 reader rules. It is a free function
+// over the storage manager so the preflight glue's ApprovalReader — which is
+// constructed with storage alone — resolves records by exactly the same rule
+// as dispatch.
+//
+// Every producer now keys records by the raw upstream name (runtime's
+// discovery producer checkToolApprovals, the ApproveTools review surface and
+// the user toggle setToolEnabledNoEmit all read and write (server, "ns:erase")
+// for a raw "ns:erase"), so the EXACT record is the tool's record and wins
+// outright whenever it exists.
+//
+// What remains to be reconciled is the store a pre-105 binary left behind:
+// discovery used to file a raw name that carries a ":" segment under the
+// COLLAPSED key — everything after the first colon, so "ns:erase" landed
+// under "erase". Such a record is ambiguous on its face: it may describe the
+// raw "ns:erase" that produced it, or a genuine sibling tool "erase". Nothing
+// rewrites it (research D4, tool_quarantine.go: guessing would be a silent
+// approval); instead a legacy collapsed record APPROVES only the raw name it
+// stores. Read for a namespaced name it can therefore only RESTRICT: its
+// quarantine lock (pending / changed) and its user Disabled flag still bind
+// the namespaced tool — a tool that was locked or disabled at every instant
+// must not become callable because its record sits under the old key — while
+// an approved, enabled legacy record is reported as "no record", so the
+// namespaced tool stays pending under an active gate until it is approved by
+// its own name (the first discovery after upgrade files that exact record).
+//
+// Both keys are read in ONE storage snapshot (Manager.GetToolApprovals: a
+// single read lock and a single read transaction) so a pair of operator writes
+// cannot land between the two reads and be observed as a state that never
+// existed.
+func readToolApprovalRecord(st *storage.Manager, serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	keys := []string{toolName}
-	// The collapsed key may be EMPTY: the producer files a raw name that ends
-	// in a colon ("ns:") under (server, "") and storage accepts that key, so
-	// it is read like any other collapsed record rather than skipped.
+	// The collapsed key may be EMPTY: the pre-105 producer filed a raw name
+	// that ends in a colon ("ns:") under (server, "") and storage accepts that
+	// key, so it is read like any other collapsed record rather than skipped.
 	collapsed, hasCollapsed := "", false
 	if _, rest, ok := strings.Cut(toolName, ":"); ok {
 		collapsed, hasCollapsed = rest, true
 		keys = append(keys, collapsed)
 	}
-	records, err := p.storage.GetToolApprovals(serverName, keys...)
+	records, err := st.GetToolApprovals(serverName, keys...)
 	if err != nil {
 		return nil, err
 	}
-	exact := records[toolName]
-	var legacy *storage.ToolApprovalRecord
-	if hasCollapsed {
-		legacy = records[collapsed]
-	}
-	switch {
-	case exact == nil && legacy == nil:
-		return nil, fmt.Errorf("%w: %s", storage.ErrToolApprovalNotFound, storage.ToolApprovalKey(serverName, toolName))
-	case exact == nil:
-		return legacy, nil
-	case legacy == nil:
+	if exact := records[toolName]; exact != nil {
 		return exact, nil
-	default:
-		return mergeApprovalRecords(exact, legacy), nil
 	}
+	if hasCollapsed {
+		if legacy := records[collapsed]; legacy != nil && legacyApprovalRestricts(legacy) {
+			return legacy, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s", storage.ErrToolApprovalNotFound, storage.ToolApprovalKey(serverName, toolName))
 }
 
-// mergeApprovalRecords folds the exact-name and collapsed-name records for one
-// raw tool into the single view preflight.ClassifyTool and the dispatch
-// responses consume. The record that carries a quarantine lock (pending or
-// changed) is the base, so Status and the review evidence that goes with it
-// (previous / current description, hashes) come from the producer that wrote
-// the lock. When BOTH are locked, the changed record is the base whichever
-// key it sits under: it is the one carrying the rug-pull evidence, and letting
-// the exact record win the tie would answer a plain "pending approval" and
-// drop that evidence from the dispatch response and the activity reason. The
-// exact record is the base when neither is locked or both carry the same
-// lock. The user's Disabled flag is OR'd across both, so a toggle filed under
-// either key keeps blocking. The result is a copy — the stored records are
-// never mutated.
-func mergeApprovalRecords(exact, legacy *storage.ToolApprovalRecord) *storage.ToolApprovalRecord {
-	base := exact
-	if approvalLockRank(legacy) > approvalLockRank(exact) {
-		base = legacy
+// legacyApprovalRestricts reports whether a pre-105 collapsed record carries a
+// fact that must keep binding the namespaced raw name it may have been filed
+// for: a quarantine lock or a user block. An approved, enabled record carries
+// only an approval, and an approval belongs to the exact raw name alone.
+func legacyApprovalRestricts(record *storage.ToolApprovalRecord) bool {
+	if record.Disabled {
+		return true
 	}
-	merged := *base
-	merged.Disabled = exact.Disabled || legacy.Disabled
-	return &merged
-}
-
-// approvalLockRank orders the quarantine locks for mergeApprovalRecords:
-// unlocked < pending < changed. A changed record outranks a pending one
-// because it carries the review evidence the rug-pull response is built from.
-func approvalLockRank(record *storage.ToolApprovalRecord) int {
 	switch record.Status {
-	case storage.ToolApprovalStatusChanged:
-		return 2
-	case storage.ToolApprovalStatusPending:
-		return 1
+	case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
+		return true
 	default:
-		return 0
+		return false
+	}
+}
+
+// implicitPendingApproval is the snapshot half of the FR-009 reader: while the
+// tool-level quarantine gate is active for a server, a tool its discovery
+// snapshot contains that has NO approval record is pending, never ready
+// (research D4). It returns an in-memory pending record for the pair — never
+// persisted, shaped like the one the discovery producer would have filed so
+// every consumer answers exactly as it does for a stored pending record (the
+// TOOL_QUARANTINED body, the activity reason, the describe_tool gate) — or nil
+// when the rule does not apply: the gate is off for the server, or the
+// snapshot does not list the raw name (an undiscovered name is identity
+// resolution's concern, not approval's).
+//
+// In production the record is genuinely absent only through the discovery
+// fail-open paths (checkToolApprovals / applyDifferentialToolUpdate skipping
+// record creation) and, until the first discovery after upgrade, for a
+// namespaced tool whose pre-105 record was collapsed onto a sibling's key;
+// both are exactly the windows in which "no record" used to read as ready.
+func implicitPendingApproval(serverName, toolName string, identity toolIdentity, quarantineGate bool) *storage.ToolApprovalRecord {
+	if !quarantineGate || !identity.Found {
+		return nil
+	}
+	return &storage.ToolApprovalRecord{
+		ServerName:         serverName,
+		ToolName:           toolName,
+		Status:             storage.ToolApprovalStatusPending,
+		CurrentDescription: identity.Description,
 	}
 }
