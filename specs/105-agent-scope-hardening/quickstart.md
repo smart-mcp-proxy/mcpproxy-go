@@ -13,8 +13,8 @@ go test -race -count=1 -skip 'E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracef
 go test -tags server -race -count=1 ./internal/serveredition/...      # D, B (user callers)
 go build -tags server -o /dev/null ./cmd/mcpproxy                     # never bare: it clobbers ./mcpproxy
 
-# 3. Goldens untouched (H0 is the only exception, limited to two description strings)
-git diff --stat -- internal/server/testdata && test -z "$(git diff --stat -- internal/server/testdata)"
+# 3. Frozen goldens untouched (H0 is the only exception, limited to two description strings; H1 adds testdata/scope_latency/ but never touches goldens)
+test -z "$(git diff --stat origin/main -- internal/server/testdata/*.golden.json internal/server/testdata/toolslist_goldens)"
 
 # 4. Lint with the CI config (stricter than scripts/run-linter.sh)
 /opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...

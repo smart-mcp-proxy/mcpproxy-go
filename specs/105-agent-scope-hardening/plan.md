@@ -16,7 +16,7 @@ Spec 105 is the acceptance contract for "every MCP request an agent token makes 
 **Target Platform**: macOS/Linux/Windows daemon; Docker isolation paths touched (FR-007 G5)
 **Project Type**: single Go module, backend only (no frontend/tray changes; docs under `docs/features/`)
 **Performance Goals**: FR-011 — on the frozen 527-tool snapshot (+50-prompt set, 10-page cache entry), for `retrieve_tools`, `read_cache`, `prompts/list`, `tools/list`: scoped p95 within 20 ms of admin, and admin p95 regresses ≤ max(10%, 5 ms) vs merge-base on the CI reference runner; constitution I (<100 ms BM25 on 1,000 tools) unchanged
-**Constraints**: SC-005 admin byte-parity on every surface except the named exceptions; three frozen tool-surface goldens must not change except H0's two description strings; `isToolCallable`/`indexedToolVisible` stays quarantine-blind (Spec 085); bbolt `Update` rolls back on non-nil return; mcp-go `WithToolFilter` is re-evaluated at call time
+**Constraints**: SC-005 admin byte-parity on every surface except the named exceptions; frozen tool-surface goldens (`*.golden.json`, `toolslist_goldens/`) must not change except H0's two description strings — H1 adds `testdata/scope_latency/` fixtures beside them; retained effects (`spec.md:114,161`) are asserted in a separate ownership/outcome mode, never normalised away; `isToolCallable`/`indexedToolVisible` stays quarantine-blind (Spec 085); bbolt `Update` rolls back on non-nil return; mcp-go `WithToolFilter` is re-evaluated at call time
 **Scale/Scope**: 54 gaps, ~35 production files, ~25 test files inverted or added, 4 docs files; nine PRs
 
 ## Constitution Check

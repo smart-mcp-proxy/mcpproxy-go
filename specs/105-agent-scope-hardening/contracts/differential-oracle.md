@@ -24,6 +24,14 @@ func runScopeScenario(t *testing.T, usID string, fn func(f *scopeFixture, ctx co
 4. Asserts: normalized(A) == normalized(B) byte-for-byte for everything else; no sentinel substring in the raw A response; where the scenario names an admin control, admin(A) ≠ admin(B) (proves the scenario discriminates).
 5. Registers `usID` in the coverage table; `TestScopeCoverage_EveryUserStoryScenario` fails if any of US1.1–US1.8, US2.1–US2.6, US3.1–US3.4 has no registration.
 
+### Retained-effect mode (SC-001 exclusions, `spec.md:114,161`)
+
+`runRetainedEffectScenario(t, name, fn)` is the alternative assertion mode for the documented retained effects: prompt-name collision, global prompt cap, direct display-name collision, **shared-limiter contention** (global capacity 1, no queue, a held call on hidden `b`, a call to `a` → the existing "proxy-wide limit saturated" response), **cross-server scan admission** (real discovery with an established baseline on `a`, then a same-name near-identical tool on hidden `b` under `trust_mode: scan` → `a`'s new tool held pending by a shadowing finding), shared prompt-refresh deadline, shared log rotation/retention. Instead of cross-fixture equality it asserts: (a) every item returned is owned by an authorized server, (b) no hidden definition or content and no sentinel appears, (c) the documented outcome (the specific refusal / pending state) is observed. Each effect has one named fixture.
+
+### Operator-published content (`spec.md:116`)
+
+Positive controls, not differential: (a) a scoped initialization whose custom `instructions` mention `b:private_search` is published to the `a`-only token (documented); (b) a stored script returning a constant without an upstream call is callable by the `a`-only token and its constant is returned (documented), while a script that calls `b` is refused at the nested call; (c) a missing-script request under a restricted token does not enumerate (H0).
+
 ## Counting oracle (SC-002)
 
 `startCountingTargetTierUpstream` (exists) — every refusal scenario asserts `calls == 0` after the request; every allowed cell asserts `calls == 1`. The FR-009 tables are generated at the spec's shape (`spec.md:132`): **retrieve 54 cells** = 3 permission sets (`{read}`, `{read,write}`, `{read,write,destructive}`) × 3 target tiers × 3 `call_tool_*` variants × strict-intent on/off, each pre-classified as allowed / insufficient-permission / intent-mismatch; plus a **direct** table (permission set × target tier, through `HandleMessage`) and a **nested** table (permission set × target tier, through the real sandbox runtime with the envelope asserted). Includes the paired-name rows (`erase` approved, `ns:erase` config-denied / unapproved) and `auth.AdminContext()` control rows.
