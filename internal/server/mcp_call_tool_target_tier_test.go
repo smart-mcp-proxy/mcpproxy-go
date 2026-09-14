@@ -2,13 +2,9 @@ package server
 
 import (
 	"context"
-	"fmt"
-	"net"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -361,49 +357,15 @@ func (c *upstreamCalls) dispatched() []string {
 // tool and records each call it receives. Refusals are then proven by an
 // invocation count of zero rather than by the absence of a dispatch error,
 // and an admitted call is proven by the count AND the raw name it arrived
-// under.
+// under. Since Spec 105 (T002) it is a thin wrapper over startCountingUpstream
+// in scope_fixture_test.go with every tool seeded as approved.
 func startCountingTargetTierUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, server string, tools []stateview.ToolInfo) *upstreamCalls {
 	t.Helper()
-	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
-
-	calls := &upstreamCalls{}
-	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true))
+	specs := make([]toolSpec, 0, len(tools))
 	for _, tool := range tools {
-		mcpSrv.AddTool(mcp.Tool{Name: tool.Name, Description: tool.Description, InputSchema: mcp.ToolInputSchema{Type: "object"}},
-			func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				calls.record(request.Params.Name)
-				return mcp.NewToolResultText("ok"), nil
-			})
+		specs = append(specs, toolSpec{Name: tool.Name, Description: tool.Description, Annotations: tool.Annotations})
 	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
-	go func() { _ = httpSrv.Serve(ln) }()
-	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
-
-	serverCfg := &config.ServerConfig{
-		Name: server, URL: fmt.Sprintf("http://%s", ln.Addr().String()), Protocol: "streamable-http", Enabled: true,
-	}
-	require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
-	rt.Supervisor().StateView().UpdateServer(server, func(s *stateview.ServerStatus) {
-		s.Name = server
-		s.Enabled = true
-		s.Connected = true
-		s.Tools = tools
-	})
-	for _, tool := range tools {
-		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
-			ServerName: server, ToolName: tool.Name, Status: storage.ToolApprovalStatusApproved,
-		}))
-	}
-	require.NoError(t, proxy.upstreamManager.AddServerConfig(server, serverCfg))
-	require.NoError(t, proxy.upstreamManager.ConnectAll(context.Background()))
-	require.Eventually(t, func() bool {
-		client, ok := proxy.upstreamManager.GetClient(server)
-		return ok && client.IsConnected()
-	}, 10*time.Second, 50*time.Millisecond, "stub upstream must connect")
-	return calls
+	return startCountingUpstream(t, proxy, rt, server, specs...).upstreamCalls
 }
 
 // Spec 105 FR-009 / SC-002 oracles on the retrieve surface: a permission-
@@ -1210,5 +1172,150 @@ func TestCallToolRead_ServerPrefixedRawName_IsNotReNormalized(t *testing.T) {
 		text := result.Content[0].(mcp.TextContent).Text
 		assert.Contains(t, text, "TOOL_QUARANTINED", "the pending lock under the exact raw name must answer")
 		assert.NotContains(t, text, "No client found", "the call must never reach dispatch")
+	})
+}
+
+// callToolReadResult drives call_tool_read through handleCallToolVariant for
+// any caller and returns the result plus its first text block. Unlike
+// callToolReadOn it does not assert IsError: the TOOL_QUARANTINED policy
+// answer is IsError=false by design, so the callers below assert on the body
+// and the upstream-call witness instead.
+func callToolReadResult(t *testing.T, proxy *MCPProxyServer, ctx context.Context, name string) (*mcp.CallToolResult, string) {
+	t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = contracts.ToolVariantRead
+	req.Params.Arguments = map[string]interface{}{"name": name}
+	result, err := proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.Content)
+	return result, result.Content[0].(mcp.TextContent).Text
+}
+
+// fullTierAgentOn is the FR-009 "full-tier, a-only" caller: every permission
+// tier, restricted to the one server, so only an identity/approval gate can
+// refuse it.
+func fullTierAgentOn(server string) context.Context {
+	return agentCtx([]string{server}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, "")
+}
+
+// Spec 105 FR-009 G1 (task T004), retrieve-surface cell. Production discovery
+// on the merge base files the raw "ns:erase" under the collapsed key
+// (a, "erase") — see TestCheckToolApprovals_NamespacedTool_PendingUnderRawName
+// in internal/runtime — so a manual-trust server whose baseline approved
+// "erase" and later exposed "ns:erase" holds exactly ONE record: an approved
+// "erase". FR-009 says a collapsed legacy record approves only the exact raw
+// name it stores and the namespaced tool remains PENDING until approved by its
+// own name; while the quarantine gate is active, "no approval record" for a
+// tool the snapshot contains is pending, never ready, at every gate site.
+// Today the reader falls back to the approved "erase" record and dispatches
+// "ns:erase" for any caller holding its tier.
+func TestCallToolRead_NamespacedTool_NoOwnRecord_IsPendingNotInherited(t *testing.T) {
+	for label, ctx := range map[string]context.Context{
+		"full-tier a-only token": fullTierAgentOn("a"),
+		"api-key admin":          adminCtx(),
+	} {
+		t.Run(label, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{manualTrustServerConfig("a")})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			probe := watchPolicyDecisions(t, rt)
+			// Exactly what the merge-base producer leaves behind: the
+			// baseline "erase" approved, and NOTHING under "ns:erase".
+			up := startCountingUpstream(t, proxy, rt, "a",
+				readSpec("erase"),
+				toolSpec{Name: "ns:erase", Description: "Read ns:erase", Annotations: readSpec("ns:erase").Annotations, NoRecord: true},
+			)
+			_, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no exact-name record may exist")
+			serverCfg, err := proxy.storage.GetUpstreamServer("a")
+			require.NoError(t, err)
+			require.False(t, serverCfg.IsQuarantineSkipped(),
+				"fixture: the quarantine gate must be active for the server, or pending cannot apply")
+
+			_, text := callToolReadResult(t, proxy, ctx, "a:ns:erase")
+			assert.Contains(t, text, "TOOL_QUARANTINED",
+				"a snapshot tool with no record of its own must be pending, not inherit erase's approval")
+			assert.NotContains(t, text, "\"ok\"", "the upstream's answer must never be returned")
+			assert.Equal(t, int64(0), up.count.Load(), "the call must never reach the upstream")
+			assert.Empty(t, up.dispatched())
+
+			payload := probe.awaitOne(t)
+			assert.Equal(t, "blocked", payload["decision"])
+			assert.Equal(t, "a", payload["server_name"])
+			assert.Equal(t, "ns:erase", payload["tool_name"], "the activity record must carry the raw name")
+
+			// Positive control on the same fixture: the tool whose record
+			// exists under its exact name is admitted, under its exact name.
+			result, ctlText := callToolReadResult(t, proxy, ctx, "a:erase")
+			require.False(t, result.IsError, "control: erase is approved and must dispatch: %s", ctlText)
+			assert.Equal(t, int64(1), up.count.Load())
+			assert.Equal(t, []string{"erase"}, up.dispatched())
+		})
+	}
+}
+
+// manualTrustServerConfig is a trust_mode: manual server config — every
+// post-baseline addition or change is held for review, and the gate is never
+// skipped.
+func manualTrustServerConfig(name string) *config.ServerConfig {
+	return &config.ServerConfig{Name: name, Enabled: true, TrustMode: string(config.TrustModeManual)}
+}
+
+// Spec 105 FR-009 G4 (task T007), retrieve-surface cells. A tool name the
+// discovery snapshot of a KNOWN server does not contain has no resolvable
+// registration identity. Today tierForAnnotations grants it the destructive
+// tier, so any caller holding that tier — a full-tier token, or an
+// administrator who skips the tier gate — reaches the upstream with an
+// unverified name (the merge-base pins this in
+// TestCallToolRead_UndiscoveredTool_RequiresDestructiveTier's "token holding
+// destructive still reaches dispatch" cell, which the fix inverts). Research
+// D4: a failed resolution on a known server is refused with the insufficient-
+// permission body and zero upstream calls for EVERY caller, administrators
+// included (the SC-005 named exception); the unknown-server branch is
+// server-existence handling and is unchanged.
+//
+// Oracle note: the counting stub registers no handler for "ghost", so the
+// invocation count alone cannot witness a reach — the merge base reaches the
+// upstream and relays its own "tool 'ghost' not found" answer, which is why
+// the body is asserted alongside the count.
+func TestCallToolRead_UnresolvedIdentityOnKnownServer_RefusedForEveryCaller(t *testing.T) {
+	for label, ctx := range map[string]context.Context{
+		"full-tier a-only token": fullTierAgentOn("a"),
+		"api-key admin":          adminCtx(),
+	} {
+		t.Run(label, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			up := startCountingUpstream(t, proxy, rt, "a", readSpec("erase"))
+			require.Nil(t, proxy.lookupToolAnnotations("a", "ghost"), "fixture: the snapshot must not contain ghost")
+
+			result, text := callToolReadResult(t, proxy, ctx, "a:ghost")
+			require.True(t, result.IsError, "an unresolvable identity must be an error result, got: %s", text)
+			assert.Contains(t, text, "Permission denied",
+				"a failed identity resolution on a known server must be refused with the insufficient-permission body")
+			assert.NotContains(t, text, "not found", "the upstream's own answer must never be relayed")
+			assert.Equal(t, int64(0), up.count.Load(), "the call must never reach the upstream")
+
+			// Positive control: the discovered tool still dispatches.
+			ctl, ctlText := callToolReadResult(t, proxy, ctx, "a:erase")
+			require.False(t, ctl.IsError, "control: erase must dispatch: %s", ctlText)
+			assert.Equal(t, []string{"erase"}, up.dispatched())
+		})
+	}
+
+	t.Run("control: unknown server keeps the server-existence answer", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		up := startCountingUpstream(t, proxy, rt, "a", readSpec("erase"))
+
+		// On the retrieve surface an unknown server is classified
+		// server-not-configured by the shared gate and answered with the
+		// TOOL_BLOCKED policy body (IsError=false by design) — that answer
+		// is pinned here so the identity fix cannot widen into it.
+		_, text := callToolReadResult(t, proxy, adminCtx(), "zzz:ghost")
+		assert.NotContains(t, text, "Permission denied",
+			"an UNKNOWN server is server-existence handling, not identity resolution, and must keep its own answer")
+		assert.Contains(t, text, "TOOL_BLOCKED")
+		assert.Equal(t, int64(0), up.count.Load())
 	})
 }

@@ -427,3 +427,119 @@ func TestRunPreflightHashDisclosureAndPins(t *testing.T) {
 	assert.Equal(t, preflight.VerdictBlocked, stale.Verdict)
 	assert.Equal(t, int64(0), atomic.LoadInt64(fixture.upstreamHits))
 }
+
+// Spec 105 FR-009 gap G3 (task T006): preflightApprovalReader.ToolApproval
+// reads the approval record under the EXACT raw name only and reports "no
+// record" as the implicit-approved default (nil, nil). For a raw tool whose
+// approval identity was collapsed by the pre-105 discovery producer — a
+// pending record filed under "erase" for "ns:erase" — preflight therefore
+// answers `ready` for a:ns:erase while retrieve dispatch refuses it as pending
+// (evaluateExactToolGate merges the collapsed key).
+//
+// FR-009: "a pending approval for ns:erase is a pending approval for
+// ns:erase"; "while the quarantine gate is active for a server, 'no approval
+// record' for a tool its snapshot contains is pending, never ready, at every
+// gate site" — the preflight reader is one of those sites. Both layers are
+// asserted: the reader seam the gap map names, and the outcome the served
+// surface would return, so a fix landing at either layer is measured where it
+// is observable and a fix at neither cannot pass.
+func TestPreflight_CollapsedPendingRecordIsPendingNotReady(t *testing.T) {
+	fixture := newPreflightFixture(t, nil)
+	// trust_mode manual keeps the quarantine gate active for "a"
+	// (IsQuarantineSkipped is false; DefaultConfig leaves quarantine_enabled
+	// nil, which IsQuarantineEnabled reads as on).
+	fixture.addServer(t, &config.ServerConfig{Name: "a", Enabled: true, Protocol: "http", TrustMode: string(config.TrustModeManual)})
+	require.True(t, fixture.cfg.IsQuarantineEnabled(), "precondition: the quarantine gate is active")
+	fixture.indexTool(t, "a", "erase")
+	fixture.indexTool(t, "a", "ns:erase")
+
+	// The connection snapshot "a" is Ready and contains both raw names — the
+	// FR-009 wording is about a tool "its snapshot contains", so the snapshot
+	// is supplied at the one seam production reads it from.
+	fixture.proxy.preflightStateSource = func() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations, error) {
+		return stubState{state: preflight.RuntimeStateReady}, func(serverName, toolName string) *config.ToolAnnotations {
+			if serverName != "a" {
+				return nil
+			}
+			switch toolName {
+			case "erase":
+				return &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}
+			case "ns:erase":
+				return &config.ToolAnnotations{DestructiveHint: boolPtr(true)}
+			}
+			return nil
+		}, nil
+	}
+	t.Cleanup(func() { fixture.proxy.preflightStateSource = nil })
+
+	// The pre-105 producer state: the raw tool "ns:erase" has its pending
+	// record collapsed onto "erase", and nothing under its own name.
+	require.NoError(t, fixture.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:         "a",
+		ToolName:           "erase",
+		Status:             storage.ToolApprovalStatusPending,
+		CurrentDescription: "Erase for real",
+	}))
+	require.NoError(t, fixture.storage.DeleteToolApproval("a", "ns:erase"))
+	_, err := fixture.storage.GetToolApproval("a", "ns:erase")
+	require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "precondition: no exact-name record for ns:erase")
+
+	// Control (passes on HEAD): the retrieve-surface gate already reads the
+	// collapsed record as a pending lock, which is the disagreement G3 names.
+	gate := fixture.proxy.evaluateExactToolGate("a", "ns:erase")
+	require.NotNil(t, gate.approval)
+	require.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus, "control: retrieve dispatch refuses a:ns:erase as pending")
+
+	t.Run("reader: ToolApproval for ns:erase is the pending record, not nil", func(t *testing.T) {
+		reader := &preflightApprovalReader{storage: fixture.storage}
+		state, err := reader.ToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		require.NotNil(t, state, "no exact-name record must not read as implicit-approved while the collapsed record is pending")
+		assert.Equal(t, storage.ToolApprovalStatusPending, state.Status)
+		assert.False(t, state.Disabled)
+	})
+
+	t.Run("outcome: a:ns:erase is tool_pending_approval, not ready", func(t *testing.T) {
+		out, err := fixture.proxy.RunPreflight(context.Background(), preflight.Params{
+			Tools: []preflight.ToolRef{{ID: "a:ns:erase"}, {ID: "a:erase"}},
+		})
+		require.NoError(t, err)
+		require.Len(t, out.Results, 2)
+
+		nsErase := resultByID(t, out, "a:ns:erase")
+		assert.Equal(t, preflight.StatusUnavailable, nsErase.Status, "a:ns:erase must not be ready: %+v", nsErase)
+		assert.Equal(t, preflight.ReasonToolPendingApproval, nsErase.Reason)
+		assert.Empty(t, nsErase.Hash, "a pending tool carries no pin")
+
+		// The exact-name record keeps binding its own tool (control; passes
+		// on HEAD).
+		erase := resultByID(t, out, "a:erase")
+		assert.Equal(t, preflight.StatusUnavailable, erase.Status)
+		assert.Equal(t, preflight.ReasonToolPendingApproval, erase.Reason)
+
+		assert.Equal(t, int64(0), atomic.LoadInt64(fixture.upstreamHits), "a preflight must never touch an upstream server")
+	})
+
+	// A record approved under the exact name keeps binding only its own raw
+	// name (FR-009 conservative legacy rule), so approving "erase" must not
+	// make ns:erase ready.
+	t.Run("approving the collapsed name does not ready the namespaced tool", func(t *testing.T) {
+		require.NoError(t, fixture.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+		}))
+		t.Cleanup(func() {
+			require.NoError(t, fixture.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusPending, CurrentDescription: "Erase for real",
+			}))
+		})
+
+		out, err := fixture.proxy.RunPreflight(context.Background(), preflight.Params{
+			Tools: []preflight.ToolRef{{ID: "a:ns:erase"}, {ID: "a:erase"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, preflight.StatusReady, resultByID(t, out, "a:erase").Status, "control: the exact-name approval readies its own tool")
+		nsErase := resultByID(t, out, "a:ns:erase")
+		assert.NotEqual(t, preflight.StatusReady, nsErase.Status,
+			"a:ns:erase has no approval under its own name and must stay pending: %+v", nsErase)
+	})
+}
