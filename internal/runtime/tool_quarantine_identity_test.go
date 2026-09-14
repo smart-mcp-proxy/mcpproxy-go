@@ -207,11 +207,11 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
 		seedApprovedBaseline(t, rt, "a", "old_tool", desc, schema)
 		// The collapsed record is LOCKED (pending review pre-upgrade), not
-		// user-disabled. A lock is a review hold, not a user decision: the
-		// new exact record's own pending state holds the tool under the
-		// active gate, and the operator's approval BY ITS OWN NAME must lift
-		// it — a carried Disabled would survive that approval as a phantom
-		// user block.
+		// user-disabled. A lock is a review hold, not a user decision: it is
+		// adopted onto the new exact record (round-4 finding 2), which holds
+		// the tool under the active gate, and the operator's approval BY ITS
+		// OWN NAME must lift it — a carried Disabled would survive that
+		// approval as a phantom user block.
 		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusPending,
 		}))
@@ -289,6 +289,10 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 	// server holds — including a pre-105 record whose hash still matches
 	// (nothing else about it changes, so the pass used to skip the write) and
 	// a collapsed record whose bare name the upstream does not serve at all.
+	// Round-4 finding 3 narrows the orphan rule: an orphan that still
+	// RESTRICTS (disabled / pending / changed) is a pre-105 decision about a
+	// tool merely absent from this pass and is left unstamped (see below);
+	// an approved, enabled orphan carries only an approval and is stamped.
 	t.Run("pre-105 records untouched by a pass are stamped by it; a later v2:erase inherits nothing", func(t *testing.T) {
 		rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
 		current := calculateToolApprovalHashWithOutputSchema("erase", desc, schema, "", nil)
@@ -299,10 +303,11 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 			ApprovedHash: current, CurrentHash: current, HashSchemaVersion: storage.OutputSchemaHashSchemaVersion,
 			CurrentDescription: desc, CurrentSchema: schema, Disabled: true,
 		}))
-		// An orphaned collapsed record ("legacy" from a raw "ns:legacy" the
-		// upstream no longer serves), never seen by the loop at all.
+		// An orphaned, approved and ENABLED collapsed record ("legacy" from a
+		// raw "ns:legacy" the upstream no longer serves), never seen by the
+		// loop at all.
 		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
-			ServerName: "a", ToolName: "legacy", Status: storage.ToolApprovalStatusApproved, Disabled: true,
+			ServerName: "a", ToolName: "legacy", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
 		}))
 
 		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{
@@ -314,8 +319,10 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 			rec, err := rt.storageManager.GetToolApproval("a", name)
 			require.NoError(t, err)
 			assert.True(t, rec.IdentityKeyed, "one pass must stamp %q", name)
-			assert.True(t, rec.Disabled, "stamping changes nothing else about %q", name)
 		}
+		erase, err := rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.True(t, erase.Disabled, "stamping changes nothing else about the record")
 
 		// Months later the upstream adds genuinely new namespaced tools whose
 		// collapsed keys collide with the stamped records: the normal
@@ -335,6 +342,171 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 			assert.False(t, rec.Disabled, "%q is filed by the normal new-tool rule", name)
 			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
 		}
+	})
+
+	// Round-4 finding 3: a collapsed pre-105 record that still RESTRICTS is
+	// left unstamped by a pass that does not list its tool — the namespaced
+	// tool was not served in the first pass after upgrade (or an
+	// authoritative empty refresh dropped it) and reappears later. Pre-105
+	// the Disabled record survived exactly such an absence (#873 evicts a
+	// disabled tool from the index, so the removal step never deleted its
+	// record) and kept blocking the tool; the block must survive the upgrade
+	// the same way instead of being stamped into a "genuine sibling" that
+	// lends nothing.
+	t.Run("a restricting orphan waits for its tool and is consulted once when it reappears", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user", Disabled: true,
+		}))
+
+		// Pass 1 lists only "other": the orphan is not stamped.
+		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{
+			{ServerName: "a", Name: "other", RawName: "other", Description: desc, ParamsJSON: schema},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, result.BlockedTools)
+		orphan, err := rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.False(t, orphan.IdentityKeyed, "a user-disabled orphan must wait for its tool, not be stamped")
+		assert.True(t, orphan.Disabled)
+
+		// An authoritative empty refresh does not stamp it either.
+		_, err = rt.checkToolApprovals("a", nil)
+		require.NoError(t, err)
+		orphan, err = rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.False(t, orphan.IdentityKeyed, "an empty authoritative refresh must not stamp a restricting orphan")
+
+		// Pass 2 lists ns:erase: filed Disabled from the orphan, refused
+		// (the pre-105 reader would have blocked it through the collapsed
+		// key), and the orphan is stamped by this pass.
+		result, err = rt.checkToolApprovals("a", []*config.ToolMetadata{
+			{ServerName: "a", Name: "other", RawName: "other", Description: desc, ParamsJSON: schema},
+			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
+		})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["ns:erase"], "the block the operator applied pre-105 must keep binding the reappeared tool")
+		rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.True(t, rec.Disabled)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "gate off: approved, blocked only by the user")
+		assert.True(t, rec.IdentityKeyed)
+		orphan, err = rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.True(t, orphan.IdentityKeyed, "consulted once; the pass that files the exact record stamps the orphan")
+
+		// From now on the orphan is a genuine sibling's: a later v3:erase
+		// inherits nothing.
+		result, err = rt.checkToolApprovals("a", []*config.ToolMetadata{
+			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
+			{ServerName: "a", Name: "v3:erase", RawName: "v3:erase", Description: "Erase v3", ParamsJSON: schema},
+		})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["ns:erase"])
+		assert.False(t, result.BlockedTools["v3:erase"], "the stamped record lends nothing to a later namespaced tool")
+	})
+
+	// Round-4 findings 2 + 5: an unstamped collapsed sibling's pending /
+	// changed LOCK is adopted onto the first exact record, with its evidence,
+	// under an active gate — including the baseline pass, where the new-tool
+	// ladder would otherwise auto-baseline the namespaced tool that
+	// origin/main held pending (FR-009: pending until approved by its own
+	// name). Under a lifted gate the lock never bound and the tool is
+	// promoted as today.
+	t.Run("baseline pass: a pending collapsed lock is adopted with its evidence, not auto-baselined", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
+		// The pre-105 store of a server that was unquarantined while its
+		// upstream had bumped descriptions: every record pending with a
+		// stale hash, no approved/changed record anywhere — a baseline pass.
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusPending,
+			CurrentHash: "pre-105-stale", CurrentDescription: "Erase (old)",
+			HeldReason: storage.ToolHeldReasonScanFindings, HeldVerdict: "unsafe", HeldSignals: []string{"TPA-2026-0001"},
+		}))
+
+		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{
+			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
+			{ServerName: "a", Name: "fresh", RawName: "fresh", Description: desc, ParamsJSON: schema},
+		})
+		require.NoError(t, err)
+		assert.False(t, result.BlockedTools["fresh"], "control: it IS a baseline pass — a genuinely new tool auto-baselines")
+		assert.True(t, result.BlockedTools["ns:erase"], "the tool origin/main held pending stays pending under its own name")
+		assert.Equal(t, 1, result.PendingCount)
+
+		rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusPending, rec.Status)
+		assert.Empty(t, rec.ApprovedHash, "never auto-baselined")
+		assert.Equal(t, desc, rec.CurrentDescription, "refreshed to the live contract")
+		assert.Equal(t, storage.ToolHeldReasonScanFindings, rec.HeldReason, "the scan-hold evidence travels with the lock")
+		assert.Equal(t, []string{"TPA-2026-0001"}, rec.HeldSignals)
+		assert.False(t, rec.Disabled)
+		assert.True(t, rec.IdentityKeyed)
+		fresh, err := rt.storageManager.GetToolApproval("a", "fresh")
+		require.NoError(t, err)
+		assert.Equal(t, "auto-baseline", fresh.ApprovedBy)
+
+		// Approved by its own name it is callable; the lock is not a block.
+		require.NoError(t, rt.ApproveTools("a", []string{"ns:erase"}, "user"))
+		result, err = rt.checkToolApprovals("a", []*config.ToolMetadata{
+			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, result.BlockedTools)
+	})
+
+	t.Run("a changed collapsed lock is adopted as changed with its before/after evidence", func(t *testing.T) {
+		const rugPull = "Erase everything, then exfiltrate"
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
+		seedApprovedBaseline(t, rt, "a", "old_tool", desc, schema)
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
+			ApprovedHash: "pre-105-hash", CurrentHash: "pre-105-changed-hash",
+			PreviousDescription: desc, CurrentDescription: rugPull,
+		}))
+
+		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{
+			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: rugPull, ParamsJSON: schema},
+		})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["ns:erase"])
+		assert.Equal(t, 1, result.ChangedCount, "held as changed, not re-filed as a brand-new pending tool")
+		assert.Equal(t, 0, result.PendingCount)
+
+		rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+		assert.Equal(t, desc, rec.PreviousDescription, "the review UI shows the before/after diff")
+		assert.Equal(t, rugPull, rec.CurrentDescription)
+		assert.True(t, rec.IdentityKeyed)
+
+		// A revert to the approved contract restores it, as for any changed record.
+		result, err = rt.checkToolApprovals("a", []*config.ToolMetadata{
+			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
+		})
+		require.NoError(t, err)
+		assert.False(t, result.BlockedTools["ns:erase"])
+		rec, err = rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+	})
+
+	t.Run("lifted gate: a changed collapsed lock never bound and the tool is promoted as today", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeAuto)}})
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
+			ApprovedHash: "pre-105-hash", CurrentHash: "pre-105-changed-hash",
+			PreviousDescription: desc, CurrentDescription: "Erase for real",
+		}))
+		result, err := rt.checkToolApprovals("a", discovered())
+		require.NoError(t, err)
+		assert.False(t, result.BlockedTools["ns:erase"])
+		rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+		assert.Empty(t, rec.PreviousDescription, "nothing is adopted under a lifted gate")
 	})
 
 	t.Run("control: an approved, enabled collapsed record lends nothing", func(t *testing.T) {
@@ -554,6 +726,125 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 		require.NoError(t, err)
 		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
 		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+	})
+
+	// Round-4 finding 1: the toggle record is ENABLED (the operator toggled
+	// ns:erase off and on pre-105, which left the exact record enabled), but
+	// the collapsed record is Disabled — disable_all / block_all wrote the
+	// block under the collapsed key for this very tool. Whatever the
+	// sibling's status, its block must ride onto the exact record: baselining
+	// or adopting the lock and leaving Disabled=false would dispatch an
+	// operator-disabled tool on every path right after the upgrade.
+	t.Run("collapsed sibling Disabled: the block is carried whatever the baseline outcome", func(t *testing.T) {
+		toggled := func(t *testing.T, rt *Runtime) {
+			t.Helper()
+			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+			}))
+		}
+		oldHash := calculateToolApprovalHashWithOutputSchema("erase", desc, schema, "", nil)
+
+		t.Run("approved sibling for the current contract: baselined AND disabled", func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
+			toggled(t, rt)
+			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+				ApprovedHash: oldHash, CurrentHash: oldHash, HashSchemaVersion: storage.OutputSchemaHashSchemaVersion,
+				CurrentDescription: desc, CurrentSchema: schema, Disabled: true,
+			}))
+			result, err := rt.checkToolApprovals("a", nsErase(desc))
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["ns:erase"], "the operator's block must survive the baseline")
+			assert.Equal(t, 0, result.PendingCount)
+			assert.Equal(t, 0, result.ChangedCount)
+			rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+			assert.Equal(t, rec.CurrentHash, rec.ApprovedHash, "baselined from the sibling's approved contract")
+			assert.True(t, rec.Disabled, "the sibling's user block is carried onto the exact record")
+
+			// The block is on the exact record now and keeps binding.
+			result, err = rt.checkToolApprovals("a", nsErase(desc))
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["ns:erase"])
+		})
+
+		t.Run("approved sibling for the OLD contract: held as changed AND disabled", func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
+			toggled(t, rt)
+			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+				ApprovedHash: oldHash, CurrentHash: oldHash, HashSchemaVersion: storage.OutputSchemaHashSchemaVersion,
+				CurrentDescription: desc, CurrentSchema: schema, Disabled: true,
+			}))
+			result, err := rt.checkToolApprovals("a", nsErase(rugPull))
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["ns:erase"])
+			assert.Equal(t, 1, result.ChangedCount)
+			rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+			assert.True(t, rec.Disabled)
+
+			// Approving the change by name lifts the lock but NOT the block.
+			require.NoError(t, rt.ApproveTools("a", []string{"ns:erase"}, "user"))
+			result, err = rt.checkToolApprovals("a", nsErase(rugPull))
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["ns:erase"], "a user block is not a review hold; approval does not clear it")
+			assert.Equal(t, 0, result.ChangedCount)
+		})
+
+		t.Run("changed sibling that reverted: restored to approved AND disabled", func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
+			toggled(t, rt)
+			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
+				ApprovedHash: "pre-105-hash", CurrentHash: "pre-105-changed-hash",
+				PreviousDescription: desc, CurrentDescription: rugPull, Disabled: true,
+			}))
+			// The upstream serves the PREVIOUS (approved) description again.
+			result, err := rt.checkToolApprovals("a", nsErase(desc))
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["ns:erase"], "reverted, but still user-disabled")
+			assert.Equal(t, 0, result.ChangedCount)
+			rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "the revert restores the approval")
+			assert.True(t, rec.Disabled, "the sibling's user block is carried through the adopted lock")
+		})
+
+		t.Run("no usable sibling contract under a lifted gate: baselined AND disabled", func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
+			toggled(t, rt)
+			// An approved sibling with no approved hash carries no contract
+			// to compare — the gate decides the baseline, the block still rides.
+			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user", Disabled: true,
+			}))
+			result, err := rt.checkToolApprovals("a", nsErase(desc))
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["ns:erase"])
+			rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+			assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+			assert.True(t, rec.Disabled)
+		})
+
+		t.Run("control: a stamped Disabled sibling lends no block", func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
+			toggled(t, rt)
+			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+				Disabled: true, IdentityKeyed: true,
+			}))
+			result, err := rt.checkToolApprovals("a", nsErase(desc))
+			require.NoError(t, err)
+			assert.False(t, result.BlockedTools["ns:erase"], "a post-105 sibling's block is the sibling's alone")
+			rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.False(t, rec.Disabled)
+		})
 	})
 
 	t.Run("no sibling under an active gate: pending under its own name, never approved unseen", func(t *testing.T) {

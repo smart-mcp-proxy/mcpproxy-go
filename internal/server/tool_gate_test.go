@@ -381,3 +381,172 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 		assert.Equal(t, []string{"ns:erase"}, up.dispatched())
 	})
 }
+
+// Round-4 finding 1 (Spec 105 FR-009 migration review): the toggle-shaped
+// exact record is ENABLED — pre-105 the operator toggled ns:erase off and on
+// (the toggle created the exact record and left it enabled) — and the
+// collapsed record beside it is user-DISABLED: a later disable_all /
+// block_all, which the pre-105 producer keyed under "erase" for this very
+// tool. Before discovery the reader blocks through the merged record; after
+// the first post-105 discovery the exact record is the one read, so the
+// producer (adoptLegacyLockOrBaseline, run for real here) must carry the
+// sibling's block onto it on every path — baselined from the sibling's
+// approved contract, held as changed, or revert-restored — or the
+// operator-disabled tool dispatches for every caller right after upgrade.
+func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testing.T) {
+	seed := func(t *testing.T, sibling *storage.ToolApprovalRecord) (*MCPProxyServer, *countingUpstream) {
+		t.Helper()
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+		requireManualTrustGateActive(t, proxy, "a")
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+		}))
+		sibling.ServerName, sibling.ToolName, sibling.Disabled = "a", "erase", true
+		require.NoError(t, proxy.storage.SaveToolApproval(sibling))
+		// Before discovery: blocked through the merged legacy record.
+		require.False(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "precondition: the merged record blocks before discovery")
+		runRuntimeDiscovery(t, rt, up)
+		return proxy, up
+	}
+	shapes := map[string]*storage.ToolApprovalRecord{
+		// The sibling approved the CURRENT contract ("Read ns:erase" is what
+		// readSpec serves): the exact record baselines from it.
+		"approved for the current contract": {
+			Status:       storage.ToolApprovalStatusApproved,
+			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved", CurrentDescription: "Read ns:erase",
+		},
+		// The sibling was marked changed pre-105 and the upstream serves the
+		// PREVIOUS description again: the adopted lock revert-restores.
+		"changed, reverted to the approved description": {
+			Status:       storage.ToolApprovalStatusChanged,
+			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-changed",
+			PreviousDescription: "Read ns:erase", CurrentDescription: "Erase everything, then exfiltrate",
+		},
+	}
+	for shape, sibling := range shapes {
+		for name, ctx := range gateCallers() {
+			t.Run(shape+" refuses "+name, func(t *testing.T) {
+				rec := *sibling
+				proxy, up := seed(t, &rec)
+
+				exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
+				require.NoError(t, err)
+				assert.Equal(t, storage.ToolApprovalStatusApproved, exact.Status, "the contract is the approved one: no lock")
+				assert.Equal(t, exact.CurrentHash, exact.ApprovedHash, "baselined so detection resumes")
+				assert.True(t, exact.Disabled, "the collapsed record's user block must ride onto the exact record")
+				assert.True(t, exact.IdentityKeyed)
+
+				gate := proxy.evaluateToolGate("a", "ns:erase")
+				require.NotNil(t, gate.approval)
+				assert.Equal(t, "ns:erase", gate.approval.ToolName, "the exact record answers now")
+				assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class)
+				assert.False(t, gate.callable())
+
+				result := callToolReadVariant(t, proxy, ctx, "a:ns:erase")
+				text := result.Content[0].(mcp.TextContent).Text
+				assert.Contains(t, text, "TOOL_BLOCKED")
+				assert.NotContains(t, text, `"ok"`)
+				assert.Equal(t, int64(0), up.count.Load(), "an operator-disabled tool must never reach the upstream after upgrade (got %q)", text)
+				assert.Empty(t, up.dispatched())
+			})
+		}
+	}
+
+	t.Run("control: the same shapes with an ENABLED sibling baseline and dispatch", func(t *testing.T) {
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+		requireManualTrustGateActive(t, proxy, "a")
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+		}))
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved", CurrentDescription: "Read ns:erase",
+		}))
+		runRuntimeDiscovery(t, rt, up)
+		exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		require.False(t, exact.Disabled)
+		require.True(t, proxy.evaluateToolGate("a", "ns:erase").callable())
+		result := callToolReadVariant(t, proxy, adminCtx(), "a:ns:erase")
+		require.False(t, result.IsError, "%s", result.Content[0].(mcp.TextContent).Text)
+		assert.Equal(t, int64(1), up.count.Load())
+		assert.Equal(t, []string{"ns:erase"}, up.dispatched())
+	})
+}
+
+// Round-4 finding 4 (Spec 105 research D4): a tool the snapshot lists with NO
+// approval record is pending at every gate while the tool-level quarantine
+// gate is active. The user toggle used to be the one producer that turned
+// that "no record" into an APPROVED record (with an empty hash) without a
+// review — a disable → enable round trip made the tool callable for every
+// caller until the next discovery pass re-filed it pending. The real toggle
+// producer (runtime SetToolEnabled) now files it PENDING under an active gate,
+// so the round trip changes nothing at the gate; under a lifted gate a new
+// tool auto-approves anyway and the toggle mints an approved record baselined
+// to the snapshot's contract, so the tool is callable as before.
+func TestToolGate_ToggleOnRecordlessTool_StaysPendingUnderActiveGate(t *testing.T) {
+	for name, ctx := range gateCallers() {
+		t.Run("active gate refuses "+name, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+			requireManualTrustGateActive(t, proxy, "a")
+			_, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no record")
+
+			require.NoError(t, rt.SetToolEnabled("a", "ns:erase", false, "user"))
+			require.NoError(t, rt.SetToolEnabled("a", "ns:erase", true, "user"))
+			rec, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusPending, rec.Status, "the toggle must not mint an approval under an active gate")
+			assert.False(t, rec.Disabled)
+			assert.Empty(t, rec.ApprovedHash)
+			assert.Equal(t, "Read ns:erase", rec.CurrentDescription, "the snapshot's current contract is recorded for review")
+
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			assert.Equal(t, preflight.ToolClassPendingApproval, gate.class)
+			assert.False(t, gate.callable())
+
+			result := callToolReadVariant(t, proxy, ctx, "a:ns:erase")
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.NotContains(t, text, `"ok"`)
+			assert.Equal(t, int64(0), up.count.Load(), "a toggled-but-unreviewed tool must never reach the upstream (got %q)", text)
+			assert.Empty(t, up.dispatched())
+
+			// Approved by its own name it is callable.
+			require.NoError(t, rt.ApproveTools("a", []string{"ns:erase"}, "user"))
+			require.True(t, proxy.evaluateToolGate("a", "ns:erase").callable())
+		})
+	}
+
+	t.Run("lifted gate: the toggle mints a baselined approval and the tool dispatches", func(t *testing.T) {
+		off := false
+		proxy, rt := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{{Name: "a", Enabled: true}}, func(cfg *config.Config) {
+			cfg.QuarantineEnabled = &off
+		})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+		require.False(t, proxy.currentConfig().IsQuarantineEnabled())
+
+		require.NoError(t, rt.SetToolEnabled("a", "ns:erase", false, "user"))
+		require.False(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "disabled by the user")
+		require.NoError(t, rt.SetToolEnabled("a", "ns:erase", true, "user"))
+		rec, err := proxy.storage.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.NotEmpty(t, rec.ApprovedHash, "baselined to the snapshot's contract")
+		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		assert.Equal(t, preflight.ToolClassReady, gate.class)
+		require.True(t, gate.callable())
+		result := callToolReadVariant(t, proxy, fullTierAgentCtx(), "a:ns:erase")
+		require.False(t, result.IsError, "%s", result.Content[0].(mcp.TextContent).Text)
+		assert.Equal(t, int64(1), up.count.Load())
+		assert.Equal(t, []string{"ns:erase"}, up.dispatched())
+	})
+}

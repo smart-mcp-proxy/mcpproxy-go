@@ -439,16 +439,21 @@ collapsed record stays with the bare name it stores.
 Two things about the old record carry over so an upgrade never silently
 widens access:
 
-- A **user block** (a `Disabled` toggle) on the collapsed record is copied
-  onto the namespaced tool's new record, and the log says so at `WARN` naming
-  both keys. The namespaced tool stays hidden until you enable it under its
-  own name — a tool you had blocked before the upgrade is still blocked after
-  it. A **quarantine lock** (`pending` / `changed`) on the collapsed record is
-  *not* turned into a block: under an active gate the new record is pending
-  under its own name anyway, and approving it by that name is all it takes
-  (no second enable toggle); under `trust_mode: auto` or
-  `quarantine_enabled: false` the old lock never bound and the tool
-  auto-approves as before.
+- A **user block** (a `Disabled` toggle, `disable_all`, `block_all`) on the
+  collapsed record is copied onto the namespaced tool's new record, and the
+  log says so at `WARN` naming both keys. The namespaced tool stays hidden
+  until you enable it under its own name — a tool you had blocked before the
+  upgrade is still blocked after it. A **quarantine lock** (`pending` /
+  `changed`) on the collapsed record is adopted onto the new record *with its
+  evidence* (the before/after definition of a rug pull, the scan verdict of
+  a held tool) on `manual` and `scan` trust — including the first discovery
+  of a server that has no baseline yet, where a brand-new tool would be
+  auto-baselined: a tool the old release held for review stays held until
+  you approve it by its own name, and the review shows what the old release
+  had flagged rather than "new tool". The lock is never turned into a block:
+  approving the tool by its name is all it takes (no second enable toggle).
+  Under `trust_mode: auto` or `quarantine_enabled: false` the old lock never
+  bound and the tool auto-approves as before.
 - A namespaced tool you had **toggled** in the UI before the upgrade already
   has a record under its exact name — one that the toggle created without an
   approved contract hash. Such a record carries no approval decision of its
@@ -460,18 +465,34 @@ widens access:
   detection works from then on — while a differing definition is held as
   `changed` with the approved one as the before-evidence, exactly as the
   collapsed record itself would have been (a tool that changed while it had
-  no live baseline is a potential rug pull, not a new baseline). With no
-  collapsed record at all the tool is pending under its own name on `manual`
-  and `scan` trust (a green scan approves it on `scan`), and baselined on
-  `trust_mode: auto` or with `quarantine_enabled: false`. Nothing you toggled
-  is ever approved for a definition nobody reviewed.
+  no live baseline is a potential rug pull, not a new baseline). A user
+  block on the collapsed record rides along on every one of those outcomes.
+  With no collapsed record at all the tool is pending under its own name on
+  `manual` and `scan` trust (a green scan approves it on `scan`), and
+  baselined on `trust_mode: auto` or with `quarantine_enabled: false`.
+  Nothing you toggled is ever approved for a definition nobody reviewed.
+
+The same rule now applies to the toggle itself: disabling or re-enabling a
+tool that has **no approval record yet** (a tool discovery listed but never
+filed) creates a `pending` record while the quarantine gate is active for its
+server — the toggle records visibility, it does not approve — so a disable →
+enable round trip leaves the tool pending until you approve it by name.
+Under `trust_mode: auto` or `quarantine_enabled: false` the record is
+approved and baselined to the definition the server currently reports.
 
 Only records written by an older release are consulted this way. Every record
 this release writes is stamped as identity-keyed, and the first discovery pass
 after upgrade stamps every remaining record the server holds — including
 collapsed records for tools the server no longer lists — so the migration
 runs exactly once per server: a genuine sibling `erase` you disable later
-never affects a new `v2:erase`.
+never affects a new `v2:erase`. The one exception is an old record that still
+*restricts* — user-disabled, `pending` or `changed` — for a tool the pass did
+not list (the tool was not served on the first pass after upgrade, or an
+authoritative empty refresh dropped it). Such a record is a decision you or
+the old release made about a tool that is merely absent, so it is left
+unstamped and waits: when the tool reappears, the pass that files its exact
+record consults the old record once — the block or lock carries over exactly
+as above — and stamps it then.
 
 ## Disabling Quarantine
 

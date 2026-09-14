@@ -1300,25 +1300,51 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 		}
 	}
 
-	// Reconnect restores the retained set AND its marker for server1; the
-	// empty server has nothing to restore and stays undiscovered.
+	// The disconnect clears the marker on the retained Supervisor state too:
+	// a reconcile pass (which copies the retained state back into the
+	// StateView) must not resurrect "discovery completed" for a connection
+	// that has not run a pass — the retained tools survive, the marker does
+	// not.
+	if snap := sup.snapshot.Load().(*ServerStateSnapshot); snap.Servers["server1"].ToolsDiscovered || len(snap.Servers["server1"].Tools) != 1 {
+		t.Errorf("server1 retained state after disconnect: marker must be cleared, tools kept, got discovered=%v tools=%d",
+			snap.Servers["server1"].ToolsDiscovered, len(snap.Servers["server1"].Tools))
+	}
+	_ = sup.reconcile(configSvc.Current())
+	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1 after disconnect+reconcile: marker must stay cleared with the tools retained, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
+
+	// Reconnect restores the retained set for server1 but NOT the marker —
+	// the next connection needs its own discovery pass; the empty server has
+	// nothing to restore and stays undiscovered.
 	for _, name := range []string{"server1", "empty"} {
 		sup.updateSnapshotFromEvent(Event{
 			Type: EventServerConnected, ServerName: name, Timestamp: time.Now(),
 			Payload: map[string]interface{}{"connected": true},
 		})
 	}
-	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
-		t.Errorf("server1 after reconnect: retained set and marker must be restored, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1 after reconnect: retained set restored without the marker, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
 	if st := status("empty"); st.ToolsDiscovered {
 		t.Error("empty after reconnect: nothing retained, must stay undiscovered until discovery re-runs")
 	}
 
-	// A reconcile pass carries the marker over with the retained tools.
+	// A reconcile pass carries the (cleared) marker over with the retained
+	// tools; the connection's own discovery pass re-stamps it.
+	_ = sup.reconcile(configSvc.Current())
+	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1 after reconnect+reconcile: marker must stay cleared until discovery re-runs, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
+	if err := sup.RefreshServerToolsFromDiscovery("server1", tools); err != nil {
+		t.Fatalf("RefreshServerToolsFromDiscovery: %v", err)
+	}
+	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1 after rediscovery: marker must be re-stamped with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
 	_ = sup.reconcile(configSvc.Current())
 	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
-		t.Errorf("server1 after reconcile: marker must survive with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+		t.Errorf("server1 after rediscovery+reconcile: marker must survive with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
 
 	// The lenient connect path and the sweep stamp a server whose tools/list
@@ -1349,8 +1375,8 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	if snap := sup.snapshot.Load().(*ServerStateSnapshot); snap.Version != before+1 {
 		t.Errorf("an idempotent stamp must not publish, got version %d", snap.Version)
 	}
-	// A server whose StateView marker was cleared by a disconnect (the
-	// Supervisor snapshot keeps its stamp) is re-stamped on the StateView side.
+	// A disconnect clears the marker on both sides; a zero-tool list on the
+	// next connection re-stamps both.
 	sup.updateSnapshotFromEvent(Event{
 		Type: EventServerDisconnected, ServerName: "fresh", Timestamp: time.Now(),
 		Payload: map[string]interface{}{"connected": false},
@@ -1358,8 +1384,11 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	if status("fresh").ToolsDiscovered {
 		t.Fatal("fresh after disconnect: StateView marker must be cleared")
 	}
+	if sup.snapshot.Load().(*ServerStateSnapshot).Servers["fresh"].ToolsDiscovered {
+		t.Fatal("fresh after disconnect: the retained Supervisor state must drop its stamp too")
+	}
 	sup.MarkServersToolsDiscovered([]string{"fresh"})
-	if !status("fresh").ToolsDiscovered {
-		t.Error("fresh: a zero-tool list after reconnect must stamp the StateView even though the snapshot retained its stamp")
+	if !status("fresh").ToolsDiscovered || !sup.snapshot.Load().(*ServerStateSnapshot).Servers["fresh"].ToolsDiscovered {
+		t.Error("fresh: a zero-tool list after reconnect must stamp both the StateView and the retained state")
 	}
 }

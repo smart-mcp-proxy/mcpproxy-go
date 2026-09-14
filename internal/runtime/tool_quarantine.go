@@ -367,6 +367,62 @@ type ToolApprovalResult struct {
 	ChangedCount int
 }
 
+// toolQuarantineGate is the per-server resolution of the tool-level
+// quarantine gate — the single place the global flag, the server's
+// skip/quarantined state and its trust mode (spec 086) are folded into the
+// enforcement levels checkToolApprovals and the user toggle
+// (setToolEnabledNoEmit) key on.
+type toolQuarantineGate struct {
+	globalEnabled     bool
+	serverSkipped     bool
+	serverQuarantined bool
+	// autoApproveChanges: trust_mode auto (today's behavior — every change
+	// and addition auto-approves).
+	autoApproveChanges bool
+	// scanMode: trust_mode scan — a change auto-approves ONLY on a green
+	// in-process TPA verdict, else it is held (fail closed).
+	scanMode bool
+	// enforceNewTools: block NEW tools for review (unless quarantine is
+	// disabled globally or the server is skipped). Even trusted
+	// (non-quarantined) servers have new tools reviewed when quarantine is
+	// globally enabled — this prevents injection via new tool additions on
+	// compromised servers; only skip_quarantine=true explicitly opts out.
+	enforceNewTools bool
+	// enforceQuarantine: full quarantine mode for servers explicitly
+	// quarantined.
+	enforceQuarantine bool
+}
+
+// active reports whether a new, unreviewed tool on this server is held for
+// review under its own name (the mirror image of neverBaselinedGate.lifted):
+// quarantine is enforced for the server and the operator has not opted into
+// auto-approving changes. trust_mode: scan counts as active — a scan can
+// approve a change discovery observes, never a record the toggle mints.
+func (g toolQuarantineGate) active() bool {
+	return g.enforceNewTools && !g.autoApproveChanges
+}
+
+// resolveToolQuarantineGate resolves the gate for a server from the current
+// config (trust mode: manual → every change/addition held; auto → all
+// auto-approved; scan → green-scan-gated).
+func (r *Runtime) resolveToolQuarantineGate(serverName string) toolQuarantineGate {
+	cfg := r.Config()
+	gate := toolQuarantineGate{globalEnabled: cfg.IsQuarantineEnabled()}
+	for _, sc := range cfg.Servers {
+		if sc.Name == serverName {
+			mode := sc.EffectiveTrustMode()
+			gate.serverSkipped = sc.IsQuarantineSkipped()
+			gate.serverQuarantined = sc.Quarantined
+			gate.autoApproveChanges = mode == config.TrustModeAuto
+			gate.scanMode = mode == config.TrustModeScan
+			break
+		}
+	}
+	gate.enforceNewTools = gate.globalEnabled && !gate.serverSkipped
+	gate.enforceQuarantine = gate.enforceNewTools && gate.serverQuarantined
+	return gate
+}
+
 // checkToolApprovals checks and updates tool approval records for discovered tools.
 // It returns the set of tool names that should be blocked (not indexed).
 // If quarantine is disabled (globally or per-server), new tools are auto-approved
@@ -378,39 +434,13 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	}
 
 	// Determine if quarantine is enforced for this server
-	cfg := r.Config()
-	globalEnabled := cfg.IsQuarantineEnabled()
-
-	serverSkipped := false
-	serverQuarantined := false
-	autoApproveChanges := false
-	scanMode := false
-	for _, sc := range cfg.Servers {
-		if sc.Name == serverName {
-			// Single trust-tier resolution point (spec 086):
-			//   auto   -> autoApproveChanges=true (today's behavior)
-			//   scan   -> scanMode=true; a change auto-approves ONLY on a green
-			//             in-process TPA verdict, else it is held (fail closed)
-			//   manual -> both false; every change/addition is held
-			mode := sc.EffectiveTrustMode()
-			serverSkipped = sc.IsQuarantineSkipped()
-			serverQuarantined = sc.Quarantined
-			autoApproveChanges = mode == config.TrustModeAuto
-			scanMode = mode == config.TrustModeScan
-			break
-		}
-	}
-
-	// Quarantine enforcement levels:
-	// 1. enforceNewTools: block NEW tools for review (unless quarantine is disabled or server skipped)
-	// 2. enforceQuarantine: full quarantine mode for servers explicitly quarantined
-	//
-	// Even trusted (non-quarantined) servers should have new tools reviewed when quarantine
-	// is globally enabled. This prevents injection attacks via new tool additions on
-	// compromised servers. Only skip_quarantine=true explicitly opts out.
-	// Changed tools (rug pull) are always blocked when globalEnabled is true (line ~438).
-	enforceNewTools := globalEnabled && !serverSkipped
-	enforceQuarantine := globalEnabled && !serverSkipped && serverQuarantined
+	gate := r.resolveToolQuarantineGate(serverName)
+	globalEnabled := gate.globalEnabled
+	serverQuarantined := gate.serverQuarantined
+	autoApproveChanges := gate.autoApproveChanges
+	scanMode := gate.scanMode
+	enforceNewTools := gate.enforceNewTools
+	enforceQuarantine := gate.enforceQuarantine
 
 	// Trust-baseline model (MCP-2931): a trusted (non-quarantined) server whose
 	// tools have NEVER been approved before treats its CURRENT toolset as the
@@ -525,6 +555,22 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 
 		if err != nil {
+			// Spec 105 FR-009, legacy carry-over (lock): the raw name has no
+			// exact record, but an UNSTAMPED collapsed sibling may hold the
+			// pending/changed lock pre-105 discovery filed FOR this tool.
+			// Under an active gate that lock — with its rug-pull / scan-hold
+			// evidence — is adopted onto the first exact record instead of
+			// re-filing the tool as brand new: the review UI keeps showing
+			// the before/after diff, and on a baseline pass the tool stays
+			// pending until approved by its own name rather than being
+			// auto-baselined (FR-009). Under a lifted gate the lock never
+			// bound and the ordinary new-tool ladder below applies.
+			if adopted := r.adoptLegacyLockForNewTool(serverName, toolName, priorByName, tool, currentHash, schemaJSON, outputSchemaJSON, gate.active()); adopted != nil {
+				existing, err = adopted, nil
+			}
+		}
+
+		if err != nil {
 			// No existing record - this is a new tool. Decide whether it
 			// auto-approves and under which provenance label:
 			//   - "auto"               quarantine disabled globally or skip_quarantine
@@ -552,14 +598,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// the block is copied here once, onto the record that will be read
 			// from now on.
 			//
-			// ONLY the user's Disabled block is carried. A pending/changed
-			// LOCK on the sibling is not converted into a block: under an
-			// active gate this new record's own pending state holds the tool
-			// exactly as the lock did, and under a lifted gate the lock never
-			// bound (the existing promote rule applies) — carrying it as
-			// Disabled would turn a review hold into a permanent user block
-			// that ApproveTools never clears. And only an UNSTAMPED sibling is
-			// consulted (storage.ToolApprovalRecord.IdentityKeyed): a record a
+			// Here the user's Disabled block is what is carried. A
+			// pending/changed LOCK on the sibling is adopted with its
+			// evidence under an active gate (adoptLegacyLockForNewTool
+			// above, so this branch never sees it); under a lifted gate the
+			// lock never bound (the existing promote rule applies) — and it
+			// is never converted into a block, which would turn a review
+			// hold into a permanent user block that ApproveTools never
+			// clears. Only an UNSTAMPED sibling is consulted
+			// (storage.ToolApprovalRecord.IdentityKeyed): a record a
 			// post-105 binary wrote is a genuine sibling tool, and FR-009
 			// forbids inheriting anything from it.
 			legacyDisabled := r.legacyCollapsedSiblingDisabled(serverName, toolName, priorByName)
@@ -609,6 +656,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					zap.String("tool", toolName),
 					zap.String("approved_by", approvedBy),
 					zap.Bool("disabled", legacyDisabled))
+				r.stampConsultedLegacySibling(serverName, toolName, priorByName)
 
 				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
 					"", tool.Description, "", schemaJSON)
@@ -648,6 +696,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				zap.String("server", serverName),
 				zap.String("tool", toolName),
 				zap.Bool("server_quarantined", serverQuarantined))
+			r.stampConsultedLegacySibling(serverName, toolName, priorByName)
 
 			result.BlockedTools[toolName] = true
 			result.PendingCount++
@@ -677,8 +726,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// baseline, so the approval is genuine), marked changed when that
 		// contract differs (a rug pull across the upgrade), and filed pending
 		// under an active gate when no sibling exists at all — an
-		// unreviewed tool stays unreviewed. The record's own Disabled flag is
-		// the user's decision on the exact name and is left alone.
+		// unreviewed tool stays unreviewed. An unstamped sibling's user block
+		// (Disabled) is carried onto the exact record on every one of those
+		// paths — pre-105 disable_all / block_all wrote it under the collapsed
+		// key for this very tool — so the block below (`existing.Disabled`)
+		// keeps holding it after the upgrade.
 		if existing.Status == storage.ToolApprovalStatusApproved && existing.ApprovedHash == "" {
 			r.adoptLegacyLockOrBaseline(serverName, existing, priorByName, tool, currentHash, schemaJSON, outputSchemaJSON, neverBaselinedGate{
 				enforceNewTools:    enforceNewTools,
@@ -1209,8 +1261,19 @@ func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 // From then on legacyCollapsedSibling and the reader's legacy re-admission
 // (internal/server/tool_gate.go) consult nothing on this server: a sibling
 // record is a genuine sibling's own, and a later "v2:erase" inherits nothing
-// from an "erase" the operator disables months after the upgrade. The pass
-// that ran just before this call is the one and only pass that migrates.
+// from an "erase" the operator disables months after the upgrade.
+//
+// The one exception is an orphan that still RESTRICTS
+// (storage.ToolApprovalRecord.Restricts: user-disabled, pending or changed).
+// Such a record is a pre-105 decision about a tool that is merely absent
+// from this pass — not served in the first pass after upgrade, or dropped by
+// an authoritative empty refresh — and a collapsed one may be the only
+// record of a block or lock on a namespaced tool (#873 evicts a disabled
+// tool from the index, so pre-105 it survived exactly such an absence). It
+// is left unstamped so it waits for its tool to reappear and is consulted
+// once then, by the pass that files the exact record (which stamps it).
+// Approved, enabled orphans carry only an approval, which belongs to the
+// exact name they store, and are stamped here.
 func (r *Runtime) stampRemainingLegacyToolApprovals(serverName string) {
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
@@ -1219,11 +1282,21 @@ func (r *Runtime) stampRemainingLegacyToolApprovals(serverName string) {
 		return
 	}
 	var unstamped []*storage.ToolApprovalRecord
+	var deferred []string
 	for _, rec := range records {
-		if rec != nil && !rec.IdentityKeyed {
-			rec.IdentityKeyed = true
-			unstamped = append(unstamped, rec)
+		if rec == nil || rec.IdentityKeyed {
+			continue
 		}
+		if rec.Restricts() {
+			deferred = append(deferred, rec.ToolName)
+			continue
+		}
+		rec.IdentityKeyed = true
+		unstamped = append(unstamped, rec)
+	}
+	if len(deferred) > 0 {
+		r.logger.Info("Pre-105 tool approval records that still restrict (disabled / pending / changed) are left unstamped until their tool is listed again",
+			zap.String("server", serverName), zap.Strings("tools", deferred))
 	}
 	if len(unstamped) == 0 {
 		return
@@ -1281,6 +1354,33 @@ func (r *Runtime) legacyCollapsedSiblingDisabled(serverName, rawName string, pri
 	return true
 }
 
+// stampConsultedLegacySibling ends the legacy consults for a collapsed
+// record once the pass has filed (or adopted onto) the exact record of the
+// namespaced tool it was consulted for: the record is re-read and stamped
+// identity-keyed so a later "v3:erase" inherits nothing from it. A restricting
+// orphan is otherwise left unstamped by stampRemainingLegacyToolApprovals,
+// which is what lets it wait for its tool — this is the "consulted once"
+// half of that rule. The fresh read (never the pre-pass listing) is what
+// keeps this from overwriting a record the same pass already updated, e.g.
+// when the bare name is served too and was processed first.
+func (r *Runtime) stampConsultedLegacySibling(serverName, rawName string, prior map[string]*storage.ToolApprovalRecord) {
+	sibling := legacyCollapsedSibling(rawName, prior)
+	if sibling == nil {
+		return
+	}
+	rec, err := r.storageManager.GetToolApproval(serverName, sibling.ToolName)
+	if err != nil || rec == nil || rec.IdentityKeyed {
+		return
+	}
+	if saveErr := r.saveToolApproval(rec); saveErr != nil {
+		r.logger.Debug("Failed to stamp consulted legacy collapsed approval record",
+			zap.String("server", serverName), zap.String("legacy_key", sibling.ToolName), zap.Error(saveErr))
+		return
+	}
+	r.logger.Info("Legacy collapsed approval record consulted for its namespaced tool; stamped identity-keyed, legacy consults for it end",
+		zap.String("server", serverName), zap.String("tool", rawName), zap.String("legacy_key", sibling.ToolName))
+}
+
 // neverBaselinedGate is the slice of checkToolApprovals' gate resolution that
 // adoptLegacyLockOrBaseline needs to decide what a never-baselined exact
 // record becomes when no legacy sibling carries a lock for it.
@@ -1322,6 +1422,13 @@ func (g neverBaselinedGate) lifted() bool {
 //     gate (quarantine off, skip_quarantine, trust_mode auto) it is
 //     baselined to the current contract, which is what a new tool would get.
 //
+// Whenever an unstamped sibling exists, its user block (Disabled) is OR'd
+// onto the exact record on every branch: pre-105 disable_all / block_all
+// wrote the block under the collapsed key for this very tool, and the
+// toggle-shaped exact record (enabled) would otherwise shadow it the moment
+// it is baselined or adopts the lock — an operator-disabled namespaced tool
+// must stay disabled after the upgrade, not dispatch on every path.
+//
 // Either way the current contract fields are refreshed and the record is
 // saved; a failed save leaves the in-memory record adopted / held / baselined
 // so this pass still answers correctly, and the next pass retries the write.
@@ -1336,6 +1443,14 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage
 	existing.CurrentOutputSchema = outputSchemaJSON
 
 	sibling := legacyCollapsedSibling(toolName, prior)
+	if sibling != nil && sibling.Disabled && !existing.Disabled {
+		existing.Disabled = true
+		r.logger.Warn("Legacy collapsed approval record is user-disabled; carrying the block onto the never-baselined exact-name record",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("legacy_key", sibling.ToolName),
+			zap.String("legacy_status", sibling.Status))
+	}
 	switch {
 	case sibling != nil && (sibling.Status == storage.ToolApprovalStatusPending || sibling.Status == storage.ToolApprovalStatusChanged):
 		existing.Status = sibling.Status
@@ -1415,7 +1530,100 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage
 			zap.String("server", serverName),
 			zap.String("tool", toolName),
 			zap.Error(saveErr))
+		return
 	}
+	r.stampConsultedLegacySibling(serverName, toolName, prior)
+}
+
+// adoptLegacyLockForNewTool handles a raw name with NO exact record whose
+// UNSTAMPED collapsed sibling carries a pending/changed lock — the lock
+// pre-105 discovery filed for this very tool under the collapsed key. Under
+// an active gate (activeGate: quarantine enforced for the server, no
+// auto-approve opt-in; scan trust included) the first exact record is
+// created by adopting that lock with everything the review UI needs — the
+// Previous* contract of a rug pull, the scan-hold reason/verdict/signals, the
+// user's Disabled block — and the record is saved (stamped) and returned so
+// checkToolApprovals runs it through the ORDINARY pending/changed handling:
+//
+//   - pending: CurrentHash is the sibling's (hashed under the collapsed
+//     name), so the baseline-pass promotion's priorHashMatches guard can
+//     never fire — the tool stays pending until approved by its own name
+//     (FR-009), exactly as origin/main held the collapsed record;
+//   - changed: the live contract is the current one and the sibling's
+//     approved contract the before-evidence; a revert to it restores the
+//     record, anything else stays held (a green scan may approve it under
+//     scan trust, as for any changed record).
+//
+// Under a lifted gate it returns nil: the lock never bound and the
+// new-tool ladder's promote rule applies. A stamped sibling is never
+// consulted (FR-009: nothing is inherited from a genuine sibling tool).
+func (r *Runtime) adoptLegacyLockForNewTool(serverName, toolName string, prior map[string]*storage.ToolApprovalRecord, tool *config.ToolMetadata, currentHash, schemaJSON, outputSchemaJSON string, activeGate bool) *storage.ToolApprovalRecord {
+	if !activeGate {
+		return nil
+	}
+	sibling := legacyCollapsedSibling(toolName, prior)
+	if sibling == nil {
+		return nil
+	}
+	if sibling.Status != storage.ToolApprovalStatusPending && sibling.Status != storage.ToolApprovalStatusChanged {
+		return nil
+	}
+
+	record := &storage.ToolApprovalRecord{
+		ServerName:           serverName,
+		ToolName:             toolName,
+		Status:               sibling.Status,
+		HashSchemaVersion:    storage.OutputSchemaHashSchemaVersion,
+		ApprovedAt:           sibling.ApprovedAt,
+		ApprovedBy:           sibling.ApprovedBy,
+		PreviousDescription:  sibling.PreviousDescription,
+		PreviousSchema:       sibling.PreviousSchema,
+		PreviousOutputSchema: sibling.PreviousOutputSchema,
+		HeldReason:           sibling.HeldReason,
+		HeldVerdict:          sibling.HeldVerdict,
+		HeldSignals:          append([]string(nil), sibling.HeldSignals...),
+		Disabled:             r.legacyCollapsedSiblingDisabled(serverName, toolName, prior),
+	}
+	if sibling.Status == storage.ToolApprovalStatusPending {
+		// What was pending: the sibling's recorded contract. The pending
+		// branch refreshes it to the live one right after it has compared
+		// the two.
+		record.CurrentHash = sibling.CurrentHash
+		record.CurrentDescription = sibling.CurrentDescription
+		record.CurrentSchema = sibling.CurrentSchema
+		record.CurrentOutputSchema = sibling.CurrentOutputSchema
+	} else {
+		record.CurrentHash = currentHash
+		record.CurrentDescription = tool.Description
+		record.CurrentSchema = schemaJSON
+		record.CurrentOutputSchema = outputSchemaJSON
+	}
+
+	if saveErr := r.saveToolApproval(record); saveErr != nil {
+		r.logger.Error("Failed to save tool approval record adopting its legacy collapsed record's lock",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.Error(saveErr))
+	} else {
+		r.stampConsultedLegacySibling(serverName, toolName, prior)
+	}
+	r.logger.Warn("New exact approval record adopts the lock of its legacy collapsed record",
+		zap.String("server", serverName),
+		zap.String("tool", toolName),
+		zap.String("legacy_key", sibling.ToolName),
+		zap.String("adopted_status", sibling.Status),
+		zap.Bool("disabled", record.Disabled))
+
+	if sibling.Status == storage.ToolApprovalStatusChanged {
+		r.emitToolQuarantineEvent(serverName, toolName, "tool_description_changed",
+			sibling.ApprovedHash, currentHash,
+			sibling.PreviousDescription, tool.Description,
+			sibling.PreviousSchema, schemaJSON)
+	} else {
+		r.emitToolQuarantineEvent(serverName, toolName, "tool_discovered", "", currentHash,
+			"", tool.Description, "", schemaJSON)
+	}
+	return record
 }
 
 // legacySiblingApprovesContract reports whether an unstamped, approved
@@ -1653,9 +1861,20 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 //
 // A tool approval record is created on demand when one does not yet exist —
 // without this, callers would only be able to toggle tools that had already
-// transited the quarantine flow (i.e. only when QuarantineEnabled is on and
-// SkipQuarantine is off on the server). The synthesized record's Status is
-// "approved" so the new entry never reintroduces a tool into quarantine.
+// transited the quarantine flow. The toggle expresses user visibility intent,
+// not a quarantine decision, so the synthesized record never mints an
+// approval nobody made (Spec 105 FR-009, research D4): while the tool-level
+// quarantine gate is ACTIVE for the server a record-less tool is pending at
+// every gate, and the record is filed `pending` — with the toggle's Disabled
+// flag and the snapshot's current contract — so it stays refused until an
+// operator approves it by its own name (an "approved" record with an empty
+// hash would read as ready and dispatch for every caller until the next
+// discovery pass re-filed it pending). Under a lifted gate (quarantine off,
+// skip_quarantine, trust_mode auto) a new tool auto-approves anyway, so the
+// record is `approved` and baselined to the snapshot's current contract
+// (ApprovedHash = current hash) so rug-pull detection works from the first
+// discovery; a tool the snapshot does not hold is approved without a hash
+// and baselined by the next pass (adoptLegacyLockOrBaseline).
 //
 // Critical: we ONLY synthesize on storage.ErrToolApprovalNotFound. Any other
 // GetToolApproval error (decode failure, closed DB, mmap remap during
@@ -1672,17 +1891,10 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 	case err == nil:
 		// existing record — keep its Status, just flip Disabled below.
 	case errors.Is(err, storage.ErrToolApprovalNotFound):
-		// First time we've seen this tool. The tool has been seen by MCP
-		// (we wouldn't be toggling it otherwise), so "approved" is the
-		// correct admin state — the toggle expresses user visibility
-		// intent, not a quarantine decision.
-		record = &storage.ToolApprovalRecord{
-			ServerName: serverName,
-			ToolName:   toolName,
-			Status:     storage.ToolApprovalStatusApproved,
-			ApprovedAt: time.Now().UTC(),
-			ApprovedBy: updatedBy,
-		}
+		// First time we've seen this tool: synthesize the record the
+		// discovery producer would have filed for it under this server's
+		// gate (see the function comment).
+		record = r.newToggleSynthesizedRecord(serverName, toolName, updatedBy)
 	default:
 		// Real read error — refuse to write. See comment above for rationale.
 		return false, fmt.Errorf("read tool approval %s:%s: %w", serverName, toolName, err)
@@ -1712,6 +1924,85 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 		"", record.CurrentSchema)
 
 	return true, nil
+}
+
+// newToggleSynthesizedRecord builds the record setToolEnabledNoEmit files for
+// a record-less tool (see its function comment): pending under an active
+// tool-level quarantine gate, approved and baselined to the snapshot's current
+// contract under a lifted one. The caller sets Disabled.
+func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy string) *storage.ToolApprovalRecord {
+	record := &storage.ToolApprovalRecord{
+		ServerName: serverName,
+		ToolName:   toolName,
+	}
+	// The snapshot's current contract, when the StateView lists the raw name.
+	if tool := r.snapshotToolMetadata(serverName, toolName); tool != nil {
+		schemaJSON := tool.ParamsJSON
+		if schemaJSON == "" {
+			schemaJSON = "{}"
+		}
+		schemaJSON = normalizeJSON(schemaJSON)
+		outputSchemaJSON := normalizeJSON(tool.OutputSchemaJSON)
+		record.CurrentHash = calculateToolApprovalHashWithOutputSchema(toolName, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations)
+		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+		record.CurrentDescription = tool.Description
+		record.CurrentSchema = schemaJSON
+		record.CurrentOutputSchema = outputSchemaJSON
+	}
+
+	if r.resolveToolQuarantineGate(serverName).active() {
+		record.Status = storage.ToolApprovalStatusPending
+		r.logger.Info("Tool toggled before any approval record existed; filed pending under an active quarantine gate until approved by name",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("updated_by", updatedBy))
+		return record
+	}
+	record.Status = storage.ToolApprovalStatusApproved
+	record.ApprovedHash = record.CurrentHash
+	record.ApprovedAt = time.Now().UTC()
+	record.ApprovedBy = updatedBy
+	return record
+}
+
+// snapshotToolMetadata returns the StateView's current contract for a raw
+// tool name on a server — the same fields the discovery producer hashes —
+// or nil when the snapshot does not list the exact name. The StateView holds
+// raw names verbatim (Spec 105 FR-009), so only the exact name matches.
+func (r *Runtime) snapshotToolMetadata(serverName, toolName string) *config.ToolMetadata {
+	if r.supervisor == nil {
+		return nil
+	}
+	snapshot := r.supervisor.StateView().Snapshot()
+	if snapshot == nil {
+		return nil
+	}
+	status, ok := snapshot.Servers[serverName]
+	if !ok || status == nil {
+		return nil
+	}
+	for i := range status.Tools {
+		info := status.Tools[i]
+		if info.Name != toolName {
+			continue
+		}
+		paramsJSON := ""
+		if info.InputSchema != nil {
+			if raw, err := json.Marshal(info.InputSchema); err == nil {
+				paramsJSON = string(raw)
+			}
+		}
+		return &config.ToolMetadata{
+			ServerName:       serverName,
+			Name:             info.Name,
+			RawName:          info.Name,
+			Description:      info.Description,
+			ParamsJSON:       paramsJSON,
+			OutputSchemaJSON: info.OutputSchemaJSON,
+			Annotations:      info.Annotations,
+		}
+	}
+	return nil
 }
 
 // SetToolEnabled sets whether a tool is enabled for exposure to MCP clients.
@@ -1818,19 +2109,20 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 	return changed, nil
 }
 
-// collectKnownToolNames returns the set of tool short-names (no "server:"
-// prefix) currently known for a server. Prefers the StateView snapshot
-// (covers in-memory tools), falling back to the search index, and finally
-// to whatever approval records already exist for the server.
+// collectKnownToolNames returns the set of RAW tool names currently known for
+// a server — the exact names approval records are keyed by (Spec 105
+// FR-009), colons included: a raw "ns:erase" is "ns:erase", never "erase".
+// Prefers the StateView snapshot (covers in-memory tools; it holds raw names
+// verbatim), falling back to the search index (canonical "server:raw" ids,
+// read through their RawName), and finally to whatever approval records
+// already exist for the server. Stripping everything before the first colon
+// here would collapse a namespaced tool onto its sibling's key and leave the
+// namespaced tool itself untoggled by disable_all / block_all.
 func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
 	seen := make(map[string]struct{})
 	add := func(name string) {
 		if name == "" {
 			return
-		}
-		// Strip "server:" prefix if present.
-		if idx := strings.Index(name, ":"); idx != -1 {
-			name = name[idx+1:]
 		}
 		seen[name] = struct{}{}
 	}
@@ -1847,7 +2139,7 @@ func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
 	if r.indexManager != nil {
 		if tools, err := r.indexManager.GetToolsByServer(serverName); err == nil {
 			for _, tool := range tools {
-				add(tool.Name)
+				add(config.RawToolName(tool))
 			}
 		}
 	}

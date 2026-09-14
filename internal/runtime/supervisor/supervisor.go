@@ -1262,6 +1262,18 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 		if connected, ok := event.Payload["connected"].(bool); ok {
 			state.Connected = connected
 			state.LastSeen = event.Timestamp
+			if !connected {
+				// The discovery-completed marker (Spec 105 FR-009, research
+				// D4) is per connection: the next connection needs its own
+				// discovery pass. It is cleared on the retained Supervisor
+				// state as well as on the StateView below — reconcile copies
+				// the retained state back into the StateView, and the
+				// reconnect branch restores the retained tool set from it, so
+				// a stale stamp here would resurrect "discovery completed"
+				// for a connection that has not discovered anything yet.
+				// The retained Tools themselves are kept (MCP-2094).
+				state.ToolsDiscovered = false
+			}
 
 			// Update ConnectionInfo from pre-fetched server state
 			if connInfo != nil {
@@ -1314,10 +1326,14 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						if len(state.Tools) > 0 {
 							status.Tools = toolInfosFromMetadata(state.Tools)
 							status.ToolCount = len(state.Tools)
-							// The restored set is a completed discovery's result,
-							// so its ToolsDiscovered stamp travels with it; an
-							// empty retained set restores nothing and the server
-							// stays undiscovered until discovery re-runs.
+							// The restored set is the PREVIOUS connection's
+							// discovery result, kept for counts and listings
+							// until discovery re-runs; the discovery-completed
+							// marker is not restored with it — the disconnect
+							// cleared it on the retained state too, and this
+							// connection has not completed a pass yet (an
+							// unlisted name reads as "discovery not completed,
+							// retry", never as "stale name").
 							status.ToolsDiscovered = state.ToolsDiscovered
 						} else {
 							status.ToolCount = toolCount

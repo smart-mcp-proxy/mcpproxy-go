@@ -319,10 +319,11 @@ type ToolApprovalRecord struct {
 // its lock or block must keep binding the namespaced name it may have been
 // filed for while no exact record exists (internal/server/tool_gate.go
 // readToolApprovalRecord). The discovery producer
-// (internal/runtime/tool_quarantine.go checkToolApprovals) carries only the
-// user's Disabled block onto the new exact record — a lock is re-established
-// by the exact record's own pending state under an active gate — and only
-// from an unstamped sibling (IdentityKeyed).
+// (internal/runtime/tool_quarantine.go checkToolApprovals) carries the
+// user's Disabled block onto the new exact record and, under an active gate,
+// adopts the lock with its evidence — only from an unstamped sibling
+// (IdentityKeyed) — and its end-of-pass stamping leaves a restricting orphan
+// unstamped so it can be consulted once when its tool reappears.
 func (r *ToolApprovalRecord) Restricts() bool {
 	if r == nil {
 		return false
