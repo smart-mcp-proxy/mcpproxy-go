@@ -2515,6 +2515,21 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
 		}
+		// Spec 105 FR-009 (research D4), astra r1 I3: the identity gate
+		// above deferred because the StateView read the server as not
+		// connected, yet the live client IS connected — the connected event
+		// is still in flight or was dropped. The not-connected verdict the
+		// deferral relied on did not fire, so re-read the snapshot and refuse
+		// an unlisted name here, with zero upstream calls. The tier gate
+		// already ran with the destructive fallback (the strictest tier), so
+		// no re-check is needed for scoped callers.
+		if errMsg, refuse := p.liveIdentityRefusal(serverName, actualToolName, identity, client); refuse {
+			p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity (live client connected, snapshot stale)",
+				zap.String("server_name", serverName),
+				zap.String("tool_name", actualToolName))
+			p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			return mcp.NewToolResultError(errMsg), nil
+		}
 	} else {
 		// Get list of available servers for helpful error message
 		availableServers := p.upstreamManager.GetAllServerNames()
@@ -6939,6 +6954,31 @@ func unresolvedToolIdentityMessage(serverName, toolName string, discoveryDone bo
 	}
 	return fmt.Sprintf("Permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it; refresh the tool list with retrieve_tools and retry with a listed name",
 		serverName, toolName, serverName)
+}
+
+// liveIdentityRefusal closes the D4 deferral window (astra r1 I3). The
+// identity gate stands aside when the StateView reads a known server as not
+// connected (toolIdentity.SnapshotHydrated false) because the pre-105
+// not-connected verdict will refuse — but that verdict consults the LIVE
+// client, and the StateView's Connected flag is written only by the async
+// server_connected event (notifications → actor_pool, which drops on a full
+// channel → supervisor goroutine) or the 30s reconcile. In that window the
+// live client is connected, the not-connected verdict does not fire, and an
+// unlisted name would dispatch with the destructive-tier fallback and, under
+// a lifted quarantine gate or an existing record for a now-stale name, no
+// approval answer either. So, once the live client has been found connected,
+// the snapshot is re-read and the name is refused unless it now lists it. A
+// server whose live client is NOT connected keeps the not-connected /
+// connecting / reconnect_on_use verdicts untouched.
+func (p *MCPProxyServer) liveIdentityRefusal(serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (string, bool) {
+	if !deferred.ServerKnown || deferred.SnapshotHydrated || client == nil || !client.IsConnected() {
+		return "", false
+	}
+	live := p.resolveExactToolIdentity(serverName, toolName)
+	if live.Found {
+		return "", false
+	}
+	return unresolvedToolIdentityMessage(serverName, toolName, live.SnapshotHydrated && live.DiscoveryDone), true
 }
 
 // lookupOutputSchema returns the declared output schema (raw JSON) for a tool,

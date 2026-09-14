@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
 
 func evalOne(t *testing.T, w *world, ref ToolRef) Result {
@@ -685,4 +686,33 @@ func TestLookupIndexed_ExactCanonicalOnly_NeverSiblingAlias(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "a:a:erase", got.Name)
+}
+
+// Spec 105 FR-009, astra r1 R1: an INDEXED tool with NO approval record is
+// pending under an active gate (shared classifier), but there is nothing in
+// the review UI to approve yet — ApproveTools skips a missing record and
+// triggers no rediscovery, so the taxonomy's `approve` remediation is a dead
+// end. Check mode carries the same re-discovery body dispatch and
+// describe_tool answer (one shared source in reasons.go), while the reason
+// code stays tool_pending_approval; a STORED pending record keeps the
+// approve action.
+func TestEvaluate_NoApprovalRecord_PointsAtRediscoveryNotApprove(t *testing.T) {
+	res := evalOne(t, healthyWorld().forget(), ToolRef{ID: id})
+	assert.Equal(t, StatusUnavailable, res.Status)
+	assert.Equal(t, ReasonToolPendingApproval, res.Reason, "the reason code contract is unchanged")
+	assert.Equal(t, health.ActionRestart, res.Action, "no record to approve: the action is re-discovery")
+	assert.Equal(t, NoApprovalRecordDetail(id), res.Detail)
+	assert.Equal(t, NoApprovalRecordRemediation(srv), res.Remediation)
+	assert.Contains(t, res.Remediation, `upstream_servers operation="refresh"`)
+	assert.NotContains(t, res.Remediation, "Review and approve the tool")
+
+	stored := evalOne(t, healthyWorld().approval(func(a *ApprovalState) { a.Status = ApprovalStatusPending }), ToolRef{ID: id})
+	assert.Equal(t, ReasonToolPendingApproval, stored.Reason)
+	assert.Equal(t, health.ActionApprove, stored.Action, "a stored pending record is approvable and keeps the taxonomy default")
+	assert.Equal(t, DefaultRemediation(ReasonToolPendingApproval), stored.Remediation)
+
+	// Gate off: no record does not gate (unchanged).
+	off := healthyWorld().forget()
+	off.policy.quarantine = false
+	assert.Equal(t, StatusReady, evalOne(t, off, ToolRef{ID: id}).Status)
 }

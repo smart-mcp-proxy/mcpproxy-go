@@ -915,14 +915,19 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 
 		// If tool was previously marked "changed", check if the tool has reverted
-		// to its PREVIOUS (pre-change) description. Only auto-approve if the
-		// description matches the APPROVED version, not the current (changed) one.
-		// This prevents the bug where a changed tool gets auto-approved on the
-		// next checkToolApprovals pass because CurrentDescription was already
-		// updated to the new description.
+		// to its PREVIOUS (pre-change) contract. Only auto-approve if the WHOLE
+		// contract — description AND input/output schemas — matches the APPROVED
+		// version, not the current (changed) one. This prevents the bug where a
+		// changed tool gets auto-approved on the next checkToolApprovals pass
+		// because CurrentDescription was already updated to the new description,
+		// and (astra r1 P1) the bug where a schema-only change — description
+		// unchanged, so a description-only comparison already "matched" — was
+		// restored to approved on the very pass that marked it changed, with the
+		// changed schema baselined and the stale PreviousOutputSchema left in
+		// place so a genuine revert then read as a rug pull.
 		if existing.Status == storage.ToolApprovalStatusChanged {
-			// Only restore if the tool reverted to the PREVIOUS (approved) description
-			if existing.PreviousDescription != "" && tool.Description == existing.PreviousDescription {
+			// Only restore if the tool reverted to the PREVIOUS (approved) contract
+			if revertedToPreviousContract(existing, tool.Description, schemaJSON, outputSchemaJSON) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionRevert); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -936,9 +941,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
 				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr == nil {
-					r.logger.Info("Changed tool restored (reverted to previous description)",
+					r.logger.Info("Changed tool restored (reverted to previous contract)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
 				}
@@ -1278,6 +1284,29 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	return result, nil
 }
 
+// revertedToPreviousContract reports whether a changed record's live contract
+// is the one it was approved for BEFORE the change: description AND
+// input/output schemas (astra r1 P1). A schema-only change keeps the
+// description equal, so a description-only comparison would restore the
+// record — and baseline the changed schema — on the very pass that marked it
+// changed (adoptLegacyLockOrBaseline marks and falls through in one pass; the
+// ordinary rug-pull path on the next). A Previous* schema the record never
+// stored (a pre-output-schema record, or a producer that recorded only the
+// description) is not evidence and is not compared — the same idiom as
+// legacySiblingApprovesContract.
+func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string) bool {
+	if existing.PreviousDescription == "" || description != existing.PreviousDescription {
+		return false
+	}
+	if existing.PreviousSchema != "" && normalizeJSON(existing.PreviousSchema) != normalizeJSON(schemaJSON) {
+		return false
+	}
+	if existing.PreviousOutputSchema != "" && normalizeJSON(existing.PreviousOutputSchema) != normalizeJSON(outputSchemaJSON) {
+		return false
+	}
+	return true
+}
+
 // saveToolApproval persists an approval record through the ONLY write seam
 // the runtime uses, stamping it as identity-keyed first (Spec 105 FR-009,
 // storage.ToolApprovalRecord.IdentityKeyed): every record this binary writes
@@ -1304,10 +1333,10 @@ func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 // tool ever existed, and the block would evaporate the moment its exact
 // record was filed approved+enabled. So such a record keeps waiting — the
 // same window stampRemainingLegacyToolApprovals already grants a restricting
-// orphan — and is stamped by the pass that files its namespaced tool
-// (stampConsultedLegacySibling) or by the first write that leaves it
-// unrestricted. Brand-new records never take this path: they are this
-// binary's own and are stamped by saveToolApproval.
+// orphan — while it restricts, and is stamped by the first write that leaves
+// it unrestricted (a consult never stamps a restricting record, see
+// stampConsultedLegacySibling). Brand-new records never take this path: they
+// are this binary's own and are stamped by saveToolApproval.
 func (r *Runtime) saveReadToolApproval(record *storage.ToolApprovalRecord, wasUnstamped bool) error {
 	if wasUnstamped && record.Restricts() {
 		record.IdentityKeyed = false
@@ -1337,9 +1366,10 @@ func (r *Runtime) saveReadToolApproval(record *storage.ToolApprovalRecord, wasUn
 // record of a block or lock on a namespaced tool (#873 evicts a disabled
 // tool from the index, so pre-105 it survived exactly such an absence). It
 // is left unstamped so it waits for its tool to reappear and is consulted
-// once then, by the pass that files the exact record (which stamps it).
-// Approved, enabled orphans carry only an approval, which belongs to the
-// exact name they store, and are stamped here.
+// while it restricts, by every pass that files an exact record collapsing to
+// it (stampConsultedLegacySibling stamps it only once it no longer
+// restricts). Approved, enabled orphans carry only an approval, which
+// belongs to the exact name they store, and are stamped here.
 func (r *Runtime) stampRemainingLegacyToolApprovals(serverName string) {
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
@@ -1347,7 +1377,7 @@ func (r *Runtime) stampRemainingLegacyToolApprovals(serverName string) {
 			zap.String("server", serverName), zap.Error(err))
 		return
 	}
-	var unstamped []*storage.ToolApprovalRecord
+	var candidates []string
 	var deferred []string
 	for _, rec := range records {
 		if rec == nil || rec.IdentityKeyed {
@@ -1357,24 +1387,34 @@ func (r *Runtime) stampRemainingLegacyToolApprovals(serverName string) {
 			deferred = append(deferred, rec.ToolName)
 			continue
 		}
-		rec.IdentityKeyed = true
-		unstamped = append(unstamped, rec)
+		candidates = append(candidates, rec.ToolName)
 	}
 	if len(deferred) > 0 {
 		r.logger.Info("Pre-105 tool approval records that still restrict (disabled / pending / changed) are left unstamped until their tool is listed again",
 			zap.String("server", serverName), zap.Strings("tools", deferred))
 	}
-	if len(unstamped) == 0 {
+	if len(candidates) == 0 {
 		return
 	}
-	if err := r.storageManager.SaveToolApprovals(unstamped); err != nil {
+	if r.legacyStampBeforeWrite != nil {
+		r.legacyStampBeforeWrite()
+	}
+	// The listing above is a detached snapshot and nothing serialises this
+	// sweep against an operator write (SetToolEnabled / BlockTools) on one of
+	// the listed records. The stamp therefore never writes the listed copies
+	// back (astra r1 P4: a stale copy would have discarded a concurrent
+	// Disabled=true AND stamped the record): the store re-reads each record
+	// inside the write transaction, under the same manager lock the operator
+	// write takes, and touches only the IdentityKeyed bit of a record that is
+	// still unstamped and still unrestricting at that instant.
+	names, err := r.storageManager.StampToolApprovalsIdentityKeyed(serverName, candidates)
+	if err != nil {
 		r.logger.Warn("Failed to stamp remaining legacy tool approval records identity-keyed",
-			zap.String("server", serverName), zap.Int("count", len(unstamped)), zap.Error(err))
+			zap.String("server", serverName), zap.Int("count", len(candidates)), zap.Error(err))
 		return
 	}
-	names := make([]string, 0, len(unstamped))
-	for _, rec := range unstamped {
-		names = append(names, rec.ToolName)
+	if len(names) == 0 {
+		return
 	}
 	r.logger.Info("Stamped remaining pre-105 tool approval records identity-keyed; legacy collapsed-name consults end for this server",
 		zap.String("server", serverName), zap.Strings("tools", names))
@@ -1422,13 +1462,26 @@ func (r *Runtime) legacyCollapsedSiblingDisabled(serverName, rawName string, pri
 
 // stampConsultedLegacySibling ends the legacy consults for a collapsed
 // record once the pass has filed (or adopted onto) the exact record of the
-// namespaced tool it was consulted for: the record is re-read and stamped
-// identity-keyed so a later "v3:erase" inherits nothing from it. A restricting
-// orphan is otherwise left unstamped by stampRemainingLegacyToolApprovals,
-// which is what lets it wait for its tool — this is the "consulted once"
-// half of that rule. The fresh read (never the pre-pass listing) is what
-// keeps this from overwriting a record the same pass already updated, e.g.
-// when the bare name is served too and was processed first.
+// namespaced tool it was consulted for — PROVIDED the record no longer
+// restricts: it is re-read and stamped identity-keyed so a later "v3:erase"
+// inherits nothing from it. A record that still RESTRICTS (user-disabled,
+// pending or changed) is never stamped by a consult (astra r1 P3): filing one
+// namespaced identity does not prove every pre-105 tool the collapsed record
+// protected has been migrated. "v1:erase" and "v2:erase" both collapsed to
+// "erase", and pre-105 a user block on "erase" bound BOTH through the
+// collapsed key; if v2:erase is absent from the pass that files v1:erase and
+// returns later, a stamp here would let it file approved+enabled under a
+// lifted gate — the operator's block evaporating silently (fail-open). So a
+// restricting record keeps waiting, consulted by every namespaced identity
+// that collapses to it, and is stamped by the first write that leaves it
+// unrestricted (saveReadToolApproval: the operator enabling or approving it
+// by its own key, a served bare name that stops restricting). The accepted
+// cost is exactly origin/main's behaviour: a user-disabled orphan "erase"
+// keeps lending its block to every future "*:erase" (one un-hide per new
+// tool), and a pending/changed orphan lends its lock, until the operator
+// acts on "erase" itself. The fresh read (never the pre-pass listing) is
+// what keeps this from overwriting a record the same pass already updated,
+// e.g. when the bare name is served too and was processed first.
 func (r *Runtime) stampConsultedLegacySibling(serverName, rawName string, prior map[string]*storage.ToolApprovalRecord) {
 	sibling := legacyCollapsedSibling(rawName, prior)
 	if sibling == nil {
@@ -1436,6 +1489,11 @@ func (r *Runtime) stampConsultedLegacySibling(serverName, rawName string, prior 
 	}
 	rec, err := r.storageManager.GetToolApproval(serverName, sibling.ToolName)
 	if err != nil || rec == nil || rec.IdentityKeyed {
+		return
+	}
+	if rec.Restricts() {
+		r.logger.Info("Legacy collapsed approval record consulted for a namespaced tool still restricts; left unstamped so it keeps binding every tool that collapses to it",
+			zap.String("server", serverName), zap.String("tool", rawName), zap.String("legacy_key", sibling.ToolName))
 		return
 	}
 	if saveErr := r.saveToolApproval(rec); saveErr != nil {

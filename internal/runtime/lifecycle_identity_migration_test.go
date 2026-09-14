@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -126,4 +127,98 @@ func TestApplyDifferentialToolUpdate_HealsPreUpgradeCollapsedDoc(t *testing.T) {
 	require.NoError(t, err)
 	_, err = rt.storageManager.GetToolApproval("a", "ns:erase")
 	require.NoError(t, err)
+}
+
+// Spec 105 FR-009 migration, astra r1 P2: a server whose ONLY tool is the
+// namespaced "ns:erase". The pre-105 index holds it under the collapsed docID
+// "a:erase" and the approval store holds its baseline under "erase". On the
+// first discovery after upgrade the raw-name diff reads the collapsed
+// document back as "erase", finds no served "erase", and treated it as a
+// REMOVED tool — deleting the "erase" record. When that record was the
+// server's only approved/changed one, the next discovery became a
+// trust-baseline pass (checkToolApprovals' serverHasBaseline flipped to
+// false) and promoted the still-pending "ns:erase" — pending precisely
+// because its contract did NOT match the baseline — to approved with
+// ApprovedBy "auto-baseline": a rug pull across the upgrade dispatched on the
+// second discovery. The collapsed key is a migration alias of the served
+// namespaced name, not a removal, and its record must survive.
+func TestApplyDifferentialToolUpdate_CollapsedAliasOfServedNamespacedTool_KeepsBaselineRecord(t *testing.T) {
+	newRuntime := func(t *testing.T) *Runtime {
+		t.Helper()
+		cfg := &config.Config{
+			DataDir: t.TempDir(),
+			Listen:  "127.0.0.1:0",
+			Servers: []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}},
+			// Quarantine ON (the default): the baseline-pass promotion is
+			// the path under test.
+			QuarantineEnabled: boolP(true),
+		}
+		rt, err := New(cfg, "", zap.NewNop())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = rt.Close() })
+		return rt
+	}
+	nsErase := pairedNameTools()[1]
+	schema := normalizeJSON(nsErase.ParamsJSON)
+
+	t.Run("rug pull across the upgrade stays held on the second discovery", func(t *testing.T) {
+		rt := newRuntime(t)
+		ctx := context.Background()
+		plantCollapsedLegacyDoc(t, rt)
+		// The operator approved a DIFFERENT contract pre-upgrade.
+		const oldDesc = "the description the operator approved pre-upgrade"
+		oldHash := calculateToolApprovalHashWithOutputSchema("erase", oldDesc, schema, "", nil)
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+			ApprovedHash: oldHash, CurrentHash: oldHash, HashSchemaVersion: storage.OutputSchemaHashSchemaVersion,
+			CurrentDescription: oldDesc, CurrentSchema: schema,
+		}))
+
+		// Pass 1: the index heals to a:ns:erase only, ns:erase is filed
+		// pending (no lock to adopt, contract differs from the baseline), and
+		// the "erase" baseline record SURVIVES.
+		require.NoError(t, rt.applyDifferentialToolUpdate(ctx, "a", []*config.ToolMetadata{nsErase}))
+		byRaw := indexedByRawName(t, rt)
+		assert.NotContains(t, byRaw, "ns:erase", "pending on pass 1: not indexed")
+		assert.NotContains(t, byRaw, "erase", "the collapsed document is gone from the index")
+		nsRecord, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusPending, nsRecord.Status)
+		legacy, err := rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err, "the collapsed key is a migration alias of the served ns:erase, not a removed tool: its record must survive")
+		assert.Equal(t, "user", legacy.ApprovedBy)
+		assert.True(t, legacy.IdentityKeyed, "the pass that filed ns:erase stamped the consulted alias inert")
+
+		// Pass 2: the server still has a baseline, so the pending ns:erase
+		// is NOT promoted by the trust-baseline rule.
+		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{nsErase})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["ns:erase"], "a contract the operator never approved must stay held on every pass")
+		nsRecord, err = rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusPending, nsRecord.Status, "FR-009: pending until approved by its own name")
+		assert.NotEqual(t, "auto-baseline", nsRecord.ApprovedBy)
+		_, err = rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err, "a rediscovery of the same set must not delete the alias record either")
+	})
+
+	t.Run("control: a genuinely removed bare tool with no served namespaced sibling loses its record", func(t *testing.T) {
+		rt := newRuntime(t)
+		ctx := context.Background()
+		plain := pairedNameTools()[0]
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "gone", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+			ApprovedHash: "h", CurrentHash: "h", HashSchemaVersion: storage.OutputSchemaHashSchemaVersion, IdentityKeyed: true,
+		}))
+		require.NoError(t, rt.indexManager.IndexTool(&config.ToolMetadata{ServerName: "a", Name: "gone", Description: "gone", ParamsJSON: schema, Hash: "h"}))
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: plain.Name, Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+			ApprovedHash:      calculateToolApprovalHashWithOutputSchema(plain.Name, plain.Description, schema, "", nil),
+			CurrentHash:       calculateToolApprovalHashWithOutputSchema(plain.Name, plain.Description, schema, "", nil),
+			HashSchemaVersion: storage.OutputSchemaHashSchemaVersion, IdentityKeyed: true,
+		}))
+		require.NoError(t, rt.applyDifferentialToolUpdate(ctx, "a", []*config.ToolMetadata{plain}))
+		_, err := rt.storageManager.GetToolApproval("a", "gone")
+		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "a removed tool's record is still cleaned up")
+	})
 }

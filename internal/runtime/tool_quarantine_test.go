@@ -275,6 +275,64 @@ func TestCheckToolApprovals_TrustedServer_NewToolPending(t *testing.T) {
 	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
 }
 
+// astra r1 P1 (pre-existing latent bug on the ordinary rug-pull path): a
+// tool approved for description D + output schema O1 that starts serving
+// D + O2 was marked changed on pass 1 — and restored to approved on pass 2,
+// because the changed-record revert predicate compared the DESCRIPTION alone
+// (D == D) and baselined the changed schema. It must stay held on every pass
+// until the operator approves it or the upstream reverts to O1.
+func TestCheckToolApprovals_OutputSchemaOnlyChange_StaysChangedAcrossPasses(t *testing.T) {
+	const (
+		desc     = "Creates a GitHub issue"
+		schema   = `{"type":"object"}`
+		outputV1 = `{"type":"object","properties":{"id":{"type":"integer"}}}`
+		outputV2 = `{"type":"object","properties":{"id":{"type":"integer"},"token":{"type":"string"}}}`
+	)
+	tool := func(output string) []*config.ToolMetadata {
+		return []*config.ToolMetadata{
+			{ServerName: "github", Name: "create_issue", RawName: "create_issue", Description: desc, ParamsJSON: schema, OutputSchemaJSON: output},
+		}
+	}
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true, TrustMode: string(config.TrustModeManual)},
+	})
+
+	// Baseline pass on the trusted server: approved for D + O1.
+	result, err := rt.checkToolApprovals("github", tool(outputV1))
+	require.NoError(t, err)
+	require.Empty(t, result.BlockedTools)
+	baseline, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	require.Equal(t, storage.ToolApprovalStatusApproved, baseline.Status)
+
+	// Pass 1 with O2: marked changed, blocked.
+	result, err = rt.checkToolApprovals("github", tool(outputV2))
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"])
+	assert.Equal(t, 1, result.ChangedCount)
+
+	// Pass 2 with O2: the description alone still matches the previous one,
+	// which must NOT read as a revert.
+	result, err = rt.checkToolApprovals("github", tool(outputV2))
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"], "a schema-only change must stay held on the second pass")
+	assert.Equal(t, 1, result.ChangedCount)
+	rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	assert.Equal(t, baseline.ApprovedHash, rec.ApprovedHash, "the changed schema must not be baselined")
+	assert.Equal(t, normalizeJSON(outputV1), normalizeJSON(rec.PreviousOutputSchema))
+
+	// A genuine revert to O1 restores it.
+	result, err = rt.checkToolApprovals("github", tool(outputV1))
+	require.NoError(t, err)
+	assert.Empty(t, result.BlockedTools, "the approved contract is back")
+	rec, err = rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+	assert.Empty(t, rec.PreviousOutputSchema)
+}
+
 func TestCheckToolApprovals_AutoApproved_ThenChanged_StillBlocked(t *testing.T) {
 	// Verify that even auto-approved tools get blocked if their hash changes later.
 	// Use a shared temp dir so the second runtime reuses the same DB.

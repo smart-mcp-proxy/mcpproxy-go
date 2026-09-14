@@ -215,3 +215,53 @@ func TestCodeExecution_DroppedServer_RecordlessHiddenToolIsPending(t *testing.T)
 		})
 	}
 }
+
+// Nested-path twin of
+// TestCallToolRead_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesUnlistedName
+// (astra r1 I3): the sandbox's identity read defers on a not-connected
+// snapshot, and callTool had no not-connected check of its own before
+// client.CallTool — so while the connected event was in flight, a script
+// dispatched an unlisted name to the live client. Same closure, same
+// envelope, zero upstream calls.
+func TestCodeExecution_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesUnlistedName(t *testing.T) {
+	for label, ctx := range map[string]context.Context{
+		"full-tier a-only token": fullTierAgentOn("a"),
+		"api-key admin":          adminCtx(),
+		"no auth context":        context.Background(),
+	} {
+		t.Run(label, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{{Name: "a", Enabled: true}}, func(cfg *config.Config) {
+				f := false
+				cfg.QuarantineEnabled = &f
+			})
+			up := startCountingUpstream(t, proxy, rt, "a", readSpec("erase"))
+			up.serve(readSpec("ghost"))
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Connected = false
+				s.ToolsDiscovered = false
+				s.Tools = nil
+			})
+			client, ok := proxy.upstreamManager.GetClient("a")
+			require.True(t, ok)
+			require.True(t, client.IsConnected(), "fixture: the LIVE client is connected")
+			require.False(t, proxy.resolveExactToolIdentity("a", "ghost").Unresolved(), "fixture: the identity read defers on the stale snapshot")
+
+			call := runSandboxCallTool(t, proxy, ctx, "a", "ghost")
+			assert.False(t, call.OK)
+			assert.Equal(t, string(jsruntime.ErrorCodePermissionDenied), call.Code,
+				"an unlisted name on a live-connected server must be the insufficient-permission envelope (got %q: %s)", call.Code, call.Message)
+			assert.Contains(t, call.Message, "cannot be resolved")
+			assert.NotContains(t, call.Message, "not found", "the upstream's own answer must never be relayed")
+			assert.Equal(t, int64(0), up.count.Load(), "the call must never reach the upstream")
+
+			// Positive control once the snapshot catches up.
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Connected, s.ToolsDiscovered = true, true
+				s.Tools = []stateview.ToolInfo{readSpec("erase").info(), readSpec("ghost").info()}
+			})
+			ctl := runSandboxCallTool(t, proxy, ctx, "a", "ghost")
+			assert.True(t, ctl.OK, "control: a listed name dispatches (got %q: %s)", ctl.Code, ctl.Message)
+			assert.Equal(t, int64(1), up.count.Load())
+		})
+	}
+}

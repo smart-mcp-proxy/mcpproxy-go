@@ -492,7 +492,7 @@ func TestSupervisor_RefreshToolsFromDiscovery(t *testing.T) {
 	}
 
 	// Refresh tools from discovery
-	err := supervisor.RefreshToolsFromDiscovery(tools)
+	_, err := supervisor.RefreshToolsFromDiscovery(tools, supervisor.DiscoveryGenerations())
 	if err != nil {
 		t.Fatalf("RefreshToolsFromDiscovery failed: %v", err)
 	}
@@ -549,13 +549,13 @@ func TestSupervisor_RefreshToolsFromDiscovery_EmptyTools(t *testing.T) {
 	supervisor := New(configSvc, mockUpstream, zap.NewNop())
 
 	// Test with nil tools
-	err := supervisor.RefreshToolsFromDiscovery(nil)
+	_, err := supervisor.RefreshToolsFromDiscovery(nil, supervisor.DiscoveryGenerations())
 	if err != nil {
 		t.Errorf("Expected no error with nil tools, got %v", err)
 	}
 
 	// Test with empty tools slice
-	err = supervisor.RefreshToolsFromDiscovery([]*config.ToolMetadata{})
+	_, err = supervisor.RefreshToolsFromDiscovery([]*config.ToolMetadata{}, supervisor.DiscoveryGenerations())
 	if err != nil {
 		t.Errorf("Expected no error with empty tools, got %v", err)
 	}
@@ -593,7 +593,7 @@ func TestSupervisor_ReconnectRepopulatesStateViewTools(t *testing.T) {
 		{Name: "tool1", ServerName: "server1", Description: "Test tool 1"},
 		{Name: "tool2", ServerName: "server1", Description: "Test tool 2"},
 	}
-	if err := sup.RefreshToolsFromDiscovery(tools); err != nil {
+	if _, err := sup.RefreshToolsFromDiscovery(tools, sup.DiscoveryGenerations()); err != nil {
 		t.Fatalf("RefreshToolsFromDiscovery failed: %v", err)
 	}
 	mockUpstream.SetServerTools("server1", tools)
@@ -662,13 +662,13 @@ func TestSupervisor_RefreshToolsFromDiscovery_ShrinkingToolSet(t *testing.T) {
 		{Name: "tool2", ServerName: "server1"},
 		{Name: "tool3", ServerName: "server1"},
 	}
-	if err := sup.RefreshToolsFromDiscovery(threeTools); err != nil {
+	if _, err := sup.RefreshToolsFromDiscovery(threeTools, sup.DiscoveryGenerations()); err != nil {
 		t.Fatalf("RefreshToolsFromDiscovery (3 tools) failed: %v", err)
 	}
 
 	// Upstream now legitimately exposes only one tool.
 	oneTool := []*config.ToolMetadata{{Name: "tool1", ServerName: "server1"}}
-	if err := sup.RefreshToolsFromDiscovery(oneTool); err != nil {
+	if _, err := sup.RefreshToolsFromDiscovery(oneTool, sup.DiscoveryGenerations()); err != nil {
 		t.Fatalf("RefreshToolsFromDiscovery (1 tool) failed: %v", err)
 	}
 
@@ -1096,7 +1096,8 @@ func TestSupervisor_RefreshToolsFromDiscovery_StateViewCarriesSchema(t *testing.
 		},
 	}
 
-	require.NoError(t, supervisor.RefreshToolsFromDiscovery(tools))
+	_, err := supervisor.RefreshToolsFromDiscovery(tools, supervisor.DiscoveryGenerations())
+	require.NoError(t, err)
 
 	snapshot := supervisor.StateView().Snapshot()
 	server1, ok := snapshot.Servers["server1"]
@@ -1263,7 +1264,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	// The sweep publishes server1's tools; "empty" contributed nothing to
 	// the flat list and must stay undiscovered.
 	tools := []*config.ToolMetadata{{Name: "tool1", ServerName: "server1", Description: "Test tool 1"}}
-	if err := sup.RefreshToolsFromDiscovery(tools); err != nil {
+	if _, err := sup.RefreshToolsFromDiscovery(tools, sup.DiscoveryGenerations()); err != nil {
 		t.Fatalf("RefreshToolsFromDiscovery: %v", err)
 	}
 	if !status("server1").ToolsDiscovered {
@@ -1274,7 +1275,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	}
 
 	// The per-server publication of an EMPTY result is authoritative.
-	if err := sup.RefreshServerToolsFromDiscovery("empty", nil); err != nil {
+	if _, err := sup.RefreshServerToolsFromDiscovery("empty", nil, sup.DiscoveryGeneration("empty")); err != nil {
 		t.Fatalf("RefreshServerToolsFromDiscovery: %v", err)
 	}
 	if st := status("empty"); !st.ToolsDiscovered || len(st.Tools) != 0 || st.ToolCount != 0 {
@@ -1282,7 +1283,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 			st.ToolsDiscovered, len(st.Tools), st.ToolCount)
 	}
 	// The per-server variant only publishes tools that belong to the server.
-	if err := sup.RefreshServerToolsFromDiscovery("empty", tools); err != nil {
+	if _, err := sup.RefreshServerToolsFromDiscovery("empty", tools, sup.DiscoveryGeneration("empty")); err != nil {
 		t.Fatalf("RefreshServerToolsFromDiscovery: %v", err)
 	}
 	if st := status("empty"); len(st.Tools) != 0 {
@@ -1330,13 +1331,26 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 		t.Error("empty after reconnect: nothing retained, must stay undiscovered until discovery re-runs")
 	}
 
+	// astra r1 I1: a zero-tool list on the NEW connection must not certify
+	// the retained set — that set is the previous connection's discovery
+	// result, and this connection listed none of it. The server stays in the
+	// discovery window (unstamped, tools kept for counts) until a non-empty
+	// or authoritative pass replaces the set.
+	sup.MarkServersToolsDiscovered([]string{"server1"}, sup.DiscoveryGenerations())
+	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1: a zero-tool stamp must not certify a retained set, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
+	if snap := sup.snapshot.Load().(*ServerStateSnapshot); snap.Servers["server1"].ToolsDiscovered {
+		t.Error("server1: the retained Supervisor state must not be stamped over a retained set either")
+	}
+
 	// A reconcile pass carries the (cleared) marker over with the retained
 	// tools; the connection's own discovery pass re-stamps it.
 	_ = sup.reconcile(configSvc.Current())
 	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after reconnect+reconcile: marker must stay cleared until discovery re-runs, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
-	if err := sup.RefreshServerToolsFromDiscovery("server1", tools); err != nil {
+	if _, err := sup.RefreshServerToolsFromDiscovery("server1", tools, sup.DiscoveryGeneration("server1")); err != nil {
 		t.Fatalf("RefreshServerToolsFromDiscovery: %v", err)
 	}
 	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
@@ -1370,7 +1384,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 		t.Fatal("fresh: before any discovery ToolsDiscovered must be false")
 	}
 	before := sup.snapshot.Load().(*ServerStateSnapshot).Version
-	sup.MarkServersToolsDiscovered([]string{"fresh", "server1", "ghost"})
+	sup.MarkServersToolsDiscovered([]string{"fresh", "server1", "ghost"}, sup.DiscoveryGenerations())
 	if st := status("fresh"); !st.ToolsDiscovered || len(st.Tools) != 0 {
 		t.Errorf("fresh: a completed zero-tool list must stamp the marker with no tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
@@ -1382,7 +1396,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 			snap.Version, before, snap.Servers["fresh"].ToolsDiscovered)
 	}
 	// Nothing to stamp: no new snapshot version is published.
-	sup.MarkServersToolsDiscovered([]string{"fresh", "server1", "ghost"})
+	sup.MarkServersToolsDiscovered([]string{"fresh", "server1", "ghost"}, sup.DiscoveryGenerations())
 	if snap := sup.snapshot.Load().(*ServerStateSnapshot); snap.Version != before+1 {
 		t.Errorf("an idempotent stamp must not publish, got version %d", snap.Version)
 	}
@@ -1398,8 +1412,211 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	if sup.snapshot.Load().(*ServerStateSnapshot).Servers["fresh"].ToolsDiscovered {
 		t.Fatal("fresh after disconnect: the retained Supervisor state must drop its stamp too")
 	}
-	sup.MarkServersToolsDiscovered([]string{"fresh"})
+	sup.MarkServersToolsDiscovered([]string{"fresh"}, sup.DiscoveryGenerations())
 	if !status("fresh").ToolsDiscovered || !sup.snapshot.Load().(*ServerStateSnapshot).Servers["fresh"].ToolsDiscovered {
 		t.Error("fresh: a zero-tool list after reconnect must stamp both the StateView and the retained state")
 	}
+}
+
+// connectionEvent is a delivered connect / disconnect event for name.
+func connectionEvent(name string, connected bool) Event {
+	typ := EventServerConnected
+	if !connected {
+		typ = EventServerDisconnected
+	}
+	return Event{Type: typ, ServerName: name, Timestamp: time.Now(), Payload: map[string]interface{}{"connected": connected}}
+}
+
+// markerFixture is a reconciled one-server supervisor plus a StateView reader.
+func markerFixture(t *testing.T) (*Supervisor, *MockUpstreamAdapter, *configsvc.Service, func(string) *stateview.ServerStatus) {
+	t.Helper()
+	cfg := &config.Config{Listen: "127.0.0.1:8080", Servers: []*config.ServerConfig{{Name: "s", Enabled: true}}}
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	t.Cleanup(func() { configSvc.Close() })
+	mockUpstream := NewMockUpstreamAdapter()
+	t.Cleanup(func() { mockUpstream.Close() })
+	_ = mockUpstream.AddServer("s", cfg.Servers[0])
+	sup := New(configSvc, mockUpstream, zap.NewNop())
+	_ = sup.reconcile(configSvc.Current())
+	return sup, mockUpstream, configSvc, func(name string) *stateview.ServerStatus {
+		t.Helper()
+		st, ok := sup.StateView().Snapshot().Servers[name]
+		if !ok {
+			t.Fatalf("server %q missing from StateView", name)
+		}
+		return st
+	}
+}
+
+// TestSupervisor_StaleDiscoveryResultIsDropped pins the connection-generation
+// binding of discovery publication (Spec 105 FR-009 "stale generation";
+// astra r1 I2). The marker is per connection, but publication was keyed by
+// server name alone and last-writer-wins, so a result captured on connection
+// A landed on connection B whenever ListTools→index→publish spanned a
+// disconnect+reconnect (the serial sweep with a synchronous RestartServer
+// inside it): B read discovered=true with A's names before its own pass, and
+// — if B's reactive discovery had published FIRST — the delayed sweep
+// overwrote it, so B's genuine names were refused as stale. A publish now
+// carries the generation it was captured under and is dropped when the
+// server's connection has moved on.
+func TestSupervisor_StaleDiscoveryResultIsDropped(t *testing.T) {
+	aTools := []*config.ToolMetadata{{Name: "old_tool", ServerName: "s"}}
+	bTools := []*config.ToolMetadata{{Name: "new_tool", ServerName: "s"}}
+
+	t.Run("captured on A, published after B connected", func(t *testing.T) {
+		sup, _, _, status := markerFixture(t)
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		gens := sup.DiscoveryGenerations() // captured under A, before ListTools
+		sup.updateSnapshotFromEvent(connectionEvent("s", false))
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		require.False(t, status("s").ToolsDiscovered, "precondition: B is undiscovered")
+
+		stale, err := sup.RefreshToolsFromDiscovery(aTools, gens)
+		require.NoError(t, err)
+		require.Equal(t, []string{"s"}, stale, "the caller is told which servers to re-list")
+		st := status("s")
+		require.False(t, st.ToolsDiscovered, "A's result must not certify B: discovered=%v tools=%v", st.ToolsDiscovered, st.Tools)
+		require.Empty(t, st.Tools, "A's names must not land on B")
+
+		// B's own result, captured under B's generation, publishes.
+		published, err := sup.RefreshServerToolsFromDiscovery("s", bTools, sup.DiscoveryGeneration("s"))
+		require.NoError(t, err)
+		require.True(t, published)
+		st = status("s")
+		require.True(t, st.ToolsDiscovered)
+		require.Len(t, st.Tools, 1)
+		require.Equal(t, "new_tool", st.Tools[0].Name)
+
+		// A's delayed result arriving AFTER B published is still dropped:
+		// B's genuine names are not overwritten.
+		stale, err = sup.RefreshToolsFromDiscovery(aTools, gens)
+		require.NoError(t, err)
+		require.Equal(t, []string{"s"}, stale)
+		st = status("s")
+		require.True(t, st.ToolsDiscovered)
+		require.Equal(t, "new_tool", st.Tools[0].Name, "a stale publish must not overwrite the current connection's result")
+	})
+
+	t.Run("captured on A, published while disconnected, then B connects", func(t *testing.T) {
+		sup, _, _, status := markerFixture(t)
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		gens := sup.DiscoveryGenerations()
+		sup.updateSnapshotFromEvent(connectionEvent("s", false))
+		stale, err := sup.RefreshToolsFromDiscovery(aTools, gens)
+		require.NoError(t, err)
+		require.Equal(t, []string{"s"}, stale)
+		require.False(t, sup.snapshot.Load().(*ServerStateSnapshot).Servers["s"].ToolsDiscovered, "a stale result must not stamp the retained state while disconnected")
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		st := status("s")
+		require.True(t, st.Connected)
+		require.False(t, st.ToolsDiscovered, "B must not read discovered from a result captured on A")
+		require.Empty(t, st.Tools)
+	})
+
+	t.Run("a zero-tool stamp captured under a superseded connection is dropped too", func(t *testing.T) {
+		sup, _, _, status := markerFixture(t)
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		gens := sup.DiscoveryGenerations()
+		sup.updateSnapshotFromEvent(connectionEvent("s", false))
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		sup.MarkServersToolsDiscovered([]string{"s"}, gens)
+		require.False(t, status("s").ToolsDiscovered)
+		sup.MarkServersToolsDiscovered([]string{"s"}, sup.DiscoveryGenerations())
+		require.True(t, status("s").ToolsDiscovered, "the same stamp under the current generation lands")
+	})
+
+	t.Run("control: a result captured and published on the same connection lands", func(t *testing.T) {
+		sup, _, _, status := markerFixture(t)
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		stale, err := sup.RefreshToolsFromDiscovery(aTools, sup.DiscoveryGenerations())
+		require.NoError(t, err)
+		require.Empty(t, stale)
+		require.True(t, status("s").ToolsDiscovered)
+	})
+
+	t.Run("reconcile carries the generation and bumps it on a disconnect it observes", func(t *testing.T) {
+		sup, mockUpstream, configSvc, _ := markerFixture(t)
+		require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
+		_ = sup.reconcile(configSvc.Current())
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		before := sup.DiscoveryGeneration("s")
+		_ = sup.reconcile(configSvc.Current())
+		require.Equal(t, before, sup.DiscoveryGeneration("s"), "a reconcile that observes no change keeps the generation")
+		require.NoError(t, mockUpstream.DisconnectServer("s"))
+		_ = sup.reconcile(configSvc.Current())
+		require.Equal(t, before+1, sup.DiscoveryGeneration("s"), "a disconnect reconcile observes (dropped event) moves the generation")
+	})
+}
+
+// TestSupervisor_DroppedDisconnectEventClearsMarker pins astra r1 I4: the
+// only code that cleared the per-connection marker was the disconnect event
+// handler, and event delivery is best-effort (actor_pool.emitEvent drops on a
+// full channel). After a dropped disconnect, reconcile copied the stale stamp
+// forward with the retained tools and the connect branch left it in place
+// (its restore ran only for an empty StateView set), so connection B read
+// discovered=true with connection A's names before its own pass. Reconcile
+// now invalidates the marker whenever it observes the server disconnected,
+// and the connect event clears it on both sides regardless of what was
+// retained.
+func TestSupervisor_DroppedDisconnectEventClearsMarker(t *testing.T) {
+	tools := []*config.ToolMetadata{{Name: "erase", ServerName: "s"}}
+	retained := func(t *testing.T, sup *Supervisor) *ServerState {
+		t.Helper()
+		return sup.snapshot.Load().(*ServerStateSnapshot).Servers["s"]
+	}
+
+	t.Run("reconcile observes the disconnect", func(t *testing.T) {
+		sup, mockUpstream, configSvc, status := markerFixture(t)
+		require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
+		_ = sup.reconcile(configSvc.Current())
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		published, err := sup.RefreshServerToolsFromDiscovery("s", tools, sup.DiscoveryGeneration("s"))
+		require.NoError(t, err)
+		require.True(t, published)
+		require.True(t, status("s").ToolsDiscovered)
+
+		// The manager drops the connection; the event is lost.
+		require.NoError(t, mockUpstream.DisconnectServer("s"))
+		_ = sup.reconcile(configSvc.Current())
+		st := status("s")
+		require.False(t, st.Connected)
+		require.False(t, st.ToolsDiscovered, "reconcile is authoritative for Connected and must invalidate the per-connection marker with it")
+		require.False(t, retained(t, sup).ToolsDiscovered, "the retained state must drop the stamp too")
+		require.Len(t, retained(t, sup).Tools, 1, "the retained tools are kept (MCP-2094)")
+
+		// Connection B: the connect event arrives, no rediscovery yet.
+		require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		st = status("s")
+		require.True(t, st.Connected)
+		require.False(t, st.ToolsDiscovered, "B has not completed a pass: A's stamp must not certify A's names")
+		require.Len(t, st.Tools, 1, "the retained set is restored for counts and listings")
+
+		// B's own pass re-stamps.
+		published, err = sup.RefreshServerToolsFromDiscovery("s", tools, sup.DiscoveryGeneration("s"))
+		require.NoError(t, err)
+		require.True(t, published)
+		require.True(t, status("s").ToolsDiscovered)
+	})
+
+	t.Run("no reconcile between the dropped disconnect and the connect event", func(t *testing.T) {
+		sup, mockUpstream, configSvc, status := markerFixture(t)
+		require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
+		_ = sup.reconcile(configSvc.Current())
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		_, err := sup.RefreshServerToolsFromDiscovery("s", tools, sup.DiscoveryGeneration("s"))
+		require.NoError(t, err)
+		require.True(t, status("s").ToolsDiscovered)
+		gen := sup.DiscoveryGeneration("s")
+
+		// Dropped disconnect, then the connect event for B with the
+		// StateView still holding A's tools and stamp.
+		sup.updateSnapshotFromEvent(connectionEvent("s", true))
+		st := status("s")
+		require.True(t, st.Connected)
+		require.False(t, st.ToolsDiscovered, "a connect event is a new connection: the stamp must be cleared on the StateView even when its tools were never cleared")
+		require.False(t, retained(t, sup).ToolsDiscovered, "... and on the retained state")
+		require.Len(t, st.Tools, 1, "the tools stay for counts")
+		require.Equal(t, gen+1, sup.DiscoveryGeneration("s"), "the connect edge moves the generation, so a result captured on A is dropped")
+	})
 }

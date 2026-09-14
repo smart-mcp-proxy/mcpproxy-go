@@ -6,6 +6,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -35,7 +36,7 @@ func toolPendingApprovalResult(serverName, toolName string, approval *storage.To
 			"reason":              "no_approval_record",
 			"message":             fmt.Sprintf("Tool '%s:%s' is in the server's tool list but has no approval record yet, so it cannot be called while tool-level quarantine is active for the server.", serverName, toolName),
 			"current_description": approval.CurrentDescription,
-			"action":              fmt.Sprintf("No approval record exists for this tool yet; the server's tools are re-evaluated on its next discovery pass. Re-discover the server (upstream_servers operation=\"refresh\" name=\"%s\", or mcpproxy upstream restart %s) and retry; the tool then appears for review under mcpproxy upstream inspect %s.", serverName, serverName, serverName),
+			"action":              "No approval record exists for this tool yet. " + preflight.NoApprovalRecordRemediation(serverName),
 		}, "pending tool approval")
 	}
 	response := map[string]interface{}{

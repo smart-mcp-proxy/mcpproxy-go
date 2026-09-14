@@ -305,7 +305,20 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 		Discovered:        indexed != nil,
 	})
 	if !class.Callable() {
-		return unavailable(id, class.Reason(), classDetail(class, serverName, toolName)), nil
+		res := unavailable(id, class.Reason(), classDetail(class, serverName, toolName))
+		// Spec 105 FR-009 implicit pending (astra r1 R1): no record exists to
+		// approve yet, so the taxonomy's approve remediation is a dead end —
+		// ApproveTools skips a missing record and triggers no rediscovery.
+		// Same per-occurrence override idiom as server_unhealthy, same body as
+		// dispatch and describe_tool; the reason code stays
+		// tool_pending_approval (closed FR-003 enum, exit code and counters
+		// unchanged).
+		if class == ToolClassPendingApproval && approval == nil {
+			res.Action = health.ActionRestart
+			res.Detail = NoApprovalRecordDetail(id)
+			res.Remediation = NoApprovalRecordRemediation(serverName)
+		}
+		return res, nil
 	}
 
 	// 10. hash_mismatch — evaluated only now that the tool is known to exist

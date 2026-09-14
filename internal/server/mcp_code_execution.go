@@ -742,6 +742,25 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 		return nil, err
 	}
 
+	// Spec 105 FR-009 (research D4), astra r1 I3: the sandbox's identity
+	// read (lookupToolPermission) defers to the server-level verdicts when
+	// the StateView reads the server as not connected — but this path has no
+	// not-connected check of its own before client.CallTool, and the live
+	// client may be connected while the connected event is still in flight.
+	// Same closure as handleCallToolVariant: refuse an unlisted name once the
+	// live client is found connected.
+	if u.proxy != nil {
+		deferred := u.proxy.resolveExactToolIdentity(serverName, toolName)
+		if msg, refuse := u.proxy.liveIdentityRefusal(serverName, toolName, deferred, client); refuse {
+			refusal := errors.New(msg)
+			duration := time.Since(startTime)
+			u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
+			u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
+			u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
+			return nil, refusal
+		}
+	}
+
 	// Call the tool
 	result, err := client.CallTool(ctx, toolName, args)
 	if err == nil {
@@ -1269,6 +1288,21 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 	identity := p.resolveExactToolIdentity(serverName, toolName)
 	if identity.Unresolved() {
 		return jsruntime.PermissionTierUnresolved
+	}
+	// Spec 105 FR-009 (research D4), astra r1 I3: the identity read defers
+	// when the StateView reads the server as not connected, relying on the
+	// server-level verdicts — but this path has no not-connected check of
+	// its own before client.CallTool, and the live client may be connected
+	// while the server_connected event is still in flight. Same closure as
+	// handleCallToolVariant (liveIdentityRefusal): once the live client is
+	// found connected, an unlisted name is unresolved, and the sandbox
+	// answers with the permission envelope before any AuthInfo check.
+	if identity.ServerKnown && !identity.SnapshotHydrated && p.upstreamManager != nil {
+		if client, ok := p.upstreamManager.GetClient(serverName); ok {
+			if _, refuse := p.liveIdentityRefusal(serverName, toolName, identity, client); refuse {
+				return jsruntime.PermissionTierUnresolved
+			}
+		}
 	}
 	return tierForAnnotations(identity.Annotations, identity.Found)
 }

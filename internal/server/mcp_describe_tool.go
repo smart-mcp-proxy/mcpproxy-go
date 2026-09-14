@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 )
 
 // maxDescribeToolIDs caps a describe_tool batch (Spec 085 FR-010). Matches the
@@ -62,9 +63,8 @@ const describeNotFoundRemediation = "Tool not found or no longer available; list
 // record, so the agent is pointed at re-discovery rather than at the approve
 // flow.
 func describeNoApprovalRecordRemediation(serverName string) string {
-	return fmt.Sprintf("In the server's tool list but no approval record exists for it yet, so it is withheld while tool-level quarantine is active for the server. "+
-		"The server's tools are re-evaluated on its next discovery pass: re-discover the server (upstream_servers operation=\"refresh\" name=\"%s\", or mcpproxy upstream restart %s) and retry; the tool then appears for review under mcpproxy upstream inspect %s.",
-		serverName, serverName, serverName)
+	return "In the server's tool list but no approval record exists for it yet, so it is withheld while tool-level quarantine is active for the server. " +
+		preflight.NoApprovalRecordRemediation(serverName)
 }
 
 // describeMalformedIDRemediation is the answer to an id that does not parse.

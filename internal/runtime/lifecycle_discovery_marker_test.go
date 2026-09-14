@@ -78,4 +78,29 @@ func TestDiscovery_ZeroToolServerIsStampedDiscoveredOnLenientAndSweepPaths(t *te
 		assert.True(t, st.ToolsDiscovered, "the sweep stamps a server that listed zero tools")
 		assert.Empty(t, st.Tools)
 	})
+
+	// astra r1 I1: after a reconnect the StateView holds the PREVIOUS
+	// connection's tool set (restored for counts, MCP-2094) with the marker
+	// cleared. A zero-tool list on the new connection must not stamp that
+	// set as this connection's discovery result — the names were never
+	// listed by it, and the stale annotations would drive the tier check.
+	for _, path := range []struct {
+		name string
+		run  func() error
+	}{
+		{"lenient connect path", func() error { return rt.DiscoverAndIndexToolsForServer(context.Background(), "a") }},
+		{"sweep", func() error { return rt.DiscoverAndIndexTools(context.Background()) }},
+	} {
+		t.Run(path.name+": a retained set is never certified by an empty list", func(t *testing.T) {
+			resetWindow()
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Tools = []stateview.ToolInfo{{Name: "erase", Description: "previous connection's tool"}}
+				s.ToolCount = 1
+			})
+			require.NoError(t, path.run())
+			st := status()
+			assert.False(t, st.ToolsDiscovered, "a retained set must not be stamped as this connection's result")
+			assert.Len(t, st.Tools, 1, "the retained set is kept for counts, not wiped")
+		})
+	}
 }

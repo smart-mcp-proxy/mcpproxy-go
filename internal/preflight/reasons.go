@@ -1,6 +1,29 @@
 package preflight
 
-import "github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
+import (
+	"fmt"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
+)
+
+// NoApprovalRecordDetail / NoApprovalRecordRemediation are the Spec 105 FR-009
+// implicit-pending bodies shared by dispatch (toolPendingApprovalResult, reason
+// no_approval_record), describe_tool and check mode, so the three FR-009
+// readers cannot drift (astra r1 R1): a tool the discovery snapshot contains
+// with NO stored approval record is pending under its own name while the
+// quarantine gate applies, but nothing is listed in the review UI to approve
+// yet — the taxonomy's "approve" remediation is a dead end (ApproveTools skips
+// a missing record and triggers no rediscovery). The server's next discovery
+// pass files the real record, so the caller is pointed at re-discovery.
+func NoApprovalRecordDetail(id string) string {
+	return fmt.Sprintf("Tool %q is in the server's tool list but has no approval record yet, so it is withheld while tool-level quarantine is active for the server.", id)
+}
+
+// NoApprovalRecordRemediation is the re-discovery instruction for a
+// record-less tool; see NoApprovalRecordDetail.
+func NoApprovalRecordRemediation(serverName string) string {
+	return fmt.Sprintf("The server's tools are re-evaluated on its next discovery pass: re-discover the server (upstream_servers operation=\"refresh\" name=\"%s\", or mcpproxy upstream restart %s) and retry; the tool then appears for review under mcpproxy upstream inspect %s.", serverName, serverName, serverName)
+}
 
 // Status is the per-tool outcome. `ready` is a success status, not a failure
 // reason — a ready result carries no reason, retryable or action field.

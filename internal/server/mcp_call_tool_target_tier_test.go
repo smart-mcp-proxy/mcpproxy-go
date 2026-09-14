@@ -1713,3 +1713,111 @@ func TestCallToolRead_ConnectedUndiscoveredServer_RefusedForEveryCaller(t *testi
 		})
 	}
 }
+
+// Spec 105 FR-009 (research D4), astra r1 I3: the disconnected exemption in
+// toolIdentity.Unresolved() assumes the pre-105 not-connected verdict will
+// refuse when the StateView reads a known server as not connected. That
+// verdict consults the LIVE client, and the StateView's Connected flag lags
+// it — it is written only by the async server_connected event (notification
+// → actor_pool, which DROPS on a full channel → supervisor goroutine) or the
+// 30s reconcile. In that window the identity gate deferred, the live-client
+// check passed, and an unlisted name dispatched: with the quarantine gate
+// off (or an existing record for a now-stale name under an active gate) the
+// shared gate had no approval answer either. The deferral is now closed once
+// the live client is found connected: the snapshot is re-read and the name
+// refused unless it lists it, with zero upstream calls.
+func TestCallToolRead_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesUnlistedName(t *testing.T) {
+	type cell struct {
+		name          string
+		quarantineOff bool
+		ctx           context.Context
+		toolName      string
+		staleApproval bool
+	}
+	cells := []cell{
+		{name: "admin, quarantine off, ghost", quarantineOff: true, ctx: adminCtx(), toolName: "ghost"},
+		{name: "full-tier token, quarantine off, ghost", quarantineOff: true, ctx: fullTierAgentOn("a"), toolName: "ghost"},
+		{name: "admin, quarantine on, approved record for a stale name", quarantineOff: false, ctx: adminCtx(), toolName: "stale", staleApproval: true},
+		{name: "full-tier token, quarantine on, approved record for a stale name", quarantineOff: false, ctx: fullTierAgentOn("a"), toolName: "stale", staleApproval: true},
+	}
+	for _, c := range cells {
+		t.Run(c.name, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{{Name: "a", Enabled: true}}, func(cfg *config.Config) {
+				if c.quarantineOff {
+					f := false
+					cfg.QuarantineEnabled = &f
+				}
+			})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			up := startCountingUpstream(t, proxy, rt, "a", readSpec("erase"))
+			// The stub really serves the name (a dispatch would be witnessed
+			// by the counter), but the proxy's snapshot does not list it.
+			up.serve(readSpec(c.toolName))
+			if c.staleApproval {
+				require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+					ServerName: "a", ToolName: c.toolName, Status: storage.ToolApprovalStatusApproved, IdentityKeyed: true,
+				}))
+			}
+
+			// The window: the server_connected event has not been applied
+			// (or was dropped) while the live client is connected.
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Connected = false
+				s.ToolsDiscovered = false
+				s.Tools = nil
+			})
+			client, ok := proxy.upstreamManager.GetClient("a")
+			require.True(t, ok)
+			require.True(t, client.IsConnected(), "fixture: the LIVE client is connected")
+			identity := proxy.resolveExactToolIdentity("a", c.toolName)
+			require.True(t, identity.ServerKnown)
+			require.False(t, identity.SnapshotHydrated)
+			require.False(t, identity.Unresolved(), "fixture: the identity gate defers on the stale snapshot")
+
+			result, text := callToolReadResult(t, proxy, c.ctx, "a:"+c.toolName)
+			require.True(t, result.IsError, "%s", text)
+			assert.Contains(t, text, "Permission denied", "the unresolved-identity body")
+			assert.Contains(t, text, "discovery has not completed", "the snapshot is not hydrated: the remediation is to retry")
+			assert.NotContains(t, text, "ok")
+			assert.Equal(t, int64(0), up.count.Load(), "D4: an unverified name must never reach the upstream (got %q)", text)
+			assert.Empty(t, up.dispatched())
+
+			// Positive control: once the snapshot catches up and lists the
+			// name, the same caller dispatches it.
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Connected = true
+				s.ToolsDiscovered = true
+				s.Tools = []stateview.ToolInfo{readSpec("erase").info(), readSpec(c.toolName).info()}
+			})
+			if !c.staleApproval && !c.quarantineOff {
+				t.Skip("no control under an active gate without a record")
+			}
+			ctl, ctlText := callToolReadResult(t, proxy, c.ctx, "a:"+c.toolName)
+			assert.False(t, ctl.IsError, "control: a listed name dispatches: %s", ctlText)
+			assert.Equal(t, int64(1), up.count.Load())
+		})
+	}
+
+	t.Run("control: a live client that is NOT connected keeps the not-connected body", func(t *testing.T) {
+		serverCfg := &config.ServerConfig{Name: "a", Enabled: true, URL: "http://127.0.0.1:9/mcp", Protocol: "streamable-http"}
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{serverCfg})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
+		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+			s.Name, s.Enabled, s.Connected = "a", true, false
+		})
+		// Approved before the server dropped (as in
+		// TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts): the
+		// answer must be about the connection, not the record.
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ghost", Status: storage.ToolApprovalStatusApproved, IdentityKeyed: true,
+		}))
+		require.NoError(t, proxy.upstreamManager.AddServerConfig("a", serverCfg))
+		client, ok := proxy.upstreamManager.GetClient("a")
+		require.True(t, ok)
+		require.False(t, client.IsConnected())
+		_, text := callToolReadResult(t, proxy, adminCtx(), "a:ghost")
+		assert.Contains(t, text, "Server 'a' is not connected")
+		assert.NotContains(t, text, "cannot be resolved", "the live-identity closure must not pre-empt the connection verdict")
+	})
+}

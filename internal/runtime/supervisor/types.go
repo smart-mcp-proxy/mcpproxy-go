@@ -23,9 +23,19 @@ type ServerState struct {
 	Tools          []*config.ToolMetadata // Phase 7.1: Cached tools for lock-free reads
 	// ToolsDiscovered mirrors stateview.ServerStatus.ToolsDiscovered on the
 	// retained snapshot: set when discovery publishes a tool set for the
-	// server (even an empty one), retained across disconnects like Tools so
-	// the reconnect restore can carry it back into the StateView with them.
+	// server (even an empty one). It is PER CONNECTION: cleared on every
+	// connection-state edge (disconnect AND connect) and whenever reconcile
+	// observes the server disconnected, so a stale stamp can never certify
+	// the previous connection's retained Tools for a new connection (Spec 105
+	// FR-009, research D4; astra r1 I1/I4).
 	ToolsDiscovered bool
+	// ConnectionGeneration counts the server's connection-state edges
+	// (bumped on every connect / disconnect event and on a disconnect
+	// reconcile observes). A discovery result is published only if the
+	// generation it was captured under is still current, so a result whose
+	// capture straddled a reconnect is dropped instead of landing on the new
+	// connection (Spec 105 FR-009 "stale generation"; astra r1 I2).
+	ConnectionGeneration uint64
 
 	// Reconciliation metadata
 	DesiredVersion int64 // Config version that defines this desired state

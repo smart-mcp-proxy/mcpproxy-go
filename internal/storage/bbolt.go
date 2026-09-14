@@ -372,30 +372,50 @@ func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	})
 }
 
-// SaveToolApprovals writes several tool approval records in ONE update
-// transaction: either every record lands or none does. Used by the discovery
-// producer to stamp a server's remaining pre-105 records identity-keyed in a
-// single write after its first pass (Spec 105 FR-009).
-func (b *BoltDB) SaveToolApprovals(records []*ToolApprovalRecord) error {
-	if len(records) == 0 {
-		return nil
+// StampToolApprovalsIdentityKeyed marks the named records of one server
+// identity-keyed (Spec 105 FR-009) in ONE update transaction, re-reading each
+// record INSIDE the transaction and stamping it only if it is still unstamped
+// and still does not Restricts() at write time. Used by the discovery
+// producer to end the legacy consults for a server's remaining pre-105
+// records after its first pass. The in-transaction re-read is what makes the
+// sweep safe against an operator write (SetToolEnabled / BlockTools) that
+// lands between the caller's listing and this stamp (astra r1 P4): a stale
+// listed copy is never written back, so the operator's Disabled=true is
+// neither discarded nor stamped over — only the IdentityKeyed bit is ever
+// touched. Returns the names actually stamped.
+func (b *BoltDB) StampToolApprovalsIdentityKeyed(serverName string, toolNames []string) ([]string, error) {
+	if len(toolNames) == 0 {
+		return nil, nil
 	}
-	return b.db.Update(func(tx *bbolt.Tx) error {
+	var stamped []string
+	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
-		for _, record := range records {
-			if record == nil {
+		for _, name := range toolNames {
+			key := []byte(ToolApprovalKey(serverName, name))
+			data := bucket.Get(key)
+			if data == nil {
 				continue
 			}
-			data, err := record.MarshalBinary()
+			record := &ToolApprovalRecord{}
+			if err := record.UnmarshalBinary(data); err != nil {
+				return err
+			}
+			if record.IdentityKeyed || record.Restricts() {
+				continue
+			}
+			record.IdentityKeyed = true
+			out, err := record.MarshalBinary()
 			if err != nil {
 				return err
 			}
-			if err := bucket.Put([]byte(record.Key()), data); err != nil {
+			if err := bucket.Put(key, out); err != nil {
 				return err
 			}
+			stamped = append(stamped, name)
 		}
 		return nil
 	})
+	return stamped, err
 }
 
 // GetToolApproval retrieves a tool approval record by server and tool name.
