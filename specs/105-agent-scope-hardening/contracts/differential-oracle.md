@@ -19,13 +19,14 @@ func newScopeFixture(t *testing.T, full bool) *scopeFixture
 func runScopeScenario(t *testing.T, usID string, fn func(f *scopeFixture, ctx context.Context) any)
 ```
 1. Runs `fn` against both fixtures with `aOnly`.
-2. `normalizeScopeResponse`: strips ids, timestamps, request ids, `usage_count` deltas, ranking-dependent fields listed in SC-001 (retrieve-oracle exclusion), sorts unordered lists.
-3. Asserts: normalized(A) == normalized(B) byte-for-byte; no sentinel substring in the raw A response; where the scenario names an admin control, admin(A) ≠ admin(B) (proves the scenario discriminates).
-4. Registers `usID` in the coverage table; `TestScopeCoverage_EveryUserStoryScenario` fails if any of US1.1–US1.8, US2.1–US2.6, US3.1–US3.4 has no registration.
+2. `normalizeScopeResponse`: strips only **nondeterministic** fields (ids, timestamps, request ids), sorts unordered lists. Seeded usage counts are deterministic and are compared.
+3. Ranking-dependent fields named by SC-001 (results, `total`, `filter_diagnostics`, scores) are **excluded from the cross-fixture equality and asserted per fixture** against the retrieve-oracle derivation: unchanged `Search` with `Size=documentCount` over the selected corpus, filtered to authorized hits, cut to the ranked window (`spec.md:113`). The baseline is the existing search, never `SearchScoped` itself.
+4. Asserts: normalized(A) == normalized(B) byte-for-byte for everything else; no sentinel substring in the raw A response; where the scenario names an admin control, admin(A) ≠ admin(B) (proves the scenario discriminates).
+5. Registers `usID` in the coverage table; `TestScopeCoverage_EveryUserStoryScenario` fails if any of US1.1–US1.8, US2.1–US2.6, US3.1–US3.4 has no registration.
 
 ## Counting oracle (SC-002)
 
-`startCountingTargetTierUpstream` (exists) — every refusal scenario asserts `calls == 0` after the request; every allowed cell asserts `calls == 1`. The FR-009 54-cell table (3 paths × 6 permission sets × 3 targets) is generated, not hand-written.
+`startCountingTargetTierUpstream` (exists) — every refusal scenario asserts `calls == 0` after the request; every allowed cell asserts `calls == 1`. The FR-009 tables are generated at the spec's shape (`spec.md:132`): **retrieve 54 cells** = 3 permission sets (`{read}`, `{read,write}`, `{read,write,destructive}`) × 3 target tiers × 3 `call_tool_*` variants × strict-intent on/off, each pre-classified as allowed / insufficient-permission / intent-mismatch; plus a **direct** table (permission set × target tier, through `HandleMessage`) and a **nested** table (permission set × target tier, through the real sandbox runtime with the envelope asserted). Includes the paired-name rows (`erase` approved, `ns:erase` config-denied / unapproved) and `auth.AdminContext()` control rows.
 
 ## HTTP matrix (FR-014, `scope_http_matrix_test.go`)
 
@@ -33,4 +34,4 @@ Real tokens minted through `mintAgentToken(name, allowed, perms, pin)`; requests
 
 ## Latency (FR-011, `scope_latency_test.go`)
 
-527-tool snapshot via `loadDeferredLargeCorpus`; 20 warm-up + 200 timed `retrieve_tools` per caller; assert `p95(aOnly) − p95(admin) ≤ 20ms`; skipped under `-race`. Manual merge-base `benchstat` recipe in quickstart.
+527-tool snapshot via `loadDeferredLargeCorpus`, a frozen 50-prompt set and a frozen 10-page cache entry; 20 warm-up + 200 timed calls per caller for each of `retrieve_tools`, `read_cache`, `prompts/list`, `tools/list`; assert `p95(aOnly) − p95(admin) ≤ 20ms` per operation; skipped under `-race`. **Merge-base bound**: `.github/workflows/scope-latency.yml` (non-race, CI reference runner) runs the same benchmark at merge-base and head in one job and fails if administrator p95 regresses by more than max(10%, 5 ms) on any operation (research D10).

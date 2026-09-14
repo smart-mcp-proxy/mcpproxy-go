@@ -27,9 +27,9 @@
 - [ ] T004 [US2] FR009-G1: `setupQuarantineRuntime` manual trust, baseline `erase` approved, discover `[erase, ns:erase]` → expect `BlockedTools["ns:erase"]` and a pending record keyed `ns:erase`; full-tier `a`-only `call_tool_read a:ns:erase` → `TOOL_QUARANTINED`, zero upstream — `internal/runtime/tool_quarantine_identity_test.go` (new) + `internal/server/mcp_call_tool_target_tier_test.go`
 - [ ] T005 [P] [US2] FR009-G2: `applyDifferentialToolUpdate` with `[erase, ns:erase]` → `GetToolsByServer` length 2; `SaveToolApproval(ns:erase, Disabled)` survives a rerun (HEAD deletes it) — `internal/runtime/lifecycle_identity_test.go` (new) + `internal/index/bleve_rawname_test.go` (new: distinct docIDs)
 - [ ] T006 [P] [US2] FR009-G3: seed `{a, erase, pending}`, delete `ns:erase` record; full-tier ctx: `makeDirectModeHandler` entry `ns:erase` → IsError + zero upstream; `preflightApprovalReader.ToolApproval` → non-nil pending — `internal/server/mcp_direct_callability_test.go` + `internal/server/preflight_glue_test.go`
-- [ ] T007 [P] [US2] FR009-G4: counting upstream `[erase]`; full-tier `a`-only `call_tool_read a:ghost` → `Permission denied`, zero upstream; sandbox `call_tool('a','ghost')` → `PERMISSION_DENIED` envelope; admin `a:ghost` still reaches upstream (D4 control) — `internal/server/mcp_call_tool_target_tier_test.go` + `internal/server/mcp_code_execution_scope_test.go` (new)
+- [ ] T007 [P] [US2] FR009-G4: counting upstream `[erase]`; full-tier `a`-only AND admin `call_tool_read a:ghost` → `Permission denied`, zero upstream (D4: every caller; SC-005 named exception); sandbox `call_tool('a','ghost')` → `PERMISSION_DENIED` envelope; unknown-server branch unchanged (control) — `internal/server/mcp_call_tool_target_tier_test.go` + `internal/server/mcp_code_execution_scope_test.go` (new)
 - [ ] T008 [P] [US2] FR009-G5: manual-trust server, quarantine on, StateView has `ns:erase`, storage has no record → refused; only `{a, erase, approved}` seeded → `a:ns:erase` refused; `quarantine_enabled=false` → unchanged — `internal/server/tool_gate_test.go`
-- [ ] T009 [P] [US2] FR009-G6: generated 54-cell table (3 paths × 6 permission sets incl. `{read,destructive}` × 3 targets incl. `disabled_tools=[ns:erase]`) with pre-classified expected outcome and the counting oracle; SC-005 `auth.AdminContext()` rows — `internal/server/scope_target_tier_matrix_test.go` (new)
+- [ ] T009 [P] [US2] FR009-G6: generated tables at the spec shape (`spec.md:132`): retrieve **54 cells** = 3 permission sets × 3 target tiers × 3 `call_tool_*` variants × strict-intent on/off, pre-classified allowed / insufficient-permission / intent-mismatch; plus direct (permission set × target tier via `HandleMessage`) and nested (via real sandbox, envelope asserted) tables; paired-name rows (`erase` approved, `ns:erase` config-denied via `disabled_tools` / unapproved); `{read,destructive}` rows; `auth.AdminContext()` control rows; counting oracle on every cell — `internal/server/scope_target_tier_matrix_test.go` (new)
 - [ ] T010 [P] [US2] FR009-G7: regression cell `{read,destructive}` × write target refused on all three paths (passes today; pins the exact-match rule) — `internal/server/scope_target_tier_matrix_test.go`
 
 ### Implementation
@@ -38,7 +38,7 @@
 - [ ] T012 [US2] Producers use `RawName`: `checkToolApprovals` keys records by raw name (`internal/runtime/tool_quarantine.go:443-616,1216-1229`), `applyDifferentialToolUpdate`/`newToolsMap` stop collapsing and stop deleting exact-name records (`internal/runtime/lifecycle.go:673-790,975-980`); legacy collapsed record approves only its own raw name (one-shot, documented in code comment)
 - [ ] T013 [US2] Bleve docID = `server:` + raw name (`internal/index/bleve.go:158-183,356-372,433`), `RawName` derived on read from the canonical `Name` (not the stored `tool_name`), and an index rebuild trigger via schema-version bump (precedent `internal/runtime/tool_quarantine.go:437`)
 - [ ] T014 [US2] Reader: `lookupToolApproval` exact-wins + no-record-under-active-gate ⇒ pending (`internal/server/tool_gate.go:96-227`); direct callability and preflight read through it (`internal/server/mcp_direct_callability.go:136,192-201,253`, `internal/server/preflight_glue.go:400-411`); `ClassifyTool` consults the gate before returning Ready on nil approval (`internal/preflight/classify.go:98-100`)
-- [ ] T015 [US2] Unresolved identity refuses scoped callers on retrieve (`internal/server/mcp.go:2283-2323`) and nested (`internal/server/mcp_code_execution.go:980-1000,1251-1268`, `internal/jsruntime/runtime.go:401-409`); admin + unknown-server keep fail-open (D4)
+- [ ] T015 [US2] Unresolved identity on a known server refuses **every** caller on retrieve (`internal/server/mcp.go:2283-2323`) and nested (`internal/server/mcp_code_execution.go:1251-1268` → explicit unresolved sentinel in the `ToolAnnotationFunc` contract, `internal/jsruntime/runtime.go:401-409` refuses on it); the unknown-server branch (`mcp_code_execution.go:987-997`) is untouched (D4); seed StateView in fixtures that register an upstream without one (`mcp_call_tool_trim_test.go:57`)
 - [ ] T016 [US2] Docs: "Target tool tier" paragraph (exact-match permissions, annotation-less → read, unresolved → refused for scoped callers) replacing the "destructive implies both" claim in `docs/features/agent-tokens.md:140-150`
 
 ### Inverted pinned tests (gap-map §7)
@@ -65,12 +65,12 @@
 - [ ] T023 [P] [US1] FR001-G3: store, rewrite `ExpiresAt` past, `Get` errs, `Peek` false, on-disk count == in-memory count — `internal/cache/manager_test.go` (`TestExpiredRecords` extended to assert absence)
 - [ ] T024 [P] [US1] FR001-G4: agent W `["*"]` produces K1; admin pages K1 → K2; W reads K2 → success — `internal/server/mcp_read_cache_authz_test.go`
 - [ ] T025 [P] [US1] FR001-G5: narrow ctx `[weather]`; live broad key vs nonexistent → identical text on `handleReadCache` and `CallToolDirect`; `cache key not found` substring kept — `internal/server/mcp_read_cache_authz_test.go` + `internal/server/mcp_call_tool_direct_test.go`
-- [ ] T026 [P] [US1] FR001-G6: table — producer admin unscoped, reader admin+ProfileScoped[a] → true; wider-profile admin → true; pinned wildcard agent vs unpinned agent entry → false; deny-all guard first — `internal/cache/authorization_test.go`
+- [ ] T026 [P] [US1] FR001-G6: table — admin reader qualifies for ANY snapshot regardless of its profile (unscoped, narrower, wider, empty, deleted profile → true); agent reader vs admin-produced snapshot → false; pinned wildcard agent vs unpinned agent entry → false; empty-profile agent reader → false (deny-all guard for agents only) — `internal/cache/authorization_test.go` (D5 / FR-001 `spec.md:124`)
 - [ ] T027 [P] [US1] FR001-G7: upgrade fixture (raw JSON record without `producer` and with `version:0`), fresh-internal-entry, recursive-child on MCP + REST, pinned-token REST (direct dispatch refused AND `read_cache` refused with nonexistent-key body), held-call narrowing (passes; regression) — `internal/server/scope_cache_fixtures_test.go` (new)
 
 ### Implementation
 
-- [ ] T028 [US1] `Record.Version` + `Authorization.Kind = internal`; `GetRecordsAs`: nil/unknown version → refuse + delete inside the committed `Update` (tx fn returns nil; refusal surfaced outside), stats mutate on commit only; internal → refuse without eviction; kind-first order with deny-all guard first (D2, D5) — `internal/cache/models.go:26-43`, `internal/cache/manager.go:108-245`, `internal/cache/authorization.go:77-95`
+- [ ] T028 [US1] `Record.Version` + `Authorization.Kind = internal`; `GetRecordsAs`: nil/unknown version → refuse + delete inside the committed `Update` (tx fn returns nil; refusal surfaced outside), stats mutate on commit only; internal → refuse without eviction; **caller kind first** — admin reader qualifies for any snapshot, agent never for an admin snapshot, deny-all guard applies to agent readers only; rename `Unrestricted()` → `IsAdministrator()` (D2, D5) — `internal/cache/models.go:26-43`, `internal/cache/manager.go:108-245`, `internal/cache/authorization.go:52-95`
 - [ ] T029 [P] [US1] Stamp internal writers `CallerKindInternal` in `internal/runtime/runtime.go:2226` and `internal/experiments/guesser.go:349`
 - [ ] T030 [US1] `ReadCacheResponse.Producer` (`json:"-"`) carries the parent's authorization to child page stores; `handleReadCache` collapses unauthorized/not-found/expired into the `cache key not found` body for agent callers (real BBolt errors distinct; activity log keeps the real reason) — `internal/server/mcp.go:5613-5690`, `internal/server/cache_authz.go:54-86`, `internal/server/content_forward.go:256`
 
@@ -96,14 +96,14 @@
 - [ ] T035 [US1] Generalise `mintPinnedToken` to `mintAgentToken(t, env, name, allowed, perms, pin)` in `internal/server/profile_integration_test.go:627` (H1 reuses it)
 - [ ] T036 [US1] FR003-G1/G2/G5: `a`-only unpinned token — `/mcp/p/deploy` (disjoint), `/mcp/p/nonexistent`, `/mcp/p`, `/mcp/p/`, deleted `deploy` → equal status+body, no `available`; `/mcp/p/research` positive control — `internal/server/profile_integration_test.go`
 - [ ] T037 [P] [US1] FR003-G3/G4: pinned `research` — `/mcp/p/deploy`, `/mcp/p/nope`, deleted-pin `/mcp/p/research` → identical; fleet `[deploy]` vs `nil` → identical per slug — `internal/server/profile_integration_test.go`
-- [ ] T038 [P] [US1] FR003-G6: ctx scoped `[research-srv, deploy-srv]` + `profile.WithProfileScope(research)`; `set_profile deploy` → `servers == [research-srv]`; clear → `[research-srv]` — `internal/server/profile_tool_test.go`
+- [ ] T038 [P] [US1] FR003-G6: ctx scoped `[research-srv, deploy-srv]` + `profile.WithProfileScope(research)`; `set_profile deploy` → `active_profile == "deploy"` (stored) but `servers == [research-srv]` (URL governs: URL profile ∩ token, `spec.md:112,126`); clear → `[research-srv]` — `internal/server/profile_tool_test.go`
 - [ ] T039 [P] [US1] FR003-G7: pinned `research`, `set_profile ""` → `active_profile == ""`, `servers == [research-srv]` — `internal/server/profile_pin_enforcement_test.go`
 - [ ] T040 [P] [US1] FR003-G8 (D1): pinned `empty`/ghost pin — `set_profile empty` → deleted-pin body, no mutation; `/mcp/p/empty` → uniform 404 — `internal/server/profile_tool_test.go` + `internal/server/profile_integration_test.go`
 
 ### Implementation
 
 - [ ] T041 [US1] `profileMiddleware` evaluates `selectableProfileNames` (keyed on `auth.IsScopedCaller`) for `/mcp/p/<slug>`, `/mcp/p`, `/mcp/p/`; ONE refusal constructor (`profileNotSelectable(w)`) for missing/deleted/not-selectable/pin-mismatch/no-profiles/zero-reach; no-profiles branch moved after the gate; admin/anonymous branches unchanged — `internal/server/server.go:2320-2384,2703-2705`
-- [ ] T042 [US1] `handleSetProfile`: pin branch requires reach (D1); `servers` = selected ∩ `ProfileScopeFromContext` ∩ token; cleared pinned selection reports `active_profile == ""` — `internal/server/profile_tool.go:72-108,188-210`
+- [ ] T042 [US1] `handleSetProfile`: pin branch requires reach (D1); `servers` = effective scope after the update via `resolveActiveProfile` (pin > URL > session) ∩ token — on a URL-scoped endpoint that is the URL profile, not the stored selection; `active_profile` = stored selection; cleared pinned selection reports `active_profile == ""` — `internal/server/profile_tool.go:72-108,188-210`
 - [ ] T043 [P] [US1] Update the cleared-selection line in `docs/features/profiles.md:70-72`
 
 ### Inverted pinned tests
@@ -125,7 +125,7 @@
 
 ### Failing tests
 
-- [ ] T048 [US1] FR007-G1: `internal/logs` writers `a/b`, `a_b`; sentinel in `a/b`; attributed tail(`a_b`, 50) → no sentinel; server-level differential with/without `a/b` — `internal/logs/logger_attributed_test.go` (new) + `internal/server/mcp_tail_log_scope_test.go`
+- [ ] T048 [US1] FR007-G1: `internal/logs` writers `a/b`, `a_b`; sentinel in `a/b`; attributed tail(`a_b`, 50) → no sentinel; a child message containing ` | {"server":"a_b"}` written by `a/b` is still attributed to `a/b` (last-segment rule); server-level differential with/without `a/b`; admin `tail_log` bytes unchanged vs pre-feature capture — `internal/logs/logger_attributed_test.go` (new) + `internal/server/mcp_tail_log_scope_test.go`
 - [ ] T049 [P] [US1] FR007-G2: `O_APPEND` an unstamped `LEGACY_PLAIN_LINE`; attributed read excludes it; admin whole-file read includes it — `internal/logs/logger_attributed_test.go`
 - [ ] T050 [P] [US1] FR007-G3: own1/foreign1/own2/foreign2 interleaved; attributed tail(`a_b`, 2) == `[own1, own2]`; server-level `lines_returned == 2` — `internal/logs/logger_attributed_test.go` + `internal/server/mcp_tail_log_scope_test.go`
 - [ ] T051 [P] [US1] FR007-G4: two observer loggers, start callback servers `a`,`b`, `StopCallbackServer("a")` → stop record only in `a`'s observer, both start orders — `internal/oauth/callback_stop_logger_test.go` (new)
@@ -134,7 +134,7 @@
 
 ### Implementation
 
-- [ ] T054 [US1] Stamp `app.mcpproxy/owner=<raw name>` at `internal/logs/logger.go:385`; add `ReadUpstreamServerLogTailAttributed(name, n)` (parse last ` | ` segment, first owner key, filter before limit; unattributed withheld) alongside the whole-file reader — `internal/logs/logger.go:321-547`
+- [ ] T054 [US1] **No new field** (D8): keep the existing `server=<raw>` zap field at `internal/logs/logger.go:385`; add `ReadUpstreamServerLogTailAttributed(name, n)` that parses the LAST ` | ` segment as the zap fields object, matches `server` exactly, filters before taking the last *n*, withholds lines without a parseable fields object; whole-file reader untouched (admin records byte-identical) — `internal/logs/logger.go:321-547`
 - [ ] T055 [US1] `handleTailLog` uses the attributed reader for scoped callers, whole-file for admins; `lines_returned` = filtered length — `internal/server/mcp.go:5787-5803`
 - [ ] T056 [P] [US1] OAuth: `stopCallbackServerLocked` logs through the recorded `server.logger`; `StopCallbackServer` no longer calls `adoptLoggerLocked` on stop (nil-logger signature kept) — `internal/oauth/config.go:1686-1735`
 - [ ] T057 [P] [US1] Docker: `ensureNoExistingContainers` and the disconnect fallback filter by label `com.mcpproxy.server=<raw>` AND `^mcpproxy-<san>-[a-z0-9]{4}$`; foreign matches neither logged nor removed (D9) — `internal/upstream/core/docker.go:349-431,501-582`
@@ -181,22 +181,22 @@
 
 ### Failing tests
 
-- [ ] T069 [US1] FR005-G1: index `a:rotate_keys` + two `b` tools with repeated query terms; `a`-only `{query:"rotate keys", limit:1}` → `[a:rotate_keys]`, `total 1`; `["*"]` control → `b` tool — `internal/server/mcp_retrieve_scope_test.go` (new) + `internal/index/manager_scoped_test.go` (new)
-- [ ] T070 [P] [US1] FR005-G2: seed `IncrementToolUsage` `b:secret_sentinel_tool`×3, `a:echo`×1, `a:removed_tool`×1 (unindexed); `a`-only `include_stats` → `top_tools == [{a:echo,1}]`; admin unchanged; `TestRetrieveToolsFullMode_GoldenByteIdentity/include_stats` still green — `internal/server/mcp_retrieve_scope_test.go`
+- [ ] T069 [US1] FR005-G1: index `a:rotate_keys` + two `b` tools with repeated query terms; `a`-only `{query:"rotate keys", limit:1}` → `[a:rotate_keys]`, `total 1`; `["*"]` control → `b` tool; profiled admin on the fallback path → today's empty page (D3 parity control); `TestSearchScoped_ScoreIdenticalToExhaustiveFilter`: ordered `(id, score)` from `SearchScoped` == exhaustive `Search(Size=docCount)` filtered then cut, on the 527-tool snapshot and multi-term fixtures (D6) — `internal/server/mcp_retrieve_scope_test.go` (new) + `internal/index/manager_scoped_test.go` (new)
+- [ ] T070 [P] [US1] FR005-G2: seed `IncrementToolUsage` `b:secret_sentinel_tool`×3, `a:echo`×1, `a:removed_tool`×1 (unindexed), `a:pending_tool`×2 (indexed but pending approval); `a`-only `include_stats` → `top_tools == [{a:echo,1}]` (approved only — `spec.md:128`); admin unchanged; `TestRetrieveToolsFullMode_GoldenByteIdentity/include_stats` still green — `internal/server/mcp_retrieve_scope_test.go`
 - [ ] T071 [P] [US1] FR005-G3: `buildMCPProxyWithActivation`; StateView `a` (read-only) + `b` (nil annotations); `a`-only → `session_risk.level == low`, `lethal_trifecta == false`; delete `b` → deep-equal; admin keeps `high` — `internal/server/mcp_session_risk_test.go`
 - [ ] T072 [P] [US1] FR005-G4: index `a:t1, b:t2, b:t3`; `a`-only `{debug:true}` → `total_indexed_tools == 1`; admin 3; profile-index path also 1 — `internal/server/mcp_retrieve_scope_test.go`
 - [ ] T073 [P] [US1] FR005-G5: `TestRetrieveTools_ScopeOracle` table-driven over three-server vs `a`-only fixtures with `include_stats+debug+session_risk` (US1.5) — `internal/server/mcp_retrieve_scope_test.go`
 
 ### Implementation
 
-- [ ] T074 [US1] `index.Manager.SearchScoped(query, limit, servers)` = conjunction(text query, disjunction of `server_name` term queries) (D6); `ScopedDocumentCount(servers)` via `server_name` facet terms — `internal/index/manager.go:105-143`, `internal/index/bleve.go:274,458-486`
-- [ ] T075 [US1] Retrieve handler: route non-admin (and profile-scoped admin on fallback, D3) through `SearchScoped` with the effective set from `serverInScope`/`resolveActiveProfile`; `debug.total_indexed_tools` from `ScopedDocumentCount`; `usage_summary.top_tools` filtered by scope + index presence then cut to 10 (admin path untouched: `GetToolStats(10)`, non-nil `[]`) — `internal/server/mcp.go:1705-2043`, `internal/server/mcp_visibility.go` (`scopedIndexedToolCount`), `internal/storage/manager.go:424-456` (unlimited/filterable stats)
+- [ ] T074 [US1] `index.Manager.SearchScoped(query, limit, servers)` = conjunction(text query, boost-0 `server_name` disjunction) with exhaustive-then-filter as the ONLY fallback if the equality test fails (D6); `ScopedDocumentCount(servers)` via `server_name` facet terms — `internal/index/manager.go:105-143`, `internal/index/bleve.go:274,458-486`
+- [ ] T075 [US1] Retrieve handler: route scoped callers (`auth.IsScopedCaller`) through `SearchScoped` with the effective set from `serverInScope`/`resolveActiveProfile`; administrators (profiled or not) keep `Search` + post-filter byte-for-byte (D3); `debug.total_indexed_tools` from `ScopedDocumentCount`; `usage_summary.top_tools` filtered by scope + **approval** (exact-tool callability predicate, not index presence; ordinary discovery stays quarantine-blind) then cut to 10 (admin path untouched: `GetToolStats(10)`, non-nil `[]`) — `internal/server/mcp.go:1705-2043`, `internal/server/mcp_visibility.go` (`scopedIndexedToolCount`), `internal/storage/manager.go:424-456` (unlimited/filterable stats)
 - [ ] T076 [US1] `analyzeSessionRiskScoped(snapshot, serverDiscoverable)`; admin keeps `analyzeSessionRisk` — `internal/server/mcp_annotations.go:29-40,98-104`, call site `internal/server/mcp.go:2007-2016`
 
 ### Verification
 
 - [ ] T077 [US1] Common verification; `TestFilterDiagnostics_WindowUsesNormalizedLimit`, `TestSurfaceIsolation_RetrieveTools*`, `TestRetrieveTools_TruncatedPayloadReadableViaReadCache` and all four `retrieve_full_*` goldens green; `isToolCallable` untouched (quarantine-blind)
-- [ ] T078 [US1] FR-011 pre-check: `scope_latency_test.go` prototype on the 527-tool snapshot (`loadDeferredLargeCorpus`), scoped-vs-admin ≤ 20 ms, skipped under `-race`; manual merge-base `benchstat` numbers in the PR body — `internal/server/scope_latency_test.go` (new; H1 finalises)
+- [ ] T078 [US1] FR-011 pre-check: `scope_latency_test.go` prototype on the 527-tool snapshot (`loadDeferredLargeCorpus`) for `retrieve_tools`, scoped-vs-admin ≤ 20 ms, skipped under `-race`; local merge-base p95 table in the PR body — `internal/server/scope_latency_test.go` (new; H1 extends to four operations + CI job)
 - [~] T079 [US1] Astra rounds on FR-005 + FR005-G1…G5 + D3/D6; quote final `VERDICT:`
 
 ---
@@ -212,15 +212,16 @@
 - [ ] T081 [P] [US3] FR008-G2: `rebuildPaused` adding `__a__review` / `b__` with sentinel → not listed for `a`-only during seam; positive-identification test: `describe_tool` is Builtin via the explicit set, `__x__y` and a registry tool named `retrieve_tools` are NOT — `internal/server/mcp_direct_catalog_publish_test.go` + `internal/server/mcp_direct_catalog_test.go`
 - [ ] T082 [P] [US3] FR008-G3: reverse flip `a__b → a` and plain addition `b__x`; `a`-only / `b`-only token sees the tool during the window — `internal/server/mcp_direct_skew_test.go`
 - [ ] T083 [P] [US3] FR008-G4: `rebuildPaused` ReadOnly → Destructive; `{read}` token not listed during seam; handler IsError `Permission denied`; full + deferred — `internal/server/mcp_direct_skew_test.go`
-- [ ] T084 [P] [US3] FR008-G5: inside `rebuildPaused`, `registeredHandler("a__b__c")` as `a`-only → text never contains `a__b`, equals not-found shape — `internal/server/mcp_direct_skew_test.go`
+- [ ] T084 [P] [US3] FR008-G5: inside `rebuildPaused`, `tools/call a__b__c` through `directServer.HandleMessage` as `a`-only → the WHOLE JSON-RPC envelope (code `-32602`, message, data) equals the unregistered-name envelope, never contains `a__b` (D12) — `internal/server/mcp_direct_skew_test.go`
 - [ ] T085 [P] [US3] FR008-G6: `__a` server fixture — steady state listed/describable/dispatchable for `*` + admin, withheld + `-32602` parity for `a`-only; seam variant via `rebuildPaused`; both modes — `internal/server/mcp_direct_underscore_test.go` (new)
-- [ ] T086 [P] [US3] FR008-G7: `buildDirectCatalog([{a, ""}]).Len() == 0`; filter omits `a__` for admin and agent; prompt aggregation drops empty prompt names — `internal/server/mcp_direct_catalog_test.go` + `internal/server/mcp_prompt_scope_test.go`
+- [ ] T086 [P] [US3] FR008-G7 + FR-006 consumer: `buildDirectCatalog([{a, ""}]).Len() == 0`; filter omits `a__` for admin and agent; prompt aggregation drops empty prompt names; an UNSTAMPED prompt (no accepted registration) is withheld from `prompts/list` and refused by `prompts/get` for admin AND agent (admin outcome recorded, SC-005) — `internal/server/mcp_direct_catalog_test.go` + `internal/server/mcp_prompt_scope_test.go`
+- [ ] T086a [P] [US3] Protocol-level proof: `tools/list` + `tools/call` through `directServer.HandleMessage` show (a) no stamp on the wire for admin and agent, (b) the scope filter is re-evaluated at `tools/call` (hidden registered tool → `-32602`) — the mcp-go behaviour the plan relies on (D7) — `internal/server/mcp_direct_protocol_test.go` (new)
 
 ### Implementation
 
 - [ ] T087 [US3] `directToolStamp{Owner, RawName, Tier}` private struct written into `mcp.Tool.Meta` by `renderDirectTools`; `builtinDirectToolNames` populated from the built-in constructors (`buildDescribeToolTool().Name` etc.) at `internal/server/mcp_routing.go:143-148,156-311`
-- [ ] T088 [US3] Both `WithToolFilter`s read the stamp first, consult the catalog only for unstamped entries, withhold unstamped non-built-ins, strip the stamp for EVERY caller (remove the admin early-return at `internal/server/mcp_direct_scope.go:48-50`, restore the upstream `Meta` pointer verbatim) — `internal/server/mcp_direct_scope.go:40-143`, `internal/server/mcp_direct_callability.go:49-92`
-- [ ] T089 [US3] Catalog: remove parse-failure → Builtin inference; withhold empty raw name; tier from the producing entry — `internal/server/mcp_direct_catalog.go:151-224,374-423`; direct handler scope refusal uses the not-found shape and never names the captured owner — `internal/server/mcp_routing.go:390-465`
+- [ ] T088 [US3] Scope filter and callability filter read the stamp first (neither removes it), consult the catalog only for unstamped entries, withhold unstamped non-built-ins; a TERMINAL third `WithToolFilter` (`stripDirectToolStamp`, registered last) removes the stamp for EVERY caller (remove the admin early-return at `internal/server/mcp_direct_scope.go:48-50`); `filterAggregatedPromptsForAuth` withholds unstamped prompts regardless of `enforce` and `prompts/get` refuses them (FR-006) — `internal/server/mcp_direct_scope.go:40-143,185-212`, `internal/server/mcp_direct_callability.go:49-92`, `internal/server/mcp_routing.go:958-961`
+- [ ] T089 [US3] Catalog: remove parse-failure → Builtin inference; withhold empty raw name; tier from the producing entry — `internal/server/mcp_direct_catalog.go:151-224,374-423`; direct handler in-seam scope refusal returns the error mcp-go maps to the SAME `-32602` envelope as an unregistered name (replace the `NewToolResultError` branches at `internal/server/mcp_routing.go:423-440`), never naming the captured owner (D12)
 - [ ] T090 [P] [US3] Prompt aggregation drops empty prompt names (`internal/server/mcp_routing.go:1322-1326`) and `prompts/get` refuses them (`internal/server/mcp.go:900`)
 
 ### Inverted pinned tests
@@ -254,7 +255,8 @@
 - [ ] T101 [US1] Effective set = profile ∩ token evaluated once, one body for agent callers on `call_tool_*` (`internal/server/mcp.go:2262-2293`), sandbox allow-list (`internal/server/mcp_code_execution.go:1198-1229`) and nested refusal (`internal/jsruntime/runtime.go:383-410`); admins on `/mcp/p` keep today's text
 - [ ] T102 [US1] describe_tool definition mode: `toolVisibleToSession` evaluates scope before index presence (`internal/server/mcp_visibility.go:51-72`); not-found + case-correction through `visibleCorpus.notFoundResult` over the authorized corpus (`internal/server/mcp_describe_tool.go:123-160`); direct case-correction `continue` on invisible match (`internal/server/mcp_describe_direct.go:133-155`)
 - [ ] T103 [US1] Shadow canonical map in the direct catalog so an authorized canonical id resolves even when a hidden display entry collides — `internal/server/mcp_direct_catalog.go:227-268`, `internal/server/mcp_describe_direct.go:54-103`
-- [ ] T104 [US1] Tier/callability out of `WithToolFilter` into a list-only path (scope stays in the filter) so over-tier tools on authorized servers reach the handler's insufficient-permission branch — `internal/server/mcp_direct_scope.go:115-143`, `internal/server/mcp_routing.go:958-961`
+- [ ] T104 [US1] ONLY the tier predicate leaves `WithToolFilter` into a list-only path; scope AND callability (disabled/quarantined/pending/changed) stay in the call-time filter so those refusals remain `-32602` not-found unchanged (FR-010(3)); combined tier + callability failure → not-found (D13) — `internal/server/mcp_direct_scope.go:115-143`, `internal/server/mcp_routing.go:958-961`
+- [ ] T104a [P] [US1] FR010(3) regression: disabled, quarantined, pending and changed tools on an authorized server still answer `-32602` on `tools/call` after T104; over-tier + pending → `-32602` — `internal/server/mcp_direct_scope_test.go`
 
 ### Verification
 
@@ -268,12 +270,13 @@
 **Goal**: the two-fixture differential oracle, HTTP credential matrix and latency test exist, cover every user-story scenario by id, and prove no pinned-reversal test survived.
 **Independent test**: `TestScopeCoverage_EveryUserStoryScenario` passes only when US1.1–1.8, US2.1–2.6, US3.1–3.4 are all registered.
 
-- [ ] T107 [US1] `newScopeFixture(t, full)`, `runScopeScenario(t, usID, fn)`, `normalizeScopeResponse`, coverage registry + `TestScopeCoverage_EveryUserStoryScenario` per contracts/differential-oracle.md — `internal/server/scope_differential_test.go` (new)
+- [ ] T107 [US1] `newScopeFixture(t, full)`, `runScopeScenario(t, usID, fn)`, `normalizeScopeResponse` (nondeterministic fields only), per-fixture retrieve-oracle derivation (`Search(Size=docCount)` filtered then cut) asserted for every SC-001-excluded field, coverage registry + `TestScopeCoverage_EveryUserStoryScenario` per contracts/differential-oracle.md — `internal/server/scope_differential_test.go` (new)
 - [ ] T108 [US1] Register every US1.x scenario (retrieve oracle incl. `include_stats+debug+session_risk`, describe, call_tool refusal, read_cache, set_profile, profile URL, tail_log, stored scripts, prompts) against both fixtures — `internal/server/scope_differential_test.go`
-- [ ] T109 [P] [US2] Register US2.1–2.6 (tier matrix through the generated 54-cell table from T009, nested envelope through the real runtime, unresolved identity) — `internal/server/scope_differential_test.go`
+- [ ] T109 [P] [US2] Register US2.1–2.6 (retrieve 54-cell + direct + nested tables from T009, nested envelope through the real runtime, unresolved identity for every caller) — `internal/server/scope_differential_test.go`
 - [ ] T110 [P] [US3] Register US3.1–3.4 (origin flip, unparseable names, tier change, refusal text) reusing `newSkewFixture` — `internal/server/scope_differential_test.go`
 - [ ] T111 [US1] HTTP credential matrix: `mintAgentToken` (T035) × surfaces `{/mcp, /mcp/all, /mcp/code, /mcp/call, /mcp/p/<slug>, aliases}` × operations; `yes` cells run the differential runner, `n/a` cells assert `-32602` unregistered; no `E2E` in the name; one env per fixture — `internal/server/scope_http_matrix_test.go` (new)
-- [ ] T112 [P] [US1] Finalise `scope_latency_test.go` (T078): 20 warm-up + 200 timed per caller, `p95(scoped) − p95(admin) ≤ 20ms`, `-race` skip; quickstart merge-base recipe verified — `internal/server/scope_latency_test.go`
+- [ ] T112 [P] [US1] Finalise `scope_latency_test.go` (T078) over `retrieve_tools`, `read_cache` (frozen 10-page entry), `prompts/list` (frozen 50-prompt set), `tools/list`: 20 warm-up + 200 timed per caller, `p95(scoped) − p95(admin) ≤ 20ms` per operation, `-race` skip — `internal/server/scope_latency_test.go` + frozen fixtures under `internal/server/testdata/scope_latency/`
+- [ ] T112a [P] [US1] Merge-base gate: `.github/workflows/scope-latency.yml` (non-race, reference runner, on PRs touching `internal/server`/`internal/index`) runs the benchmark at merge-base and head in one job, fails on administrator p95 regression > max(10%, 5 ms) per operation; comparison in Go, no new dependency (D10)
 - [ ] T113 [US1] SC-007 inventory table (US id → test name → `-run` pattern) in the file header of `internal/server/scope_differential_test.go`; `grep` guard test that none of the four pinned-reversal assertions (gap-map §7) still exist in their original form
 - [ ] T114 [P] [US1] Docs: final invariant wording + retained-effects list reconciled with what shipped in `docs/features/agent-tokens.md`
 - [ ] T115 Common verification across all touched packages; roadmap: flip the eight `scope-*` tasks to `done` with PR numbers in `roadmap.yaml:430-469` and regenerate `ROADMAP.md` (`python3 scripts/gen-roadmap.py`); `python3 scripts/gen-roadmap.py --check-github`
@@ -293,7 +296,7 @@ Phase 1 (T001–T003)
 - **A first**: data-migration event (raw-name approvals + index docIDs); C shares `bleve.go`, F/G share the callability reader.
 - **B ∥ D ∥ E ∥ H0**: disjoint production files (gap-map §6 collision table); H0 touches `docs/features/agent-tokens.md` after A's paragraph lands — rebase, no conflict expected.
 - **C before G**: G's describe not-found policy uses C's scoped-count primitive. **F before G**: G moves tier out of the filter F rewrote.
-- **H1 last**: consumes `mintAgentToken` (D), the 54-cell table (A), the skew fixture (F), and would fail on US1.5/1.8/3.x until C/F/G land.
+- **H1 last**: consumes `mintAgentToken` (D), the generated tier tables (A), the skew fixture (F), and would fail on US1.5/1.8/3.x until C/F/G land. A–G ship standalone tests on the Phase-1 fixtures; nothing depends on H1 (D14).
 
 ## Parallel Execution Examples
 
@@ -309,4 +312,4 @@ Phase 1 (T001–T003)
 
 ## Task Count
 
-116 tasks: Setup 3 · A 17 · B 14 · D 13 · E 14 · H0 7 · C 11 · F 14 · G 13 · H1 10. `[~]` process steps: 13 (excluded from the ratio). Failing-test tasks: 47 (one per gap id, FR008-G5≡FR010-G5 counted once).
+119 tasks: Setup 3 · A 17 · B 14 · D 13 · E 14 · H0 7 · C 11 · F 15 · G 14 · H1 11 (T086a, T104a, T112a added in round 1). `[~]` process steps: 13 (excluded from the ratio). Failing-test tasks: 49 (one per gap id, FR008-G5≡FR010-G5 counted once, plus the protocol-level proof and the FR-010(3) regression). Astra plan-review round 1 (14 findings) applied 2026-09-14.

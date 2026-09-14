@@ -34,12 +34,13 @@ grep "VERDICT:" .review-tmp/astra-r1.txt                   # must exist — exit
 
 Round cap: 10 fix→re-review rounds per PR; verify each finding against the code before fixing.
 
-## FR-011 manual merge-base measurement (C, once)
+## FR-011 merge-base measurement (C prototype, H1 gate)
 
 ```bash
-go test -run TestScopeLatency -bench . -count 6 ./internal/server/ > /tmp/new.txt
-git stash-free: check out origin/main in a second worktree and repeat into /tmp/old.txt
-benchstat /tmp/old.txt /tmp/new.txt     # scoped p95 within 20ms of admin; record numbers in the PR body
+go test -run TestScopeLatency -count 1 ./internal/server/      # in-run: scoped p95 within 20 ms of admin, four operations
+# CI: .github/workflows/scope-latency.yml runs the same benchmark at merge-base and head on the reference runner
+# and fails on >max(10%, 5 ms) administrator p95 regression (research D10). Locally, repeat in a second worktree
+# at origin/main and compare the printed p95 table by hand; paste both tables into the PR body.
 ```
 
 ## Live check (A, B, D, E — one real daemon each)
