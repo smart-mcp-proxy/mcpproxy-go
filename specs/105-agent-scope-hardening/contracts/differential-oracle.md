@@ -1,6 +1,6 @@
 # Contract: two-fixture differential oracle (FR-013, SC-001, SC-007)
 
-Every Spec 105 PR adds its scenarios to this harness; H1 completes it and enumerates coverage by User Story id.
+PRs A–G ship standalone tests on the Phase-1 fixtures (`scope_fixture_test.go`); H1 introduces this harness and re-registers those scenarios by User Story id (research D14). Nothing before H1 depends on it.
 
 ## Fixtures (`internal/server/scope_differential_test.go`)
 
@@ -34,4 +34,4 @@ Real tokens minted through `mintAgentToken(name, allowed, perms, pin)`; requests
 
 ## Latency (FR-011, `scope_latency_test.go`)
 
-527-tool snapshot via `loadDeferredLargeCorpus`, a frozen 50-prompt set and a frozen 10-page cache entry; 20 warm-up + 200 timed calls per caller for each of `retrieve_tools`, `read_cache`, `prompts/list`, `tools/list`; assert `p95(aOnly) − p95(admin) ≤ 20ms` per operation; skipped under `-race`. **Merge-base bound**: `.github/workflows/scope-latency.yml` (non-race, CI reference runner) runs the same benchmark at merge-base and head in one job and fails if administrator p95 regresses by more than max(10%, 5 ms) on any operation (research D10).
+527-tool snapshot via `loadDeferredLargeCorpus`, a frozen 50-prompt set and a frozen 10-page cache entry; 20 warm-up + 200 timed calls per caller for each of `retrieve_tools`, `read_cache`, `prompts/list`, `tools/list`; assert `p95(aOnly) − p95(admin) ≤ 20ms` per operation; skipped under `-race`. **Merge-base bound**: `.github/workflows/scope-latency.yml` (non-race, CI reference runner) checks out merge-base into a second directory, copies head's `scope_latency_test.go` + `testdata/scope_latency/` fixtures over it (test-only, backward compatible), runs both in one job, and fails if administrator p95 regresses by more than max(10%, 5 ms) on any operation **or if either side yields no measurement for any operation** (research D10).

@@ -12,7 +12,7 @@ Caller in every row: agent token `allowed={a}`, `perms={read}`, no pin, unless s
 | `call_tool_read b:t` (no client for target) | scope refusal; `Available servers:` ⊆ effective scope | same | ≡, no sentinel |
 | `call_tool_read b:t` with pin `P={a,b}` | effective set = P ∩ token = `{a}` ⇒ same body as `zzz:t` | same | ≡ |
 | `call_tool_write a:write_tool` (authorized, over-tier) | `Permission denied … 'write'`, zero upstream | n/a | tier refusal is **not** non-disclosing by design |
-| `call_tool_read a:ghost` (unresolved identity, scoped caller) | insufficient-permission, zero upstream | same | admin keeps fail-open (D4) |
+| `call_tool_read a:ghost` (unresolved identity on a known server) | insufficient-permission, zero upstream | same | every caller incl. admin (D4, SC-005 named exception); unknown-server branch unchanged |
 | `read_cache K` (K produced under broader scope) | `cache key not found` | `cache key not found` | ≡ on MCP and REST `/api/v1/tools/call`; internal/legacy keys same body |
 | `code_execution script=missing` | error without `Available scripts` | same | ≡; admin enumerates |
 | `upstream_servers tail_log b` | `tailLogNotFound` (exists) | same | ≡ (regression) |
@@ -26,8 +26,8 @@ Caller in every row: agent token `allowed={a}`, `perms={read}`, no pin, unless s
 | `tools/list` with `__a` server tool | withheld for a-only; listed for `*` and admin | — | steady state **and** seam |
 | `tools/list` with empty raw name `a__` | withheld from every caller | — | SC-005 exception |
 | `prompts/list` / `prompts/get` unstamped or empty-name prompt | withheld/unfetchable for every caller incl. admin | — | FR-006 fail-closed; admin outcome recorded |
-| `tools/call a__b__c` inside seam | full `-32602` envelope ≡ unregistered name, never names `a__b` | `-32602 not found` | **whole-envelope** parity (code, message, data, result shape) — research D12 |
-| `tools/call a__write_tool` `{read}` token | `Permission denied` isError, zero upstream | — | tier out of `WithToolFilter`; disabled/quarantined/pending/changed stay filter-level not-found (D13) |
+| `tools/call a__b__c` inside seam | full `-32602` envelope ≡ the envelope for the same requested name `a__b__c` in the fixture where `a__b` is absent | `-32602 not found` | **whole-envelope** parity (code, message, data, result shape) — research D12; the caller-supplied name is echoed in both, the canonical owner never appears as independent metadata |
+| `tools/call a__write_tool` `{read}` token | `Permission denied` isError, zero upstream | — | filter passes over-tier through (D13); disabled/quarantined/pending/changed alone stay filter-level `-32602`; over-tier + pending → insufficient-permission (tier-first, `spec.md:133`) |
 | `describe_tool x__y:z` with hidden `x` exposing `y:z` | resolves to authorized `x__y:z` | same | ≡ (shadow canonical map); admin `not_found` control unchanged |
 | `describe_tool b:read` with hidden `B:read` and authorized `b:Read` | suggestion `b:Read` | same | ≡ |
 
@@ -51,3 +51,4 @@ Caller in every row: agent token `allowed={a}`, `perms={read}`, no pin, unless s
 | unattributed/legacy line | withheld from scoped callers; admin whole-file reader unchanged |
 | OAuth callback stop for `a` | record lands in `a`'s subject-bound logger only, both start orders |
 | Docker connect/disconnect for `a` with foreign `mcpproxy-a-b-wxyz` present | foreign container never logged into `a`, never removed; `mcpproxy-a-wxyz` with label `a` is removed |
+| Docker disconnect for `a` with NO owned container and a foreign container on the same image | image-name fallback touches nothing (label + name required on every path) |

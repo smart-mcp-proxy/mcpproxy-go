@@ -38,7 +38,7 @@ Authorization{ Kind, AllowedServers, Permissions, ProfilePin, ProfileServers }  
 - `Version`: 0/absent = legacy ⇒ refuse every caller, delete inside the committed `Update`, stats mutate only after commit. Current = 1.
 - `Kind = internal` (new writer stamp for `runtime.go:2226`, `guesser.go:349`): refuse `read_cache` for every caller, **never evict**.
 - Recursive pagination: `ReadCacheResponse.Producer` (`json:"-"`) carries the **parent's** authorization to the child page store, so provenance is monotone down the chain.
-- Authorization check order: deny-all guard → `reader.Unrestricted()` → kind → servers/permissions/pin/profile-set (D5).
+- Authorization check order (FR-001, D5): **caller kind first** — administrator reader qualifies for any snapshot; agent reader never qualifies for an administrator snapshot; then, agents only: deny-all guard (empty effective profile → false) → allowed servers ⊇ → permissions ⊇ → pin equality → profile-set ⊇. `Unrestricted()` renamed `IsAdministrator()`.
 
 ## Rendered direct tool stamp (F — FR-008)
 
@@ -51,7 +51,7 @@ directToolStamp{ Owner string; RawName string; Tier permission }   // private st
 
 ## Log record ownership (E — FR-007)
 
-Each per-server writer stamps `app.mcpproxy/owner=<raw server name>` (`logger.go:385`). Attributed reader: parse the last ` | ` segment as JSON, take the **first** `app.mcpproxy/owner`, filter by exact raw name **before** taking the last *n* lines; `lines_returned` = filtered length. Lines without the key are unattributed ⇒ withheld from scoped callers.
+No new field: the existing zap field `server=<raw server name>` (`logger.go:385`) is the ownership signal (D8). Attributed reader: console encoder — scan ` | {` boundaries left to right, accept the first whose suffix decodes as exactly one complete JSON object, read `server` from it; JSON encoder — the whole line is the object. Filter by exact raw name **before** taking the last *n* lines; `lines_returned` = filtered length. Lines with no accepted boundary are unattributed ⇒ withheld from scoped callers. Producer rule: child-controlled text is only ever a field value, never the message.
 
 Container ownership: label `com.mcpproxy.server=<raw>` (exists) AND name `^mcpproxy-<sanitised>-[a-z0-9]{4}$`.
 
@@ -64,7 +64,7 @@ One constructor per surface; hidden ≡ nonexistent in status, body and timing c
 | retrieve dispatch (`call_tool_*`) scope | existing not-in-scope result (`mcp.go:2289`) | unchanged text; `Available servers:` filtered by effective scope |
 | describe_tool definition mode | `visibleCorpus.notFoundResult` over authorized corpus | not-found + suggestion computed over authorized corpus only |
 | direct surface hidden tool | mcp-go filter (`-32602 tool '<name>' not found`) | unchanged (scope stays in `WithToolFilter`) |
-| direct surface over-tier on authorized server | handler insufficient-permission result | `Permission denied: … requires '<tier>'` (tier out of the filter) |
+| direct surface over-tier on authorized server | handler insufficient-permission result | `Permission denied: … requires '<tier>'` (filter passes over-tier tools through; tier-first over callability, D13) |
 | read_cache (MCP + REST) | `cache key not found` | unauthorized / not-found / expired collapse for agent callers |
 | `/mcp/p/*` for scoped callers | single 404 constructor | `unknown profile` without `available` |
 | stored script not found | existing error without enumeration | admin keeps `Available scripts (N)` |
