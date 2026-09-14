@@ -253,9 +253,13 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			AllowedServers: authCtx.AllowedServers,
 			Permissions:    authCtx.Permissions,
 		}
-		// Provide tool annotation lookup function for permission tier resolution
-		options.ToolAnnotationFunc = p.lookupToolPermission
 	}
+	// Provide the tool annotation lookup for permission-tier resolution to
+	// EVERY execution, not only authenticated ones: it is also the sandbox's
+	// identity gate (Spec 105 FR-009, research D4 — jsruntime
+	// PermissionTierUnresolved), which applies to stdio / in-process callers
+	// that carry no AuthContext as much as to HTTP callers.
+	options.ToolAnnotationFunc = p.lookupToolPermission
 
 	// Spec 057 (Codex #621 finding 2): Intersect profile scope into code_execution.
 	p.applyProfileScopeToExecution(ctx, &options)

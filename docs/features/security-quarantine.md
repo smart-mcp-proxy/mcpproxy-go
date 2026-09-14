@@ -436,12 +436,31 @@ tool, or the Web UI. `trust_mode: auto` servers (and installs with
 `quarantine_enabled: false`) auto-approve them. Nothing is deleted: the old
 collapsed record stays with the bare name it stores.
 
-Two things carry over from the old record so an upgrade never silently widens
-access: a **user block** (a `Disabled` toggle) or a **quarantine lock**
-(`pending` / `changed`) on the collapsed record is copied onto the namespaced
-tool's new record, and the log says so at `WARN` naming both keys. The
-namespaced tool then stays hidden until you enable it under its own name — a
-tool you had blocked before the upgrade is still blocked after it.
+Two things about the old record carry over so an upgrade never silently
+widens access:
+
+- A **user block** (a `Disabled` toggle) on the collapsed record is copied
+  onto the namespaced tool's new record, and the log says so at `WARN` naming
+  both keys. The namespaced tool stays hidden until you enable it under its
+  own name — a tool you had blocked before the upgrade is still blocked after
+  it. A **quarantine lock** (`pending` / `changed`) on the collapsed record is
+  *not* turned into a block: under an active gate the new record is pending
+  under its own name anyway, and approving it by that name is all it takes
+  (no second enable toggle); under `trust_mode: auto` or
+  `quarantine_enabled: false` the old lock never bound and the tool
+  auto-approves as before.
+- A namespaced tool you had **toggled** in the UI before the upgrade already
+  has a record under its exact name — one that the toggle created without an
+  approved contract hash. Such a record carries no approval decision, so if
+  the collapsed record holds a `pending` / `changed` lock, that lock (with its
+  before/after evidence) is adopted onto the exact record on the first
+  discovery after upgrade and the tool stays held for review under its own
+  name; otherwise the record is baselined to the tool's current definition so
+  change detection works for it from then on.
+
+Only records written by an older release are consulted this way — every
+record this release writes is stamped as identity-keyed, so a genuine
+sibling `erase` you disable later never affects a new `v2:erase`.
 
 ## Disabling Quarantine
 

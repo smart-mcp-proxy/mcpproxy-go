@@ -259,7 +259,7 @@ func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.
 		slices.Equal(existing.HeldSignals, prevSignals) {
 		return
 	}
-	if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+	if saveErr := r.saveToolApproval(existing); saveErr != nil {
 		r.logger.Debug("Failed to persist scan-hold evidence on tool approval",
 			zap.String("server", serverName),
 			zap.String("tool", toolName),
@@ -344,7 +344,7 @@ func (r *Runtime) scanApproveChange(serverName, toolName string, existing *stora
 	existing.PreviousSchema = ""
 	existing.PreviousOutputSchema = ""
 	existing.ClearScanHold() // the record is no longer held — drop stale evidence
-	if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+	if saveErr := r.saveToolApproval(existing); saveErr != nil {
 		*existing = snapshot // restore so the caller's mark-changed path sees true old values
 		r.logger.Error("Failed to scan-approve tool change",
 			zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
@@ -420,12 +420,20 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	// presence disqualifies the baseline pass and post-baseline review resumes.
 	// Detection is snapshotted BEFORE the loop so promoting tools mid-pass does
 	// not flip the decision.
+	//
+	// The same pre-pass listing is the ONLY store the Spec 105 legacy
+	// consults below read (legacyCollapsedSibling): a collapsed pre-105
+	// record is looked up as it stood BEFORE this pass, so the order in
+	// which "erase" and "ns:erase" are processed cannot change the outcome —
+	// processing "erase" first re-saves (and stamps) its record, which would
+	// otherwise hide it from "ns:erase" on the very pass that migrates it.
 	serverHasBaseline := false
+	priorByName := make(map[string]*storage.ToolApprovalRecord)
 	if priorRecords, listErr := r.storageManager.ListToolApprovals(serverName); listErr == nil {
 		for _, rec := range priorRecords {
+			priorByName[rec.ToolName] = rec
 			if rec.Status == storage.ToolApprovalStatusApproved || rec.Status == storage.ToolApprovalStatusChanged {
 				serverHasBaseline = true
-				break
 			}
 		}
 	}
@@ -501,7 +509,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentDescription = storedDesc
 				existing.CurrentSchema = normalizeJSON(storedSchema)
 				existing.CurrentOutputSchema = outputSchemaJSON
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveToolApproval(existing); saveErr != nil {
 					r.logger.Debug("Failed to backfill output schema approval hash",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -534,16 +542,27 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 			// Spec 105 FR-009, legacy carry-over: a pre-105 binary filed a raw
 			// "ns:erase" under the COLLAPSED key "erase". Its approval stays
-			// with the bare name, but a user block or quarantine lock it
-			// carries must not evaporate the moment this exact record is
-			// created — under a lifted gate (quarantine off, skip_quarantine,
-			// auto-approve changes, green scan) the new record would otherwise
-			// be saved approved+enabled and the operator's block on the
-			// namespaced tool would be silently lost. The reader
-			// (internal/server/tool_gate.go) only consults the collapsed
-			// record while no exact one exists, so the block is copied here
-			// once, onto the record that will be read from now on.
-			legacyDisabled := r.legacyCollapsedRecordRestricts(serverName, toolName)
+			// with the bare name, but a user block it carries must not
+			// evaporate the moment this exact record is created — under a
+			// lifted gate (quarantine off, skip_quarantine, auto-approve
+			// changes, green scan) the new record would otherwise be saved
+			// approved+enabled and the operator's block on the namespaced tool
+			// would be silently lost. The reader (internal/server/tool_gate.go)
+			// only consults the collapsed record while no exact one exists, so
+			// the block is copied here once, onto the record that will be read
+			// from now on.
+			//
+			// ONLY the user's Disabled block is carried. A pending/changed
+			// LOCK on the sibling is not converted into a block: under an
+			// active gate this new record's own pending state holds the tool
+			// exactly as the lock did, and under a lifted gate the lock never
+			// bound (the existing promote rule applies) — carrying it as
+			// Disabled would turn a review hold into a permanent user block
+			// that ApproveTools never clears. And only an UNSTAMPED sibling is
+			// consulted (storage.ToolApprovalRecord.IdentityKeyed): a record a
+			// post-105 binary wrote is a genuine sibling tool, and FR-009
+			// forbids inheriting anything from it.
+			legacyDisabled := r.legacyCollapsedSiblingDisabled(serverName, toolName, priorByName)
 			switch {
 			case !enforceNewTools:
 				autoApprove, approvedBy = true, "auto"
@@ -576,7 +595,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					Disabled:            legacyDisabled,
 				}
 
-				if saveErr := r.storageManager.SaveToolApproval(record); saveErr != nil {
+				if saveErr := r.saveToolApproval(record); saveErr != nil {
 					r.logger.Error("Failed to save auto-approved tool record",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -617,7 +636,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			}
 			holdEvidence.applyTo(record)
 
-			if saveErr := r.storageManager.SaveToolApproval(record); saveErr != nil {
+			if saveErr := r.saveToolApproval(record); saveErr != nil {
 				r.logger.Error("Failed to save tool approval record",
 					zap.String("server", serverName),
 					zap.String("tool", toolName),
@@ -637,6 +656,26 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				"", tool.Description, "", schemaJSON)
 
 			continue
+		}
+
+		// Spec 105 FR-009 (migration review): an APPROVED record whose
+		// ApprovedHash is EMPTY was never baselined by discovery. The pre-105
+		// user toggle (setToolEnabledNoEmit) synthesized exactly this shape
+		// under the exact raw name whenever the operator toggled a namespaced
+		// tool — while discovery kept the tool's real quarantine lock under the
+		// COLLAPSED key "erase". Read on its own, the empty-hash record would
+		// (a) never trip the `ApprovedHash != ""` rug-pull guard below, so
+		// detection for the tool is dead forever, and (b) shadow the collapsed
+		// lock, so a rug-pulled "ns:erase" dispatches for every caller right
+		// after upgrade. So, once: if an UNSTAMPED collapsed sibling carries a
+		// pending/changed lock, that lock (with its rug-pull evidence) is
+		// adopted onto the exact record, which then flows through the ordinary
+		// pending/changed handling below; otherwise the record is baselined to
+		// the current contract so rug-pull detection resumes. The record's own
+		// Disabled flag is the user's decision on the exact name and is left
+		// alone.
+		if existing.Status == storage.ToolApprovalStatusApproved && existing.ApprovedHash == "" {
+			r.adoptLegacyLockOrBaseline(serverName, toolName, existing, priorByName, currentHash, tool.Description, schemaJSON, outputSchemaJSON)
 		}
 
 		if existing.Disabled {
@@ -674,7 +713,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				needsSave = true
 			}
 			if needsSave {
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveToolApproval(existing); saveErr != nil {
 					r.logger.Debug("Failed to update tool approval record",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -713,7 +752,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			if promote {
 				if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, promoteReason); invErr != nil {
 					// Refuse to promote on an invariant violation — keep blocked.
-					if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+					if saveErr := r.saveToolApproval(existing); saveErr != nil {
 						r.logger.Debug("Failed to update pending tool approval",
 							zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
 					}
@@ -732,7 +771,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveToolApproval(existing); saveErr != nil {
 					r.logger.Error("Failed to promote pending tool approval",
 						zap.String("server", serverName), zap.String("tool", toolName),
 						zap.String("approved_by", promoteBy), zap.Error(saveErr))
@@ -747,7 +786,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			}
 
 			// Stays pending — persist the updated current info.
-			if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+			if saveErr := r.saveToolApproval(existing); saveErr != nil {
 				r.logger.Debug("Failed to update pending tool approval",
 					zap.String("server", serverName),
 					zap.String("tool", toolName),
@@ -791,7 +830,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Changed tool restored (reverted to previous description)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -820,7 +859,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Changed tool auto-approved (auto_approve_tool_changes enabled)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -894,7 +933,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveToolApproval(existing); saveErr != nil {
 					r.logger.Debug("Failed to migrate changed tool approval hash",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -947,7 +986,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Tool auto-approved (identical content, hash formula change)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -993,7 +1032,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Tool auto-approved (description matches, schema format differs)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -1024,7 +1063,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveToolApproval(existing); saveErr != nil {
 					r.logger.Error("Failed to auto-approve changed tool",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -1078,7 +1117,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			existing.CurrentOutputSchema = outputSchemaJSON
 			holdEvidence.applyTo(existing)
 
-			if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+			if saveErr := r.saveToolApproval(existing); saveErr != nil {
 				r.logger.Error("Failed to update changed tool approval",
 					zap.String("server", serverName),
 					zap.String("tool", toolName),
@@ -1124,30 +1163,102 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	return result, nil
 }
 
-// legacyCollapsedRecordRestricts reports whether a pre-Spec-105 COLLAPSED
-// record for the raw name — the record an older binary filed under the text
-// after the first colon ("erase" for a raw "ns:erase") — carries a user block
-// or quarantine lock that must be carried onto the tool's first exact record
-// (storage.ToolApprovalRecord.Restricts). A raw name without a colon has no
-// collapsed sibling. The hit is logged at Warn with both keys so the
-// first-start churn after upgrade is diagnosable; an approved, enabled
-// collapsed record is silent because it lends nothing.
-func (r *Runtime) legacyCollapsedRecordRestricts(serverName, rawName string) bool {
+// saveToolApproval persists an approval record through the ONLY write seam
+// the runtime uses, stamping it as identity-keyed first (Spec 105 FR-009,
+// storage.ToolApprovalRecord.IdentityKeyed): every record this binary writes
+// is keyed by the exact raw tool name, and the stamp is what tells the legacy
+// consults (legacyCollapsedSibling) that a record is a genuine sibling rather
+// than a pre-105 collapsed one.
+func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
+	record.IdentityKeyed = true
+	return r.storageManager.SaveToolApproval(record)
+}
+
+// legacyCollapsedSibling returns the pre-Spec-105 COLLAPSED record for a raw
+// name — the record an older binary filed under the text after the first
+// colon ("erase" for a raw "ns:erase") — or nil when there is none: the raw
+// name has no colon, the store holds nothing under the collapsed key, or the
+// record there is STAMPED identity-keyed (written by a post-105 binary, so it
+// is a genuine sibling tool's own record and lends nothing to another raw
+// name). It reads from the pre-pass listing (prior) so the outcome does not
+// depend on the order in which the pass processes the two names.
+func legacyCollapsedSibling(rawName string, prior map[string]*storage.ToolApprovalRecord) *storage.ToolApprovalRecord {
 	_, collapsed, ok := strings.Cut(rawName, ":")
-	if !ok || r.storageManager == nil {
+	if !ok {
+		return nil
+	}
+	sibling := prior[collapsed]
+	if sibling == nil || sibling.IdentityKeyed {
+		return nil
+	}
+	return sibling
+}
+
+// legacyCollapsedSiblingDisabled reports whether an unstamped collapsed
+// sibling carries the user's Disabled block, which the first exact record for
+// the raw name inherits (checkToolApprovals new-tool branch). A pending or
+// changed lock on the sibling is deliberately NOT reported: it is a review
+// hold, not a user decision, and the exact record's own status represents
+// it. The hit is logged at Warn with both keys so the first-start churn after
+// upgrade is diagnosable.
+func (r *Runtime) legacyCollapsedSiblingDisabled(serverName, rawName string, prior map[string]*storage.ToolApprovalRecord) bool {
+	sibling := legacyCollapsedSibling(rawName, prior)
+	if sibling == nil || !sibling.Disabled {
 		return false
 	}
-	sibling, err := r.storageManager.GetToolApproval(serverName, collapsed)
-	if err != nil || sibling == nil || !sibling.Restricts() {
-		return false
-	}
-	r.logger.Warn("Legacy collapsed approval record restricts a namespaced tool; carrying its block onto the exact-name record",
+	r.logger.Warn("Legacy collapsed approval record is user-disabled; carrying the block onto the namespaced tool's exact-name record",
 		zap.String("server", serverName),
 		zap.String("tool", rawName),
-		zap.String("legacy_key", collapsed),
-		zap.String("legacy_status", sibling.Status),
-		zap.Bool("legacy_disabled", sibling.Disabled))
+		zap.String("legacy_key", sibling.ToolName),
+		zap.String("legacy_status", sibling.Status))
 	return true
+}
+
+// adoptLegacyLockOrBaseline handles an APPROVED exact record with an EMPTY
+// ApprovedHash (see the call site in checkToolApprovals). If an unstamped
+// collapsed sibling carries a pending/changed lock, the lock and its rug-pull
+// evidence (Previous* contract, scan-hold reason) are adopted onto the exact
+// record so the tool stays held under its own name until an operator approves
+// it BY that name; otherwise the record is baselined to the current contract
+// so the rug-pull guard has a hash to compare against. Either way the current
+// contract fields are refreshed and the record is saved; a failed save leaves
+// the in-memory record adopted/baselined so this pass still holds or
+// baselines the tool, and the next pass retries the write.
+func (r *Runtime) adoptLegacyLockOrBaseline(serverName, toolName string, existing *storage.ToolApprovalRecord, prior map[string]*storage.ToolApprovalRecord, currentHash, description, schemaJSON, outputSchemaJSON string) {
+	existing.CurrentHash = currentHash
+	existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+	existing.CurrentDescription = description
+	existing.CurrentSchema = schemaJSON
+	existing.CurrentOutputSchema = outputSchemaJSON
+
+	sibling := legacyCollapsedSibling(toolName, prior)
+	switch {
+	case sibling != nil && (sibling.Status == storage.ToolApprovalStatusPending || sibling.Status == storage.ToolApprovalStatusChanged):
+		existing.Status = sibling.Status
+		existing.PreviousDescription = sibling.PreviousDescription
+		existing.PreviousSchema = sibling.PreviousSchema
+		existing.PreviousOutputSchema = sibling.PreviousOutputSchema
+		existing.HeldReason = sibling.HeldReason
+		existing.HeldVerdict = sibling.HeldVerdict
+		existing.HeldSignals = append([]string(nil), sibling.HeldSignals...)
+		r.logger.Warn("Never-baselined exact approval record adopts the lock of its legacy collapsed record",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("legacy_key", sibling.ToolName),
+			zap.String("adopted_status", sibling.Status))
+	default:
+		existing.ApprovedHash = currentHash
+		r.logger.Info("Never-baselined exact approval record baselined to its current contract; rug-pull detection resumes",
+			zap.String("server", serverName),
+			zap.String("tool", toolName))
+	}
+
+	if saveErr := r.saveToolApproval(existing); saveErr != nil {
+		r.logger.Error("Failed to save never-baselined tool approval record",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.Error(saveErr))
+	}
 }
 
 func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
@@ -1306,7 +1417,7 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		record.PreviousOutputSchema = ""
 		record.ClearScanHold()
 
-		if err := r.storageManager.SaveToolApproval(record); err != nil {
+		if err := r.saveToolApproval(record); err != nil {
 			return err
 		}
 		approved++
@@ -1401,7 +1512,7 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 
 	record.Disabled = !enabled
 
-	if err := r.storageManager.SaveToolApproval(record); err != nil {
+	if err := r.saveToolApproval(record); err != nil {
 		return false, err
 	}
 
@@ -1699,7 +1810,7 @@ func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy st
 		record.ClearScanHold()
 		record.Disabled = true
 
-		if err := r.storageManager.SaveToolApproval(record); err != nil {
+		if err := r.saveToolApproval(record); err != nil {
 			return blocked, err
 		}
 		blocked++

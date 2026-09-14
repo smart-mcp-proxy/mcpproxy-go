@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -1220,4 +1221,103 @@ func TestSupervisor_Reconcile_RespectsRetryBackoff(t *testing.T) {
 	})
 	reconcileAndDrain()
 	require.True(t, isConnected(), "supervisor never probes a given-up server again")
+}
+
+// TestSupervisor_ToolsDiscoveredMarker pins the Spec 105 FR-009 (research D4)
+// discovery-completed marker: a server reads ToolsDiscovered=false from
+// reconcile until discovery publishes a result; the per-server publication
+// stamps it even for an EMPTY result; a disconnect clears it with the tool
+// set; a reconnect restores it together with the retained non-empty set (an
+// empty retained set restores nothing, so the server stays undiscovered
+// until discovery re-runs); and a later reconcile preserves it.
+func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{
+			{Name: "server1", Enabled: true},
+			{Name: "empty", Enabled: true},
+		},
+	}
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+	_ = mockUpstream.AddServer("server1", cfg.Servers[0])
+	_ = mockUpstream.AddServer("empty", cfg.Servers[1])
+
+	sup := New(configSvc, mockUpstream, zap.NewNop())
+	_ = sup.reconcile(configSvc.Current())
+
+	status := func(name string) *stateview.ServerStatus {
+		t.Helper()
+		st, ok := sup.StateView().Snapshot().Servers[name]
+		if !ok {
+			t.Fatalf("server %q missing from StateView", name)
+		}
+		return st
+	}
+	if status("server1").ToolsDiscovered || status("empty").ToolsDiscovered {
+		t.Fatal("before any discovery: ToolsDiscovered must be false")
+	}
+
+	// The sweep publishes server1's tools; "empty" contributed nothing to
+	// the flat list and must stay undiscovered.
+	tools := []*config.ToolMetadata{{Name: "tool1", ServerName: "server1", Description: "Test tool 1"}}
+	if err := sup.RefreshToolsFromDiscovery(tools); err != nil {
+		t.Fatalf("RefreshToolsFromDiscovery: %v", err)
+	}
+	if !status("server1").ToolsDiscovered {
+		t.Error("server1: discovery published a tool set, ToolsDiscovered must be true")
+	}
+	if status("empty").ToolsDiscovered {
+		t.Error("empty: absent from the sweep result, must stay undiscovered")
+	}
+
+	// The per-server publication of an EMPTY result is authoritative.
+	if err := sup.RefreshServerToolsFromDiscovery("empty", nil); err != nil {
+		t.Fatalf("RefreshServerToolsFromDiscovery: %v", err)
+	}
+	if st := status("empty"); !st.ToolsDiscovered || len(st.Tools) != 0 || st.ToolCount != 0 {
+		t.Errorf("empty: a completed zero-tool discovery must stamp ToolsDiscovered with no tools, got discovered=%v tools=%d count=%d",
+			st.ToolsDiscovered, len(st.Tools), st.ToolCount)
+	}
+	// The per-server variant only publishes tools that belong to the server.
+	if err := sup.RefreshServerToolsFromDiscovery("empty", tools); err != nil {
+		t.Fatalf("RefreshServerToolsFromDiscovery: %v", err)
+	}
+	if st := status("empty"); len(st.Tools) != 0 {
+		t.Errorf("empty: another server's tools must not be published under it, got %d", len(st.Tools))
+	}
+
+	// Disconnect clears the marker with the tool set.
+	for _, name := range []string{"server1", "empty"} {
+		sup.updateSnapshotFromEvent(Event{
+			Type: EventServerDisconnected, ServerName: name, Timestamp: time.Now(),
+			Payload: map[string]interface{}{"connected": false},
+		})
+		if st := status(name); st.ToolsDiscovered || len(st.Tools) != 0 {
+			t.Errorf("%s after disconnect: marker and tools must be cleared, got discovered=%v tools=%d", name, st.ToolsDiscovered, len(st.Tools))
+		}
+	}
+
+	// Reconnect restores the retained set AND its marker for server1; the
+	// empty server has nothing to restore and stays undiscovered.
+	for _, name := range []string{"server1", "empty"} {
+		sup.updateSnapshotFromEvent(Event{
+			Type: EventServerConnected, ServerName: name, Timestamp: time.Now(),
+			Payload: map[string]interface{}{"connected": true},
+		})
+	}
+	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1 after reconnect: retained set and marker must be restored, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
+	if st := status("empty"); st.ToolsDiscovered {
+		t.Error("empty after reconnect: nothing retained, must stay undiscovered until discovery re-runs")
+	}
+
+	// A reconcile pass carries the marker over with the retained tools.
+	_ = sup.reconcile(configSvc.Current())
+	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1 after reconcile: marker must survive with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
 }

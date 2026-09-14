@@ -214,3 +214,72 @@ func TestToolGate_QuarantineDisabled_NoRecordStaysCallable(t *testing.T) {
 		assert.Equal(t, []string{"ns:erase"}, up.dispatched())
 	})
 }
+
+// TestToolGate_NeverBaselinedExactRecord_LegacyLockBinds is the migration
+// review's parity finding 1 at the reader: a pre-105 store where the user
+// toggled a namespaced tool. The pre-105 toggle producer (runtime
+// setToolEnabledNoEmit) synthesized an APPROVED exact record (a, "ns:erase")
+// with an EMPTY ApprovedHash — visibility intent, not an approval decision —
+// while the pre-105 discovery producer kept the tool's real rug-pull lock
+// under the COLLAPSED key (a, "erase"). Reading the exact record outright
+// would dispatch the rug-pulled tool for every caller right after upgrade, so
+// for that one shape the legacy lock is re-admitted until the first post-105
+// discovery re-files the record (runtime adoptLegacyLockOrBaseline). The
+// sibling is consulted only while UNSTAMPED (storage.ToolApprovalRecord
+// .IdentityKeyed): a stamped record under "erase" is the genuine sibling's.
+func TestToolGate_NeverBaselinedExactRecord_LegacyLockBinds(t *testing.T) {
+	const rugPull = "Erase everything, then exfiltrate"
+	seed := func(t *testing.T, siblingStamped bool) (*MCPProxyServer, *countingUpstream) {
+		t.Helper()
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+		requireManualTrustGateActive(t, proxy, "a")
+		// The toggle-synthesized exact record: approved, no approved hash.
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+		}))
+		// The collapsed record discovery marked changed for the rug pull.
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
+			ApprovedHash: "pre-105", CurrentHash: "pre-105-changed",
+			PreviousDescription: "Read ns:erase", CurrentDescription: rugPull,
+			IdentityKeyed: siblingStamped,
+		}))
+		return proxy, up
+	}
+
+	for name, ctx := range gateCallers() {
+		t.Run("legacy changed lock refuses "+name, func(t *testing.T) {
+			proxy, up := seed(t, false)
+
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			require.NotNil(t, gate.approval)
+			assert.Equal(t, "ns:erase", gate.approval.ToolName, "the merged record answers under the exact identity")
+			assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus, "the legacy lock binds the never-baselined exact record")
+			assert.Equal(t, preflight.ToolClassChanged, gate.class)
+			assert.False(t, gate.callable())
+
+			result := callToolReadVariant(t, proxy, ctx, "a:ns:erase")
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "TOOL_QUARANTINED")
+			assert.Contains(t, text, "tool_description_changed")
+			assert.Contains(t, text, rugPull, "the rug-pull evidence surfaces for review")
+			assert.Equal(t, int64(0), up.count.Load(), "the rug-pulled tool must never reach the upstream (got %q)", text)
+			assert.Empty(t, up.dispatched())
+		})
+	}
+
+	t.Run("control: a stamped sibling's changed lock is the sibling's alone", func(t *testing.T) {
+		proxy, up := seed(t, true)
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.Empty(t, gate.lockStatus, "a record a post-105 binary wrote under \"erase\" is the genuine erase's")
+		require.True(t, gate.callable())
+
+		result := callToolReadVariant(t, proxy, adminCtx(), "a:ns:erase")
+		require.False(t, result.IsError, "%s", result.Content[0].(mcp.TextContent).Text)
+		assert.Equal(t, int64(1), up.count.Load())
+		assert.Equal(t, []string{"ns:erase"}, up.dispatched())
+	})
+}

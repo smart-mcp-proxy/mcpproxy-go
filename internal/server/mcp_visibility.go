@@ -21,6 +21,14 @@ const (
 	visReasonToolPendingApproval = "tool_pending_approval"
 	visReasonToolChangedApproval = "tool_changed_approval"
 	visReasonToolNotCallable     = "tool_not_callable"
+	// visReasonToolNoApprovalRecord is the Spec 105 FR-009 implicit-pending
+	// case: the tool is in the server's discovery snapshot and the quarantine
+	// gate is active, but NO approval record exists yet (implicitPendingApproval).
+	// It is withheld exactly like a stored pending record, but its remediation
+	// differs — nothing is listed in the review UI to approve, the server's
+	// next discovery pass files the record — so describe_tool answers with
+	// the same no-record body dispatch does (toolPendingApprovalResult).
+	visReasonToolNoApprovalRecord = "tool_no_approval_record"
 )
 
 // The two resolvers share one set of step helpers (serverInScope,
@@ -48,6 +56,15 @@ const (
 //	tool approval (pending/changed, Spec 032) → isToolCallable
 //
 // The empty reason means visible.
+//
+// The pair arrives ALREADY SPLIT into server and RAW tool name (describe's
+// splitServerTool, suggestCanonicalToolID's index read) and is consulted
+// exactly from here — never normalized a second time (Spec 105 FR-009): a
+// raw name that begins with the server's own prefix ("a:erase" on "a",
+// canonical id "a:a:erase") would otherwise be gated on the sibling "erase"
+// while the index lookup above already resolved its own document, so a
+// pending "a:erase" rendered its definition on the approved sibling's gate
+// and an approved one was withheld on the pending sibling's.
 func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, toolName string) (visible bool, reason string) {
 	if !p.toolIndexed(serverName, toolName) {
 		return false, visReasonNotIndexed
@@ -55,7 +72,6 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 	authCtx := auth.AuthContextFromContext(ctx)
 	_, profileScope := p.resolveActiveProfile(ctx)
 
-	serverName, toolName = normalizeServerTool(serverName, toolName)
 	if !p.serverInScope(authCtx, profileScope, serverName) {
 		return false, visReasonServerNotInScope
 	}
@@ -80,9 +96,11 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 // merge-base FULL-mode result set did not gate them (FR-006). The quarantine
 // second pass (collectQuarantinedToolMatches + `seen` dedupe) keeps handling
 // quarantined servers exactly where it always did.
+//
+// The pair arrives ALREADY SPLIT (the retrieve loop derives the raw name from
+// the index hit once, config.RawToolName) and is consulted exactly — see
+// toolVisibleToSession for why a second normalization is wrong.
 func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileScope *profile.ProfileScope, serverName, toolName string) (visible bool, reason string) {
-	serverName, toolName = normalizeServerTool(serverName, toolName)
-
 	// Profile scope (Spec 057) + agent-token server scope (Spec 028) —
 	// applied BEFORE any classification so an agent never learns a tool
 	// exists on a server it cannot access.
@@ -91,7 +109,6 @@ func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileSc
 	}
 
 	// Callability: disabled/blocked tools are non-existent for discovery.
-	// The pair was normalized once above and is consulted exactly from here.
 	if !p.isExactToolCallable(serverName, toolName) {
 		return false, visReasonToolNotCallable
 	}
@@ -125,6 +142,9 @@ func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string 
 	}
 	switch gate.lockStatus {
 	case storage.ToolApprovalStatusPending:
+		if isImplicitPendingApproval(gate.approval) {
+			return visReasonToolNoApprovalRecord
+		}
 		return visReasonToolPendingApproval
 	case storage.ToolApprovalStatusChanged:
 		return visReasonToolChangedApproval
@@ -239,7 +259,7 @@ func (p *MCPProxyServer) suggestCanonicalToolID(ctx context.Context, serverName,
 			continue
 		}
 		for _, tool := range tools {
-			_, bare := normalizeServerTool(server, tool.Name)
+			bare := config.RawToolName(tool)
 			if !strings.EqualFold(bare, toolName) || (server == serverName && bare == toolName) {
 				continue
 			}

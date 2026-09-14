@@ -402,12 +402,10 @@ func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gat
 		return errorEnvelope(ErrorCodeServerNotAllowed, fmt.Sprintf("server not allowed: %s", serverName)), ""
 	}
 
-	// Auth context enforcement (Spec 031)
-	if ec.authInfo == nil {
-		return nil, ""
-	}
-
-	if !ec.authInfo.CanAccessServer(serverName) {
+	// Auth context enforcement (Spec 031): the token's server scope answers
+	// before anything about the tool is looked up, so an out-of-scope server
+	// is refused without disclosing whether the name resolves on it.
+	if ec.authInfo != nil && !ec.authInfo.CanAccessServer(serverName) {
 		return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), ""
 	}
 
@@ -418,13 +416,22 @@ func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gat
 		// Spec 105 FR-009 (research D4): an identity the lookup could not
 		// resolve on a known server has no tier to hold, so the refusal is
 		// decided BEFORE HasPermission — which an administrator AuthInfo
-		// always passes — and answers with the permission envelope, never
-		// with an upstream's own "tool not found".
+		// always passes — and BEFORE the nil-AuthInfo return below, so a
+		// stdio / in-process caller that carries no AuthInfo at all is held
+		// to the same identity rule as every HTTP caller. It answers with the
+		// permission envelope, never with an upstream's own "tool not found".
 		if requiredPerm == PermissionTierUnresolved {
 			return errorEnvelope(ErrorCodePermissionDenied,
 				fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
 					serverName, toolName, serverName)), ""
 		}
+	}
+
+	// No AuthInfo (stdio / in-process administrator): no permission tier to
+	// check, and no tier reported for the max-permission tracking either —
+	// exactly as before the identity check moved above this return.
+	if ec.authInfo == nil {
+		return nil, ""
 	}
 
 	if !ec.authInfo.HasPermission(requiredPerm) {

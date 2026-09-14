@@ -39,6 +39,7 @@ func seedTargetTierServer(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runti
 		s.Name = server
 		s.Enabled = true
 		s.Connected = true
+		s.ToolsDiscovered = true
 		s.Tools = tools
 	})
 	for _, tool := range tools {
@@ -480,7 +481,7 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 		t.Helper()
 		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
 		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
-			s.Name, s.Enabled, s.Connected = "a", true, true
+			s.Name, s.Enabled, s.Connected, s.ToolsDiscovered = "a", true, true, true
 			s.Tools = []stateview.ToolInfo{nsErase}
 		})
 		// Exactly what the pre-105 checkToolApprovals wrote for the raw name
@@ -536,15 +537,18 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 		// Inverted pre-105 pin. The merge-base reader returned the more
 		// restrictive of the two keys because two producers wrote them
 		// (discovery collapsed, the user toggle exact). Every producer now
-		// writes the exact key, so an exact approved record IS the operator's
-		// approval of "ns:erase" by its own name, and the pending collapsed
-		// record is a sibling "erase"'s (or an orphan the upgrade left
-		// behind); letting it shadow the exact approval would keep an
-		// operator-approved tool blocked behind an unrelated name forever.
+		// writes the exact key, so an exact approved record that carries an
+		// approved contract hash — what discovery and ApproveTools write — IS
+		// the operator's approval of "ns:erase" by its own name, and the
+		// pending collapsed record is a sibling "erase"'s (or an orphan the
+		// upgrade left behind); letting it shadow the exact approval would
+		// keep an operator-approved tool blocked behind an unrelated name
+		// forever.
 		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
 		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending})
 		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
 			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved,
+			ApprovedHash: "baseline", CurrentHash: "baseline",
 		}))
 		gate := proxy.evaluateToolGate("a", "ns:erase")
 		require.NotNil(t, gate.approval)
@@ -554,6 +558,40 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 		// isToolCallable is the quarantine-blind search filter (Spec 085): it
 		// honours only Disabled, so it agrees here for a different reason.
 		assert.True(t, proxy.isToolCallable("a", "ns:erase"))
+	})
+
+	t.Run("a never-baselined exact record does not outrank a pending legacy collapsed one", func(t *testing.T) {
+		// The one exact shape that carries NO approval decision: approved with
+		// an EMPTY ApprovedHash — what the pre-105 user toggle
+		// (setToolEnabledNoEmit) synthesized under the exact raw name while
+		// discovery kept the real lock under the collapsed key. Until the
+		// first post-105 discovery re-files it, the legacy lock still binds.
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending})
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+		}))
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.Equal(t, "ns:erase", gate.approval.ToolName, "the merged record answers under the exact identity")
+		assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus, "the legacy lock binds a never-baselined exact record")
+		assert.False(t, gate.callable())
+	})
+
+	t.Run("a stamped pending sibling lends nothing to a never-baselined exact record", func(t *testing.T) {
+		// The collapsed key holds a record a post-105 binary wrote
+		// (IdentityKeyed): it is the genuine "erase" tool's own record, never
+		// a collapsed "ns:erase", so the re-admission does not apply.
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedCollapsedRecord(t, proxy, rt, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending, IdentityKeyed: true})
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+		}))
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.Equal(t, "ns:erase", gate.approval.ToolName)
+		assert.Empty(t, gate.lockStatus, "a stamped sibling's lock is the sibling's alone")
+		assert.True(t, gate.callable())
 	})
 
 	t.Run("a restrictive exact record outranks an approved collapsed one", func(t *testing.T) {
@@ -634,7 +672,7 @@ func TestToolGate_RugPullOnExactRecord_StaleLegacyApprovalCannotShadowIt(t *test
 	proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
 	rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
-		s.Name, s.Enabled, s.Connected = "a", true, true
+		s.Name, s.Enabled, s.Connected, s.ToolsDiscovered = "a", true, true, true
 		s.Tools = []stateview.ToolInfo{{
 			Name: "ns:erase", Description: "Namespaced erase",
 			Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
@@ -736,7 +774,7 @@ func TestToolGate_ExactRecordCarriesEveryLock_LegacyCollapsedDoesNotMerge(t *tes
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
 		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
-			s.Name, s.Enabled, s.Connected = "a", true, true
+			s.Name, s.Enabled, s.Connected, s.ToolsDiscovered = "a", true, true, true
 			s.Tools = []stateview.ToolInfo{{
 				Name: "ns:erase", Description: "Namespaced erase",
 				Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
@@ -827,9 +865,12 @@ func TestToolGate_ExactRecordCarriesEveryLock_LegacyCollapsedDoesNotMerge(t *tes
 	})
 
 	// Inverted pre-105 cells: the collapsed key's facts are NOT merged in.
-	t.Run("legacy collapsed changed lock is not merged into an exact user-disable", func(t *testing.T) {
+	t.Run("legacy collapsed changed lock is not merged into a baselined exact user-disable", func(t *testing.T) {
 		collapsed := changedRecord()
-		proxy, _ := seed(t, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true}, &collapsed)
+		proxy, _ := seed(t, storage.ToolApprovalRecord{
+			Status: storage.ToolApprovalStatusApproved, Disabled: true,
+			ApprovedHash: "baseline", CurrentHash: "baseline",
+		}, &collapsed)
 		gate := proxy.evaluateToolGate("a", "ns:erase")
 		require.NotNil(t, gate.approval)
 		assert.Equal(t, "ns:erase", gate.approval.ToolName)
@@ -837,6 +878,22 @@ func TestToolGate_ExactRecordCarriesEveryLock_LegacyCollapsedDoesNotMerge(t *tes
 		assert.Empty(t, gate.lockStatus, "the sibling's changed lock must not be borrowed")
 		assert.Empty(t, gate.approval.CurrentDescription, "nor its rug-pull evidence")
 		assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class)
+		assert.False(t, gate.callable())
+	})
+
+	t.Run("legacy collapsed changed lock IS merged into a never-baselined exact user-disable", func(t *testing.T) {
+		// The pre-105 toggle shape (approved, ApprovedHash "") carries no
+		// approval decision, so the narrow re-admission applies: the exact
+		// identity answers with the legacy lock AND the user's block.
+		collapsed := changedRecord()
+		proxy, _ := seed(t, storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusApproved, Disabled: true, ApprovedBy: "user"}, &collapsed)
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.NotNil(t, gate.approval)
+		assert.Equal(t, "ns:erase", gate.approval.ToolName)
+		assert.True(t, gate.approval.Disabled, "the user's block on the exact name survives the merge")
+		assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus, "the legacy lock binds")
+		assert.Equal(t, "Erase everything, then exfiltrate", gate.approval.CurrentDescription, "with its rug-pull evidence")
+		assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class, "the user block still outranks the lock for callability")
 		assert.False(t, gate.callable())
 	})
 
@@ -1014,7 +1071,7 @@ func TestToolGate_TrailingColonRawName_ReadsProducersEmptyKeyRecord(t *testing.T
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
 		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
-			s.Name, s.Enabled, s.Connected = "a", true, true
+			s.Name, s.Enabled, s.Connected, s.ToolsDiscovered = "a", true, true, true
 			s.Tools = []stateview.ToolInfo{trailing}
 		})
 		// Exactly what checkToolApprovals writes for the raw name "ns:".
@@ -1124,26 +1181,60 @@ func TestLookupToolApproval_ReadsBothKeysFromOneSnapshot(t *testing.T) {
 		assert.True(t, record.Disabled)
 	})
 
-	t.Run("both records present: the exact one wins outright, nothing is merged", func(t *testing.T) {
+	t.Run("both records present: a baselined exact one wins outright, nothing is merged", func(t *testing.T) {
 		// Inverted pre-105 pin: the merge-base reader took the locked record
 		// as the base and OR'd the exact record's Disabled flag in. Every
-		// producer now writes the exact key, so the collapsed record is a
-		// sibling's and none of its facts belong to "ns:erase".
+		// producer now writes the exact key, so an exact record that carries
+		// an approved contract hash is the tool's own approval and the
+		// collapsed record is a sibling's: none of its facts belong to
+		// "ns:erase".
 		proxy := seed(t,
-			storage.ToolApprovalRecord{ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, Disabled: true},
+			storage.ToolApprovalRecord{ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, Disabled: true, ApprovedHash: "baseline", CurrentHash: "baseline"},
 			storage.ToolApprovalRecord{ToolName: "erase", Status: storage.ToolApprovalStatusPending, CurrentHash: "h-pending"})
 		record, err := proxy.lookupToolApproval("a", "ns:erase")
 		require.NoError(t, err)
 		require.NotNil(t, record)
 		assert.Equal(t, "ns:erase", record.ToolName)
 		assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status, "the sibling's pending lock is not borrowed")
-		assert.Empty(t, record.CurrentHash, "nor its hash")
+		assert.Equal(t, "baseline", record.CurrentHash, "nor its hash")
 		assert.True(t, record.Disabled, "the exact record is returned as stored")
 		for _, key := range []string{"ns:erase", "erase"} {
 			stored, err := proxy.storage.GetToolApproval("a", key)
 			require.NoError(t, err)
 			assert.Equal(t, key == "ns:erase", stored.Disabled, "the read must not write back into the stored %q record", key)
 		}
+	})
+
+	t.Run("both records present: a never-baselined exact one re-admits an unstamped legacy lock", func(t *testing.T) {
+		// The pre-105 toggle shape (approved, ApprovedHash "") carries no
+		// approval decision, so the restricting collapsed record binds: the
+		// answer is the legacy lock on the exact identity, with the union of
+		// both Disabled flags, and nothing is written back.
+		proxy := seed(t,
+			storage.ToolApprovalRecord{ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, Disabled: true, ApprovedBy: "user"},
+			storage.ToolApprovalRecord{ToolName: "erase", Status: storage.ToolApprovalStatusPending, CurrentHash: "h-pending"})
+		record, err := proxy.lookupToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		assert.Equal(t, "ns:erase", record.ToolName, "answered under the exact identity")
+		assert.Equal(t, storage.ToolApprovalStatusPending, record.Status, "the legacy lock binds")
+		assert.Equal(t, "h-pending", record.CurrentHash)
+		assert.True(t, record.Disabled, "the exact record's Disabled survives the merge")
+		for _, key := range []string{"ns:erase", "erase"} {
+			stored, err := proxy.storage.GetToolApproval("a", key)
+			require.NoError(t, err)
+			assert.Equal(t, key == "ns:erase", stored.Disabled, "the read must not write back into the stored %q record", key)
+			assert.Equal(t, key == "erase", stored.Status == storage.ToolApprovalStatusPending, "the read must not write back into the stored %q record", key)
+		}
+
+		// A STAMPED collapsed record is a genuine sibling's and is ignored.
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusPending, CurrentHash: "h-pending", IdentityKeyed: true,
+		}))
+		record, err = proxy.lookupToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status, "a stamped sibling's lock is the sibling's alone")
+		assert.Empty(t, record.CurrentHash)
 	})
 
 	t.Run("a raw name without a colon reads the exact key alone", func(t *testing.T) {
@@ -1539,4 +1630,72 @@ func TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts(t *testing.T) {
 			})
 		}
 	})
+}
+
+// Spec 105 FR-009 (research D4), migration review finding 1: the
+// connect→discovery window. From the server_connected event until
+// RefreshToolsFromDiscovery publishes the tool set, the StateView reads
+// Connected=true, Tools=nil, ToolsDiscovered=false — on every process start,
+// for every server. A hydration rule keyed on len(Tools) > 0 read that as
+// "not hydrated", fell through to the destructive-tier fallback and let an
+// administrator or destructive-tier token dispatch ANY name — including one
+// the upstream hides from tools/list — with no record and no identity. The
+// discovery-completed marker closes it: a connected server whose discovery
+// has not completed, and a connected server whose completed discovery lists
+// zero tools, both refuse every name with the unresolved-identity body and
+// zero upstream calls; a disconnected server keeps the pre-105 not-connected
+// body (TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts).
+func TestCallToolRead_ConnectedUndiscoveredServer_RefusedForEveryCaller(t *testing.T) {
+	callers := map[string]context.Context{
+		"full-tier a-only token": fullTierAgentOn("a"),
+		"api-key admin":          adminCtx(),
+	}
+	seed := func(t *testing.T, discovered bool) (*MCPProxyServer, *countingUpstream) {
+		t.Helper()
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		// The upstream really serves "steal" (so a leak would be witnessed by
+		// the counter), but the proxy holds no snapshot entry and no record.
+		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("steal")))
+		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+			s.Connected = true
+			s.Tools = nil
+			s.ToolsDiscovered = discovered
+		})
+		identity := proxy.resolveExactToolIdentity("a", "steal")
+		require.True(t, identity.ServerKnown)
+		require.True(t, identity.SnapshotHydrated, "fixture: the server is connected, enabled and not quarantined")
+		require.Equal(t, discovered, identity.DiscoveryDone)
+		require.False(t, identity.Found)
+		_, err := proxy.storage.GetToolApproval("a", "steal")
+		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no record")
+		return proxy, up
+	}
+
+	for _, cell := range []struct {
+		name       string
+		discovered bool
+	}{
+		{"connected, discovery not yet completed", false},
+		{"control: discovery completed with zero tools", true},
+	} {
+		t.Run(cell.name, func(t *testing.T) {
+			for label, ctx := range callers {
+				t.Run(label, func(t *testing.T) {
+					proxy, up := seed(t, cell.discovered)
+					require.True(t, proxy.resolveExactToolIdentity("a", "steal").Unresolved(),
+						"a connected server with no completed discovery result listing the name is unresolved")
+					assert.Equal(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "steal"),
+						"the nested path refuses through the same identity")
+
+					result, text := callToolReadResult(t, proxy, ctx, "a:steal")
+					require.True(t, result.IsError, "%s", text)
+					assert.Contains(t, text, "cannot be resolved", "the unresolved-identity body")
+					assert.NotContains(t, text, "ok")
+					assert.Equal(t, int64(0), up.count.Load(), "an unverified name must never reach the upstream (got %q)", text)
+					assert.Empty(t, up.dispatched())
+				})
+			}
+		})
+	}
 }

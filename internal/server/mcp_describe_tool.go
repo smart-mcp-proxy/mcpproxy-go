@@ -53,6 +53,20 @@ const (
 // old text told a stuck agent to call a tool it cannot see.
 const describeNotFoundRemediation = "Tool not found or no longer available; list tools again."
 
+// describeNoApprovalRecordRemediation is the describe_tool answer for a tool
+// the server's discovery snapshot contains that has NO approval record yet
+// while the quarantine gate is active (Spec 105 FR-009 implicit pending). It
+// carries the same instruction as the dispatch body
+// (toolPendingApprovalResult, reason no_approval_record): there is nothing
+// in the review UI to approve yet, the server's next discovery pass files the
+// record, so the agent is pointed at re-discovery rather than at the approve
+// flow.
+func describeNoApprovalRecordRemediation(serverName string) string {
+	return fmt.Sprintf("In the server's tool list but no approval record exists for it yet, so it is withheld while tool-level quarantine is active for the server. "+
+		"The server's tools are re-evaluated on its next discovery pass: re-discover the server (upstream_servers operation=\"refresh\" name=\"%s\", or mcpproxy upstream restart %s) and retry; the tool then appears for review under mcpproxy upstream inspect %s.",
+		serverName, serverName, serverName)
+}
+
 // describeMalformedIDRemediation is the answer to an id that does not parse.
 // Promoted from an inline literal so the surface-neutral wording lives in one
 // place.
@@ -228,6 +242,11 @@ func (p *MCPProxyServer) describeVisibilityError(reason, serverName, toolName st
 		return describeErrQuarantined, disabledToolRemediation(contracts.DisabledStatusServerQuarantined)
 	case visReasonToolPendingApproval:
 		return describeErrPendingApproval, disabledToolRemediation(contracts.DisabledStatusPendingApproval)
+	case visReasonToolNoApprovalRecord:
+		// Spec 105 FR-009 implicit pending: nothing is listed to approve yet,
+		// so the approve-flow remediation would be a dead end. Same
+		// remediation dispatch answers for this case (toolPendingApprovalResult).
+		return describeErrPendingApproval, describeNoApprovalRecordRemediation(serverName)
 	case visReasonToolChangedApproval:
 		return describeErrChanged, disabledToolRemediation(contracts.DisabledStatusPendingApproval)
 	case visReasonToolNotCallable:

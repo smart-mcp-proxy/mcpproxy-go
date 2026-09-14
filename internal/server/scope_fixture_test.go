@@ -132,6 +132,7 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 		s.Name = server
 		s.Enabled = true
 		s.Connected = true
+		s.ToolsDiscovered = true
 		s.Tools = up.Tools
 	})
 	for _, tool := range tools {

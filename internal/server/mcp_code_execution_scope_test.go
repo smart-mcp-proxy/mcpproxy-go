@@ -82,6 +82,10 @@ func TestCodeExecution_UnresolvedIdentityOnKnownServer_RefusedForEveryCaller(t *
 	for label, ctx := range map[string]context.Context{
 		"full-tier a-only token": fullTierAgentOn("a"),
 		"api-key admin":          adminCtx(),
+		// The stdio / in-process caller carries NO AuthContext at all
+		// (migration review, critique0 #8): the identity gate runs for it
+		// too, ahead of the sandbox's nil-AuthInfo early return.
+		"no auth context": context.Background(),
 	} {
 		t.Run(label, func(t *testing.T) {
 			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})

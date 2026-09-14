@@ -680,6 +680,7 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 		if existing, ok := existingStates[srv.Name]; ok {
 			state.LastSeen = existing.LastSeen
 			state.Tools = existing.Tools // Tools come from background discovery
+			state.ToolsDiscovered = existing.ToolsDiscovered
 			// If actual state didn't have tool count but existing does, keep it
 			if state.ToolCount == 0 && existing.ToolCount > 0 {
 				state.ToolCount = existing.ToolCount
@@ -722,6 +723,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 
 		// Phase 7.1: Convert ToolMetadata to ToolInfo and cache in StateView
 		status.Tools = toolInfosFromMetadata(state.Tools)
+		status.ToolsDiscovered = state.ToolsDiscovered
 
 		// Map connection state to string
 		// Use detailed state from ConnectionInfo when available to avoid mislabeling disconnected servers as "connecting"
@@ -1043,6 +1045,12 @@ func toolInfosFromMetadata(tools []*config.ToolMetadata) []stateview.ToolInfo {
 
 // RefreshToolsFromDiscovery updates both the Supervisor snapshot and StateView with tools from background discovery.
 // This is called after DiscoverAndIndexTools completes to populate the UI cache.
+//
+// Only servers that contributed at least one tool are touched: a server absent
+// from the flat list cannot be told apart from one that listed zero tools, so
+// it keeps whatever the previous pass published. A single server whose
+// discovery completed with ZERO tools is published through
+// RefreshServerToolsFromDiscovery, which names the server explicitly.
 func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) error {
 	if tools == nil {
 		return nil
@@ -1054,6 +1062,42 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
 	}
 
+	s.publishDiscoveredTools(toolsByServer)
+	s.logger.Debug("Refreshed tools in Supervisor snapshot and StateView from discovery",
+		zap.Int("server_count", len(toolsByServer)),
+		zap.Int("total_tools", len(tools)))
+	return nil
+}
+
+// RefreshServerToolsFromDiscovery publishes ONE server's completed discovery
+// result — tools may be empty — into the Supervisor snapshot and the
+// StateView, stamping ToolsDiscovered for it (Spec 105 FR-009, research D4).
+// This is the per-server discovery path (connect, tools/list_changed, the
+// operator's refresh), where an empty result is authoritative: the server
+// really lists no tools, so every name on it must resolve as undiscovered
+// rather than fall through to the connect→discovery window's fallback.
+func (s *Supervisor) RefreshServerToolsFromDiscovery(serverName string, tools []*config.ToolMetadata) error {
+	if serverName == "" {
+		return nil
+	}
+	serverTools := make([]*config.ToolMetadata, 0, len(tools))
+	for _, tool := range tools {
+		if tool != nil && tool.ServerName == serverName {
+			serverTools = append(serverTools, tool)
+		}
+	}
+	s.publishDiscoveredTools(map[string][]*config.ToolMetadata{serverName: serverTools})
+	s.logger.Debug("Refreshed tools in Supervisor snapshot and StateView from server discovery",
+		zap.String("server", serverName),
+		zap.Int("total_tools", len(serverTools)))
+	return nil
+}
+
+// publishDiscoveredTools writes a completed discovery result per server into
+// the Supervisor snapshot (source of truth) and then the StateView, stamping
+// ToolsDiscovered on both so identity resolution can tell "discovery has not
+// run" from "discovery found nothing".
+func (s *Supervisor) publishDiscoveredTools(toolsByServer map[string][]*config.ToolMetadata) {
 	// Update Supervisor's snapshot first (source of truth for StateView)
 	s.stateMu.Lock()
 	currentSnapshot := s.snapshot.Load().(*ServerStateSnapshot)
@@ -1071,6 +1115,7 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 		if state, exists := newServers[serverName]; exists {
 			state.ToolCount = len(serverTools)
 			state.Tools = serverTools
+			state.ToolsDiscovered = true
 		}
 	}
 
@@ -1097,14 +1142,9 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 			// could not protect against empty/stale discoveries anyway (MCP-2094).
 			status.ToolCount = len(serverTools)
 			status.Tools = toolInfosFromMetadata(serverTools)
+			status.ToolsDiscovered = true
 		})
 	}
-
-	s.logger.Debug("Refreshed tools in Supervisor snapshot and StateView from discovery",
-		zap.Int("server_count", len(toolsByServer)),
-		zap.Int("total_tools", len(tools)))
-
-	return nil
 }
 
 // forwardUpstreamEvents forwards upstream events to supervisor listeners.
@@ -1216,6 +1256,11 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						if len(state.Tools) > 0 {
 							status.Tools = toolInfosFromMetadata(state.Tools)
 							status.ToolCount = len(state.Tools)
+							// The restored set is a completed discovery's result,
+							// so its ToolsDiscovered stamp travels with it; an
+							// empty retained set restores nothing and the server
+							// stays undiscovered until discovery re-runs.
+							status.ToolsDiscovered = state.ToolsDiscovered
 						} else {
 							status.ToolCount = toolCount
 						}
@@ -1232,6 +1277,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					status.DisconnectedAt = &t
 					status.Tools = nil // Clear tools on disconnect
 					status.ToolCount = 0
+					status.ToolsDiscovered = false // the next connection needs its own discovery pass
 				}
 
 				// Update ConnectionInfo for immediate error propagation to UI

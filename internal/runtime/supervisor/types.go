@@ -21,6 +21,11 @@ type ServerState struct {
 	LastSeen       time.Time
 	ToolCount      int
 	Tools          []*config.ToolMetadata // Phase 7.1: Cached tools for lock-free reads
+	// ToolsDiscovered mirrors stateview.ServerStatus.ToolsDiscovered on the
+	// retained snapshot: set when discovery publishes a tool set for the
+	// server (even an empty one), retained across disconnects like Tools so
+	// the reconnect restore can carry it back into the StateView with them.
+	ToolsDiscovered bool
 
 	// Reconciliation metadata
 	DesiredVersion int64 // Config version that defines this desired state

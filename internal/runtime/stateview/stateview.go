@@ -35,7 +35,19 @@ type ServerStatus struct {
 	RetryCount     int
 	ToolCount      int
 	Tools          []ToolInfo // Phase 7.1: Cached tool list for lock-free reads
-	Metadata       map[string]interface{}
+	// ToolsDiscovered reports that a discovery pass has COMPLETED for this
+	// connection and Tools is its authoritative result — including an
+	// authoritative EMPTY result for an upstream that lists zero tools. It is
+	// stamped by the supervisor when discovery publishes the tool set
+	// (RefreshToolsFromDiscovery / RefreshServerToolsFromDiscovery) and
+	// cleared together with Tools on disconnect, so a freshly connected server
+	// whose discovery has not run yet reads Connected=true, Tools=nil,
+	// ToolsDiscovered=false. Spec 105 FR-009 (research D4) keys tool-identity
+	// resolution on it rather than on len(Tools) > 0: the connect→discovery
+	// window and a genuinely tool-less server both fail CLOSED instead of
+	// admitting any name with the destructive-tier fallback.
+	ToolsDiscovered bool
+	Metadata        map[string]interface{}
 	// Diagnostic is the most recent classified failure for this server, or nil
 	// when the server is healthy (or the last failure has not yet been classified).
 	// Spec 044.

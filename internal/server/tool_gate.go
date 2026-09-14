@@ -211,7 +211,8 @@ func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*stora
 // discovery producer checkToolApprovals, the ApproveTools review surface and
 // the user toggle setToolEnabledNoEmit all read and write (server, "ns:erase")
 // for a raw "ns:erase"), so the EXACT record is the tool's record and wins
-// outright whenever it exists.
+// outright whenever it exists — with the single never-baselined exception
+// described below.
 //
 // What remains to be reconciled is the store a pre-105 binary left behind:
 // discovery used to file a raw name that carries a ":" segment under the
@@ -227,6 +228,22 @@ func (p *MCPProxyServer) lookupToolApproval(serverName, toolName string) (*stora
 // an approved, enabled legacy record is reported as "no record", so the
 // namespaced tool stays pending under an active gate until it is approved by
 // its own name (the first discovery after upgrade files that exact record).
+//
+// One exact-record shape does NOT win outright: an APPROVED exact record whose
+// ApprovedHash is EMPTY. The pre-105 user toggle (runtime setToolEnabledNoEmit)
+// synthesized exactly that record under the exact raw name whenever the
+// operator toggled a namespaced tool, while discovery kept the tool's real
+// quarantine lock under the collapsed key — so until the first discovery
+// after upgrade re-files it (runtime adoptLegacyLockOrBaseline), the exact
+// record carries the user's visibility intent and no approval decision at
+// all. For that shape, and only that shape, a restricting collapsed sibling
+// still binds: the merge is re-admitted narrowly, with the sibling's lock and
+// the union of both Disabled flags on the exact identity.
+//
+// Only an UNSTAMPED collapsed record is a legacy one
+// (storage.ToolApprovalRecord.IdentityKeyed): a record a post-105 binary wrote
+// under "erase" is the genuine "erase" tool's own record and lends nothing to
+// "ns:erase" on either branch.
 //
 // Both keys are read in ONE storage snapshot (Manager.GetToolApprovals: a
 // single read lock and a single read transaction) so a pair of operator writes
@@ -246,23 +263,41 @@ func readToolApprovalRecord(st *storage.Manager, serverName, toolName string) (*
 	if err != nil {
 		return nil, err
 	}
-	if exact := records[toolName]; exact != nil {
-		return exact, nil
-	}
+	var legacy *storage.ToolApprovalRecord
 	if hasCollapsed {
-		if legacy := records[collapsed]; legacy != nil && legacyApprovalRestricts(legacy) {
-			return legacy, nil
+		if candidate := records[collapsed]; candidate != nil && !candidate.IdentityKeyed && legacyApprovalRestricts(candidate) {
+			legacy = candidate
 		}
 	}
+	if exact := records[toolName]; exact != nil {
+		if legacy != nil && neverBaselined(exact) {
+			merged := *legacy
+			merged.ServerName, merged.ToolName = exact.ServerName, exact.ToolName
+			merged.Disabled = exact.Disabled || legacy.Disabled
+			merged.HeldSignals = append([]string(nil), legacy.HeldSignals...)
+			return &merged, nil
+		}
+		return exact, nil
+	}
+	if legacy != nil {
+		return legacy, nil
+	}
 	return nil, fmt.Errorf("%w: %s", storage.ErrToolApprovalNotFound, storage.ToolApprovalKey(serverName, toolName))
+}
+
+// neverBaselined reports the exact-record shape the pre-105 user toggle
+// synthesized: approved, but with no approved contract hash — discovery has
+// not baselined it, so it carries no approval decision that could outrank a
+// legacy lock (readToolApprovalRecord).
+func neverBaselined(record *storage.ToolApprovalRecord) bool {
+	return record.Status == storage.ToolApprovalStatusApproved && record.ApprovedHash == ""
 }
 
 // legacyApprovalRestricts reports whether a pre-105 collapsed record carries a
 // fact that must keep binding the namespaced raw name it may have been filed
 // for: a quarantine lock or a user block. An approved, enabled record carries
 // only an approval, and an approval belongs to the exact raw name alone. The
-// rule itself lives on the record (storage.ToolApprovalRecord.Restricts) so
-// the discovery producer applies the same one when it files the exact record.
+// rule itself lives on the record (storage.ToolApprovalRecord.Restricts).
 func legacyApprovalRestricts(record *storage.ToolApprovalRecord) bool {
 	return record.Restricts()
 }

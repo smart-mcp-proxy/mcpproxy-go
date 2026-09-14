@@ -642,9 +642,12 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
-	// Update StateView with discovered tools
+	// Update StateView with discovered tools. The per-server variant stamps
+	// the server's discovery as completed even when the result is EMPTY, so
+	// a tool-less server is not left in the connect→discovery window (Spec
+	// 105 FR-009, research D4).
 	if r.supervisor != nil {
-		if err := r.supervisor.RefreshToolsFromDiscovery(tools); err != nil {
+		if err := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools); err != nil {
 			r.logger.Warn("Failed to refresh tools in StateView for server",
 				zap.String("server", serverName),
 				zap.Error(err))
