@@ -160,18 +160,22 @@ func (b *BleveIndex) Close() error {
 // and "ns:erase" on one server are two documents. The previous derivation
 // split ToolMetadata.Name at its FIRST colon, which read the namespace prefix
 // of a raw "ns:erase" as if it were a server prefix and collapsed both tools
-// onto "<server>:erase" (last writer wins). Documents written under the old
-// derivation are retired by the one-shot index rebuild the runtime triggers on
-// the storage schema-version bump (storage.ToolIdentitySchemaVersion).
+// onto "<server>:erase" (last writer wins). A document written under the old
+// derivation is not migrated by hand: the runtime's differential index update
+// (applyDifferentialToolUpdate) keys both sides by raw name, so the first
+// discovery after upgrade re-hashes the collapsed document under its docID
+// and adds the namespaced sibling under its own exact id.
 //
-// full_tool_name is stored as the canonical "<server>:<raw name>" id, which
-// the read seams hand back as Name (#871). Storing the raw name there (the
-// previous behaviour) was ambiguous for a raw name that begins with the
-// server's own prefix ("a:erase" on server "a"): the read-back guard in
-// CanonicalToolName would take it for an already-canonical "a:erase" and the
-// differential update would then diff the tool against the wrong identity.
-// searchable_text is left as before (raw tool name + Name + description +
-// schema) so the scored full-text fields do not move for existing fixtures.
+// The STORED fields are byte-for-byte what they were before FR-009 for every
+// metadata shape that does not carry a colon in its raw name: tool_name is the
+// raw name and full_tool_name is ToolMetadata.Name verbatim (the raw name for
+// discovery-shaped metadata, the canonical id for index-read or fixture
+// metadata). Both are SCORED fields — the exact-match TermQuery on
+// full_tool_name (boost 4.0) and the field-less _all MatchQuery in SearchTools
+// — so storing the canonical id there instead moved every administrator
+// retrieve_tools score for production-shaped documents (SC-005). The tool's
+// identity is therefore never derived from full_tool_name on read-back;
+// readToolMetadata takes it from the docID.
 func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 	toolName := config.RawToolName(toolMeta)
 	docID := toolDocID(toolMeta.ServerName, toolName)
@@ -185,7 +189,7 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 
 	doc := &ToolDocument{
 		ToolName:         toolName,
-		FullToolName:     docID,
+		FullToolName:     toolMeta.Name,
 		ServerName:       toolMeta.ServerName,
 		Description:      toolMeta.Description,
 		ParamsJSON:       toolMeta.ParamsJSON,
@@ -195,7 +199,6 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 		SearchableText:   searchableText,
 	}
 
-	// The docID doubles as the canonical id: "<server>:<raw name>".
 	return docID, doc
 }
 
@@ -205,15 +208,25 @@ func toolDocID(serverName, rawName string) string {
 	return config.CanonicalToolName(serverName, rawName)
 }
 
-// readToolMetadata rebuilds tool metadata from a stored hit. Name is the
-// canonical "<server>:<raw>" id (#871) and RawName is derived from THAT, not
-// from the stored tool_name field: for documents written before the FR-009
-// docID change tool_name holds the collapsed suffix ("erase" for a raw
-// "ns:erase"), whereas the canonical id was always built from the raw name and
-// is correct for old and new documents alike.
-func readToolMetadata(fields map[string]interface{}) *config.ToolMetadata {
+// readToolMetadata rebuilds tool metadata from a stored hit. Identity comes
+// from the docID alone (Spec 105 FR-009): the docID is "<server>:<raw name>"
+// for documents written by toolDocument, so the canonical Name (#871) IS the
+// docID and RawName is the docID with exactly this server's own prefix
+// trimmed once — never re-derived from the stored tool_name or
+// full_tool_name fields. Those are search fields, not identity: for a
+// document written before FR-009 tool_name holds the collapsed suffix
+// ("erase" for a raw "ns:erase") and full_tool_name the raw name, and a raw
+// name that begins with the server's own prefix ("a:erase" on server "a",
+// docID "a:a:erase") would be mistaken by the CanonicalToolName guard for an
+// already-canonical "a:erase".
+func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolMetadata {
 	serverName := getStringField(fields, "server_name")
-	canonical := CanonicalToolName(serverName, getStringField(fields, "full_tool_name"))
+	canonical := docID
+	if canonical == "" {
+		// Defensive only: bleve always reports hit.ID. Fall back to the stored
+		// name so a malformed hit still renders rather than vanishing.
+		canonical = CanonicalToolName(serverName, getStringField(fields, "full_tool_name"))
+	}
 	return &config.ToolMetadata{
 		Name:             canonical,
 		RawName:          strings.TrimPrefix(canonical, serverName+":"),
@@ -341,7 +354,7 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	var results []*config.SearchResult
 	for _, hit := range searchResult.Hits {
 		results = append(results, &config.SearchResult{
-			Tool:  readToolMetadata(hit.Fields),
+			Tool:  readToolMetadata(hit.ID, hit.Fields),
 			Score: hit.Score,
 		})
 	}
@@ -441,7 +454,7 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 		}
 
 		for _, hit := range searchResult.Hits {
-			tools = append(tools, readToolMetadata(hit.Fields))
+			tools = append(tools, readToolMetadata(hit.ID, hit.Fields))
 		}
 
 		if len(searchResult.Hits) < b.searchPageSize {

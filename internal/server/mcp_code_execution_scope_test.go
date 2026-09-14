@@ -12,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 )
 
 // Spec 105 FR-009 on the nested (code_execution) dispatch path. The sandbox is
@@ -117,4 +118,36 @@ func TestCodeExecution_UnresolvedIdentityOnKnownServer_RefusedForEveryCaller(t *
 		assert.Contains(t, call.Message, "server not found: zzz")
 		assert.Equal(t, int64(0), up.count.Load())
 	})
+}
+
+// Nested-path twin of TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts:
+// a KNOWN server whose StateView snapshot is EMPTY because of its own state
+// (quarantined, never discovered) must not be answered with the unresolved-
+// identity envelope inside a script either. The sandbox's annotation lookup
+// keeps its tier fallback for an un-hydrated snapshot, so checkDispatchGates
+// passes the call on to policyRefusal, which answers with the pre-105
+// quarantine verdict — for administrators and full-tier agents alike.
+func TestCodeExecution_EmptySnapshot_KeepsServerLevelVerdicts(t *testing.T) {
+	for label, ctx := range map[string]context.Context{
+		"full-tier a-only token": fullTierAgentOn("a"),
+		"api-key admin":          adminCtx(),
+	} {
+		t.Run(label, func(t *testing.T) {
+			serverCfg := &config.ServerConfig{Name: "a", Enabled: true, Quarantined: true}
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{serverCfg})
+			require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Name, s.Enabled, s.Quarantined, s.Connected, s.Tools = "a", true, true, false, nil
+			})
+			require.NotEqual(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "erase"),
+				"an empty snapshot is the server's state, not an unresolved identity")
+
+			call := runSandboxCallTool(t, proxy, ctx, "a", "erase")
+			assert.False(t, call.OK)
+			assert.NotEqual(t, string(jsruntime.ErrorCodePermissionDenied), call.Code,
+				"the quarantine verdict must answer, not the identity gate (got %q: %s)", call.Code, call.Message)
+			assert.Contains(t, call.Message, "quarantined for security review", "pre-105 body from policyRefusal")
+			assert.NotContains(t, call.Message, "cannot be resolved")
+		})
+	}
 }

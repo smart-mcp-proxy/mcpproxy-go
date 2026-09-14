@@ -2314,14 +2314,19 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
-	// Spec 105 FR-009 (research D4): a name the discovery snapshot of a KNOWN
-	// server does not contain has no resolvable registration identity, so no
-	// permission tier can be established for it. It is refused with the
-	// insufficient-permission body and zero upstream calls for EVERY caller —
-	// administrators included (spec Edge Case (2), SC-005's named exception):
-	// an unverified name must never reach an upstream on anyone's behalf. A
-	// server the snapshot does not hold is not this condition; the shared
-	// gate below keeps answering that with its server-existence verdict.
+	// Spec 105 FR-009 (research D4): a name the discovery snapshot of a KNOWN,
+	// CONNECTED server with a POPULATED snapshot does not contain has no
+	// resolvable registration identity, so no permission tier can be
+	// established for it. It is refused with the insufficient-permission body
+	// and zero upstream calls for EVERY caller — administrators included (spec
+	// Edge Case (2), SC-005's named exception): an unverified name must never
+	// reach an upstream on anyone's behalf. Two cases are deliberately NOT
+	// this condition and fall through to the verdicts that always owned them:
+	// a server the snapshot does not hold (server-existence handling below),
+	// and a server whose snapshot is empty because it is quarantined,
+	// disabled, disconnected or still connecting (the shared gate's
+	// quarantine/disabled answers and the not-connected / reconnect_on_use
+	// handling further down, in their pre-105 order).
 	if identity.Unresolved() {
 		errMsg := unresolvedToolIdentityMessage(serverName, actualToolName)
 		p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity",
@@ -6809,6 +6814,16 @@ type toolIdentity struct {
 	// also covers a proxy with no runtime wired (pure-unit constructions),
 	// which therefore never refuses on identity grounds.
 	ServerKnown bool
+	// SnapshotHydrated reports whether the server's snapshot is authoritative
+	// for its tool set: the server is enabled, not quarantined, connected and
+	// has discovered at least one tool. The StateView registers every
+	// configured server and carries an EMPTY tool list for one that is
+	// disconnected, connecting, OAuth-pending, disabled, quarantined or not
+	// yet discovered — an absent name there says nothing about the tool's
+	// identity, only about the server's state, and the server-level verdicts
+	// (quarantined / disabled / not connected / reconnect_on_use) own that
+	// answer exactly as they did before Spec 105.
+	SnapshotHydrated bool
 	// Found reports whether the server's snapshot lists the raw name, verbatim.
 	Found bool
 	// Description and Annotations are the snapshot's metadata for the tool;
@@ -6817,13 +6832,17 @@ type toolIdentity struct {
 	Annotations *config.ToolAnnotations
 }
 
-// Unresolved reports the D4 refusal condition: the server is known but its
-// snapshot does not list the raw name — an undiscovered or stale name whose
-// permission tier cannot be established, so no caller may dispatch it. A
-// server the snapshot does not hold is NOT this condition: that is
-// server-existence handling and stays with the paths that own it.
+// Unresolved reports the D4 refusal condition: the server is known, CONNECTED
+// with a POPULATED snapshot, and that snapshot does not list the raw name —
+// an undiscovered or stale name whose permission tier cannot be established,
+// so no caller may dispatch it. Two things are NOT this condition: a server
+// the snapshot does not hold (server-existence handling, which stays with
+// the paths that own it), and a known server whose snapshot is empty because
+// of its own state (quarantined, disabled, disconnected, connecting) — those
+// keep their pre-105 server-level verdicts, which run in the same order they
+// always did and which the caller's reconnect_on_use path relies on.
 func (id toolIdentity) Unresolved() bool {
-	return id.ServerKnown && !id.Found
+	return id.ServerKnown && id.SnapshotHydrated && !id.Found
 }
 
 // resolveExactToolIdentity resolves a pair that is ALREADY split into server
@@ -6847,7 +6866,10 @@ func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) t
 	if !exists || serverStatus == nil {
 		return toolIdentity{}
 	}
-	identity := toolIdentity{ServerKnown: true}
+	identity := toolIdentity{
+		ServerKnown:      true,
+		SnapshotHydrated: serverStatus.Enabled && !serverStatus.Quarantined && serverStatus.Connected && len(serverStatus.Tools) > 0,
+	}
 
 	// Only the EXACT raw name — the identity that is dispatched (Spec 105
 	// FR-009) — is matched. The StateView holds the name the upstream

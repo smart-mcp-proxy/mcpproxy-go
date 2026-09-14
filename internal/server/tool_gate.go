@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -137,7 +139,10 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 		// implicit-approved default survives only for a tool the snapshot
 		// does not list (identity resolution's concern) or while the gate is
 		// off for the server.
-		gate.approval = implicitPendingApproval(serverName, toolName, identity, quarantineGate)
+		gate.approval = implicitPendingApproval(serverName, toolName, identity.Found, identity.Description, quarantineGate)
+		if gate.approval != nil {
+			p.logImplicitPending("tool_gate", serverName, toolName)
+		}
 	default:
 		// A real BBolt failure must not silently re-enable a tool the user
 		// disabled (isToolCallable's long-standing fail-closed rule).
@@ -255,17 +260,24 @@ func readToolApprovalRecord(st *storage.Manager, serverName, toolName string) (*
 // legacyApprovalRestricts reports whether a pre-105 collapsed record carries a
 // fact that must keep binding the namespaced raw name it may have been filed
 // for: a quarantine lock or a user block. An approved, enabled record carries
-// only an approval, and an approval belongs to the exact raw name alone.
+// only an approval, and an approval belongs to the exact raw name alone. The
+// rule itself lives on the record (storage.ToolApprovalRecord.Restricts) so
+// the discovery producer applies the same one when it files the exact record.
 func legacyApprovalRestricts(record *storage.ToolApprovalRecord) bool {
-	if record.Disabled {
-		return true
-	}
-	switch record.Status {
-	case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
-		return true
-	default:
-		return false
-	}
+	return record.Restricts()
+}
+
+// implicitPendingHeldReason marks the in-memory record implicitPendingApproval
+// synthesizes. It is never persisted — the discovery producer stamps only the
+// storage.ToolHeldReason* scan reasons — so it cannot collide with a stored
+// record, and it lets the response builders tell "no record yet" apart from a
+// pending record an operator can actually find and approve in the review UI.
+const implicitPendingHeldReason = "no_approval_record"
+
+// isImplicitPendingApproval reports whether a record is the synthesized
+// no-record placeholder rather than a stored pending record.
+func isImplicitPendingApproval(record *storage.ToolApprovalRecord) bool {
+	return record != nil && record.HeldReason == implicitPendingHeldReason
 }
 
 // implicitPendingApproval is the snapshot half of the FR-009 reader: while the
@@ -273,25 +285,46 @@ func legacyApprovalRestricts(record *storage.ToolApprovalRecord) bool {
 // snapshot contains that has NO approval record is pending, never ready
 // (research D4). It returns an in-memory pending record for the pair — never
 // persisted, shaped like the one the discovery producer would have filed so
-// every consumer answers exactly as it does for a stored pending record (the
-// TOOL_QUARANTINED body, the activity reason, the describe_tool gate) — or nil
-// when the rule does not apply: the gate is off for the server, or the
-// snapshot does not list the raw name (an undiscovered name is identity
-// resolution's concern, not approval's).
+// the gate, the activity reason and the describe_tool gate answer exactly as
+// they do for a stored pending record — or nil when the rule does not apply:
+// the gate is off for the server, or the snapshot does not list the raw name
+// (an undiscovered name is identity resolution's concern, not approval's).
+//
+// The record is tagged implicitPendingHeldReason so the refusal BODY differs
+// from a stored pending record's: nothing is listed in the review UI for it
+// yet, so the standard "ask the user to approve" remediation would be a dead
+// end. Instead it says the server's tools are re-evaluated on its next
+// discovery pass, which is what files the real record.
 //
 // In production the record is genuinely absent only through the discovery
 // fail-open paths (checkToolApprovals / applyDifferentialToolUpdate skipping
 // record creation) and, until the first discovery after upgrade, for a
 // namespaced tool whose pre-105 record was collapsed onto a sibling's key;
 // both are exactly the windows in which "no record" used to read as ready.
-func implicitPendingApproval(serverName, toolName string, identity toolIdentity, quarantineGate bool) *storage.ToolApprovalRecord {
-	if !quarantineGate || !identity.Found {
+// Callers log the synthesis at Warn (logImplicitPending) so the fail-open
+// discovery path that produced it is diagnosable.
+func implicitPendingApproval(serverName, toolName string, discovered bool, description string, quarantineGate bool) *storage.ToolApprovalRecord {
+	if !quarantineGate || !discovered {
 		return nil
 	}
 	return &storage.ToolApprovalRecord{
 		ServerName:         serverName,
 		ToolName:           toolName,
 		Status:             storage.ToolApprovalStatusPending,
-		CurrentDescription: identity.Description,
+		CurrentDescription: description,
+		HeldReason:         implicitPendingHeldReason,
 	}
+}
+
+// logImplicitPending records, at Warn, that a dispatch gate refused a
+// snapshot tool because no approval record exists for it — the discovery
+// pass that should have filed one either has not run yet or failed open.
+func (p *MCPProxyServer) logImplicitPending(site, serverName, toolName string) {
+	if p.logger == nil {
+		return
+	}
+	p.logger.Warn("Snapshot tool has no approval record; treating as pending under the active quarantine gate",
+		zap.String("site", site),
+		zap.String("server_name", serverName),
+		zap.String("tool_name", toolName))
 }

@@ -415,6 +415,34 @@ approved+enabled state.
 A blocked tool can be re-exposed later with the normal enable operation
 (`POST /api/v1/servers/{id}/tools/{tool}/enabled` with `{"enabled": true}`).
 
+### Namespaced tool names
+
+A tool's identity is the exact name its server reports in `tools/list`, colons
+included. `erase` and `ns:erase` on the same server are two tools, and each has
+its own approval record, index entry and callability — a record for `erase`
+never approves `ns:erase`, and vice versa. Every gate (dispatch through
+`call_tool_*`, direct-name dispatch on `/mcp/all`, `call_tool()` inside code
+execution, preflight and `describe_tool`) looks the record up under the exact
+name it will dispatch.
+
+Releases before this rule filed a colon-named tool under the text after its
+first colon, so `ns:erase` shared the record `erase`. On the first discovery
+after upgrading, a server that has a baseline (any approved tool) and serves
+colon-named tools therefore sees those tools **become pending once, under
+their own names** on `manual` and `scan` trust — review them with
+`mcpproxy upstream inspect <server>` and approve them with
+`mcpproxy upstream approve <server> <tool>`, the `quarantine_security` MCP
+tool, or the Web UI. `trust_mode: auto` servers (and installs with
+`quarantine_enabled: false`) auto-approve them. Nothing is deleted: the old
+collapsed record stays with the bare name it stores.
+
+Two things carry over from the old record so an upgrade never silently widens
+access: a **user block** (a `Disabled` toggle) or a **quarantine lock**
+(`pending` / `changed`) on the collapsed record is copied onto the namespaced
+tool's new record, and the log says so at `WARN` naming both keys. The
+namespaced tool then stays hidden until you enable it under its own name — a
+tool you had blocked before the upgrade is still blocked after it.
+
 ## Disabling Quarantine
 
 **Not recommended**, but you can opt out of quarantine globally by setting a

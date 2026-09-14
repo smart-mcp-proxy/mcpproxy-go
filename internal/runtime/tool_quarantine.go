@@ -531,6 +531,19 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// holdEvidence carries the scan verdict + matched TPA/check ids onto
 			// the pending record when the scan gate refuses a new tool (FR-018).
 			var holdEvidence *scanHoldEvidence
+
+			// Spec 105 FR-009, legacy carry-over: a pre-105 binary filed a raw
+			// "ns:erase" under the COLLAPSED key "erase". Its approval stays
+			// with the bare name, but a user block or quarantine lock it
+			// carries must not evaporate the moment this exact record is
+			// created — under a lifted gate (quarantine off, skip_quarantine,
+			// auto-approve changes, green scan) the new record would otherwise
+			// be saved approved+enabled and the operator's block on the
+			// namespaced tool would be silently lost. The reader
+			// (internal/server/tool_gate.go) only consults the collapsed
+			// record while no exact one exists, so the block is copied here
+			// once, onto the record that will be read from now on.
+			legacyDisabled := r.legacyCollapsedRecordRestricts(serverName, toolName)
 			switch {
 			case !enforceNewTools:
 				autoApprove, approvedBy = true, "auto"
@@ -560,6 +573,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					CurrentDescription:  tool.Description,
 					CurrentSchema:       schemaJSON,
 					CurrentOutputSchema: outputSchemaJSON,
+					Disabled:            legacyDisabled,
 				}
 
 				if saveErr := r.storageManager.SaveToolApproval(record); saveErr != nil {
@@ -574,11 +588,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				r.logger.Info("New tool discovered, auto-approved",
 					zap.String("server", serverName),
 					zap.String("tool", toolName),
-					zap.String("approved_by", approvedBy))
+					zap.String("approved_by", approvedBy),
+					zap.Bool("disabled", legacyDisabled))
 
 				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
 					"", tool.Description, "", schemaJSON)
 
+				if legacyDisabled {
+					result.BlockedTools[toolName] = true
+				}
 				continue
 			}
 
@@ -595,6 +613,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				CurrentDescription:  tool.Description,
 				CurrentSchema:       schemaJSON,
 				CurrentOutputSchema: outputSchemaJSON,
+				Disabled:            legacyDisabled,
 			}
 			holdEvidence.applyTo(record)
 
@@ -1105,44 +1124,48 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	return result, nil
 }
 
-// outputSchemaHashMigrationPending reports whether any approved record still
-// carries a pre-output-schema hash, i.e. the version-gated backfill in
-// checkToolApprovals has work left. A listing failure reads as pending (fail
-// closed: callers must not advance the schema version on a guess).
-func (r *Runtime) outputSchemaHashMigrationPending() bool {
-	if r.storageManager == nil {
+// legacyCollapsedRecordRestricts reports whether a pre-Spec-105 COLLAPSED
+// record for the raw name — the record an older binary filed under the text
+// after the first colon ("erase" for a raw "ns:erase") — carries a user block
+// or quarantine lock that must be carried onto the tool's first exact record
+// (storage.ToolApprovalRecord.Restricts). A raw name without a colon has no
+// collapsed sibling. The hit is logged at Warn with both keys so the
+// first-start churn after upgrade is diagnosable; an approved, enabled
+// collapsed record is silent because it lends nothing.
+func (r *Runtime) legacyCollapsedRecordRestricts(serverName, rawName string) bool {
+	_, collapsed, ok := strings.Cut(rawName, ":")
+	if !ok || r.storageManager == nil {
 		return false
+	}
+	sibling, err := r.storageManager.GetToolApproval(serverName, collapsed)
+	if err != nil || sibling == nil || !sibling.Restricts() {
+		return false
+	}
+	r.logger.Warn("Legacy collapsed approval record restricts a namespaced tool; carrying its block onto the exact-name record",
+		zap.String("server", serverName),
+		zap.String("tool", rawName),
+		zap.String("legacy_key", collapsed),
+		zap.String("legacy_status", sibling.Status),
+		zap.Bool("legacy_disabled", sibling.Disabled))
+	return true
+}
+
+func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
+	if r.storageManager == nil {
+		return
 	}
 
 	records, err := r.storageManager.ListToolApprovals("")
 	if err != nil {
 		r.logger.Debug("Failed to list tool approvals for output schema hash migration",
 			zap.Error(err))
-		return true
+		return
 	}
 
 	for _, record := range records {
 		if record.Status == storage.ToolApprovalStatusApproved && record.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
-			return true
+			return
 		}
-	}
-	return false
-}
-
-// markOutputSchemaHashMigrationCompleteIfReady advances the storage schema
-// version to OutputSchemaHashSchemaVersion once every approved record has been
-// backfilled. It deliberately stamps THAT version and not CurrentSchemaVersion:
-// later version-gated migrations (the Spec 105 tool-identity index rebuild)
-// record themselves on the next start, when they observe the advanced version.
-func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
-	if r.storageManager == nil || r.outputSchemaHashMigrationPending() {
-		return
-	}
-
-	// Never move the version backwards: a database already past this
-	// migration has nothing to record here.
-	if current, err := r.storageManager.GetSchemaVersion(); err == nil && current >= storage.OutputSchemaHashSchemaVersion {
-		return
 	}
 
 	if err := r.storageManager.SetSchemaVersion(storage.OutputSchemaHashSchemaVersion); err != nil {

@@ -1004,6 +1004,11 @@ func (u *upstreamToolCaller) policyRefusal(serverName, toolName string) error {
 	}
 	switch gate.lockStatus {
 	case storage.ToolApprovalStatusPending:
+		if isImplicitPendingApproval(gate.approval) {
+			// Spec 105 FR-009: no stored record yet, so there is nothing to
+			// approve — the server's next discovery pass files it.
+			return fmt.Errorf("tool %s:%s has no approval record yet and cannot be called while tool-level quarantine is active; re-discover server %q (upstream_servers operation=\"refresh\") and retry", serverName, toolName, serverName)
+		}
 		return fmt.Errorf("tool %s:%s is pending security approval and cannot be called", serverName, toolName)
 	case storage.ToolApprovalStatusChanged:
 		return fmt.Errorf("tool %s:%s changed since approval and is locked pending review", serverName, toolName)
@@ -1233,16 +1238,19 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // by the retrieve surface (call_tool_*), code execution, and — through the same
 // DeriveCallWith — direct mode.
 //
-// A tool the StateView has not seen on a server it DOES hold has no
-// establishable tier (Spec 105 FR-009, research D4): the sandbox is answered
-// with jsruntime.PermissionTierUnresolved and refuses the call for every
-// caller, administrators included, so an unverified name never reaches the
-// upstream. Only when the proxy has no opinion at all — the server is not in
-// the snapshot, or no runtime is wired — does the lookup fall back to the
-// DESTRUCTIVE tier, the top of the permission ladder, so a token reaches such
-// a name only when it holds that top tier (defaulting to read there once
-// authorized every undiscovered tool for read-only tokens); the unknown-server
-// case is then answered by the bridge's own server-existence path. Note
+// A tool the StateView has not seen on a server it DOES hold — connected,
+// with a populated snapshot — has no establishable tier (Spec 105 FR-009,
+// research D4): the sandbox is answered with jsruntime.PermissionTierUnresolved
+// and refuses the call for every caller, administrators included, so an
+// unverified name never reaches the upstream. When the proxy has no opinion —
+// the server is not in the snapshot, no runtime is wired, or the snapshot is
+// empty because the server is quarantined, disabled, disconnected or still
+// connecting — the lookup falls back to the DESTRUCTIVE tier, the top of the
+// permission ladder, so a token reaches such a name only when it holds that
+// top tier (defaulting to read there once authorized every undiscovered tool
+// for read-only tokens); those cases are then answered by the bridge's own
+// server-existence path and by policyRefusal's server-level verdicts, in
+// their pre-105 order. Note
 // auth.HasPermission is exact-match, not hierarchical, so a token minted as
 // [read, destructive] without write is admitted here while call_tool_write
 // itself would refuse it. The BM25 index is deliberately not consulted: it

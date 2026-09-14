@@ -655,3 +655,34 @@ func TestEvaluate_UsesSharedClassifier(t *testing.T) {
 	w3 := healthyWorld().autoApprove().approval(func(a *ApprovalState) { a.Disabled = true })
 	assert.Equal(t, ReasonToolBlockedByUser, evalOne(t, w3, ToolRef{ID: id}).Reason)
 }
+
+// Spec 105 FR-009 (adversarial review, critique0 #3): lookupIndexed matches
+// the canonical "<server>:<raw>" id alone. The former bare-name alternate let
+// a raw "a:erase" on server "a" (canonical "a:a:erase", nonexistent) resolve
+// to the sibling "erase" document (canonical "a:erase"), so preflight claimed
+// existence — and, with the gate off, answered `ready` — for a name dispatch
+// refuses as unresolved.
+func TestLookupIndexed_ExactCanonicalOnly_NeverSiblingAlias(t *testing.T) {
+	ec := EvalContext{Index: &fakeIndex{tools: map[string][]IndexedTool{
+		"a": {{Name: "a:erase"}},
+	}}}
+
+	got, err := lookupIndexed(&ec, "a", "erase")
+	require.NoError(t, err)
+	require.NotNil(t, got, "the canonical id resolves")
+	assert.Equal(t, "a:erase", got.Name)
+
+	got, err = lookupIndexed(&ec, "a", "a:erase")
+	require.NoError(t, err)
+	assert.Nil(t, got, "raw a:erase (canonical a:a:erase) must not resolve to the erase document")
+
+	// Once the self-prefixed tool is indexed under its own canonical id it
+	// resolves — and only it does.
+	ec.Index = &fakeIndex{tools: map[string][]IndexedTool{
+		"a": {{Name: "a:erase"}, {Name: "a:a:erase"}},
+	}}
+	got, err = lookupIndexed(&ec, "a", "a:erase")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "a:a:erase", got.Name)
+}

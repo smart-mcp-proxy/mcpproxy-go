@@ -496,7 +496,12 @@ func normalizeHealthAction(action string) string {
 }
 
 // lookupIndexed resolves an exact (server, tool) pair against the shared index.
-// Exact match only — no fuzzy resolution, no live ListTools fallback.
+// Exact match only — no fuzzy resolution, no live ListTools fallback, and the
+// indexed Name is compared against the canonical "<server>:<raw>" id ALONE
+// (Spec 105 FR-009): the index always hands back canonical ids, so a bare-name
+// alternate could only ever match when one tool's raw name equals a sibling's
+// canonical id (raw "a:erase" on server "a" resolving to the raw "erase" doc),
+// which claimed existence for a name dispatch refuses.
 func lookupIndexed(ec *EvalContext, serverName, toolName string) (*IndexedTool, error) {
 	if ec.Index == nil {
 		return nil, fmt.Errorf("preflight: no index reader configured")
@@ -507,7 +512,7 @@ func lookupIndexed(ec *EvalContext, serverName, toolName string) (*IndexedTool, 
 	}
 	full := serverName + ":" + toolName
 	for i := range tools {
-		if tools[i].Name == full || tools[i].Name == toolName {
+		if tools[i].Name == full {
 			t := tools[i]
 			return &t, nil
 		}

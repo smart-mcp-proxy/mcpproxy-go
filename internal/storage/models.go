@@ -142,22 +142,12 @@ type BaselineSweepState struct {
 	Findings int `json:"findings"`
 }
 
-// Current schema version. A fresh database starts here, so none of the
-// version-gated migrations below run on it.
-const CurrentSchemaVersion = 4
+// Current schema version
+const CurrentSchemaVersion = 3
 
 // OutputSchemaHashSchemaVersion is the schema version that starts including
 // MCP outputSchema in the tool approval hash baseline.
 const OutputSchemaHashSchemaVersion = 3
-
-// ToolIdentitySchemaVersion is the schema version from which the search index
-// keys every tool document by its exact raw upstream name
-// ("<server>:<raw name>", Spec 105 FR-009). Databases below this version were
-// written alongside an index whose docIDs collapsed a namespaced raw name to
-// its suffix ("ns:erase" → "<server>:erase"), so the runtime clears the index
-// once on startup and lets discovery rebuild it under the exact identity
-// (runtime.rebuildIndexForToolIdentity).
-const ToolIdentitySchemaVersion = 4
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
@@ -302,6 +292,30 @@ type ToolApprovalRecord struct {
 	// "tpa.TPA-2026-0001.hidden_instruction" or "phrase.injection". Deduplicated,
 	// order-stable, capped at MaxToolHeldSignals.
 	HeldSignals []string `json:"held_signals,omitempty"`
+}
+
+// Restricts reports whether the record carries a fact that binds the tool
+// beyond a plain approval: a quarantine lock (pending / changed) or the
+// user's Disabled block. It is the shared reader rule for a pre-Spec-105
+// COLLAPSED record — a raw "ns:erase" that an older binary filed under
+// "erase": such a record may approve only the exact raw name it stores, but
+// its lock or block must keep binding the namespaced name it may have been
+// filed for (internal/server/tool_gate.go readToolApprovalRecord; the
+// discovery producer carries the block onto the new exact record in
+// internal/runtime/tool_quarantine.go checkToolApprovals).
+func (r *ToolApprovalRecord) Restricts() bool {
+	if r == nil {
+		return false
+	}
+	if r.Disabled {
+		return true
+	}
+	switch r.Status {
+	case ToolApprovalStatusPending, ToolApprovalStatusChanged:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetScanHold records the evidence of a trust_mode: scan hold on the record.

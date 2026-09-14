@@ -447,3 +447,62 @@ func TestDescribeTool_ModeIndependent(t *testing.T) {
 		compactResult.Content[0].(mcp.TextContent).Text,
 		"describe_tool must return identical bytes in both response modes (FR-012)")
 }
+
+// Spec 105 FR-009 (adversarial review, critique0 #3 / critique3 #3): the index
+// resolver matches the canonical "<server>:<raw>" id ALONE. Its former
+// bare-name alternate (`tool.Name == toolName`) could only ever match when a
+// raw name equalled a sibling's canonical id — a raw "a:erase" on server "a"
+// resolving to the "erase" document — which rendered one tool's schema under
+// a foreign id and made describe claim existence for a name dispatch refuses.
+// Round-trip: raw "a:erase" on server "a" is docID "a:a:erase" and reads back
+// with RawName "a:erase"; describe "a:a:erase" resolves IT, describe "a:erase"
+// resolves the plain "erase", and when only "erase" exists the raw "a:erase"
+// resolves nothing.
+func TestDescribeTool_SelfPrefixedRawName_ResolvesExactlyNeverAsSibling(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
+	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+		ServerName: "a", Name: "erase", RawName: "erase", Description: "Plain erase.",
+		ParamsJSON: `{"type":"object","properties":{"plain":{"type":"boolean"}}}`, Hash: "h-plain",
+	}))
+
+	t.Run("only erase indexed: raw a:erase resolves nothing", func(t *testing.T) {
+		require.NotNil(t, proxy.lookupIndexedTool("a", "erase"))
+		assert.Nil(t, proxy.lookupIndexedTool("a", "a:erase"),
+			"a raw name equal to a sibling's canonical id must not resolve to that sibling")
+
+		resp := callDescribe(t, proxy, context.Background(), []interface{}{"a:a:erase"})
+		assert.Empty(t, resp.Definitions, "describe must not render erase's schema under a foreign id")
+		require.Len(t, resp.Errors, 1)
+	})
+
+	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+		ServerName: "a", Name: "a:erase", RawName: "a:erase", Description: "Self-prefixed erase.",
+		ParamsJSON: `{"type":"object","properties":{"self":{"type":"boolean"}}}`, Hash: "h-self",
+	}))
+
+	t.Run("both indexed: each canonical id resolves its own document", func(t *testing.T) {
+		self := proxy.lookupIndexedTool("a", "a:erase")
+		require.NotNil(t, self, "raw a:erase must resolve once its own document exists")
+		assert.Equal(t, "a:a:erase", self.Name)
+		assert.Equal(t, "a:erase", self.RawName)
+		assert.Equal(t, "h-self", self.Hash)
+
+		plain := proxy.lookupIndexedTool("a", "erase")
+		require.NotNil(t, plain)
+		assert.Equal(t, "a:erase", plain.Name)
+		assert.Equal(t, "h-plain", plain.Hash)
+
+		resp := callDescribe(t, proxy, context.Background(), []interface{}{"a:a:erase", "a:erase"})
+		require.Empty(t, resp.Errors)
+		require.Len(t, resp.Definitions, 2)
+		byName := map[string]map[string]interface{}{}
+		for _, def := range resp.Definitions {
+			byName[def["name"].(string)] = def
+		}
+		require.Contains(t, byName, "a:a:erase")
+		require.Contains(t, byName, "a:erase")
+		assert.Equal(t, "Self-prefixed erase.", byName["a:a:erase"]["description"])
+		assert.Equal(t, "Plain erase.", byName["a:erase"]["description"])
+	})
+}

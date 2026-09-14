@@ -11,7 +11,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 const connectAttemptTimeout = 3*time.Minute + 15*time.Second // Must exceed per-server Docker timeout (3min)
@@ -184,11 +183,6 @@ func (r *Runtime) backgroundInitialization() {
 	}
 
 	appCtx := r.AppContext()
-
-	// One-shot index migration for Spec 105 FR-009. Runs BEFORE any server is
-	// loaded or connected so no discovery pass can populate the index ahead of
-	// the clear (connect-time discovery would otherwise be wiped and redone).
-	r.rebuildIndexForToolIdentity()
 
 	// Load configured servers - saves to storage synchronously (fast ~100-200ms),
 	// then starts connections asynchronously (slow 30s+)
@@ -2023,81 +2017,6 @@ func (r *Runtime) HandleUpstreamServerChange(ctx context.Context) {
 			"reason": "tool_discovery_complete",
 		})
 	}()
-}
-
-// rebuildIndexForToolIdentity retires index documents written under the
-// pre-FR-009 docID derivation (Spec 105).
-//
-// Before the change, IndexTool/BatchIndex split ToolMetadata.Name at its FIRST
-// colon, so a raw "ns:erase" on server "a" was stored as docID "a:erase" —
-// the same document as a real "erase" (last writer wins), and one that
-// DeleteTool("a", "ns:erase") could never address. Those stale documents
-// cannot be repaired in place: the collapsed docID does not say which raw
-// name produced it. The only safe migration is to drop the shared index once
-// and let the next discovery pass rebuild it under the exact
-// "<server>:<raw name>" identity; per-profile indexes are rebuilt from the
-// shared one by reconcileProfileIndexes after that pass (profile membership is
-// in-memory, so every profile is rebuilt on first reconcile after a restart).
-//
-// The trigger is the storage schema version (precedent: the output-schema hash
-// migration gated in checkToolApprovals): a database below
-// storage.ToolIdentitySchemaVersion has an index written by the old
-// derivation. The version is advanced only once the older, lazily-completed
-// output-schema hash migration is not still pending, because that migration
-// keys off the SAME version (< OutputSchemaHashSchemaVersion) and stamping the
-// newer version early would skip it and false-flag every approved tool with an
-// outputSchema as a rug-pull. While it is pending the clear is repeated on
-// each start — idempotent and cheap (the differential update repopulates the
-// index from discovery either way) — until markOutputSchemaHashMigrationComplete
-// advances the version, after which the next start records this one too.
-//
-// Approval records are NOT touched here: a collapsed legacy record keeps
-// approving only its own raw name because the producers now key by exact raw
-// name (checkToolApprovals) — see the migration note there.
-func (r *Runtime) rebuildIndexForToolIdentity() {
-	if r.indexManager == nil || r.storageManager == nil {
-		return
-	}
-
-	schemaVersion, err := r.storageManager.GetSchemaVersion()
-	if err != nil {
-		r.logger.Warn("Failed to read storage schema version; skipping tool-identity index rebuild",
-			zap.Error(err))
-		return
-	}
-	if schemaVersion >= storage.ToolIdentitySchemaVersion {
-		return
-	}
-
-	docsBefore, _ := r.indexManager.GetDocumentCount()
-	if err := r.indexManager.ClearAll(); err != nil {
-		r.logger.Error("Failed to clear search index for tool-identity migration; stale collapsed docIDs may persist",
-			zap.Uint64("schema_version", schemaVersion),
-			zap.Error(err))
-		return
-	}
-	// Signatures keyed by the retired documents are orphans now; the rebuild
-	// re-warms the cache from the fresh documents.
-	r.reconcileSignatureCache()
-
-	r.logger.Info("Search index cleared for tool-identity migration; discovery will rebuild it under exact raw names",
-		zap.Uint64("schema_version", schemaVersion),
-		zap.Uint64("target_schema_version", storage.ToolIdentitySchemaVersion),
-		zap.Uint64("docs_dropped", docsBefore))
-
-	if schemaVersion < storage.OutputSchemaHashSchemaVersion && r.outputSchemaHashMigrationPending() {
-		r.logger.Info("Tool-identity migration recorded later: output-schema hash migration still pending on the same schema version",
-			zap.Uint64("schema_version", schemaVersion))
-		return
-	}
-
-	if err := r.storageManager.SetSchemaVersion(storage.ToolIdentitySchemaVersion); err != nil {
-		r.logger.Warn("Failed to record tool-identity schema version; the index rebuild will repeat on next start",
-			zap.Error(err))
-		return
-	}
-	r.logger.Info("Tool-identity migration recorded",
-		zap.Uint64("schema_version", storage.ToolIdentitySchemaVersion))
 }
 
 func (r *Runtime) cleanupOrphanedIndexEntries() {

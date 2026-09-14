@@ -79,12 +79,14 @@ func (a *AuthInfo) HasPermission(perm string) bool {
 type ToolAnnotationLookup func(serverName, toolName string) string
 
 // PermissionTierUnresolved is the ToolAnnotationLookup outcome for a name the
-// discovery snapshot of a KNOWN server does not contain (Spec 105 FR-009,
-// research D4). It is not a tier: no permission set — not even an
-// administrator's, which passes every tier check — may dispatch a tool the
-// proxy cannot identify, so checkDispatchGates refuses the call with
+// populated discovery snapshot of a KNOWN, CONNECTED server does not contain
+// (Spec 105 FR-009, research D4). It is not a tier: no permission set — not
+// even an administrator's, which passes every tier check — may dispatch a
+// tool the proxy cannot identify, so checkDispatchGates refuses the call with
 // PERMISSION_DENIED and the upstream is never asked. A lookup that has no
-// opinion (server unknown, no runtime) keeps answering with a tier.
+// opinion (server unknown, no runtime, or a snapshot emptied by the server's
+// own state — quarantined, disabled, disconnected) keeps answering with a
+// tier so the server-level verdicts downstream answer as they always did.
 const PermissionTierUnresolved = "unresolved"
 
 // ToolCaller is an interface for calling upstream MCP tools

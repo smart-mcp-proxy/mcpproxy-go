@@ -234,12 +234,19 @@ func TestLookupToolPermission_UndiscoveredOnKnownServerIsUnresolved(t *testing.T
 // and the full-tier token alike — and nothing reaches dispatch. The
 // counting-oracle version of the same rule, administrators included, is
 // TestCallToolRead_UnresolvedIdentityOnKnownServer_RefusedForEveryCaller.
+//
+// The server is connected with a POPULATED snapshot that lacks the name:
+// that is the identity condition. An EMPTY snapshot (disconnected, quarantined,
+// disabled, connecting) is the server's state, not the tool's identity, and
+// keeps its pre-105 server-level verdict — see
+// TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts.
 func TestCallToolRead_UndiscoveredTool_RefusedForEveryCaller(t *testing.T) {
 	newProxy := func(t *testing.T) *MCPProxyServer {
 		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "github", Enabled: true}})
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
-		// Server is in storage and approved, but the StateView carries NO tools.
-		seedTargetTierServer(t, proxy, rt, "github", nil)
+		// Server is in storage and approved and its snapshot is hydrated with
+		// an unrelated tool; delete_repo is NOT in it.
+		seedTargetTierServer(t, proxy, rt, "github", []stateview.ToolInfo{{Name: "list_repos", Description: "List"}})
 		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
 			ServerName: "github", ToolName: "delete_repo", Status: storage.ToolApprovalStatusApproved,
 		}))
@@ -493,6 +500,8 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 
 			gate := proxy.evaluateToolGate("a", "ns:erase")
 			require.NotNil(t, gate.approval, "the gate must fall back to the collapsed record the producer wrote")
+			assert.Equal(t, "erase", gate.approval.ToolName, "the collapsed record itself, not the synthesized no-record placeholder")
+			assert.False(t, isImplicitPendingApproval(gate.approval))
 			assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
 			assert.False(t, gate.callable())
 
@@ -1347,6 +1356,8 @@ func TestCallToolRead_NamespacedTool_NoOwnRecord_IsPendingNotInherited(t *testin
 			_, text := callToolReadResult(t, proxy, ctx, "a:ns:erase")
 			assert.Contains(t, text, "TOOL_QUARANTINED",
 				"a snapshot tool with no record of its own must be pending, not inherit erase's approval")
+			assert.Contains(t, text, "no_approval_record",
+				"no stored record exists, so the body must say so rather than point at a review entry that is not there")
 			assert.NotContains(t, text, "\"ok\"", "the upstream's answer must never be returned")
 			assert.Equal(t, int64(0), up.count.Load(), "the call must never reach the upstream")
 			assert.Empty(t, up.dispatched())
@@ -1429,5 +1440,103 @@ func TestCallToolRead_UnresolvedIdentityOnKnownServer_RefusedForEveryCaller(t *t
 			"an UNKNOWN server is server-existence handling, not identity resolution, and must keep its own answer")
 		assert.Contains(t, text, "TOOL_BLOCKED")
 		assert.Equal(t, int64(0), up.count.Load())
+	})
+}
+
+// Spec 105 FR-009 (research D4), server-state controls (adversarial review
+// findings critique0 #2 / critique1 #1): the StateView registers EVERY
+// configured server and carries an EMPTY tool list for one that is
+// quarantined (never discovered), disabled or disconnected (Tools cleared on
+// disconnect). An absent name in an empty snapshot says nothing about the
+// tool's identity, only about the server's state, so the unresolved-identity
+// refusal must NOT fire there: the pre-105 server-level verdicts — the
+// quarantine analysis body, the disabled block, the not-connected answer that
+// reconnect_on_use hangs off — answer first, for administrators and agents
+// alike, exactly as before this spec. The fixture is a real Runtime whose
+// StateView holds the server (ServerKnown=true) with Tools=nil, which the
+// per-test seeding of the hydrated fixtures never produces.
+func TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts(t *testing.T) {
+	callers := map[string]context.Context{
+		"full-tier a-only token": fullTierAgentOn("a"),
+		"api-key admin":          adminCtx(),
+	}
+	// A scoped token that lacks the destructive tier keeps the pre-105
+	// under-tier refusal for an empty snapshot (found=false → destructive
+	// fallback) — a permission body, never the unresolved one.
+	readOnly := readOnlyAgentCtx("a")
+
+	seedEmpty := func(t *testing.T, serverCfg *config.ServerConfig, mutate func(*stateview.ServerStatus)) *MCPProxyServer {
+		t.Helper()
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{serverCfg})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
+		rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+			s.Name = "a"
+			s.Enabled = serverCfg.Enabled
+			s.Quarantined = serverCfg.Quarantined
+			s.Connected = false
+			s.Tools = nil
+			mutate(s)
+		})
+		identity := proxy.resolveExactToolIdentity("a", "erase")
+		require.True(t, identity.ServerKnown, "fixture: the StateView must hold the server")
+		require.False(t, identity.SnapshotHydrated, "fixture: the snapshot must be empty")
+		require.False(t, identity.Unresolved(), "an empty snapshot is not the identity condition")
+		return proxy
+	}
+
+	t.Run("quarantined server answers the quarantine analysis body", func(t *testing.T) {
+		for label, ctx := range callers {
+			t.Run(label, func(t *testing.T) {
+				proxy := seedEmpty(t, &config.ServerConfig{Name: "a", Enabled: true, Quarantined: true}, func(*stateview.ServerStatus) {})
+				result, text := callToolReadResult(t, proxy, ctx, "a:erase")
+				assert.Contains(t, text, "QUARANTINED_SERVER_BLOCKED", "pre-105 body: the quarantine analysis response")
+				assert.False(t, result.IsError, "the quarantine analysis is a parsable policy payload, not an error result")
+				assert.NotContains(t, text, "cannot be resolved", "the identity gate must not pre-empt the quarantine verdict")
+			})
+		}
+		t.Run("read-only token", func(t *testing.T) {
+			proxy := seedEmpty(t, &config.ServerConfig{Name: "a", Enabled: true, Quarantined: true}, func(*stateview.ServerStatus) {})
+			_, text := callToolReadResult(t, proxy, readOnly, "a:erase")
+			assert.Contains(t, text, "does not have 'destructive' permission", "pre-105: an empty snapshot keeps the destructive fallback for the tier gate")
+			assert.NotContains(t, text, "cannot be resolved")
+		})
+	})
+
+	t.Run("disabled server answers the disabled block", func(t *testing.T) {
+		for label, ctx := range callers {
+			t.Run(label, func(t *testing.T) {
+				proxy := seedEmpty(t, &config.ServerConfig{Name: "a", Enabled: false}, func(*stateview.ServerStatus) {})
+				result, text := callToolReadResult(t, proxy, ctx, "a:erase")
+				require.True(t, result.IsError)
+				assert.Contains(t, text, "TOOL_BLOCKED", "pre-105 body: the shared gate's disabled-server block")
+				assert.NotContains(t, text, "cannot be resolved")
+			})
+		}
+	})
+
+	t.Run("disconnected server answers the not-connected body and reaches the reconnect path", func(t *testing.T) {
+		for label, ctx := range callers {
+			t.Run(label, func(t *testing.T) {
+				serverCfg := &config.ServerConfig{Name: "a", Enabled: true, URL: "http://127.0.0.1:9/mcp", Protocol: "streamable-http"}
+				proxy := seedEmpty(t, serverCfg, func(*stateview.ServerStatus) {})
+				// The tool was approved before the server dropped; the record
+				// must not matter to the answer, which is about connection.
+				require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+					ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+				}))
+				// A configured-but-not-connected client, exactly what a dropped
+				// server leaves behind in the upstream manager.
+				require.NoError(t, proxy.upstreamManager.AddServerConfig("a", serverCfg))
+				client, ok := proxy.upstreamManager.GetClient("a")
+				require.True(t, ok)
+				require.False(t, client.IsConnected(), "fixture: the client must not be connected")
+
+				result, text := callToolReadResult(t, proxy, ctx, "a:erase")
+				require.True(t, result.IsError)
+				assert.Contains(t, text, "Server 'a' is not connected", "pre-105 body: the not-connected answer, which is where reconnect_on_use hangs")
+				assert.NotContains(t, text, "cannot be resolved", "the identity gate must not pre-empt the connection verdict")
+			})
+		}
 	})
 }

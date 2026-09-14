@@ -23,7 +23,7 @@ EffectiveScope{
 | store | key today | key after A | migration |
 |---|---|---|---|
 | `tool_approvals` (bbolt) | `server` + `extractToolName(name)` (collapses `ns:erase` → `erase`) | `server` + `RawName` | one-shot: on first discovery after upgrade, a collapsed record whose raw name is not exactly present is left in place and approves **only** `erase`; `ns:erase` gets its own `pending` record |
-| bleve doc id | `server:SplitN(name,":",2)[1]` | `server:` + `RawName` | index rebuild trigger (schema-version bump, precedent `tool_quarantine.go:437`) |
+| bleve doc id | `server:SplitN(name,":",2)[1]` | `server:` + `RawName` | none — the raw-keyed differential update re-hashes a collapsed `a:erase` doc and adds `a:ns:erase` on the first discovery after upgrade (no schema-version bump; review 2026-09-14) |
 | `StateView` tools | raw names already | unchanged | — |
 | approval hash | desc + schema (annotations excluded) | unchanged | documented: a tier change alone does not re-quarantine |
 
