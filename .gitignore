@@ -125,6 +125,7 @@ data/
 assets/mcpproxy.icns
 build-info.json
 .claude/
+.agents/
 config.db.backup.*
 node_modules/
 certs/
