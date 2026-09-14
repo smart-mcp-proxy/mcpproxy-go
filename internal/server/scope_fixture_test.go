@@ -97,6 +97,20 @@ type countingUpstream struct {
 	Server string
 	URL    string
 	Tools  []stateview.ToolInfo
+	mcpSrv *mcpserver.MCPServer
+}
+
+// serve registers one more tool on the running stub upstream, for tests
+// whose upstream lists a tool on a LATER discovery pass than the first (the
+// Spec 105 "bare erase on pass 1, ns:erase on pass 2" cells). The next
+// runtime discovery lists it; storage records are never seeded here.
+func (u *countingUpstream) serve(spec toolSpec) {
+	u.Tools = append(u.Tools, spec.info())
+	u.mcpSrv.AddTool(mcp.Tool{Name: spec.Name, Description: spec.Description, InputSchema: mcp.ToolInputSchema{Type: "object"}},
+		func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			u.record(request.Params.Name)
+			return mcp.NewToolResultText("ok"), nil
+		})
 }
 
 // startCountingUpstream publishes an approved, connected server into the live
@@ -108,15 +122,10 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 	t.Helper()
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 
-	up := &countingUpstream{upstreamCalls: &upstreamCalls{}, Server: server}
 	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true))
+	up := &countingUpstream{upstreamCalls: &upstreamCalls{}, Server: server, mcpSrv: mcpSrv}
 	for _, tool := range tools {
-		up.Tools = append(up.Tools, tool.info())
-		mcpSrv.AddTool(mcp.Tool{Name: tool.Name, Description: tool.Description, InputSchema: mcp.ToolInputSchema{Type: "object"}},
-			func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				up.record(request.Params.Name)
-				return mcp.NewToolResultText("ok"), nil
-			})
+		up.serve(tool)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

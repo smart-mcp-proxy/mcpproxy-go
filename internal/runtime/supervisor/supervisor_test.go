@@ -1352,8 +1352,19 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	// never-discovered "fresh" server gets the marker with no tools, server1
 	// keeps its retained set, and a name the snapshot does not hold is
 	// ignored.
-	cfg.Servers = append(cfg.Servers, &config.ServerConfig{Name: "fresh", Enabled: true})
-	_ = mockUpstream.AddServer("fresh", cfg.Servers[2])
+	// The earlier reconcile passes dispatched their connect actions
+	// asynchronously and those goroutines still read the published config's
+	// Servers slice (configsvc.Snapshot.GetServer), so the live *config.Config
+	// is never mutated here: a fresh copy with its own Servers slice is
+	// published through the config service instead, exactly as production
+	// config updates arrive.
+	fresh := &config.ServerConfig{Name: "fresh", Enabled: true}
+	grown := *cfg
+	grown.Servers = append(append([]*config.ServerConfig(nil), cfg.Servers...), fresh)
+	if err := configSvc.Update(&grown, configsvc.UpdateTypeModify, "test"); err != nil {
+		t.Fatalf("configSvc.Update: %v", err)
+	}
+	_ = mockUpstream.AddServer("fresh", fresh)
 	_ = sup.reconcile(configSvc.Current())
 	if status("fresh").ToolsDiscovered {
 		t.Fatal("fresh: before any discovery ToolsDiscovered must be false")

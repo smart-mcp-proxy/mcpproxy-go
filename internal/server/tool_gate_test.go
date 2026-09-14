@@ -356,7 +356,7 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the producer must hold the rug-pulled contract")
 			assert.Empty(t, rec.ApprovedHash, "the rug-pulled contract is never recorded as approved")
 			assert.Equal(t, oldDesc, rec.PreviousDescription)
-			assert.True(t, rec.IdentityKeyed)
+			assert.False(t, rec.IdentityKeyed, "held as changed it still restricts and keeps waiting unstamped; the approval by name stamps it (round 6)")
 
 			gate := proxy.evaluateToolGate("a", "ns:erase")
 			assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus)
@@ -475,7 +475,7 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 				assert.Equal(t, storage.ToolApprovalStatusApproved, exact.Status, "the contract is the approved one: no lock")
 				assert.Equal(t, exact.CurrentHash, exact.ApprovedHash, "baselined so detection resumes")
 				assert.True(t, exact.Disabled, "the collapsed record's user block must ride onto the exact record")
-				assert.True(t, exact.IdentityKeyed)
+				assert.False(t, exact.IdentityKeyed, "user-disabled it still restricts and keeps waiting unstamped (round 6)")
 
 				gate := proxy.evaluateToolGate("a", "ns:erase")
 				require.NotNil(t, gate.approval)
@@ -565,6 +565,75 @@ func TestToolGate_LegacyCollapsedRecord_OperatorDisablePreDiscoveryKeepsBlock(t 
 			assert.Contains(t, text, "TOOL_BLOCKED")
 			assert.NotContains(t, text, `"ok"`)
 			assert.Equal(t, int64(0), up.count.Load(), "an operator-disabled tool must never reach the upstream (got %q)", text)
+			assert.Empty(t, up.dispatched())
+		})
+	}
+}
+
+// Round-6 finding (Spec 105 FR-009 migration review, 2b remaining shapes):
+// the pre-105 store holds ns:erase's record under the collapsed key "erase",
+// user-DISABLED and approved for ns:erase's own description. After the
+// upgrade the server serves a GENUINE bare "erase" first (a different
+// contract — the likelier shape, since the collapsed record stores
+// ns:erase's description), and ns:erase only on a later pass. Pass 1 takes
+// the rug-pull branch and marks the collapsed record changed; that save used
+// to stamp it, so the ns:erase filed on pass 2 inherited nothing and — with
+// quarantine off — was auto-approved, enabled, and dispatched for every
+// caller, while origin/main kept it blocked through the shared key. Every
+// save of a read record now goes through the runtime write seam
+// (saveReadToolApproval): the still-restricting record keeps waiting
+// unstamped, lends its block on pass 2, and the gate refuses with zero
+// upstream calls. Both passes run the real producer (runRuntimeDiscovery /
+// RefreshServerTools) against a stub upstream that grows the tool.
+func TestToolGate_LegacyCollapsedRecord_BareServedFirstWithDifferingContractKeepsBlock(t *testing.T) {
+	for name, ctx := range gateCallers() {
+		t.Run("refuses "+name, func(t *testing.T) {
+			off := false
+			proxy, rt := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{{Name: "a", Enabled: true}}, func(cfg *config.Config) {
+				cfg.QuarantineEnabled = &off
+			})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			// Pass 1 serves only the bare erase ("Read erase").
+			up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("erase")))
+			require.False(t, proxy.currentConfig().IsQuarantineEnabled(), "fixture: the gate is lifted")
+			// The pre-105 store: ns:erase's record under "erase", approved for
+			// ns:erase's description (never the bare tool's), user-disabled.
+			require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+				ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved", HashSchemaVersion: storage.OutputSchemaHashSchemaVersion,
+				CurrentDescription: "Read ns:erase", Disabled: true,
+			}))
+			require.False(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "precondition: blocked through the legacy record before discovery")
+
+			runRuntimeDiscovery(t, rt, up)
+			collapsed, err := proxy.storage.GetToolApproval("a", "erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, collapsed.Status, "the bare erase's contract differs: rug-pull branch")
+			assert.True(t, collapsed.Disabled)
+			assert.False(t, collapsed.IdentityKeyed, "a served, user-disabled pre-105 record keeps waiting whichever branch wrote it")
+			_, err = proxy.storage.GetToolApproval("a", "ns:erase")
+			require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "pass 1 did not list ns:erase")
+
+			// Pass 2: the upstream lists ns:erase too.
+			up.serve(readSpec("ns:erase"))
+			require.NoError(t, rt.RefreshServerTools(context.Background(), "a"))
+			exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusApproved, exact.Status, "with the gate lifted the new record auto-approves ...")
+			assert.True(t, exact.Disabled, "... but carries the operator's block from the collapsed record")
+			assert.True(t, exact.IdentityKeyed)
+
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			require.NotNil(t, gate.approval)
+			assert.Equal(t, "ns:erase", gate.approval.ToolName, "the exact record answers now")
+			assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class)
+			assert.False(t, gate.callable())
+
+			result := callToolReadVariant(t, proxy, ctx, "a:ns:erase")
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "TOOL_BLOCKED")
+			assert.NotContains(t, text, `"ok"`)
+			assert.Equal(t, int64(0), up.count.Load(), "an operator-disabled tool must never reach the upstream after upgrade (got %q)", text)
 			assert.Empty(t, up.dispatched())
 		})
 	}

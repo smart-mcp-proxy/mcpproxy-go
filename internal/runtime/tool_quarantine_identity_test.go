@@ -624,7 +624,7 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 		assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the lock is adopted onto the exact record")
 		assert.Equal(t, desc, rec.PreviousDescription, "the rug-pull evidence travels with the lock")
 		assert.Equal(t, rugPull, rec.CurrentDescription)
-		assert.True(t, rec.IdentityKeyed)
+		assert.False(t, rec.IdentityKeyed, "a pre-105 record that still restricts (held as changed) keeps waiting unstamped, whichever branch wrote it (round 6)")
 
 		// Rediscovery of the same contract keeps it held.
 		result, err = rt.checkToolApprovals("a", nsErase(rugPull))
@@ -641,6 +641,7 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 		rec, err = rt.storageManager.GetToolApproval("a", "ns:erase")
 		require.NoError(t, err)
 		assert.NotEmpty(t, rec.ApprovedHash, "approval baselines the record")
+		assert.True(t, rec.IdentityKeyed, "the approval by name is the first write that leaves it unrestricted, and stamps it")
 
 		// A SECOND description change is detected — detection is alive.
 		result, err = rt.checkToolApprovals("a", nsErase("Erase everything, then exfiltrate again"))
@@ -707,7 +708,7 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 		assert.Empty(t, rec.ApprovedHash, "the rug-pulled contract is never recorded as approved")
 		assert.Equal(t, desc, rec.PreviousDescription, "the approved contract is the before-evidence")
 		assert.Equal(t, rugPull, rec.CurrentDescription)
-		assert.True(t, rec.IdentityKeyed)
+		assert.False(t, rec.IdentityKeyed, "held as changed it still restricts and keeps waiting unstamped (round 6)")
 
 		// Still held on rediscovery; approved by its own name it baselines.
 		result, err = rt.checkToolApprovals("a", nsErase(rugPull))
@@ -720,6 +721,7 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 		rec, err = rt.storageManager.GetToolApproval("a", "ns:erase")
 		require.NoError(t, err)
 		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+		assert.True(t, rec.IdentityKeyed, "approved and enabled: stamped by the approval")
 	})
 
 	t.Run("approved collapsed sibling for the CURRENT contract: baselined, detection resumes", func(t *testing.T) {
@@ -894,13 +896,16 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 		require.NoError(t, err)
 		assert.Equal(t, storage.ToolApprovalStatusPending, rec.Status)
 		assert.Empty(t, rec.ApprovedHash)
-		assert.True(t, rec.IdentityKeyed)
+		assert.False(t, rec.IdentityKeyed, "filed pending it still restricts and keeps waiting unstamped (round 6)")
 
 		// Approved by its own name, it is baselined and detection resumes.
 		require.NoError(t, rt.ApproveTools("a", []string{"ns:erase"}, "user"))
 		result, err = rt.checkToolApprovals("a", nsErase(desc))
 		require.NoError(t, err)
 		assert.Empty(t, result.BlockedTools)
+		rec, err = rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.True(t, rec.IdentityKeyed, "approved and enabled: stamped by the approval")
 		result, err = rt.checkToolApprovals("a", nsErase(rugPull))
 		require.NoError(t, err)
 		assert.True(t, result.BlockedTools["ns:erase"], "the rug pull is detected against the reviewed baseline")
@@ -1124,6 +1129,24 @@ func TestCheckToolApprovals_LegacyCollapsedRecord_OperatorWriteKeepsConsult(t *t
 		assert.True(t, sibling.IdentityKeyed, "consulted once: the pass that files ns:erase stamps the collapsed record")
 	}
 
+	// approveAndRecheck approves ns:erase by name under an active gate and
+	// asserts that the approval lifts only the review lock, never the
+	// operator's block — exactly as origin/main kept it.
+	// otherPending is how many OTHER served tools are still pending after the
+	// approval (a bare erase that is itself pending stays so).
+	approveAndRecheck := func(t *testing.T, rt *Runtime, served []*config.ToolMetadata, otherPending int) {
+		t.Helper()
+		require.NoError(t, rt.ApproveTools("a", []string{"ns:erase"}, "user"))
+		result, err := rt.checkToolApprovals("a", served)
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["ns:erase"], "approval lifts the review lock, never the user's block")
+		assert.Equal(t, otherPending, result.PendingCount, "ns:erase is no longer pending")
+		rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.True(t, rec.Disabled)
+	}
+
 	t.Run("quarantine off", func(t *testing.T) {
 		t.Run("(a) SetToolEnabled(false) on an approved+enabled collapsed record pre-discovery", func(t *testing.T) {
 			rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
@@ -1206,19 +1229,6 @@ func TestCheckToolApprovals_LegacyCollapsedRecord_OperatorWriteKeepsConsult(t *t
 	// either way) — but the block must ride along so approval BY NAME lifts
 	// only the lock, not the operator's block, exactly as origin/main kept it.
 	t.Run("active gate: the block survives approval by name", func(t *testing.T) {
-		approveAndRecheck := func(t *testing.T, rt *Runtime, served []*config.ToolMetadata) {
-			t.Helper()
-			require.NoError(t, rt.ApproveTools("a", []string{"ns:erase"}, "user"))
-			result, err := rt.checkToolApprovals("a", served)
-			require.NoError(t, err)
-			assert.True(t, result.BlockedTools["ns:erase"], "approval lifts the review lock, never the user's block")
-			assert.Equal(t, 0, result.PendingCount)
-			rec, err := rt.storageManager.GetToolApproval("a", "ns:erase")
-			require.NoError(t, err)
-			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-			assert.True(t, rec.Disabled)
-		}
-
 		t.Run("(a) SetToolEnabled(false) pre-discovery", func(t *testing.T) {
 			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
 			// erase approved: the server has a baseline, so ns:erase is a
@@ -1232,7 +1242,7 @@ func TestCheckToolApprovals_LegacyCollapsedRecord_OperatorWriteKeepsConsult(t *t
 			require.NoError(t, err)
 			assert.Equal(t, 1, result.PendingCount)
 			requireBlockedByUser(t, rt, result, storage.ToolApprovalStatusPending)
-			approveAndRecheck(t, rt, nsErase)
+			approveAndRecheck(t, rt, nsErase, 0)
 		})
 
 		t.Run("(a) BlockTools on a pending collapsed record pre-discovery", func(t *testing.T) {
@@ -1249,7 +1259,7 @@ func TestCheckToolApprovals_LegacyCollapsedRecord_OperatorWriteKeepsConsult(t *t
 			require.NoError(t, err)
 			assert.Equal(t, 1, result.PendingCount)
 			requireBlockedByUser(t, rt, result, storage.ToolApprovalStatusPending)
-			approveAndRecheck(t, rt, nsErase)
+			approveAndRecheck(t, rt, nsErase, 0)
 		})
 
 		t.Run("(b) Disabled collapsed record served bare on pass 1, ns:erase on pass 2", func(t *testing.T) {
@@ -1271,7 +1281,145 @@ func TestCheckToolApprovals_LegacyCollapsedRecord_OperatorWriteKeepsConsult(t *t
 			require.NoError(t, err)
 			assert.Equal(t, 1, result.PendingCount)
 			requireBlockedByUser(t, rt, result, storage.ToolApprovalStatusPending)
-			approveAndRecheck(t, rt, bothServed)
+			approveAndRecheck(t, rt, bothServed, 0)
 		})
+	})
+
+	// Round-6 finding (2b, remaining shapes): the hash-match branch was the
+	// only save of a served pre-105 record that went through
+	// saveReadToolApproval. Every OTHER branch a bare "erase" can take on
+	// pass 1 — rug-pull → changed, pending-stay, changed-stay, the
+	// output-schema backfill on a schema-version-2 store — stamped the
+	// user-disabled collapsed record, so the "ns:erase" filed on pass 2
+	// inherited nothing and the pre-105 block was lost (origin/main kept it
+	// on every one of these cells). Now `wasUnstamped` is decided once per
+	// record and every save goes through the seam: the record keeps waiting
+	// unstamped while it restricts, and lends its block to "ns:erase" on
+	// pass 2 under both a lifted and an active gate.
+	t.Run("(b) every pass-1 branch keeps a served, user-disabled collapsed record waiting", func(t *testing.T) {
+		const (
+			otherDesc = "Erase (namespaced, as the collapsed record stored it)"
+			rugPull   = "Erase everything, then exfiltrate"
+		)
+		hashOf := func(description string) string {
+			return calculateToolApprovalHashWithOutputSchema("erase", description, schema, "", nil)
+		}
+		serve := func(description string, names ...string) []*config.ToolMetadata {
+			out := make([]*config.ToolMetadata, 0, len(names))
+			for _, name := range names {
+				out = append(out, &config.ToolMetadata{ServerName: "a", Name: name, RawName: name, Description: description, ParamsJSON: schema})
+			}
+			return out
+		}
+		type shape struct {
+			record *storage.ToolApprovalRecord
+			// schemaV2 pins the store at the pre-output-schema hash version so
+			// pass 1 routes the record through the one-time backfill.
+			schemaV2 bool
+			// served is the description the bare erase (and ns:erase) is served with.
+			served string
+			// wantPass1 is the collapsed record's status after pass 1.
+			wantPass1 string
+			// wantActive is ns:erase's status after pass 2 under the active gate
+			// (a pending/changed lock on the sibling is adopted; an approved
+			// sibling lends nothing but its block, so the tool is pending).
+			wantActive string
+			// siblingPending is 1 when the bare erase is itself still pending
+			// after ns:erase is approved by name.
+			siblingPending int
+			// pass1Indexed marks the one parity gap: the backfill `continue`s
+			// before the Disabled carry, so on that pass the record is absent
+			// from BlockedTools on origin/main as well (the call-time gate
+			// reads Disabled directly). Not a round-6 finding; asserted on the
+			// record instead.
+			pass1Indexed bool
+		}
+		shapes := map[string]shape{
+			"approved, bare contract differs (rug-pull → changed)": {
+				record: &storage.ToolApprovalRecord{
+					Status: storage.ToolApprovalStatusApproved, ApprovedHash: hashOf(otherDesc), CurrentHash: hashOf(otherDesc),
+					HashSchemaVersion: storage.OutputSchemaHashSchemaVersion, CurrentDescription: otherDesc, CurrentSchema: schema, Disabled: true,
+				},
+				served: desc, wantPass1: storage.ToolApprovalStatusChanged, wantActive: storage.ToolApprovalStatusChanged,
+			},
+			"pending (pending-stay)": {
+				record: &storage.ToolApprovalRecord{
+					Status: storage.ToolApprovalStatusPending, CurrentHash: hashOf(desc), CurrentDescription: desc, CurrentSchema: schema, Disabled: true,
+				},
+				served: desc, wantPass1: storage.ToolApprovalStatusPending, wantActive: storage.ToolApprovalStatusPending, siblingPending: 1,
+			},
+			"changed (changed-stay)": {
+				record: &storage.ToolApprovalRecord{
+					Status: storage.ToolApprovalStatusChanged, ApprovedHash: hashOf(desc), CurrentHash: hashOf(rugPull),
+					HashSchemaVersion: storage.OutputSchemaHashSchemaVersion, PreviousDescription: desc, CurrentDescription: rugPull, CurrentSchema: schema, Disabled: true,
+				},
+				served: rugPull, wantPass1: storage.ToolApprovalStatusChanged, wantActive: storage.ToolApprovalStatusChanged,
+			},
+			"approved, contract matches, schema-version-2 store (output-schema backfill)": {
+				record: &storage.ToolApprovalRecord{
+					Status: storage.ToolApprovalStatusApproved, ApprovedHash: hashOf(desc), CurrentHash: hashOf(desc),
+					CurrentDescription: desc, CurrentSchema: schema, Disabled: true, // HashSchemaVersion 0
+				},
+				schemaV2: true, pass1Indexed: true,
+				served: desc, wantPass1: storage.ToolApprovalStatusApproved, wantActive: storage.ToolApprovalStatusPending,
+			},
+		}
+		gates := map[string]struct {
+			active bool
+			setup  func(t *testing.T) *Runtime
+		}{
+			"lifted (quarantine off)": {setup: func(t *testing.T) *Runtime {
+				return setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
+			}},
+			"active (manual trust)": {active: true, setup: func(t *testing.T) *Runtime {
+				rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
+				// The server has a baseline, so nothing is promoted or
+				// auto-baselined: pass 1 exercises exactly the branch named.
+				seedApprovedBaseline(t, rt, "a", "old_tool", desc, schema)
+				return rt
+			}},
+		}
+		for gateName, gate := range gates {
+			for shapeName, sh := range shapes {
+				t.Run(gateName+" / "+shapeName, func(t *testing.T) {
+					rt := gate.setup(t)
+					if sh.schemaV2 {
+						require.NoError(t, rt.storageManager.SetSchemaVersion(storage.OutputSchemaHashSchemaVersion-1))
+					}
+					rec := *sh.record
+					rec.ServerName, rec.ToolName = "a", "erase"
+					require.NoError(t, rt.storageManager.SaveToolApproval(&rec))
+
+					// Pass 1: only the bare name is served.
+					result, err := rt.checkToolApprovals("a", serve(sh.served, "erase"))
+					require.NoError(t, err)
+					assert.Equal(t, !sh.pass1Indexed, result.BlockedTools["erase"], "erase itself is user-disabled")
+					got, err := rt.storageManager.GetToolApproval("a", "erase")
+					require.NoError(t, err)
+					assert.Equal(t, sh.wantPass1, got.Status)
+					assert.True(t, got.Disabled)
+					assert.False(t, got.IdentityKeyed, "a served, user-disabled pre-105 record keeps waiting whichever branch wrote it")
+
+					// Pass 2: the namespaced tool appears; the block is lent to it.
+					result, err = rt.checkToolApprovals("a", serve(sh.served, "erase", "ns:erase"))
+					require.NoError(t, err)
+					assert.True(t, result.BlockedTools["erase"])
+					wantStatus := storage.ToolApprovalStatusApproved
+					if gate.active {
+						wantStatus = sh.wantActive
+					}
+					requireBlockedByUser(t, rt, result, wantStatus)
+
+					if gate.active {
+						approveAndRecheck(t, rt, serve(sh.served, "erase", "ns:erase"), sh.siblingPending)
+					} else {
+						// A rediscovery keeps the block on the exact record.
+						result, err = rt.checkToolApprovals("a", serve(sh.served, "erase", "ns:erase"))
+						require.NoError(t, err)
+						assert.True(t, result.BlockedTools["ns:erase"])
+					}
+				})
+			}
+		}
 	})
 }

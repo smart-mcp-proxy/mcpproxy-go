@@ -248,8 +248,10 @@ func (e *scanHoldEvidence) applyTo(record *storage.ToolApprovalRecord) {
 // recordScanHold updates an ALREADY-PERSISTED approval record with the current
 // scan-hold evidence, persisting only when it actually changed. Discovery runs
 // this gate on every reconnect, so the no-op guard keeps a steady-state held
-// tool from generating a BBolt write per pass.
-func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.ToolApprovalRecord, evidence *scanHoldEvidence) {
+// tool from generating a BBolt write per pass. The record was READ by the
+// caller's pass and still restricts (it is held), so the write goes through
+// saveReadToolApproval with the caller's wasUnstamped (Spec 105 FR-009).
+func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, evidence *scanHoldEvidence) {
 	if existing == nil || r.storageManager == nil {
 		return
 	}
@@ -259,7 +261,7 @@ func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.
 		slices.Equal(existing.HeldSignals, prevSignals) {
 		return
 	}
-	if saveErr := r.saveToolApproval(existing); saveErr != nil {
+	if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 		r.logger.Debug("Failed to persist scan-hold evidence on tool approval",
 			zap.String("server", serverName),
 			zap.String("tool", toolName),
@@ -320,8 +322,11 @@ func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*confi
 // verdict (spec 086 stage 2). It routes through enforceInvariant with
 // ReasonScanApproved; returns true when the record was saved approved, false when
 // the invariant refused or the save failed — in which case the caller MUST fall
-// through to the fail-closed (held) path.
-func (r *Runtime) scanApproveChange(serverName, toolName string, existing *storage.ToolApprovalRecord, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string) bool {
+// through to the fail-closed (held) path. The record was READ by the caller's
+// pass, so the write goes through saveReadToolApproval with the caller's
+// wasUnstamped (Spec 105 FR-009): a user-disabled pre-105 record scan-approved
+// here still restricts and keeps waiting unstamped.
+func (r *Runtime) scanApproveChange(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string) bool {
 	if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonScanApproved); invErr != nil {
 		return false
 	}
@@ -344,7 +349,7 @@ func (r *Runtime) scanApproveChange(serverName, toolName string, existing *stora
 	existing.PreviousSchema = ""
 	existing.PreviousOutputSchema = ""
 	existing.ClearScanHold() // the record is no longer held — drop stale evidence
-	if saveErr := r.saveToolApproval(existing); saveErr != nil {
+	if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 		*existing = snapshot // restore so the caller's mark-changed path sees true old values
 		r.logger.Error("Failed to scan-approve tool change",
 			zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
@@ -515,6 +520,19 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// Look up existing approval record
 		existing, err := r.storageManager.GetToolApproval(serverName, toolName)
 
+		// Spec 105 FR-009 (migration review, round 6): whether the record
+		// this pass READ was still unstamped is decided ONCE, here, and every
+		// save of `existing` below goes through saveReadToolApproval with it
+		// — the rug-pull mark, the pending/changed holds, the backfill, the
+		// formula migrations and the scan helpers alike. A save that stamps
+		// mid-branch would otherwise make a later `!existing.IdentityKeyed`
+		// read lie, and a pre-105 record that still restricts after the
+		// write (user-disabled, pending, changed) must keep waiting unstamped
+		// for the namespaced tool it may have been filed for, whichever
+		// branch wrote it. A record adopted from a collapsed sibling below
+		// (adoptLegacyLockForNewTool) is brand new and never unstamped.
+		wasUnstamped := existing != nil && !existing.IdentityKeyed
+
 		// The backfill is for records that HOLD an approved contract. An
 		// approved record with an EMPTY ApprovedHash was never baselined (the
 		// pre-105 user toggle synthesized that shape; see the never-baselined
@@ -550,7 +568,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentDescription = storedDesc
 				existing.CurrentSchema = normalizeJSON(storedSchema)
 				existing.CurrentOutputSchema = outputSchemaJSON
-				if saveErr := r.saveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 					r.logger.Debug("Failed to backfill output schema approval hash",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -750,7 +768,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			if outputSchemaHashMigration && existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
 				migratedOutputSchemaApprovals = true
 			}
-			r.adoptLegacyLockOrBaseline(serverName, existing, priorByName, tool, currentHash, schemaJSON, outputSchemaJSON, neverBaselinedGate{
+			r.adoptLegacyLockOrBaseline(serverName, existing, wasUnstamped, priorByName, tool, currentHash, schemaJSON, outputSchemaJSON, neverBaselinedGate{
 				enforceNewTools:    enforceNewTools,
 				autoApproveChanges: autoApproveChanges,
 				scanMode:           scanMode,
@@ -773,7 +791,6 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// namespaced tool this pass does not list yet, so it keeps
 			// waiting unstamped (saveReadToolApproval) and there is nothing
 			// to write for it.
-			wasUnstamped := !existing.IdentityKeyed
 			needsSave := wasUnstamped && !existing.Disabled
 			if existing.Status != storage.ToolApprovalStatusApproved {
 				// Hash matches but status is not approved (e.g., falsely marked "changed"
@@ -842,7 +859,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			if promote {
 				if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, promoteReason); invErr != nil {
 					// Refuse to promote on an invariant violation — keep blocked.
-					if saveErr := r.saveToolApproval(existing); saveErr != nil {
+					if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 						r.logger.Debug("Failed to update pending tool approval",
 							zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
 					}
@@ -861,7 +878,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.saveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 					r.logger.Error("Failed to promote pending tool approval",
 						zap.String("server", serverName), zap.String("tool", toolName),
 						zap.String("approved_by", promoteBy), zap.Error(saveErr))
@@ -876,7 +893,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			}
 
 			// Stays pending — persist the updated current info.
-			if saveErr := r.saveToolApproval(existing); saveErr != nil {
+			if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 				r.logger.Debug("Failed to update pending tool approval",
 					zap.String("server", serverName),
 					zap.String("tool", toolName),
@@ -920,7 +937,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.saveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr == nil {
 					r.logger.Info("Changed tool restored (reverted to previous description)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -949,7 +966,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.saveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr == nil {
 					r.logger.Info("Changed tool auto-approved (auto_approve_tool_changes enabled)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -965,22 +982,18 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// the matched TPA/check ids recorded on the record (FR-018).
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				if clean && r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
+				if clean && r.scanApproveChange(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
 					continue
 				}
-				r.recordScanHold(serverName, toolName, existing, evidence)
+				r.recordScanHold(serverName, toolName, existing, wasUnstamped, evidence)
 			}
 			// Tool still has the changed description — keep it blocked. A
-			// pre-105 record that stays changed is re-saved once for the
-			// identity-keyed stamp (Spec 105 FR-009).
-			if !existing.IdentityKeyed {
-				if saveErr := r.saveToolApproval(existing); saveErr != nil {
-					r.logger.Debug("Failed to stamp changed tool approval record",
-						zap.String("server", serverName),
-						zap.String("tool", toolName),
-						zap.Error(saveErr))
-				}
-			}
+			// pre-105 record that stays changed still RESTRICTS, so there is
+			// no stamp to write for it (Spec 105 FR-009): like a served,
+			// user-disabled record it keeps waiting unstamped for a
+			// namespaced tool it may have been filed for, and is stamped by
+			// the first write that leaves it unrestricted (a revert, an
+			// approval by name) or by the pass that files that tool.
 			if globalEnabled {
 				result.BlockedTools[toolName] = true
 				result.ChangedCount++
@@ -1033,7 +1046,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.saveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 					r.logger.Debug("Failed to migrate changed tool approval hash",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -1086,7 +1099,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.saveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr == nil {
 					r.logger.Info("Tool auto-approved (identical content, hash formula change)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -1132,7 +1145,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.saveToolApproval(existing); saveErr == nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr == nil {
 					r.logger.Info("Tool auto-approved (description matches, schema format differs)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
@@ -1163,7 +1176,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
-				if saveErr := r.saveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 					r.logger.Error("Failed to auto-approve changed tool",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -1190,7 +1203,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			var holdEvidence *scanHoldEvidence
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				if clean && r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
+				if clean && r.scanApproveChange(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
 					continue
 				}
 				holdEvidence = evidence
@@ -1217,7 +1230,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			existing.CurrentOutputSchema = outputSchemaJSON
 			holdEvidence.applyTo(existing)
 
-			if saveErr := r.saveToolApproval(existing); saveErr != nil {
+			if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 				r.logger.Error("Failed to update changed tool approval",
 					zap.String("server", serverName),
 					zap.String("tool", toolName),
@@ -1483,11 +1496,18 @@ func (g neverBaselinedGate) lifted() bool {
 // must stay disabled after the upgrade, not dispatch on every path.
 //
 // Either way the current contract fields are refreshed and the record is
-// saved; a failed save leaves the in-memory record adopted / held / baselined
-// so this pass still answers correctly, and the next pass retries the write.
-// The record then flows through the ordinary approved / pending / changed
-// handling in checkToolApprovals.
-func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage.ToolApprovalRecord, prior map[string]*storage.ToolApprovalRecord, tool *config.ToolMetadata, currentHash, schemaJSON, outputSchemaJSON string, gate neverBaselinedGate) {
+// saved through saveReadToolApproval with the caller's wasUnstamped (round
+// 6): a never-baselined record that adopts a lock or a block still
+// RESTRICTS, and a pre-105 record that restricts keeps waiting unstamped —
+// the pre-105 bulk toggle collapsed names too, so an empty-hash "erase" it
+// minted may be the only record of a block on "ns:erase". It is stamped by
+// the first write that leaves it unrestricted (an approval by its own name)
+// or by the pass that files the namespaced tool. A failed save leaves the
+// in-memory record adopted / held / baselined so this pass still answers
+// correctly, and the next pass retries the write. The record then flows
+// through the ordinary approved / pending / changed handling in
+// checkToolApprovals.
+func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, prior map[string]*storage.ToolApprovalRecord, tool *config.ToolMetadata, currentHash, schemaJSON, outputSchemaJSON string, gate neverBaselinedGate) {
 	toolName := existing.ToolName
 	existing.CurrentHash = currentHash
 	existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
@@ -1578,7 +1598,7 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage
 			zap.String("tool", toolName))
 	}
 
-	if saveErr := r.saveToolApproval(existing); saveErr != nil {
+	if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 		r.logger.Error("Failed to save never-baselined tool approval record",
 			zap.String("server", serverName),
 			zap.String("tool", toolName),
