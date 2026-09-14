@@ -316,10 +316,14 @@ func runRuntimeDiscovery(t *testing.T, rt *runtime.Runtime, up *countingUpstream
 // (runRuntimeDiscovery) and the gate is then driven through dispatch.
 func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testing.T) {
 	const oldDesc = "Erase preview"
-	seed := func(t *testing.T, siblingApprovedDesc string) (*MCPProxyServer, *countingUpstream) {
+	// schemaVersion is the store's output-schema hash migration marker: the
+	// current version, or the previous one for a store whose migration never
+	// completed (round-5 finding 1 — see the second loop below).
+	seedAt := func(t *testing.T, siblingApprovedDesc string, schemaVersion uint64) (*MCPProxyServer, *countingUpstream) {
 		t.Helper()
 		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		require.NoError(t, proxy.storage.SetSchemaVersion(schemaVersion))
 		// The upstream serves "ns:erase" described as "Read ns:erase" (readSpec).
 		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 		requireManualTrustGateActive(t, proxy, "a")
@@ -337,6 +341,10 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 		}))
 		runRuntimeDiscovery(t, rt, up)
 		return proxy, up
+	}
+	seed := func(t *testing.T, siblingApprovedDesc string) (*MCPProxyServer, *countingUpstream) {
+		t.Helper()
+		return seedAt(t, siblingApprovedDesc, storage.OutputSchemaHashSchemaVersion)
 	}
 
 	for name, ctx := range gateCallers() {
@@ -360,6 +368,37 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 			assert.Contains(t, text, "tool_description_changed")
 			assert.NotContains(t, text, `"ok"`)
 			assert.Equal(t, int64(0), up.count.Load(), "the rug-pulled tool must never reach the upstream (got %q)", text)
+			assert.Empty(t, up.dispatched())
+		})
+	}
+
+	// Round-5 finding 1: on a store still at the previous schema version the
+	// producer's one-time output-schema backfill used to run BEFORE the
+	// never-baselined handling and, finding no stored contract on the toggle
+	// record, baselined it to the LIVE (rug-pulled) contract and skipped the
+	// hold — so the shared reader handed the tool to every caller on every
+	// path. The backfill now requires an approved contract to re-hash.
+	for name, ctx := range gateCallers() {
+		t.Run("changed across the upgrade on a schema-version-2 store refuses "+name, func(t *testing.T) {
+			proxy, up := seedAt(t, oldDesc, storage.OutputSchemaHashSchemaVersion-1)
+
+			rec, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the backfill must not baseline a never-baselined record blind")
+			assert.Empty(t, rec.ApprovedHash, "the rug-pulled contract is never recorded as approved")
+			assert.Equal(t, oldDesc, rec.PreviousDescription)
+			assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), rec.HashSchemaVersion, "adoption raises the hash version so the migration still completes")
+
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus)
+			assert.False(t, gate.callable())
+
+			result := callToolReadVariant(t, proxy, ctx, "a:ns:erase")
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "TOOL_QUARANTINED")
+			assert.Contains(t, text, "tool_description_changed")
+			assert.NotContains(t, text, `"ok"`)
+			assert.Equal(t, int64(0), up.count.Load(), "the rug-pulled tool must never reach the upstream on a v2 store either (got %q)", text)
 			assert.Empty(t, up.dispatched())
 		})
 	}
@@ -476,6 +515,59 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 		assert.Equal(t, int64(1), up.count.Load())
 		assert.Equal(t, []string{"ns:erase"}, up.dispatched())
 	})
+}
+
+// Round-5 finding 2a (Spec 105 FR-009 migration review): the operator
+// disables the collapsed "erase" between the upgrade and the server's first
+// discovery (the stale index still shows it with ns:erase's description).
+// That write used to stamp the record and end its legacy consult, so the
+// first discovery filed ns:erase without the block and — after approval by
+// name — dispatched a tool origin/main kept blocked through the shared key.
+// The write seam (runtime saveReadToolApproval) now leaves a still-restricting
+// pre-105 record unstamped; the producer carries its block onto the exact
+// record, and the gate refuses through it even after approval by name.
+func TestToolGate_LegacyCollapsedRecord_OperatorDisablePreDiscoveryKeepsBlock(t *testing.T) {
+	for name, ctx := range gateCallers() {
+		t.Run("refuses "+name, func(t *testing.T) {
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+			up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+			requireManualTrustGateActive(t, proxy, "a")
+			// The pre-105 store: ns:erase's record under the collapsed key,
+			// approved and enabled.
+			require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+			}))
+			// Post-upgrade, pre-discovery: the operator hides it.
+			require.NoError(t, rt.SetToolEnabled("a", "erase", false, "user"))
+			collapsed, err := proxy.storage.GetToolApproval("a", "erase")
+			require.NoError(t, err)
+			require.True(t, collapsed.Disabled)
+			assert.False(t, collapsed.IdentityKeyed, "the operator write must not end the legacy consult while the record restricts")
+			require.False(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "precondition: blocked through the legacy record before discovery")
+
+			runRuntimeDiscovery(t, rt, up)
+			exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusPending, exact.Status, "post-baseline addition under an active gate")
+			assert.True(t, exact.Disabled, "the block rides onto the exact record")
+
+			// Approved by its own name: the lock lifts, the block does not.
+			require.NoError(t, rt.ApproveTools("a", []string{"ns:erase"}, "user"))
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			require.NotNil(t, gate.approval)
+			assert.Equal(t, "ns:erase", gate.approval.ToolName, "the exact record answers now")
+			assert.Equal(t, preflight.ToolClassBlockedByUser, gate.class)
+			assert.False(t, gate.callable())
+
+			result := callToolReadVariant(t, proxy, ctx, "a:ns:erase")
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "TOOL_BLOCKED")
+			assert.NotContains(t, text, `"ok"`)
+			assert.Equal(t, int64(0), up.count.Load(), "an operator-disabled tool must never reach the upstream (got %q)", text)
+			assert.Empty(t, up.dispatched())
+		})
+	}
 }
 
 // Round-4 finding 4 (Spec 105 research D4): a tool the snapshot lists with NO

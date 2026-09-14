@@ -515,7 +515,18 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// Look up existing approval record
 		existing, err := r.storageManager.GetToolApproval(serverName, toolName)
 
-		if existing != nil && existing.Status == storage.ToolApprovalStatusApproved && outputSchemaHashMigration && existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+		// The backfill is for records that HOLD an approved contract. An
+		// approved record with an EMPTY ApprovedHash was never baselined (the
+		// pre-105 user toggle synthesized that shape; see the never-baselined
+		// handling below) and has no contract to re-hash: its stored
+		// description/schema are empty, so the fallback to the LIVE contract
+		// would make the match trivially true and baseline the record blind
+		// to whatever the upstream serves right now — on a store still at
+		// schema version 2 that skipped every legacy-lock / rug-pull /
+		// Disabled carry-over below (Spec 105 FR-009 migration review, round
+		// 5). Such a record is left to adoptLegacyLockOrBaseline, which sets
+		// HashSchemaVersion so the migration can still complete.
+		if existing != nil && existing.Status == storage.ToolApprovalStatusApproved && existing.ApprovedHash != "" && outputSchemaHashMigration && existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
 			// One-time output-schema hash backfill: previously approved tools did
 			// not store outputSchema in the approved contract hash. Rebaseline using
 			// the stored approved description/input schema plus the currently observed
@@ -732,6 +743,13 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// key for this very tool — so the block below (`existing.Disabled`)
 		// keeps holding it after the upgrade.
 		if existing.Status == storage.ToolApprovalStatusApproved && existing.ApprovedHash == "" {
+			// A never-baselined record below the output-schema hash version
+			// is the one shape the backfill above skips; adoption stamps the
+			// current version onto it, so the migration-complete check must
+			// still run at the end of this pass.
+			if outputSchemaHashMigration && existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+				migratedOutputSchemaApprovals = true
+			}
 			r.adoptLegacyLockOrBaseline(serverName, existing, priorByName, tool, currentHash, schemaJSON, outputSchemaJSON, neverBaselinedGate{
 				enforceNewTools:    enforceNewTools,
 				autoApproveChanges: autoApproveChanges,
@@ -749,8 +767,14 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// untouched is still re-saved once so it carries the
 			// identity-keyed stamp — the legacy consults are bounded to the
 			// upgrade only if every record a discovery pass sees gets stamped
-			// (saveToolApproval stamps on write).
-			needsSave := !existing.IdentityKeyed
+			// (saveToolApproval stamps on write). The one exception is a
+			// record that still RESTRICTS (here: user-disabled — the status
+			// is approved below): it may be the collapsed record of a
+			// namespaced tool this pass does not list yet, so it keeps
+			// waiting unstamped (saveReadToolApproval) and there is nothing
+			// to write for it.
+			wasUnstamped := !existing.IdentityKeyed
+			needsSave := wasUnstamped && !existing.Disabled
 			if existing.Status != storage.ToolApprovalStatusApproved {
 				// Hash matches but status is not approved (e.g., falsely marked "changed"
 				// by a previous binary with a different hash formula). Restore to approved.
@@ -779,7 +803,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				needsSave = true
 			}
 			if needsSave {
-				if saveErr := r.saveToolApproval(existing); saveErr != nil {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 					r.logger.Debug("Failed to update tool approval record",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
@@ -1252,10 +1276,39 @@ func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 	return r.storageManager.SaveToolApproval(record)
 }
 
+// saveReadToolApproval is saveToolApproval for a record that was READ from
+// the store and mutated in place, with one exception (Spec 105 FR-009
+// migration review, round 5): a record that was UNSTAMPED when read
+// (wasUnstamped) and still Restricts() after the write — user-disabled,
+// pending or changed — is written back WITHOUT the identity-keyed stamp. A
+// pre-105 record is a collapsed one until proven otherwise, and a restricting
+// collapsed record may be the only record of a block or lock on a namespaced
+// tool that has not been filed yet: the operator disabling or blocking
+// "erase" between the upgrade and the server's first discovery, or a bare
+// "erase" served on the first pass while "ns:erase" only appears on a later
+// one. Stamping it there would end the legacy consult
+// (legacyCollapsedSibling / the reader's re-admission) before the namespaced
+// tool ever existed, and the block would evaporate the moment its exact
+// record was filed approved+enabled. So such a record keeps waiting — the
+// same window stampRemainingLegacyToolApprovals already grants a restricting
+// orphan — and is stamped by the pass that files its namespaced tool
+// (stampConsultedLegacySibling) or by the first write that leaves it
+// unrestricted. Brand-new records never take this path: they are this
+// binary's own and are stamped by saveToolApproval.
+func (r *Runtime) saveReadToolApproval(record *storage.ToolApprovalRecord, wasUnstamped bool) error {
+	if wasUnstamped && record.Restricts() {
+		record.IdentityKeyed = false
+		return r.storageManager.SaveToolApproval(record)
+	}
+	return r.saveToolApproval(record)
+}
+
 // stampRemainingLegacyToolApprovals bounds the Spec 105 FR-009 legacy logic to
 // the upgrade: after a discovery pass has processed every tool the server
 // currently lists (each of those records is saved, and so stamped, by the
-// pass itself), every OTHER record the server still holds unstamped — a
+// pass itself — except one that still restricts, which saveReadToolApproval
+// leaves waiting for the same reason as the orphan rule below), every OTHER
+// record the server still holds unstamped — a
 // collapsed pre-105 record whose bare name is not served, or a record for a
 // tool the upstream no longer lists — is stamped identity-keyed in one write.
 // From then on legacyCollapsedSibling and the reader's legacy re-admission
@@ -1800,6 +1853,10 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 			return err
 		}
 
+		// Spec 105 FR-009: an operator write on a pre-105 record must not
+		// end its legacy consult while it still restricts (saveReadToolApproval).
+		wasUnstamped := !record.IdentityKeyed
+
 		record.Status = storage.ToolApprovalStatusApproved
 		record.ApprovedHash = record.CurrentHash
 		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
@@ -1810,7 +1867,7 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		record.PreviousOutputSchema = ""
 		record.ClearScanHold()
 
-		if err := r.saveToolApproval(record); err != nil {
+		if err := r.saveReadToolApproval(record, wasUnstamped); err != nil {
 			return err
 		}
 		approved++
@@ -1887,9 +1944,16 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 	}
 
 	record, err := r.storageManager.GetToolApproval(serverName, toolName)
+	// Spec 105 FR-009: a pre-105 record the operator toggles between the
+	// upgrade and the server's first discovery may be the collapsed record
+	// of a namespaced tool not filed yet; while it still restricts after the
+	// write it keeps its legacy consult (saveReadToolApproval). A record
+	// synthesized here is this binary's own and is stamped.
+	wasUnstamped := false
 	switch {
 	case err == nil:
 		// existing record — keep its Status, just flip Disabled below.
+		wasUnstamped = !record.IdentityKeyed
 	case errors.Is(err, storage.ErrToolApprovalNotFound):
 		// First time we've seen this tool: synthesize the record the
 		// discovery producer would have filed for it under this server's
@@ -1909,7 +1973,7 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 
 	record.Disabled = !enabled
 
-	if err := r.saveToolApproval(record); err != nil {
+	if err := r.saveReadToolApproval(record, wasUnstamped); err != nil {
 		return false, err
 	}
 
@@ -2275,6 +2339,10 @@ func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy st
 			return blocked, err
 		}
 
+		// Spec 105 FR-009: a block on a pre-105 record keeps its legacy
+		// consult — the blocked record always restricts (saveReadToolApproval).
+		wasUnstamped := !record.IdentityKeyed
+
 		// Approve + disable in a single write — all-or-nothing.
 		record.Status = storage.ToolApprovalStatusApproved
 		record.ApprovedHash = record.CurrentHash
@@ -2287,7 +2355,7 @@ func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy st
 		record.ClearScanHold()
 		record.Disabled = true
 
-		if err := r.saveToolApproval(record); err != nil {
+		if err := r.saveReadToolApproval(record, wasUnstamped); err != nil {
 			return blocked, err
 		}
 		blocked++
