@@ -670,12 +670,21 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// after upgrade. So, once: if an UNSTAMPED collapsed sibling carries a
 		// pending/changed lock, that lock (with its rug-pull evidence) is
 		// adopted onto the exact record, which then flows through the ordinary
-		// pending/changed handling below; otherwise the record is baselined to
-		// the current contract so rug-pull detection resumes. The record's own
-		// Disabled flag is the user's decision on the exact name and is left
-		// alone.
+		// pending/changed handling below. Otherwise the record is NEVER
+		// baselined blindly to whatever the upstream serves right now: it is
+		// baselined only when an unstamped APPROVED sibling's approved
+		// contract matches the current one (the sibling was this tool's real
+		// baseline, so the approval is genuine), marked changed when that
+		// contract differs (a rug pull across the upgrade), and filed pending
+		// under an active gate when no sibling exists at all — an
+		// unreviewed tool stays unreviewed. The record's own Disabled flag is
+		// the user's decision on the exact name and is left alone.
 		if existing.Status == storage.ToolApprovalStatusApproved && existing.ApprovedHash == "" {
-			r.adoptLegacyLockOrBaseline(serverName, toolName, existing, priorByName, currentHash, tool.Description, schemaJSON, outputSchemaJSON)
+			r.adoptLegacyLockOrBaseline(serverName, existing, priorByName, tool, currentHash, schemaJSON, outputSchemaJSON, neverBaselinedGate{
+				enforceNewTools:    enforceNewTools,
+				autoApproveChanges: autoApproveChanges,
+				scanMode:           scanMode,
+			})
 		}
 
 		if existing.Disabled {
@@ -684,7 +693,12 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 		// Existing record found - check if hash matches
 		if existing.ApprovedHash == currentHash {
-			needsSave := false
+			// Spec 105 FR-009: a pre-105 record the pass otherwise leaves
+			// untouched is still re-saved once so it carries the
+			// identity-keyed stamp — the legacy consults are bounded to the
+			// upgrade only if every record a discovery pass sees gets stamped
+			// (saveToolApproval stamps on write).
+			needsSave := !existing.IdentityKeyed
 			if existing.Status != storage.ToolApprovalStatusApproved {
 				// Hash matches but status is not approved (e.g., falsely marked "changed"
 				// by a previous binary with a different hash formula). Restore to approved.
@@ -880,7 +894,17 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				}
 				r.recordScanHold(serverName, toolName, existing, evidence)
 			}
-			// Tool still has the changed description — keep it blocked
+			// Tool still has the changed description — keep it blocked. A
+			// pre-105 record that stays changed is re-saved once for the
+			// identity-keyed stamp (Spec 105 FR-009).
+			if !existing.IdentityKeyed {
+				if saveErr := r.saveToolApproval(existing); saveErr != nil {
+					r.logger.Debug("Failed to stamp changed tool approval record",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(saveErr))
+				}
+			}
 			if globalEnabled {
 				result.BlockedTools[toolName] = true
 				result.ChangedCount++
@@ -1152,6 +1176,8 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		r.markOutputSchemaHashMigrationCompleteIfReady()
 	}
 
+	r.stampRemainingLegacyToolApprovals(serverName)
+
 	if len(result.BlockedTools) > 0 {
 		r.logger.Info("Tool-level quarantine: tools blocked",
 			zap.String("server", serverName),
@@ -1172,6 +1198,47 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 	record.IdentityKeyed = true
 	return r.storageManager.SaveToolApproval(record)
+}
+
+// stampRemainingLegacyToolApprovals bounds the Spec 105 FR-009 legacy logic to
+// the upgrade: after a discovery pass has processed every tool the server
+// currently lists (each of those records is saved, and so stamped, by the
+// pass itself), every OTHER record the server still holds unstamped — a
+// collapsed pre-105 record whose bare name is not served, or a record for a
+// tool the upstream no longer lists — is stamped identity-keyed in one write.
+// From then on legacyCollapsedSibling and the reader's legacy re-admission
+// (internal/server/tool_gate.go) consult nothing on this server: a sibling
+// record is a genuine sibling's own, and a later "v2:erase" inherits nothing
+// from an "erase" the operator disables months after the upgrade. The pass
+// that ran just before this call is the one and only pass that migrates.
+func (r *Runtime) stampRemainingLegacyToolApprovals(serverName string) {
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		r.logger.Debug("Failed to list tool approvals for identity stamping",
+			zap.String("server", serverName), zap.Error(err))
+		return
+	}
+	var unstamped []*storage.ToolApprovalRecord
+	for _, rec := range records {
+		if rec != nil && !rec.IdentityKeyed {
+			rec.IdentityKeyed = true
+			unstamped = append(unstamped, rec)
+		}
+	}
+	if len(unstamped) == 0 {
+		return
+	}
+	if err := r.storageManager.SaveToolApprovals(unstamped); err != nil {
+		r.logger.Warn("Failed to stamp remaining legacy tool approval records identity-keyed",
+			zap.String("server", serverName), zap.Int("count", len(unstamped)), zap.Error(err))
+		return
+	}
+	names := make([]string, 0, len(unstamped))
+	for _, rec := range unstamped {
+		names = append(names, rec.ToolName)
+	}
+	r.logger.Info("Stamped remaining pre-105 tool approval records identity-keyed; legacy collapsed-name consults end for this server",
+		zap.String("server", serverName), zap.Strings("tools", names))
 }
 
 // legacyCollapsedSibling returns the pre-Spec-105 COLLAPSED record for a raw
@@ -1214,20 +1281,57 @@ func (r *Runtime) legacyCollapsedSiblingDisabled(serverName, rawName string, pri
 	return true
 }
 
+// neverBaselinedGate is the slice of checkToolApprovals' gate resolution that
+// adoptLegacyLockOrBaseline needs to decide what a never-baselined exact
+// record becomes when no legacy sibling carries a lock for it.
+type neverBaselinedGate struct {
+	enforceNewTools    bool
+	autoApproveChanges bool
+	scanMode           bool
+}
+
+// lifted reports whether a new, unreviewed tool would auto-approve on this
+// server (checkToolApprovals' new-tool branch minus the baseline pass, which
+// can never apply here: the never-baselined record itself is approved, so the
+// server already has a baseline).
+func (g neverBaselinedGate) lifted() bool {
+	return !g.enforceNewTools || g.autoApproveChanges
+}
+
 // adoptLegacyLockOrBaseline handles an APPROVED exact record with an EMPTY
-// ApprovedHash (see the call site in checkToolApprovals). If an unstamped
-// collapsed sibling carries a pending/changed lock, the lock and its rug-pull
-// evidence (Previous* contract, scan-hold reason) are adopted onto the exact
-// record so the tool stays held under its own name until an operator approves
-// it BY that name; otherwise the record is baselined to the current contract
-// so the rug-pull guard has a hash to compare against. Either way the current
-// contract fields are refreshed and the record is saved; a failed save leaves
-// the in-memory record adopted/baselined so this pass still holds or
-// baselines the tool, and the next pass retries the write.
-func (r *Runtime) adoptLegacyLockOrBaseline(serverName, toolName string, existing *storage.ToolApprovalRecord, prior map[string]*storage.ToolApprovalRecord, currentHash, description, schemaJSON, outputSchemaJSON string) {
+// ApprovedHash (see the call site in checkToolApprovals). The exact record was
+// synthesized by the pre-105 user toggle and carries no approval decision, so
+// the decision is derived from the UNSTAMPED collapsed sibling — the record
+// pre-105 discovery actually kept for this tool — and from the server's gate:
+//
+//   - sibling pending/changed: the lock and its rug-pull evidence (Previous*
+//     contract, scan-hold reason) are adopted onto the exact record so the
+//     tool stays held under its own name until an operator approves it BY
+//     that name;
+//   - sibling approved with a contract: the exact record is baselined ONLY
+//     when the sibling's approved contract equals the current one hashed
+//     under the collapsed name (any of the hash formulas the rug-pull guard
+//     itself accepts, or identical stored text); otherwise the tool changed
+//     while it had no live baseline — while the proxy was down, across the
+//     upgrade, or under a compromised upstream — and it is marked changed
+//     with the sibling's contract as the Previous* evidence, exactly what the
+//     pre-105 binary would have done to the collapsed record;
+//   - no usable sibling: under an active gate the record is filed pending
+//     like any new, unreviewed tool (scan trust: a green offline scan
+//     approves it, anything else holds it with the evidence); under a lifted
+//     gate (quarantine off, skip_quarantine, trust_mode auto) it is
+//     baselined to the current contract, which is what a new tool would get.
+//
+// Either way the current contract fields are refreshed and the record is
+// saved; a failed save leaves the in-memory record adopted / held / baselined
+// so this pass still answers correctly, and the next pass retries the write.
+// The record then flows through the ordinary approved / pending / changed
+// handling in checkToolApprovals.
+func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage.ToolApprovalRecord, prior map[string]*storage.ToolApprovalRecord, tool *config.ToolMetadata, currentHash, schemaJSON, outputSchemaJSON string, gate neverBaselinedGate) {
+	toolName := existing.ToolName
 	existing.CurrentHash = currentHash
 	existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
-	existing.CurrentDescription = description
+	existing.CurrentDescription = tool.Description
 	existing.CurrentSchema = schemaJSON
 	existing.CurrentOutputSchema = outputSchemaJSON
 
@@ -1246,9 +1350,62 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName, toolName string, existin
 			zap.String("tool", toolName),
 			zap.String("legacy_key", sibling.ToolName),
 			zap.String("adopted_status", sibling.Status))
-	default:
+	case sibling != nil && sibling.Status == storage.ToolApprovalStatusApproved && sibling.ApprovedHash != "":
+		if legacySiblingApprovesContract(sibling, tool, schemaJSON, outputSchemaJSON) {
+			existing.ApprovedHash = currentHash
+			r.logger.Info("Never-baselined exact approval record baselined from its legacy collapsed record's approved contract; rug-pull detection resumes",
+				zap.String("server", serverName),
+				zap.String("tool", toolName),
+				zap.String("legacy_key", sibling.ToolName))
+			break
+		}
+		// The contract the operator approved (under the collapsed key) is not
+		// the one the upstream serves now: a rug pull the exact record would
+		// otherwise have hidden forever. Hold it with the approved contract as
+		// the evidence, as the collapsed record itself would have been marked.
+		existing.Status = storage.ToolApprovalStatusChanged
+		existing.PreviousDescription = sibling.CurrentDescription
+		existing.PreviousSchema = sibling.CurrentSchema
+		existing.PreviousOutputSchema = sibling.CurrentOutputSchema
+		existing.ClearScanHold()
+		r.logger.Warn("Never-baselined exact approval record differs from its legacy collapsed record's approved contract; held as changed (potential rug pull)",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("legacy_key", sibling.ToolName),
+			zap.String("legacy_approved_hash", sibling.ApprovedHash),
+			zap.String("current_hash", currentHash))
+		r.emitToolQuarantineEvent(serverName, toolName, "tool_description_changed",
+			sibling.ApprovedHash, currentHash,
+			sibling.CurrentDescription, tool.Description,
+			sibling.CurrentSchema, schemaJSON)
+	case gate.lifted():
 		existing.ApprovedHash = currentHash
-		r.logger.Info("Never-baselined exact approval record baselined to its current contract; rug-pull detection resumes",
+		r.logger.Info("Never-baselined exact approval record baselined to its current contract (quarantine gate lifted for the server); rug-pull detection resumes",
+			zap.String("server", serverName),
+			zap.String("tool", toolName))
+	case gate.scanMode:
+		if clean, evidence := r.scanChangeIsClean(serverName, tool); clean {
+			existing.ApprovedHash = currentHash
+			existing.ApprovedAt = time.Now().UTC()
+			existing.ApprovedBy = "scan-approved"
+			existing.ClearScanHold()
+			r.logger.Info("Never-baselined exact approval record scan-approved (trust_mode: scan, clean verdict); rug-pull detection resumes",
+				zap.String("server", serverName),
+				zap.String("tool", toolName))
+		} else {
+			existing.Status = storage.ToolApprovalStatusPending
+			evidence.applyTo(existing)
+			r.logger.Warn("Never-baselined exact approval record has no legacy baseline and did not scan clean; filed pending under its own name",
+				zap.String("server", serverName),
+				zap.String("tool", toolName))
+		}
+	default:
+		// Active gate, nothing to inherit: the tool was never reviewed under
+		// any name, so it is pending like any new tool until an operator
+		// approves it by its own name.
+		existing.Status = storage.ToolApprovalStatusPending
+		existing.ClearScanHold()
+		r.logger.Warn("Never-baselined exact approval record has no legacy baseline; filed pending under its own name for review",
 			zap.String("server", serverName),
 			zap.String("tool", toolName))
 	}
@@ -1259,6 +1416,34 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName, toolName string, existin
 			zap.String("tool", toolName),
 			zap.Error(saveErr))
 	}
+}
+
+// legacySiblingApprovesContract reports whether an unstamped, approved
+// collapsed record's approved contract is the tool's CURRENT contract. The
+// pre-105 producer hashed the contract under the COLLAPSED name, so the
+// current description / schemas are hashed under that name with every formula
+// the rug-pull guard in checkToolApprovals accepts for a pre-output-schema
+// record (current, legacy, with-annotations); as a last resort the stored
+// text is compared when the sibling's stored current contract is the one it
+// approved. Anything else is a contract the operator never approved.
+func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON string) bool {
+	collapsed := sibling.ToolName
+	if sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
+		return true
+	}
+	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
+			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
+			return true
+		}
+	}
+	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
+		return false
+	}
+	descMatch := sibling.CurrentDescription == tool.Description
+	schemaMatch := sibling.CurrentSchema == "" || normalizeJSON(sibling.CurrentSchema) == normalizeJSON(schemaJSON)
+	outputMatch := sibling.CurrentOutputSchema == "" || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
+	return descMatch && schemaMatch && outputMatch
 }
 
 func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {

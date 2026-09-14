@@ -258,7 +258,7 @@ func TestCallToolRead_UndiscoveredTool_RefusedForEveryCaller(t *testing.T) {
 
 	t.Run("read-only token is refused as unresolved, not as under-tiered", func(t *testing.T) {
 		text := callToolReadOn(t, newProxy(t), readOnlyAgentCtx("github"), "github:delete_repo")
-		assert.Contains(t, text, unresolvedToolIdentityMessage("github", "delete_repo"))
+		assert.Contains(t, text, unresolvedToolIdentityMessage("github", "delete_repo", true))
 		assert.NotContains(t, text, "does not have 'destructive' permission",
 			"no tier is derived for a name that cannot be resolved")
 		assert.NotContains(t, text, "No client found")
@@ -271,7 +271,7 @@ func TestCallToolRead_UndiscoveredTool_RefusedForEveryCaller(t *testing.T) {
 			Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 		})
 		text := callToolReadOn(t, newProxy(t), full, "github:delete_repo")
-		assert.Contains(t, text, unresolvedToolIdentityMessage("github", "delete_repo"))
+		assert.Contains(t, text, unresolvedToolIdentityMessage("github", "delete_repo", true))
 		assert.NotContains(t, text, "No client found", "the pre-105 reach into dispatch is exactly what D4 closes")
 	})
 }
@@ -1033,7 +1033,7 @@ func TestLookupToolPermission_ExactRawNameOutranksPrefixedAlternative(t *testing
 
 		for label, ctx := range map[string]context.Context{"read-only token": readOnlyAgentCtx("a"), "full-tier token": fullTierAgentOn("a"), "api-key admin": adminCtx()} {
 			text := callToolReadOn(t, proxy, ctx, "a:ns:erase")
-			assert.Contains(t, text, unresolvedToolIdentityMessage("a", "ns:erase"), label)
+			assert.Contains(t, text, unresolvedToolIdentityMessage("a", "ns:erase", true), label)
 			assert.NotContains(t, text, "does not have 'destructive' permission", "%s: no tier is derived for an unresolved name", label)
 			assert.NotContains(t, text, "No client found", "%s: the call must never reach dispatch", label)
 		}
@@ -1672,12 +1672,25 @@ func TestCallToolRead_ConnectedUndiscoveredServer_RefusedForEveryCaller(t *testi
 		return proxy, up
 	}
 
+	// The two bodies differ in their remediation: the discovery window says
+	// "retry shortly" (there is no list to refresh from yet), the completed
+	// zero-tool result says "refresh with retrieve_tools". The marker is what
+	// tells them apart, so a rule that dropped DiscoveryDone from
+	// Unresolved() would collapse both cells onto one body and fail here.
+	windowBody := unresolvedToolIdentityMessage("a", "steal", false)
+	absentBody := unresolvedToolIdentityMessage("a", "steal", true)
+	require.NotEqual(t, windowBody, absentBody)
+	require.Contains(t, windowBody, "discovery has not completed")
+	require.Contains(t, absentBody, "retrieve_tools")
+
 	for _, cell := range []struct {
 		name       string
 		discovered bool
+		body       string
+		otherBody  string
 	}{
-		{"connected, discovery not yet completed", false},
-		{"control: discovery completed with zero tools", true},
+		{"connected, discovery not yet completed", false, windowBody, absentBody},
+		{"control: discovery completed with zero tools", true, absentBody, windowBody},
 	} {
 		t.Run(cell.name, func(t *testing.T) {
 			for label, ctx := range callers {
@@ -1690,7 +1703,8 @@ func TestCallToolRead_ConnectedUndiscoveredServer_RefusedForEveryCaller(t *testi
 
 					result, text := callToolReadResult(t, proxy, ctx, "a:steal")
 					require.True(t, result.IsError, "%s", text)
-					assert.Contains(t, text, "cannot be resolved", "the unresolved-identity body")
+					assert.Contains(t, text, cell.body, "the unresolved-identity body for this discovery state")
+					assert.NotContains(t, text, cell.otherBody, "the remediation must name the actual discovery state")
 					assert.NotContains(t, text, "ok")
 					assert.Equal(t, int64(0), up.count.Load(), "an unverified name must never reach the upstream (got %q)", text)
 					assert.Empty(t, up.dispatched())

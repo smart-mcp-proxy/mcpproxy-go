@@ -372,6 +372,32 @@ func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	})
 }
 
+// SaveToolApprovals writes several tool approval records in ONE update
+// transaction: either every record lands or none does. Used by the discovery
+// producer to stamp a server's remaining pre-105 records identity-keyed in a
+// single write after its first pass (Spec 105 FR-009).
+func (b *BoltDB) SaveToolApprovals(records []*ToolApprovalRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		for _, record := range records {
+			if record == nil {
+				continue
+			}
+			data, err := record.MarshalBinary()
+			if err != nil {
+				return err
+			}
+			if err := bucket.Put([]byte(record.Key()), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // GetToolApproval retrieves a tool approval record by server and tool name.
 // Returns ErrToolApprovalNotFound (wrapped so callers can use errors.Is) when
 // no record exists. Any other error indicates a real read failure (decode

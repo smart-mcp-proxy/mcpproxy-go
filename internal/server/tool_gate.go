@@ -127,6 +127,19 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 	// classifier's Discovered input, so the two cannot disagree about whether
 	// the tool is in the snapshot.
 	identity := p.resolveExactToolIdentity(serverName, toolName)
+	// The no-record rule holds for a tool the snapshot lists AND for any name
+	// on a known, enabled, trusted server whose snapshot is empty only because
+	// it is NOT CONNECTED (dropped, connecting, reconnect_on_use): such a
+	// snapshot cannot show the name absent, and a disconnected server whose
+	// tools were all discovered holds a record for every listed one — so a
+	// record-less name there is a tool discovery never listed, which must not
+	// read as ready just because the server dropped. A disabled or
+	// quarantined server keeps its own server-level verdict ahead of any
+	// approval answer, and a server the StateView does not hold at all keeps
+	// the implicit default (unit fixtures without a runtime; server-existence
+	// handling owns the rest).
+	recordRequired := identity.Found ||
+		(identity.ServerKnown && !identity.SnapshotHydrated && serverConfig.Enabled && !serverConfig.Quarantined)
 
 	approval, approvalErr := p.lookupToolApproval(serverName, toolName)
 	switch {
@@ -135,11 +148,12 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 	case errors.Is(approvalErr, storage.ErrToolApprovalNotFound):
 		// No record. Spec 105 FR-009 (research D4): while the tool-level
 		// quarantine gate is active for the server, a tool the discovery
-		// snapshot contains is PENDING under its own name, never ready — the
-		// implicit-approved default survives only for a tool the snapshot
-		// does not list (identity resolution's concern) or while the gate is
-		// off for the server.
-		gate.approval = implicitPendingApproval(serverName, toolName, identity.Found, identity.Description, quarantineGate)
+		// snapshot contains — or a name on a server whose snapshot cannot
+		// vouch either way (recordRequired) — is PENDING under its own name,
+		// never ready; the implicit-approved default survives only for a
+		// name a hydrated snapshot does not list (identity resolution's
+		// concern) or while the gate is off for the server.
+		gate.approval = implicitPendingApproval(serverName, toolName, recordRequired, identity.Description, quarantineGate)
 		if gate.approval != nil {
 			p.logImplicitPending("tool_gate", serverName, toolName)
 		}
@@ -168,7 +182,7 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 		Approval:          approvalStateFor(gate.approval),
 		// Belt and braces with implicitPendingApproval above: the classifier
 		// applies the same no-record rule itself, so the two cannot drift.
-		Discovered: identity.Found,
+		Discovered: recordRequired,
 	})
 	return gate
 }

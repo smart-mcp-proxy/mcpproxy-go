@@ -365,26 +365,28 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 
 	r.logger.Info("Discovering and indexing tools...", zap.Bool("due_only", dueOnly))
 
-	var tools []*config.ToolMetadata
-	var err error
-	if dueOnly {
-		tools, err = r.upstreamManager.DiscoverToolsDue(ctx)
-	} else {
-		tools, err = r.upstreamManager.DiscoverTools(ctx)
-	}
+	tools, listed, err := r.upstreamManager.DiscoverToolsReport(ctx, dueOnly)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
-	}
-
-	if len(tools) == 0 {
-		r.logger.Warn("No tools discovered from upstream servers")
-		return nil
 	}
 
 	// Group tools by server name for differential updates
 	toolsByServer := make(map[string][]*config.ToolMetadata)
 	for _, tool := range tools {
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
+	}
+
+	// A server whose tools/list SUCCEEDED with zero tools has completed its
+	// discovery just as surely as one that listed ten: stamp it so its names
+	// resolve as absent instead of lingering in the connect→discovery window
+	// (Spec 105 FR-009, research D4). Its tool set is left alone — the sweep
+	// never wipes a server on an empty result — and servers the sweep skipped
+	// or that failed to list are not stamped.
+	r.markZeroToolServersDiscovered(listed, toolsByServer)
+
+	if len(tools) == 0 {
+		r.logger.Warn("No tools discovered from upstream servers")
+		return nil
 	}
 
 	// Snapshot the set of currently-known servers so we can prune entries for
@@ -595,9 +597,14 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 		if !authoritative {
 			// Lenient path (reactive discovery): a transient empty result must
 			// not wipe a server's tools. Leave the index and last-good snapshot
-			// untouched; the next sweep or a real change will reconcile.
+			// untouched; the next sweep or a real change will reconcile. The
+			// discovery itself did complete, though: stamp the server so a
+			// genuinely tool-less one does not stay in the connect→discovery
+			// window (Spec 105 FR-009); a retained tool set already carries
+			// the stamp and is untouched.
 			r.logger.Warn("No tools discovered from server; keeping existing index (lenient path)",
 				zap.String("server", serverName))
+			r.markZeroToolServersDiscovered([]string{serverName}, nil)
 			return nil
 		}
 		// Authoritative path (explicit refresh/discover, issue #873): zero tools
@@ -662,6 +669,23 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 		zap.String("server", serverName),
 		zap.Int("count", len(tools)))
 	return nil
+}
+
+// markZeroToolServersDiscovered stamps ToolsDiscovered on every server in
+// listed that contributed no tools to toolsByServer — a completed tools/list
+// that returned nothing — without touching its tool set (Spec 105 FR-009,
+// research D4; supervisor.MarkServersToolsDiscovered).
+func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata) {
+	if r.supervisor == nil {
+		return
+	}
+	zeroTool := make([]string, 0, len(listed))
+	for _, serverName := range listed {
+		if _, hasTools := toolsByServer[serverName]; !hasTools {
+			zeroTool = append(zeroTool, serverName)
+		}
+	}
+	r.supervisor.MarkServersToolsDiscovered(zeroTool)
 }
 
 // applyDifferentialToolUpdate performs differential update of tools for a server.

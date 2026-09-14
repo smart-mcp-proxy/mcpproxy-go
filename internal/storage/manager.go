@@ -505,6 +505,15 @@ func (m *Manager) SaveToolApproval(record *ToolApprovalRecord) error {
 	return m.db.SaveToolApproval(record)
 }
 
+// SaveToolApprovals saves several tool approval records atomically, in one
+// storage transaction under one manager write lock.
+func (m *Manager) SaveToolApprovals(records []*ToolApprovalRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveToolApprovals(records)
+}
+
 // GetToolApproval retrieves a tool approval record by server and tool name
 func (m *Manager) GetToolApproval(serverName, toolName string) (*ToolApprovalRecord, error) {
 	m.mu.RLock()

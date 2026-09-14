@@ -315,3 +315,7 @@ Phase 1 (T001–T003)
 ## Task Count
 
 121 tasks: Setup 3 · A 17 · B 14 · D 13 · E 15 · H0 7 · C 11 · F 15 · G 14 · H1 12 (T086a, T104a, T112a added in round 1; T054a in round 2; T108a in round 3). Astra rounds 1–5 applied 2026-09-14. `[~]` process steps: 13 (excluded from the ratio). Failing-test tasks: 49 (one per gap id, FR008-G5≡FR010-G5 counted once, plus the protocol-level proof and the FR-010(3) regression). Astra plan-review round 1 (14 findings) applied 2026-09-14.
+
+## Follow-ups (not in this spec)
+
+- [ ] **REST replay tool gate** — `POST /api/v1/tool-calls/{id}/replay` dispatches with no tool gate, identity resolution or target-tier check (`internal/runtime/runtime.go` ~`:1350-1437` calls `client.CallTool` directly; `internal/httpapi/server.go` ~`:4978-4992` only checks `canSeeServer`). A read-only scoped token can replay a recorded destructive call; a pending/changed/disabled/config-denied/record-less tool re-executes. Fix in a separate spec/PR by routing replay through `resolveExactToolIdentity` + `evaluateExactToolGate` + `tierForAnnotations`/`HasPermission` (or through `handleCallToolVariant` with the recorded variant). Details: gap-map.md §8. Found by the PR A round-3 review (finding 3); pre-existing on `main`.

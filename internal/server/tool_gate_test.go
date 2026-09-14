@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -277,6 +278,103 @@ func TestToolGate_NeverBaselinedExactRecord_LegacyLockBinds(t *testing.T) {
 		assert.Empty(t, gate.lockStatus, "a record a post-105 binary wrote under \"erase\" is the genuine erase's")
 		require.True(t, gate.callable())
 
+		result := callToolReadVariant(t, proxy, adminCtx(), "a:ns:erase")
+		require.False(t, result.IsError, "%s", result.Content[0].(mcp.TextContent).Text)
+		assert.Equal(t, int64(1), up.count.Load())
+		assert.Equal(t, []string{"ns:erase"}, up.dispatched())
+	})
+}
+
+// runRuntimeDiscovery connects the RUNTIME's own upstream manager to the
+// counting upstream and runs the real single-server discovery
+// (RefreshServerTools → checkToolApprovals → StateView publish), so a test can
+// observe what the discovery PRODUCER files for a seeded pre-105 store and
+// then drive the gate against exactly that store. The proxy under test keeps
+// its own manager (createTestProxyWithRuntime wires two), so the counting
+// witness still sees every dispatch the proxy makes.
+func runRuntimeDiscovery(t *testing.T, rt *runtime.Runtime, up *countingUpstream) {
+	t.Helper()
+	rtm := rt.UpstreamManager()
+	require.NotNil(t, rtm)
+	serverCfg := &config.ServerConfig{Name: up.Server, URL: up.URL, Protocol: "streamable-http", Enabled: true}
+	require.NoError(t, rtm.AddServerConfig(up.Server, serverCfg))
+	require.NoError(t, rtm.ConnectAll(context.Background()))
+	require.Eventually(t, func() bool {
+		client, ok := rtm.GetClient(up.Server)
+		return ok && client.IsConnected()
+	}, 10*time.Second, 50*time.Millisecond, "runtime manager must connect to %q", up.Server)
+	require.NoError(t, rt.RefreshServerTools(context.Background(), up.Server))
+}
+
+// Round-3 finding 1 (Spec 105 FR-009 migration review): the toggle-synthesized
+// exact record beside a collapsed record that pre-105 discovery had APPROVED
+// for the tool's OLD contract. If the upstream changed the tool while it had
+// no live baseline — across the upgrade, or because it is compromised — the
+// first discovery after upgrade must hold it as changed (as the collapsed
+// record would have been), never baseline the exact record to the rug-pulled
+// contract and hand it to every caller. The producer runs for real here
+// (runRuntimeDiscovery) and the gate is then driven through dispatch.
+func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testing.T) {
+	const oldDesc = "Erase preview"
+	seed := func(t *testing.T, siblingApprovedDesc string) (*MCPProxyServer, *countingUpstream) {
+		t.Helper()
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
+		// The upstream serves "ns:erase" described as "Read ns:erase" (readSpec).
+		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+		requireManualTrustGateActive(t, proxy, "a")
+		// The pre-105 store: the toggle record (approved, no hash) and the
+		// collapsed record approved for siblingApprovedDesc. The collapsed
+		// record's stored current contract IS its approved one (hashes equal,
+		// schema text unknown), the shape a pre-105 binary left behind.
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "ns:erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+		}))
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
+			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved",
+			CurrentDescription: siblingApprovedDesc,
+		}))
+		runRuntimeDiscovery(t, rt, up)
+		return proxy, up
+	}
+
+	for name, ctx := range gateCallers() {
+		t.Run("changed across the upgrade refuses "+name, func(t *testing.T) {
+			proxy, up := seed(t, oldDesc)
+
+			rec, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the producer must hold the rug-pulled contract")
+			assert.Empty(t, rec.ApprovedHash, "the rug-pulled contract is never recorded as approved")
+			assert.Equal(t, oldDesc, rec.PreviousDescription)
+			assert.True(t, rec.IdentityKeyed)
+
+			gate := proxy.evaluateToolGate("a", "ns:erase")
+			assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus)
+			assert.False(t, gate.callable())
+
+			result := callToolReadVariant(t, proxy, ctx, "a:ns:erase")
+			text := result.Content[0].(mcp.TextContent).Text
+			assert.Contains(t, text, "TOOL_QUARANTINED")
+			assert.Contains(t, text, "tool_description_changed")
+			assert.NotContains(t, text, `"ok"`)
+			assert.Equal(t, int64(0), up.count.Load(), "the rug-pulled tool must never reach the upstream (got %q)", text)
+			assert.Empty(t, up.dispatched())
+		})
+	}
+
+	t.Run("control: the collapsed record approved the CURRENT contract, so it baselines and dispatches", func(t *testing.T) {
+		proxy, up := seed(t, "Read ns:erase")
+
+		rec, err := proxy.storage.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.NotEmpty(t, rec.ApprovedHash, "baselined from the collapsed record's approved contract")
+		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+
+		gate := proxy.evaluateToolGate("a", "ns:erase")
+		require.True(t, gate.callable())
 		result := callToolReadVariant(t, proxy, adminCtx(), "a:ns:erase")
 		require.False(t, result.IsError, "%s", result.Content[0].(mcp.TextContent).Text)
 		assert.Equal(t, int64(1), up.count.Load())

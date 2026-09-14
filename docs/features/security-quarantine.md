@@ -451,16 +451,27 @@ widens access:
   auto-approves as before.
 - A namespaced tool you had **toggled** in the UI before the upgrade already
   has a record under its exact name — one that the toggle created without an
-  approved contract hash. Such a record carries no approval decision, so if
-  the collapsed record holds a `pending` / `changed` lock, that lock (with its
-  before/after evidence) is adopted onto the exact record on the first
-  discovery after upgrade and the tool stays held for review under its own
-  name; otherwise the record is baselined to the tool's current definition so
-  change detection works for it from then on.
+  approved contract hash. Such a record carries no approval decision of its
+  own, so on the first discovery after upgrade it takes its decision from the
+  collapsed record: a `pending` / `changed` lock there (with its before/after
+  evidence) is adopted and the tool stays held for review under its own name;
+  an approval there counts only if the definition it approved is the one the
+  server reports now — then the exact record is baselined and change
+  detection works from then on — while a differing definition is held as
+  `changed` with the approved one as the before-evidence, exactly as the
+  collapsed record itself would have been (a tool that changed while it had
+  no live baseline is a potential rug pull, not a new baseline). With no
+  collapsed record at all the tool is pending under its own name on `manual`
+  and `scan` trust (a green scan approves it on `scan`), and baselined on
+  `trust_mode: auto` or with `quarantine_enabled: false`. Nothing you toggled
+  is ever approved for a definition nobody reviewed.
 
-Only records written by an older release are consulted this way — every
-record this release writes is stamped as identity-keyed, so a genuine
-sibling `erase` you disable later never affects a new `v2:erase`.
+Only records written by an older release are consulted this way. Every record
+this release writes is stamped as identity-keyed, and the first discovery pass
+after upgrade stamps every remaining record the server holds — including
+collapsed records for tools the server no longer lists — so the migration
+runs exactly once per server: a genuine sibling `erase` you disable later
+never affects a new `v2:erase`.
 
 ## Disabling Quarantine
 

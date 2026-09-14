@@ -1093,6 +1093,64 @@ func (s *Supervisor) RefreshServerToolsFromDiscovery(serverName string, tools []
 	return nil
 }
 
+// MarkServersToolsDiscovered stamps ToolsDiscovered on the named servers
+// WITHOUT touching their tool sets (Spec 105 FR-009, research D4). It is the
+// marker for a discovery pass that completed with zero tools on a path that
+// deliberately keeps whatever tool set the server already has — the lenient
+// reactive connect path and the sweep, which must not wipe a server's tools on
+// a transient empty result. A server that has never published a tool set is
+// thereby "discovered, nothing served": every name on it resolves as absent
+// (refused) rather than lingering in the connect→discovery window; a server
+// that retained its set through a reconnect already carries the stamp.
+func (s *Supervisor) MarkServersToolsDiscovered(serverNames []string) {
+	if len(serverNames) == 0 {
+		return
+	}
+	// The StateView is what identity resolution reads, and it is the side
+	// that clears the marker on disconnect (the Supervisor snapshot retains
+	// its tool set and stamp across a reconnect), so a server needs stamping
+	// when EITHER side lacks the marker.
+	view := s.stateView.Snapshot()
+
+	s.stateMu.Lock()
+	currentSnapshot := s.snapshot.Load().(*ServerStateSnapshot)
+	newServers := make(map[string]*ServerState, len(currentSnapshot.Servers))
+	for name, state := range currentSnapshot.Servers {
+		newState := *state
+		newServers[name] = &newState
+	}
+	snapshotChanged := false
+	stampView := make([]string, 0, len(serverNames))
+	for _, name := range serverNames {
+		if state, exists := newServers[name]; exists && !state.ToolsDiscovered {
+			state.ToolsDiscovered = true
+			snapshotChanged = true
+		}
+		if status, exists := view.Servers[name]; exists && status != nil && !status.ToolsDiscovered {
+			stampView = append(stampView, name)
+		}
+	}
+	if snapshotChanged {
+		s.snapshot.Store(&ServerStateSnapshot{
+			Servers:   newServers,
+			Timestamp: time.Now(),
+			Version:   currentSnapshot.Version + 1,
+		})
+		s.version++
+	}
+	s.stateMu.Unlock()
+
+	for _, name := range stampView {
+		s.stateView.UpdateServer(name, func(status *stateview.ServerStatus) {
+			status.ToolsDiscovered = true
+		})
+	}
+	if snapshotChanged || len(stampView) > 0 {
+		s.logger.Debug("Stamped discovery completed for servers that listed no tools",
+			zap.Strings("servers", stampView), zap.Bool("snapshot_changed", snapshotChanged))
+	}
+}
+
 // publishDiscoveredTools writes a completed discovery result per server into
 // the Supervisor snapshot (source of truth) and then the StateView, stamping
 // ToolsDiscovered on both so identity resolution can tell "discovery has not

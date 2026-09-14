@@ -10,9 +10,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 105 FR-009 on the nested (code_execution) dispatch path. The sandbox is
@@ -152,6 +154,64 @@ func TestCodeExecution_EmptySnapshot_KeepsServerLevelVerdicts(t *testing.T) {
 				"the quarantine verdict must answer, not the identity gate (got %q: %s)", call.Code, call.Message)
 			assert.Contains(t, call.Message, "quarantined for security review", "pre-105 body from policyRefusal")
 			assert.NotContains(t, call.Message, "cannot be resolved")
+		})
+	}
+}
+
+// Round-3 finding 4 (Spec 105 FR-009 migration review): a KNOWN server that
+// DROPPED (reconnect_on_use) has an empty snapshot because of its own state,
+// so identity resolution cannot show a name absent and the tier read falls
+// back to destructive — pre-105 behaviour the server-level verdicts are meant
+// to own. But the shared gate itself used to read "no record" as READY there,
+// which left a never-listed, record-less tool (one the upstream hides from
+// tools/list) with an open gate for an administrator or destructive-tier
+// token the moment anything reconnected the server. Under an active gate the
+// gate now classifies such a name pending, so the refusal is the gate's own
+// (no approval record) and nothing reaches the upstream — the disconnected
+// server with a RECORDED tool keeps the pre-105 not-connected answer
+// (TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts).
+func TestCodeExecution_DroppedServer_RecordlessHiddenToolIsPending(t *testing.T) {
+	destructiveTier := agentCtx([]string{"a"}, []string{auth.PermRead, auth.PermDestructive}, "")
+	for label, ctx := range map[string]context.Context{
+		"destructive-tier a-only token": destructiveTier,
+		"api-key admin":                 adminCtx(),
+	} {
+		t.Run(label, func(t *testing.T) {
+			serverCfg := &config.ServerConfig{Name: "a", Enabled: true, ReconnectOnUse: true}
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{serverCfg})
+			// The upstream really serves "hidden" (the counter would witness a
+			// leak) but never listed it: no snapshot entry, no record.
+			up := startCountingUpstream(t, proxy, rt, "a", readSpec("erase"), noRecordSpec(readSpec("hidden")))
+			requireManualTrustGateActive(t, proxy, "a")
+
+			// The server drops: the client disconnects and the StateView is
+			// cleared the way the supervisor clears it on server_disconnected.
+			client, ok := proxy.upstreamManager.GetClient("a")
+			require.True(t, ok)
+			require.NoError(t, client.Disconnect())
+			require.False(t, client.IsConnected(), "fixture: the client must be dropped")
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Connected = false
+				s.Tools = nil
+				s.ToolsDiscovered = false
+			})
+			identity := proxy.resolveExactToolIdentity("a", "hidden")
+			require.True(t, identity.ServerKnown)
+			require.False(t, identity.SnapshotHydrated, "fixture: the snapshot is empty because the server dropped")
+			require.False(t, identity.Unresolved(), "a dropped server is not the identity condition")
+			require.NotEqual(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "hidden"))
+
+			gate := proxy.evaluateExactToolGate("a", "hidden")
+			assert.False(t, gate.callable(), "no record on a dropped server under an active gate must not read as ready")
+			assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
+			assert.True(t, isImplicitPendingApproval(gate.approval))
+
+			call := runSandboxCallTool(t, proxy, ctx, "a", "hidden")
+			assert.False(t, call.OK)
+			assert.Contains(t, call.Message, "no approval record", "the gate, not the transport, must answer (got %q: %s)", call.Code, call.Message)
+			assert.NotContains(t, call.Message, "not connected")
+			assert.Equal(t, int64(0), up.count.Load(), "the hidden tool must never reach the upstream")
+			assert.Empty(t, up.dispatched())
 		})
 	}
 }

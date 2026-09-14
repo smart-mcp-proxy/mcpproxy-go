@@ -1320,4 +1320,46 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after reconcile: marker must survive with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
+
+	// The lenient connect path and the sweep stamp a server whose tools/list
+	// completed with ZERO tools without touching any tool set: a
+	// never-discovered "fresh" server gets the marker with no tools, server1
+	// keeps its retained set, and a name the snapshot does not hold is
+	// ignored.
+	cfg.Servers = append(cfg.Servers, &config.ServerConfig{Name: "fresh", Enabled: true})
+	_ = mockUpstream.AddServer("fresh", cfg.Servers[2])
+	_ = sup.reconcile(configSvc.Current())
+	if status("fresh").ToolsDiscovered {
+		t.Fatal("fresh: before any discovery ToolsDiscovered must be false")
+	}
+	before := sup.snapshot.Load().(*ServerStateSnapshot).Version
+	sup.MarkServersToolsDiscovered([]string{"fresh", "server1", "ghost"})
+	if st := status("fresh"); !st.ToolsDiscovered || len(st.Tools) != 0 {
+		t.Errorf("fresh: a completed zero-tool list must stamp the marker with no tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
+	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
+		t.Errorf("server1: stamping must not touch a retained tool set, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
+	}
+	if snap := sup.snapshot.Load().(*ServerStateSnapshot); snap.Version != before+1 || !snap.Servers["fresh"].ToolsDiscovered {
+		t.Errorf("the Supervisor snapshot must carry the stamp in one new version, got version %d (before %d) discovered=%v",
+			snap.Version, before, snap.Servers["fresh"].ToolsDiscovered)
+	}
+	// Nothing to stamp: no new snapshot version is published.
+	sup.MarkServersToolsDiscovered([]string{"fresh", "server1", "ghost"})
+	if snap := sup.snapshot.Load().(*ServerStateSnapshot); snap.Version != before+1 {
+		t.Errorf("an idempotent stamp must not publish, got version %d", snap.Version)
+	}
+	// A server whose StateView marker was cleared by a disconnect (the
+	// Supervisor snapshot keeps its stamp) is re-stamped on the StateView side.
+	sup.updateSnapshotFromEvent(Event{
+		Type: EventServerDisconnected, ServerName: "fresh", Timestamp: time.Now(),
+		Payload: map[string]interface{}{"connected": false},
+	})
+	if status("fresh").ToolsDiscovered {
+		t.Fatal("fresh after disconnect: StateView marker must be cleared")
+	}
+	sup.MarkServersToolsDiscovered([]string{"fresh"})
+	if !status("fresh").ToolsDiscovered {
+		t.Error("fresh: a zero-tool list after reconnect must stamp the StateView even though the snapshot retained its stamp")
+	}
 }

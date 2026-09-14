@@ -2332,7 +2332,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// quarantine/disabled answers and the not-connected / reconnect_on_use
 	// handling further down, in their pre-105 order).
 	if identity.Unresolved() {
-		errMsg := unresolvedToolIdentityMessage(serverName, actualToolName)
+		errMsg := unresolvedToolIdentityMessage(serverName, actualToolName, identity.DiscoveryDone)
 		p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity",
 			zap.String("server_name", serverName),
 			zap.String("tool_name", actualToolName),
@@ -6926,8 +6926,17 @@ func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) t
 // (Spec 105 FR-009, research D4). It is worded as a permission refusal —
 // the caller holds no tier for a tool the proxy cannot identify — and
 // deliberately does not echo any upstream answer: the upstream is never
-// asked.
-func unresolvedToolIdentityMessage(serverName, toolName string) string {
+// asked. The remediation depends on WHY the name is unresolved
+// (toolIdentity.DiscoveryDone): while the server's discovery has not
+// completed for this connection, no tool list exists yet to refresh from and
+// the caller should simply retry shortly; once discovery has completed and
+// the name is absent from its result, the caller must refresh with
+// retrieve_tools and pick a listed name.
+func unresolvedToolIdentityMessage(serverName, toolName string, discoveryDone bool) string {
+	if !discoveryDone {
+		return fmt.Sprintf("Permission denied: tool '%s:%s' cannot be resolved because tool discovery has not completed for server '%s' yet, so no permission tier applies to it; retry shortly, once the server's tools have been discovered",
+			serverName, toolName, serverName)
+	}
 	return fmt.Sprintf("Permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it; refresh the tool list with retrieve_tools and retry with a listed name",
 		serverName, toolName, serverName)
 }

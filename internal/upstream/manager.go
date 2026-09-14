@@ -1080,7 +1080,18 @@ func (m *Manager) pruneSweptState(known map[string]struct{}) {
 // Security: Tools from quarantined servers are NOT discovered to prevent
 // Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	return m.discoverTools(ctx, false)
+	tools, _, err := m.discoverTools(ctx, false)
+	return tools, err
+}
+
+// DiscoverToolsReport is DiscoverTools / DiscoverToolsDue with the names of
+// the servers whose tools/list actually SUCCEEDED in this sweep, so a caller
+// can tell a server that listed zero tools (discovery completed, nothing
+// served) from one the sweep skipped or that failed to list (Spec 105
+// FR-009: the discovery-completed marker must be stamped for the former and
+// left alone for the latter).
+func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+	return m.discoverTools(ctx, dueOnly)
 }
 
 // DiscoverToolsDue is the periodic-sweep variant of DiscoverTools: it lists only
@@ -1090,10 +1101,11 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 // event-driven callers (connect, reload, manual refresh) use DiscoverTools for a
 // full sweep (spec 074, US3/SC-006/FR-005).
 func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata, error) {
-	return m.discoverTools(ctx, true)
+	tools, _, err := m.discoverTools(ctx, true)
+	return tools, err
 }
 
-func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, error) {
+func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
 	type clientSnapshot struct {
 		id          string
 		name        string
@@ -1139,6 +1151,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 	now := time.Now()
 
 	var allTools []*config.ToolMetadata
+	var listed []string
 	connectedCount := 0
 	skippedNotDue := 0
 	known := make(map[string]struct{}, len(snapshots))
@@ -1206,6 +1219,9 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		// Record the sweep only after a successful list so a transient failure
 		// retries on the next cycle rather than waiting a full interval.
 		m.markSwept(snapshot.name, now)
+		if snapshot.name != "" {
+			listed = append(listed, snapshot.name)
+		}
 
 		if tools != nil {
 			allTools = append(allTools, tools...)
@@ -1221,7 +1237,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		zap.Bool("due_only", dueOnly),
 		zap.Int("skipped_not_due", skippedNotDue))
 
-	return allTools, nil
+	return allTools, listed, nil
 }
 
 // tryReconnectOnUse attempts a single synchronous reconnect for a disconnected
