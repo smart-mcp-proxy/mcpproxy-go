@@ -67,6 +67,25 @@ type Engine struct {
 // allowed — it is the zero-dependency default. A Docker-based (deep) scanner is
 // allowed only when the deep-scan layer is enabled and, when a per-scanner
 // allow-list is configured, the scanner is on it.
+// setDeepScan replaces the deep-scan switch and allow-list under e.mu. The
+// config hot-reload path (Service.SetDeepScan via ApplySecurityConfig) runs on
+// the routing-mode-refresh goroutine while StartScan reads the same fields
+// under e.mu in resolveScanners, so the writer must take the lock too.
+func (e *Engine) setDeepScan(enabled bool, allow map[string]bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.deepScanEnabled = enabled
+	e.deepScanScanners = allow
+}
+
+// deepScanIsEnabled reads the deep-scan switch under e.mu for callers outside
+// the StartScan critical section.
+func (e *Engine) deepScanIsEnabled() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.deepScanEnabled
+}
+
 func (e *Engine) deepScanAllowed(s *ScannerPlugin) bool {
 	if s.InProcess {
 		return true
