@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -663,4 +664,116 @@ func TestCallTool_RecordUnquarantinedWhileStateViewLags_NeverDispatches(t *testi
 	sb := runSandboxCallTool(t, proxy, adminCtx(), "a", "erase")
 	assert.True(t, sb.OK, "control: nested dispatch (got %q: %s)", sb.Code, sb.Message)
 	assert.Equal(t, int64(2), up.count.Load())
+}
+
+// TestCallTool_GateRecordIsTheOnlyPersistedReadOfADispatch pins the codex r7
+// H1 invariant: a dispatch reads the persisted server record ONCE — the
+// shared gate's read — and every later identity step (hydration, live
+// certification) reuses that record; the live certification re-reads only
+// the StateView and the live client. An operator's quarantine / disable
+// that lands AFTER the gate has captured its record and BEFORE the live
+// certification (dispatchGatePause stages exactly that window) is therefore
+// invisible to this dispatch: the gate's record admitted, the identity it
+// hydrated is certified on the live generation, and the call is dispatched
+// pinned to that generation — the pre-105 race semantics (gate, then
+// dispatch), with the operator's write owning every LATER dispatch. It
+// used to be answered from a second, independent read that saw the new
+// record, un-hydrated the identity, and refused with the discovery-window
+// body ("discovery has not completed ... retry shortly") — a verdict neither
+// the gate's record (admit) nor the new record (quarantine analysis /
+// TOOL_BLOCKED) selects, and a remediation that cannot heal either.
+//
+// The nested path used to take three independent reads for one sandboxed
+// call (policyRefusal, identity hydration, live certification); it now takes
+// one.
+func TestCallTool_GateRecordIsTheOnlyPersistedReadOfADispatch(t *testing.T) {
+	cells := []struct {
+		name string
+		flip func(*config.ServerConfig)
+		// directBody / nestedBody: the persisted verdict the NEXT dispatch —
+		// the first one whose gate reads the flipped record — answers.
+		directBody string
+		nestedBody string
+	}{
+		{
+			name:       "quarantined between the gate and the live certification",
+			flip:       func(c *config.ServerConfig) { c.Quarantined = true },
+			directBody: "QUARANTINED_SERVER_BLOCKED",
+			nestedBody: "is quarantined for security review",
+		},
+		{
+			name:       "disabled between the gate and the live certification",
+			flip:       func(c *config.ServerConfig) { c.Enabled = false },
+			directBody: "TOOL_BLOCKED",
+			nestedBody: "TOOL_BLOCKED",
+		},
+	}
+	for _, cell := range cells {
+		for label, ctx := range identitySkewCallers() {
+			t.Run(cell.name+"/"+label, func(t *testing.T) {
+				proxy, rt, up := seedEpochFixture(t)
+				stored, err := proxy.storage.GetUpstreamServer("a")
+				require.NoError(t, err)
+				flipped := *stored
+				cell.flip(&flipped)
+
+				// The seam: the operator's write lands in storage after the
+				// dispatch gate captured its record and before the live
+				// certification. The StateView and the live client are
+				// untouched (the reconcile that follows the write has not run).
+				var paused atomic.Int64
+				proxy.dispatchGatePause = func(serverName, toolName string) {
+					require.Equal(t, "a", serverName)
+					require.Equal(t, "erase", toolName)
+					require.NoError(t, proxy.storage.SaveUpstreamServer(&flipped))
+					paused.Add(1)
+				}
+				t.Cleanup(func() { proxy.dispatchGatePause = nil })
+
+				// Direct: the gate's record admitted, so the dispatch is
+				// certified on the live generation and reaches the upstream
+				// exactly once — never the discovery-window body a second
+				// persisted read would answer.
+				result, text := callToolReadResult(t, proxy, ctx, "a:erase")
+				require.Equal(t, int64(1), paused.Load(), "fixture: the seam must have fired once")
+				assert.False(t, result.IsError, "direct: the gate's record admitted the dispatch (got %s)", text)
+				assert.NotContains(t, text, "cannot be resolved", "direct: a second persisted read must not un-hydrate the identity the gate certified")
+				assert.NotContains(t, text, cell.directBody, "direct: the gate's record was not yet flipped when it was read")
+				assert.Equal(t, int64(1), up.count.Load(), "direct: dispatched once, on the gate's verdict (dispatched %v)", up.dispatched())
+
+				// The NEXT dispatch reads the flipped record at its gate and
+				// answers the persisted verdict, zero further upstream calls.
+				proxy.dispatchGatePause = nil
+				next, nextText := callToolReadResult(t, proxy, ctx, "a:erase")
+				assert.Contains(t, nextText, cell.directBody, "direct: the next gate reads the operator's write (got %s)", nextText)
+				assert.NotContains(t, nextText, "cannot be resolved", nextText)
+				_ = next
+				assert.Equal(t, int64(1), up.count.Load())
+
+				// Nested: same invariant on the sandbox bridge. Reset the
+				// record so the bridge's gate admits, and flip it again in
+				// the seam.
+				require.NoError(t, proxy.storage.SaveUpstreamServer(stored))
+				st, ok := rt.Supervisor().StateView().GetServer("a")
+				require.True(t, ok)
+				require.True(t, st.Enabled && !st.Quarantined && st.Connected && st.ToolsDiscovered, "fixture: the StateView is as discovery left it (%+v)", st)
+				paused.Store(0)
+				proxy.dispatchGatePause = func(serverName, toolName string) {
+					require.NoError(t, proxy.storage.SaveUpstreamServer(&flipped))
+					paused.Add(1)
+				}
+				sb := runSandboxCallTool(t, proxy, ctx, "a", "erase")
+				require.Equal(t, int64(1), paused.Load(), "fixture: the bridge's seam must have fired once")
+				assert.True(t, sb.OK, "nested: the bridge's gate admitted the dispatch (got %q: %s)", sb.Code, sb.Message)
+				assert.NotContains(t, sb.Message, "cannot be resolved", "nested: a second persisted read must not un-hydrate the identity the gate certified")
+				assert.Equal(t, int64(2), up.count.Load(), "nested: dispatched once, on the gate's verdict (dispatched %v)", up.dispatched())
+
+				proxy.dispatchGatePause = nil
+				sbNext := runSandboxCallTool(t, proxy, ctx, "a", "erase")
+				assert.False(t, sbNext.OK, "nested: the next gate reads the operator's write")
+				assert.Contains(t, sbNext.Message, cell.nestedBody, "nested: the persisted verdict (got %q: %s)", sbNext.Code, sbNext.Message)
+				assert.Equal(t, int64(2), up.count.Load(), "nothing further reaches the upstream (dispatched %v)", up.dispatched())
+			})
+		}
+	}
 }

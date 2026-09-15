@@ -61,7 +61,11 @@ type toolGate struct {
 	// refusal a dispatch path answers before them can be true only when
 	// that read cannot answer quarantined or disabled. Dispatch paths take
 	// their annotations, tier and identity refusal from here rather than
-	// from a second, independent read.
+	// from a second, independent read — and the live certification that
+	// follows the gate (liveIdentityRefusal) hydrates from serverConfig
+	// too, so the gate's read is the dispatch's ONLY persisted read (codex
+	// r7 H1): the live check re-reads the StateView and the live client,
+	// never storage.
 	identity toolIdentity
 }
 

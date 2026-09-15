@@ -244,6 +244,20 @@ type MCPProxyServer struct {
 	// keep staging the window by hand instead of observing the real publisher.
 	directRebuildPause func()
 
+	// dispatchGatePause, when non-nil, is invoked by the dispatch paths that
+	// run a live identity certification (handleCallToolVariant, the sandbox
+	// bridge upstreamToolCaller.CallTool) AFTER the shared gate has captured
+	// its ONE persisted server record and BEFORE that certification runs.
+	// Nil in production; the only writer is a test.
+	//
+	// It exists because the "one persisted record per dispatch" invariant
+	// (Spec 105 FR-009; codex r7 H1) is otherwise untestable: an operator's
+	// quarantine / disable that lands between the gate's read and the live
+	// certification is a window no fixture can stage from outside, and a
+	// second, independent read there answered the discovery-window body for
+	// a dispatch the gate's record had already decided.
+	dispatchGatePause func(serverName, toolName string)
+
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64
@@ -2288,7 +2302,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// server-level verdicts below all answer from this one read, so the tier
 	// a token was authorized against, the annotations the variant is
 	// validated against and the server state the identity refusal defers to
-	// can never come from two different snapshots (Spec 105 FR-009).
+	// can never come from two different snapshots (Spec 105 FR-009). It is
+	// also the dispatch's ONLY persisted read (codex r7 H1): the live
+	// certification further down hydrates from gate.serverConfig rather
+	// than re-reading storage, so an operator's write that lands after this
+	// point owns the NEXT dispatch, not a second verdict for this one.
 	// Found=false means the proxy holds no metadata for the pair (server
 	// unknown, tool undiscovered, or no runtime). The pair was split from the
 	// canonical id above, so it is read EXACTLY: a raw name that starts with
@@ -2298,6 +2316,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	gate := p.evaluateExactToolGate(serverName, actualToolName)
 	identity := gate.identity
 	annotations, annotationsFound := identity.Annotations, identity.Found
+	if p.dispatchGatePause != nil {
+		p.dispatchGatePause(serverName, actualToolName)
+	}
 
 	// Spec 028: Enforce agent token scope restrictions. The server-scope and
 	// variant-permission gates run before the identity gate so a scoped
@@ -2543,8 +2564,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// re-read also runs for a HYDRATED snapshot (astra r2 C3): the live
 		// client found connected here is the authority on which connection
 		// the snapshot's stamp describes, so a name certified by a previous
-		// connection is refused with the discovery-window body.
-		live, errMsg, refuse := p.liveIdentityRefusal(serverName, actualToolName, identity, client)
+		// connection is refused with the discovery-window body. The re-read
+		// covers the StateView and the live client only: the persisted
+		// record is the ONE the gate captured above (codex r7 H1), so an
+		// operator's write since then cannot turn the gate's admission into
+		// an identity refusal — it owns the next dispatch, whose gate reads
+		// it.
+		live, errMsg, refuse := p.liveIdentityRefusal(gate.serverConfig, serverName, actualToolName, identity, client)
 		if refuse {
 			p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity (live client connected, snapshot stale)",
 				zap.String("server_name", serverName),
@@ -7004,9 +7030,13 @@ func (id toolIdentity) certified() bool {
 //
 // It reads the server's PERSISTED record for the hydration verdict (codex
 // r6 G1; see resolveExactToolIdentityIn). A caller that already holds that
-// record — the shared gate, evaluateExactToolGate — must resolve through
-// resolveExactToolIdentityWith instead, so its server-level verdicts and the
-// identity derive from ONE read.
+// record — the shared gate, evaluateExactToolGate, and every step of a
+// dispatch that follows the gate (liveIdentityRefusal, the sandbox bridge's
+// hydration) — must resolve through resolveExactToolIdentityWith instead, so
+// its server-level verdicts and the identity derive from ONE read (codex r7
+// H1: one persisted record per dispatch). This convenience is for the
+// non-dispatch readers (describe_tool, visibility, direct callability) and
+// for tests.
 func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) toolIdentity {
 	return p.resolveExactToolIdentityWith(p.persistedServerRecord(serverName), serverName, toolName)
 }
@@ -7249,11 +7279,26 @@ func unresolvedToolIdentityMessage(serverName, toolName string, discoveryDone bo
 // discovery-window body. The zero identity comes back only when the check
 // stood aside (no runtime, server not in the StateView, client not
 // connected), and the caller dispatches unpinned as before.
-func (p *MCPProxyServer) liveIdentityRefusal(serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (toolIdentity, string, bool) {
+//
+// The re-read is of the StateView and the live client ONLY. record is the
+// persisted server record the caller's dispatch gate captured (nil when the
+// gate found none) and the live identity is hydrated from THAT record, never
+// from a fresh storage read (codex r7 H1): a dispatch reads the persisted
+// record exactly once, at its gate, and every later identity step reuses
+// it. Otherwise an operator's quarantine / disable landing between the
+// gate's read and this check un-hydrated the live identity, and the dispatch
+// the gate's record had already admitted was refused with the
+// discovery-window body — a verdict neither record selects (the gate's
+// admits; the new one answers quarantine analysis / TOOL_BLOCKED, and does
+// so for the next dispatch, whose gate reads it), with a "retry shortly"
+// remediation that heals nothing. The write owns every later dispatch; this
+// one keeps the pre-105 gate-then-dispatch semantics, pinned to the
+// generation it certified.
+func (p *MCPProxyServer) liveIdentityRefusal(record *config.ServerConfig, serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (toolIdentity, string, bool) {
 	if !deferred.ServerKnown || client == nil || !client.IsConnected() {
 		return toolIdentity{}, "", false
 	}
-	live := p.resolveExactToolIdentity(serverName, toolName)
+	live := p.resolveExactToolIdentityWith(record, serverName, toolName)
 	if live.certified() {
 		return live, "", false
 	}

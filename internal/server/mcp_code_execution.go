@@ -724,12 +724,22 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	// dispatch has always been permissive about existence (FR-002 makes that
 	// guarantee one-way), and tightening it here would break in-process fixtures
 	// that register an upstream without a config record.
-	if refusal := u.policyRefusal(serverName, toolName); refusal != nil {
+	//
+	// The gate is this call's ONE persisted read (codex r7 H1): the policy
+	// verdict, the identity hydration and the live certification below all
+	// derive from the record it captured, exactly as handleCallToolVariant's
+	// do. gated is false only for a proxy without storage (pure-unit
+	// constructions), where no persisted record exists to read at all.
+	gate, gated := u.dispatchGate(serverName, toolName)
+	if refusal := policyRefusalFor(gate, gated); refusal != nil {
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
 		u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
 		return nil, refusal
+	}
+	if u.proxy != nil && u.proxy.dispatchGatePause != nil {
+		u.proxy.dispatchGatePause(serverName, toolName)
 	}
 
 	// Get the managed client for the server
@@ -751,11 +761,19 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	// Same closure as handleCallToolVariant: once the live client is found
 	// connected, only a CERTIFIED name dispatches (an unlisted name, or one
 	// the not-hydrated snapshot retains from a previous generation, is the
-	// discovery window — codex r4 E1).
+	// discovery window — codex r4 E1). The deferred identity is the GATE's
+	// (hydrated from the record it captured) and the live certification is
+	// hydrated from that same record (codex r7 H1); only the StateView and
+	// the live client are re-read here.
 	var certified toolIdentity
 	if u.proxy != nil {
-		deferred := u.proxy.resolveExactToolIdentity(serverName, toolName)
-		live, msg, refuse := u.proxy.liveIdentityRefusal(serverName, toolName, deferred, client)
+		deferred := gate.identity
+		if !gated {
+			// No storage, so no persisted record: the snapshot's own flags
+			// stand, as they do for the shared gate on a record-less server.
+			deferred = u.proxy.resolveExactToolIdentityWith(nil, serverName, toolName)
+		}
+		live, msg, refuse := u.proxy.liveIdentityRefusal(gate.serverConfig, serverName, toolName, deferred, client)
 		if refuse {
 			refusal := errors.New(msg)
 			duration := time.Since(startTime)
@@ -1027,15 +1045,39 @@ func subCallActivityOutcome(result interface{}, callErr error) (status, errMsg, 
 	return status, errMsg, response, truncated
 }
 
-// policyRefusal evaluates the shared per-tool policy gates for a sandboxed call
-// and returns the refusal a script sees, or nil when the tool is callable.
-func (u *upstreamToolCaller) policyRefusal(serverName, toolName string) error {
+// dispatchGate is the sandbox bridge's ONE evaluation of the shared per-tool
+// policy gates for a call — the single persisted read of the dispatch (codex
+// r7 H1), which policyRefusalFor, the identity hydration and the live
+// certification in CallTool all consume. It reports false, with the zero
+// gate, for a proxy without storage (pure-unit constructions), where there
+// is no persisted record to read and the gate is skipped exactly as it was
+// before the consolidation.
+func (u *upstreamToolCaller) dispatchGate(serverName, toolName string) (toolGate, bool) {
 	if u.proxy == nil || u.proxy.storage == nil {
-		return nil
+		return toolGate{}, false
 	}
 	// The script named the server and the raw tool separately, so the pair
 	// is already split and is gated exactly (never re-normalized).
-	gate := u.proxy.evaluateExactToolGate(serverName, toolName)
+	return u.proxy.evaluateExactToolGate(serverName, toolName), true
+}
+
+// policyRefusal evaluates the shared per-tool policy gates for a sandboxed call
+// and returns the refusal a script sees, or nil when the tool is callable. It
+// takes its own gate read; CallTool, which also needs the gate's record for
+// the identity steps that follow, reads once through dispatchGate and
+// answers through policyRefusalFor instead.
+func (u *upstreamToolCaller) policyRefusal(serverName, toolName string) error {
+	return policyRefusalFor(u.dispatchGate(serverName, toolName))
+}
+
+// policyRefusalFor is policyRefusal over an already-evaluated gate. gated is
+// dispatchGate's second result: false means no gate was evaluated (no
+// storage) and nothing is refused.
+func policyRefusalFor(gate toolGate, gated bool) error {
+	if !gated {
+		return nil
+	}
+	serverName, toolName := gate.serverName, gate.toolName
 	if gate.serverConfig == nil {
 		if gate.storageErr != nil {
 			// The record exists as far as anyone knows — it just could not be
@@ -1333,17 +1375,20 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // which is already split, so the raw name is read exactly rather than
 // normalized a second time (a raw name may start with the server's prefix).
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
-	var identity toolIdentity
+	var (
+		identity toolIdentity
+		record   *config.ServerConfig
+	)
 	if p.storage != nil {
 		gate := p.evaluateExactToolGate(serverName, toolName)
 		if gate.serverQuarantined() || gate.serverDisabled() {
 			return tierForAnnotations(gate.identity.Annotations, gate.identity.Found)
 		}
-		identity = gate.identity
+		identity, record = gate.identity, gate.serverConfig
 	} else {
 		// A proxy without storage (pure-unit constructions): no persisted
 		// record exists to read, so the snapshot's own flags stand.
-		identity = p.resolveExactToolIdentity(serverName, toolName)
+		identity = p.resolveExactToolIdentityWith(nil, serverName, toolName)
 	}
 	if identity.Unresolved() {
 		return jsruntime.PermissionTierUnresolved
@@ -1357,10 +1402,12 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 	// found connected, any name short of certified — unlisted, or retained
 	// from a previous generation on a not-hydrated snapshot — is unresolved,
 	// and the sandbox answers with the permission envelope before any
-	// AuthInfo check.
+	// AuthInfo check. The closure is hydrated from the gate's record above
+	// (codex r7 H1): this lookup, like a dispatch, reads the persisted
+	// record once.
 	if identity.ServerKnown && !identity.SnapshotHydrated && p.upstreamManager != nil {
 		if client, ok := p.upstreamManager.GetClient(serverName); ok {
-			if _, _, refuse := p.liveIdentityRefusal(serverName, toolName, identity, client); refuse {
+			if _, _, refuse := p.liveIdentityRefusal(record, serverName, toolName, identity, client); refuse {
 				return jsruntime.PermissionTierUnresolved
 			}
 		}
