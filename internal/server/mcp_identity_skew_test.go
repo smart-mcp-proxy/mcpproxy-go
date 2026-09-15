@@ -777,3 +777,111 @@ func TestCallTool_GateRecordIsTheOnlyPersistedReadOfADispatch(t *testing.T) {
 		}
 	}
 }
+
+// TestCodeExecution_PreflightGateIsTheDispatchGate pins codex r9 I1, the
+// nested-path variant of the r7 H1 invariant. A sandboxed call_tool() used
+// to take TWO independent persisted reads: the JavaScript preflight
+// (jsruntime checkDispatchGates → lookupToolPermission) read the record to
+// decide the identity / tier, and the bridge (upstreamToolCaller.CallTool →
+// dispatchGate) read it AGAIN to decide the policy verdict. An operator's
+// quarantine / disable landing between the two (sandboxPreflightPause
+// stages exactly that window) was answered by whichever read saw it: for a
+// listed name the preflight admitted and the bridge refused with the
+// quarantine / TOOL_BLOCKED body; for an unlisted name the preflight's
+// unresolved verdict pre-empted the verdict the bridge's gate would have
+// selected. Neither is the verdict of ONE gate. Now the preflight captures
+// the nested call's single gate (lookupToolGate) and the bridge dispatches
+// on that same capture (CallToolWithGate) — identity, tier, policy verdict
+// and persisted record all derive from it — so the call answers exactly as
+// the r7 test answers the direct path: the gate admitted, the call
+// dispatches once, pinned to the certified generation; the NEXT call's gate
+// reads the operator's write and refuses with zero upstream calls.
+func TestCodeExecution_PreflightGateIsTheDispatchGate(t *testing.T) {
+	cells := []struct {
+		name       string
+		flip       func(*config.ServerConfig)
+		nestedBody string
+	}{
+		{
+			name:       "quarantined between the preflight and the dispatch",
+			flip:       func(c *config.ServerConfig) { c.Quarantined = true },
+			nestedBody: "is quarantined for security review",
+		},
+		{
+			name:       "disabled between the preflight and the dispatch",
+			flip:       func(c *config.ServerConfig) { c.Enabled = false },
+			nestedBody: "TOOL_BLOCKED",
+		},
+	}
+	for _, cell := range cells {
+		for label, ctx := range identitySkewCallers() {
+			t.Run(cell.name+"/"+label, func(t *testing.T) {
+				proxy, rt, up := seedEpochFixture(t)
+				stored, err := proxy.storage.GetUpstreamServer("a")
+				require.NoError(t, err)
+				flipped := *stored
+				cell.flip(&flipped)
+
+				// The seam: the operator's write lands in storage after the
+				// sandbox's preflight captured its record and before the
+				// bridge dispatches. The StateView and the live client are
+				// untouched (the reconcile that follows the write has not run).
+				var paused atomic.Int64
+				proxy.sandboxPreflightPause = func(serverName, toolName string) {
+					require.Equal(t, "a", serverName)
+					require.NoError(t, proxy.storage.SaveUpstreamServer(&flipped))
+					paused.Add(1)
+				}
+				t.Cleanup(func() { proxy.sandboxPreflightPause = nil })
+
+				// Listed name: the ONE gate admitted, so the call dispatches
+				// exactly once — never the policy refusal a second persisted
+				// read at the bridge would answer.
+				sb := runSandboxCallTool(t, proxy, ctx, "a", "erase")
+				require.Equal(t, int64(1), paused.Load(), "fixture: the seam must have fired once")
+				assert.True(t, sb.OK, "the preflight's gate admitted the dispatch, and the bridge must dispatch on THAT gate (got %q: %s)", sb.Code, sb.Message)
+				assert.NotContains(t, sb.Message, cell.nestedBody, "the bridge must not re-read the record the preflight already captured")
+				assert.NotContains(t, sb.Message, "cannot be resolved")
+				assert.Equal(t, int64(1), up.count.Load(), "dispatched once, on the gate's verdict (dispatched %v)", up.dispatched())
+
+				// The NEXT call's gate reads the operator's write: the
+				// server-level verdict, zero further upstream calls.
+				proxy.sandboxPreflightPause = nil
+				st, ok := rt.Supervisor().StateView().GetServer("a")
+				require.True(t, ok)
+				require.True(t, st.Enabled && !st.Quarantined && st.Connected && st.ToolsDiscovered, "fixture: the StateView still lags (%+v)", st)
+				next := runSandboxCallTool(t, proxy, ctx, "a", "erase")
+				assert.False(t, next.OK, "the next gate reads the operator's write")
+				assert.Equal(t, string(jsruntime.ErrorCodeUpstreamError), next.Code, "got %q: %s", next.Code, next.Message)
+				assert.Contains(t, next.Message, cell.nestedBody, "the persisted verdict (got %q: %s)", next.Code, next.Message)
+				assert.Equal(t, int64(1), up.count.Load(), "nothing further reaches the upstream (dispatched %v)", up.dispatched())
+
+				// Unlisted name, the r9 scenario verbatim: the record is
+				// restored, the gate captured at the preflight reads it
+				// enabled and unquarantined with "ghost" unresolved, and the
+				// operator's write lands after that capture. The call answers
+				// the captured gate's verdict — unresolved identity — and the
+				// NEXT call answers the server-level verdict for the same name
+				// (SC-005 parity with its listed sibling), zero upstream calls.
+				require.NoError(t, proxy.storage.SaveUpstreamServer(stored))
+				paused.Store(0)
+				proxy.sandboxPreflightPause = func(string, string) {
+					require.NoError(t, proxy.storage.SaveUpstreamServer(&flipped))
+					paused.Add(1)
+				}
+				ghost := runSandboxCallTool(t, proxy, ctx, "a", "ghost")
+				require.Equal(t, int64(1), paused.Load(), "fixture: the seam must have fired once")
+				assert.False(t, ghost.OK)
+				assert.Equal(t, string(jsruntime.ErrorCodePermissionDenied), ghost.Code, "ghost: the captured gate's verdict (got %q: %s)", ghost.Code, ghost.Message)
+				assert.Contains(t, ghost.Message, "cannot be resolved", ghost.Message)
+				proxy.sandboxPreflightPause = nil
+				ghostNext := runSandboxCallTool(t, proxy, ctx, "a", "ghost")
+				assert.False(t, ghostNext.OK)
+				assert.Equal(t, string(jsruntime.ErrorCodeUpstreamError), ghostNext.Code, "ghost: the next gate reads the operator's write (got %q: %s)", ghostNext.Code, ghostNext.Message)
+				assert.Contains(t, ghostNext.Message, cell.nestedBody, ghostNext.Message)
+				assert.NotContains(t, ghostNext.Message, "cannot be resolved", "ghost: the server-level verdict owns every name once the record says so")
+				assert.Equal(t, int64(1), up.count.Load(), "nothing reaches the upstream for an unlisted name (dispatched %v)", up.dispatched())
+			})
+		}
+	}
+}

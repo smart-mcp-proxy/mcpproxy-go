@@ -258,6 +258,19 @@ type MCPProxyServer struct {
 	// a dispatch the gate's record had already decided.
 	dispatchGatePause func(serverName, toolName string)
 
+	// sandboxPreflightPause, when non-nil, is invoked by the sandbox's
+	// pre-authorization lookup (lookupToolGate, the jsruntime
+	// ToolGateLookup) AFTER it has captured the nested call's ONE persisted
+	// server record and BEFORE the sandbox authorizes and dispatches on it.
+	// Nil in production; the only writer is a test.
+	//
+	// It exists because the nested path's variant of the "one persisted
+	// record per dispatch" invariant (codex r9 I1) is otherwise untestable:
+	// the JavaScript preflight and the bridge's dispatch used to take two
+	// independent reads, and an operator's quarantine / disable landing
+	// between them answered a verdict neither read alone selects.
+	sandboxPreflightPause func(serverName, toolName string)
+
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64

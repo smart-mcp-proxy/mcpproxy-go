@@ -259,8 +259,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// EVERY execution, not only authenticated ones: it is also the sandbox's
 	// identity gate (Spec 105 FR-009, research D4 — jsruntime
 	// PermissionTierUnresolved), which applies to stdio / in-process callers
-	// that carry no AuthContext as much as to HTTP callers.
-	options.ToolAnnotationFunc = p.lookupToolPermission
+	// that carry no AuthContext as much as to HTTP callers. The gate-capturing
+	// form is wired so the lookup's read is the nested call's ONE persisted
+	// read: the bridge (CallToolWithGate) dispatches on the gate it captured
+	// rather than taking a second one (codex r9 I1).
+	options.ToolGateFunc = p.lookupToolGate
 
 	// Spec 057 (Codex #621 finding 2): Intersect profile scope into code_execution.
 	p.applyProfileScopeToExecution(ctx, &options)
@@ -693,8 +696,47 @@ type upstreamToolCaller struct {
 	proxy *MCPProxyServer
 }
 
-// CallTool implements jsruntime.ToolCaller interface
+// sandboxGate is the jsruntime.ToolGate the bridge hands from the sandbox's
+// pre-authorization lookup (lookupToolGate) to CallToolWithGate: the ONE
+// persisted read of a nested call (codex r9 I1), captured before the
+// JavaScript authorization and consumed by the dispatch, so the identity,
+// tier, policy verdict and persisted record all derive from it. gated is
+// dispatchGate's second result carried along: false means no gate was
+// evaluated (a proxy without storage).
+type sandboxGate struct {
+	gate  toolGate
+	gated bool
+}
+
+// CallTool implements jsruntime.ToolCaller. It takes the gate read itself,
+// for a caller that captured none (a sandbox wired with the tier-only
+// ToolAnnotationFunc, or a unit test driving the bridge directly).
 func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (interface{}, error) {
+	gate, gated := u.dispatchGate(serverName, toolName)
+	return u.callTool(ctx, serverName, toolName, args, gate, gated)
+}
+
+// CallToolWithGate implements jsruntime.GatedToolCaller: the dispatch runs
+// on the gate lookupToolGate captured for this very call, never on a read
+// of its own (codex r9 I1). A gate that is not the bridge's, that was
+// captured for another pair, or that is record-less while this bridge has
+// storage to read, is not trusted — the call falls back to CallTool's own
+// read, which is the pre-r9 behaviour, never a bypass of the policy gate.
+func (u *upstreamToolCaller) CallToolWithGate(ctx context.Context, serverName, toolName string, args map[string]interface{}, gate jsruntime.ToolGate) (interface{}, error) {
+	captured, ok := gate.(*sandboxGate)
+	switch {
+	case !ok || captured == nil:
+		return u.CallTool(ctx, serverName, toolName, args)
+	case captured.gated && (captured.gate.serverName != serverName || captured.gate.toolName != toolName):
+		return u.CallTool(ctx, serverName, toolName, args)
+	case !captured.gated && u.proxy != nil && u.proxy.storage != nil:
+		return u.CallTool(ctx, serverName, toolName, args)
+	}
+	return u.callTool(ctx, serverName, toolName, args, captured.gate, captured.gated)
+}
+
+// callTool is the dispatch proper, over an already-evaluated gate.
+func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName string, args map[string]interface{}, gate toolGate, gated bool) (interface{}, error) {
 	startTime := time.Now()
 	// One correlation id per sub-call: the sanitisation policy decision and
 	// the activity record must carry the same id, and mintCorrelationIDAt
@@ -728,9 +770,11 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	// The gate is this call's ONE persisted read (codex r7 H1): the policy
 	// verdict, the identity hydration and the live certification below all
 	// derive from the record it captured, exactly as handleCallToolVariant's
-	// do. gated is false only for a proxy without storage (pure-unit
-	// constructions), where no persisted record exists to read at all.
-	gate, gated := u.dispatchGate(serverName, toolName)
+	// do. On the sandbox path it was captured BEFORE the JavaScript
+	// authorization (lookupToolGate → CallToolWithGate; codex r9 I1), so the
+	// tier the script was authorized against and the verdict answered here
+	// are one read. gated is false only for a proxy without storage
+	// (pure-unit constructions), where no persisted record exists to read.
 	if refusal := policyRefusalFor(gate, gated); refusal != nil {
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
@@ -1360,10 +1404,11 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // returned for such a server is the pre-105 fallback (destructive for an
 // unlisted name, the annotations' tier for a listed one), so a scoped
 // token's own permission check answers exactly as it did before Spec 105
-// and policyRefusal then refuses with the server-level body. A record that
-// flips between this read and the bridge's is refused either way: the
-// bridge re-reads the gate ahead of dispatch and admits only a certified
-// identity on a connected client, never an unpinned dispatch. Note
+// and policyRefusal then refuses with the server-level body. There is no
+// second read for a record to flip between: the gate this lookup captures
+// (lookupToolGate) IS the one the bridge dispatches on (codex r9 I1), so a
+// write that lands after it owns the next call, and the bridge still
+// admits only a certified identity on a connected client. Note
 // auth.HasPermission is exact-match, not hierarchical, so a token minted as
 // [read, destructive] without write is admitted here while call_tool_write
 // itself would refuse it. The BM25 index is deliberately not consulted: it
@@ -1375,14 +1420,35 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // which is already split, so the raw name is read exactly rather than
 // normalized a second time (a raw name may start with the server's prefix).
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
+	tier, _ := p.lookupToolGate(serverName, toolName)
+	return tier
+}
+
+// lookupToolGate is lookupToolPermission with the gate it decided the tier
+// from — the jsruntime.ToolGateLookup the sandbox is wired with. The gate
+// it returns is the nested call's ONE persisted read (codex r9 I1): the
+// tier the sandbox authorizes against is derived from it here, and the
+// bridge's CallToolWithGate answers the policy verdict, hydrates the
+// identity and certifies the live client from the same capture, so an
+// operator's write that lands between the sandbox's authorization and its
+// dispatch owns every LATER call and never splits one call's verdict.
+// For a proxy without storage the gate is the record-less marker
+// (sandboxGate.gated=false), which the bridge treats exactly as its own
+// record-less read.
+func (p *MCPProxyServer) lookupToolGate(serverName, toolName string) (string, jsruntime.ToolGate) {
 	var (
 		identity toolIdentity
 		record   *config.ServerConfig
+		captured = &sandboxGate{}
 	)
 	if p.storage != nil {
-		gate := p.evaluateExactToolGate(serverName, toolName)
+		captured.gate, captured.gated = p.evaluateExactToolGate(serverName, toolName), true
+		if p.sandboxPreflightPause != nil {
+			p.sandboxPreflightPause(serverName, toolName)
+		}
+		gate := captured.gate
 		if gate.serverQuarantined() || gate.serverDisabled() {
-			return tierForAnnotations(gate.identity.Annotations, gate.identity.Found)
+			return tierForAnnotations(gate.identity.Annotations, gate.identity.Found), captured
 		}
 		identity, record = gate.identity, gate.serverConfig
 	} else {
@@ -1391,7 +1457,7 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 		identity = p.resolveExactToolIdentityWith(nil, serverName, toolName)
 	}
 	if identity.Unresolved() {
-		return jsruntime.PermissionTierUnresolved
+		return jsruntime.PermissionTierUnresolved, captured
 	}
 	// Spec 105 FR-009 (research D4), astra r1 I3: the identity read defers
 	// when the StateView reads the server as not connected, relying on the
@@ -1408,11 +1474,11 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 	if identity.ServerKnown && !identity.SnapshotHydrated && p.upstreamManager != nil {
 		if client, ok := p.upstreamManager.GetClient(serverName); ok {
 			if _, _, refuse := p.liveIdentityRefusal(record, serverName, toolName, identity, client); refuse {
-				return jsruntime.PermissionTierUnresolved
+				return jsruntime.PermissionTierUnresolved, captured
 			}
 		}
 	}
-	return tierForAnnotations(identity.Annotations, identity.Found)
+	return tierForAnnotations(identity.Annotations, identity.Found), captured
 }
 
 // tierForAnnotations maps one lookupToolAnnotationsFound result to the
