@@ -55,12 +55,19 @@ func (f *fakeApprovals) ToolApproval(serverName, toolName string) (*ApprovalStat
 }
 
 type fakeState struct {
-	states map[string]ServerRuntime
+	states     map[string]ServerRuntime
+	identities map[string]ToolIdentity // key "server:tool"
 }
 
 func (f *fakeState) ServerRuntime(serverName string) (ServerRuntime, bool) {
 	rt, ok := f.states[serverName]
 	return rt, ok
+}
+
+// ToolIdentity answers from identities when a test seeds them, and makes no
+// claim otherwise (the pure-unit default).
+func (f *fakeState) ToolIdentity(serverName, toolName string) ToolIdentity {
+	return f.identities[serverName+":"+toolName]
 }
 
 type fakePolicy struct {

@@ -1480,8 +1480,17 @@ func (r *Runtime) legacyCollapsedSiblingDisabled(serverName, rawName string, pri
 // keeps lending its block to every future "*:erase" (one un-hide per new
 // tool), and a pending/changed orphan lends its lock, until the operator
 // acts on "erase" itself. The fresh read (never the pre-pass listing) is
-// what keeps this from overwriting a record the same pass already updated,
-// e.g. when the bare name is served too and was processed first.
+// what keeps this from acting on a record the same pass already updated,
+// e.g. when the bare name is served too and was processed first — but it
+// only decides the log line: the stamp itself goes through
+// StampToolApprovalsIdentityKeyed, which re-reads the record inside one
+// write transaction under the manager lock and touches only IdentityKeyed
+// on a record that is still unstamped and still unrestricting at that
+// instant (astra r2 C1). Nothing serialises a discovery pass against an
+// operator SetToolEnabled / BlockTools on the sibling, and writing the
+// detached copy back would have discarded a Disabled=true that landed in
+// the window AND stamped the record — the same defect the sweep
+// (stampRemainingLegacyToolApprovals) was cured of.
 func (r *Runtime) stampConsultedLegacySibling(serverName, rawName string, prior map[string]*storage.ToolApprovalRecord) {
 	sibling := legacyCollapsedSibling(rawName, prior)
 	if sibling == nil {
@@ -1496,9 +1505,18 @@ func (r *Runtime) stampConsultedLegacySibling(serverName, rawName string, prior 
 			zap.String("server", serverName), zap.String("tool", rawName), zap.String("legacy_key", sibling.ToolName))
 		return
 	}
-	if saveErr := r.saveToolApproval(rec); saveErr != nil {
+	if r.consultStampBeforeWrite != nil {
+		r.consultStampBeforeWrite()
+	}
+	names, err := r.storageManager.StampToolApprovalsIdentityKeyed(serverName, []string{sibling.ToolName})
+	if err != nil {
 		r.logger.Debug("Failed to stamp consulted legacy collapsed approval record",
-			zap.String("server", serverName), zap.String("legacy_key", sibling.ToolName), zap.Error(saveErr))
+			zap.String("server", serverName), zap.String("legacy_key", sibling.ToolName), zap.Error(err))
+		return
+	}
+	if len(names) == 0 {
+		// Restricted or stamped by a concurrent write since the read above:
+		// the operator's decision is the last word and stays unstamped.
 		return
 	}
 	r.logger.Info("Legacy collapsed approval record consulted for its namespaced tool; stamped identity-keyed, legacy consults for it end",

@@ -254,11 +254,9 @@ func TestCodeExecution_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesU
 			assert.NotContains(t, call.Message, "not found", "the upstream's own answer must never be relayed")
 			assert.Equal(t, int64(0), up.count.Load(), "the call must never reach the upstream")
 
-			// Positive control once the snapshot catches up.
-			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
-				s.Connected, s.ToolsDiscovered = true, true
-				s.Tools = []stateview.ToolInfo{readSpec("erase").info(), readSpec("ghost").info()}
-			})
+			// Positive control once the snapshot catches up (stamped on the
+			// live connection).
+			stampDiscoveredOnLiveConnection(t, proxy, rt, "a", []stateview.ToolInfo{readSpec("erase").info(), readSpec("ghost").info()})
 			ctl := runSandboxCallTool(t, proxy, ctx, "a", "ghost")
 			assert.True(t, ctl.OK, "control: a listed name dispatches (got %q: %s)", ctl.Code, ctl.Message)
 			assert.Equal(t, int64(1), up.count.Load())

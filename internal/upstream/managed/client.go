@@ -506,6 +506,20 @@ func (mc *Client) IsConnected() bool {
 	return mc.StateManager.IsReady()
 }
 
+// ConnectionEpoch returns the client's connection-instance token: a
+// monotonically increasing counter bumped on every successful Connect and on
+// every Disconnect (see connectionEpoch), so two observations that read the
+// same value were made on the SAME live connection. The runtime captures it
+// before listing a server's tools and the supervisor stamps it on the
+// discovery snapshot with ToolsDiscovered (stateview.ServerStatus.
+// DiscoveryEpoch); every tool-identity read compares the stamp with the live
+// value, so a discovery result that belongs to a previous connection can
+// never certify a name on the current one when the connection events were
+// dropped or lag (Spec 105 FR-009 "stale generation"; astra r2 C3).
+func (mc *Client) ConnectionEpoch() int64 {
+	return mc.connectionEpoch.Load()
+}
+
 // IsConnecting returns whether the client is in a connecting state
 func (mc *Client) IsConnecting() bool {
 	return mc.StateManager.IsConnecting()

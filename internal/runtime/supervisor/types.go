@@ -36,11 +36,42 @@ type ServerState struct {
 	// capture straddled a reconnect is dropped instead of landing on the new
 	// connection (Spec 105 FR-009 "stale generation"; astra r1 I2).
 	ConnectionGeneration uint64
+	// ConnectionEpoch is the live client's connection-instance token
+	// (managed.Client.ConnectionEpoch) as the adapter last reported it: set
+	// on the states the adapter builds (ActorPoolSimple) and recorded on the
+	// retained snapshot by every event and reconcile pass. A reconcile that
+	// finds the live token moved since the last observation has missed a
+	// connection edge (dropped events) and treats it as one: marker cleared,
+	// generation bumped, rediscovery kicked (astra r2 C3). Zero when the
+	// adapter reports no token (unit fixtures).
+	ConnectionEpoch int64
+	// DiscoveryEpoch is the ConnectionEpoch the current discovery stamp was
+	// captured under (DiscoveryCapture.Epoch), published together with
+	// ToolsDiscovered and mirrored to stateview.ServerStatus.DiscoveryEpoch,
+	// which identity resolution compares with the live client's token. Zero
+	// while no discovery has been published for this connection.
+	DiscoveryEpoch int64
 
 	// Reconciliation metadata
 	DesiredVersion int64 // Config version that defines this desired state
 	LastReconcile  time.Time
 	ReconcileCount int
+}
+
+// DiscoveryCapture binds a discovery result to the connection it was listed
+// under (Spec 105 FR-009 "stale generation"). A discovery caller takes it
+// BEFORE listing a server's tools and hands it back to the publish call:
+//
+//   - Generation is the Supervisor's own edge counter
+//     (ServerState.ConnectionGeneration); the publish is dropped when it has
+//     moved on (astra r1 I2).
+//   - Epoch is the live client's connection-instance token
+//     (managed.Client.ConnectionEpoch) at capture time; it is stamped on the
+//     snapshot with the result so every identity read can tell whether the
+//     stamp still describes the live connection (astra r2 C3).
+type DiscoveryCapture struct {
+	Generation uint64
+	Epoch      int64
 }
 
 // ServerStateSnapshot is an immutable view of all server states.

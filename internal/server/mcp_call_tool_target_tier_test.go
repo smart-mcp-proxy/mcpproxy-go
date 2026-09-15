@@ -1783,12 +1783,9 @@ func TestCallToolRead_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesUn
 			assert.Empty(t, up.dispatched())
 
 			// Positive control: once the snapshot catches up and lists the
-			// name, the same caller dispatches it.
-			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
-				s.Connected = true
-				s.ToolsDiscovered = true
-				s.Tools = []stateview.ToolInfo{readSpec("erase").info(), readSpec(c.toolName).info()}
-			})
+			// name (stamped on the live connection), the same caller
+			// dispatches it.
+			stampDiscoveredOnLiveConnection(t, proxy, rt, "a", []stateview.ToolInfo{readSpec("erase").info(), readSpec(c.toolName).info()})
 			if !c.staleApproval && !c.quarantineOff {
 				t.Skip("no control under an active gate without a record")
 			}

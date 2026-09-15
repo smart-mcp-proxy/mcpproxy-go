@@ -366,10 +366,12 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 
 	r.logger.Info("Discovering and indexing tools...", zap.Bool("due_only", dueOnly))
 
-	// Capture every server's connection generation BEFORE listing: the
-	// publish below is bound to it, so a result whose capture straddled a
-	// reconnect is dropped rather than landing on the new connection (Spec
-	// 105 FR-009 "stale generation"; astra r1 I2).
+	// Capture every server's connection generation AND live connection
+	// token BEFORE listing: the publish below is bound to the generation, so
+	// a result whose capture straddled a reconnect is dropped rather than
+	// landing on the new connection (Spec 105 FR-009 "stale generation";
+	// astra r1 I2), and stamped with the token so an identity read can tell
+	// whether it still describes the live connection (astra r2 C3).
 	gens := r.discoveryGenerations()
 
 	tools, listed, err := r.upstreamManager.DiscoverToolsReport(ctx, dueOnly)
@@ -590,8 +592,10 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 		return false, fmt.Errorf("client not found for server %s", serverName)
 	}
 
-	// The connection generation this result will be published under: captured
-	// BEFORE the list so a reconnect during it is detected at publish time.
+	// The connection generation and live connection token this result will
+	// be published under: captured BEFORE the list so a reconnect during it
+	// is detected at publish time (generation) or at identity-read time
+	// (token, astra r2 C3).
 	gen := r.discoveryGeneration(serverName)
 
 	// Retry logic: Sometimes connection events fire slightly before the server is fully ready
@@ -652,7 +656,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 			// window until a non-empty or authoritative pass (astra r1 I1).
 			r.logger.Warn("No tools discovered from server; keeping existing index (lenient path)",
 				zap.String("server", serverName))
-			r.markZeroToolServersDiscovered([]string{serverName}, nil, map[string]uint64{serverName: gen})
+			r.markZeroToolServersDiscovered([]string{serverName}, nil, map[string]supervisor.DiscoveryCapture{serverName: gen})
 			return true, nil
 		}
 		// Authoritative path (explicit refresh/discover, issue #873): zero tools
@@ -727,7 +731,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 
 // discoveryGenerations is supervisor.DiscoveryGenerations, nil-safe for
 // fixtures without a supervisor.
-func (r *Runtime) discoveryGenerations() map[string]uint64 {
+func (r *Runtime) discoveryGenerations() map[string]supervisor.DiscoveryCapture {
 	if r.supervisor == nil {
 		return nil
 	}
@@ -735,9 +739,9 @@ func (r *Runtime) discoveryGenerations() map[string]uint64 {
 }
 
 // discoveryGeneration is supervisor.DiscoveryGeneration, nil-safe.
-func (r *Runtime) discoveryGeneration(serverName string) uint64 {
+func (r *Runtime) discoveryGeneration(serverName string) supervisor.DiscoveryCapture {
 	if r.supervisor == nil {
-		return 0
+		return supervisor.DiscoveryCapture{}
 	}
 	return r.supervisor.DiscoveryGeneration(serverName)
 }
@@ -748,7 +752,7 @@ func (r *Runtime) discoveryGeneration(serverName string) uint64 {
 // research D4; supervisor.MarkServersToolsDiscovered, which also refuses to
 // stamp a server still holding a previous connection's retained set). gens
 // is the generation capture taken before the list.
-func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]uint64) {
+func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture) {
 	if r.supervisor == nil {
 		return
 	}

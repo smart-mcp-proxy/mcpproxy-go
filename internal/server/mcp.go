@@ -32,6 +32,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -2522,7 +2523,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// deferral relied on did not fire, so re-read the snapshot and refuse
 		// an unlisted name here, with zero upstream calls. The tier gate
 		// already ran with the destructive fallback (the strictest tier), so
-		// no re-check is needed for scoped callers.
+		// no re-check is needed for scoped callers. The re-read also runs
+		// for a HYDRATED snapshot (astra r2 C3): the live client found
+		// connected here is the authority on which connection the snapshot's
+		// stamp describes, so a name certified by a previous connection is
+		// refused with the discovery-window body.
 		if errMsg, refuse := p.liveIdentityRefusal(serverName, actualToolName, identity, client); refuse {
 			p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity (live client connected, snapshot stale)",
 				zap.String("server_name", serverName),
@@ -6856,14 +6861,25 @@ type toolIdentity struct {
 	// reconnect_on_use) own that answer exactly as they did before Spec 105.
 	SnapshotHydrated bool
 	// DiscoveryDone reports whether a discovery pass has completed for the
-	// current connection (stateview.ServerStatus.ToolsDiscovered), so the
-	// snapshot's tool list — possibly EMPTY, for an upstream that lists no
-	// tools — is its authoritative result. A connected server whose discovery
-	// has not run yet is NOT resolvable: its snapshot is empty for want of a
-	// pass, not because the name is absent, and admitting names in that
-	// window with the destructive-tier fallback would let an upstream that
-	// hides tools from tools/list keep them callable with zero approval.
+	// LIVE connection: stateview.ServerStatus.ToolsDiscovered is set AND the
+	// connection token the stamp was captured under
+	// (ServerStatus.DiscoveryEpoch) is the live client's current one
+	// (managed.Client.ConnectionEpoch). Then the snapshot's tool list —
+	// possibly EMPTY, for an upstream that lists no tools — is its
+	// authoritative result. A connected server whose discovery has not run
+	// yet is NOT resolvable: its snapshot is empty for want of a pass, not
+	// because the name is absent, and admitting names in that window with
+	// the destructive-tier fallback would let an upstream that hides tools
+	// from tools/list keep them callable with zero approval. Nor is a server
+	// whose stamp belongs to a PREVIOUS connection (astra r2 C3): the
+	// connect/disconnect events that clear the stamp are best-effort, and a
+	// name connection A discovered says nothing about what connection B
+	// serves under it.
 	DiscoveryDone bool
+	// StaleConnection reports that DiscoveryDone was withdrawn because the
+	// live client's connection token differs from the snapshot's stamp: the
+	// discovery result is a previous connection's (astra r2 C3).
+	StaleConnection bool
 	// Found reports whether the server's snapshot lists the raw name, verbatim.
 	Found bool
 	// Description and Annotations are the snapshot's metadata for the tool;
@@ -6902,8 +6918,15 @@ func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) t
 		return toolIdentity{}
 	}
 
-	snapshot := supervisor.StateView().Snapshot()
-	serverStatus, exists := snapshot.Servers[serverName]
+	return p.resolveExactToolIdentityIn(supervisor.StateView().Snapshot().Servers, serverName, toolName)
+}
+
+// resolveExactToolIdentityIn is resolveExactToolIdentity against a
+// caller-supplied StateView snapshot, so a batch reader that already holds
+// one (the preflight glue) resolves every id against the same instant it
+// reads the connection state from.
+func (p *MCPProxyServer) resolveExactToolIdentityIn(servers map[string]*stateview.ServerStatus, serverName, toolName string) toolIdentity {
+	serverStatus, exists := servers[serverName]
 	if !exists || serverStatus == nil {
 		return toolIdentity{}
 	}
@@ -6911,6 +6934,23 @@ func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) t
 		ServerKnown:      true,
 		SnapshotHydrated: serverStatus.Enabled && !serverStatus.Quarantined && serverStatus.Connected,
 		DiscoveryDone:    serverStatus.ToolsDiscovered,
+	}
+	// The stamp certifies the tool list only for the connection it was
+	// captured on. The StateView's Connected/ToolsDiscovered are written by
+	// best-effort events (dropped on a full channel, delivered through two
+	// goroutine hops) or the 30s reconcile, so the live client may already
+	// be a NEW connection while the snapshot still carries the previous
+	// one's stamp and tools. Compare the stamp's token with the live client's
+	// (astra r2 C3): a mismatch is the discovery window for this connection
+	// — refused as "discovery has not completed", not as a stale name — until
+	// its own pass re-stamps the snapshot. A client that is not connected is
+	// left to the not-connected / reconnect_on_use verdicts, in their pre-105
+	// order.
+	if identity.SnapshotHydrated && identity.DiscoveryDone {
+		if live, ok := p.liveConnectionEpoch(serverName); ok && live != serverStatus.DiscoveryEpoch {
+			identity.DiscoveryDone = false
+			identity.StaleConnection = true
+		}
 	}
 
 	// Only the EXACT raw name — the identity that is dispatched (Spec 105
@@ -6934,6 +6974,22 @@ func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) t
 	}
 
 	return identity
+}
+
+// liveConnectionEpoch returns the live client's connection-instance token
+// for a server, and whether there is a CONNECTED live client to read it from
+// (managed.Client.ConnectionEpoch; astra r2 C3). No upstream manager (a
+// pure-unit proxy), no client, or a client that is not connected reports
+// false, and the caller then makes no token claim.
+func (p *MCPProxyServer) liveConnectionEpoch(serverName string) (int64, bool) {
+	if p.upstreamManager == nil {
+		return 0, false
+	}
+	client, ok := p.upstreamManager.GetClient(serverName)
+	if !ok || client == nil || !client.IsConnected() {
+		return 0, false
+	}
+	return client.ConnectionEpoch(), true
 }
 
 // unresolvedToolIdentityMessage is the insufficient-permission body every
@@ -6970,12 +7026,19 @@ func unresolvedToolIdentityMessage(serverName, toolName string, discoveryDone bo
 // the snapshot is re-read and the name is refused unless it now lists it. A
 // server whose live client is NOT connected keeps the not-connected /
 // connecting / reconnect_on_use verdicts untouched.
+//
+// The re-read is not limited to the deferred (not-hydrated) case (astra r2
+// C3): a hydrated snapshot that resolved the name at the top of the dispatch
+// may belong to a previous connection, and the live client found connected
+// here is the authority on WHICH connection that is — resolveExactToolIdentity
+// compares the stamp's token with it, so a name certified by connection A is
+// refused on connection B with the discovery-window body.
 func (p *MCPProxyServer) liveIdentityRefusal(serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (string, bool) {
-	if !deferred.ServerKnown || deferred.SnapshotHydrated || client == nil || !client.IsConnected() {
+	if !deferred.ServerKnown || client == nil || !client.IsConnected() {
 		return "", false
 	}
 	live := p.resolveExactToolIdentity(serverName, toolName)
-	if live.Found {
+	if live.Found && !live.Unresolved() {
 		return "", false
 	}
 	return unresolvedToolIdentityMessage(serverName, toolName, live.SnapshotHydrated && live.DiscoveryDone), true

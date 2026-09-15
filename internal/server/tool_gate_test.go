@@ -292,7 +292,7 @@ func TestToolGate_NeverBaselinedExactRecord_LegacyLockBinds(t *testing.T) {
 // then drive the gate against exactly that store. The proxy under test keeps
 // its own manager (createTestProxyWithRuntime wires two), so the counting
 // witness still sees every dispatch the proxy makes.
-func runRuntimeDiscovery(t *testing.T, rt *runtime.Runtime, up *countingUpstream) {
+func runRuntimeDiscovery(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, up *countingUpstream) {
 	t.Helper()
 	rtm := rt.UpstreamManager()
 	require.NotNil(t, rtm)
@@ -304,6 +304,7 @@ func runRuntimeDiscovery(t *testing.T, rt *runtime.Runtime, up *countingUpstream
 		return ok && client.IsConnected()
 	}, 10*time.Second, 50*time.Millisecond, "runtime manager must connect to %q", up.Server)
 	require.NoError(t, rt.RefreshServerTools(context.Background(), up.Server))
+	rebindDiscoveryToProxyConnection(t, proxy, rt, up.Server)
 }
 
 // Round-3 finding 1 (Spec 105 FR-009 migration review): the toggle-synthesized
@@ -339,7 +340,7 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved",
 			CurrentDescription: siblingApprovedDesc,
 		}))
-		runRuntimeDiscovery(t, rt, up)
+		runRuntimeDiscovery(t, proxy, rt, up)
 		return proxy, up
 	}
 	seed := func(t *testing.T, siblingApprovedDesc string) (*MCPProxyServer, *countingUpstream) {
@@ -446,7 +447,7 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 		require.NoError(t, proxy.storage.SaveToolApproval(sibling))
 		// Before discovery: blocked through the merged legacy record.
 		require.False(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "precondition: the merged record blocks before discovery")
-		runRuntimeDiscovery(t, rt, up)
+		runRuntimeDiscovery(t, proxy, rt, up)
 		return proxy, up
 	}
 	shapes := map[string]*storage.ToolApprovalRecord{
@@ -505,7 +506,7 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved,
 			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved", CurrentDescription: "Read ns:erase",
 		}))
-		runRuntimeDiscovery(t, rt, up)
+		runRuntimeDiscovery(t, proxy, rt, up)
 		exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
 		require.NoError(t, err)
 		require.False(t, exact.Disabled)
@@ -546,7 +547,7 @@ func TestToolGate_LegacyCollapsedRecord_OperatorDisablePreDiscoveryKeepsBlock(t 
 			assert.False(t, collapsed.IdentityKeyed, "the operator write must not end the legacy consult while the record restricts")
 			require.False(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "precondition: blocked through the legacy record before discovery")
 
-			runRuntimeDiscovery(t, rt, up)
+			runRuntimeDiscovery(t, proxy, rt, up)
 			exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
 			require.NoError(t, err)
 			assert.Equal(t, storage.ToolApprovalStatusPending, exact.Status, "post-baseline addition under an active gate")
@@ -605,7 +606,7 @@ func TestToolGate_LegacyCollapsedRecord_BareServedFirstWithDifferingContractKeep
 			}))
 			require.False(t, proxy.evaluateToolGate("a", "ns:erase").callable(), "precondition: blocked through the legacy record before discovery")
 
-			runRuntimeDiscovery(t, rt, up)
+			runRuntimeDiscovery(t, proxy, rt, up)
 			collapsed, err := proxy.storage.GetToolApproval("a", "erase")
 			require.NoError(t, err)
 			assert.Equal(t, storage.ToolApprovalStatusChanged, collapsed.Status, "the bare erase's contract differs: rug-pull branch")
@@ -617,6 +618,7 @@ func TestToolGate_LegacyCollapsedRecord_BareServedFirstWithDifferingContractKeep
 			// Pass 2: the upstream lists ns:erase too.
 			up.serve(readSpec("ns:erase"))
 			require.NoError(t, rt.RefreshServerTools(context.Background(), "a"))
+			rebindDiscoveryToProxyConnection(t, proxy, rt, "a")
 			exact, err := proxy.storage.GetToolApproval("a", "ns:erase")
 			require.NoError(t, err)
 			assert.Equal(t, storage.ToolApprovalStatusApproved, exact.Status, "with the gate lifted the new record auto-approves ...")

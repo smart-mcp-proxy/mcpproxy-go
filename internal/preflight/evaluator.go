@@ -85,12 +85,46 @@ type ServerRuntime struct {
 	Action string
 }
 
+// ToolIdentity is the read-only outcome of resolving one (server, raw tool)
+// pair against the live discovery snapshot — the registration identity every
+// dispatch path authorizes against (Spec 105 FR-009, research D4). It mirrors
+// the dispatch-side resolution without importing it:
+//
+//   - Known: the snapshot holds the server at all. The zero value (Known
+//     false) is "no identity claim" — a pure-unit reader, or a server the
+//     snapshot has never held — and the evaluator then falls through to the
+//     existence test it always ran.
+//   - Hydrated: the server is enabled, not quarantined and CONNECTED, so its
+//     snapshot is the authority on its tool set. A known server that is not
+//     hydrated keeps the server-level connection verdicts.
+//   - DiscoveryDone: a discovery pass has completed for the LIVE connection
+//     (the snapshot's stamp was captured on the connection the client
+//     currently holds).
+//   - Found: the completed result lists the raw name, verbatim.
+type ToolIdentity struct {
+	Known         bool
+	Hydrated      bool
+	DiscoveryDone bool
+	Found         bool
+}
+
+// Unresolved reports the D4 refusal condition dispatch applies: a known,
+// hydrated server whose discovery has not completed for the live connection
+// or whose completed discovery does not list the name.
+func (id ToolIdentity) Unresolved() bool {
+	return id.Known && id.Hydrated && (!id.DiscoveryDone || !id.Found)
+}
+
 // StateReader reads the connection-state snapshot (stateview). It is a snapshot
 // read: lock-free, never blocking, never triggering a connect.
 type StateReader interface {
 	// ServerRuntime returns the runtime view of a server; found=false when the
 	// snapshot has no entry for it.
 	ServerRuntime(serverName string) (rt ServerRuntime, found bool)
+	// ToolIdentity resolves a (server, raw tool) pair against the same
+	// snapshot. A reader with no identity information returns the zero value
+	// (no claim).
+	ToolIdentity(serverName, toolName string) ToolIdentity
 }
 
 // ConfigPolicy reads configuration-derived policy.
@@ -253,6 +287,31 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	if !policy.Enabled {
 		return unavailable(id, ReasonServerDisabled,
 			fmt.Sprintf("Server %q is disabled.", serverName)), nil
+	}
+
+	// 4b. Registration identity (Spec 105 FR-009, research D4; astra r2 C2).
+	//     Every dispatch path refuses a name a KNOWN, CONNECTED server's
+	//     completed discovery does not list, and any name on one whose
+	//     discovery has not completed for the live connection — for every
+	//     caller. FR-002 makes preflight one-way consistent with dispatch
+	//     (a refusal must never read as ready), and neither the index (a
+	//     stale document whose delete failed) nor an approval record (a kept
+	//     migration alias) is registration identity, so the existence test
+	//     below cannot be the whole answer. The verdicts stay inside the
+	//     closed FR-003 enum: the discovery window is server_initializing
+	//     (retryable), an absent name is the ONE not_found construction —
+	//     the same bytes at both tiers, so nothing about the server's tool
+	//     set leaks through the shape. A server the snapshot does not hold,
+	//     or holds not connected, makes no identity claim here and keeps
+	//     the chain that always owned it (connectionVerdict).
+	if ec.State != nil {
+		if identity := ec.State.ToolIdentity(serverName, toolName); identity.Unresolved() {
+			if !identity.DiscoveryDone {
+				return unavailable(id, ReasonServerInitializing,
+					fmt.Sprintf("Server %q has not completed tool discovery for its current connection yet.", serverName)), nil
+			}
+			return corpus.notFoundResult(id)
+		}
 	}
 
 	// 5. not_found — exact-id existence. The shared index is the primary

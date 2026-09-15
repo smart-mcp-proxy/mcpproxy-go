@@ -257,6 +257,8 @@ func (s stubState) ServerRuntime(_ string) (preflight.ServerRuntime, bool) {
 	return preflight.ServerRuntime{State: s.state}, true
 }
 
+func (stubState) ToolIdentity(_, _ string) preflight.ToolIdentity { return preflight.ToolIdentity{} }
+
 type stubPolicy struct{ enabled map[string]bool }
 
 func (p stubPolicy) ServerPolicy(serverName string) (preflight.ServerPolicy, error) {

@@ -29,6 +29,23 @@ type MockUpstreamAdapter struct {
 	states         map[string]*ServerState
 }
 
+// setConnected mirrors managed.Client's connection token
+// (connectionEpoch): it moves on every connection EDGE — a Connect that
+// establishes a connection, a Disconnect that drops one — and not on a
+// redundant call (a real Connect on a connected client returns early), so a
+// test can settle the adapter with repeated ConnectServer calls and still
+// model a reconnect the events never reported (astra r2 C3). Caller holds mu.
+func (m *MockUpstreamAdapter) setConnected(name string, connected bool) {
+	state, ok := m.states[name]
+	if !ok {
+		return
+	}
+	if state.Connected != connected {
+		state.ConnectionEpoch++
+	}
+	state.Connected = connected
+}
+
 func NewMockUpstreamAdapter() *MockUpstreamAdapter {
 	return &MockUpstreamAdapter{
 		addedServers:   make(map[string]*config.ServerConfig),
@@ -65,9 +82,7 @@ func (m *MockUpstreamAdapter) ConnectServer(ctx context.Context, name string) er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.connected[name] = true
-	if state, ok := m.states[name]; ok {
-		state.Connected = true
-	}
+	m.setConnected(name, true)
 	return nil
 }
 
@@ -75,9 +90,7 @@ func (m *MockUpstreamAdapter) DisconnectServer(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.disconnected = append(m.disconnected, name)
-	if state, ok := m.states[name]; ok {
-		state.Connected = false
-	}
+	m.setConnected(name, false)
 	return nil
 }
 
@@ -94,7 +107,8 @@ func (m *MockUpstreamAdapter) GetServerState(name string) (*ServerState, error) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if state, ok := m.states[name]; ok {
-		return state, nil
+		stateCopy := *state
+		return &stateCopy, nil
 	}
 	return nil, nil
 }
@@ -1247,7 +1261,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	_ = mockUpstream.AddServer("empty", cfg.Servers[1])
 
 	sup := New(configSvc, mockUpstream, zap.NewNop())
-	_ = sup.reconcile(configSvc.Current())
+	settledReconcile(sup, configSvc)
 
 	status := func(name string) *stateview.ServerStatus {
 		t.Helper()
@@ -1310,7 +1324,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 		t.Errorf("server1 retained state after disconnect: marker must be cleared, tools kept, got discovered=%v tools=%d",
 			snap.Servers["server1"].ToolsDiscovered, len(snap.Servers["server1"].Tools))
 	}
-	_ = sup.reconcile(configSvc.Current())
+	settledReconcile(sup, configSvc)
 	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after disconnect+reconcile: marker must stay cleared with the tools retained, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
@@ -1353,7 +1367,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	// scenario under test is a server that IS connected, so settle the
 	// adapter state deterministically before every reconcile below.
 	_ = mockUpstream.ConnectServer(context.Background(), "server1")
-	_ = sup.reconcile(configSvc.Current())
+	settledReconcile(sup, configSvc)
 	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after reconnect+reconcile: marker must stay cleared until discovery re-runs, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
@@ -1364,7 +1378,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 		t.Errorf("server1 after rediscovery: marker must be re-stamped with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
 	_ = mockUpstream.ConnectServer(context.Background(), "server1")
-	_ = sup.reconcile(configSvc.Current())
+	settledReconcile(sup, configSvc)
 	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after rediscovery+reconcile: marker must survive with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
@@ -1388,7 +1402,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	}
 	_ = mockUpstream.AddServer("fresh", fresh)
 	_ = mockUpstream.ConnectServer(context.Background(), "server1")
-	_ = sup.reconcile(configSvc.Current())
+	settledReconcile(sup, configSvc)
 	if status("fresh").ToolsDiscovered {
 		t.Fatal("fresh: before any discovery ToolsDiscovered must be false")
 	}
@@ -1436,6 +1450,16 @@ func connectionEvent(name string, connected bool) Event {
 	return Event{Type: typ, ServerName: name, Timestamp: time.Now(), Payload: map[string]interface{}{"connected": connected}}
 }
 
+// settledReconcile runs one reconcile pass and waits for the actions it
+// dispatched (AddServer + ConnectServer on the mock, on a goroutine) to land
+// before returning, so a later step that disconnects the mock and reconciles
+// again cannot be raced by a connect action from an EARLIER pass re-connecting
+// the mock underneath it.
+func settledReconcile(sup *Supervisor, configSvc *configsvc.Service) {
+	_ = sup.reconcile(configSvc.Current())
+	sup.actionWg.Wait()
+}
+
 // markerFixture is a reconciled one-server supervisor plus a StateView reader.
 func markerFixture(t *testing.T) (*Supervisor, *MockUpstreamAdapter, *configsvc.Service, func(string) *stateview.ServerStatus) {
 	t.Helper()
@@ -1446,7 +1470,7 @@ func markerFixture(t *testing.T) (*Supervisor, *MockUpstreamAdapter, *configsvc.
 	t.Cleanup(func() { mockUpstream.Close() })
 	_ = mockUpstream.AddServer("s", cfg.Servers[0])
 	sup := New(configSvc, mockUpstream, zap.NewNop())
-	_ = sup.reconcile(configSvc.Current())
+	settledReconcile(sup, configSvc)
 	return sup, mockUpstream, configSvc, func(name string) *stateview.ServerStatus {
 		t.Helper()
 		st, ok := sup.StateView().Snapshot().Servers[name]
@@ -1548,12 +1572,12 @@ func TestSupervisor_StaleDiscoveryResultIsDropped(t *testing.T) {
 		require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
 		_ = sup.reconcile(configSvc.Current())
 		sup.updateSnapshotFromEvent(connectionEvent("s", true))
-		before := sup.DiscoveryGeneration("s")
+		before := sup.DiscoveryGeneration("s").Generation
 		_ = sup.reconcile(configSvc.Current())
-		require.Equal(t, before, sup.DiscoveryGeneration("s"), "a reconcile that observes no change keeps the generation")
+		require.Equal(t, before, sup.DiscoveryGeneration("s").Generation, "a reconcile that observes no change keeps the generation")
 		require.NoError(t, mockUpstream.DisconnectServer("s"))
 		_ = sup.reconcile(configSvc.Current())
-		require.Equal(t, before+1, sup.DiscoveryGeneration("s"), "a disconnect reconcile observes (dropped event) moves the generation")
+		require.Equal(t, before+1, sup.DiscoveryGeneration("s").Generation, "a disconnect reconcile observes (dropped event) moves the generation")
 	})
 }
 
@@ -1577,7 +1601,7 @@ func TestSupervisor_DroppedDisconnectEventClearsMarker(t *testing.T) {
 	t.Run("reconcile observes the disconnect", func(t *testing.T) {
 		sup, mockUpstream, configSvc, status := markerFixture(t)
 		require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
-		_ = sup.reconcile(configSvc.Current())
+		settledReconcile(sup, configSvc)
 		sup.updateSnapshotFromEvent(connectionEvent("s", true))
 		published, err := sup.RefreshServerToolsFromDiscovery("s", tools, sup.DiscoveryGeneration("s"))
 		require.NoError(t, err)
@@ -1616,7 +1640,7 @@ func TestSupervisor_DroppedDisconnectEventClearsMarker(t *testing.T) {
 		_, err := sup.RefreshServerToolsFromDiscovery("s", tools, sup.DiscoveryGeneration("s"))
 		require.NoError(t, err)
 		require.True(t, status("s").ToolsDiscovered)
-		gen := sup.DiscoveryGeneration("s")
+		gen := sup.DiscoveryGeneration("s").Generation
 
 		// Dropped disconnect, then the connect event for B with the
 		// StateView still holding A's tools and stamp.
@@ -1626,6 +1650,97 @@ func TestSupervisor_DroppedDisconnectEventClearsMarker(t *testing.T) {
 		require.False(t, st.ToolsDiscovered, "a connect event is a new connection: the stamp must be cleared on the StateView even when its tools were never cleared")
 		require.False(t, retained(t, sup).ToolsDiscovered, "... and on the retained state")
 		require.Len(t, st.Tools, 1, "the tools stay for counts")
-		require.Equal(t, gen+1, sup.DiscoveryGeneration("s"), "the connect edge moves the generation, so a result captured on A is dropped")
+		require.Equal(t, gen+1, sup.DiscoveryGeneration("s").Generation, "the connect edge moves the generation, so a result captured on A is dropped")
 	})
+}
+
+// TestSupervisor_ReconcileDetectsUnobservedReconnect pins astra r2 C3 on the
+// reconcile side. The Supervisor's ConnectionGeneration moves only on an edge
+// it OBSERVES — a delivered connect/disconnect event, or a reconcile that
+// reads the server disconnected. When both events of a disconnect+reconnect
+// are dropped (actor_pool.emitEvent drops on a full channel) and the manager
+// already reports the new connection by the time reconcile runs, nothing
+// moved: the previous connection's stamp, tools and generation survived until
+// the next sweep (default 5 min). The adapter now reports the live client's
+// connection token (managed.Client.ConnectionEpoch); a discovery result is
+// stamped with the token it was captured under, and a reconcile that finds
+// the live token moved treats it as the missed edge: marker cleared,
+// generation bumped, reactive discovery kicked.
+func TestSupervisor_ReconcileDetectsUnobservedReconnect(t *testing.T) {
+	tools := []*config.ToolMetadata{{Name: "erase", ServerName: "s"}}
+	sup, mockUpstream, configSvc, status := markerFixture(t)
+
+	// Connection A, observed, discovered.
+	require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
+	settledReconcile(sup, configSvc)
+	sup.updateSnapshotFromEvent(connectionEvent("s", true))
+	captureA := sup.DiscoveryGeneration("s")
+	require.NotZero(t, captureA.Epoch, "the adapter reports the live connection token")
+	published, err := sup.RefreshServerToolsFromDiscovery("s", tools, captureA)
+	require.NoError(t, err)
+	require.True(t, published)
+	st := status("s")
+	require.True(t, st.ToolsDiscovered)
+	require.Equal(t, captureA.Epoch, st.DiscoveryEpoch, "the stamp carries the token it was captured under")
+	require.Equal(t, captureA.Epoch, sup.snapshot.Load().(*ServerStateSnapshot).Servers["s"].DiscoveryEpoch)
+
+	// The connect event above kicked A's own reactive discovery (the
+	// pre-105 trigger); the kicks counted from here on are reconcile's.
+	var kickedMu sync.Mutex
+	var kicked []string
+	sup.SetOnServerConnectedCallback(func(name string) {
+		kickedMu.Lock()
+		defer kickedMu.Unlock()
+		kicked = append(kicked, name)
+	})
+	kickedCount := func() int {
+		kickedMu.Lock()
+		defer kickedMu.Unlock()
+		return len(kicked)
+	}
+
+	// A reconcile that observes the SAME connection keeps everything.
+	settledReconcile(sup, configSvc)
+	st = status("s")
+	require.True(t, st.Connected && st.ToolsDiscovered)
+	require.Equal(t, captureA.Epoch, st.DiscoveryEpoch)
+	require.Equal(t, captureA.Generation, sup.DiscoveryGeneration("s").Generation)
+	require.Zero(t, kickedCount(), "nothing to re-list on an unchanged connection")
+
+	// Both events of a disconnect+reconnect are dropped; by the time reconcile
+	// runs the manager reports connection B as connected.
+	require.NoError(t, mockUpstream.DisconnectServer("s"))
+	require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
+	settledReconcile(sup, configSvc)
+	st = status("s")
+	require.True(t, st.Connected, "reconcile reads B as connected")
+	require.False(t, st.ToolsDiscovered, "A's stamp must not survive an unobserved reconnect")
+	require.Zero(t, st.DiscoveryEpoch)
+	require.Len(t, st.Tools, 1, "the retained tools stay for counts and listings (MCP-2094)")
+	retained := sup.snapshot.Load().(*ServerStateSnapshot).Servers["s"]
+	require.False(t, retained.ToolsDiscovered)
+	require.Equal(t, captureA.Generation+1, retained.ConnectionGeneration, "the missed edge moves the generation")
+	require.Eventually(t, func() bool { return kickedCount() == 1 }, 2*time.Second, 10*time.Millisecond,
+		"the reactive discovery the dropped connect event would have kicked is kicked by reconcile")
+
+	// A's delayed result (captured under A) is dropped at publish time.
+	published, err = sup.RefreshServerToolsFromDiscovery("s", tools, captureA)
+	require.NoError(t, err)
+	require.False(t, published)
+	require.False(t, status("s").ToolsDiscovered)
+
+	// B's own pass, captured under B's token, lands and re-stamps.
+	captureB := sup.DiscoveryGeneration("s")
+	require.NotEqual(t, captureA.Epoch, captureB.Epoch)
+	published, err = sup.RefreshServerToolsFromDiscovery("s", tools, captureB)
+	require.NoError(t, err)
+	require.True(t, published)
+	st = status("s")
+	require.True(t, st.ToolsDiscovered)
+	require.Equal(t, captureB.Epoch, st.DiscoveryEpoch)
+
+	// Steady state again: no further kick, stamp kept.
+	settledReconcile(sup, configSvc)
+	require.True(t, status("s").ToolsDiscovered)
+	require.Equal(t, 1, kickedCount())
 }

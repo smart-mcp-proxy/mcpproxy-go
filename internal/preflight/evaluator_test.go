@@ -716,3 +716,55 @@ func TestEvaluate_NoApprovalRecord_PointsAtRediscoveryNotApprove(t *testing.T) {
 	off.policy.quarantine = false
 	assert.Equal(t, StatusReady, evalOne(t, off, ToolRef{ID: id}).Status)
 }
+
+// Spec 105 FR-009 (research D4), astra r2 C2: an indexed tool with an
+// approved record is NOT ready when the served snapshot says the known,
+// connected server does not list it (a stale index document, a kept
+// migration-alias record) or has not completed discovery for its live
+// connection — dispatch refuses both, and FR-002 forbids preflight reading
+// them as ready. The verdicts stay inside the closed enum.
+func TestEvaluate_UnresolvedIdentity_NeverReady(t *testing.T) {
+	withIdentity := func(w *world, ident ToolIdentity) *world {
+		w.state.identities = map[string]ToolIdentity{id: ident}
+		return w
+	}
+
+	t.Run("listed by the live connection: ready (control)", func(t *testing.T) {
+		res := evalOne(t, withIdentity(healthyWorld(), ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: true, Found: true}), ToolRef{ID: id})
+		assert.Equal(t, StatusReady, res.Status)
+	})
+
+	t.Run("no identity claim: the existence chain decides (control)", func(t *testing.T) {
+		assert.Equal(t, StatusReady, evalOne(t, healthyWorld(), ToolRef{ID: id}).Status)
+		assert.Equal(t, StatusReady, evalOne(t, withIdentity(healthyWorld(), ToolIdentity{Known: true, Hydrated: false}), ToolRef{ID: id}).Status,
+			"a known server that is not connected keeps the connection verdicts, not an identity one")
+	})
+
+	t.Run("completed discovery does not list the name: not_found at both tiers", func(t *testing.T) {
+		stale := ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: true, Found: false}
+		operator := evalOne(t, withIdentity(healthyWorld(), stale), ToolRef{ID: id})
+		assert.Equal(t, StatusUnavailable, operator.Status)
+		assert.Equal(t, ReasonNotFound, operator.Reason)
+		assert.Empty(t, operator.Hash)
+
+		agentWorld := withIdentity(healthyWorld(), stale)
+		agentWorld.tier = TierAgentToken
+		agent := evalOne(t, agentWorld, ToolRef{ID: id})
+		assert.Equal(t, operator, agent, "the one not_found construction: byte-identical at both tiers")
+	})
+
+	t.Run("discovery not completed for the live connection: server_initializing", func(t *testing.T) {
+		res := evalOne(t, withIdentity(healthyWorld(), ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: false, Found: true}), ToolRef{ID: id})
+		assert.Equal(t, StatusUnavailable, res.Status)
+		assert.Equal(t, ReasonServerInitializing, res.Reason)
+		assert.True(t, res.Retryable)
+	})
+
+	t.Run("identity outranks the tool-level gates", func(t *testing.T) {
+		// A pending record for a name discovery no longer lists must not
+		// report a lock for a tool that does not exist.
+		w := withIdentity(healthyWorld().approval(func(a *ApprovalState) { a.Status = ApprovalStatusPending }),
+			ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: true, Found: false})
+		assert.Equal(t, ReasonNotFound, evalOne(t, w, ToolRef{ID: id}).Reason)
+	})
+}

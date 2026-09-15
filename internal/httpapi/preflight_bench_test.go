@@ -64,6 +64,8 @@ func (b *benchState) ServerRuntime(serverName string) (preflight.ServerRuntime, 
 	return rt, ok
 }
 
+func (*benchState) ToolIdentity(_, _ string) preflight.ToolIdentity { return preflight.ToolIdentity{} }
+
 type benchPolicy struct {
 	servers map[string]preflight.ServerPolicy
 }

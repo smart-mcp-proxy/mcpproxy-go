@@ -47,7 +47,16 @@ type ServerStatus struct {
 	// window and a genuinely tool-less server both fail CLOSED instead of
 	// admitting any name with the destructive-tier fallback.
 	ToolsDiscovered bool
-	Metadata        map[string]interface{}
+	// DiscoveryEpoch is the live client's connection-instance token
+	// (managed.Client.ConnectionEpoch) captured BEFORE the tools/list that
+	// produced Tools, stamped together with ToolsDiscovered. Identity
+	// resolution compares it with the client's current token: a mismatch
+	// means the connection changed since discovery ran — its events dropped
+	// or lagging, no reconcile edge observed yet — and the stamp certifies
+	// nothing for the live connection (Spec 105 FR-009; astra r2 C3). Zero
+	// when no discovery has been published for this connection.
+	DiscoveryEpoch int64
+	Metadata       map[string]interface{}
 	// Diagnostic is the most recent classified failure for this server, or nil
 	// when the server is healthy (or the last failure has not yet been classified).
 	// Spec 044.

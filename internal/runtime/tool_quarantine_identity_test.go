@@ -1671,3 +1671,92 @@ func TestStampRemainingLegacyToolApprovals_ConcurrentOperatorDisableSurvives(t *
 		}
 	})
 }
+
+// astra r2 C1: stampConsultedLegacySibling had the same two-transaction
+// read-check-write shape the sweep above was cured of — GetToolApproval
+// (manager read lock, released), Restricts() on the detached copy,
+// saveToolApproval writing the WHOLE stale record back stamped. An operator
+// SetToolEnabled(a, erase, false) landing between that read and that write
+// was overwritten with Disabled=false AND the record was stamped, ending the
+// legacy consult for every later "*:erase". The consult now stamps through
+// the same in-transaction conditional stamp the sweep uses.
+func TestStampConsultedLegacySibling_ConcurrentOperatorDisableSurvives(t *testing.T) {
+	const (
+		desc   = "Erase preview"
+		schema = `{"type":"object"}`
+	)
+	nsErase := []*config.ToolMetadata{
+		{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
+	}
+	v2Erase := []*config.ToolMetadata{
+		{ServerName: "a", Name: "v2:erase", RawName: "v2:erase", Description: desc, ParamsJSON: schema},
+	}
+	seedUnstampedEnabled := func(t *testing.T, rt *Runtime) {
+		t.Helper()
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusApproved, ApprovedBy: "user",
+		}))
+	}
+
+	t.Run("deterministic: the operator disables the sibling between the consult's read and its stamp", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedUnstampedEnabled(t, rt)
+		fired := false
+		rt.consultStampBeforeWrite = func() {
+			fired = true
+			require.NoError(t, rt.SetToolEnabled("a", "erase", false, "user"))
+			rec, err := rt.storageManager.GetToolApproval("a", "erase")
+			require.NoError(t, err)
+			require.True(t, rec.Disabled, "fixture: the operator write landed in the window")
+			require.False(t, rec.IdentityKeyed, "fixture: a restricting pre-105 record stays unstamped (saveReadToolApproval)")
+		}
+		// Only "ns:erase" is served: it collapses to the unstamped "erase",
+		// so the pass consults it and reaches the stamp.
+		_, err := rt.checkToolApprovals("a", nsErase)
+		require.NoError(t, err)
+		require.True(t, fired, "fixture: the consult must have reached its stamp")
+
+		rec, err := rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.True(t, rec.Disabled, "the operator's disable must survive the consult stamp, never be overwritten by the stale read")
+		assert.False(t, rec.IdentityKeyed, "a record that restricts at write time must not be stamped")
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+
+		// The block still binds a later namespaced tool that collapses to it.
+		result, err := rt.checkToolApprovals("a", v2Erase)
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["v2:erase"], "the legacy consult must still lend the block")
+	})
+
+	t.Run("control: with no concurrent write the consulted sibling is stamped", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
+		seedUnstampedEnabled(t, rt)
+		_, err := rt.checkToolApprovals("a", nsErase)
+		require.NoError(t, err)
+		rec, err := rt.storageManager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.True(t, rec.IdentityKeyed)
+		assert.False(t, rec.Disabled)
+	})
+
+	t.Run("unsequenced: a real goroutine race never loses the disable", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
+		for i := 0; i < 40; i++ {
+			seedUnstampedEnabled(t, rt)
+			done := make(chan struct{}, 2)
+			go func() {
+				defer func() { done <- struct{}{} }()
+				_, _ = rt.checkToolApprovals("a", nsErase)
+			}()
+			go func() {
+				defer func() { done <- struct{}{} }()
+				_ = rt.SetToolEnabled("a", "erase", false, "user")
+			}()
+			<-done
+			<-done
+			rec, err := rt.storageManager.GetToolApproval("a", "erase")
+			require.NoError(t, err)
+			require.True(t, rec.Disabled, "iteration %d: the operator's disable was lost", i)
+		}
+	})
+}

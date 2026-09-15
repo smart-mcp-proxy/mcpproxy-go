@@ -482,11 +482,33 @@ func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(server
 		}
 		return nil
 	}
-	return &preflightStateSnapshot{servers: servers}, annotations, nil
+	return &preflightStateSnapshot{servers: servers, proxy: p}, annotations, nil
 }
 
 type preflightStateSnapshot struct {
 	servers map[string]*stateview.ServerStatus
+	// proxy supplies the live-connection token comparison the dispatch-side
+	// identity read makes (liveConnectionEpoch); nil for a snapshot a test
+	// injects without a proxy, which then makes no token claim.
+	proxy *MCPProxyServer
+}
+
+// ToolIdentity is the preflight projection of the dispatch-side identity
+// read (resolveExactToolIdentity: Spec 105 FR-009, research D4; astra r2
+// C2), resolved against the SAME snapshot the connection verdict reads, so a
+// batch is judged against one instant and preflight can never disagree with
+// dispatch about what the snapshot lists.
+func (s *preflightStateSnapshot) ToolIdentity(serverName, toolName string) preflight.ToolIdentity {
+	if s.proxy == nil {
+		return preflight.ToolIdentity{}
+	}
+	identity := s.proxy.resolveExactToolIdentityIn(s.servers, serverName, toolName)
+	return preflight.ToolIdentity{
+		Known:         identity.ServerKnown,
+		Hydrated:      identity.SnapshotHydrated,
+		DiscoveryDone: identity.DiscoveryDone,
+		Found:         identity.Found,
+	}
 }
 
 func (s *preflightStateSnapshot) ServerRuntime(serverName string) (preflight.ServerRuntime, bool) {

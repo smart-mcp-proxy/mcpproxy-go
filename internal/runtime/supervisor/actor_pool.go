@@ -172,10 +172,11 @@ func (p *ActorPoolSimple) GetServerState(name string) (*ServerState, error) {
 	config := client.GetConfig() // Thread-safe config access
 
 	state := &ServerState{
-		Name:      name,
-		Config:    config,
-		Enabled:   config.Enabled,
-		Connected: connected,
+		Name:            name,
+		Config:          config,
+		Enabled:         config.Enabled,
+		Connected:       connected,
+		ConnectionEpoch: client.ConnectionEpoch(),
 	}
 
 	if config.Quarantined {
@@ -210,10 +211,11 @@ func (p *ActorPoolSimple) GetAllStates() map[string]*ServerState {
 		connected := client.IsConnected()
 
 		state := &ServerState{
-			Name:      name,
-			Config:    client.GetConfig(),
-			Enabled:   client.GetConfig().Enabled,
-			Connected: connected,
+			Name:            name,
+			Config:          client.GetConfig(),
+			Enabled:         client.GetConfig().Enabled,
+			Connected:       connected,
+			ConnectionEpoch: client.ConnectionEpoch(),
 		}
 
 		if client.GetConfig().Quarantined {

@@ -29,6 +29,14 @@ const (
 	// next discovery pass files the record — so describe_tool answers with
 	// the same no-record body dispatch does (toolPendingApprovalResult).
 	visReasonToolNoApprovalRecord = "tool_no_approval_record"
+	// visReasonToolUnresolved is the Spec 105 FR-009 (research D4) identity
+	// case: the server is known, connected and the authority on its own tool
+	// set, and the raw name has no registration identity on it — discovery
+	// has not completed for the live connection, or its completed result
+	// does not list the name (a stale index document, a kept migration-alias
+	// record). Dispatch refuses such a name for every caller, so describe_tool
+	// withholds its definition with the plain not-found shape (astra r2 C2).
+	visReasonToolUnresolved = "tool_unresolved"
 )
 
 // The two resolvers share one set of step helpers (serverInScope,
@@ -74,6 +82,22 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 
 	if !p.serverInScope(authCtx, profileScope, serverName) {
 		return false, visReasonServerNotInScope
+	}
+	// Spec 105 FR-009 (research D4), astra r2 C2: an index document is not a
+	// registration identity. A name the KNOWN, CONNECTED server's completed
+	// discovery does not list — a stale document whose Bleve delete failed,
+	// a kept migration-alias record — or a server whose discovery has not
+	// completed for the live connection is refused by every dispatch path,
+	// so describe_tool must not render its definition (Spec 098 FR-002: a
+	// dispatch refusal never reads as available). Ordered AFTER the scope
+	// gate so scope stays silent, and BEFORE the lock gates so a stale
+	// pending record cannot report a lock for a tool that no longer exists.
+	// Search (indexedToolVisible) deliberately does NOT take this gate: the
+	// retrieve_tools listing stays index-based (Spec 085), and a stale hit
+	// there self-heals through the dispatch body. Adding a gate here keeps
+	// the FR-011 upper bound (describe ⊆ search) by construction.
+	if p.resolveExactToolIdentity(serverName, toolName).Unresolved() {
+		return false, visReasonToolUnresolved
 	}
 	// describe_tool-only strict gates (contract steps 3–4) — ordered BEFORE
 	// callability so a quarantined/pending id reports its real lock, not a

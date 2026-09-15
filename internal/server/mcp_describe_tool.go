@@ -54,6 +54,13 @@ const (
 // old text told a stuck agent to call a tool it cannot see.
 const describeNotFoundRemediation = "Tool not found or no longer available; list tools again."
 
+// describeDiscoveryPendingRemediation is the not-found remediation for a name
+// on a server whose tool discovery has not completed for the live connection
+// (Spec 105 FR-009, research D4): there is no tool list to refresh from yet,
+// so the caller should retry shortly — the same remediation dispatch answers
+// (unresolvedToolIdentityMessage).
+const describeDiscoveryPendingRemediation = "Tool not found: tool discovery has not completed for this server yet; retry shortly, once its tools have been discovered."
+
 // describeNoApprovalRecordRemediation is the describe_tool answer for a tool
 // the server's discovery snapshot contains that has NO approval record yet
 // while the quarantine gate is active (Spec 105 FR-009 implicit pending). It
@@ -251,6 +258,16 @@ func (p *MCPProxyServer) describeVisibilityError(reason, serverName, toolName st
 		return describeErrChanged, disabledToolRemediation(contracts.DisabledStatusPendingApproval)
 	case visReasonToolNotCallable:
 		return describeErrDisabled, disabledToolRemediation(p.classifyDisabledTool(serverName, toolName))
+	case visReasonToolUnresolved:
+		// Spec 105 FR-009 (research D4), astra r2 C2: the not-found shape
+		// dispatch's refusal maps to. The remediation depends on WHY the
+		// name is unresolved, exactly as unresolvedToolIdentityMessage's does:
+		// no completed discovery for the live connection → retry shortly;
+		// a completed discovery that does not list the name → list again.
+		if !p.resolveExactToolIdentity(serverName, toolName).DiscoveryDone {
+			return describeErrNotFound, describeDiscoveryPendingRemediation
+		}
+		return describeErrNotFound, describeNotFoundRemediation
 	default: // visReasonNotIndexed and anything future
 		return describeErrNotFound, describeNotFoundRemediation
 	}

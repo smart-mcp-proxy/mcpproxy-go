@@ -162,7 +162,52 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 		client, ok := proxy.upstreamManager.GetClient(server)
 		return ok && client.IsConnected()
 	}, 10*time.Second, 50*time.Millisecond, "stub upstream %q must connect", server)
+	// The discovery stamp above was written before the client connected;
+	// bind it to the live connection now, exactly as the runtime's publish
+	// does (astra r2 C3).
+	stampDiscoveredOnLiveConnection(t, proxy, rt, server, up.Tools)
 	return up
+}
+
+// rebindDiscoveryToProxyConnection re-stamps the server's discovery result
+// with the PROXY's own live client token. createTestProxyWithRuntime wires
+// two upstream managers — the runtime's, through which a real discovery pass
+// (runRuntimeDiscovery / rt.RefreshServerTools) stamps the StateView, and the
+// proxy's, whose client the dispatch-side identity read compares against. In
+// production they are one manager and one token; here the two clients hold
+// independent counters, so a test that runs the real producer and then
+// dispatches through the proxy binds the stamp to the client dispatch reads
+// (astra r2 C3). The tool set the producer published is left untouched.
+func rebindDiscoveryToProxyConnection(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, server string) {
+	t.Helper()
+	client, ok := proxy.upstreamManager.GetClient(server)
+	require.True(t, ok, "fixture: server %q must have a live client on the proxy's manager", server)
+	epoch := client.ConnectionEpoch()
+	rt.Supervisor().StateView().UpdateServer(server, func(s *stateview.ServerStatus) {
+		s.DiscoveryEpoch = epoch
+	})
+}
+
+// stampDiscoveredOnLiveConnection publishes tools as the LIVE connection's
+// completed discovery result: Connected, ToolsDiscovered and the connection
+// token the identity reads compare against (stateview.ServerStatus.
+// DiscoveryEpoch = managed.Client.ConnectionEpoch), the way the supervisor
+// stamps a result the runtime captured on this connection. A test that
+// re-hydrates the StateView by hand after connecting must use it, or the
+// stamp reads as a previous connection's and every name resolves as
+// "discovery not completed" (astra r2 C3).
+func stampDiscoveredOnLiveConnection(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, server string, tools []stateview.ToolInfo) {
+	t.Helper()
+	client, ok := proxy.upstreamManager.GetClient(server)
+	require.True(t, ok, "fixture: server %q must have a live client", server)
+	epoch := client.ConnectionEpoch()
+	rt.Supervisor().StateView().UpdateServer(server, func(s *stateview.ServerStatus) {
+		s.Connected = true
+		s.ToolsDiscovered = true
+		s.DiscoveryEpoch = epoch
+		s.Tools = tools
+		s.ToolCount = len(tools)
+	})
 }
 
 // TestScopeFixture_Contract pins the fixture rules above in executable form
