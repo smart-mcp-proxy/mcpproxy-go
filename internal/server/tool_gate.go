@@ -53,6 +53,22 @@ type toolGate struct {
 	// Dispatch fails CLOSED on it (isToolCallable always has), so it is folded
 	// into callable().
 	storageErr error
+	// identity is the registration identity of the pair (Spec 105 FR-009,
+	// research D4), resolved against the SAME persisted record serverConfig
+	// holds (codex r6 G1): its hydration — and therefore its Unresolved()
+	// verdict — and the server-level verdicts above (serverQuarantined,
+	// ToolClassServerDisabled) derive from one read, so the identity
+	// refusal a dispatch path answers before them can be true only when
+	// that read cannot answer quarantined or disabled. Dispatch paths take
+	// their annotations, tier and identity refusal from here rather than
+	// from a second, independent read.
+	identity toolIdentity
+}
+
+// serverDisabled reports the server-level disabled gate as the classifier
+// decides it from the persisted record.
+func (g toolGate) serverDisabled() bool {
+	return g.class == preflight.ToolClassServerDisabled
 }
 
 // callable reports whether dispatch may proceed.
@@ -114,6 +130,9 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 			gate.storageErr = err
 		}
 		gate.class = preflight.ToolClassServerNotConfigured
+		// No record: the identity stands on the StateView's own flags, as
+		// it does for a StateView-only fixture.
+		gate.identity = p.resolveExactToolIdentityWith(nil, serverName, toolName)
 		return gate
 	}
 	gate.serverConfig = serverConfig
@@ -125,8 +144,12 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 
 	// ONE snapshot read serves both the no-record rule below and the
 	// classifier's Discovered input, so the two cannot disagree about whether
-	// the tool is in the snapshot.
-	identity := p.resolveExactToolIdentity(serverName, toolName)
+	// the tool is in the snapshot — and ONE persisted read (serverConfig,
+	// above) serves both the classifier's server policy and the identity's
+	// hydration, so the identity refusal and the quarantined / disabled
+	// verdicts cannot disagree about the server's state either (codex r6 G1).
+	identity := p.resolveExactToolIdentityWith(serverConfig, serverName, toolName)
+	gate.identity = identity
 	// The no-record rule holds only for a tool the LIVE snapshot lists. A
 	// name on a server whose snapshot is empty because of its own state
 	// (disconnected, connecting, quarantined, disabled) keeps the server-level

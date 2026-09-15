@@ -1296,13 +1296,32 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // and refuses the call for every caller, administrators included, so an
 // unverified name never reaches the upstream. When the proxy has no opinion —
 // the server is not in the snapshot, no runtime is wired, or the snapshot is
-// empty because the server is quarantined, disabled, disconnected or still
-// connecting — the lookup falls back to the DESTRUCTIVE tier, the top of the
-// permission ladder, so a token reaches such a name only when it holds that
-// top tier (defaulting to read there once authorized every undiscovered tool
-// for read-only tokens); those cases are then answered by the bridge's own
-// server-existence path and by policyRefusal's server-level verdicts, in
-// their pre-105 order. Note
+// not authoritative because the server is quarantined, disabled, disconnected
+// or still connecting — the lookup falls back to the DESTRUCTIVE tier, the
+// top of the permission ladder, so a token reaches such a name only when it
+// holds that top tier (defaulting to read there once authorized every
+// undiscovered tool for read-only tokens); those cases are then answered by
+// the bridge's own server-existence path and by policyRefusal's server-level
+// verdicts, in their pre-105 order.
+//
+// The server-level verdicts run FIRST here, from the same shared gate read
+// the bridge's policyRefusal answers with (codex r6 G1): a server whose
+// PERSISTED record says quarantined or disabled — an operator's write the
+// StateView has not caught up with yet, so the snapshot still reads
+// connected and discovered and the live client is still connected — is
+// answered by that verdict for every name on it, listed or not, with zero
+// upstream calls. Without that, the identity read (hydrated on the lagging
+// StateView flags, or the live-client closure below, which refuses anything
+// short of certified once the client is connected) pre-empted it for the
+// absent name while the listed sibling answered the quarantine / blocked
+// body — two names, one server, two verdicts (SC-005 parity). The tier
+// returned for such a server is the pre-105 fallback (destructive for an
+// unlisted name, the annotations' tier for a listed one), so a scoped
+// token's own permission check answers exactly as it did before Spec 105
+// and policyRefusal then refuses with the server-level body. A record that
+// flips between this read and the bridge's is refused either way: the
+// bridge re-reads the gate ahead of dispatch and admits only a certified
+// identity on a connected client, never an unpinned dispatch. Note
 // auth.HasPermission is exact-match, not hierarchical, so a token minted as
 // [read, destructive] without write is admitted here while call_tool_write
 // itself would refuse it. The BM25 index is deliberately not consulted: it
@@ -1314,7 +1333,18 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 // which is already split, so the raw name is read exactly rather than
 // normalized a second time (a raw name may start with the server's prefix).
 func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) string {
-	identity := p.resolveExactToolIdentity(serverName, toolName)
+	var identity toolIdentity
+	if p.storage != nil {
+		gate := p.evaluateExactToolGate(serverName, toolName)
+		if gate.serverQuarantined() || gate.serverDisabled() {
+			return tierForAnnotations(gate.identity.Annotations, gate.identity.Found)
+		}
+		identity = gate.identity
+	} else {
+		// A proxy without storage (pure-unit constructions): no persisted
+		// record exists to read, so the snapshot's own flags stand.
+		identity = p.resolveExactToolIdentity(serverName, toolName)
+	}
 	if identity.Unresolved() {
 		return jsruntime.PermissionTierUnresolved
 	}
@@ -1343,9 +1373,11 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 // caller that already holds the StateView read (handleCallToolVariant, which
 // needs the same annotations for intent validation) classifies the tier from
 // THAT read rather than taking a second, independent snapshot. found=false
-// reaches it only when the proxy holds no snapshot for the server at all —
-// an undiscovered name on a known server is refused before any tier is
-// derived (toolIdentity.Unresolved).
+// reaches it only when the proxy holds no snapshot for the server at all, or
+// when the snapshot is not authoritative because of the server's own state
+// (quarantined, disabled, not connected) and a server-level verdict owns the
+// name — an undiscovered name on a known, connected server is refused before
+// any tier is derived (toolIdentity.Unresolved).
 func tierForAnnotations(annotations *config.ToolAnnotations, found bool) string {
 	if !found {
 		return contracts.OperationTypeDestructive

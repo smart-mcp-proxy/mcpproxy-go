@@ -497,12 +497,16 @@ type preflightStateSnapshot struct {
 // read (resolveExactToolIdentity: Spec 105 FR-009, research D4; astra r2
 // C2), resolved against the SAME snapshot the connection verdict reads, so a
 // batch is judged against one instant and preflight can never disagree with
-// dispatch about what the snapshot lists.
+// dispatch about what the snapshot lists. Hydration takes the persisted
+// server record, as dispatch does (codex r6 G1); the evaluator has already
+// answered quarantined / disabled from the storage-backed ServerPolicy
+// ahead of this read, so the record here only keeps the identity's own
+// verdict on the same footing as dispatch's.
 func (s *preflightStateSnapshot) ToolIdentity(serverName, toolName string) preflight.ToolIdentity {
 	if s.proxy == nil {
 		return preflight.ToolIdentity{}
 	}
-	identity := s.proxy.resolveExactToolIdentityIn(s.servers, serverName, toolName)
+	identity := s.proxy.resolveExactToolIdentityIn(s.servers, serverName, toolName, s.proxy.persistedServerRecord(serverName))
 	return preflight.ToolIdentity{
 		Known:         identity.ServerKnown,
 		Hydrated:      identity.SnapshotHydrated,

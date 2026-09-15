@@ -37,6 +37,14 @@ import (
 // with its discovery stamp, and every identity read compares it with the
 // client's current token: a mismatch is the discovery window ("retry
 // shortly") until B's own pass re-stamps it.
+//
+// G1 (codex r6): the identity gate derived its hydration from the StateView's
+// cached Enabled / Quarantined flags while the server-level verdicts read the
+// persisted record. An operator's quarantine / disable that the StateView
+// had not caught up with yet answered the identity refusal for an absent
+// name and the server-level verdict for the listed sibling. Hydration now
+// derives from the same persisted read as the server-level verdicts, on
+// both dispatch paths.
 
 // describeDefinitions runs describe_tool in definition mode for one id and
 // returns the definitions and per-id errors.
@@ -451,4 +459,208 @@ func TestCallTool_StaleConnectedSnapshot_LiveClientDisconnected_KeepsNotConnecte
 	ctl, ctlText := callToolReadResult(t, proxy, adminCtx(), "a:erase")
 	assert.False(t, ctl.IsError, "control: the listed sibling dispatches after the reconnect: %s", ctlText)
 	assert.Equal(t, int64(1), up.count.Load())
+}
+
+// TestCallTool_PersistedServerVerdictOutranksLaggingStateView pins codex r6
+// G1: an operator quarantines or disables a server AFTER its discovery
+// completed. Runtime.EnableServer / QuarantineServer write the persisted
+// record synchronously and reconcile the StateView afterwards (a goroutine,
+// or the LoadConfiguredServers pass after the write), so a concurrent MCP
+// call reads a record that says quarantined / disabled while the StateView
+// entry still reads enabled, non-quarantined, connected, discovered, and
+// the live client is still connected. The identity read used to derive its
+// hydration from the StateView flags and refused an absent name as
+// "undiscovered or stale — refresh with retrieve_tools" while the LISTED
+// sibling on the same server answered the persisted record's verdict
+// (quarantine analysis / TOOL_BLOCKED) — two names, one server, two
+// verdicts (the F1-class parity break of research D4 / SC-005), and the
+// ghost's remediation was wrong. Identity hydration now derives from the
+// SAME persisted record the server-level verdicts read, so the server-level
+// verdict owns every name on the server, on both paths, with zero upstream
+// calls.
+func TestCallTool_PersistedServerVerdictOutranksLaggingStateView(t *testing.T) {
+	cells := []struct {
+		name string
+		flip func(*config.ServerConfig)
+		// directBody / directIsError: the pre-105 retrieve-surface answer
+		// (TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts pins the
+		// same bodies for a consistent snapshot).
+		directBody    string
+		directIsError bool
+		// nestedBody: policyRefusal's text as the sandbox sees it.
+		nestedBody string
+	}{
+		{
+			name:          "quarantined after discovery",
+			flip:          func(c *config.ServerConfig) { c.Quarantined = true },
+			directBody:    "QUARANTINED_SERVER_BLOCKED",
+			directIsError: false,
+			nestedBody:    "is quarantined for security review",
+		},
+		{
+			name:          "disabled after discovery",
+			flip:          func(c *config.ServerConfig) { c.Enabled = false },
+			directBody:    "TOOL_BLOCKED",
+			directIsError: true,
+			nestedBody:    "TOOL_BLOCKED",
+		},
+	}
+	for _, cell := range cells {
+		for label, ctx := range identitySkewCallers() {
+			t.Run(cell.name+"/"+label, func(t *testing.T) {
+				proxy, rt, up := seedEpochFixture(t)
+
+				// The operator's write lands in storage; the StateView and
+				// the live client are exactly as discovery left them.
+				stored, err := proxy.storage.GetUpstreamServer("a")
+				require.NoError(t, err)
+				flipped := *stored
+				cell.flip(&flipped)
+				require.NoError(t, proxy.storage.SaveUpstreamServer(&flipped))
+				st, ok := rt.Supervisor().StateView().GetServer("a")
+				require.True(t, ok)
+				require.True(t, st.Enabled && !st.Quarantined && st.Connected && st.ToolsDiscovered,
+					"fixture: the StateView still reads enabled, non-quarantined, connected, discovered (%+v)", st)
+				client, ok := proxy.upstreamManager.GetClient("a")
+				require.True(t, ok)
+				require.True(t, client.IsConnected(), "fixture: the live client is still connected")
+
+				ghost := proxy.resolveExactToolIdentity("a", "ghost")
+				require.True(t, ghost.ServerKnown)
+				assert.False(t, ghost.SnapshotHydrated,
+					"identity hydration derives from the persisted record, not the lagging StateView flags (got %+v)", ghost)
+				assert.False(t, ghost.Unresolved(), "a quarantined / disabled server is not the identity condition, whatever the StateView says")
+
+				for _, name := range []string{"ghost", "erase"} {
+					// Direct: the persisted record's verdict, for the absent
+					// name and the listed sibling alike.
+					result, text := callToolReadResult(t, proxy, ctx, "a:"+name)
+					assert.Equal(t, cell.directIsError, result.IsError, "%s: %s", name, text)
+					assert.Contains(t, text, cell.directBody, "%s: SC-005 parity — the server-level verdict owns every name on the server (got %s)", name, text)
+					assert.NotContains(t, text, "cannot be resolved", "%s: the identity gate must not pre-empt the server-level verdict", name)
+					assert.NotContains(t, text, "retrieve_tools and retry", "%s: retrieve_tools cannot heal a quarantined / disabled server: wrong remediation", name)
+
+					// Nested: the sandbox's tier read defers to the server-level
+					// verdict and policyRefusal answers it with zero upstream calls.
+					assert.NotEqual(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", name),
+						"%s: the sandbox's tier read must defer to the persisted server-level verdict", name)
+					sb := runSandboxCallTool(t, proxy, ctx, "a", name)
+					assert.False(t, sb.OK, "%s: the sandbox must refuse", name)
+					assert.Equal(t, string(jsruntime.ErrorCodeUpstreamError), sb.Code, "%s: got %q: %s", name, sb.Code, sb.Message)
+					assert.Contains(t, sb.Message, cell.nestedBody, "%s: sandbox: the server-level verdict (got %q: %s)", name, sb.Code, sb.Message)
+					assert.NotContains(t, sb.Message, "cannot be resolved", "%s: the identity gate must not pre-empt the server-level verdict", name)
+				}
+				assert.Equal(t, int64(0), up.count.Load(), "nothing reaches the upstream (dispatched %v)", up.dispatched())
+
+				// Positive control: the operator's write is reverted before
+				// the StateView ever caught up. The never-listed name is
+				// Unresolved again on both paths; the listed sibling
+				// dispatches, certified on the live generation.
+				require.NoError(t, proxy.storage.SaveUpstreamServer(stored))
+				require.True(t, proxy.resolveExactToolIdentity("a", "ghost").Unresolved(), "control: ghost is unresolved once the record is restored")
+				_, text := callToolReadResult(t, proxy, ctx, "a:ghost")
+				assert.Contains(t, text, "cannot be resolved")
+				assert.Equal(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "ghost"))
+				assert.Equal(t, int64(0), up.count.Load())
+				ctl, ctlText := callToolReadResult(t, proxy, ctx, "a:erase")
+				assert.False(t, ctl.IsError, "control: the listed sibling dispatches once the record is restored: %s", ctlText)
+				assert.Equal(t, int64(1), up.count.Load())
+			})
+		}
+	}
+}
+
+// TestCallTool_RecordUnquarantinedWhileStateViewLags_NeverDispatches is the
+// reverse skew of codex r6 G1: the operator LIFTS the quarantine (the
+// persisted record reads enabled, not quarantined) while the StateView still
+// carries the quarantined shape — Quarantined=true, Connected=false,
+// Tools=nil, no discovery stamp. The persisted record now decides the
+// server-level verdicts AND the identity hydration, but hydration still
+// requires the snapshot to be connected, and the live client stays the
+// authority on dispatch: while the client is not connected every name
+// answers the not-connected verdict; once it connects and until its own
+// discovery pass re-stamps the snapshot, every name is the D4 discovery
+// window ("discovery has not completed") — never a dispatch with the
+// destructive-tier fallback, because a snapshot that was never hydrated
+// for this connection certifies nothing.
+func TestCallTool_RecordUnquarantinedWhileStateViewLags_NeverDispatches(t *testing.T) {
+	proxy, rt, up := seedEpochFixture(t)
+	stored, err := proxy.storage.GetUpstreamServer("a")
+	require.NoError(t, err)
+	require.True(t, stored.Enabled && !stored.Quarantined, "fixture: the persisted record reads enabled, not quarantined")
+
+	// The StateView lags: still the quarantined shape (never discovered).
+	rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+		s.Quarantined = true
+		s.Connected = false
+		s.ToolsDiscovered = false
+		s.DiscoveryEpoch = 0
+		s.Tools = nil
+		s.ToolCount = 0
+	})
+	client, ok := proxy.upstreamManager.GetClient("a")
+	require.True(t, ok)
+
+	// Phase 1: the live client is not connected yet.
+	require.NoError(t, client.Disconnect())
+	require.Eventually(t, func() bool { return !client.IsConnected() }, 5*time.Second, 20*time.Millisecond)
+	ghost := proxy.resolveExactToolIdentity("a", "ghost")
+	require.True(t, ghost.ServerKnown && !ghost.SnapshotHydrated && !ghost.Unresolved(), "fixture: not hydrated, not the identity condition (%+v)", ghost)
+	for label, ctx := range identitySkewCallers() {
+		t.Run("not connected/"+label, func(t *testing.T) {
+			for _, name := range []string{"ghost", "erase"} {
+				result, text := callToolReadResult(t, proxy, ctx, "a:"+name)
+				require.True(t, result.IsError, "%s: %s", name, text)
+				assert.Contains(t, text, "Server 'a' is not connected", "%s: the not-connected verdict owns a dropped server (got %s)", name, text)
+				assert.NotContains(t, text, "QUARANTINED", "%s: the lifted quarantine must not be answered from the lagging StateView", name)
+				assert.NotContains(t, text, "cannot be resolved", name)
+			}
+			sb := runSandboxCallTool(t, proxy, ctx, "a", "ghost")
+			assert.False(t, sb.OK)
+			assert.Equal(t, string(jsruntime.ErrorCodeUpstreamError), sb.Code, "got %q: %s", sb.Code, sb.Message)
+			assert.Contains(t, sb.Message, "not connected", "sandbox: the not-connected verdict (got %q: %s)", sb.Code, sb.Message)
+			assert.Equal(t, int64(0), up.count.Load())
+		})
+	}
+
+	// Phase 2: the client connects; the snapshot has not been re-stamped.
+	require.NoError(t, proxy.upstreamManager.ConnectAll(context.Background()))
+	require.Eventually(t, client.IsConnected, 10*time.Second, 50*time.Millisecond, "fixture: the stub must reconnect")
+	for label, ctx := range identitySkewCallers() {
+		t.Run("connected, not re-stamped/"+label, func(t *testing.T) {
+			for _, name := range []string{"ghost", "erase"} {
+				result, text := callToolReadResult(t, proxy, ctx, "a:"+name)
+				require.True(t, result.IsError, "%s: %s", name, text)
+				assert.Contains(t, text, unresolvedToolIdentityMessage("a", name, false),
+					"%s: the D4 discovery window until this connection's own pass re-stamps the snapshot (got %s)", name, text)
+				assert.NotContains(t, text, "QUARANTINED", name)
+			}
+			assert.Equal(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "ghost"))
+			sb := runSandboxCallTool(t, proxy, ctx, "a", "ghost")
+			assert.False(t, sb.OK)
+			assert.Equal(t, string(jsruntime.ErrorCodePermissionDenied), sb.Code, "got %q: %s", sb.Code, sb.Message)
+			assert.Contains(t, sb.Message, "cannot be resolved")
+			assert.Equal(t, int64(0), up.count.Load(), "nothing dispatches on a never-hydrated snapshot (dispatched %v)", up.dispatched())
+		})
+	}
+
+	// Positive control: this connection's own discovery pass re-stamps the
+	// snapshot. The StateView's Quarantined flag is STILL stale (true) — the
+	// persisted record is the authority — so the listed name is certified and
+	// dispatches, while the never-listed name is a stale name.
+	stampDiscoveredOnLiveConnection(t, proxy, rt, "a", up.Tools)
+	st, ok := rt.Supervisor().StateView().GetServer("a")
+	require.True(t, ok)
+	require.True(t, st.Quarantined, "fixture: the StateView flag still lags")
+	require.True(t, proxy.resolveExactToolIdentity("a", "erase").certified(), "control: the persisted record hydrates the re-stamped snapshot")
+	require.True(t, proxy.resolveExactToolIdentity("a", "ghost").Unresolved())
+	_, text := callToolReadResult(t, proxy, adminCtx(), "a:ghost")
+	assert.Contains(t, text, unresolvedToolIdentityMessage("a", "ghost", true))
+	assert.Equal(t, int64(0), up.count.Load())
+	ctl, ctlText := callToolReadResult(t, proxy, adminCtx(), "a:erase")
+	assert.False(t, ctl.IsError, "control: the listed sibling dispatches: %s", ctlText)
+	assert.Equal(t, int64(1), up.count.Load())
+	sb := runSandboxCallTool(t, proxy, adminCtx(), "a", "erase")
+	assert.True(t, sb.OK, "control: nested dispatch (got %q: %s)", sb.Code, sb.Message)
+	assert.Equal(t, int64(2), up.count.Load())
 }
