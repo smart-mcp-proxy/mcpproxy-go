@@ -31,7 +31,7 @@ import (
 // whose Disconnect already closed the previous generation.
 func simulateReconnect(mc *Client) {
 	mc.epochMu.Lock()
-	mc.connectionEpoch.Add(1)
+	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.epochMu.Unlock()
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateConnecting)
@@ -128,4 +128,33 @@ func TestCallToolOnEpoch_SameGenerationDispatches(t *testing.T) {
 	_, err = mc.CallTool(context.Background(), "erase", nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, fake.callCount())
+}
+
+// TestConnectionEpoch_UniqueAcrossReplacementClients pins codex round 8: a
+// replacement client instance installed under the SAME server name must not
+// restart the epoch sequence, or a discovery stamp certified against the old
+// instance's epoch would match the new instance's first connection and an
+// epoch-pinned dispatch would send a stale name to it. Epochs are drawn from a
+// process-wide counter, so the two instances' first connections never share a
+// value and the pinned call against the old epoch is refused on the new one.
+func TestConnectionEpoch_UniqueAcrossReplacementClients(t *testing.T) {
+	sc := &config.ServerConfig{Name: "db", Enabled: true}
+	cfg := &config.Config{Servers: []*config.ServerConfig{sc}}
+
+	a, _ := newAdmissionClient(t, cfg, "db", nil)
+	simulateReconnect(a) // instance A: first connection
+	epochA := a.ConnectionEpoch()
+
+	b, _ := newAdmissionClient(t, cfg, "db", nil)
+	simulateReconnect(b) // instance B replaces A under the same name
+	epochB := b.ConnectionEpoch()
+
+	require.NotEqual(t, epochA, epochB, "two client instances under one server name must never share a connection epoch")
+	require.Greater(t, epochB, epochA, "epochs are strictly increasing process-wide")
+
+	fake := &fakeToolCaller{}
+	b.toolInvoker = fake
+	_, err := b.CallToolOnEpoch(context.Background(), "erase", nil, epochA)
+	require.Error(t, err, "a dispatch pinned to instance A's epoch must be refused by instance B")
+	require.Zero(t, fake.callCount(), "the stale-pinned call must never reach the transport")
 }

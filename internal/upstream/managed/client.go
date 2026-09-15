@@ -127,6 +127,13 @@ type Client struct {
 	// machine back at Ready — indistinguishable from "never left". A stale
 	// verdict must not be applied to a brand-new healthy session (GH #965
 	// review).
+	//
+	// Values are drawn from the PROCESS-WIDE counter below, never restarted per
+	// client: a replacement client instance installed under the same server
+	// name (remove + re-add, config reload) must not restart at the epoch a
+	// discovery stamp was certified against, or an epoch-pinned dispatch would
+	// match the new instance's first connection and send a stale name to it
+	// (Spec 105 FR-009, codex review round 8).
 	connectionEpoch atomic.Int64
 
 	// epochMu serializes the probe goroutine's final epoch-check-and-SetError
@@ -386,7 +393,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// the state-change callback synchronously (types.go), and epochMu must
 	// never be held across foreign code (GH #965 review, rounds 2-3).
 	mc.epochMu.Lock()
-	mc.connectionEpoch.Add(1)
+	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.epochMu.Unlock()
 
 	// Transition to ready state only if not already ready
@@ -477,7 +484,7 @@ func (mc *Client) Disconnect() error {
 	// flip the freshly Disconnected state back to Error (GH #965 review,
 	// round 4).
 	mc.epochMu.Lock()
-	mc.connectionEpoch.Add(1)
+	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.epochMu.Unlock()
 
 	// Reset state
@@ -2093,3 +2100,11 @@ func (mc *Client) setToolCountCache(count int) {
 func (mc *Client) isDockerServer() bool {
 	return containsString(mc.GetConfig().Command, "docker")
 }
+
+// connectionEpochCounter hands out connection epochs to every managed client
+// in the process. It is process-wide so an epoch never repeats across client
+// instances that share a server name (see Client.connectionEpoch).
+var connectionEpochCounter atomic.Int64
+
+// nextConnectionEpoch returns a fresh, strictly increasing epoch.
+func nextConnectionEpoch() int64 { return connectionEpochCounter.Add(1) }
