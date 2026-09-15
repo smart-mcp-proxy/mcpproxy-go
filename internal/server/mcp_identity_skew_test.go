@@ -355,3 +355,100 @@ func TestCallTool_RetainedToolsOnNotConnectedSnapshot_LiveClientRefused(t *testi
 		})
 	}
 }
+
+// TestCallTool_StaleConnectedSnapshot_LiveClientDisconnected_KeepsNotConnectedVerdict
+// pins codex r5 F1, the mirror of astra r1 I3: the StateView still reads
+// Connected=true / ToolsDiscovered=true with connection A's stamp and tools
+// (the server_disconnected event is in flight or was dropped, and the 30s
+// reconcile has not swept yet) while the live client is NOT connected. The
+// identity read used to take the snapshot's Connected at face value
+// (hydrated, discovery done) and refused an absent name at the top of the
+// dispatch as "undiscovered or stale name — refresh with retrieve_tools",
+// while the LISTED sibling on the same dropped server, certified by the same
+// stale stamp, fell through to "Server 'a' is not connected". Two names on
+// one dropped server answered different verdicts, and the ghost's
+// remediation was wrong (retrieve_tools cannot heal a dropped server) —
+// contrary to research D4 (disconnected servers keep their server-level
+// verdicts) and SC-005 parity. The snapshot's Connected is now overruled by
+// the live client: a client that is present and NOT connected makes the
+// snapshot not hydrated, exactly as when it reads Connected=false, so the
+// not-connected verdict owns BOTH names on every path, with zero upstream
+// calls and no reconnect inside dispatch.
+func TestCallTool_StaleConnectedSnapshot_LiveClientDisconnected_KeepsNotConnectedVerdict(t *testing.T) {
+	proxy, rt, up := seedEpochFixture(t)
+
+	client, ok := proxy.upstreamManager.GetClient("a")
+	require.True(t, ok)
+	stampEpoch := client.ConnectionEpoch()
+	require.NoError(t, client.Disconnect())
+	require.Eventually(t, func() bool { return !client.IsConnected() }, 5*time.Second, 20*time.Millisecond,
+		"fixture: the live client is dropped")
+
+	// Model the delayed / dropped disconnect event: the snapshot stays
+	// exactly as connection A published it.
+	rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+		s.Connected = true
+		s.ToolsDiscovered = true
+		s.DiscoveryEpoch = stampEpoch
+		s.Tools = up.Tools
+		s.ToolCount = len(up.Tools)
+	})
+	st, ok := rt.Supervisor().StateView().GetServer("a")
+	require.True(t, ok)
+	require.True(t, st.Connected && st.ToolsDiscovered, "fixture: the snapshot still reads connected+discovered (%+v)", st)
+	require.False(t, client.IsConnected(), "fixture: the live client disagrees with the snapshot")
+
+	ghost := proxy.resolveExactToolIdentity("a", "ghost")
+	require.True(t, ghost.ServerKnown)
+	assert.False(t, ghost.SnapshotHydrated, "the live client is not connected: the snapshot's Connected is stale (got %+v)", ghost)
+	assert.False(t, ghost.Unresolved(), "a dropped server is not the identity condition, whatever its snapshot says")
+	listed := proxy.resolveExactToolIdentity("a", "erase")
+	assert.False(t, listed.certified(), "a stale stamp certifies nothing on a dropped client (got %+v)", listed)
+
+	for label, ctx := range identitySkewCallers() {
+		t.Run(label, func(t *testing.T) {
+			// The ghost: the not-connected verdict, not the identity body.
+			result, text := callToolReadResult(t, proxy, ctx, "a:ghost")
+			require.True(t, result.IsError, "%s", text)
+			assert.Contains(t, text, "Server 'a' is not connected", "D4: a dropped server keeps the not-connected verdict (got %s)", text)
+			assert.NotContains(t, text, "cannot be resolved", "the identity gate must not pre-empt the connection verdict")
+			assert.NotContains(t, text, "retrieve_tools", "retrieve_tools cannot heal a dropped server: wrong remediation")
+
+			// The listed sibling: the same verdict, for the same reason.
+			result, text = callToolReadResult(t, proxy, ctx, "a:erase")
+			require.True(t, result.IsError, "%s", text)
+			assert.Contains(t, text, "Server 'a' is not connected", "SC-005 parity: both names on one dropped server answer alike (got %s)", text)
+
+			assert.False(t, client.IsConnected(), "dispatch must never reconnect on its own")
+			assert.Equal(t, int64(0), up.count.Load(), "nothing reaches a dropped upstream (dispatched %v)", up.dispatched())
+		})
+	}
+
+	// Nested: the sandbox's tier read does not classify the ghost as
+	// unresolved, and the managed client's own not-connected refusal answers
+	// through the bridge's upstream-error envelope, zero upstream calls.
+	assert.NotEqual(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "ghost"),
+		"the sandbox's tier read must defer to the server-level verdict on a dropped client")
+	sb := runSandboxCallTool(t, proxy, adminCtx(), "a", "ghost")
+	assert.False(t, sb.OK)
+	assert.Equal(t, string(jsruntime.ErrorCodeUpstreamError), sb.Code, "got %q: %s", sb.Code, sb.Message)
+	assert.Contains(t, sb.Message, "not connected", "sandbox: D4 expects the not-connected verdict (got %q: %s)", sb.Code, sb.Message)
+	assert.NotContains(t, sb.Message, "cannot be resolved")
+	assert.False(t, client.IsConnected(), "the nested path must never reconnect inside dispatch")
+	assert.Equal(t, int64(0), up.count.Load())
+
+	// Positive control: the server reconnects and its own pass re-stamps the
+	// fresh generation. The never-listed name is now Unresolved (hydrated,
+	// discovery done, absent) on both paths; the listed sibling dispatches.
+	require.NoError(t, proxy.upstreamManager.ConnectAll(context.Background()))
+	require.Eventually(t, client.IsConnected, 10*time.Second, 50*time.Millisecond, "fixture: the stub must reconnect")
+	stampDiscoveredOnLiveConnection(t, proxy, rt, "a", up.Tools)
+	require.True(t, proxy.resolveExactToolIdentity("a", "ghost").Unresolved(), "control: the fresh stamp does not list ghost")
+	_, text := callToolReadResult(t, proxy, adminCtx(), "a:ghost")
+	assert.Contains(t, text, "cannot be resolved")
+	assert.Equal(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "ghost"))
+	assert.Equal(t, int64(0), up.count.Load())
+	ctl, ctlText := callToolReadResult(t, proxy, adminCtx(), "a:erase")
+	assert.False(t, ctl.IsError, "control: the listed sibling dispatches after the reconnect: %s", ctlText)
+	assert.Equal(t, int64(1), up.count.Load())
+}

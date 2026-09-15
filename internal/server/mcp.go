@@ -6886,15 +6886,21 @@ type toolIdentity struct {
 	ServerKnown bool
 	// SnapshotHydrated reports whether the server is in the state in which
 	// its snapshot is the authority on its tool set: enabled, not quarantined
-	// and CONNECTED. The StateView registers every configured server; for
-	// one that is disconnected, connecting, OAuth-pending, disabled or
-	// quarantined its tool list is NOT authoritative — usually empty, but
-	// the reconcile sweep republishes a disconnected server's retained set
-	// for counts (supervisor.reconcile) — so neither an absent nor a present
-	// name there says anything about the tool's identity, only about the
-	// server's state, and the server-level verdicts (quarantined / disabled
-	// / not connected / reconnect_on_use) own that answer exactly as they
-	// did before Spec 105.
+	// and CONNECTED. "Connected" is decided by the LIVE client when there is
+	// one (codex r5 F1): the snapshot's Connected flag is written by
+	// best-effort events or the 30s reconcile and can still read true after
+	// the client has dropped, and a snapshot the live client contradicts is
+	// as stale as one that reads Connected=false — it is NOT hydrated. The
+	// StateView registers every configured server; for one that is
+	// disconnected, connecting, OAuth-pending, disabled or quarantined its
+	// tool list is NOT authoritative — usually empty, but the reconcile sweep
+	// republishes a disconnected server's retained set for counts
+	// (supervisor.reconcile), and a lagging disconnect leaves the previous
+	// connection's full stamp and list in place — so neither an absent nor a
+	// present name there says anything about the tool's identity, only about
+	// the server's state, and the server-level verdicts (quarantined /
+	// disabled / not connected / reconnect_on_use) own that answer exactly as
+	// they did before Spec 105, for every name on the server alike (SC-005).
 	SnapshotHydrated bool
 	// DiscoveryDone reports whether a discovery pass has completed for the
 	// LIVE connection: stateview.ServerStatus.ToolsDiscovered is set AND the
@@ -6939,11 +6945,15 @@ type toolIdentity struct {
 // it), and a known server whose snapshot is NOT HYDRATED because of its own
 // state (quarantined, disabled, disconnected, connecting) — those keep their
 // pre-105 server-level verdicts, which run in the same order they always did
-// and which the caller's reconnect_on_use path relies on. A not-hydrated
-// snapshot is not necessarily EMPTY (the reconcile sweep retains a
-// disconnected server's tool set for counts), which is why the deferral is
-// safe only while the live client really is not connected: once it is,
-// liveIdentityRefusal re-reads and admits nothing short of certified().
+// and which the caller's reconnect_on_use path relies on. "Disconnected" is
+// the LIVE client's word where there is one, not the snapshot's flag (codex
+// r5 F1): a snapshot that still reads Connected=true for a dropped client is
+// not hydrated either. A not-hydrated snapshot is not necessarily EMPTY (the
+// reconcile sweep retains a disconnected server's tool set for counts; a
+// lagging disconnect leaves the previous connection's whole list), which is
+// why the deferral is safe only while the live client really is not
+// connected: once it is, liveIdentityRefusal re-reads and admits nothing
+// short of certified().
 func (id toolIdentity) Unresolved() bool {
 	return id.ServerKnown && id.SnapshotHydrated && (!id.DiscoveryDone || !id.Found)
 }
@@ -6997,21 +7007,42 @@ func (p *MCPProxyServer) resolveExactToolIdentityIn(servers map[string]*statevie
 		DiscoveryDone:    serverStatus.ToolsDiscovered,
 		DiscoveryEpoch:   serverStatus.DiscoveryEpoch,
 	}
-	// The stamp certifies the tool list only for the connection it was
-	// captured on. The StateView's Connected/ToolsDiscovered are written by
+	// The snapshot's Connected and its discovery stamp are written by
 	// best-effort events (dropped on a full channel, delivered through two
-	// goroutine hops) or the 30s reconcile, so the live client may already
-	// be a NEW connection while the snapshot still carries the previous
-	// one's stamp and tools. Compare the stamp's token with the live client's
-	// (astra r2 C3): a mismatch is the discovery window for this connection
-	// — refused as "discovery has not completed", not as a stale name — until
-	// its own pass re-stamps the snapshot. A client that is not connected is
-	// left to the not-connected / reconnect_on_use verdicts, in their pre-105
-	// order.
-	if identity.SnapshotHydrated && identity.DiscoveryDone {
-		if live, ok := p.liveConnectionEpoch(serverName); ok && live != serverStatus.DiscoveryEpoch {
-			identity.DiscoveryDone = false
-			identity.StaleConnection = true
+	// goroutine hops) or the 30s reconcile, so they can lag the live client
+	// in BOTH directions, and the live client is the authority on each:
+	//
+	//   - The client is present and NOT connected while the snapshot still
+	//     reads Connected=true (the disconnect event is in flight or was
+	//     dropped; codex r5 F1): nothing on that snapshot is authoritative
+	//     any more — its Connected is stale, exactly as if it read false —
+	//     so it is NOT hydrated and the not-connected / connecting /
+	//     reconnect_on_use verdicts own every name on the server, listed or
+	//     not, in their pre-105 order (research D4; SC-005 parity: two names
+	//     on one dropped server must not answer different verdicts, and the
+	//     "refresh with retrieve_tools" remediation cannot heal a dropped
+	//     server).
+	//   - The client is connected but a NEW connection while the snapshot
+	//     still carries the previous one's stamp and tools (astra r2 C3):
+	//     the stamp certifies the tool list only for the connection it was
+	//     captured on, so a token mismatch is the discovery window for this
+	//     connection — refused as "discovery has not completed", not as a
+	//     stale name — until its own pass re-stamps the snapshot.
+	//   - No client at all (a pure-unit proxy, or a StateView-only fixture):
+	//     the snapshot stands as read, fail-closed.
+	//
+	// The mirror window — snapshot Connected=false while the live client IS
+	// connected — is closed by liveIdentityRefusal (astra r1 I3), which the
+	// dispatch paths run once they have found the client connected.
+	if identity.SnapshotHydrated {
+		switch live, state := p.liveConnectionState(serverName); state {
+		case liveClientDisconnected:
+			identity.SnapshotHydrated = false
+		case liveClientConnected:
+			if identity.DiscoveryDone && live != serverStatus.DiscoveryEpoch {
+				identity.DiscoveryDone = false
+				identity.StaleConnection = true
+			}
 		}
 	}
 
@@ -7044,14 +7075,42 @@ func (p *MCPProxyServer) resolveExactToolIdentityIn(servers map[string]*statevie
 // pure-unit proxy), no client, or a client that is not connected reports
 // false, and the caller then makes no token claim.
 func (p *MCPProxyServer) liveConnectionEpoch(serverName string) (int64, bool) {
+	epoch, state := p.liveConnectionState(serverName)
+	return epoch, state == liveClientConnected
+}
+
+// liveClientState is what the live upstream client says about a server,
+// independently of the StateView snapshot (codex r5 F1).
+type liveClientState int
+
+const (
+	// liveClientAbsent: no upstream manager (a pure-unit proxy) or no client
+	// for the server — the live side makes no claim either way.
+	liveClientAbsent liveClientState = iota
+	// liveClientDisconnected: a client exists and is NOT connected
+	// (disconnected, connecting, OAuth-pending, ...): whatever the snapshot
+	// reads, the server is not callable and the server-level verdicts own it.
+	liveClientDisconnected
+	// liveClientConnected: a client exists and is connected; the epoch
+	// returned alongside is its current connection generation.
+	liveClientConnected
+)
+
+// liveConnectionState is liveConnectionEpoch with the not-connected case
+// told apart from the no-client case, so resolveExactToolIdentityIn can
+// overrule a snapshot whose Connected flag the live client contradicts.
+func (p *MCPProxyServer) liveConnectionState(serverName string) (int64, liveClientState) {
 	if p.upstreamManager == nil {
-		return 0, false
+		return 0, liveClientAbsent
 	}
 	client, ok := p.upstreamManager.GetClient(serverName)
-	if !ok || client == nil || !client.IsConnected() {
-		return 0, false
+	if !ok || client == nil {
+		return 0, liveClientAbsent
 	}
-	return client.ConnectionEpoch(), true
+	if !client.IsConnected() {
+		return 0, liveClientDisconnected
+	}
+	return client.ConnectionEpoch(), liveClientConnected
 }
 
 // unresolvedToolIdentityMessage is the insufficient-permission body every
